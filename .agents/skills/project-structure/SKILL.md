@@ -16,7 +16,9 @@ choice affects the shared plan contract.
 - `src/index.js`: expose the root source API to the executable and root tests.
 - `src/cli.js`: own argument parsing, validation, concise terminal output, and dispatch.
 - `src/config.js`: own repository configuration loading, strict validation, and role resolution precedence.
-- `src/clarifications.js`: own clarification artifact creation, editor invocation, transcript updates, and input hashing.
+- `src/clarifications.js`: expose and coordinate the clarification boundary.
+- `src/clarification-*.js`: keep its confined file and editor helpers internal
+  to the root clarification boundary.
 - `src/pipeline-registry.js`: own the explicit list of built-in pipelines; do not turn it into a plugin system.
 - `src/runner.js`: coordinate `run`, `resume`, and `status` without backend-specific flags.
 - `src/state.js`: expose and coordinate the run-store boundary.

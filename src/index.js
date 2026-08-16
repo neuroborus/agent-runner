@@ -1,5 +1,10 @@
 export { main } from "./cli.js";
 export {
+  CLARIFICATION_TEMPLATE,
+  ClarificationError,
+  createClarificationService,
+} from "./clarifications.js";
+export {
   CONFIG_FILENAME,
   CONFIG_SCHEMA_VERSION,
   ConfigurationError,

@@ -85,7 +85,8 @@ All pipelines additionally require:
 | `src/index.js` | Public root source boundary |
 | `src/cli.js` | Argument parsing and terminal-facing command dispatch |
 | `src/config.js` | Repository configuration loading, validation, and role resolution |
-| `src/clarifications.js` | Clarification artifacts, editor invocation, transcript updates, and hashes |
+| `src/clarifications.js` | Public clarification-service coordination |
+| `src/clarification-*.js` | Internal confined-file and editor helpers |
 | `src/pipeline-registry.js` | Explicit registry of built-in pipelines |
 | `src/runner.js` | High-level run, resume, and status orchestration |
 | `src/state.js` | Public run-store coordination and state-directory resolution |
