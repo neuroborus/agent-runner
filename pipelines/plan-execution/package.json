@@ -1,0 +1,14 @@
+{
+  "name": "@agent-runner/plan-execution",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Execute a validated commit plan through implementation and review",
+  "type": "module",
+  "exports": "./src/index.js",
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=24 <25"
+  }
+}

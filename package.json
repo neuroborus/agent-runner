@@ -1,0 +1,26 @@
+{
+  "name": "agent-runner",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Local CLI for authoring and executing explicit agent pipelines",
+  "type": "module",
+  "exports": "./src/index.js",
+  "workspaces": [
+    "packages/*",
+    "pipelines/*"
+  ],
+  "bin": {
+    "agent-run": "./bin/agent-run.js"
+  },
+  "scripts": {
+    "check": "npm test && node bin/agent-run.js --help",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "dependencies": {
+    "@agent-runner/plan-authoring": "0.0.0",
+    "@agent-runner/plan-execution": "0.0.0"
+  }
+}

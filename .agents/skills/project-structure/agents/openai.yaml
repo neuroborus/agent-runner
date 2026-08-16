@@ -1,0 +1,4 @@
+interface:
+  display_name: "Project Structure"
+  short_description: "Place monorepo code in the right workspace"
+  default_prompt: "Use $project-structure to place or review Agent Runner monorepo files."
