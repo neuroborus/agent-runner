@@ -73,6 +73,9 @@ All pipelines additionally require:
 - Pause when retry budgets are exhausted or repository reconciliation is unsafe.
 - Store state outside both the target repository and task directory, and write state atomically.
 - Never make correctness depend on a native Codex or Claude session surviving interruption.
+- Persist each run transition as a complete write-ahead event before atomically
+  replacing state, and require one recoverable execution lease for mutating run
+  or resume operations; keep status reads lock-free.
 
 ## Repository Map
 
@@ -85,7 +88,8 @@ All pipelines additionally require:
 | `src/clarifications.js` | Clarification artifacts, editor invocation, transcript updates, and hashes |
 | `src/pipeline-registry.js` | Explicit registry of built-in pipelines |
 | `src/runner.js` | High-level run, resume, and status orchestration |
-| `src/state.js` | State directory resolution, atomic state, events, and recovery |
+| `src/state.js` | Public run-store coordination and state-directory resolution |
+| `src/state-*.js` | Internal state file, journal, lease, and validation helpers |
 | `src/git.js` | Git preflight, snapshots, fingerprints, guards, and local commits |
 | `src/agents/index.js` | Public agent-adapter directory boundary |
 | `src/agents/` | Codex and Claude adapter implementations |

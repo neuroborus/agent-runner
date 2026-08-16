@@ -248,6 +248,7 @@ State layout:
 
 ```text
 <state-root>/runs/<run-id>/
+├── .lease            # present only while a mutating owner is active
 ├── state.json
 ├── events.jsonl
 ├── progress.md
@@ -256,6 +257,13 @@ State layout:
     ├── reviewer.md
     └── resolved.md
 ```
+
+A mutating `run` or `resume` must acquire the atomic per-run execution lease
+before recovery or workflow advancement. A competing owner is rejected. Stale
+recovery requires both the configured age threshold and proof that the recorded
+same-host process is no longer alive; age alone or a foreign host is
+insufficient. `status` and public activity reads are lock-free and never acquire
+the execution lease.
 
 ### `state.json`
 
@@ -286,6 +294,14 @@ Persist at least:
 - latest reviewed content fingerprint;
 - escalation reason when paused.
 
+The common envelope also persists an optional opaque source-session reference,
+every direct Worker, Reviewer, or Arbiter child session ID, monotonic revision
+and timestamps, and an opaque pipeline-owned state object. Store
+correction-round snapshots and arbitration episodes there without asking the
+root runtime to interpret them. Native backend session resume is optional; the
+persisted task, plan, decisions, summaries, and lineage must be sufficient to
+continue with a new native session.
+
 Write state atomically using temporary-file + rename.
 
 ### `events.jsonl`
@@ -295,6 +311,20 @@ Append-only machine-readable event history.
 Never rewrite previous events.
 
 A partially written final line after a crash may be ignored during recovery; earlier valid lines remain authoritative history.
+
+Every complete event contains the entire next state and its monotonic revision.
+For each transition, append and sync that write-ahead event before atomically
+replacing `state.json`. Recovery removes only an incomplete final fragment,
+rejects malformed durable records, and advances a lagging state file from the
+last valid event. Revisions are the stable cursor for resume and activity
+consumers.
+
+An event may include a bounded public activity record with `actor`, `phase`,
+`kind`, and a concise one-line `message`. The pipeline derives normalized role
+summaries, findings, and decisions only from validated structured results. The
+state service validates generic shape and size limits without interpreting
+roles or outcomes, and cursor readers expose only this safe projection rather
+than private pipeline state.
 
 ### `progress.md`
 
@@ -313,7 +343,13 @@ Human-readable summary of:
 - created commit SHAs;
 - pause reasons.
 
-Do not store raw agent chain-of-thought or complete model transcripts.
+Do not store raw model transcripts or agent chain-of-thought.
+
+Regenerate `progress.md` after state recovery when it is missing or stale. Write
+pipeline-declared run artifacts such as `context/*.md` atomically beneath the
+run directory, rejecting absolute paths, traversal, reserved state filenames,
+and symlink escapes. Reject symbolic or hard links for managed state and lease
+files.
 
 ---
 

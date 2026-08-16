@@ -5,11 +5,11 @@ pipelines. It is designed to orchestrate local Codex CLI and Claude Code
 processes while keeping persistence, Git safety, and backend execution in one
 small runner.
 
-> **Status:** initial project scaffold. The public command shape, module
-> boundaries, versioned repository configuration, two pipeline descriptors,
-> tests, and agent guidance are present. The `run`, `resume`, and `status`
-> workflows are not implemented yet and deliberately return a non-zero exit
-> code.
+> **Status:** the public command shape, module boundaries, versioned repository
+> configuration, deterministic commit-plan contract, external run store, two
+> pipeline descriptors, tests, and agent guidance are present. The `run`,
+> `resume`, and `status` workflows are not wired yet and deliberately return a
+> non-zero exit code.
 
 Architecture is documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 Each pipeline owns its specification under its workspace.
@@ -124,9 +124,12 @@ agent-run run plan-execution \
   --arbiter codex
 ```
 
-Runner state will use `$XDG_STATE_HOME/agent-runner/` with
+Runner state uses `$XDG_STATE_HOME/agent-runner/` with
 `~/.local/state/agent-runner/` as the fallback. Every run records its pipeline
-ID and state-schema version and is addressed by a run ID.
+ID and state-schema version and is addressed by an opaque run ID. Complete
+write-ahead events precede atomic state replacement; recovery repairs a lagging
+state file and derived progress. Mutating runs require one execution lease,
+while status and bounded public activity reads remain lock-free.
 
 ## Pipeline Boundary
 
@@ -155,6 +158,10 @@ not provide a workflow DSL or duplicate pipeline-owned policy.
 │   ├── index.js
 │   ├── pipeline-registry.js
 │   ├── runner.js
+│   ├── state-files.js
+│   ├── state-journal.js
+│   ├── state-lease.js
+│   ├── state-validation.js
 │   └── state.js
 ├── packages/
 │   └── commit-plan/

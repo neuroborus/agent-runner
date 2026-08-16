@@ -227,6 +227,35 @@ test("all pipelines define the bounded clarification lifecycle", async () => {
   assert.match(gitignore, /^LOCAL_ARTIFACTS\/$/mu);
 });
 
+test("run-state durability and lease ownership are documented", async () => {
+  const documents = await Promise.all([
+    readFile(new URL("../AGENTS.md", import.meta.url), "utf8"),
+    readFile(new URL("../README.md", import.meta.url), "utf8"),
+    readFile(new URL("../docs/ARCHITECTURE.md", import.meta.url), "utf8"),
+    readFile(
+      new URL("../pipelines/plan-authoring/docs/SPEC.md", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../pipelines/plan-execution/docs/SPEC.md", import.meta.url),
+      "utf8",
+    ),
+  ]);
+
+  for (const document of documents) {
+    assert.match(document, /write-ahead/iu);
+    assert.match(document, /execution lease/iu);
+    assert.match(document, /lock-free/iu);
+  }
+  for (const document of documents.slice(2)) {
+    assert.match(document, /source-session/iu);
+    assert.match(document, /raw model\s+transcripts/iu);
+  }
+
+  assert.match(documents[2], /actor.*phase.*kind.*message/su);
+  assert.match(documents[2], /symlink escapes/iu);
+});
+
 test("Worker commit ownership and shared plan safety are documented", async () => {
   const [agentsGuidance, readme, specification, commitPlanContract] =
     await Promise.all([

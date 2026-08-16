@@ -45,6 +45,27 @@ backend-specific `model`. The root runtime applies the shared precedence rules
 documented in [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md); this
 pipeline owns only its roles, setting validation, and defaults.
 
+## Persistent Run State
+
+The root run store persists this pipeline outside the project and task
+directories using the common contract in
+[`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md). Its versioned envelope
+records canonical inputs, resolved Planner and Reviewer configuration, hashes,
+revision and clarification counters, pause state, optional source-session
+reference, direct child role/session IDs, and opaque plan-authoring state.
+Drafts, findings, correction-round snapshots, and stagnation evidence remain
+pipeline-owned structured data; draft and context artifacts are written
+atomically beneath the run directory.
+
+Every transition appends and syncs its complete write-ahead event before
+atomically replacing `state.json`; `progress.md` is a derived public projection.
+Recovery advances lagging state from the last complete event, removes only an
+incomplete final fragment, and regenerates progress. A mutating run or resume
+must hold the per-run execution lease, while status remains read-only and
+lock-free. The pipeline creates concise public activity messages only from
+validated structured Planner or Reviewer results. Never persist raw model
+transcripts, chain-of-thought, credentials, or unhashed remote or identity data.
+
 ## Clarification
 
 The runner ensures the clarification artifact exists without overwriting an

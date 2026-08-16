@@ -19,7 +19,9 @@ choice affects the shared plan contract.
 - `src/clarifications.js`: own clarification artifact creation, editor invocation, transcript updates, and input hashing.
 - `src/pipeline-registry.js`: own the explicit list of built-in pipelines; do not turn it into a plugin system.
 - `src/runner.js`: coordinate `run`, `resume`, and `status` without backend-specific flags.
-- `src/state.js`: own state-directory resolution, atomic state writes, events, progress, and recovery.
+- `src/state.js`: expose and coordinate the run-store boundary.
+- `src/state-*.js`: keep its atomic file, write-ahead journal, execution-lease,
+  and persisted-shape helpers internal to the root state boundary.
 - `src/git.js`: own Git preflight, snapshots, fingerprints, mutation guards, Worker commit authorization/verification, and remote-configuration guards.
 - `src/agents/codex.js`: own Codex CLI probing, command construction, and output normalization.
 - `src/agents/claude.js`: own Claude Code probing, command construction, and output normalization.

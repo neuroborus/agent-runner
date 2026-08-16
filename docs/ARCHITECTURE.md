@@ -99,6 +99,48 @@ The root loader owns only the versioned envelope, strict field validation, and
 resolution precedence; it does not duplicate pipeline-specific role or setting
 lists.
 
+## External Run State
+
+The root runtime persists runs under `$XDG_STATE_HOME/agent-runner/`, falling
+back to `~/.local/state/agent-runner/`. A run is addressed by an opaque ID and
+stored beneath `runs/<run-id>/`; preflight rejects a state root inside the
+canonical project or task directory.
+
+`state.json` contains the common versioned envelope: monotonic revision,
+pipeline ID and state version, canonical paths, resolved roles, counters,
+hashes, pause state, session lineage, timestamps, and opaque pipeline-owned
+state. The root validates JSON shape and size without interpreting workflow
+roles or outcomes. Session lineage records an optional source-session reference
+and every direct child role/session ID, but native session resume remains an
+optimization rather than a correctness dependency.
+
+Each state transition is a small write-ahead transaction:
+
+1. append and sync a complete `events.jsonl` record containing the next state;
+2. atomically replace `state.json` using a temporary file and rename;
+3. atomically regenerate the derived `progress.md` projection.
+
+Revisions start at `1` and remain contiguous. Recovery ignores and removes only
+an incomplete final event fragment, rejects malformed durable records, advances
+a lagging `state.json` from the last complete event, and regenerates stale or
+missing progress. Valid event history is never discarded.
+
+Events may carry an optional bounded public activity record containing only
+`actor`, `phase`, `kind`, and a concise one-line `message`. Pipelines derive
+these messages from validated structured results; the state service validates
+only their generic form. Cursor-based readers expose this projection without
+returning private pipeline state, model output, credentials, or unhashed remote
+and identity values. Persist concise structured decisions and summaries, never
+raw model transcripts or chain-of-thought.
+
+Every mutating run or resume holds one atomic per-run execution lease. Status
+and public activity reads remain lock-free. A competing owner is rejected; a
+lease is recoverable only after its age threshold when its same-host process is
+demonstrably dead. Pipeline-declared run artifacts are atomically replaced
+beneath the run directory, with absolute paths, traversal, reserved state files,
+and symlink escapes rejected. Managed state and lease paths must be isolated
+regular files rather than symbolic or hard links.
+
 ## Clarification Lifecycle
 
 Every pipeline starts with an explicit, pipeline-owned `CLARIFY` state. Its
