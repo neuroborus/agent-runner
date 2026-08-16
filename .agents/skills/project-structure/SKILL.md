@@ -15,6 +15,7 @@ choice affects the shared plan contract.
 - `bin/agent-run.js`: keep the executable entry point thin.
 - `src/index.js`: expose the root source API to the executable and root tests.
 - `src/cli.js`: own argument parsing, validation, concise terminal output, and dispatch.
+- `src/config.js`: own repository configuration loading, strict validation, and role resolution precedence.
 - `src/clarifications.js`: own clarification artifact creation, editor invocation, transcript updates, and input hashing.
 - `src/pipeline-registry.js`: own the explicit list of built-in pipelines; do not turn it into a plugin system.
 - `src/runner.js`: coordinate `run`, `resume`, and `status` without backend-specific flags.
@@ -39,6 +40,8 @@ choice affects the shared plan contract.
 - Keep pipelines explicit and independently owned; do not introduce a generic workflow DSL or dynamic plugin loader.
 - Do not extract CLI, Git, state, agent adapters, or test helpers into packages until another real consumer needs them.
 - Keep the backend contract small and functional; contain CLI-specific details inside adapters.
+- Keep the configuration envelope and precedence in the root runtime while
+  pipeline descriptors own roles, setting validators, and defaults.
 - Keep plan parsing and Conventional Commit subject validation deterministic, shared, and separate from pipeline prompting.
 - Keep Git snapshots and fingerprints deterministic and side-effect free.
 - Allow a Worker commit only through a one-shot runner authorization after the commit gate; reject co-author trailers and remote-configuration changes.

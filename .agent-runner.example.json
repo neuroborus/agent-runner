@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "defaultBackend": "codex",
+  "pipelines": {
+    "plan-authoring": {
+      "maxRevisionRounds": 15,
+      "stagnationWindowRounds": 3,
+      "roles": {
+        "planner": {},
+        "reviewer": {
+          "backend": "claude",
+          "model": "sonnet"
+        }
+      }
+    },
+    "plan-execution": {
+      "maxFixRoundsPerStep": 5,
+      "maxDisputesPerFinding": 2,
+      "maxSameFindingRounds": 3,
+      "stagnationWindowRounds": 3,
+      "roles": {
+        "worker": {},
+        "reviewer": {
+          "backend": "claude"
+        },
+        "arbiter": {}
+      }
+    }
+  }
+}

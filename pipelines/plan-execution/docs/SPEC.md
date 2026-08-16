@@ -205,7 +205,19 @@ Claude worker + Codex reviewer
 
 The Arbiter must also support either backend.
 
-Model overrides may be added, but are not required for V1. Do not hard-code model names into workflow logic.
+The pipeline descriptor declares the `worker`, `reviewer`, and `arbiter` roles.
+Role objects under `pipelines.plan-execution.roles` in `.agent-runner.json` may
+provide an optional `backend` and backend-specific `model`. Backend precedence
+is CLI role override, repository pipeline-role value, repository-wide default,
+then preflight failure. Model precedence is CLI role override, repository
+pipeline-role value, then the selected backend's native default. Do not
+hard-code model names into workflow logic.
+
+The descriptor also owns the positive-integer settings and built-in defaults
+listed under [Retry Limits and No-Progress Detection](#14-retry-limits-and-no-progress-detection).
+Repository overrides live directly under `pipelines.plan-execution`. The root
+loader strictly validates the versioned envelope and delegates these values to
+the descriptor rather than duplicating pipeline policy.
 
 Codex and Claude do **not** both need to be installed for every run. Preflight validates the Worker and Reviewer selected for the run. The Arbiter backend may be validated lazily when arbitration is first needed.
 
@@ -1084,6 +1096,7 @@ Defaults:
 maxFixRoundsPerStep = 5
 maxDisputesPerFinding = 2
 maxSameFindingRounds = 3
+stagnationWindowRounds = 3
 ```
 
 A fix round is one Worker fix response followed by the required finalization/review cycle.

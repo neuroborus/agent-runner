@@ -19,8 +19,18 @@ test("registry exposes explicit immutable pipeline descriptors", () => {
     assert.ok(Number.isSafeInteger(pipeline.stateVersion));
     assert.ok(pipeline.stateVersion > 0);
     assert.ok(Object.isFrozen(pipeline));
+    assert.ok(Object.isFrozen(pipeline.roles));
+    assert.ok(Object.isFrozen(pipeline.settings));
     assert.ok(Object.isFrozen(pipeline.runOptions));
     assert.ok(Object.isFrozen(pipeline.requiredRunOptions));
+    for (const role of pipeline.roles) {
+      assert.ok(pipeline.runOptions.includes(role));
+    }
+    for (const setting of Object.values(pipeline.settings)) {
+      assert.ok(Object.isFrozen(setting));
+      assert.equal(typeof setting.errorMessage, "string");
+      assert.ok(setting.validate(setting.defaultValue));
+    }
     for (const option of pipeline.requiredRunOptions) {
       assert.ok(pipeline.runOptions.includes(option));
     }
@@ -28,6 +38,15 @@ test("registry exposes explicit immutable pipeline descriptors", () => {
 });
 
 test("pipelines own their pipeline-specific run options", () => {
+  assert.deepEqual(getPipeline("plan-authoring").roles, [
+    "planner",
+    "reviewer",
+  ]);
+  assert.deepEqual(getPipeline("plan-execution").roles, [
+    "worker",
+    "reviewer",
+    "arbiter",
+  ]);
   assert.deepEqual(getPipeline("plan-authoring").runOptions, [
     "project",
     "task",

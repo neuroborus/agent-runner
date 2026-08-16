@@ -6,9 +6,10 @@ processes while keeping persistence, Git safety, and backend execution in one
 small runner.
 
 > **Status:** initial project scaffold. The public command shape, module
-> boundaries, two pipeline descriptors, tests, and agent guidance are present. The
-> `run`, `resume`, and `status` workflows are not implemented yet and
-> deliberately return a non-zero exit code.
+> boundaries, versioned repository configuration, two pipeline descriptors,
+> tests, and agent guidance are present. The `run`, `resume`, and `status`
+> workflows are not implemented yet and deliberately return a non-zero exit
+> code.
 
 Architecture is documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 Each pipeline owns its specification under its workspace.
@@ -49,6 +50,11 @@ repositories.
 Both pipelines share the deterministic
 [`@agent-runner/commit-plan`](packages/commit-plan/README.md) contract. The
 authoring pipeline produces that artifact; the execution pipeline consumes it.
+
+Repository defaults may be stored in an ignored `.agent-runner.json` copied
+from the tracked [example](.agent-runner.example.json). The V1 loader validates
+the schema and pipeline-owned settings, rejects unsupported role backends and
+malformed model fields, and never rewrites the local file.
 
 A task directory has this shape:
 
@@ -125,11 +131,11 @@ ID and state-schema version and is addressed by a run ID.
 ## Pipeline Boundary
 
 The registry is static in V1. A pipeline descriptor exports an ID, a state
-version, pipeline-specific accepted and required `run` options, and a
-description; the root CLI owns the common `--clarify` lifecycle option. Each
-workspace owns its explicit JavaScript workflow. The runner provides state,
-events, agents, and Git services; it does not provide a workflow DSL or
-duplicate pipeline-specific role names and persisted states as root policy.
+version, roles, configuration settings and defaults, pipeline-specific accepted
+and required `run` options, and a description; the root CLI owns the common
+`--clarify` lifecycle option. Each workspace owns its explicit JavaScript
+workflow. The runner provides state, events, agents, and Git services; it does
+not provide a workflow DSL or duplicate pipeline-owned policy.
 
 ## Repository Layout
 
@@ -143,6 +149,7 @@ duplicate pipeline-specific role names and persisted states as root policy.
 │   │   ├── codex.js
 │   │   └── index.js
 │   ├── cli.js
+│   ├── config.js
 │   ├── clarifications.js
 │   ├── git.js
 │   ├── index.js

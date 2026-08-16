@@ -17,6 +17,7 @@ npm-debug.log*
 .env
 .env.*
 !.env.example
+/.agent-runner.json
 .claude/settings.local.json
 LOCAL_ARTIFACTS/
 

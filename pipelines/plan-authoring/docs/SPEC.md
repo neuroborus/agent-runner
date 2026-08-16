@@ -28,6 +28,23 @@ rounds, the user answers through a text editor, and the runner writes the final
 plan atomically. No other tracked or untracked file, index entry, commit, or ref
 may change.
 
+## Configuration
+
+The pipeline descriptor declares the `planner` and `reviewer` roles and owns
+these positive-integer repository settings:
+
+```text
+maxRevisionRounds = 15
+stagnationWindowRounds = 3
+```
+
+Values may be overridden under `pipelines.plan-authoring` in the repository's
+versioned `.agent-runner.json` contract. Role objects live under
+`pipelines.plan-authoring.roles` and may contain an optional `backend` and
+backend-specific `model`. The root runtime applies the shared precedence rules
+documented in [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md); this
+pipeline owns only its roles, setting validation, and defaults.
+
 ## Clarification
 
 The runner ensures the clarification artifact exists without overwriting an
@@ -157,6 +174,8 @@ creates a commit, pushes, or changes remote configuration or Git identity.
 - Use explicit JavaScript workflow logic, not a workflow DSL.
 - Keep Planner and Plan Reviewer prompts pipeline-specific.
 - Keep target-repository agent turns read-only.
-- Keep clarification and revision budgets finite and pause rather than accepting unresolved input or an invalid plan.
+- Keep clarification and revision budgets finite, apply the resolved
+  `maxRevisionRounds`, and pause rather than accepting unresolved input or an
+  invalid plan.
 - Do not turn clarifications into an open-ended chat after work begins.
 - Do not automatically start plan execution after authoring completes.

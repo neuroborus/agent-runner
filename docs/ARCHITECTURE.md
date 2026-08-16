@@ -20,6 +20,7 @@ declare an internal runtime dependency before an actual import needs it.
 ## Root Runner Ownership
 
 - CLI parsing, pipeline selection, and concise terminal output.
+- Versioned repository configuration loading, validation, and role resolution.
 - Run IDs, atomic state, append-only events, resume, and status.
 - Clarification files, editor invocation, transcript updates, and input hashes.
 - Codex and Claude adapter execution and access-mode enforcement.
@@ -37,11 +38,11 @@ keep ownership visible and avoid barrel cycles.
 
 ## Pipeline Ownership
 
-Each pipeline owns its input interpretation, accepted `run` options, prompts,
-structured-output schemas, explicit JavaScript state machine, retry policy, and
-completion criteria. Accepted and required options are exposed through its
-static descriptor; pipeline states remain workspace-owned rather than becoming
-root runtime policy.
+Each pipeline owns its input interpretation, roles, configuration settings and
+defaults, accepted `run` options, prompts, structured-output schemas, explicit
+JavaScript state machine, retry policy, and completion criteria. Roles, settings,
+and accepted and required options are exposed through its static descriptor;
+pipeline states remain workspace-owned rather than becoming root runtime policy.
 
 The root CLI owns `--clarify` as a common run-lifecycle option. Role and
 pipeline-specific options remain in pipeline descriptors.
@@ -55,6 +56,48 @@ V1 registers:
 
 The registry is static. V1 has no dynamic plugins, workflow DSL, or generic DAG
 executor.
+
+## Repository Configuration
+
+The root runtime reads an optional `.agent-runner.json` from the canonical
+target repository root. The file requires `schemaVersion: 1`; unknown versions,
+pipelines, roles, settings, and fields are errors. The loader never rewrites it.
+A tracked `.agent-runner.example.json` documents the contract, while the local
+runtime file must remain ignored and untracked. Git preflight enforces that
+repository boundary before a workflow starts.
+
+The V1 shape is:
+
+```json
+{
+  "schemaVersion": 1,
+  "defaultBackend": "codex",
+  "pipelines": {
+    "plan-execution": {
+      "maxFixRoundsPerStep": 5,
+      "roles": {
+        "worker": {
+          "backend": "claude",
+          "model": "sonnet"
+        }
+      }
+    }
+  }
+}
+```
+
+`defaultBackend` is optional. A role backend resolves from its CLI override,
+pipeline-role repository value, then `defaultBackend`; absence after those
+steps is a preflight error. A role model resolves from its CLI override, then
+its pipeline-role repository value, otherwise the selected backend uses its
+native default. There is no repository-wide model because model identifiers are
+backend-specific. The selected adapter validates every explicit model before
+that role's first agent turn.
+
+Pipeline descriptors validate their own settings and supply built-in defaults.
+The root loader owns only the versioned envelope, strict field validation, and
+resolution precedence; it does not duplicate pipeline-specific role or setting
+lists.
 
 ## Clarification Lifecycle
 

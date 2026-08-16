@@ -26,6 +26,8 @@ contracts. `packages/commit-plan/README.md` owns the shared plan contract.
 - Use `node:test`; keep real Codex and Claude smoke tests opt-in.
 - Prefer small functional modules and split them only when they become meaningfully large.
 - Keep backend-specific flags and output normalization inside `src/agents/`.
+- Keep repository configuration loading and precedence in `src/config.js`; let
+  pipeline descriptors own their roles, setting validators, and defaults.
 - Keep shared plan parsing and validation in `packages/commit-plan/`; never use an LLM to parse `plan.md` or generate commit subjects.
 - Require each plan heading to carry the exact subject-only Conventional Commit message: `type(scope)[!]: imperative summary`.
 - Outside an Agent Runner workflow, do not create a Git commit during direct repository maintenance unless the user explicitly asks for one. Finalization stages only the relevant change set and drafts its commit message.
@@ -79,6 +81,7 @@ All pipelines additionally require:
 | `bin/agent-run.js` | Thin executable entry point |
 | `src/index.js` | Public root source boundary |
 | `src/cli.js` | Argument parsing and terminal-facing command dispatch |
+| `src/config.js` | Repository configuration loading, validation, and role resolution |
 | `src/clarifications.js` | Clarification artifacts, editor invocation, transcript updates, and hashes |
 | `src/pipeline-registry.js` | Explicit registry of built-in pipelines |
 | `src/runner.js` | High-level run, resume, and status orchestration |
