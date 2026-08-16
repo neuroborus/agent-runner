@@ -6,6 +6,7 @@ import * as commitPlanApi from "../src/index.js";
 const {
   assertCommitSubject,
   COMMIT_TYPES,
+  CommitPlanValidationError,
   MAX_COMMIT_SUBJECT_LENGTH,
   validateCommitSubject,
 } = commitPlanApi;
@@ -44,6 +45,14 @@ test("rejects invalid commit subjects", () => {
   ]) {
     assert.notEqual(validateCommitSubject(subject).length, 0, subject);
   }
+
+  assert.throws(
+    () => assertCommitSubject("invalid"),
+    (error) =>
+      error instanceof CommitPlanValidationError &&
+      error.code === "ERR_INVALID_COMMIT_SUBJECT" &&
+      Object.isFrozen(error.issues),
+  );
 });
 
 test("exports the allowed type set as immutable data", () => {
