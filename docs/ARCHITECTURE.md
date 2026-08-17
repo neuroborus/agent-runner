@@ -114,6 +114,23 @@ roles or outcomes. Session lineage records an optional source-session reference
 and every direct child role/session ID, but native session resume remains an
 optimization rather than a correctness dependency.
 
+## Agent Context Recovery
+
+Backend sessions are disposable execution context, not durable workflow state.
+Every retryable prompt can be reconstructed from validated run state, durable
+artifacts, and the observed workspace. When a native context is full, an adapter
+may compact it and retry once; if continuation still fails, writable and
+read-only work can resume in a fresh session with a concise recovery preface.
+
+An explicitly supplied source session is different: the adapter must create a
+direct child and return its ID without resuming or mutating the source. If the
+source cannot be forked, the turn fails before agent work rather than silently
+losing lineage.
+
+Interrupted one-shot effects are also different. In particular, a
+`local-commit` turn is never replayed; control returns to the runner for pending
+authorization and Git-state verification.
+
 Each state transition is a small write-ahead transaction:
 
 1. append and sync a complete `events.jsonl` record containing the next state;

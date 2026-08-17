@@ -27,7 +27,10 @@ choice affects the shared plan contract.
 - `src/git.js`: expose and coordinate the Git safety boundary.
 - `src/git-*.js`: keep Git process, snapshot, and commit-verification helpers
   internal to the root Git boundary.
-- `src/agents/codex.js`: own Codex CLI probing, command construction, and output normalization.
+- `src/agents/codex.js`: own Codex adapter coordination, probing, and
+  request/result normalization.
+- `src/agents/codex-*.js`: keep its app-server transport and constrained commit
+  helpers internal to the Codex adapter.
 - `src/agents/claude.js`: own Claude Code probing, command construction, and output normalization.
 - `src/agents/index.js`: expose the agent-adapter directory API.
 - `packages/commit-plan/`: own deterministic plan parsing, serialization, and validation shared by multiple pipelines.

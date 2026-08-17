@@ -369,8 +369,11 @@ const backend = {
       structuredOutput: true,
       readOnly: true,
       autonomousWrite: true,
+      workspaceWrite: true,
       localCommit: true,
-      remoteWriteBlocked: true
+      remoteWriteBlocked: true,
+      nativeSessionContinuation: true,
+      nativeSessionFork: true
     };
   },
 
@@ -392,7 +395,8 @@ A request should contain only runner-level concepts such as:
   access: "read-only" | "workspace-write" | "local-commit",
   prompt,
   schema,
-  sessionId,
+  session: { mode: "fork" | "continue", id }, // optional
+  authorizationId, // local-commit only
   commit: { expectedHead, message } // local-commit only
 }
 ```
@@ -406,7 +410,10 @@ continues to block any other history/ref mutation, pushes, hosting-service
 writes, and remote configuration changes. Fail preflight if the selected Worker
 backend cannot provide that boundary; do not rely on prompt compliance alone.
 
-Native session resume is optional. Runner correctness must not depend on it. If a backend session cannot be resumed, reconstruct the next prompt from persisted runner state.
+Native session continuation is optional. Runner correctness must not depend on
+it. If a backend session cannot be continued, reconstruct the next prompt from
+persisted runner state and the observed workspace. A supplied fork source must
+be forked directly; never resume it or silently replace an unavailable source.
 
 Use structured output for all machine-actionable decisions:
 
@@ -427,7 +434,26 @@ Plain Markdown is acceptable for bootstrap/context summaries.
 
 ### Codex
 
-Use non-interactive Codex execution.
+Use the non-interactive Codex app-server JSONL protocol. Probe the installed
+`codex-cli` version and required app-server flags before the first role turn.
+Start each process with strict configuration and hosted search, browser,
+computer-use, image-generation, artifact, Code Mode, JS REPL, memory,
+automatic-goal, guardian-review, multi-agent, external app, plugin,
+lifecycle-hook, notification, MCP, shell-environment snapshot, and skill-driven
+MCP dependency installation capabilities disabled. Route no native approval to
+a subagent or interactive reviewer.
+Resolve and disable every configured MCP server individually, then verify the
+effective configuration before starting a thread; fail closed when isolation
+cannot be proven. The Codex process retains its own provider connectivity, but
+command tools receive no network access, workspace-write excludes implicit
+temporary-directory roots, Git metadata remains read-only, and reported
+activity is rejected if it uses a disabled or unknown tool or attempts a push,
+hosting-service mutation, or remote reconfiguration. Strip ambient Git
+repository redirection and identity overrides from every Codex process
+environment, and expose only Codex's filtered core environment without injected
+values or shell-profile loading to agent commands. Remove key-, secret-, and
+token-named variables from the isolated local-commit executor while retaining
+the ordinary environment needed by Git and hooks.
 
 Worker:
 
@@ -444,6 +470,33 @@ approval policy: never
 ```
 
 Use Codex structured output / JSON Schema support for machine-actionable responses.
+
+Validate every explicit model with `model/list` and reject any reported model
+reroute. Fresh turns use `thread/start`; continuation uses `thread/resume`; and
+a supplied source session uses `thread/fork`, with the returned child thread ID
+persisted as role lineage. Unavailable continuation may fall back to a fresh
+reconstructed turn, while an unavailable fork source is an error.
+
+On native context exhaustion, request thread compaction and retry the turn once.
+If the context remains full, start a fresh turn reconstructed from durable
+runner input and the current workspace. Never replay an interrupted
+`local-commit` turn: return an ambiguous outcome so the runner consumes no
+second authorization and verifies Git state before deciding how to proceed.
+
+`local-commit` additionally supplies an opaque authorization ID, expected HEAD,
+and exact subject. Its agent turn is read-only and may only confirm readiness
+through the adapter's strict schema; it cannot modify files, stage changes, or
+write Git metadata itself. After confirmation, the Worker adapter runs the
+exact HEAD check, `git add -A`, and ordinary subject-only commit in a dedicated
+Codex permission profile. That profile grants write access only to the
+workspace and resolved Git directory, denies command network access, preserves
+Git hooks and configured Git identity, and receives no ambient Git overrides.
+
+Probe this isolated commit profile by verifying outside-workspace write denial,
+Git-metadata writes, and network denial. Report `localCommit: false` and fail
+preflight if any boundary cannot be enforced. Any interrupted or failed commit
+executor returns an ambiguous outcome for the runner's one-shot authorization
+and final Git-state verification; it is never replayed.
 
 ### Claude Code
 
