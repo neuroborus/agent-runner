@@ -1,4 +1,8 @@
-import { CLAUDE_BACKEND_ID } from "./claude.js";
+import {
+  CLAUDE_BACKEND_ID,
+  ClaudeAdapterError,
+  createClaudeAdapter,
+} from "./claude.js";
 import {
   CODEX_BACKEND_ID,
   CodexAdapterError,
@@ -7,8 +11,10 @@ import {
 
 export {
   CLAUDE_BACKEND_ID,
+  ClaudeAdapterError,
   CODEX_BACKEND_ID,
   CodexAdapterError,
+  createClaudeAdapter,
   createCodexAdapter,
 };
 

@@ -7,7 +7,7 @@ small runner.
 
 > **Status:** the public command shape, module boundaries, versioned repository
 > configuration, deterministic commit-plan contract, external run store,
-> clarification and Git-safety services, Codex adapter, two pipeline
+> clarification and Git-safety services, Codex and Claude adapters, two pipeline
 > descriptors, tests, and agent guidance are present. The `run`, `resume`, and
 > `status` workflows are not wired yet and deliberately return a non-zero exit
 > code.
@@ -34,14 +34,15 @@ Each pipeline owns its specification under its workspace.
 
 - Node.js 24 LTS: `>=24 <25`
 - Git
-- Codex CLI 0.147.0 or newer stable and/or Claude Code, depending on the
-  selected role backends
+- Codex CLI 0.147.0 or newer stable and/or Claude Code 2.1.233 or newer stable,
+  depending on the selected role backends
+- `bubblewrap` and `socat` for the V1 Claude backend on Linux
 
 The project uses native ES modules and currently has no runtime npm
 dependencies outside the local workspaces. Adapter tests use process fakes;
-set `AGENT_RUNNER_LIVE_CODEX=1` to include the real Codex smoke turn. Real
-Claude tests remain opt-in, and workflow tests will use fakes and temporary Git
-repositories.
+set `AGENT_RUNNER_LIVE_CODEX=1` or `AGENT_RUNNER_LIVE_CLAUDE=1` to include the
+corresponding real smoke turn. Workflow tests use fakes and temporary Git
+repositories by default.
 
 ## Pipelines
 
@@ -152,7 +153,9 @@ not provide a workflow DSL or duplicate pipeline-owned policy.
 │   └── agent-run.js
 ├── src/
 │   ├── agents/
+│   │   ├── adapter-contract.js
 │   │   ├── claude.js
+│   │   ├── claude-local-commit.js
 │   │   ├── codex-app-server.js
 │   │   ├── codex-local-commit.js
 │   │   ├── codex.js

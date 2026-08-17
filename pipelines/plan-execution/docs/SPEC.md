@@ -500,7 +500,18 @@ and final Git-state verification; it is never replayed.
 
 ### Claude Code
 
-Use non-interactive print mode.
+Use non-interactive print mode with JSON output. Start in safe mode, expose only
+the built-in repository tools needed by the role, disable Chrome and prompt
+suggestions, and load an explicitly empty MCP configuration. Supply
+invocation-local settings that
+disable bypass mode and commit attribution, disable model fallback, require the
+native command sandbox to start successfully, deny its network access, forbid
+unsandboxed command retries, and deny writes to the resolved Git metadata
+directories. Use native sandbox credential-deny entries so Bash commands cannot
+inherit provider credentials without enabling subprocess hardening that
+downgrades `auto` to Manual mode, and reject any reported permission-mode
+fallback. Fail preflight when the host cannot enforce those settings. Plan-mode
+turns do not expose editing tools and also deny command writes to the workspace.
 
 Worker default:
 
@@ -526,6 +537,32 @@ permission mode: plan
 Do not enable bypass permissions in Reviewer or Arbiter sessions.
 
 Use `--output-format json` and `--json-schema` for machine-actionable output.
+Reject permission denials from a non-interactive turn instead of treating a
+partial response as success. Pass an explicit model without a fallback chain
+and reject a full model ID when the result's model usage reports a different
+model.
+
+Fresh turns omit resume flags. Continuation uses `--resume <session-id>`, and a
+supplied source session uses `--resume <session-id> --fork-session`; persist the
+returned child ID and reject the source ID as invalid fork lineage. An
+unavailable continuation may reconstruct a fresh turn, but an unavailable fork
+source is an error.
+
+Enable native auto-compaction for every turn. On an explicit context-exhaustion
+result, retry the durable request once in the same session with compaction
+instructions, then reconstruct it in a fresh session if the context remains
+full. Never replay an interrupted `local-commit` turn.
+
+On Linux, the isolated local-commit executor uses a probed `bubblewrap` profile
+with a read-only host filesystem, writable workspace and resolved Git
+directories, private temporary and runtime directories, and no network. The
+agent confirmation turn remains in `plan` mode; after confirmation the executor
+checks the expected HEAD, runs `git add -A`, rechecks HEAD, and creates one
+subject-only commit with the exact supplied message. It preserves Git hooks and
+configured identity, strips ambient Git redirection and sensitive command
+environment values, and never adds Claude attribution. Report
+`localCommit: false` when this profile or Claude's required Linux sandbox
+dependencies cannot be probed.
 
 ### Backend-neutral `finalization` skill
 

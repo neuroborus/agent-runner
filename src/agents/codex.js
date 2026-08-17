@@ -2,10 +2,16 @@ import {
   execFile as executeFileCallback,
   spawn,
 } from "node:child_process";
-import { isAbsolute } from "node:path";
 import { promisify } from "node:util";
 
 import packageMetadata from "../../package.json" with { type: "json" };
+import {
+  createAdapterContract,
+  deepFreeze,
+  isEnvironment,
+  isRecord,
+  isolateGitEnvironment,
+} from "./adapter-contract.js";
 import { createCodexAppServerClient } from "./codex-app-server.js";
 import {
   executeCodexLocalCommit,
@@ -16,56 +22,9 @@ export const CODEX_BACKEND_ID = "codex";
 
 const executeFile = promisify(executeFileCallback);
 const MINIMUM_CODEX_VERSION = Object.freeze([0, 147, 0]);
-const ACCESS_MODES = new Set([
-  "read-only",
-  "workspace-write",
-  "local-commit",
-]);
-const REQUEST_FIELDS = Object.freeze([
-  "access",
-  "authorizationId",
-  "commit",
-  "cwd",
-  "model",
-  "prompt",
-  "schema",
-  "session",
-]);
-const SESSION_FIELDS = Object.freeze(["id", "mode"]);
-const COMMIT_FIELDS = Object.freeze(["expectedHead", "message"]);
-const OBJECT_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
-const MAX_PROMPT_BYTES = 1024 * 1024;
-const MAX_SCHEMA_BYTES = 1024 * 1024;
-const MAX_SCHEMA_DEPTH = 128;
 const MAX_MCP_SERVERS = 256;
 const MCP_SERVER_NAME_PATTERN = /^[A-Za-z0-9_-]+$/u;
 const MAX_MODEL_PAGES = 32;
-const SCHEMA_CHILD_KEYWORDS = Object.freeze([
-  "additionalItems",
-  "additionalProperties",
-  "allOf",
-  "anyOf",
-  "contains",
-  "contentSchema",
-  "else",
-  "if",
-  "items",
-  "not",
-  "oneOf",
-  "prefixItems",
-  "propertyNames",
-  "then",
-  "unevaluatedItems",
-  "unevaluatedProperties",
-]);
-const SCHEMA_MAP_KEYWORDS = Object.freeze([
-  "$defs",
-  "definitions",
-  "dependencies",
-  "dependentSchemas",
-  "patternProperties",
-  "properties",
-]);
 const DISABLED_FEATURES = Object.freeze([
   "apps",
   "artifact",
@@ -225,34 +184,10 @@ export class CodexAdapterError extends Error {
   }
 }
 
-function isRecord(value) {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return false;
-  }
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
-
-function isEnvironment(value) {
-  return (
-    Object.prototype.toString.call(value) === "[object Object]" &&
-    Object.values(value).every(
-      (entry) => typeof entry === "string" || entry === undefined,
-    )
-  );
-}
-
-function isolateEnvironment(value) {
-  const environment = { ...value };
-  for (const name of Object.keys(environment)) {
-    const normalizedName = name.toUpperCase();
-    if (normalizedName === "EMAIL" || normalizedName.startsWith("GIT_")) {
-      delete environment[name];
-    }
-  }
-  environment.GIT_TERMINAL_PROMPT = "0";
-  return Object.freeze(environment);
-}
+const { assertFields, normalizeRequest } = createAdapterContract({
+  AdapterError: CodexAdapterError,
+  backendName: "Codex",
+});
 
 function isolateCommandEnvironment(value) {
   const environment = { ...value };
@@ -262,270 +197,6 @@ function isolateCommandEnvironment(value) {
     }
   }
   return Object.freeze(environment);
-}
-
-function assertFields(value, fields, name) {
-  if (!isRecord(value)) {
-    throw new CodexAdapterError(`${name} must be an object.`, {
-      code: "ERR_INVALID_CODEX_OPTIONS",
-    });
-  }
-  const unknown = Object.keys(value).find((field) => !fields.includes(field));
-  if (unknown !== undefined) {
-    throw new CodexAdapterError(`${name} field is not supported: ${unknown}.`, {
-      code: "ERR_INVALID_CODEX_OPTIONS",
-    });
-  }
-  return value;
-}
-
-function assertString(value, name, maximumLength = 4096) {
-  if (
-    typeof value !== "string" ||
-    value.length === 0 ||
-    value.length > maximumLength ||
-    /[\0\r\n]/u.test(value)
-  ) {
-    throw new CodexAdapterError(`${name} is invalid.`, {
-      code: "ERR_INVALID_CODEX_OPTIONS",
-    });
-  }
-  return value;
-}
-
-function assertJsonValue(value) {
-  const ancestors = new Set();
-  const pending = [{ depth: 0, value }];
-  while (pending.length > 0) {
-    const entry = pending.pop();
-    if (entry.exit === true) {
-      ancestors.delete(entry.value);
-      continue;
-    }
-    if (
-      entry.value === null ||
-      typeof entry.value === "string" ||
-      typeof entry.value === "boolean" ||
-      (typeof entry.value === "number" && Number.isFinite(entry.value))
-    ) {
-      continue;
-    }
-    if (typeof entry.value !== "object" || ancestors.has(entry.value)) {
-      throw new CodexAdapterError("JSON Schema must contain only JSON values.", {
-        code: "ERR_INVALID_CODEX_SCHEMA",
-      });
-    }
-    if (entry.depth > MAX_SCHEMA_DEPTH) {
-      throw new CodexAdapterError("JSON Schema is too deeply nested.", {
-        code: "ERR_INVALID_CODEX_SCHEMA",
-      });
-    }
-    let children;
-    if (Array.isArray(entry.value)) {
-      children = entry.value;
-    } else if (isRecord(entry.value)) {
-      children = Object.values(entry.value);
-    } else {
-      throw new CodexAdapterError("JSON Schema must be a plain JSON object.", {
-        code: "ERR_INVALID_CODEX_SCHEMA",
-      });
-    }
-    ancestors.add(entry.value);
-    pending.push({ exit: true, value: entry.value });
-    for (let index = children.length - 1; index >= 0; index -= 1) {
-      pending.push({ depth: entry.depth + 1, value: children[index] });
-    }
-  }
-}
-
-function assertStrictObjectSchemas(schema) {
-  const pending = [schema];
-  while (pending.length > 0) {
-    const entry = pending.pop();
-    if (Array.isArray(entry)) {
-      for (const child of entry) {
-        pending.push(child);
-      }
-      continue;
-    }
-    if (!isRecord(entry)) {
-      continue;
-    }
-    const describesObject =
-      entry.type === "object" ||
-      (Array.isArray(entry.type) && entry.type.includes("object")) ||
-      entry.properties !== undefined;
-    if (describesObject) {
-      if (
-        !isRecord(entry.properties) ||
-        entry.additionalProperties !== false ||
-        !Array.isArray(entry.required)
-      ) {
-        throw new CodexAdapterError(
-          "Object schemas must declare properties, every required field, " +
-            "and additionalProperties: false.",
-          { code: "ERR_INVALID_CODEX_SCHEMA" },
-        );
-      }
-      const properties = Object.keys(entry.properties);
-      if (
-        entry.required.length !== properties.length ||
-        new Set(entry.required).size !== properties.length ||
-        properties.some((property) => !entry.required.includes(property))
-      ) {
-        throw new CodexAdapterError(
-          "Every object-schema property must be required exactly once.",
-          { code: "ERR_INVALID_CODEX_SCHEMA" },
-        );
-      }
-    }
-    for (const keyword of SCHEMA_CHILD_KEYWORDS) {
-      if (entry[keyword] !== undefined) {
-        pending.push(entry[keyword]);
-      }
-    }
-    for (const keyword of SCHEMA_MAP_KEYWORDS) {
-      if (isRecord(entry[keyword])) {
-        for (const child of Object.values(entry[keyword])) {
-          pending.push(child);
-        }
-      }
-    }
-  }
-}
-
-function deepFreeze(value) {
-  const pending = [value];
-  while (pending.length > 0) {
-    const entry = pending.pop();
-    if (
-      entry !== null &&
-      typeof entry === "object" &&
-      !Object.isFrozen(entry)
-    ) {
-      Object.freeze(entry);
-      for (const child of Object.values(entry)) {
-        pending.push(child);
-      }
-    }
-  }
-  return value;
-}
-
-function normalizeSchema(value) {
-  if (value === undefined) {
-    return undefined;
-  }
-  assertJsonValue(value);
-  if (!isRecord(value) || value.type !== "object") {
-    throw new CodexAdapterError("Codex output schema must describe an object.", {
-      code: "ERR_INVALID_CODEX_SCHEMA",
-    });
-  }
-  assertStrictObjectSchemas(value);
-  const source = JSON.stringify(value);
-  if (Buffer.byteLength(source) > MAX_SCHEMA_BYTES) {
-    throw new CodexAdapterError("Codex output schema is too large.", {
-      code: "ERR_INVALID_CODEX_SCHEMA",
-    });
-  }
-  return deepFreeze(JSON.parse(source));
-}
-
-function normalizeSession(value) {
-  if (value === undefined) {
-    return undefined;
-  }
-  assertFields(value, SESSION_FIELDS, "Codex session");
-  if (!["continue", "fork"].includes(value.mode)) {
-    throw new CodexAdapterError("Codex session mode is invalid.", {
-      code: "ERR_INVALID_CODEX_OPTIONS",
-    });
-  }
-  return Object.freeze({
-    mode: value.mode,
-    id: assertString(value.id, "Codex session ID"),
-  });
-}
-
-function normalizeCommit(value) {
-  assertFields(value, COMMIT_FIELDS, "Codex commit constraint");
-  if (
-    typeof value.expectedHead !== "string" ||
-    !OBJECT_ID_PATTERN.test(value.expectedHead) ||
-    typeof value.message !== "string" ||
-    value.message.length === 0 ||
-    value.message.trim() !== value.message ||
-    /[\0\r\n]/u.test(value.message) ||
-    [...value.message].length > 72
-  ) {
-    throw new CodexAdapterError("Codex commit constraint is invalid.", {
-      code: "ERR_INVALID_CODEX_OPTIONS",
-    });
-  }
-  return Object.freeze({
-    expectedHead: value.expectedHead,
-    message: value.message,
-  });
-}
-
-function normalizeRequest(value) {
-  assertFields(value, REQUEST_FIELDS, "Codex request");
-  if (
-    typeof value.cwd !== "string" ||
-    !isAbsolute(value.cwd) ||
-    /[\0\r\n]/u.test(value.cwd) ||
-    !ACCESS_MODES.has(value.access) ||
-    typeof value.prompt !== "string" ||
-    value.prompt.trim().length === 0 ||
-    /\0/u.test(value.prompt) ||
-    Buffer.byteLength(value.prompt) > MAX_PROMPT_BYTES
-  ) {
-    throw new CodexAdapterError("Codex request is invalid.", {
-      code: "ERR_INVALID_CODEX_OPTIONS",
-    });
-  }
-  const model =
-    value.model === undefined
-      ? undefined
-      : assertString(value.model, "Codex model", 256);
-  const session = normalizeSession(value.session);
-  const schema = normalizeSchema(value.schema);
-  if (value.access === "local-commit") {
-    if (schema !== undefined) {
-      throw new CodexAdapterError(
-        "Local-commit requests use the adapter confirmation schema.",
-        { code: "ERR_INVALID_CODEX_OPTIONS" },
-      );
-    }
-    return Object.freeze({
-      access: value.access,
-      authorizationId: assertString(
-        value.authorizationId,
-        "Commit authorization ID",
-      ),
-      commit: normalizeCommit(value.commit),
-      cwd: value.cwd,
-      model,
-      prompt: value.prompt,
-      schema,
-      session,
-    });
-  }
-  if (value.authorizationId !== undefined || value.commit !== undefined) {
-    throw new CodexAdapterError(
-      "Commit constraints require local-commit access.",
-      { code: "ERR_INVALID_CODEX_OPTIONS" },
-    );
-  }
-  return Object.freeze({
-    access: value.access,
-    cwd: value.cwd,
-    model,
-    prompt: value.prompt,
-    schema,
-    session,
-  });
 }
 
 function parseVersion(value) {
@@ -1166,7 +837,7 @@ export function createCodexAdapter(options = {}) {
       code: "ERR_INVALID_CODEX_OPTIONS",
     });
   }
-  const processEnvironment = isolateEnvironment(env);
+  const processEnvironment = isolateGitEnvironment(env);
   const commandEnvironment = isolateCommandEnvironment(processEnvironment);
   let probePromise;
 

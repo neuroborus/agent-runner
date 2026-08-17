@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { parse } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
 
@@ -301,6 +302,14 @@ test("constructs with the native environment and probes capabilities", async () 
     () => createCodexAdapter({ env: { INVALID: 1 } }),
     hasCode("ERR_INVALID_CODEX_OPTIONS"),
   );
+  const invalidRequestFixture = createFixture();
+  await assert.rejects(
+    invalidRequestFixture.adapter.run(
+      request({ cwd: parse(PROJECT_PATH).root }),
+    ),
+    hasCode("ERR_INVALID_CODEX_OPTIONS"),
+  );
+  assert.equal(invalidRequestFixture.executeCalls.length, 0);
   const fixture = createFixture();
 
   assert.equal(fixture.adapter.id, CODEX_BACKEND_ID);
