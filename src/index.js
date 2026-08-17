@@ -12,6 +12,7 @@ export {
   parseRepositoryConfiguration,
   resolvePipelineConfiguration,
 } from "./config.js";
+export { createGitService, GitSafetyError } from "./git.js";
 export { getPipeline, listPipelines } from "./pipeline-registry.js";
 export {
   createRunStore,

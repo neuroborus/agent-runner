@@ -91,7 +91,8 @@ All pipelines additionally require:
 | `src/runner.js` | High-level run, resume, and status orchestration |
 | `src/state.js` | Public run-store coordination and state-directory resolution |
 | `src/state-*.js` | Internal state file, journal, lease, and validation helpers |
-| `src/git.js` | Git preflight, snapshots, fingerprints, guards, and local commits |
+| `src/git.js` | Public Git-safety coordination |
+| `src/git-*.js` | Internal Git process, snapshot, and commit-verification helpers |
 | `src/agents/index.js` | Public agent-adapter directory boundary |
 | `src/agents/` | Codex and Claude adapter implementations |
 | `packages/commit-plan/` | Shared deterministic commit-plan contract |

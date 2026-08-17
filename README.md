@@ -6,10 +6,10 @@ processes while keeping persistence, Git safety, and backend execution in one
 small runner.
 
 > **Status:** the public command shape, module boundaries, versioned repository
-> configuration, deterministic commit-plan contract, external run store, two
-> pipeline descriptors, tests, and agent guidance are present. The `run`,
-> `resume`, and `status` workflows are not wired yet and deliberately return a
-> non-zero exit code.
+> configuration, deterministic commit-plan contract, external run store,
+> clarification and Git-safety services, two pipeline descriptors, tests, and
+> agent guidance are present. The `run`, `resume`, and `status` workflows are
+> not wired yet and deliberately return a non-zero exit code.
 
 Architecture is documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 Each pipeline owns its specification under its workspace.
@@ -54,7 +54,8 @@ authoring pipeline produces that artifact; the execution pipeline consumes it.
 Repository defaults may be stored in an ignored `.agent-runner.json` copied
 from the tracked [example](.agent-runner.example.json). The V1 loader validates
 the schema and pipeline-owned settings, rejects unsupported role backends and
-malformed model fields, and never rewrites the local file.
+malformed model fields, and never rewrites the local file. Git preflight
+requires its path to remain ignored and untracked even when the file is absent.
 
 A task directory has this shape:
 
@@ -156,6 +157,8 @@ not provide a workflow DSL or duplicate pipeline-owned policy.
 │   ├── clarification-editor.js
 │   ├── clarification-files.js
 │   ├── clarifications.js
+│   ├── git-command.js
+│   ├── git-content.js
 │   ├── git.js
 │   ├── index.js
 │   ├── pipeline-registry.js
