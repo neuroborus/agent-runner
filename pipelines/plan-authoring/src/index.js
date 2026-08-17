@@ -1,11 +1,26 @@
+import {
+  createPlanAuthoringState,
+  MAX_CLARIFICATION_ROUNDS,
+  PlanAuthoringWorkflowError,
+  runPlanAuthoring,
+  WORKFLOW_STATES,
+} from "./workflow.js";
+
 export {
   CLARIFICATION_INSTRUCTIONS,
   DRAFT_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
   REVIEW_INSTRUCTIONS,
+  STAGNATION_INSTRUCTIONS,
 } from "./prompts.js";
-export { MAX_CLARIFICATION_ROUNDS, WORKFLOW_STATES } from "./workflow.js";
+export {
+  createPlanAuthoringState,
+  MAX_CLARIFICATION_ROUNDS,
+  PlanAuthoringWorkflowError,
+  runPlanAuthoring,
+  WORKFLOW_STATES,
+};
 
 export const PLAN_AUTHORING_PIPELINE_ID = "plan-authoring";
 
@@ -17,7 +32,7 @@ function positiveIntegerSetting(defaultValue) {
   });
 }
 
-const ROLES = Object.freeze(["planner", "reviewer"]);
+const ROLES = Object.freeze(["planner", "reviewer", "arbiter"]);
 const SETTINGS = Object.freeze({
   maxRevisionRounds: positiveIntegerSetting(15),
   stagnationWindowRounds: positiveIntegerSetting(3),
@@ -31,4 +46,8 @@ export const planAuthoringPipeline = Object.freeze({
   runOptions: Object.freeze(["project", "task", ...ROLES]),
   requiredRunOptions: Object.freeze(["project", "task"]),
   description: "Analyze a task, draft a commit plan, review it, and write plan.md.",
+  workflow: Object.freeze({
+    createState: createPlanAuthoringState,
+    run: runPlanAuthoring,
+  }),
 });

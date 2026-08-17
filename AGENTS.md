@@ -28,7 +28,10 @@ contracts. `packages/commit-plan/README.md` owns the shared plan contract.
 - Keep backend-specific flags and output normalization inside `src/agents/`.
 - Keep repository configuration loading and precedence in `src/config.js`; let
   pipeline descriptors own their roles, setting validators, and defaults.
-- Keep shared plan parsing and validation in `packages/commit-plan/`; never use an LLM to parse `plan.md` or generate commit subjects.
+- Keep shared plan parsing and structural and subject validation in
+  `packages/commit-plan/`. The plan-authoring Planner proposes exact commit
+  subjects, deterministic code validates them, and plan execution consumes
+  their validated text unchanged.
 - Require each plan heading to carry the exact subject-only Conventional Commit message: `type(scope)[!]: imperative summary`.
 - Outside an Agent Runner workflow, do not create a Git commit during direct repository maintenance unless the user explicitly asks for one. Finalization stages only the relevant change set and drafts its commit message.
 - Never push, mutate a remote ref, change `origin` or another remote's configuration, or write through a hosting-service API or CLI.
@@ -56,7 +59,9 @@ All pipelines additionally require:
   an editor or waiting for clarification input; consume that one-shot
   authorization when the editor closes or a resumed edit is accepted.
 - Treat clarification edits outside a runner-authorized editor window as unexpected input changes.
-- Create repository-local clarification artifacts only when `git check-ignore` confirms their resolved `LOCAL_ARTIFACTS` path is ignored; never alter target ignore rules automatically.
+- Create repository-local clarification artifacts only when `git check-ignore`
+  confirms their resolved path is ignored; never alter target ignore rules
+  automatically.
 
 `plan-execution` additionally requires:
 

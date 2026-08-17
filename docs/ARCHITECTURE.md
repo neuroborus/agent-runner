@@ -109,10 +109,11 @@ canonical project or task directory.
 `state.json` contains the common versioned envelope: monotonic revision,
 pipeline ID and state version, canonical paths, resolved roles, counters,
 hashes, pause state, session lineage, timestamps, and opaque pipeline-owned
-state. The root validates JSON shape and size without interpreting workflow
-roles or outcomes. Session lineage records an optional source-session reference
-and every direct child role/session ID, but native session resume remains an
-optimization rather than a correctness dependency.
+state, including its resolved settings. The root validates JSON shape and size
+without interpreting workflow roles or outcomes. Session lineage records an
+optional source-session reference and every direct child role/session ID, but
+native session resume remains an optimization rather than a correctness
+dependency.
 
 ## Agent Context Recovery
 
@@ -220,8 +221,8 @@ safe re-entry state. The authorization is one-shot and is consumed when the
 editor closes or a resumed edit is accepted.
 
 Repository-local clarification artifacts may be created only after
-`git check-ignore` confirms the target repository ignores their resolved
-`LOCAL_ARTIFACTS` path. The runner never edits target ignore rules automatically.
+`git check-ignore` confirms the target repository ignores their resolved paths.
+The runner never edits target ignore rules automatically.
 
 When clarification closes, the runner freezes the artifact hash. Normal work
 prompts prohibit further questions. An agent may return the structured

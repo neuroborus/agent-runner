@@ -30,8 +30,8 @@ may change.
 
 ## Configuration
 
-The pipeline descriptor declares the `planner` and `reviewer` roles and owns
-these positive-integer repository settings:
+The pipeline descriptor declares the `planner`, `reviewer`, and on-demand
+`arbiter` roles and owns these positive-integer repository settings:
 
 ```text
 maxRevisionRounds = 15
@@ -50,12 +50,13 @@ pipeline owns only its roles, setting validation, and defaults.
 The root run store persists this pipeline outside the project and task
 directories using the common contract in
 [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md). Its versioned envelope
-records canonical inputs, resolved Planner and Reviewer configuration, hashes,
-revision and clarification counters, pause state, optional source-session
-reference, direct child role/session IDs, and opaque plan-authoring state.
+records canonical inputs, resolved Planner, Reviewer, and Arbiter configuration,
+resolved pipeline settings, the initial repository baseline, hashes, revision
+and clarification counters, pause state, optional source-session reference,
+direct child role/session IDs, and opaque plan-authoring state.
 Drafts, findings, correction-round snapshots, and stagnation evidence remain
-pipeline-owned structured data; draft and context artifacts are written
-atomically beneath the run directory.
+pipeline-owned structured data in the external run state rather than task
+artifacts.
 
 Every transition appends and syncs its complete write-ahead event before
 atomically replacing `state.json`; `progress.md` is a derived public projection.
@@ -63,13 +64,14 @@ Recovery advances lagging state from the last complete event, removes only an
 incomplete final fragment, and regenerates progress. A mutating run or resume
 must hold the per-run execution lease, while status remains read-only and
 lock-free. The pipeline creates concise public activity messages only from
-validated structured Planner or Reviewer results. Never persist raw model
-transcripts, chain-of-thought, credentials, or unhashed remote or identity data.
+validated structured role results and deterministic runner outcomes. Never
+persist raw model transcripts, chain-of-thought, credentials, or unhashed
+remote or identity data.
 
 ## Clarification
 
-The runner ensures the clarification artifact exists without overwriting an
-existing transcript before the pipeline enters `CLARIFY`. The Planner studies
+Before the first Planner turn in `CLARIFY`, the runner ensures the clarification
+artifact exists without overwriting an existing transcript. The Planner studies
 the task, existing clarifications, repository instructions, relevant
 architecture, tests, and Git history in read-only mode.
 It returns structured `READY` or all currently actionable questions whose
@@ -144,7 +146,9 @@ That outcome enters `WAITING_FOR_USER` and appends the question, options, and
 evidence to the same artifact. The user edits the transcript in the authorized
 editor window. The runner persists the updated artifact hash, and the edit
 invalidates dependent analysis, drafts, and reviews; resume returns to
-`ANALYZE`.
+`ANALYZE`. It also starts a new consecutive-stagnation window and discards
+diagnostic evidence tied to the prior inputs without resetting cumulative
+revision counters or allowing a second Arbiter.
 
 ## Workflow
 
@@ -161,9 +165,12 @@ Unrecoverable internal failure              → FAILED
 ```
 
 The Planner and Plan Reviewer study the finalized inputs, repository
-instructions, relevant architecture, tests, and Git history independently. The
-Reviewer checks scope, ordering, atomic commit boundaries, dependencies,
-acceptance criteria, and commit-subject validity.
+instructions, relevant architecture, tests, and Git history independently. If
+a compatible source session was supplied, their first turns are separate direct
+forks of that source and only the returned child IDs are persisted. Neither role
+ever continues the source in place or forks from the other role. The on-demand
+Arbiter always starts fresh. The Reviewer checks scope, ordering, atomic commit
+boundaries, dependencies, acceptance criteria, and commit-subject validity.
 
 Keep role prompts short. Their mandatory English cores are:
 
@@ -176,19 +183,64 @@ Review the plan and verify that it is correct, idiomatic, minimal, consistent wi
 
 Planner finding resolution:
 For each finding below, fix the plan idiomatically and minimally, following the project's conventions.
+
+Stagnation Arbiter:
+Diagnose why the plan revision loop is not converging and choose the minimal valid next direction using the provided schema.
 ```
 
 The pipeline may append finalized inputs, access restrictions, output schemas,
-and the common product-decision instructions. The Reviewer returns structured
-actionable findings instead of editing the draft. When findings exist, the
-pipeline sends them to the Planner together with the finding-resolution core.
-The Planner returns a revised draft, and the independent Reviewer checks it
-again. Neither role writes repository or artifact files directly.
+the concise shared plan format, and the common product-decision instructions.
+The Reviewer returns structured actionable findings instead of editing the
+draft. When findings exist, the pipeline sends them to the Planner together
+with the finding-resolution core. The Planner returns a revised draft, and the
+independent Reviewer checks it again. Neither role writes repository or
+artifact files directly.
+
+The pipeline owns strict schemas for clarification readiness, Planner drafts or
+blocking product decisions, Reviewer approval or stable-ID findings, and
+stagnation directions. Fields that do not apply to the selected status remain
+present and empty so every object schema is strict and deterministic. The
+pipeline validates status-specific invariants after adapter validation.
+
+Only the Planner proposes the exact subject in each commit heading. The shared
+`@agent-runner/commit-plan` package parses and validates every proposed subject
+and plan deterministically; neither the Reviewer, Arbiter, runner, nor execution
+pipeline generates or rewrites a subject.
+
+The initial draft and review do not consume the revision budget. Each completed
+Planner revision followed by review, and when approved deterministic validation,
+that returns to revision is one blocked correction round. Persist its exact
+finding IDs, validation issues, and draft fingerprint as bounded diagnostic
+evidence. Finding-ID changes are evidence rather than a reason to reset the
+counter; do not use fuzzy matching or heuristic progress scores.
+
+After `stagnationWindowRounds` consecutive blocked correction rounds, invoke the
+fresh read-only Arbiter once. Give it only the current draft, compact correction
+history, current blockers, finalized inputs, and repository evidence. Its strict
+result may continue revision, request a plan restructure, require Reviewer
+reconsideration of the current findings, or require a product decision. It can
+never approve a plan, waive deterministic validation, edit a draft, or reset a
+budget. Reject a finding-reconsideration direction unless it names exactly the
+currently open finding IDs. A second full blocked window pauses with
+`plan_revision_not_converging`; a second stagnation arbitration is forbidden.
+
+`maxRevisionRounds` defaults to `15`. When no further revision is authorized,
+pause with `plan_revision_limit_reached` and do not write `plan.md`. Arbitration
+does not reset or bypass this limit.
 
 The final artifact must pass
 [`@agent-runner/commit-plan`](../../../packages/commit-plan/README.md) validation
 before it is written atomically. This pipeline never changes Git history,
 creates a commit, pushes, or changes remote configuration or Git identity.
+Immediately before every agent turn and the final write, re-read and compare the
+persisted hashes of `task.md`, optional `context.md`, and accepted
+`clarifications.md`. Unauthorized drift pauses and invalidates dependent drafts
+and reviews. Preserve the preflight repository snapshot as the run baseline,
+compare it before and after every agent turn and around the final write, and
+also wrap each turn in its own full snapshot check. Any other repository
+mutation pauses instead of advancing. Before creating a repository-local
+clarification transcript, require `git check-ignore` evidence that its resolved
+path is ignored and untracked.
 
 ## V1 Boundaries
 

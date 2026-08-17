@@ -29,6 +29,10 @@ test("tracked example is valid and local configuration is ignored", async () => 
     backend: "claude",
     model: "sonnet",
   });
+  assert.deepEqual(
+    configuration.pipelines["plan-authoring"].roles.arbiter,
+    {},
+  );
   assert.match(gitignore, /^\/\.agent-runner\.json$/mu);
   assert.ok(Object.isFrozen(configuration));
   assert.ok(Object.isFrozen(configuration.pipelines));
@@ -232,6 +236,7 @@ test("role resolution normalizes configuration objects", () => {
     roles: {
       planner: { backend: "codex", model: null },
       reviewer: { backend: "codex", model: null },
+      arbiter: { backend: "codex", model: null },
     },
     settings: {
       maxRevisionRounds: 4,

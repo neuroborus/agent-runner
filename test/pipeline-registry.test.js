@@ -41,6 +41,7 @@ test("pipelines own their pipeline-specific run options", () => {
   assert.deepEqual(getPipeline("plan-authoring").roles, [
     "planner",
     "reviewer",
+    "arbiter",
   ]);
   assert.deepEqual(getPipeline("plan-execution").roles, [
     "worker",
@@ -52,6 +53,7 @@ test("pipelines own their pipeline-specific run options", () => {
     "task",
     "planner",
     "reviewer",
+    "arbiter",
   ]);
   assert.deepEqual(getPipeline("plan-execution").runOptions, [
     "project",
@@ -64,6 +66,12 @@ test("pipelines own their pipeline-specific run options", () => {
     "project",
     "task",
   ]);
+  assert.equal(
+    typeof getPipeline("plan-authoring").workflow.createState,
+    "function",
+  );
+  assert.equal(typeof getPipeline("plan-authoring").workflow.run, "function");
+  assert.ok(Object.isFrozen(getPipeline("plan-authoring").workflow));
   assert.deepEqual(getPipeline("plan-execution").requiredRunOptions, [
     "project",
     "task",

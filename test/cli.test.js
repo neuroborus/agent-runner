@@ -128,7 +128,6 @@ for (const args of [
   ["resume", "--reviewer", "claude"],
   ["run", "plan-execution", "--extra-fix-rounds", "1"],
   ["run", "plan-authoring", "--worker", "codex"],
-  ["run", "plan-authoring", "--arbiter", "codex"],
   ["run", "plan-execution", "--planner", "codex"],
   ["status", "--run", "run-id", "--clarify"],
 ]) {
@@ -184,6 +183,29 @@ for (const pipeline of ["plan-authoring", "plan-execution"]) {
     assert.match(stderr.read(), /not implemented in the initial scaffold/);
   });
 }
+
+test("run plan-authoring accepts the declared Arbiter role", async () => {
+  const stdout = createSink();
+  const stderr = createSink();
+
+  const exitCode = await main(
+    [
+      "run",
+      "plan-authoring",
+      "--project",
+      "/tmp/project",
+      "--task",
+      "/tmp/task",
+      "--arbiter",
+      "codex",
+    ],
+    { stdout: stdout.stream, stderr: stderr.stream },
+  );
+
+  assert.equal(exitCode, 1);
+  assert.equal(stdout.read(), "");
+  assert.match(stderr.read(), /not implemented in the initial scaffold/);
+});
 
 test("run requires a known pipeline", async () => {
   const stdout = createSink();

@@ -10,7 +10,8 @@
         "reviewer": {
           "backend": "claude",
           "model": "sonnet"
-        }
+        },
+        "arbiter": {}
       }
     },
     "plan-execution": {
