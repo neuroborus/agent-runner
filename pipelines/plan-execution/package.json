@@ -5,6 +5,9 @@
   "description": "Execute a validated commit plan through implementation and review",
   "type": "module",
   "exports": "./src/index.js",
+  "dependencies": {
+    "@agent-runner/commit-plan": "0.0.0"
+  },
   "scripts": {
     "test": "node --test"
   },

@@ -76,6 +76,12 @@ test("pipelines own their pipeline-specific run options", () => {
     "project",
     "task",
   ]);
+  assert.equal(
+    typeof getPipeline("plan-execution").workflow.createState,
+    "function",
+  );
+  assert.equal(typeof getPipeline("plan-execution").workflow.run, "function");
+  assert.ok(Object.isFrozen(getPipeline("plan-execution").workflow));
   assert.equal(getPipeline("unknown"), undefined);
 });
 

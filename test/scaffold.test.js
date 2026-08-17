@@ -119,7 +119,9 @@ test("workspace topology keeps pipelines independent", async () => {
   assert.deepEqual(planAuthoring.dependencies, {
     "@agent-runner/commit-plan": "0.0.0",
   });
-  assert.equal(planExecution.dependencies, undefined);
+  assert.deepEqual(planExecution.dependencies, {
+    "@agent-runner/commit-plan": "0.0.0",
+  });
 });
 
 test("project skills have valid metadata", async () => {

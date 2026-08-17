@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
+  BOOTSTRAP_INSTRUCTIONS,
+  BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
   IMPLEMENTATION_INSTRUCTIONS,
@@ -9,6 +12,25 @@ import {
   PRODUCT_DECISION_INSTRUCTIONS,
   REVIEW_INSTRUCTIONS,
 } from "../src/index.js";
+
+test("bootstrap instructions preserve independent evidence and arbitration", () => {
+  assert.equal(
+    BOOTSTRAP_INSTRUCTIONS,
+    `Study the repository, task, validated plan, clarifications, project instructions, the project's finalization skill, other relevant skills, tests, and Git history independently and without modifying the repository.
+Return a concise bootstrap summary covering the task, relevant architecture and files, invariants, planned commits, risks, and the project's finalization procedure using the provided schema.`,
+  );
+  assert.equal(
+    BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
+    `Reconcile the independent Worker and Reviewer bootstrap summaries using the task, validated plan, repository, and evidence.
+Do not force agreement or modify the repository. Return a concise resolved summary, or the remaining material disagreement, using the provided schema.`,
+  );
+  assert.equal(
+    BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
+    `Resolve the bootstrap disagreement from the task, plan, repository, and evidence, choosing the minimal valid direction using the provided schema.
+
+Do not modify the repository. Resolve only the recorded disagreement and do not rewrite requirements.`,
+  );
+});
 
 test("clarification instructions keep questions before implementation", () => {
   assert.equal(
