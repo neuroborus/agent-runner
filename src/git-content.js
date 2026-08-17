@@ -450,10 +450,13 @@ export async function contentFingerprintsAtRoot(
   context,
   repositoryPath,
   allowedPaths,
+  { baseHead } = {},
 ) {
   const { currentHead, runGit } = context;
   const excludedPaths = new Set(allowedPaths);
-  const head = await currentHead(repositoryPath);
+  const head = baseHead === undefined
+    ? await currentHead(repositoryPath)
+    : baseHead;
   const trackedResult =
     head === null
       ? await runGit(repositoryPath, ["ls-files", "--cached", "-z"])

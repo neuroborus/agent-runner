@@ -157,6 +157,7 @@ not provide a workflow DSL or duplicate pipeline-owned policy.
 │   ├── clarification-editor.js
 │   ├── clarification-files.js
 │   ├── clarifications.js
+│   ├── git-commit.js
 │   ├── git-command.js
 │   ├── git-content.js
 │   ├── git.js

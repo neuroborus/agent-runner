@@ -9,6 +9,7 @@ import {
   isEnvironment,
   resolveRepository,
 } from "./git-command.js";
+import { createGitCommitService } from "./git-commit.js";
 import {
   contentFingerprintsAtRoot,
   inspectPathAtRoot,
@@ -113,12 +114,18 @@ function assertSnapshot(value) {
 
 export function createGitService(options = {}) {
   assertOptions(options, "Git-service options");
-  const { env = process.env, gitBinary = "git" } = options;
+  const {
+    authorizationIdFactory,
+    env = process.env,
+    gitBinary = "git",
+  } = options;
   if (
     !isEnvironment(env) ||
     typeof gitBinary !== "string" ||
     gitBinary.trim().length === 0 ||
-    /[\0\r\n]/u.test(gitBinary)
+    /[\0\r\n]/u.test(gitBinary) ||
+    (authorizationIdFactory !== undefined &&
+      typeof authorizationIdFactory !== "function")
   ) {
     throw new GitSafetyError("Git-service options are invalid.", {
       code: "ERR_INVALID_GIT_OPTIONS",
@@ -146,12 +153,28 @@ export function createGitService(options = {}) {
     return inspectPathAtRoot(contentContext, repositoryPath, path);
   }
 
-  async function refsFingerprint(repositoryPath) {
+  async function refsFingerprints(repositoryPath, excludedRef = null) {
     const result = await runGit(repositoryPath, [
       "for-each-ref",
       "--format=%(refname)%00%(objectname)%00%(symref)",
     ]);
-    return hashBuffer(result.stdout);
+    const all = hashBuffer(result.stdout);
+    if (excludedRef === null) {
+      return Object.freeze({ all, excluding: all });
+    }
+    const excludedPrefix = Buffer.from(`${excludedRef}\0`);
+    const hash = createHash("sha256");
+    let offset = 0;
+    while (offset < result.stdout.length) {
+      const newline = result.stdout.indexOf(0x0a, offset);
+      const end = newline === -1 ? result.stdout.length : newline + 1;
+      const record = result.stdout.subarray(offset, end);
+      if (!record.subarray(0, excludedPrefix.length).equals(excludedPrefix)) {
+        hash.update(record);
+      }
+      offset = end;
+    }
+    return Object.freeze({ all, excluding: hash.digest("hex") });
   }
 
   async function indexFingerprint(repositoryPath) {
@@ -253,9 +276,33 @@ export function createGitService(options = {}) {
       .update("\0")
       .update(configuration.stdout)
       .digest("hex");
+    function valueFingerprint(result, name) {
+      if (result.exitCode !== 0) {
+        return createHash("sha256")
+          .update(`${result.exitCode}\0`)
+          .update(result.stdout)
+          .digest("hex");
+      }
+      const value = decodeLine(result.stdout, name);
+      const match = /^(.*) <([^<>]+)> -?\d+ [+-]\d{4}$/u.exec(value);
+      if (match === null) {
+        throw new GitSafetyError(`${name} is invalid.`, {
+          code: "ERR_UNSUPPORTED_GIT_CONFIGURATION",
+        });
+      }
+      return hashBuffer(Buffer.from(`${match[1]}\0${match[2]}`));
+    }
     return Object.freeze({
       identityAvailable: author.exitCode === 0 && committer.exitCode === 0,
       identityFingerprint,
+      authorIdentityFingerprint: valueFingerprint(
+        author,
+        "Git author identity",
+      ),
+      committerIdentityFingerprint: valueFingerprint(
+        committer,
+        "Git committer identity",
+      ),
     });
   }
 
@@ -299,13 +346,25 @@ export function createGitService(options = {}) {
       branch,
       detached: branch === null && head !== null,
       clean: status.stdout.length === 0,
-      refsFingerprint: await refsFingerprint(repositoryPath),
+      refsFingerprint: (await refsFingerprints(repositoryPath)).all,
       ...content,
       indexFingerprint: await indexFingerprint(repositoryPath),
       remoteConfigurationFingerprint:
         await remoteConfigurationFingerprint(repositoryPath),
-      ...identity,
+      identityAvailable: identity.identityAvailable,
+      identityFingerprint: identity.identityFingerprint,
     });
+  }
+
+  async function contentFingerprintAgainst(repositoryPath, baseHead) {
+    return (
+      await contentFingerprintsAtRoot(
+        contentContext,
+        repositoryPath,
+        [],
+        { baseHead },
+      )
+    ).contentFingerprint;
   }
 
   async function contentFingerprint(options) {
@@ -412,8 +471,19 @@ export function createGitService(options = {}) {
     return currentSnapshot;
   }
 
+  const commitService = createGitCommitService({
+    assertSnapshot,
+    authorizationIdFactory,
+    contentFingerprintAgainst,
+    identitySnapshot,
+    refsFingerprints,
+    runGit,
+    snapshot,
+  });
+
   return Object.freeze({
     assertUnchanged,
+    ...commitService,
     contentFingerprint,
     inspectPath,
     preflight,
