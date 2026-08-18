@@ -521,21 +521,73 @@ function hasFullItemsView(turn) {
   return turn.itemsView === undefined || turn.itemsView === "full";
 }
 
-function assertCompletedTurn(value, threadId, turnId) {
+function invalidCompletedTurn(cause) {
+  return new CodexAdapterError("Codex returned an invalid completed turn.", {
+    cause,
+    code: "ERR_CODEX_PROTOCOL",
+  });
+}
+
+function assertCompletedTurnEnvelope(value, threadId, turnId) {
   if (
     !isRecord(value) ||
     value.threadId !== threadId ||
     !isRecord(value.turn) ||
-    value.turn.id !== turnId ||
+    typeof value.turn.id !== "string" ||
+    value.turn.id.length === 0 ||
+    (turnId !== undefined && value.turn.id !== turnId) ||
     !Array.isArray(value.turn.items) ||
-    !hasFullItemsView(value.turn) ||
     typeof value.turn.status !== "string"
   ) {
-    throw new CodexAdapterError("Codex returned an invalid completed turn.", {
-      code: "ERR_CODEX_PROTOCOL",
-    });
+    throw invalidCompletedTurn();
   }
   return value.turn;
+}
+
+function assertCompletedTurn(value, threadId, turnId) {
+  const turn = assertCompletedTurnEnvelope(value, threadId, turnId);
+  if (!hasFullItemsView(turn)) {
+    throw invalidCompletedTurn();
+  }
+  return turn;
+}
+
+async function resolveCompletedTurn(client, value, threadId, turnId) {
+  const turn = assertCompletedTurnEnvelope(value, threadId, turnId);
+  if (hasFullItemsView(turn)) {
+    return turn;
+  }
+  if (turn.itemsView !== "summary" && turn.itemsView !== "notLoaded") {
+    throw invalidCompletedTurn();
+  }
+  let response;
+  try {
+    response = await client.request("thread/read", {
+      threadId,
+      includeTurns: true,
+    });
+  } catch (cause) {
+    throw invalidCompletedTurn(cause);
+  }
+  if (
+    !isRecord(response) ||
+    !isRecord(response.thread) ||
+    response.thread.id !== threadId ||
+    !Array.isArray(response.thread.turns)
+  ) {
+    throw invalidCompletedTurn();
+  }
+  const matches = response.thread.turns.filter(
+    (candidate) => isRecord(candidate) && candidate.id === turnId,
+  );
+  if (matches.length !== 1) {
+    throw invalidCompletedTurn();
+  }
+  return assertCompletedTurn(
+    { threadId, turn: matches[0] },
+    threadId,
+    turnId,
+  );
 }
 
 async function startTurn(client, request, threadId, prompt) {
@@ -586,7 +638,7 @@ async function startTurn(client, request, threadId, prompt) {
       recoverable: true,
     });
   }
-  return assertCompletedTurn(completion, threadId, response.turn.id);
+  return resolveCompletedTurn(client, completion, threadId, response.turn.id);
 }
 
 async function compactThread(client, threadId) {
@@ -596,12 +648,16 @@ async function compactThread(client, threadId) {
       "turn/completed",
       (params) => isRecord(params) && params.threadId === threadId,
     );
+    const notificationTurn = assertCompletedTurnEnvelope(completion, threadId);
+    const turn = await resolveCompletedTurn(
+      client,
+      completion,
+      threadId,
+      notificationTurn.id,
+    );
     if (
-      !isRecord(completion.turn) ||
-      completion.turn.status !== "completed" ||
-      !Array.isArray(completion.turn.items) ||
-      !hasFullItemsView(completion.turn) ||
-      !completion.turn.items.some(
+      turn.status !== "completed" ||
+      !turn.items.some(
         (item) => isRecord(item) && item.type === "contextCompaction",
       )
     ) {

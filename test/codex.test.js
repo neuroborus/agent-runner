@@ -574,6 +574,54 @@ test("accepts the protocol-default full completed-turn view", async () => {
   assert.equal((await fixture.adapter.run(request())).output, "done");
 });
 
+for (const itemsView of ["notLoaded", "summary"]) {
+  test(`hydrates a ${itemsView} completed turn from thread history`, async () => {
+    const turnId = `${itemsView}-turn`;
+    const fixture = createFixture({
+      handle({ message }) {
+        if (message.method === "turn/start") {
+          const notification = completedTurn(
+            message.params.threadId,
+            turnId,
+            "Partial.",
+          );
+          notification.params.turn.itemsView = itemsView;
+          if (itemsView === "notLoaded") {
+            notification.params.turn.items = [];
+          }
+          return {
+            result: { turn: { id: turnId } },
+            notification,
+          };
+        }
+        if (message.method === "thread/read") {
+          assert.deepEqual(message.params, {
+            threadId: "thread-0",
+            includeTurns: true,
+          });
+          return {
+            result: {
+              thread: {
+                id: "thread-0",
+                turns: [
+                  completedTurn(
+                    "thread-0",
+                    turnId,
+                    "Hydrated.",
+                  ).params.turn,
+                ],
+              },
+            },
+          };
+        }
+        return undefined;
+      },
+    });
+
+    assert.equal((await fixture.adapter.run(request())).output, "Hydrated.");
+  });
+}
+
 test("rejects a null completed-turn view", async () => {
   const fixture = createFixture({
     handle({ message }) {
@@ -1299,7 +1347,7 @@ test("never replays an interrupted local-commit turn", async () => {
   assert.equal(fixture.processes.length, 1);
 });
 
-test("never commits from an incomplete completed-turn view", async () => {
+test("never commits when a partial completed turn cannot be hydrated", async () => {
   const fixture = createFixture({
     handle({ message }) {
       if (message.method === "turn/start") {
@@ -1343,7 +1391,7 @@ test("never commits from an incomplete completed-turn view", async () => {
   );
 });
 
-test("never replays an incomplete completed-turn view", async () => {
+test("never replays when a partial completed turn cannot be hydrated", async () => {
   let turns = 0;
   const fixture = createFixture({
     handle({ message }) {
@@ -1421,10 +1469,36 @@ test("returns commit-executor failures for Git-state verification", async () => 
   assert.equal(fixture.processes.length, 1);
 });
 
-test("compacts a full native context and retries the turn once", async () => {
+test("hydrates summarized compaction and retries a full context once", async () => {
   let turns = 0;
   const fixture = createFixture({
     handle({ message }) {
+      if (message.method === "thread/compact/start") {
+        const notification = completedTurn(
+          message.params.threadId,
+          "compact-turn",
+          "Compacted.",
+        );
+        notification.params.turn.itemsView = "summary";
+        return { result: {}, notification };
+      }
+      if (message.method === "thread/read") {
+        return {
+          result: {
+            thread: {
+              id: message.params.threadId,
+              turns: [
+                completedTurn(
+                  message.params.threadId,
+                  "compact-turn",
+                  "Compacted.",
+                  [{ type: "contextCompaction" }],
+                ).params.turn,
+              ],
+            },
+          },
+        };
+      }
       if (message.method !== "turn/start") {
         return undefined;
       }
@@ -1462,8 +1536,10 @@ test("compacts a full native context and retries the turn once", async () => {
   assert.deepEqual(
     fixture.processes[0].messages
       .map(({ method }) => method)
-      .filter((method) => method === "turn/start" || method === "thread/compact/start"),
-    ["turn/start", "thread/compact/start", "turn/start"],
+      .filter((method) =>
+        ["turn/start", "thread/compact/start", "thread/read"].includes(method),
+      ),
+    ["turn/start", "thread/compact/start", "thread/read", "turn/start"],
   );
 });
 
