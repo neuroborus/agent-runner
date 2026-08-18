@@ -26,6 +26,15 @@ const RUN_FIELDS = new Set([
   "sourceSession",
 ]);
 const RESUME_FIELDS = new Set(["runId", "action"]);
+const CREATE_OPTIONS_FIELDS = new Set(["runId"]);
+const INPUT_FIELDS = new Set([
+  "runId",
+  "requestId",
+  "expectedRevision",
+  "answers",
+  "responseHash",
+]);
+const ANSWER_FIELDS = new Set(["questionId", "answer"]);
 const SOURCE_SESSION_FIELDS = new Set(["backend", "id"]);
 const RUNNER_OPTION_FIELDS = new Set([
   "adapters",
@@ -336,6 +345,116 @@ function normalizeResumeInput(input) {
   });
 }
 
+function normalizeCreateOptions(options) {
+  rejectUnknownFields(options, CREATE_OPTIONS_FIELDS, "createOptions");
+  return Object.freeze({
+    runId:
+      options.runId === undefined
+        ? undefined
+        : assertNonEmptyString(options.runId, "createOptions.runId"),
+  });
+}
+
+function normalizeInputSubmission(input, { requireResponseHash = false } = {}) {
+  rejectUnknownFields(input, INPUT_FIELDS, "input");
+  if (
+    !Number.isSafeInteger(input.expectedRevision) ||
+    input.expectedRevision < 1 ||
+    !Array.isArray(input.answers)
+  ) {
+    throw new RunnerError("Input response is invalid.", {
+      code: "ERR_INVALID_RUNNER_INPUT",
+    });
+  }
+  const answers = input.answers.map((answer, index) => {
+    rejectUnknownFields(answer, ANSWER_FIELDS, `input.answers[${index}]`);
+    return Object.freeze({
+      questionId: assertNonEmptyString(
+        answer.questionId,
+        `input.answers[${index}].questionId`,
+      ),
+      answer: assertNonEmptyString(
+        answer.answer,
+        `input.answers[${index}].answer`,
+      ),
+    });
+  });
+  if (
+    requireResponseHash &&
+    (typeof input.responseHash !== "string" ||
+      !/^[a-f0-9]{64}$/u.test(input.responseHash))
+  ) {
+    throw new RunnerError("Input response hash is invalid.", {
+      code: "ERR_INVALID_RUNNER_INPUT",
+    });
+  }
+  return Object.freeze({
+    runId: assertNonEmptyString(input.runId, "input.runId"),
+    requestId: assertNonEmptyString(input.requestId, "input.requestId"),
+    expectedRevision: input.expectedRevision,
+    answers: Object.freeze(answers),
+    responseHash: input.responseHash,
+  });
+}
+
+function orderedInputAnswers(run, input) {
+  const request = run.pause?.inputRequest;
+  if (
+    run.pipelineState.workflowState !== "WAITING_FOR_USER" ||
+    run.pipelineState.pendingEdit === null ||
+    request === null ||
+    typeof request !== "object" ||
+    request.id !== input.requestId ||
+    !Array.isArray(request.questions)
+  ) {
+    throw new RunnerError("Pending input request does not match.", {
+      code: "ERR_STALE_INPUT_REQUEST",
+    });
+  }
+  if (run.revision !== input.expectedRevision) {
+    throw new RunnerError("Pending input request revision is stale.", {
+      code: "ERR_STALE_INPUT_REQUEST",
+    });
+  }
+  if (run.pause.inputResponse !== undefined) {
+    throw new RunnerError("Pending input request was already answered.", {
+      code: "ERR_INPUT_ALREADY_SUBMITTED",
+    });
+  }
+  const expectedIds = request.questions.map((question) => question.id);
+  const byId = new Map(
+    input.answers.map(({ questionId, answer }) => [questionId, answer]),
+  );
+  if (
+    byId.size !== input.answers.length ||
+    byId.size !== expectedIds.length ||
+    expectedIds.some((id) => !byId.has(id))
+  ) {
+    throw new RunnerError("One answer is required for every question.", {
+      code: "ERR_INCOMPLETE_INPUT_RESPONSE",
+    });
+  }
+  return Object.freeze(expectedIds.map((id) => byId.get(id)));
+}
+
+function pipelineForRun(run, knownPipeline) {
+  const pipeline = knownPipeline ?? getPipeline(run.pipelineId);
+  if (pipeline === undefined) {
+    throw new RunnerError(`Unknown pipeline: ${run.pipelineId}.`, {
+      code: "ERR_UNKNOWN_PIPELINE",
+    });
+  }
+  if (run.pipelineStateVersion !== pipeline.stateVersion) {
+    throw new RunnerError(
+      `Run ${run.runId} uses unsupported ${pipeline.id} state version ` +
+        `${run.pipelineStateVersion}.`,
+      { code: "ERR_UNSUPPORTED_PIPELINE_STATE_VERSION" },
+    );
+  }
+  pipeline.workflow.validateRun(run);
+  return pipeline;
+}
+
 export function createRunner(options = {}) {
   rejectUnknownFields(options, RUNNER_OPTION_FIELDS, "runnerOptions");
   const adapters = options.adapters ?? defaultAdapters();
@@ -398,13 +517,7 @@ export function createRunner(options = {}) {
   }
 
   async function execute(pipeline, run, lease, action = null) {
-    if (run.pipelineStateVersion !== pipeline.stateVersion) {
-      throw new RunnerError(
-        `Run ${run.runId} uses unsupported ${pipeline.id} state version ` +
-          `${run.pipelineStateVersion}.`,
-        { code: "ERR_UNSUPPORTED_PIPELINE_STATE_VERSION" },
-      );
-    }
+    pipelineForRun(run, pipeline);
     const settings = run.pipelineState.settings;
     if (!isRecord(settings)) {
       throw new RunnerError(`Run ${run.runId} has no resolved settings.`, {
@@ -424,6 +537,34 @@ export function createRunner(options = {}) {
     });
   }
 
+  async function validateBoundary(input) {
+    const projectPath = assertNonEmptyString(
+      input?.projectPath,
+      "run.projectPath",
+    );
+    const taskPath = assertNonEmptyString(input?.taskPath, "run.taskPath");
+    const discovery = await git.preflight({
+      allowedPaths: [],
+      projectPath,
+      requireClean: false,
+      requireIdentity: false,
+      requiredIgnoredPaths: [],
+    });
+    const repositoryPath = discovery?.snapshot?.projectPath;
+    if (
+      typeof repositoryPath !== "string" ||
+      resolve(repositoryPath) !== repositoryPath
+    ) {
+      throw new RunnerError("Git preflight returned an invalid project root.", {
+        code: "ERR_INVALID_PROJECT_ROOT",
+      });
+    }
+    return runStore.validateStateBoundary({
+      projectPath: repositoryPath,
+      taskPath,
+    });
+  }
+
   async function result(run) {
     return Object.freeze({
       directoryPath: await runStore.getRunDirectory(run.runId),
@@ -431,8 +572,9 @@ export function createRunner(options = {}) {
     });
   }
 
-  async function run(input) {
+  async function prepare(input, options = {}) {
     const normalized = normalizeRunInput(input);
+    const createOptions = normalizeCreateOptions(options);
     if (typeof normalized.proactiveClarification !== "boolean") {
       throw new RunnerError("run.proactiveClarification must be a boolean.", {
         code: "ERR_INVALID_RUNNER_INPUT",
@@ -449,19 +591,7 @@ export function createRunner(options = {}) {
         code: "ERR_UNKNOWN_PIPELINE",
       });
     }
-    const discovery = await git.preflight({
-      allowedPaths: [],
-      projectPath: normalized.projectPath,
-      requireClean: false,
-      requireIdentity: false,
-      requiredIgnoredPaths: [],
-    });
-    const projectPath = discovery?.snapshot?.projectPath;
-    if (typeof projectPath !== "string" || resolve(projectPath) !== projectPath) {
-      throw new RunnerError("Git preflight returned an invalid project root.", {
-        code: "ERR_INVALID_PROJECT_ROOT",
-      });
-    }
+    const { projectPath, taskPath } = await validateBoundary(normalized);
     const configuration = await loadConfiguration(projectPath);
     const resolved = resolvePipelineConfiguration(
       pipeline.id,
@@ -480,10 +610,13 @@ export function createRunner(options = {}) {
       settings: resolved.settings,
     });
     const created = await runStore.createRun({
+      ...(createOptions.runId === undefined
+        ? {}
+        : { runId: createOptions.runId }),
       pipelineId: pipeline.id,
       pipelineStateVersion: pipeline.stateVersion,
       projectPath,
-      taskPath: normalized.taskPath,
+      taskPath,
       roles: resolved.roles,
       sourceSession: normalized.sourceSession?.id ?? null,
       pipelineState,
@@ -504,6 +637,25 @@ export function createRunner(options = {}) {
         },
         created.state,
       );
+    } catch (cause) {
+      await created.lease.release();
+      throw cause;
+    }
+    return Object.freeze({ created, pipeline });
+  }
+
+  async function create(input, options = {}) {
+    const { created } = await prepare(input, options);
+    try {
+      return await result(created.state);
+    } finally {
+      await created.lease.release();
+    }
+  }
+
+  async function run(input) {
+    const { created, pipeline } = await prepare(input);
+    try {
       return await result(
         await execute(pipeline, created.state, created.lease),
       );
@@ -539,8 +691,83 @@ export function createRunner(options = {}) {
 
   async function status(runId) {
     assertNonEmptyString(runId, "runId");
-    return result(await runStore.loadRun(runId));
+    const run = await runStore.loadRun(runId);
+    pipelineForRun(run);
+    return result(run);
   }
 
-  return Object.freeze({ resume, run, status });
+  async function previewInput(input) {
+    const normalized = normalizeInputSubmission(input);
+    const { run } = await status(normalized.runId);
+    const answers = orderedInputAnswers(run, normalized);
+    const preview = await clarifications.previewEditAnswers(
+      run.pipelineState.pendingEdit,
+      answers,
+    );
+    return Object.freeze({
+      runId: run.runId,
+      requestId: normalized.requestId,
+      revision: run.revision,
+      responseHash: preview.hash,
+    });
+  }
+
+  async function submitInput(input) {
+    const normalized = normalizeInputSubmission(input, {
+      requireResponseHash: true,
+    });
+    const lease = await runStore.acquireRunLease(normalized.runId);
+    try {
+      const run = await runStore.recoverRun(lease);
+      pipelineForRun(run);
+      const answers = orderedInputAnswers(run, normalized);
+      const transcript = await clarifications.writeEditAnswers(
+        run.pipelineState.pendingEdit,
+        answers,
+        { expectedHash: normalized.responseHash },
+      );
+      const next = await runStore.transitionRun(
+        lease,
+        {
+          pause: {
+            ...run.pause,
+            inputResponse: {
+              requestId: normalized.requestId,
+              transcriptHash: transcript.hash,
+            },
+          },
+        },
+        {
+          activity: {
+            actor: "runner",
+            phase: "clarification",
+            kind: "submitted",
+            message: "Pending user input was recorded.",
+          },
+        },
+      );
+      await publish(
+        {
+          actor: "runner",
+          phase: "clarification",
+          kind: "submitted",
+          message: "Pending user input was recorded.",
+        },
+        next,
+      );
+      return result(next);
+    } finally {
+      await lease.release();
+    }
+  }
+
+  return Object.freeze({
+    create,
+    previewInput,
+    resume,
+    run,
+    status,
+    submitInput,
+    validateBoundary,
+  });
 }

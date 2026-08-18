@@ -20,6 +20,7 @@ declare an internal runtime dependency before an actual import needs it.
 ## Root Runner Ownership
 
 - CLI parsing, pipeline selection, and concise terminal output.
+- Local STDIO MCP tool schemas, projections, and detached-run dispatch.
 - Versioned repository configuration loading, validation, and role resolution.
 - Run IDs, atomic state, append-only events, resume, and status.
 - Clarification files, editor invocation, transcript updates, and input hashes.
@@ -41,8 +42,9 @@ keep ownership visible and avoid barrel cycles.
 Each pipeline owns its input interpretation, roles, configuration settings and
 defaults, accepted `run` options, prompts, structured-output schemas, explicit
 JavaScript state machine, retry policy, and completion criteria. Roles, settings,
-and accepted and required options are exposed through its static descriptor;
-pipeline states remain workspace-owned rather than becoming root runtime policy.
+accepted and required options, and persisted-run validation are exposed through
+its static descriptor; pipeline states remain workspace-owned rather than
+becoming root runtime policy.
 
 The root CLI owns `--clarify` as a common run-lifecycle option. Role and
 pipeline-specific options remain in pipeline descriptors.
@@ -120,12 +122,50 @@ projection. A user-action pause has a distinct exit status from an internal
 failure; neither status output nor activity rendering exposes raw prompts or
 model transcripts.
 
+## MCP Control Plane
+
+`agent-run mcp` exposes the same static registry and runner through the official
+Node MCP SDK over STDIO only. `src/mcp.js` owns the seven tools:
+`pipelines_list`, `run_start`, `run_status`, `run_activity`, `run_wait`,
+`run_respond`, and `run_resume`. It contains transport schemas and concise
+projections, not a second workflow implementation. Standard output belongs
+exclusively to MCP; bounded protocol diagnostics go to standard error without
+prompts or model transcripts.
+
+Mutating MCP calls require an opaque idempotency key. The state layer hashes the
+key, binds it to the tool and canonical arguments, and durably records an action
+intent before mutation and a receipt before returning. An exact retry returns
+the receipt; reuse with different arguments fails. An incomplete intent is
+reconciled against the reserved run ID, current revision, submitted transcript
+hash, and execution lease before work is launched again.
+
+`run_start` persists the run before spawning `agent-run resume` as a detached
+child with no inherited standard streams. `run_respond` atomically writes the
+identified answers, records their transcript hash in run state, then launches
+the same detached continuation. `run_resume` accepts only an action applicable
+to the persisted pause. The child owns the existing per-run execution lease, so
+an MCP disconnect, tool timeout, or duplicate recovery launch cannot create a
+second workflow owner.
+
+`run_wait` is one revision-driven server-side wait that ends at an unresolved
+`WAITING_FOR_USER`, `DONE`, `FAILED`, or its caller-selected timeout. Optional
+MCP progress notifications carry only bounded public activity with role labels;
+they do not wake a model or alter the run. Cancellation cancels only that wait.
+`run_activity` remains an explicit cursor-based history read rather than a
+polling primitive. V1 does not require the MCP Tasks extension, a network
+transport, authentication, or a daemon.
+
 ## External Run State
 
 The root runtime persists runs under `$XDG_STATE_HOME/agent-runner/`, falling
 back to `~/.local/state/agent-runner/`. A run is addressed by an opaque ID and
 stored beneath `runs/<run-id>/`; preflight rejects a state root inside the
 canonical project or task directory.
+
+MCP action intents and receipts live under `actions/<hashed-key>/` in the same
+external root. The opaque key itself is not persisted. Action records are
+atomically replaced and protected by a same-host process lease; they never live
+inside the target or task directory.
 
 `state.json` contains the common versioned envelope: monotonic revision,
 pipeline ID and state version, canonical paths, resolved roles, counters,
@@ -212,6 +252,16 @@ response.
 During an authorized editor window, the resulting user edit is accepted as new
 clarification input and invalidates every dependent result. Changes outside an
 authorized editor window remain unexpected input changes.
+
+MCP never launches `$VISUAL` or `$EDITOR`. It projects a pending edit as a
+structured request with a stable ID, kind, identified questions and options,
+rationale, artifact path, and run revision. An empty answer set is valid only
+for optional proactive clarification. `run_respond` requires exactly one
+non-empty answer for every identified question, preserves the supplied text,
+and rejects stale or already answered requests. Editing the artifact externally
+and calling `run_resume` remains available. A controlling agent answers from
+explicit user context or asks the user; it must not invent a material product
+decision.
 
 ```markdown
 # Clarifications

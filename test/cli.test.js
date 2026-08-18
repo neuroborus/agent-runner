@@ -77,10 +77,47 @@ test("help describes the required commands", async () => {
   assert.match(stdout.read(), /agent-run run <pipeline> --project/);
   assert.match(stdout.read(), /agent-run resume --run/);
   assert.match(stdout.read(), /agent-run status --run/);
+  assert.match(stdout.read(), /agent-run mcp/);
   assert.match(stdout.read(), /plan-authoring/);
   assert.match(stdout.read(), /plan-execution/);
   assert.match(stdout.read(), /--clarify/);
   assert.equal(stderr.read(), "");
+});
+
+test("mcp dispatches the STDIO server without constructing a runner", async () => {
+  const stdout = createSink();
+  const stderr = createSink();
+  const calls = [];
+
+  const exitCode = await main(["mcp"], {
+    stdout: stdout.stream,
+    stderr: stderr.stream,
+    startMcp(options) {
+      calls.push(options);
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(stdout.read(), "");
+  assert.equal(stderr.read(), "");
+  assert.deepEqual(calls, [{ stderr: stderr.stream }]);
+});
+
+test("mcp reports a bounded startup failure on stderr", async () => {
+  const stdout = createSink();
+  const stderr = createSink();
+
+  const exitCode = await main(["mcp"], {
+    stdout: stdout.stream,
+    stderr: stderr.stream,
+    startMcp() {
+      throw new Error("sensitive startup detail");
+    },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.equal(stdout.read(), "");
+  assert.equal(stderr.read(), "Agent Runner MCP failed to start.\n");
 });
 
 test("unknown commands fail with usage", async () => {

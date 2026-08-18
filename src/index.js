@@ -13,6 +13,14 @@ export {
   resolvePipelineConfiguration,
 } from "./config.js";
 export { createGitService, GitSafetyError } from "./git.js";
+export {
+  createDetachedLauncher,
+  createMcpControlPlane,
+  createMcpServer,
+  launchDetachedRun,
+  MCP_INSTRUCTIONS,
+  serveMcp,
+} from "./mcp.js";
 export { getPipeline, listPipelines } from "./pipeline-registry.js";
 export {
   createRunner,

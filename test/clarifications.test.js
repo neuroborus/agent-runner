@@ -600,6 +600,93 @@ test("keeps a non-interactive edit pending and accepts it after resume", async (
   assert.equal(consumed, true);
 });
 
+test("writes identified MCP answers atomically and retries the exact content", async (t) => {
+  const { artifactRoot, transcriptPath } = await createFixture(t);
+  const service = createClarificationService({
+    env: {},
+    interactive: false,
+    authorizationIdFactory: () => "mcp-answer",
+  });
+  const initial = await service.ensureTranscript({ artifactRoot, transcriptPath });
+  const questions = await service.appendQuestionRound({
+    artifactRoot,
+    transcriptPath,
+    expectedHash: initial.hash,
+    round: 1,
+    questions: [
+      { question: "First question?", whyItMatters: "It changes scope." },
+      {
+        question: "Does <!-- Write the answer here. --> remain in the question?",
+        whyItMatters: "It changes behavior.",
+      },
+    ],
+  });
+  const authorization = await service.prepareEdit({
+    artifactRoot,
+    transcriptPath,
+    expectedHash: questions.hash,
+    suspendedState: "CLARIFY",
+    action: "clarification-answers",
+    persistPendingEdit: async () => {},
+  });
+  const answers = [
+    "First answer, unchanged.",
+    "Second answer with <!-- Write the answer here. --> intact.",
+  ];
+  const preview = await service.previewEditAnswers(authorization, answers);
+  const written = await service.writeEditAnswers(authorization, answers, {
+    expectedHash: preview.hash,
+  });
+
+  assert.equal(written.hash, preview.hash);
+  assert.match(written.content, /### A1\n\nFirst answer, unchanged\./u);
+  assert.match(
+    written.content,
+    /### A2\n\nSecond answer with <!-- Write the answer here\. --> intact\./u,
+  );
+  assert.match(
+    written.content,
+    /Does <!-- Write the answer here\. --> remain in the question\?/u,
+  );
+  assert.equal(
+    (await service.writeEditAnswers(authorization, answers, {
+      expectedHash: preview.hash,
+    })).hash,
+    preview.hash,
+  );
+  await assert.rejects(
+    service.writeEditAnswers(authorization, answers, {
+      expectedHash: "f".repeat(64),
+    }),
+    isClarificationError("ERR_CLARIFICATIONS_CHANGED"),
+  );
+});
+
+test("accepts an empty proactive MCP response", async (t) => {
+  const { artifactRoot, transcriptPath } = await createFixture(t);
+  const service = createClarificationService({
+    env: {},
+    interactive: false,
+    authorizationIdFactory: () => "mcp-empty",
+  });
+  const initial = await service.ensureTranscript({ artifactRoot, transcriptPath });
+  const authorization = await service.prepareEdit({
+    artifactRoot,
+    transcriptPath,
+    expectedHash: initial.hash,
+    suspendedState: "CLARIFY",
+    action: "proactive-clarification",
+    persistPendingEdit: async () => {},
+  });
+  const preview = await service.previewEditAnswers(authorization, []);
+  const written = await service.writeEditAnswers(authorization, [], {
+    expectedHash: preview.hash,
+  });
+
+  assert.equal(written.hash, initial.hash);
+  assert.equal(written.content, initial.content);
+});
+
 test("validates structured input and transcript size", async (t) => {
   const { artifactRoot, transcriptPath } = await createFixture(t);
   const service = createClarificationService({ env: {}, interactive: false });
@@ -625,6 +712,21 @@ test("validates structured input and transcript size", async (t) => {
       whyBlocked: "Blocked",
       evidence: [],
     }),
+    ClarificationError,
+  );
+  await assert.rejects(
+    service.previewEditAnswers(
+      {
+        schemaVersion: 1,
+        id: "invalid-answer",
+        artifactRoot,
+        transcriptPath,
+        suspendedState: "CLARIFY",
+        action: "clarification-answers",
+        preEditorHash: initial.hash,
+      },
+      ["   "],
+    ),
     ClarificationError,
   );
 

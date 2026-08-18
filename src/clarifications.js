@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
 
 import {
@@ -21,6 +21,7 @@ const MAX_STRUCTURED_TEXT_LENGTH = 4_000;
 const MAX_QUESTIONS = 32;
 const MAX_OPTIONS = 16;
 const MAX_EVIDENCE_ITEMS = 32;
+const MAX_ANSWER_LENGTH = 100_000;
 const AUTHORIZATION_FIELDS = new Set([
   "schemaVersion",
   "id",
@@ -143,6 +144,93 @@ function assertPositiveInteger(value, name) {
     throw new ClarificationError(`${name} must be a positive integer.`);
   }
   return value;
+}
+
+function normalizeAnswers(value) {
+  if (!Array.isArray(value) || value.length > MAX_QUESTIONS) {
+    throw new ClarificationError("answers must be a bounded array.", {
+      code: "ERR_INVALID_CLARIFICATION_ANSWERS",
+    });
+  }
+  return value.map((answer, index) => {
+    if (
+      typeof answer !== "string" ||
+      answer.trim().length === 0 ||
+      answer.length > MAX_ANSWER_LENGTH ||
+      /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(answer.replace(/[\n\r\t]/gu, ""))
+    ) {
+      throw new ClarificationError(
+        `answers[${index}] must be non-empty plain text.`,
+        { code: "ERR_INVALID_CLARIFICATION_ANSWERS" },
+      );
+    }
+    return answer;
+  });
+}
+
+function replaceLastMarkers(source, marker, sectionPattern, replacements) {
+  const matches = [...source.matchAll(sectionPattern)].slice(
+    -replacements.length,
+  );
+  if (matches.length !== replacements.length) {
+    throw new ClarificationError("Clarification answer marker is missing.", {
+      code: "ERR_INVALID_CLARIFICATION_ANSWERS",
+    });
+  }
+  const positions = matches.map(
+    (match) => match.index + match[0].lastIndexOf(marker),
+  );
+
+  let content = source;
+  for (let index = replacements.length - 1; index >= 0; index -= 1) {
+    const position = positions[index];
+    content =
+      content.slice(0, position) +
+      replacements[index] +
+      content.slice(position + marker.length);
+  }
+  return content;
+}
+
+function answeredContent(source, action, answers) {
+  if (action === "proactive-clarification") {
+    if (answers.length !== 0) {
+      throw new ClarificationError(
+        "Proactive clarification accepts an empty answer set.",
+        { code: "ERR_INVALID_CLARIFICATION_ANSWERS" },
+      );
+    }
+    return source;
+  }
+  if (action === "product-decision") {
+    if (answers.length !== 1) {
+      throw new ClarificationError(
+        "A product decision requires exactly one answer.",
+        { code: "ERR_INVALID_CLARIFICATION_ANSWERS" },
+      );
+    }
+    return replaceLastMarkers(
+      source,
+      "<!-- Write the decision here. -->",
+      /^Decision:\n\n<!-- Write the decision here\. -->$/gmu,
+      answers,
+    );
+  }
+  if (action === "clarification-answers" && answers.length > 0) {
+    return replaceLastMarkers(
+      source,
+      "<!-- Write the answer here. -->",
+      /^### A[1-9][0-9]*\n\n<!-- Write the answer here\. -->$/gmu,
+      answers,
+    );
+  }
+  throw new ClarificationError("Clarification answer action is invalid.", {
+    code: "ERR_INVALID_CLARIFICATION_ANSWERS",
+  });
+}
+
+function contentHash(content) {
+  return createHash("sha256").update(content).digest("hex");
 }
 
 function appendSection(source, section) {
@@ -368,6 +456,74 @@ export function createClarificationService(options = {}) {
     });
   }
 
+  async function previewEditAnswers(authorization, answers) {
+    const normalized = normalizeAuthorization(authorization);
+    const normalizedAnswers = normalizeAnswers(answers);
+    const snapshot = await inspectTranscript({
+      artifactRoot: normalized.artifactRoot,
+      transcriptPath: normalized.transcriptPath,
+    });
+    if (
+      snapshot.artifactRoot !== normalized.artifactRoot ||
+      snapshot.transcriptPath !== normalized.transcriptPath
+    ) {
+      throw new ClarificationError(
+        "Edit authorization path changed unexpectedly.",
+        { code: "ERR_UNSAFE_CLARIFICATION_PATH" },
+      );
+    }
+    assertExpectedHash(snapshot, normalized.preEditorHash);
+    const content = answeredContent(
+      snapshot.content,
+      normalized.action,
+      normalizedAnswers,
+    );
+    return Object.freeze({ hash: contentHash(content) });
+  }
+
+  async function writeEditAnswers(authorization, answers, options = {}) {
+    assertOptions(options, "Answer-write options");
+    const normalized = normalizeAuthorization(authorization);
+    const normalizedAnswers = normalizeAnswers(answers);
+    const expectedHash = assertHash(options.expectedHash);
+    const snapshot = await inspectTranscript({
+      artifactRoot: normalized.artifactRoot,
+      transcriptPath: normalized.transcriptPath,
+    });
+    if (
+      snapshot.artifactRoot !== normalized.artifactRoot ||
+      snapshot.transcriptPath !== normalized.transcriptPath
+    ) {
+      throw new ClarificationError(
+        "Edit authorization path changed unexpectedly.",
+        { code: "ERR_UNSAFE_CLARIFICATION_PATH" },
+      );
+    }
+    if (snapshot.hash === normalized.preEditorHash) {
+      const content = answeredContent(
+        snapshot.content,
+        normalized.action,
+        normalizedAnswers,
+      );
+      if (contentHash(content) !== expectedHash) {
+        throw new ClarificationError("Clarification answer hash is invalid.", {
+          code: "ERR_INVALID_CLARIFICATION_HASH",
+        });
+      }
+      if (content !== snapshot.content) {
+        await replaceTranscript(snapshot, content);
+      }
+      return inspectTranscript(snapshot);
+    }
+    if (snapshot.hash === expectedHash) {
+      return snapshot;
+    }
+    throw new ClarificationError(
+      "Clarification transcript changed outside an authorized edit window.",
+      { code: "ERR_CLARIFICATIONS_CHANGED" },
+    );
+  }
+
   async function prepareEdit(options) {
     assertOptions(options, "Edit options");
     const {
@@ -587,5 +743,7 @@ export function createClarificationService(options = {}) {
     inspectTranscript,
     openEditor,
     prepareEdit,
+    previewEditAnswers,
+    writeEditAnswers,
   });
 }

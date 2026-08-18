@@ -71,6 +71,10 @@ test("pipelines own their pipeline-specific run options", () => {
     "function",
   );
   assert.equal(typeof getPipeline("plan-authoring").workflow.run, "function");
+  assert.equal(
+    typeof getPipeline("plan-authoring").workflow.validateRun,
+    "function",
+  );
   assert.ok(Object.isFrozen(getPipeline("plan-authoring").workflow));
   assert.deepEqual(getPipeline("plan-execution").requiredRunOptions, [
     "project",
@@ -81,6 +85,10 @@ test("pipelines own their pipeline-specific run options", () => {
     "function",
   );
   assert.equal(typeof getPipeline("plan-execution").workflow.run, "function");
+  assert.equal(
+    typeof getPipeline("plan-execution").workflow.validateRun,
+    "function",
+  );
   assert.ok(Object.isFrozen(getPipeline("plan-execution").workflow));
   assert.equal(getPipeline("unknown"), undefined);
 });

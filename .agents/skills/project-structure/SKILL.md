@@ -15,6 +15,7 @@ choice affects the shared plan contract.
 - `bin/agent-run.js`: keep the executable entry point thin.
 - `src/index.js`: expose the root source API to the executable and root tests.
 - `src/cli.js`: own argument parsing, validation, concise terminal output, and dispatch.
+- `src/mcp.js`: own STDIO MCP schemas, projections, revision waits, and detached dispatch without duplicating runner logic.
 - `src/config.js`: own repository configuration loading, strict validation, and role resolution precedence.
 - `src/clarifications.js`: expose and coordinate the clarification boundary.
 - `src/clarification-*.js`: keep its confined file and editor helpers internal
@@ -22,8 +23,8 @@ choice affects the shared plan contract.
 - `src/pipeline-registry.js`: own the explicit list of built-in pipelines; do not turn it into a plugin system.
 - `src/runner.js`: coordinate `run`, `resume`, and `status` without backend-specific flags.
 - `src/state.js`: expose and coordinate the run-store boundary.
-- `src/state-*.js`: keep its atomic file, write-ahead journal, execution-lease,
-  and persisted-shape helpers internal to the root state boundary.
+- `src/state-*.js`: keep its atomic file, write-ahead journal, action-intent,
+  execution-lease, and persisted-shape helpers internal to the root state boundary.
 - `src/git.js`: expose and coordinate the Git safety boundary.
 - `src/git-*.js`: keep Git process, snapshot, and commit-verification helpers
   internal to the root Git boundary.
@@ -43,18 +44,22 @@ choice affects the shared plan contract.
 ## Rules
 
 - Keep plain JavaScript, native ES modules, and Node.js standard-library APIs.
-- Do not add TypeScript, a build step, a framework, a database, or a server.
+- Do not add TypeScript, a build step, a framework, a database, a network
+  service, or a daemon.
 - Keep the dependency direction `root runtime -> pipeline workspaces -> shared contract`.
 - Expose a source directory's outward-facing API through its `index.js`; keep imports within the same directory direct instead of routing them back through the index.
 - Keep pipelines explicit and independently owned; do not introduce a generic workflow DSL or dynamic plugin loader.
 - Do not extract CLI, Git, state, agent adapters, or test helpers into packages until another real consumer needs them.
 - Keep the backend contract small and functional; contain CLI-specific details inside adapters.
 - Keep the configuration envelope and precedence in the root runtime while
-  pipeline descriptors own roles, setting validators, and defaults.
+  pipeline descriptors own roles, settings, defaults, and persisted-run
+  validators.
 - Keep plan parsing and Conventional Commit subject validation deterministic, shared, and separate from pipeline prompting.
 - Keep Git snapshots and fingerprints deterministic and side-effect free.
 - Allow a Worker commit only through a one-shot runner authorization after the commit gate; reject co-author trailers and remote-configuration changes.
 - Keep persisted runner state outside the repository and task directory.
+- Keep MCP as an asynchronous STDIO projection of the runner; persist an
+  idempotency intent before mutation and never tie run lifetime to a tool call.
 - Keep `CLARIFY` explicit in every pipeline, freeze its artifact before work, and allow later questions only through `PRODUCT_DECISION_REQUIRED`.
 - Require repository-local clarification artifacts to be ignored already; never modify a target repository's ignore rules automatically.
 - Keep machine-actionable decisions structured; keep summaries concise Markdown.

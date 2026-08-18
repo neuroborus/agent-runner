@@ -194,6 +194,54 @@ function normalizeTextList(
   );
 }
 
+function assertInputPause(run, pipelineState) {
+  const request = run.pause?.inputRequest;
+  if (
+    pipelineState.workflowState !== "WAITING_FOR_USER" ||
+    pipelineState.pendingEdit === null
+  ) {
+    if (request !== undefined || run.pause?.inputResponse !== undefined) {
+      throw workflowError("Plan-authoring input pause is invalid.");
+    }
+    return;
+  }
+  if (request === undefined) {
+    return;
+  }
+  if (!isRecord(request) || !Array.isArray(request.questions)) {
+    throw workflowError("Plan-authoring input request is invalid.");
+  }
+
+  const action = pipelineState.pendingEdit.action;
+  const productDecision = action === "product-decision";
+  const invalidQuestions =
+    action === "proactive-clarification"
+      ? request.questions.length !== 0
+      : productDecision
+        ? request.questions.length !== 1 ||
+          !isRecord(request.questions[0]) ||
+          !Array.isArray(request.questions[0].options) ||
+          request.questions[0].id !== "decision" ||
+          request.questions[0].rationale !== undefined
+        : request.questions.length === 0 ||
+          request.questions.some(
+            (question, index) =>
+              !isRecord(question) ||
+              !Array.isArray(question.options) ||
+              question.id !== `q${index + 1}` ||
+              question.options.length !== 0 ||
+              question.rationale === undefined,
+          );
+  if (
+    request.id !== pipelineState.pendingEdit.id ||
+    request.kind !== (productDecision ? "product-decision" : "clarification") ||
+    request.artifactPath !== pipelineState.pendingEdit.transcriptPath ||
+    invalidQuestions
+  ) {
+    throw workflowError("Plan-authoring input request is invalid.");
+  }
+}
+
 function normalizeProductDecision(payload) {
   return Object.freeze({
     question: normalizeText(
@@ -908,6 +956,7 @@ export function assertRun(run) {
   ) {
     throw workflowError("Plan-authoring pause state is invalid.");
   }
+  assertInputPause(run, pipelineState);
   if (pipelineState.workflowState === "WAITING_FOR_USER") {
     const expectedReason = {
       "clarification-answers": "clarification_answers_required",

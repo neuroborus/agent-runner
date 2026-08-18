@@ -61,6 +61,10 @@ V1 should have **no external runtime npm dependencies unless implementation
 proves one is necessary**. Internal npm-workspace dependencies are explicit
 repository boundaries, not third-party runtime dependencies.
 
+The local MCP boundary is that demonstrated exception: use the exact locked
+official Node MCP server SDK and its Zod peer for protocol schemas. Do not use
+them to replace deterministic pipeline or commit-plan validation.
+
 Prefer the Node.js standard library:
 
 - `node:child_process`
@@ -81,13 +85,14 @@ Do not add:
 - a transpilation/build step;
 - a CLI framework;
 - a state-machine library;
-- a validation framework;
+- a general application validation framework;
 - a logging framework;
 - a database;
-- a server;
+- a network service or daemon;
 - a DI container.
 
-Codex CLI and Claude Code are external prerequisites, not npm dependencies.
+Codex CLI and Claude Code are external prerequisites, not npm dependencies; the
+official MCP packages are the narrow protocol-boundary exception above.
 
 Do not hard-pin their versions in workflow logic. Detect and log installed versions during preflight. The adapters should target the current stable capabilities described below and fail clearly if the installed CLI cannot provide a required capability.
 
@@ -823,6 +828,14 @@ through that authorized editor window is accepted as new clarification input
 and invalidates dependent work; any edit outside an authorized window pauses
 with `clarifications_changed`.
 
+Through MCP, the root runtime never opens an editor. It projects the same
+pending authorization with identified questions and accepts an empty response
+for optional proactive clarification or one exact answer per Worker question
+through `run_respond`. A product decision requires explicit user context; the
+controlling agent asks the user when that context is absent. An external edit
+followed by `run_resume` remains an equivalent path. Detached continuation does
+not change this pipeline's lease, compatibility, Git, or commit gates.
+
 When the Worker returns `READY`, persist and freeze the artifact hash. `READY`
 is valid only when the clarification input is compatible with the validated
 plan. Both the execution transcript and optional plan-authoring clarifications
@@ -1541,6 +1554,8 @@ At minimum cover:
 37. a product answer that changes plan scope pauses with `plan_revision_required`;
 38. `LOCAL_ARTIFACTS` remains outside the commit-content fingerprint;
 39. preflight rejects a clarification path that the target repository does not ignore.
+40. MCP input uses the same one-shot authorization and preserves exact answers;
+41. MCP continuation cannot bypass the per-run lease or any local-commit gate.
 
 Real Codex/Claude smoke tests should be opt-in integration tests.
 
@@ -1580,7 +1595,7 @@ Do not build:
 - TypeScript;
 - a build step;
 - a web UI;
-- a server;
+- a network service or daemon;
 - a database;
 - cloud execution;
 - multi-user support;

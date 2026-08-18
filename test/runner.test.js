@@ -26,6 +26,7 @@ const SOURCE_SESSION = "11111111-1111-4111-8111-111111111111";
 const PLANNER_SESSION = "22222222-2222-4222-8222-222222222222";
 const REVIEWER_SESSION = "33333333-3333-4333-8333-333333333333";
 const ARBITER_SESSION = "44444444-4444-4444-8444-444444444444";
+const PREPARED_RUN = "55555555-5555-4555-8555-555555555555";
 const PLAN = `## Commit 1: feat(test): add behavior
 
 Implement the requested behavior.`;
@@ -309,7 +310,12 @@ async function createFixture(t) {
   return { projectPath, stateRoot, taskPath, workspace };
 }
 
-function runnerFor(fixture, adapters, activities = []) {
+function runnerFor(
+  fixture,
+  adapters,
+  activities = [],
+  runStore = createRunStore({ stateRoot: fixture.stateRoot }),
+) {
   return createRunner({
     adapters,
     clarifications: createClarificationService({ interactive: false }),
@@ -317,9 +323,31 @@ function runnerFor(fixture, adapters, activities = []) {
     onActivity(activity) {
       activities.push(activity);
     },
-    runStore: createRunStore({ stateRoot: fixture.stateRoot }),
+    runStore,
   });
 }
+
+test("validates the canonical Git root before creating external state", async (t) => {
+  const fixture = await createFixture(t);
+  const nestedProjectPath = join(fixture.projectPath, "nested");
+  const unsafeStateRoot = join(fixture.projectPath, ".state");
+  await mkdir(nestedProjectPath);
+  const runner = runnerFor(
+    fixture,
+    { codex: createAdapter() },
+    [],
+    createRunStore({ stateRoot: unsafeStateRoot }),
+  );
+
+  await assert.rejects(
+    runner.validateBoundary({
+      projectPath: nestedProjectPath,
+      taskPath: fixture.taskPath,
+    }),
+    (error) => error.code === "ERR_UNSAFE_STATE_ROOT",
+  );
+  await assert.rejects(readdir(unsafeStateRoot), /ENOENT/u);
+});
 
 test("runs and resumes a registered pipeline from persisted configuration", async (t) => {
   const fixture = await createFixture(t);
@@ -396,6 +424,62 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
   assert.ok(activities.some(({ actor }) => actor === "planner"));
   assert.ok(activities.some(({ actor }) => actor === "reviewer"));
   assert.ok(activities.every(({ runId }) => runId === paused.run.runId));
+});
+
+test("prepares a durable run and submits identified input before continuation", async (t) => {
+  const fixture = await createFixture(t);
+  const adapter = createAdapter({ questionFirst: true });
+  const runner = runnerFor(fixture, { codex: adapter });
+  const input = {
+    pipelineId: "plan-authoring",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    sourceSession: null,
+  };
+
+  const prepared = await runner.create(input, { runId: PREPARED_RUN });
+  assert.equal(prepared.run.runId, PREPARED_RUN);
+  assert.equal(prepared.run.pipelineState.workflowState, "CLARIFY");
+  assert.equal(
+    (await runner.status(PREPARED_RUN)).run.pipelineState.workflowState,
+    "CLARIFY",
+  );
+  assert.equal(adapter.calls.length, 0);
+
+  const paused = await runner.resume({ runId: PREPARED_RUN, action: null });
+  assert.equal(paused.run.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.deepEqual(paused.run.pause.inputRequest.questions, [
+    {
+      id: "q1",
+      question: "Which behavior is required?",
+      options: [],
+      rationale: "The answer changes the commit plan.",
+    },
+  ]);
+  const response = {
+    runId: PREPARED_RUN,
+    requestId: paused.run.pause.inputRequest.id,
+    expectedRevision: paused.run.revision,
+    answers: [{ questionId: "q1", answer: "Use behavior A exactly." }],
+  };
+  const preview = await runner.previewInput(response);
+  const submitted = await runner.submitInput({
+    ...response,
+    responseHash: preview.responseHash,
+  });
+  assert.equal(
+    submitted.run.pause.inputResponse.transcriptHash,
+    preview.responseHash,
+  );
+
+  const completed = await runner.resume({ runId: PREPARED_RUN, action: null });
+  assert.equal(completed.run.pipelineState.workflowState, "DONE");
+  assert.match(
+    await readFile(join(fixture.taskPath, "clarifications.md"), "utf8"),
+    /### A1\n\nUse behavior A exactly\./u,
+  );
 });
 
 test("rejects incompatible or unsupported source sessions before creating a run", async (t) => {

@@ -10,6 +10,7 @@
 - Stay autonomous during normal execution and pause only for explicit escalation conditions.
 - Make workflow correctness, Git safety, and resumable state more important than convenience.
 - Keep the runtime a plain Node.js CLI rather than a general agent framework.
+- Expose the same durable runner through a local asynchronous STDIO MCP boundary.
 
 ## Source Of Truth
 
@@ -27,7 +28,8 @@ contracts. `packages/commit-plan/README.md` owns the shared plan contract.
 - Prefer small functional modules and split them only when they become meaningfully large.
 - Keep backend-specific flags and output normalization inside `src/agents/`.
 - Keep repository configuration loading and precedence in `src/config.js`; let
-  pipeline descriptors own their roles, setting validators, and defaults.
+  pipeline descriptors own their roles, settings, defaults, and persisted-run
+  validation.
 - Keep shared plan parsing and structural and subject validation in
   `packages/commit-plan/`. The plan-authoring Planner proposes exact commit
   subjects, deterministic code validates them, and plan execution consumes
@@ -81,6 +83,11 @@ All pipelines additionally require:
 - Persist each run transition as a complete write-ahead event before atomically
   replacing state, and require one recoverable execution lease for mutating run
   or resume operations; keep status reads lock-free.
+- Persist MCP idempotency intents before mutation and receipts before returning;
+  detached continuations must survive client disconnect without gaining a
+  second execution owner.
+- Keep MCP on STDIO, reserve stdout for protocol traffic, never open an editor,
+  and treat wait cancellation as cancellation of the wait only.
 
 ## Repository Map
 
@@ -89,13 +96,14 @@ All pipelines additionally require:
 | `bin/agent-run.js` | Thin executable entry point |
 | `src/index.js` | Public root source boundary |
 | `src/cli.js` | Argument parsing and terminal-facing command dispatch |
+| `src/mcp.js` | STDIO MCP schemas, projections, waits, and detached dispatch |
 | `src/config.js` | Repository configuration loading, validation, and role resolution |
 | `src/clarifications.js` | Public clarification-service coordination |
 | `src/clarification-*.js` | Internal confined-file and editor helpers |
 | `src/pipeline-registry.js` | Explicit registry of built-in pipelines |
 | `src/runner.js` | High-level run, resume, and status orchestration |
 | `src/state.js` | Public run-store coordination and state-directory resolution |
-| `src/state-*.js` | Internal state file, journal, lease, and validation helpers |
+| `src/state-*.js` | Internal state file, journal, action, lease, and validation helpers |
 | `src/git.js` | Public Git-safety coordination |
 | `src/git-*.js` | Internal Git process, snapshot, and commit-verification helpers |
 | `src/agents/index.js` | Public agent-adapter directory boundary |

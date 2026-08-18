@@ -1086,6 +1086,16 @@ test("pauses for clarification answers and resumes through the authorization", a
   assert.equal(resumed.pipelineState.clarificationFrozen, true);
 });
 
+test("rejects malformed persisted structured input", async (t) => {
+  const fixture = await createFixture(t, {
+    worker: [clarificationQuestions()],
+  });
+  await fixture.run();
+  fixture.currentRun.pause.inputRequest.questions[0].id = "q2";
+
+  await assert.rejects(fixture.run(), /input request is invalid/u);
+});
+
 test("retries a temporarily unavailable clarification Worker", async (t) => {
   let interruptClarification = true;
   const fixture = await createFixture(t, {
@@ -1396,6 +1406,19 @@ test("starts a fresh Arbiter for a new bootstrap dispute", async (t) => {
 
   const paused = await fixture.run();
   assert.equal(paused.pause.reason, "product_decision_required");
+  assert.deepEqual(paused.pause.inputRequest, {
+    id: paused.pipelineState.pendingEdit.id,
+    kind: "product-decision",
+    questions: [
+      {
+        id: "decision",
+        question: "Which public behavior should be implemented?",
+        options: ["Behavior A", "Behavior B"],
+      },
+    ],
+    rationale: "Both behaviors are valid but incompatible.",
+    artifactPath: fixture.clarificationPath,
+  });
   await writeFile(
     fixture.clarificationPath,
     `${await readFile(fixture.clarificationPath, "utf8")}Behavior A.\n`,

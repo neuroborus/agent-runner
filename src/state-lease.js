@@ -236,6 +236,11 @@ export function createLeaseManager({
     });
   }
 
+  async function isLeased(runDirectory, runId) {
+    const lease = await readLease(join(runDirectory, LEASE_FILENAME), runId);
+    return lease !== null && !(await leaseIsStale(lease));
+  }
+
   async function assertLeaseFile(metadata) {
     const persistedLease = await readLease(
       join(metadata.runDirectory, LEASE_FILENAME),
@@ -286,5 +291,5 @@ export function createLeaseManager({
     metadata.released = true;
   }
 
-  return Object.freeze({ acquire, runExclusive });
+  return Object.freeze({ acquire, isLeased, runExclusive });
 }

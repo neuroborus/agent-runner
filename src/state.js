@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { watch } from "node:fs";
 import { lstat, mkdir, realpath, rm, rmdir } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import {
@@ -11,6 +12,7 @@ import {
 } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
+import { createActionStore } from "./state-actions.js";
 import { atomicWriteFile, resolveRunArtifactPath } from "./state-files.js";
 import { createStateJournal } from "./state-journal.js";
 import { createLeaseManager } from "./state-lease.js";
@@ -31,6 +33,7 @@ const DEFAULT_LEASE_STALE_MS = 5 * 60 * 1_000;
 
 const RUNS_DIRECTORY = "runs";
 const CREATE_RUN_FIELDS = new Set([
+  "runId",
   "pipelineId",
   "pipelineStateVersion",
   "projectPath",
@@ -250,6 +253,14 @@ export function createRunStore({
     timestamp,
     tokenFactory: leaseTokenFactory,
   });
+  const actions = createActionStore({
+    clock,
+    hostName,
+    processId,
+    processIsAlive,
+    stateRoot: requestedStateRoot,
+    tokenFactory: leaseTokenFactory,
+  });
 
   async function inspectRoot() {
     const canonicalRoot = await realpath(requestedStateRoot);
@@ -331,10 +342,11 @@ export function createRunStore({
     const { rootPath, runsPath } = await ensureRoot();
     assertStateRootOutside(rootPath, projectPath, taskPath);
 
-    let runId;
+    let runId = input.runId;
     let runDirectory;
-    for (let attempt = 0; attempt < 10; attempt += 1) {
-      runId = runIdFactory();
+    const attempts = runId === undefined ? 10 : 1;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      runId ??= runIdFactory();
       assertRunId(runId);
       runDirectory = join(runsPath, runId);
       try {
@@ -344,7 +356,14 @@ export function createRunStore({
         if (cause?.code !== "EEXIST") {
           throw cause;
         }
+        if (input.runId !== undefined) {
+          throw new RunStoreError(`Run already exists: ${runId}.`, {
+            cause,
+            code: "ERR_RUN_ID_COLLISION",
+          });
+        }
         runDirectory = undefined;
+        runId = undefined;
       }
     }
     if (runDirectory === undefined) {
@@ -423,6 +442,16 @@ export function createRunStore({
     }
   }
 
+  async function validateStateBoundary({ projectPath, taskPath }) {
+    const [project, task, potentialStateRoot] = await Promise.all([
+      canonicalDirectory(projectPath, "Project path"),
+      canonicalDirectory(taskPath, "Task path"),
+      canonicalPotentialPath(requestedStateRoot),
+    ]);
+    assertStateRootOutside(potentialStateRoot, project, task);
+    return Object.freeze({ projectPath: project, taskPath: task });
+  }
+
   async function acquireRunLease(runId) {
     const runDirectory = await getRunDirectory(runId);
     await loadSnapshot(runDirectory, runId);
@@ -451,6 +480,101 @@ export function createRunStore({
   async function loadRun(runId) {
     const runDirectory = await getRunDirectory(runId);
     return deepFreeze((await loadSnapshot(runDirectory, runId)).state);
+  }
+
+  async function runIsLeased(runId) {
+    const runDirectory = await getRunDirectory(runId);
+    return leases.isLeased(runDirectory, runId);
+  }
+
+  async function waitForRunChange(
+    runId,
+    { afterRevision, timeoutMs, signal } = {},
+  ) {
+    if (
+      !Number.isSafeInteger(afterRevision) ||
+      afterRevision < 0 ||
+      !Number.isSafeInteger(timeoutMs) ||
+      timeoutMs < 0 ||
+      (signal !== undefined && !(signal instanceof AbortSignal))
+    ) {
+      throw new RunStoreError("Run wait options are invalid.", {
+        code: "ERR_INVALID_RUN_WAIT",
+      });
+    }
+
+    const initial = await loadRun(runId);
+    if (initial.revision > afterRevision || timeoutMs === 0) {
+      return initial;
+    }
+    if (signal?.aborted) {
+      throw signal.reason ?? new DOMException("Aborted", "AbortError");
+    }
+
+    const runDirectory = await getRunDirectory(runId);
+    return new Promise((resolvePromise, rejectPromise) => {
+      let settled = false;
+      let timer;
+      let watcher;
+
+      const finish = (operation, value) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        watcher?.close();
+        operation(value);
+      };
+      const load = async () => {
+        try {
+          const current = await loadRun(runId);
+          if (current.revision > afterRevision) {
+            finish(resolvePromise, current);
+          }
+        } catch (cause) {
+          finish(rejectPromise, cause);
+        }
+      };
+      const onAbort = () =>
+        finish(
+          rejectPromise,
+          signal.reason ?? new DOMException("Aborted", "AbortError"),
+        );
+
+      try {
+        watcher = watch(
+          runDirectory,
+          { persistent: false },
+          (_eventType, filename) => {
+            if (
+              filename === null ||
+              ["events.jsonl", "state.json"].includes(filename.toString())
+            ) {
+              void load();
+            }
+          },
+        );
+        watcher.on("error", (cause) => finish(rejectPromise, cause));
+      } catch (cause) {
+        finish(rejectPromise, cause);
+        return;
+      }
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      timer = setTimeout(async () => {
+        try {
+          finish(resolvePromise, await loadRun(runId));
+        } catch (cause) {
+          finish(rejectPromise, cause);
+        }
+      }, timeoutMs);
+      void load();
+    });
   }
 
   async function recoverRun(lease) {
@@ -619,15 +743,20 @@ export function createRunStore({
   }
 
   return Object.freeze({
+    beginAction: actions.begin,
     rootPath: requestedStateRoot,
     acquireRunLease,
     createRun,
     getRunDirectory,
     loadRun,
     readPublicActivity,
+    readAction: actions.read,
     recordChildSession,
     recoverRun,
+    runIsLeased,
     transitionRun,
+    validateStateBoundary,
+    waitForRunChange,
     writeRunArtifact,
   });
 }

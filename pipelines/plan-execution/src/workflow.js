@@ -615,6 +615,7 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
       nextPipelineState = state(),
       nextCounters = counters(),
       nextHashes = currentRun.hashes,
+      inputRequest: requestedInputRequest,
       publicActivity = activity(
         "runner",
         "clarification",
@@ -623,6 +624,15 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
       ),
     } = {},
   ) {
+    const inputRequest = {
+      id: authorization.id,
+      kind: requestedInputRequest?.kind ?? "clarification",
+      questions: requestedInputRequest?.questions ?? [],
+      rationale:
+        requestedInputRequest?.rationale ??
+        "Optional task clarification before agent work begins.",
+      artifactPath: authorization.transcriptPath,
+    };
     await transition(
       {
         ...nextPipelineState,
@@ -632,7 +642,7 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
       {
         nextCounters,
         nextHashes,
-        pause: { reason, authorizationId: authorization.id },
+        pause: { reason, authorizationId: authorization.id, inputRequest },
         publicActivity,
       },
     );
@@ -659,6 +669,7 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
         currentRun.pause.reason,
         {
           expectedHash: result.hash,
+          inputRequest: currentRun.pause.inputRequest,
           nextPipelineState: { ...current, clarificationFrozen: false },
           nextHashes: {
             ...currentRun.hashes,
@@ -755,6 +766,17 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
       "product_decision_required",
       {
         expectedHash: transcript.hash,
+        inputRequest: {
+          kind: "product-decision",
+          questions: [
+            {
+              id: "decision",
+              question: decision.question,
+              options: decision.options,
+            },
+          ],
+          rationale: decision.whyBlocked,
+        },
         nextPipelineState: {
           ...current,
           clarificationFrozen: false,
@@ -2597,6 +2619,16 @@ ${evidence}`,
             "clarification_answers_required",
             {
               expectedHash: transcript.hash,
+              inputRequest: {
+                kind: "clarification",
+                questions: result.questions.map((question, index) => ({
+                  id: `q${index + 1}`,
+                  question: question.question,
+                  options: [],
+                  rationale: question.whyItMatters,
+                })),
+                rationale: "Answer every material clarification question.",
+              },
               nextCounters: { ...counters(), clarificationRounds: round },
               nextHashes: {
                 ...currentRun.hashes,

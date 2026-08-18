@@ -27,6 +27,20 @@ const STATE_FIELDS = new Set([
 const SESSION_LINEAGE_FIELDS = new Set(["source", "children"]);
 const CHILD_SESSION_FIELDS = new Set(["role", "sessionId"]);
 const ACTIVITY_FIELDS = new Set(["actor", "phase", "kind", "message"]);
+const INPUT_REQUEST_FIELDS = new Set([
+  "id",
+  "kind",
+  "questions",
+  "rationale",
+  "artifactPath",
+]);
+const INPUT_QUESTION_FIELDS = new Set([
+  "id",
+  "question",
+  "options",
+  "rationale",
+]);
+const INPUT_RESPONSE_FIELDS = new Set(["requestId", "transcriptHash"]);
 const TRANSITION_FIELDS = new Set([
   "counters",
   "hashes",
@@ -41,6 +55,9 @@ const MAX_KEY_LENGTH = 256;
 const MAX_STRING_LENGTH = 100_000;
 const MAX_SESSION_REFERENCE_LENGTH = 1_024;
 const MAX_ACTIVITY_MESSAGE_LENGTH = 500;
+const MAX_INPUT_ITEMS = 32;
+const MAX_INPUT_OPTIONS = 16;
+const MAX_INPUT_TEXT_LENGTH = 4_000;
 
 export class RunStoreError extends Error {
   constructor(message, { cause, code = "ERR_RUN_STORE" } = {}) {
@@ -99,6 +116,89 @@ function assertSessionReference(value, path) {
   }
 
   return value;
+}
+
+function assertInputText(value, path, maximumLength = MAX_INPUT_TEXT_LENGTH) {
+  if (
+    typeof value !== "string" ||
+    value.trim().length === 0 ||
+    value.length > maximumLength ||
+    UNSAFE_TEXT_PATTERN.test(value)
+  ) {
+    fail(`${path} must be concise plain text.`);
+  }
+  return value;
+}
+
+function normalizePause(value) {
+  const pause = cloneRecord(value, "run.pause");
+  const hasRequest = Object.hasOwn(pause, "inputRequest");
+  const hasResponse = Object.hasOwn(pause, "inputResponse");
+  if (!hasRequest) {
+    if (hasResponse) {
+      fail("run.pause.inputResponse requires inputRequest.");
+    }
+    return pause;
+  }
+
+  const request = pause.inputRequest;
+  assertRecord(request, "run.pause.inputRequest");
+  rejectUnknownFields(request, INPUT_REQUEST_FIELDS, "run.pause.inputRequest");
+  if (
+    Object.keys(request).length !== INPUT_REQUEST_FIELDS.size ||
+    !["clarification", "product-decision"].includes(request.kind) ||
+    typeof request.artifactPath !== "string" ||
+    !isAbsolute(request.artifactPath) ||
+    resolve(request.artifactPath) !== request.artifactPath ||
+    !Array.isArray(request.questions) ||
+    request.questions.length > MAX_INPUT_ITEMS
+  ) {
+    fail("run.pause.inputRequest is invalid.");
+  }
+  assertInputText(request.id, "run.pause.inputRequest.id", 256);
+  assertInputText(request.rationale, "run.pause.inputRequest.rationale");
+  request.questions.forEach((question, index) => {
+    const path = `run.pause.inputRequest.questions[${index}]`;
+    assertRecord(question, path);
+    rejectUnknownFields(question, INPUT_QUESTION_FIELDS, path);
+    if (
+      ![3, 4].includes(Object.keys(question).length) ||
+      !Object.hasOwn(question, "id") ||
+      !Object.hasOwn(question, "question") ||
+      !Object.hasOwn(question, "options") ||
+      !Array.isArray(question.options) ||
+      question.options.length > MAX_INPUT_OPTIONS
+    ) {
+      fail(`${path} is invalid.`);
+    }
+    assertInputText(question.id, `${path}.id`, 256);
+    assertInputText(question.question, `${path}.question`);
+    question.options.forEach((option, optionIndex) =>
+      assertInputText(option, `${path}.options[${optionIndex}]`),
+    );
+    if (Object.hasOwn(question, "rationale")) {
+      assertInputText(question.rationale, `${path}.rationale`);
+    }
+  });
+
+  if (hasResponse) {
+    const response = pause.inputResponse;
+    assertRecord(response, "run.pause.inputResponse");
+    rejectUnknownFields(
+      response,
+      INPUT_RESPONSE_FIELDS,
+      "run.pause.inputResponse",
+    );
+    if (
+      Object.keys(response).length !== INPUT_RESPONSE_FIELDS.size ||
+      response.requestId !== request.id ||
+      typeof response.transcriptHash !== "string" ||
+      !/^[a-f0-9]{64}$/u.test(response.transcriptHash)
+    ) {
+      fail("run.pause.inputResponse is invalid.");
+    }
+  }
+  return pause;
 }
 
 function cloneJson(value, path, depth, ancestors) {
@@ -286,8 +386,7 @@ export function normalizeRunState(value, expectedRunId) {
     }
   }
 
-  const pause =
-    value.pause === null ? null : cloneRecord(value.pause, "run.pause");
+  const pause = value.pause === null ? null : normalizePause(value.pause);
   const createdAt = normalizeTimestamp(value.createdAt, "run.createdAt");
   const updatedAt = normalizeTimestamp(value.updatedAt, "run.updatedAt");
   if (Date.parse(updatedAt) < Date.parse(createdAt)) {
@@ -330,7 +429,7 @@ export function normalizeTransitionPatch(value) {
     normalized.pause =
       patch.pause === null
         ? null
-        : cloneRecord(patch.pause, "transition.pause");
+        : normalizePause(patch.pause);
   }
 
   return normalized;

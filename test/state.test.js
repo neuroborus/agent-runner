@@ -240,6 +240,39 @@ test("persists child sessions, opaque pipeline state, and public activity", asyn
   );
 });
 
+test("validates the shared structured input envelope", async (t) => {
+  const { created, taskPath, store } = await createFixture(t);
+  const inputRequest = {
+    id: "request-1",
+    kind: "clarification",
+    questions: [
+      {
+        id: "q1",
+        question: "Which behavior is required?",
+        options: [],
+        rationale: "The answer changes behavior.",
+      },
+    ],
+    rationale: "Answer the blocking question.",
+    artifactPath: join(taskPath, "clarifications.md"),
+  };
+
+  await assert.rejects(
+    store.transitionRun(created.lease, {
+      pause: {
+        reason: "clarification_answers_required",
+        inputRequest,
+        inputResponse: {
+          requestId: "different-request",
+          transcriptHash: "a".repeat(64),
+        },
+      },
+    }),
+    (error) =>
+      error instanceof RunStoreError && error.code === "ERR_INVALID_RUN_STATE",
+  );
+});
+
 test("recovers every transition write boundary from the complete event", async (t) => {
   const workspace = await mkdtemp(join(tmpdir(), "agent-runner-crash-"));
   t.after(() => rm(workspace, { recursive: true, force: true }));

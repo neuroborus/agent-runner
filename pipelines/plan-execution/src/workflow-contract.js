@@ -239,6 +239,54 @@ function normalizeTextList(
   );
 }
 
+function assertInputPause(run, state) {
+  const request = run.pause?.inputRequest;
+  if (
+    state.workflowState !== "WAITING_FOR_USER" ||
+    state.pendingEdit === null
+  ) {
+    if (request !== undefined || run.pause?.inputResponse !== undefined) {
+      throw workflowError("Plan-execution input pause is invalid.");
+    }
+    return;
+  }
+  if (request === undefined) {
+    return;
+  }
+  if (!isRecord(request) || !Array.isArray(request.questions)) {
+    throw workflowError("Plan-execution input request is invalid.");
+  }
+
+  const action = state.pendingEdit.action;
+  const productDecision = action === "product-decision";
+  const invalidQuestions =
+    action === "proactive-clarification"
+      ? request.questions.length !== 0
+      : productDecision
+        ? request.questions.length !== 1 ||
+          !isRecord(request.questions[0]) ||
+          !Array.isArray(request.questions[0].options) ||
+          request.questions[0].id !== "decision" ||
+          request.questions[0].rationale !== undefined
+        : request.questions.length === 0 ||
+          request.questions.some(
+            (question, index) =>
+              !isRecord(question) ||
+              !Array.isArray(question.options) ||
+              question.id !== `q${index + 1}` ||
+              question.options.length !== 0 ||
+              question.rationale === undefined,
+          );
+  if (
+    request.id !== state.pendingEdit.id ||
+    request.kind !== (productDecision ? "product-decision" : "clarification") ||
+    request.artifactPath !== state.pendingEdit.transcriptPath ||
+    invalidQuestions
+  ) {
+    throw workflowError("Plan-execution input request is invalid.");
+  }
+}
+
 function emptyArray(value) {
   return Array.isArray(value) && value.length === 0;
 }
@@ -2165,6 +2213,7 @@ export function assertRun(run) {
   ) {
     throw workflowError("Plan-execution pause state is invalid.");
   }
+  assertInputPause(run, state);
   if (state.workflowState === "WAITING_FOR_USER") {
     const expectedReason = EDIT_PAUSE_REASONS[state.pendingEdit?.action];
     const hasAuthorizationId = Object.hasOwn(run.pause, "authorizationId");

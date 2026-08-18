@@ -130,6 +130,14 @@ through that authorized editor window is accepted as new clarification input
 and invalidates dependent work; any edit outside an authorized window pauses
 with `clarifications_changed`.
 
+Through MCP, the root runtime never opens an editor. It exposes the same pending
+authorization as a structured request with identified questions and accepts an
+empty response for optional proactive clarification or one exact answer per
+Planner question through `run_respond`. The controlling agent may answer from
+explicit user context and otherwise asks the user. A material product decision
+must come from explicit user context. An external artifact edit followed by
+`run_resume` uses the same authorization and remains valid.
+
 After `CLARIFY`, agents must not ask questions during normal work. They may
 return structured `PRODUCT_DECISION_REQUIRED` only when all of these are true:
 
@@ -258,3 +266,5 @@ path is ignored and untracked.
   invalid plan.
 - Do not turn clarifications into an open-ended chat after work begins.
 - Do not automatically start plan execution after authoring completes.
+- Keep MCP start, wait, response, and detached-process behavior in the root
+  runtime; this pipeline continues to own the same states and transitions.

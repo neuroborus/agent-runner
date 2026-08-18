@@ -841,6 +841,17 @@ test("rejects a persisted pause for another edit authorization", async (t) => {
   await assert.rejects(fixture.run(), /pending edit pause is invalid/u);
 });
 
+test("rejects malformed persisted structured input", async (t) => {
+  const fixture = await createFixture(t, {
+    planner: [questions()],
+    reviewer: [],
+  });
+  await fixture.run();
+  fixture.currentRun.pause.inputRequest.questions[0].id = "q2";
+
+  await assert.rejects(fixture.run(), /input request is invalid/u);
+});
+
 test("pauses after three clarification question rounds", async (t) => {
   const fixture = await createFixture(t, {
     interactive: true,
@@ -895,6 +906,19 @@ test("routes product decisions through the transcript and invalidates inputs", a
   const waiting = await fixture.run();
 
   assert.equal(waiting.pause.reason, "product_decision_required");
+  assert.deepEqual(waiting.pause.inputRequest, {
+    id: waiting.pipelineState.pendingEdit.id,
+    kind: "product-decision",
+    questions: [
+      {
+        id: "decision",
+        question: "Which public behavior should be used?",
+        options: ["Behavior A", "Behavior B"],
+      },
+    ],
+    rationale: "Both choices are valid but incompatible.",
+    artifactPath: fixture.clarificationPath,
+  });
   assert.equal(waiting.counters.productDecisions, 1);
   const decisionTransitions = fixture.transitions.filter(
     ({ patch }) => patch?.counters?.productDecisions === 1,

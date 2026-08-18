@@ -11,8 +11,8 @@ small runner.
 > plan-authoring state machine, and plan-execution through implementation,
 > finalization, review, finding resolution, and verified local commits are present.
 > The root CLI now runs, resumes, and inspects both registered pipelines with
-> durable state and live public activity. The MCP control plane is not yet
-> implemented.
+> durable state and live public activity. A local STDIO MCP control plane starts
+> and resumes the same runs asynchronously with durable idempotency.
 
 Architecture is documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 Each pipeline owns its specification under its workspace.
@@ -40,11 +40,11 @@ Each pipeline owns its specification under its workspace.
   depending on the selected role backends
 - `bubblewrap` and `socat` for the V1 Claude backend on Linux
 
-The project uses native ES modules and currently has no runtime npm
-dependencies outside the local workspaces. Adapter tests use process fakes;
-set `AGENT_RUNNER_LIVE_CODEX=1` or `AGENT_RUNNER_LIVE_CLAUDE=1` to include the
-corresponding real smoke turn. Workflow tests use fakes and temporary Git
-repositories by default.
+The project uses native ES modules. Its only external runtime dependencies are
+the official Node MCP server SDK and its schema library. Adapter tests use
+process fakes; set `AGENT_RUNNER_LIVE_CODEX=1` or
+`AGENT_RUNNER_LIVE_CLAUDE=1` to include the corresponding real smoke turn.
+Workflow tests use fakes and temporary Git repositories by default.
 
 ## Pipelines
 
@@ -102,6 +102,7 @@ agent-run run plan-execution --project /path/to/repository --task /path/to/task
 agent-run resume --run <run-id>
 agent-run status --run <run-id>
 agent-run pipelines
+agent-run mcp
 ```
 
 Role models use the corresponding derived flags, for example
@@ -170,14 +171,50 @@ agent-run resume --run <run-id> --override-finding R7
 Invalid input and startup or execution failures exit with status `1`; `status`
 exits successfully when it can read the requested run.
 
+## MCP
+
+Configure a local MCP server with command `agent-run` and argument `mcp`. The
+server uses STDIO only; stdout is reserved for protocol messages. It exposes:
+
+- `pipelines_list`
+- `run_start`
+- `run_status`
+- `run_activity`
+- `run_wait`
+- `run_respond`
+- `run_resume`
+
+Start with a unique opaque idempotency key, then call `run_wait` once for the
+desired interval. A timeout does not stop the run. Use `run_activity` only when
+an explicit or historical cursor read is needed, not as a polling loop. When a
+compatible current Codex or Claude session ID is available, pass it to
+`run_start` by default; the primary and review roles fork it independently.
+Omit it only for an explicit fresh start and never fabricate an ID.
+
+MCP never opens a text editor. A paused clarification or product decision is
+returned as structured `pendingInput`. `run_respond` requires the request ID,
+run revision, an answer for every identified question, and a new idempotency
+key; optional proactive clarification accepts an empty answer array. The
+controlling agent answers from explicit user context or asks the user, and must
+not invent a material product decision. Editing the artifact and using
+`run_resume` remains supported.
+
+Mutating tools persist an action intent before mutation and a receipt before
+returning. Runs continue in detached local children, so MCP disconnects and
+wait cancellation affect only the client call. The existing execution lease,
+Git safety checks, local-only policy, and one-shot commit authorization remain
+authoritative. V1 does not require MCP Tasks and provides no network transport
+or daemon.
+
 ## Pipeline Boundary
 
 The registry is static in V1. A pipeline descriptor exports an ID, a state
 version, roles, configuration settings and defaults, pipeline-specific accepted
-and required `run` options, and a description; the root CLI owns the common
-`--clarify` lifecycle option. Each workspace owns its explicit JavaScript
-workflow. The runner provides state, events, agents, and Git services; it does
-not provide a workflow DSL or duplicate pipeline-owned policy.
+and required `run` options, persisted-run validation, and a description; the
+root CLI owns the common `--clarify` lifecycle option. Each workspace owns its
+explicit JavaScript workflow. The runner provides state, events, agents, and
+Git services; it does not provide a workflow DSL or duplicate pipeline-owned
+policy.
 
 ## Repository Layout
 
@@ -204,9 +241,11 @@ not provide a workflow DSL or duplicate pipeline-owned policy.
 │   ├── git-content.js
 │   ├── git.js
 │   ├── index.js
+│   ├── mcp.js
 │   ├── pipeline-registry.js
 │   ├── runner.js
 │   ├── state-files.js
+│   ├── state-actions.js
 │   ├── state-journal.js
 │   ├── state-lease.js
 │   ├── state-validation.js
@@ -263,6 +302,6 @@ action that requires an explicit request; pushing remains prohibited in V1.
 
 ## V1 Non-Goals
 
-V1 intentionally excludes TypeScript, a build step, web or server components,
-databases, cloud execution, dynamic plugin loading, a declarative workflow DSL,
-PR automation, and all automatic pushing.
+V1 intentionally excludes TypeScript, a build step, network services and
+daemons, databases, cloud execution, dynamic plugin loading, a declarative
+workflow DSL, PR automation, and all automatic pushing.

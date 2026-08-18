@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { parseArgs } from "node:util";
 
 import packageMetadata from "../package.json" with { type: "json" };
+import { serveMcp } from "./mcp.js";
 import { getPipeline, listPipelines } from "./pipeline-registry.js";
 import { createRunner, parseSourceSession } from "./runner.js";
 
@@ -9,12 +10,14 @@ const COMMAND_OPTIONS = Object.freeze({
   resume: Object.freeze(["run", "extra-fix-rounds", "override-finding"]),
   status: Object.freeze(["run"]),
   pipelines: Object.freeze([]),
+  mcp: Object.freeze([]),
 });
 const COMMON_RUN_OPTIONS = Object.freeze(["clarify", "fork-from"]);
 const REQUIRED_COMMAND_OPTIONS = Object.freeze({
   resume: Object.freeze(["run"]),
   status: Object.freeze(["run"]),
   pipelines: Object.freeze([]),
+  mcp: Object.freeze([]),
 });
 
 const COMMANDS = new Set(["run", ...Object.keys(COMMAND_OPTIONS)]);
@@ -51,6 +54,7 @@ Usage:
   agent-run resume --run <run-id> [--extra-fix-rounds <count> | --override-finding <finding-id>]
   agent-run status --run <run-id>
   agent-run pipelines
+  agent-run mcp
 
 Pipelines:
 ${PIPELINE_USAGE}
@@ -190,7 +194,12 @@ function resumeAction(values) {
 
 export async function main(
   args = process.argv.slice(2),
-  { stdout = process.stdout, stderr = process.stderr, runner } = {},
+  {
+    stdout = process.stdout,
+    stderr = process.stderr,
+    runner,
+    startMcp = serveMcp,
+  } = {},
 ) {
   let parsed;
   try {
@@ -298,6 +307,15 @@ export async function main(
       .join("\n");
     stdout.write(`${output}\n`);
     return 0;
+  }
+  if (command === "mcp") {
+    try {
+      startMcp({ stderr });
+      return 0;
+    } catch {
+      stderr.write("Agent Runner MCP failed to start.\n");
+      return 1;
+    }
   }
 
   try {

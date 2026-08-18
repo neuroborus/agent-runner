@@ -5,6 +5,7 @@ import {
   runPlanAuthoring,
   WORKFLOW_STATES,
 } from "./workflow.js";
+import { assertRun as validateRun } from "./workflow-contract.js";
 
 export {
   CLARIFICATION_INSTRUCTIONS,
@@ -49,5 +50,6 @@ export const planAuthoringPipeline = Object.freeze({
   workflow: Object.freeze({
     createState: createPlanAuthoringState,
     run: runPlanAuthoring,
+    validateRun,
   }),
 });

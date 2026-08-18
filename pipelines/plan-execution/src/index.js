@@ -5,6 +5,7 @@ import {
   runPlanExecution,
   WORKFLOW_STATES,
 } from "./workflow.js";
+import { assertRun as validateRun } from "./workflow-contract.js";
 
 export {
   BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
@@ -59,5 +60,6 @@ export const planExecutionPipeline = Object.freeze({
   workflow: Object.freeze({
     createState: createPlanExecutionState,
     run: runPlanExecution,
+    validateRun,
   }),
 });
