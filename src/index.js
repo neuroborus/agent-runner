@@ -15,6 +15,11 @@ export {
 export { createGitService, GitSafetyError } from "./git.js";
 export { getPipeline, listPipelines } from "./pipeline-registry.js";
 export {
+  createRunner,
+  parseSourceSession,
+  RunnerError,
+} from "./runner.js";
+export {
   createRunStore,
   resolveStateRoot,
   RUN_STATE_SCHEMA_VERSION,

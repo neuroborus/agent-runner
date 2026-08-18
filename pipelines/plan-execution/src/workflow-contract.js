@@ -1962,14 +1962,20 @@ export function normalizePipelineState(value) {
   return value;
 }
 
-export function createPlanExecutionState({ proactiveClarification = false } = {}) {
+export function createPlanExecutionState({
+  proactiveClarification = false,
+  settings = null,
+} = {}) {
   if (typeof proactiveClarification !== "boolean") {
     throw workflowError("proactiveClarification must be a boolean.");
+  }
+  if (settings !== null) {
+    assertSettings(settings);
   }
   return Object.freeze({
     workflowState: "CLARIFY",
     preflightComplete: false,
-    settings: null,
+    settings: settings === null ? null : Object.freeze({ ...settings }),
     repositoryBaseline: null,
     backendVersions: null,
     proactiveClarification,

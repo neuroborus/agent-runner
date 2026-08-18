@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import packageMetadata from "../package.json" with { type: "json" };
-import { main } from "../src/index.js";
+import { main, parseSourceSession, RunnerError } from "../src/index.js";
+
+const RUN_ID = "11111111-1111-4111-8111-111111111111";
 
 function createSink() {
   let value = "";
@@ -16,6 +18,49 @@ function createSink() {
     read() {
       return value;
     },
+  };
+}
+
+function commandResult({
+  pipelineId = "plan-execution",
+  state = "DONE",
+} = {}) {
+  return {
+    directoryPath: `/state/runs/${RUN_ID}`,
+    run: {
+      runId: RUN_ID,
+      pipelineId,
+      taskPath: "/task",
+      pause: state === "WAITING_FOR_USER" ? { reason: "review_required" } : null,
+      pipelineState: {
+        workflowState: state,
+        clarificationPath:
+          pipelineId === "plan-execution" ? "/project/clarifications.md" : null,
+        currentStep: state === "DONE" ? null : 2,
+        findings:
+          state === "WAITING_FOR_USER"
+            ? [{ id: "R1", problem: "Review is incomplete." }]
+            : [],
+        finalizedFingerprint: "a".repeat(64),
+        reviewedFingerprint: "a".repeat(64),
+        completedCommits: ["b".repeat(40)],
+      },
+    },
+  };
+}
+
+function fakeRunner(overrides = {}) {
+  return {
+    async run() {
+      return commandResult();
+    },
+    async resume() {
+      return commandResult();
+    },
+    async status() {
+      return commandResult();
+    },
+    ...overrides,
   };
 }
 
@@ -130,6 +175,7 @@ for (const args of [
   ["run", "plan-authoring", "--worker", "codex"],
   ["run", "plan-execution", "--planner", "codex"],
   ["status", "--run", "run-id", "--clarify"],
+  ["resume", "--run", "run-id", "--fork-from", "codex:source"],
 ]) {
   test(`command rejects an unrelated option: ${args.join(" ")}`, async () => {
     const stdout = createSink();
@@ -146,24 +192,39 @@ for (const args of [
   });
 }
 
-test("declared workflow commands fail clearly until implemented", async () => {
+test("status dispatches and renders concise persisted state", async () => {
   const stdout = createSink();
   const stderr = createSink();
+  let requestedRunId;
 
-  const exitCode = await main(["status", "--run", "run-id"], {
+  const exitCode = await main(["status", "--run", RUN_ID], {
     stdout: stdout.stream,
     stderr: stderr.stream,
+    runner: fakeRunner({
+      async status(runId) {
+        requestedRunId = runId;
+        return commandResult({ state: "WAITING_FOR_USER" });
+      },
+    }),
   });
 
-  assert.equal(exitCode, 1);
-  assert.equal(stdout.read(), "");
-  assert.match(stderr.read(), /not implemented in the initial scaffold/);
+  assert.equal(exitCode, 0);
+  assert.equal(requestedRunId, RUN_ID);
+  assert.match(stdout.read(), new RegExp(`Run: ${RUN_ID}`, "u"));
+  assert.match(stdout.read(), /State: WAITING_FOR_USER/u);
+  assert.match(stdout.read(), /Pause: review_required/u);
+  assert.match(stdout.read(), /R1: Review is incomplete\./u);
+  assert.match(stdout.read(), /Finalized fingerprint: a{12}/u);
+  assert.match(stdout.read(), /Commits: b{12}/u);
+  assert.match(stdout.read(), /State directory:/u);
+  assert.equal(stderr.read(), "");
 });
 
 for (const pipeline of ["plan-authoring", "plan-execution"]) {
-  test(`run ${pipeline} accepts --clarify`, async () => {
+  test(`run ${pipeline} dispatches --clarify`, async () => {
     const stdout = createSink();
     const stderr = createSink();
+    let request;
 
     const exitCode = await main(
       [
@@ -175,36 +236,165 @@ for (const pipeline of ["plan-authoring", "plan-execution"]) {
         "/tmp/task",
         "--clarify",
       ],
-      { stdout: stdout.stream, stderr: stderr.stream },
+      {
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        runner: fakeRunner({
+          async run(input) {
+            request = input;
+            return commandResult({ pipelineId: pipeline });
+          },
+        }),
+      },
     );
 
-    assert.equal(exitCode, 1);
-    assert.equal(stdout.read(), "");
-    assert.match(stderr.read(), /not implemented in the initial scaffold/);
+    assert.equal(exitCode, 0);
+    assert.equal(request.pipelineId, pipeline);
+    assert.equal(request.proactiveClarification, true);
+    assert.match(stdout.read(), /State: DONE/u);
+    assert.equal(stderr.read(), "");
   });
 }
 
-test("run plan-authoring accepts the declared Arbiter role", async () => {
+test("run derives role, model, and source-session inputs", async () => {
   const stdout = createSink();
   const stderr = createSink();
+  let request;
 
   const exitCode = await main(
     [
       "run",
-      "plan-authoring",
+      "plan-execution",
       "--project",
       "/tmp/project",
       "--task",
       "/tmp/task",
+      "--worker",
+      "claude",
+      "--worker-model",
+      "sonnet",
+      "--reviewer",
+      "claude",
       "--arbiter",
       "codex",
+      "--fork-from",
+      "claude:source:opaque",
     ],
-    { stdout: stdout.stream, stderr: stderr.stream },
+    {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      runner: fakeRunner({
+        async run(input) {
+          request = input;
+          return commandResult();
+        },
+      }),
+    },
   );
 
-  assert.equal(exitCode, 1);
-  assert.equal(stdout.read(), "");
-  assert.match(stderr.read(), /not implemented in the initial scaffold/);
+  assert.equal(exitCode, 0);
+  assert.deepEqual(request.roleOverrides, {
+    worker: { backend: "claude", model: "sonnet" },
+    reviewer: { backend: "claude" },
+    arbiter: { backend: "codex" },
+  });
+  assert.deepEqual(request.sourceSession, {
+    backend: "claude",
+    id: "source:opaque",
+  });
+  assert.equal(stderr.read(), "");
+});
+
+test("resume dispatches one validated action and preserves pause exit", async () => {
+  const stdout = createSink();
+  const stderr = createSink();
+  let request;
+
+  const exitCode = await main(
+    ["resume", "--run", RUN_ID, "--extra-fix-rounds", "3"],
+    {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      runner: fakeRunner({
+        async resume(input) {
+          request = input;
+          return commandResult({ state: "WAITING_FOR_USER" });
+        },
+      }),
+    },
+  );
+
+  assert.equal(exitCode, 2);
+  assert.deepEqual(request, {
+    runId: RUN_ID,
+    action: { type: "extra-fix-rounds", amount: 3 },
+  });
+  assert.match(stdout.read(), /Pause: review_required/u);
+  assert.equal(stderr.read(), "");
+});
+
+test("resume dispatches one finding override", async () => {
+  let request;
+  const exitCode = await main(
+    ["resume", "--run", RUN_ID, "--override-finding", "R7"],
+    {
+      stdout: createSink().stream,
+      stderr: createSink().stream,
+      runner: fakeRunner({
+        async resume(input) {
+          request = input;
+          return commandResult();
+        },
+      }),
+    },
+  );
+
+  assert.equal(exitCode, 0);
+  assert.deepEqual(request.action, {
+    type: "override-finding",
+    findingId: "R7",
+  });
+});
+
+test("resume rejects conflicting or invalid fix actions", async () => {
+  for (const args of [
+    ["resume", "--run", RUN_ID, "--extra-fix-rounds", "0"],
+    [
+      "resume",
+      "--run",
+      RUN_ID,
+      "--extra-fix-rounds",
+      "1",
+      "--override-finding",
+      "R1",
+    ],
+  ]) {
+    const stderr = createSink();
+    assert.equal(
+      await main(args, {
+        stdout: createSink().stream,
+        stderr: stderr.stream,
+        runner: fakeRunner(),
+      }),
+      1,
+    );
+    assert.notEqual(stderr.read(), "");
+  }
+});
+
+test("source-session parsing keeps the ID opaque", () => {
+  assert.deepEqual(parseSourceSession("codex:thread:with:colons"), {
+    backend: "codex",
+    id: "thread:with:colons",
+  });
+  for (const value of ["", "codex:", "other:source", "source"]) {
+    assert.throws(
+      () => parseSourceSession(value),
+      (error) =>
+        error instanceof RunnerError &&
+        error.code === "ERR_INVALID_SOURCE_SESSION",
+    );
+  }
 });
 
 test("run requires a known pipeline", async () => {

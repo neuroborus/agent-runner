@@ -99,6 +99,27 @@ The root loader owns only the versioned envelope, strict field validation, and
 resolution precedence; it does not duplicate pipeline-specific role or setting
 lists.
 
+## Run Lifecycle
+
+The root runner resolves the canonical Git root, loads repository configuration,
+applies CLI role and model overrides, and persists the resolved roles, settings,
+and optional source-session reference before pipeline work begins. `run` then
+holds the new run's lease while invoking its statically registered workflow;
+`resume` recovers the durable event history and reconstructs the same runtime
+from persisted state without reloading role configuration or requiring a live
+native session. `status` remains lock-free.
+
+`--fork-from <backend>:<session-id>` is accepted only on a new run. The session
+ID remains opaque after the first separator. The pipeline's primary and review
+roles must use that backend and support native forking; their first turns fork
+the source independently, while the Arbiter is not constrained by it. Resume
+uses the persisted source and child lineage and never asks for the flag again.
+
+The CLI renders only persisted public activity and a concise current-state
+projection. A user-action pause has a distinct exit status from an internal
+failure; neither status output nor activity rendering exposes raw prompts or
+model transcripts.
+
 ## External Run State
 
 The root runtime persists runs under `$XDG_STATE_HOME/agent-runner/`, falling
@@ -109,11 +130,11 @@ canonical project or task directory.
 `state.json` contains the common versioned envelope: monotonic revision,
 pipeline ID and state version, canonical paths, resolved roles, counters,
 hashes, pause state, session lineage, timestamps, and opaque pipeline-owned
-state, including its resolved settings. The root validates JSON shape and size
-without interpreting workflow roles or outcomes. Session lineage records an
-optional source-session reference and every direct child role/session ID, but
-native session resume remains an optimization rather than a correctness
-dependency.
+state, including its resolved settings from the initial revision. The root
+validates JSON shape and size without interpreting workflow roles or outcomes.
+Session lineage records an optional source-session reference and every direct
+child role/session ID, but native session resume remains an optimization rather
+than a correctness dependency.
 
 Plan execution persists each prepared or consumed one-shot commit authorization
 and every verified commit SHA. After an ambiguous commit turn, resume verifies

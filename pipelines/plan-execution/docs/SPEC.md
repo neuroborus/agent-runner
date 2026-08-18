@@ -176,6 +176,35 @@ Without the flag, `CLARIFY` still runs but opens the editor only if the Worker
 returns questions. In a non-interactive environment, persist the pause and print
 the clarification artifact path instead of attempting terminal dialogue.
 
+Use role-specific model flags when an explicit backend model is required:
+
+```bash
+agent-run run plan-execution \
+  --project /path/to/repo \
+  --task /path/to/task \
+  --worker codex \
+  --worker-model <codex-model-id> \
+  --reviewer claude \
+  --reviewer-model <claude-model-id>
+```
+
+A new run may seed Worker and Reviewer from one existing session only when both
+use its backend:
+
+```bash
+agent-run run plan-execution \
+  --project /path/to/repo \
+  --task /path/to/task \
+  --worker codex \
+  --reviewer codex \
+  --fork-from codex:<session-id>
+```
+
+The runner splits only the backend prefix, keeps the session ID opaque, probes
+native fork support, and persists the resolved source. Worker and Reviewer fork
+it independently; the Arbiter remains independent and `resume` never requires
+the flag again.
+
 Role backends must be independently configurable:
 
 ```bash

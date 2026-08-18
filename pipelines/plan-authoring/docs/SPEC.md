@@ -45,6 +45,12 @@ backend-specific `model`. The root runtime applies the shared precedence rules
 documented in [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md); this
 pipeline owns only its roles, setting validation, and defaults.
 
+CLI overrides use `--planner`, `--reviewer`, and `--arbiter`, with corresponding
+`--planner-model`, `--reviewer-model`, and `--arbiter-model` flags. A new run may
+also use `--fork-from <backend>:<session-id>` when Planner and Plan Reviewer both
+use that backend. Their first turns fork the source independently; the Arbiter
+remains fresh and `resume` uses the persisted lineage without another flag.
+
 ## Persistent Run State
 
 The root run store persists this pipeline outside the project and task

@@ -1,14 +1,16 @@
+import { join } from "node:path";
 import { parseArgs } from "node:util";
 
 import packageMetadata from "../package.json" with { type: "json" };
 import { getPipeline, listPipelines } from "./pipeline-registry.js";
+import { createRunner, parseSourceSession } from "./runner.js";
 
 const COMMAND_OPTIONS = Object.freeze({
-  resume: Object.freeze(["run", "extra-fix-rounds"]),
+  resume: Object.freeze(["run", "extra-fix-rounds", "override-finding"]),
   status: Object.freeze(["run"]),
   pipelines: Object.freeze([]),
 });
-const COMMON_RUN_OPTIONS = Object.freeze(["clarify"]);
+const COMMON_RUN_OPTIONS = Object.freeze(["clarify", "fork-from"]);
 const REQUIRED_COMMAND_OPTIONS = Object.freeze({
   resume: Object.freeze(["run"]),
   status: Object.freeze(["run"]),
@@ -19,7 +21,10 @@ const COMMANDS = new Set(["run", ...Object.keys(COMMAND_OPTIONS)]);
 const GLOBAL_OPTIONS = new Set(["help", "version"]);
 const PIPELINES = listPipelines();
 const PIPELINE_RUN_OPTIONS = new Set(
-  PIPELINES.flatMap((pipeline) => pipeline.runOptions),
+  PIPELINES.flatMap((pipeline) => [
+    ...pipeline.runOptions,
+    ...pipeline.roles.map((role) => `${role}-model`),
+  ]),
 );
 
 const OPTIONS = Object.freeze({
@@ -27,6 +32,8 @@ const OPTIONS = Object.freeze({
   version: { type: "boolean", short: "v" },
   run: { type: "string" },
   "extra-fix-rounds": { type: "string" },
+  "override-finding": { type: "string" },
+  "fork-from": { type: "string" },
   ...Object.fromEntries(
     [...PIPELINE_RUN_OPTIONS].map((option) => [option, { type: "string" }]),
   ),
@@ -40,8 +47,8 @@ const PIPELINE_USAGE = PIPELINES.map(
 const USAGE = `Agent Runner
 
 Usage:
-  agent-run run <pipeline> --project <repo> --task <task-dir> [--clarify]
-  agent-run resume --run <run-id>
+  agent-run run <pipeline> --project <repo> --task <task-dir> [--clarify] [--fork-from <backend>:<session-id>]
+  agent-run resume --run <run-id> [--extra-fix-rounds <count> | --override-finding <finding-id>]
   agent-run status --run <run-id>
   agent-run pipelines
 
@@ -49,14 +56,141 @@ Pipelines:
 ${PIPELINE_USAGE}
 
 Options:
-      --clarify  Open the clarification editor before agent questions
-  -h, --help     Show this help
-  -v, --version  Show version
+      --clarify            Open the clarification editor before agent questions
+      --fork-from          Fork primary and review roles from a backend session
+      --<role>             Override a role backend
+      --<role>-model       Override a role model
+      --extra-fix-rounds   Grant a positive additional fix budget on resume
+      --override-finding   Override one applicable open finding on resume
+  -h, --help               Show this help
+  -v, --version            Show version
 `;
+
+function writeActivity(stdout, activity) {
+  const runReference =
+    activity.actor === "runner" &&
+    activity.phase === "run" &&
+    activity.kind === "created"
+      ? ` Run: ${activity.runId}.`
+      : "";
+  stdout.write(
+    `[${activity.actor}/${activity.phase}] ${activity.message}${runReference}\n`,
+  );
+}
+
+function shortFingerprint(value) {
+  return typeof value === "string" ? value.slice(0, 12) : null;
+}
+
+function runSummary({ directoryPath, run }) {
+  const state = run.pipelineState;
+  const lines = [
+    `Run: ${run.runId}`,
+    `Pipeline: ${run.pipelineId}`,
+    `State: ${state.workflowState}`,
+  ];
+  if (state.currentStep !== undefined && state.currentStep !== null) {
+    lines.push(`Step: ${state.currentStep}`);
+  }
+  if (run.pause?.reason !== undefined) {
+    lines.push(`Pause: ${run.pause.reason}`);
+  }
+  const clarificationPath =
+    state.clarificationPath ??
+    (run.pipelineId === "plan-authoring"
+      ? join(run.taskPath, "clarifications.md")
+      : null);
+  if (clarificationPath !== null) {
+    lines.push(`Clarifications: ${clarificationPath}`);
+  }
+  lines.push(`Plan: ${state.planPath ?? join(run.taskPath, "plan.md")}`);
+  if (Array.isArray(state.findings) && state.findings.length > 0) {
+    lines.push("Open findings:");
+    for (const finding of state.findings) {
+      lines.push(
+        `  ${finding.id}: ${finding.problem ?? finding.description ?? "open"}`,
+      );
+    }
+  }
+  const stagnation =
+    state.stagnationDirection?.direction ?? state.arbiterDirection?.direction;
+  if (stagnation !== undefined) {
+    lines.push(`Stagnation direction: ${stagnation}`);
+  }
+  const finalized = shortFingerprint(state.finalizedFingerprint);
+  const reviewed = shortFingerprint(state.reviewedFingerprint);
+  if (finalized !== null) {
+    lines.push(`Finalized fingerprint: ${finalized}`);
+  }
+  if (reviewed !== null) {
+    lines.push(`Reviewed fingerprint: ${reviewed}`);
+  }
+  if (
+    Array.isArray(state.completedCommits) &&
+    state.completedCommits.length > 0
+  ) {
+    lines.push(
+      `Commits: ${state.completedCommits.map(shortFingerprint).join(", ")}`,
+    );
+  }
+  lines.push(`State directory: ${directoryPath}`);
+  return `${lines.join("\n")}\n`;
+}
+
+function workflowExitCode(run) {
+  if (run.pipelineState.workflowState === "WAITING_FOR_USER") {
+    return 2;
+  }
+  return run.pipelineState.workflowState === "FAILED" ? 1 : 0;
+}
+
+function roleOverrides(pipeline, values) {
+  return Object.fromEntries(
+    pipeline.roles.flatMap((role) => {
+      const backend = values[role];
+      const model = values[`${role}-model`];
+      if (backend === undefined && model === undefined) {
+        return [];
+      }
+      return [
+        [
+          role,
+          {
+            ...(backend === undefined ? {} : { backend }),
+            ...(model === undefined ? {} : { model }),
+          },
+        ],
+      ];
+    }),
+  );
+}
+
+function resumeAction(values) {
+  const additionalRounds = values["extra-fix-rounds"];
+  const findingId = values["override-finding"];
+  if (additionalRounds !== undefined && findingId !== undefined) {
+    throw new Error(
+      "Use either --extra-fix-rounds or --override-finding, not both.",
+    );
+  }
+  if (additionalRounds !== undefined) {
+    if (!/^[1-9][0-9]*$/u.test(additionalRounds)) {
+      throw new Error("--extra-fix-rounds must be a positive integer.");
+    }
+    const amount = Number(additionalRounds);
+    if (!Number.isSafeInteger(amount)) {
+      throw new Error("--extra-fix-rounds is too large.");
+    }
+    return Object.freeze({ type: "extra-fix-rounds", amount });
+  }
+  return findingId === undefined
+    ? null
+    : Object.freeze({ type: "override-finding", findingId });
+}
 
 export async function main(
   args = process.argv.slice(2),
-  { stdout = process.stdout, stderr = process.stderr } = {},
+  { stdout = process.stdout, stderr = process.stderr, runner } = {},
 ) {
   let parsed;
   try {
@@ -110,6 +244,7 @@ export async function main(
     return 1;
   }
 
+  let pipeline;
   let supportedOptions = COMMAND_OPTIONS[command];
   let requiredOptions = REQUIRED_COMMAND_OPTIONS[command];
   let commandLabel = command;
@@ -121,13 +256,17 @@ export async function main(
       return 1;
     }
 
-    const pipeline = getPipeline(pipelineId);
+    pipeline = getPipeline(pipelineId);
     if (!pipeline) {
       stderr.write(`Unknown pipeline: ${pipelineId}\n\n${USAGE}`);
       return 1;
     }
 
-    supportedOptions = [...COMMON_RUN_OPTIONS, ...pipeline.runOptions];
+    supportedOptions = [
+      ...COMMON_RUN_OPTIONS,
+      ...pipeline.runOptions,
+      ...pipeline.roles.map((role) => `${role}-model`),
+    ];
     requiredOptions = pipeline.requiredRunOptions;
     commandLabel = `${command} ${pipelineId}`;
   }
@@ -155,14 +294,48 @@ export async function main(
 
   if (command === "pipelines") {
     const output = PIPELINES
-      .map((pipeline) => `${pipeline.id}\t${pipeline.description}`)
+      .map((entry) => `${entry.id}\t${entry.description}`)
       .join("\n");
     stdout.write(`${output}\n`);
     return 0;
   }
 
-  stderr.write(
-    `The ${command} command is not implemented in the initial scaffold.\n`,
-  );
-  return 1;
+  try {
+    const commandRunner =
+      runner ??
+      createRunner({
+        onActivity(activity) {
+          writeActivity(stdout, activity);
+        },
+      });
+    if (command === "run") {
+      const result = await commandRunner.run({
+        pipelineId: pipeline.id,
+        projectPath: values.project,
+        taskPath: values.task,
+        proactiveClarification: values.clarify ?? false,
+        roleOverrides: roleOverrides(pipeline, values),
+        sourceSession:
+          values["fork-from"] === undefined
+            ? null
+            : parseSourceSession(values["fork-from"]),
+      });
+      stdout.write(runSummary(result));
+      return workflowExitCode(result.run);
+    }
+    if (command === "resume") {
+      const result = await commandRunner.resume({
+        runId: values.run,
+        action: resumeAction(values),
+      });
+      stdout.write(runSummary(result));
+      return workflowExitCode(result.run);
+    }
+    const result = await commandRunner.status(values.run);
+    stdout.write(runSummary(result));
+    return 0;
+  } catch (error) {
+    stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  }
 }

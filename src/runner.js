@@ -1,6 +1,546 @@
-/**
- * High-level orchestration for run, resume, and status commands belongs here.
- * Keep backend-specific behavior and Git plumbing in their owning modules.
- */
+import { createHash, randomUUID } from "node:crypto";
+import { readFile, rename, rm, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 
-export {};
+import {
+  BACKEND_IDS,
+  createClaudeAdapter,
+  createCodexAdapter,
+} from "./agents/index.js";
+import { createClarificationService } from "./clarifications.js";
+import {
+  loadRepositoryConfiguration,
+  resolvePipelineConfiguration,
+} from "./config.js";
+import { createGitService } from "./git.js";
+import { getPipeline } from "./pipeline-registry.js";
+import { createRunStore } from "./state.js";
+
+const BACKENDS = new Set(BACKEND_IDS);
+const RUN_FIELDS = new Set([
+  "pipelineId",
+  "projectPath",
+  "taskPath",
+  "proactiveClarification",
+  "roleOverrides",
+  "sourceSession",
+]);
+const RESUME_FIELDS = new Set(["runId", "action"]);
+const SOURCE_SESSION_FIELDS = new Set(["backend", "id"]);
+const RUNNER_OPTION_FIELDS = new Set([
+  "adapters",
+  "clarifications",
+  "git",
+  "loadConfiguration",
+  "onActivity",
+  "runStore",
+]);
+
+export class RunnerError extends Error {
+  constructor(message, { cause, code = "ERR_RUNNER" } = {}) {
+    super(message, { cause });
+    this.name = "RunnerError";
+    this.code = code;
+  }
+}
+
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function rejectUnknownFields(value, fields, name) {
+  if (!isRecord(value)) {
+    throw new RunnerError(`${name} must be an object.`, {
+      code: "ERR_INVALID_RUNNER_INPUT",
+    });
+  }
+  const unknown = Object.keys(value).find((field) => !fields.has(field));
+  if (unknown !== undefined) {
+    throw new RunnerError(`${name}.${unknown} is not supported.`, {
+      code: "ERR_INVALID_RUNNER_INPUT",
+    });
+  }
+}
+
+function assertNonEmptyString(value, name) {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new RunnerError(`${name} must be a non-empty string.`, {
+      code: "ERR_INVALID_RUNNER_INPUT",
+    });
+  }
+  return value;
+}
+
+export function parseSourceSession(value) {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new RunnerError(
+      `Source session must use <${BACKEND_IDS.join("|")}>:<session-id>.`,
+      { code: "ERR_INVALID_SOURCE_SESSION" },
+    );
+  }
+  const separator = value.indexOf(":");
+  const backend = value.slice(0, separator);
+  const id = value.slice(separator + 1);
+  if (
+    separator < 1 ||
+    !BACKENDS.has(backend) ||
+    id.trim().length === 0 ||
+    /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(id)
+  ) {
+    throw new RunnerError(
+      `Source session must use <${BACKEND_IDS.join("|")}>:<session-id>.`,
+      { code: "ERR_INVALID_SOURCE_SESSION" },
+    );
+  }
+  return Object.freeze({ backend, id });
+}
+
+function normalizeSourceSession(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  rejectUnknownFields(value, SOURCE_SESSION_FIELDS, "sourceSession");
+  if (
+    !BACKENDS.has(value.backend) ||
+    typeof value.id !== "string" ||
+    value.id.trim().length === 0 ||
+    /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(value.id)
+  ) {
+    throw new RunnerError("sourceSession is invalid.", {
+      code: "ERR_INVALID_SOURCE_SESSION",
+    });
+  }
+  return Object.freeze({ backend: value.backend, id: value.id });
+}
+
+function fileHash(content) {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+async function inputFile(path, { optional = false } = {}) {
+  let content;
+  try {
+    content = await readFile(path, "utf8");
+  } catch (cause) {
+    if (optional && cause?.code === "ENOENT") {
+      return null;
+    }
+    throw cause;
+  }
+  return Object.freeze({ path, content, hash: fileHash(content) });
+}
+
+async function readInputs(pipelineId, taskPath) {
+  const task = await inputFile(join(taskPath, "task.md"));
+  const context = await inputFile(join(taskPath, "context.md"), {
+    optional: true,
+  });
+  if (pipelineId === "plan-authoring") {
+    return Object.freeze({ task, context });
+  }
+  if (pipelineId === "plan-execution") {
+    const [plan, taskClarifications] = await Promise.all([
+      inputFile(join(taskPath, "plan.md")),
+      inputFile(join(taskPath, "clarifications.md"), { optional: true }),
+    ]);
+    return Object.freeze({ task, plan, taskClarifications, context });
+  }
+  throw new RunnerError(`Unknown pipeline: ${pipelineId}.`, {
+    code: "ERR_UNKNOWN_PIPELINE",
+  });
+}
+
+async function writePlan(taskPath, options) {
+  const expectedPath = join(taskPath, "plan.md");
+  if (
+    !isRecord(options) ||
+    options.artifactRoot !== taskPath ||
+    options.path !== expectedPath ||
+    typeof options.content !== "string"
+  ) {
+    throw new RunnerError("Plan write is outside the task boundary.", {
+      code: "ERR_UNSAFE_PLAN_WRITE",
+    });
+  }
+  const temporaryPath = join(taskPath, `.plan-${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporaryPath, options.content, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+    await rename(temporaryPath, expectedPath);
+  } finally {
+    await rm(temporaryPath, { force: true });
+  }
+  return expectedPath;
+}
+
+function defaultAdapters() {
+  return Object.freeze({
+    codex: createCodexAdapter(),
+    claude: createClaudeAdapter(),
+  });
+}
+
+function resolveAdapter(adapters, pipelineId, role, backend) {
+  const adapter = adapters[backend];
+  if (
+    !isRecord(adapter) ||
+    typeof adapter.probe !== "function" ||
+    typeof adapter.run !== "function"
+  ) {
+    throw new RunnerError(
+      `Backend is unavailable for ${pipelineId}.${role}: ${backend}.`,
+      { code: "ERR_BACKEND_UNAVAILABLE" },
+    );
+  }
+  return adapter;
+}
+
+function validateCapabilities(
+  capabilities,
+  { backend, pipelineId, role, sourceSession },
+) {
+  if (
+    !isRecord(capabilities) ||
+    typeof capabilities.version !== "string" ||
+    capabilities.version.trim().length === 0 ||
+    capabilities.structuredOutput !== true ||
+    capabilities.readOnly !== true ||
+    capabilities.remoteWriteBlocked !== true
+  ) {
+    throw new RunnerError(
+      `Backend cannot safely run ${pipelineId}.${role}: ${backend}.`,
+      { code: "ERR_UNSUPPORTED_BACKEND" },
+    );
+  }
+  if (sourceSession !== null && capabilities.nativeSessionFork !== true) {
+    throw new RunnerError(`Backend cannot fork the supplied source: ${backend}.`, {
+      code: "ERR_UNSUPPORTED_SOURCE_SESSION",
+    });
+  }
+  return capabilities;
+}
+
+function lazyArbiterAdapter(run, configuration, adapters) {
+  let adapter;
+  let capabilitiesPromise;
+  const resolve = () => {
+    adapter ??= resolveAdapter(
+      adapters,
+      run.pipelineId,
+      "arbiter",
+      configuration.backend,
+    );
+    return adapter;
+  };
+  const resolveCapabilities = async () => {
+    capabilitiesPromise ??= Promise.resolve()
+      .then(() => resolve().probe())
+      .then((capabilities) =>
+        validateCapabilities(capabilities, {
+          backend: configuration.backend,
+          pipelineId: run.pipelineId,
+          role: "arbiter",
+          sourceSession: null,
+        }),
+      );
+    try {
+      return await capabilitiesPromise;
+    } catch (error) {
+      capabilitiesPromise = undefined;
+      throw error;
+    }
+  };
+  return Object.freeze({
+    probe: resolveCapabilities,
+    async run(request) {
+      await resolveCapabilities();
+      return resolve().run(request);
+    },
+  });
+}
+
+function roleAdapters(run, adapters) {
+  return Object.freeze(
+    Object.fromEntries(
+      Object.entries(run.roles).map(([role, configuration]) => [
+        role,
+        role === "arbiter"
+          ? lazyArbiterAdapter(run, configuration, adapters)
+          : resolveAdapter(
+              adapters,
+              run.pipelineId,
+              role,
+              configuration.backend,
+            ),
+      ]),
+    ),
+  );
+}
+
+function validateSourceRoles(pipeline, roles, sourceSession) {
+  if (sourceSession === null) {
+    return;
+  }
+  const incompatibleRole = pipeline.roles
+    .filter((role) => role !== "arbiter")
+    .find((role) => roles[role].backend !== sourceSession.backend);
+  if (incompatibleRole !== undefined) {
+    throw new RunnerError(
+      `Source backend ${sourceSession.backend} does not match ${pipeline.id}.${incompatibleRole}.`,
+      { code: "ERR_SOURCE_BACKEND_MISMATCH" },
+    );
+  }
+}
+
+async function probeRequiredRoles(pipeline, roles, adapters, sourceSession) {
+  const requiredRoles = pipeline.roles.filter((role) => role !== "arbiter");
+  const capabilitiesByBackend = new Map();
+  for (const role of requiredRoles) {
+    const backend = roles[role].backend;
+    if (!capabilitiesByBackend.has(backend)) {
+      const adapter = resolveAdapter(adapters, pipeline.id, role, backend);
+      capabilitiesByBackend.set(backend, await adapter.probe());
+    }
+    validateCapabilities(capabilitiesByBackend.get(backend), {
+      backend,
+      pipelineId: pipeline.id,
+      role,
+      sourceSession,
+    });
+  }
+}
+
+function normalizeRunInput(input) {
+  rejectUnknownFields(input, RUN_FIELDS, "run");
+  return Object.freeze({
+    pipelineId: assertNonEmptyString(input.pipelineId, "run.pipelineId"),
+    projectPath: assertNonEmptyString(input.projectPath, "run.projectPath"),
+    taskPath: assertNonEmptyString(input.taskPath, "run.taskPath"),
+    proactiveClarification:
+      input.proactiveClarification === undefined
+        ? false
+        : input.proactiveClarification,
+    roleOverrides: input.roleOverrides ?? {},
+    sourceSession: normalizeSourceSession(input.sourceSession),
+  });
+}
+
+function normalizeResumeInput(input) {
+  rejectUnknownFields(input, RESUME_FIELDS, "resume");
+  return Object.freeze({
+    runId: assertNonEmptyString(input.runId, "resume.runId"),
+    action: input.action ?? null,
+  });
+}
+
+export function createRunner(options = {}) {
+  rejectUnknownFields(options, RUNNER_OPTION_FIELDS, "runnerOptions");
+  const adapters = options.adapters ?? defaultAdapters();
+  const clarifications =
+    options.clarifications ?? createClarificationService();
+  const git = options.git ?? createGitService();
+  const loadConfiguration =
+    options.loadConfiguration ?? loadRepositoryConfiguration;
+  const onActivity = options.onActivity ?? (async () => {});
+  const runStore = options.runStore ?? createRunStore();
+  if (
+    !isRecord(adapters) ||
+    !isRecord(clarifications) ||
+    !isRecord(git) ||
+    typeof loadConfiguration !== "function" ||
+    typeof onActivity !== "function" ||
+    !isRecord(runStore)
+  ) {
+    throw new RunnerError("Runner services are invalid.", {
+      code: "ERR_INVALID_RUNNER_OPTIONS",
+    });
+  }
+
+  async function publish(activity, run) {
+    if (activity === undefined || activity === null) {
+      return;
+    }
+    await onActivity(
+      Object.freeze({
+        runId: run.runId,
+        revision: run.revision,
+        recordedAt: run.updatedAt,
+        ...activity,
+      }),
+    );
+  }
+
+  function runtimeFor(pipeline, lease, run, selectedAdapters) {
+    return Object.freeze({
+      adapters: selectedAdapters,
+      clarifications,
+      git,
+      readInputs: ({ taskPath }) => readInputs(pipeline.id, taskPath),
+      async recordChildSession(child, { activity } = {}) {
+        const next = await runStore.recordChildSession(lease, child, {
+          activity,
+        });
+        await publish(activity, next);
+        return next;
+      },
+      async transition(patch, { activity } = {}) {
+        const next = await runStore.transitionRun(lease, patch, { activity });
+        await publish(activity, next);
+        return next;
+      },
+      writePlan: (writeOptions) => writePlan(run.taskPath, writeOptions),
+      writeRunArtifact: ({ path, content }) =>
+        runStore.writeRunArtifact(lease, path, content),
+    });
+  }
+
+  async function execute(pipeline, run, lease, action = null) {
+    if (run.pipelineStateVersion !== pipeline.stateVersion) {
+      throw new RunnerError(
+        `Run ${run.runId} uses unsupported ${pipeline.id} state version ` +
+          `${run.pipelineStateVersion}.`,
+        { code: "ERR_UNSUPPORTED_PIPELINE_STATE_VERSION" },
+      );
+    }
+    const settings = run.pipelineState.settings;
+    if (!isRecord(settings)) {
+      throw new RunnerError(`Run ${run.runId} has no resolved settings.`, {
+        code: "ERR_MISSING_RUN_SETTINGS",
+      });
+    }
+    return pipeline.workflow.run({
+      action,
+      run,
+      runtime: runtimeFor(
+        pipeline,
+        lease,
+        run,
+        roleAdapters(run, adapters),
+      ),
+      settings,
+    });
+  }
+
+  async function result(run) {
+    return Object.freeze({
+      directoryPath: await runStore.getRunDirectory(run.runId),
+      run,
+    });
+  }
+
+  async function run(input) {
+    const normalized = normalizeRunInput(input);
+    if (typeof normalized.proactiveClarification !== "boolean") {
+      throw new RunnerError("run.proactiveClarification must be a boolean.", {
+        code: "ERR_INVALID_RUNNER_INPUT",
+      });
+    }
+    if (!isRecord(normalized.roleOverrides)) {
+      throw new RunnerError("run.roleOverrides must be an object.", {
+        code: "ERR_INVALID_RUNNER_INPUT",
+      });
+    }
+    const pipeline = getPipeline(normalized.pipelineId);
+    if (pipeline === undefined) {
+      throw new RunnerError(`Unknown pipeline: ${normalized.pipelineId}.`, {
+        code: "ERR_UNKNOWN_PIPELINE",
+      });
+    }
+    const discovery = await git.preflight({
+      allowedPaths: [],
+      projectPath: normalized.projectPath,
+      requireClean: false,
+      requireIdentity: false,
+      requiredIgnoredPaths: [],
+    });
+    const projectPath = discovery?.snapshot?.projectPath;
+    if (typeof projectPath !== "string" || resolve(projectPath) !== projectPath) {
+      throw new RunnerError("Git preflight returned an invalid project root.", {
+        code: "ERR_INVALID_PROJECT_ROOT",
+      });
+    }
+    const configuration = await loadConfiguration(projectPath);
+    const resolved = resolvePipelineConfiguration(
+      pipeline.id,
+      configuration,
+      normalized.roleOverrides,
+    );
+    validateSourceRoles(pipeline, resolved.roles, normalized.sourceSession);
+    await probeRequiredRoles(
+      pipeline,
+      resolved.roles,
+      adapters,
+      normalized.sourceSession,
+    );
+    const pipelineState = pipeline.workflow.createState({
+      proactiveClarification: normalized.proactiveClarification,
+      settings: resolved.settings,
+    });
+    const created = await runStore.createRun({
+      pipelineId: pipeline.id,
+      pipelineStateVersion: pipeline.stateVersion,
+      projectPath,
+      taskPath: normalized.taskPath,
+      roles: resolved.roles,
+      sourceSession: normalized.sourceSession?.id ?? null,
+      pipelineState,
+      activity: {
+        actor: "runner",
+        phase: "run",
+        kind: "created",
+        message: `${pipeline.id} run created.`,
+      },
+    });
+    try {
+      await publish(
+        {
+          actor: "runner",
+          phase: "run",
+          kind: "created",
+          message: `${pipeline.id} run created.`,
+        },
+        created.state,
+      );
+      return await result(
+        await execute(pipeline, created.state, created.lease),
+      );
+    } finally {
+      await created.lease.release();
+    }
+  }
+
+  async function resume(input) {
+    const normalized = normalizeResumeInput(input);
+    const lease = await runStore.acquireRunLease(normalized.runId);
+    try {
+      const recovered = await runStore.recoverRun(lease);
+      const pipeline = getPipeline(recovered.pipelineId);
+      if (pipeline === undefined) {
+        throw new RunnerError(`Unknown pipeline: ${recovered.pipelineId}.`, {
+          code: "ERR_UNKNOWN_PIPELINE",
+        });
+      }
+      if (normalized.action !== null && pipeline.id !== "plan-execution") {
+        throw new RunnerError(
+          `Resume actions are not supported for ${pipeline.id}.`,
+          { code: "ERR_INAPPLICABLE_RESUME_ACTION" },
+        );
+      }
+      return await result(
+        await execute(pipeline, recovered, lease, normalized.action),
+      );
+    } finally {
+      await lease.release();
+    }
+  }
+
+  async function status(runId) {
+    assertNonEmptyString(runId, "runId");
+    return result(await runStore.loadRun(runId));
+  }
+
+  return Object.freeze({ resume, run, status });
+}

@@ -1,4 +1,5 @@
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import {
   CommitPlanValidationError,
@@ -552,36 +553,41 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
         current.workflowState === "RESOLVE_FINDINGS" &&
         turnSnapshot.contentFingerprint !==
           nextRepositoryBaseline.contentFingerprint;
-      await transition(
-        changedCorrection
-          ? {
-              ...current,
-              workflowState: "FINALIZE",
-              repositoryBaseline: nextRepositoryBaseline,
-              finalizationResult: null,
-              finalizedFingerprint: null,
-              reviewedFingerprint: null,
-              previousFindings:
-                current.findings.length === 0
-                  ? current.previousFindings
-                  : current.findings,
-              findings: [],
-              pendingCorrection: true,
-              reviewReconsideration: [],
-            }
-          : {
-              ...current,
-              repositoryBaseline: nextRepositoryBaseline,
-            },
-        changedCorrection
-          ? {
-              nextCounters: {
-                ...counters(),
-                fixRounds: counters().fixRounds + 1,
+      if (
+        changedCorrection ||
+        !isDeepStrictEqual(nextRepositoryBaseline, baseline)
+      ) {
+        await transition(
+          changedCorrection
+            ? {
+                ...current,
+                workflowState: "FINALIZE",
+                repositoryBaseline: nextRepositoryBaseline,
+                finalizationResult: null,
+                finalizedFingerprint: null,
+                reviewedFingerprint: null,
+                previousFindings:
+                  current.findings.length === 0
+                    ? current.previousFindings
+                    : current.findings,
+                findings: [],
+                pendingCorrection: true,
+                reviewReconsideration: [],
+              }
+            : {
+                ...current,
+                repositoryBaseline: nextRepositoryBaseline,
               },
-            }
-          : {},
-      );
+          changedCorrection
+            ? {
+                nextCounters: {
+                  ...counters(),
+                  fixRounds: counters().fixRounds + 1,
+                },
+              }
+            : {},
+        );
+      }
     }
     if (agentError !== undefined) {
       throw agentError;

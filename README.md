@@ -10,9 +10,9 @@ small runner.
 > clarification and Git-safety services, Codex and Claude adapters, the complete
 > plan-authoring state machine, and plan-execution through implementation,
 > finalization, review, finding resolution, and verified local commits are present.
-> Two pipeline descriptors, tests, and agent guidance are included. The `run`,
-> `resume`, and `status` workflows are not wired yet and deliberately return a
-> non-zero exit code.
+> The root CLI now runs, resumes, and inspects both registered pipelines with
+> durable state and live public activity. The MCP control plane is not yet
+> implemented.
 
 Architecture is documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 Each pipeline owns its specification under its workspace.
@@ -94,7 +94,7 @@ The common contract owns numbering, structure, and the exact subject-only
 Conventional Commit format. Agents never reinterpret or rewrite the validated
 commit subject.
 
-## Intended CLI
+## CLI
 
 ```bash
 agent-run run plan-authoring --project /path/to/repository --task /path/to/task
@@ -103,6 +103,24 @@ agent-run resume --run <run-id>
 agent-run status --run <run-id>
 agent-run pipelines
 ```
+
+Role models use the corresponding derived flags, for example
+`--worker-model`, `--reviewer-model`, or `--planner-model`. A run may seed its
+primary and review roles from one existing backend session:
+
+```bash
+agent-run run plan-execution \
+  --project /path/to/repository \
+  --task /path/to/task \
+  --worker codex \
+  --reviewer codex \
+  --fork-from codex:<session-id>
+```
+
+The primary and review backends must match the source backend. Their first
+turns fork the source independently; the source is never resumed in place and
+the Arbiter remains independently configurable. The runner persists only the
+resolved source reference and child lineage, so `resume` needs no source flag.
 
 Add `--clarify` to either `run` command to open `$VISUAL` or `$EDITOR` before
 the primary agent checks whether more information is needed. Without the flag,
@@ -136,7 +154,21 @@ Runner state uses `$XDG_STATE_HOME/agent-runner/` with
 ID and state-schema version and is addressed by an opaque run ID. Complete
 write-ahead events precede atomic state replacement; recovery repairs a lagging
 state file and derived progress. Mutating runs require one execution lease,
-while status and bounded public activity reads remain lock-free.
+while status and bounded public activity reads remain lock-free. `run` and
+`resume` print concise labeled activity as it is persisted; `status` prints the
+current state, pause, artifact paths, findings, fingerprints, commit SHAs, and
+state directory without exposing model transcripts.
+
+Plan execution accepts one applicable resume action at a time:
+
+```bash
+agent-run resume --run <run-id> --extra-fix-rounds 3
+agent-run resume --run <run-id> --override-finding R7
+```
+
+`run` and `resume` exit with status `2` when they return a persisted pause.
+Invalid input and startup or execution failures exit with status `1`; `status`
+exits successfully when it can read the requested run.
 
 ## Pipeline Boundary
 
@@ -218,7 +250,7 @@ git diff --check
 git diff --cached --check
 ```
 
-Inspect the current scaffold CLI:
+Inspect the CLI:
 
 ```bash
 node bin/agent-run.js --help

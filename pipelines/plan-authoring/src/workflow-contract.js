@@ -452,7 +452,7 @@ export function normalizePipelineState(value) {
     assertSettings(value.settings);
   }
   if (
-    value.preflightComplete !== (value.settings !== null) ||
+    (value.preflightComplete && value.settings === null) ||
     (value.repositoryBaseline !== null &&
       !isRecord(value.repositoryBaseline)) ||
     value.preflightComplete !== (value.repositoryBaseline !== null)
@@ -743,14 +743,18 @@ export function normalizePipelineState(value) {
 
 export function createPlanAuthoringState({
   proactiveClarification = false,
+  settings = null,
 } = {}) {
   if (typeof proactiveClarification !== "boolean") {
     throw workflowError("proactiveClarification must be a boolean.");
   }
+  if (settings !== null) {
+    assertSettings(settings);
+  }
   return Object.freeze({
     workflowState: "CLARIFY",
     preflightComplete: false,
-    settings: null,
+    settings: settings === null ? null : Object.freeze({ ...settings }),
     repositoryBaseline: null,
     proactiveClarification,
     proactiveClarificationComplete: !proactiveClarification,
