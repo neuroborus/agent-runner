@@ -44,7 +44,8 @@ test("clarification instructions keep questions before implementation", () => {
 
 Do not modify the repository.
 If existing clarifications conflict with the validated plan, return PLAN_REVISION_REQUIRED using the provided schema.
-Otherwise, return only READY or actionable clarification questions using the provided schema.`,
+For READY, return exactly {"status":"READY","questions":[],"reason":"","question":"","options":[],"whyBlocked":"","evidence":[]}.
+Otherwise, return only actionable clarification questions using the provided schema.`,
   );
 });
 

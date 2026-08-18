@@ -2,7 +2,8 @@ export const CLARIFICATION_INSTRUCTIONS = `Study the task, validated plan, exist
 
 Do not modify the repository.
 If existing clarifications conflict with the validated plan, return PLAN_REVISION_REQUIRED using the provided schema.
-Otherwise, return only READY or actionable clarification questions using the provided schema.`;
+For READY, return exactly {"status":"READY","questions":[],"reason":"","question":"","options":[],"whyBlocked":"","evidence":[]}.
+Otherwise, return only actionable clarification questions using the provided schema.`;
 
 export const PRODUCT_DECISION_INSTRUCTIONS = `Do not ask questions after clarification closes.
 Return PRODUCT_DECISION_REQUIRED using the provided schema only when the task, plan, repository, conventions, and prior clarifications leave a choice between materially different product requirements or behaviors unresolved and progress is otherwise impossible.
