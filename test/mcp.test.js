@@ -525,6 +525,52 @@ test("resumes only an action valid for the persisted pause", async (t) => {
   );
 });
 
+test("waits for a pausing owner to release its lease before resuming", async (t) => {
+  const paths = await workspace(t, "agent-runner-mcp-resume-lease-");
+  const store = createRunStore({ stateRoot: paths.stateRoot });
+  await createStoredRun(store, paths, {
+    pipelineId: "plan-execution",
+    pause: { reason: "backend_unavailable" },
+    workflowState: "WAITING_FOR_USER",
+  });
+  const lease = await store.acquireRunLease(RUN_ID);
+  t.after(() => lease.release());
+
+  let observeLease;
+  const leaseObserved = new Promise((resolvePromise) => {
+    observeLease = resolvePromise;
+  });
+  const launches = [];
+  const control = createMcpControlPlane({
+    launchRun(id) {
+      launches.push(id);
+    },
+    runner: storedRunner(store, paths),
+    runStore: {
+      ...store,
+      async runIsLeased(id) {
+        const leased = await store.runIsLeased(id);
+        if (leased) {
+          observeLease();
+        }
+        return leased;
+      },
+    },
+  });
+  const resuming = control.runResume({
+    idempotencyKey: "resume-after-lease",
+    runId: RUN_ID,
+    expectedRevision: 1,
+    action: null,
+  });
+
+  await leaseObserved;
+  assert.deepEqual(launches, []);
+  await lease.release();
+  assert.deepEqual(await resuming, { runId: RUN_ID });
+  assert.deepEqual(launches, [RUN_ID]);
+});
+
 test("waits by revision, emits public progress, and leaves timeouts read-only", async (t) => {
   const paths = await workspace(t, "agent-runner-mcp-wait-");
   const store = createRunStore({ stateRoot: paths.stateRoot });

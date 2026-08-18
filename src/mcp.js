@@ -357,19 +357,32 @@ export function createMcpControlPlane(options = {}) {
   async function launchIfNeeded(
     runIdValue,
     baselineRevision,
-    { action = null, allowWaiting = false } = {},
+    {
+      action = null,
+      allowWaiting = false,
+      signal,
+      waitForLease = false,
+    } = {},
   ) {
-    const run = (await runner.status(runIdValue)).run;
-    if (
-      ["DONE", "FAILED"].includes(run.pipelineState.workflowState) ||
-      (!allowWaiting &&
-        run.pipelineState.workflowState === "WAITING_FOR_USER") ||
-      run.revision > baselineRevision ||
-      (await runStore.runIsLeased(runIdValue))
-    ) {
-      return;
+    while (true) {
+      const run = (await runner.status(runIdValue)).run;
+      if (
+        ["DONE", "FAILED"].includes(run.pipelineState.workflowState) ||
+        (!allowWaiting &&
+          run.pipelineState.workflowState === "WAITING_FOR_USER") ||
+        run.revision > baselineRevision
+      ) {
+        return;
+      }
+      if (!(await runStore.runIsLeased(runIdValue))) {
+        await launchRun(runIdValue, action);
+        return;
+      }
+      if (!waitForLease) {
+        return;
+      }
+      await delay(RETRY_DELAY_MS, signal);
     }
-    await launchRun(runIdValue, action);
   }
 
   async function pipelinesList() {
@@ -626,6 +639,8 @@ export function createMcpControlPlane(options = {}) {
       await launchIfNeeded(input.runId, input.expectedRevision, {
         action: input.action,
         allowWaiting: true,
+        signal,
+        waitForLease: true,
       });
       const receipt = { runId: input.runId };
       await action.complete(receipt);
