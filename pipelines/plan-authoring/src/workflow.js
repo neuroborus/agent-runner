@@ -558,7 +558,6 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
 Do not modify the repository or artifact files. This result cannot approve the plan.
-Name exactly the current finding IDs only for RECONSIDER_FINDINGS; otherwise leave findingIds empty. Use empty product-decision fields unless a product decision is required.
 
 ${evidence}
 
@@ -911,8 +910,6 @@ ${evidence}`,
           PLANNER_SCHEMA,
           (evidence) => `${DRAFT_INSTRUCTIONS}
 
-Use status DRAFT with empty product-decision fields, or PRODUCT_DECISION_REQUIRED with an empty plan.
-
 ${evidence}`,
         );
         if (output === null) {
@@ -955,8 +952,6 @@ ${evidence}`,
           "reviewer",
           REVIEW_SCHEMA,
           (evidence) => `${REVIEW_INSTRUCTIONS}
-
-Use stable lowercase kebab-case finding IDs. Use empty product-decision fields unless status is PRODUCT_DECISION_REQUIRED.
 
 ${evidence}
 
@@ -1024,7 +1019,6 @@ ${pipelineState().draft}${reviewDirectionPrompt(pipelineState())}`,
           PLANNER_SCHEMA,
           (evidence) => `${FINDING_RESOLUTION_INSTRUCTIONS}
 
-Use status DRAFT with empty product-decision fields, or PRODUCT_DECISION_REQUIRED with an empty plan.
 Treat deterministic validation issues as blocking correction input; do not waive or rewrite the validation rules.
 
 ${evidence}

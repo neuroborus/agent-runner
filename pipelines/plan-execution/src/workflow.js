@@ -1075,7 +1075,6 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
       }
 
 ${PRODUCT_DECISION_INSTRUCTIONS}
-Use PLAN_REVISION_REQUIRED with concise reason and evidence, or PRODUCT_DECISION_REQUIRED with an empty summary and reason.
 
 ${evidence}`,
       { freshSession: restartIndependentBootstrap },
@@ -1113,7 +1112,6 @@ ${evidence}`,
       (evidence) => `${BOOTSTRAP_RECONCILIATION_INSTRUCTIONS}
 
 ${PRODUCT_DECISION_INSTRUCTIONS}
-Use empty fields that do not apply to the selected status.
 
 ${evidence}
 
@@ -1175,7 +1173,6 @@ ${state().reviewerSummary}`,
       (evidence) => `${BOOTSTRAP_ARBITRATION_INSTRUCTIONS}
 
 ${PRODUCT_DECISION_INSTRUCTIONS}
-Use empty fields that do not apply to the selected direction.
 
 ${evidence}
 
@@ -1348,7 +1345,7 @@ ${JSON.stringify(state().bootstrapDisagreement, null, 2)}`,
       IMPLEMENTATION_SCHEMA,
       (evidence) => `${IMPLEMENTATION_INSTRUCTIONS}
 
-Use COMPLETED with a concise summary, BLOCKED only for an external environment blocker, or PRODUCT_DECISION_REQUIRED for the narrowly permitted product exception. Use empty fields that do not apply.
+Use BLOCKED only for an external environment blocker.
 
 ${evidence}
 
@@ -1428,7 +1425,7 @@ ${step.body}${
       FINALIZATION_SCHEMA,
       (evidence) => `${FINALIZATION_INSTRUCTIONS}
 
-Use PASS only after the complete resolved skill succeeds, FAIL with stable F-prefixed issue IDs for validation failures, SKILL_MISSING or SKILL_INVALID before invoking an unavailable skill, BLOCKED only when the procedure cannot complete safely, or PRODUCT_DECISION_REQUIRED for the narrowly permitted product exception. Use empty fields that do not apply.
+Use FAIL for validation failures, SKILL_MISSING or SKILL_INVALID before invoking an unavailable skill, and BLOCKED only when the procedure cannot complete safely.
 
 ${evidence}
 
@@ -1545,7 +1542,7 @@ ${state().resolvedSummary}`,
       REVIEW_SCHEMA,
       (evidence) => `${REVIEW_INSTRUCTIONS}
 
-Use stable R-prefixed numeric finding IDs, reusing an existing ID for the same finding. Use APPROVED with no findings, FINDINGS with every actionable blocker, or PRODUCT_DECISION_REQUIRED for the narrowly permitted product exception. Use empty fields that do not apply.
+Reuse an existing ID for an unchanged finding. Use FINDINGS with every actionable blocker.
 
 ${evidence}
 
@@ -1671,8 +1668,6 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}`,
       DISPUTE_RECONSIDERATION_SCHEMA,
       (evidence) => `${DISPUTE_RECONSIDERATION_INSTRUCTIONS}
 
-Use empty product-decision fields unless status is PRODUCT_DECISION_REQUIRED.
-
 ${evidence}
 
 Current findings:
@@ -1757,7 +1752,6 @@ ${JSON.stringify(current.pendingDisputes, null, 2)}`,
       (evidence) => `${FINDING_ARBITRATION_INSTRUCTIONS}
 
 ${PRODUCT_DECISION_INSTRUCTIONS}
-Use REQUIREMENT_AMBIGUOUS only with a complete blocking product decision. Otherwise use empty product-decision fields.
 
 ${evidence}
 
@@ -1827,7 +1821,7 @@ ${JSON.stringify(priorFindingDecisions([dispute.findingId]), null, 2)}`,
 
 ${PRODUCT_DECISION_INSTRUCTIONS}
 Do not modify the repository. This result cannot approve the implementation or satisfy review.
-Name only current Reviewer finding IDs for RECONSIDER_FINDINGS; otherwise leave findingIds empty. Use empty fields that do not apply.
+Name only current Reviewer finding IDs for RECONSIDER_FINDINGS.
 
 ${evidence}
 
@@ -2017,7 +2011,7 @@ ${JSON.stringify(
       FINDING_RESOLUTION_SCHEMA,
       (evidence) => `${FINDING_RESOLUTION_INSTRUCTIONS}
 
-Return exactly one decision for every current blocker. Finalization failures must be fixed and cannot be disputed. A finding already upheld by the Arbiter must be fixed. Use empty product-decision fields unless status is PRODUCT_DECISION_REQUIRED.${
+Finalization failures must be fixed and cannot be disputed. A finding already upheld by the Arbiter must be fixed.${
         budgetExhausted
           ? "\nThe fix budget is exhausted: do not modify the repository and return DISPUTE only where supported by evidence; a required FIX will pause for additional budget."
           : ""
@@ -2555,7 +2549,6 @@ ${evidence}`,
           (evidence) => `${CLARIFICATION_INSTRUCTIONS}
 
 ${PRODUCT_DECISION_INSTRUCTIONS}
-Use empty fields that do not apply to the selected status.
 
 ${evidence}`,
         );
