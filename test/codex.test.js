@@ -13,7 +13,7 @@ import {
 
 const PROJECT_PATH = process.cwd();
 const EXPECTED_HEAD = "a".repeat(40);
-const HELP = "--disable\n--listen\n--strict-config\n";
+const HELP = "--disable\n--enable\n--listen\n--strict-config\n";
 const STRICT_SCHEMA = Object.freeze({
   type: "object",
   properties: {
@@ -51,7 +51,7 @@ function isolatedConfiguration() {
       browser_use_external: false,
       browser_use_full_cdp_access: false,
       code_mode: false,
-      code_mode_host: false,
+      code_mode_host: true,
       code_mode_only: false,
       computer_use: false,
       goals: false,
@@ -345,6 +345,15 @@ test("fails preflight when the installed Codex cannot enforce access", async () 
     );
     assert.equal(fixture.processes.length, 0);
   }
+
+  const missingFlagFixture = createFixture({
+    help: HELP.replace("--enable\n", ""),
+  });
+  await assert.rejects(
+    missingFlagFixture.adapter.run(request()),
+    hasCode("ERR_UNSUPPORTED_CODEX_CAPABILITY"),
+  );
+  assert.equal(missingFlagFixture.processes.length, 0);
 });
 
 test(
@@ -474,6 +483,8 @@ test("runs a structured read-only turn with an explicit model", async () => {
     "--listen",
     "stdio://",
     "--strict-config",
+    "--enable",
+    "code_mode_host",
     "--disable",
     "apps",
     "--disable",
@@ -486,8 +497,6 @@ test("runs a structured read-only turn with an explicit model", async () => {
     "browser_use_full_cdp_access",
     "--disable",
     "code_mode",
-    "--disable",
-    "code_mode_host",
     "--disable",
     "code_mode_only",
     "--disable",
@@ -696,11 +705,12 @@ test("rejects substitution of an explicit model", async () => {
 });
 
 test("fails before starting a thread when isolation is incomplete", async () => {
-  const configurations = Array.from({ length: 4 }, isolatedConfiguration);
+  const configurations = Array.from({ length: 5 }, isolatedConfiguration);
   configurations[0].mcp_servers["configured-server"].enabled = true;
   configurations[1].features.multi_agent = true;
   configurations[2].shell_environment_policy.inherit = "all";
   delete configurations[3].mcp_servers["configured-server"];
+  configurations[4].features.code_mode_host = false;
 
   for (const config of configurations) {
     const fixture = createFixture({
@@ -1597,10 +1607,24 @@ test(
     const adapter = createCodexAdapter();
     const result = await adapter.run(
       request({
-        prompt: "Return JSON with ok set to true. Do not inspect files.",
-        schema: STRICT_SCHEMA,
+        prompt:
+          "Use a repository command to read package.json. Return JSON with " +
+          "packageName set to its name field and commandWorked set to true. " +
+          "Do not modify anything.",
+        schema: {
+          type: "object",
+          properties: {
+            packageName: { type: "string" },
+            commandWorked: { type: "boolean" },
+          },
+          required: ["packageName", "commandWorked"],
+          additionalProperties: false,
+        },
       }),
     );
-    assert.deepEqual(result.structured, { ok: true });
+    assert.deepEqual(result.structured, {
+      packageName: packageMetadata.name,
+      commandWorked: true,
+    });
   },
 );

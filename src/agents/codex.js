@@ -32,7 +32,6 @@ const DISABLED_FEATURES = Object.freeze([
   "browser_use_external",
   "browser_use_full_cdp_access",
   "code_mode",
-  "code_mode_host",
   "code_mode_only",
   "computer_use",
   "goals",
@@ -54,6 +53,8 @@ const APP_SERVER_BASE_ARGUMENTS = Object.freeze([
   "--listen",
   "stdio://",
   "--strict-config",
+  "--enable",
+  "code_mode_host",
   ...DISABLED_FEATURES.flatMap((feature) => ["--disable", feature]),
   "-c",
   "notify=[]",
@@ -288,6 +289,7 @@ function assertIsolatedConfiguration(value, expectedMcpServers) {
     !isRecord(config) ||
     !isRecord(features) ||
     DISABLED_FEATURES.some((feature) => features[feature] !== false) ||
+    features.code_mode_host !== true ||
     !isRecord(memories) ||
     memories.generate_memories !== false ||
     memories.use_memories !== false ||
@@ -923,7 +925,7 @@ export function createCodexAdapter(options = {}) {
       processOutput(helpResult.stdout) + processOutput(helpResult.stderr);
     const supported =
       versionAtLeast(version, MINIMUM_CODEX_VERSION) &&
-      ["--disable", "--listen", "--strict-config"].every((flag) =>
+      ["--disable", "--enable", "--listen", "--strict-config"].every((flag) =>
         help.includes(flag),
       );
     const localCommit =
