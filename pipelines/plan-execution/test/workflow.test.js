@@ -526,6 +526,8 @@ async function createFixture(
     models = {},
     onEdit,
     onFreeze,
+    onCommitRun,
+    onCommitVerify,
     onRoleRun,
     onTransition,
     plan = PLAN,
@@ -613,10 +615,44 @@ async function createFixture(
         async run(request) {
           calls[role].push(request);
           await onRoleRun?.(role, request, calls[role].length);
+          if (request.access === "local-commit") {
+            if (onCommitRun === undefined) {
+              await executeFile("git", ["-C", projectPath, "add", "-A"]);
+              await executeFile("git", [
+                "-C",
+                projectPath,
+                "commit",
+                "-qm",
+                request.commit.message,
+              ]);
+            } else {
+              await onCommitRun(request);
+            }
+            return {
+              output: "committed",
+              sessionId: request.session?.id ?? nextFreshSessionId(role),
+            };
+          }
           assert.ok(queues[role].length > 0, `Unexpected ${role} turn.`);
+          const structured = queues[role].shift();
+          if (
+            role === "worker" &&
+            structured.status === "COMPLETED" &&
+            request.prompt.includes("Implement the changes")
+          ) {
+            const step =
+              /Current planned commit:\n## Commit ([1-9][0-9]*):/u.exec(
+                request.prompt,
+              )?.[1];
+            assert.notEqual(step, undefined);
+            await writeFile(
+              join(projectPath, `implementation-${step}.txt`),
+              `implemented step ${step}\n`,
+            );
+          }
           return {
             output: "structured",
-            structured: queues[role].shift(),
+            structured,
             sessionId:
               request.session?.mode === "continue"
                 ? request.session.id
@@ -699,6 +735,7 @@ async function createFixture(
   const preflights = [];
   const transitions = [];
   const artifacts = new Map();
+  let commitAuthorizationIndex = 0;
   const runtime = {
     adapters,
     clarifications: createClarificationService({
@@ -707,6 +744,105 @@ async function createFixture(
       onFreeze,
     }),
     git: {
+      async prepareCommit({ expectedSnapshot, subject, persistPendingCommit }) {
+        const authorization = Object.freeze({
+          schemaVersion: 1,
+          id: `commit-${++commitAuthorizationIndex}`,
+          projectPath,
+          expectedHead: expectedSnapshot.head,
+          expectedBranch: expectedSnapshot.branch,
+          expectedRefsFingerprint: expectedSnapshot.refsFingerprint,
+          expectedOtherRefsFingerprint: expectedSnapshot.refsFingerprint,
+          expectedContentFingerprint: expectedSnapshot.contentFingerprint,
+          expectedIndexFingerprint: expectedSnapshot.indexFingerprint,
+          expectedRemoteConfigurationFingerprint:
+            expectedSnapshot.remoteConfigurationFingerprint,
+          expectedIdentityFingerprint: expectedSnapshot.identityFingerprint,
+          expectedAuthorIdentityFingerprint: hash("author"),
+          expectedCommitterIdentityFingerprint: hash("committer"),
+          subject,
+        });
+        const current = await gitSnapshot({
+          allowedPaths: expectedSnapshot.allowedPaths,
+        });
+        if (current.fingerprint !== expectedSnapshot.fingerprint) {
+          const error = new Error("Commit gate changed.");
+          error.code = "ERR_COMMIT_GATE_CHANGED";
+          throw error;
+        }
+        await persistPendingCommit(authorization);
+        return authorization;
+      },
+      async consumeCommit(authorization, { consumePendingCommit }) {
+        await consumePendingCommit();
+        return Object.freeze({
+          authorizationId: authorization.id,
+          cwd: authorization.projectPath,
+          access: "local-commit",
+          commit: Object.freeze({
+            expectedHead: authorization.expectedHead,
+            message: authorization.subject,
+          }),
+        });
+      },
+      async verifyCommit(authorization) {
+        await onCommitVerify?.(authorization);
+        const snapshot = await gitSnapshot();
+        if (snapshot.head === authorization.expectedHead) {
+          const error = new Error("Authorized commit was not created.");
+          error.code = "ERR_COMMIT_NOT_CREATED";
+          throw error;
+        }
+        const [{ stdout: parents }, { stdout: message }] = await Promise.all([
+          executeFile("git", [
+            "-C",
+            projectPath,
+            "show",
+            "-s",
+            "--format=%P",
+            snapshot.head,
+          ]),
+          executeFile("git", [
+            "-C",
+            projectPath,
+            "show",
+            "-s",
+            "--format=%B",
+            snapshot.head,
+          ]),
+        ]);
+        const changes = [];
+        if (parents.trim() !== authorization.expectedHead) {
+          changes.push("parent");
+        }
+        if (message.trimEnd() !== authorization.subject) {
+          changes.push("message");
+        }
+        if (/(?:^|\n)co-authored-by[ \t]*:/iu.test(message)) {
+          changes.push("co-author");
+        }
+        if (!snapshot.clean) {
+          changes.push("worktree-or-index");
+        }
+        if (
+          (await repositoryFingerprint(projectPath)) !==
+          authorization.expectedContentFingerprint
+        ) {
+          changes.push("content");
+        }
+        if (changes.length > 0) {
+          const error = new Error("Authorized commit violates its contract.");
+          error.code = "ERR_COMMIT_CONTRACT_VIOLATED";
+          error.changes = changes;
+          throw error;
+        }
+        return Object.freeze({
+          authorizationId: authorization.id,
+          head: snapshot.head,
+          subject: authorization.subject,
+          contentFingerprint: authorization.expectedContentFingerprint,
+        });
+      },
       async contentFingerprint() {
         return repositoryFingerprint(projectPath);
       },
@@ -836,8 +972,9 @@ test("clarifies and bootstraps through independent source-session forks", async 
 
   const result = await fixture.run();
 
-  assert.equal(result.pipelineState.workflowState, "COMMIT");
-  assert.equal(result.pipelineState.currentStep, 1);
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.pipelineState.currentStep, null);
+  assert.equal(result.pipelineState.completedCommits.length, 1);
   assert.equal(result.pipelineState.canonicalPlan, PLAN);
   assert.equal(result.pipelineState.clarificationPath, fixture.clarificationPath);
   assert.equal(result.pipelineState.clarificationFrozen, true);
@@ -888,9 +1025,12 @@ test("clarifies and bootstraps through independent source-session forks", async 
   for (const call of fixture.calls.worker.slice(0, 3)) {
     assert.equal(call.access, "read-only");
   }
-  for (const call of fixture.calls.worker.slice(3)) {
+  for (const call of fixture.calls.worker.filter(
+    ({ access }) => access !== "local-commit",
+  ).slice(3)) {
     assert.equal(call.access, "workspace-write");
   }
+  assert.equal(fixture.calls.worker.at(-1).access, "local-commit");
   for (const call of fixture.calls.reviewer) {
     assert.equal(call.access, "read-only");
   }
@@ -907,7 +1047,7 @@ test("accepts an unchanged proactive clarification and uses fresh role sessions"
 
   const result = await fixture.run();
 
-  assert.equal(result.pipelineState.workflowState, "COMMIT");
+  assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(result.pipelineState.proactiveClarificationComplete, true);
   assert.equal(await readFile(fixture.clarificationPath, "utf8"), "");
   assert.equal(fixture.calls.worker[0].session, undefined);
@@ -941,7 +1081,7 @@ test("pauses for clarification answers and resumes through the authorization", a
 
   const resumed = await fixture.run();
 
-  assert.equal(resumed.pipelineState.workflowState, "COMMIT");
+  assert.equal(resumed.pipelineState.workflowState, "DONE");
   assert.equal(resumed.pipelineState.pendingEdit, null);
   assert.equal(resumed.pipelineState.clarificationFrozen, true);
 });
@@ -973,7 +1113,7 @@ test("retries a temporarily unavailable clarification Worker", async (t) => {
 
   const resumed = await fixture.run();
 
-  assert.equal(resumed.pipelineState.workflowState, "COMMIT");
+  assert.equal(resumed.pipelineState.workflowState, "DONE");
 });
 
 test("pauses before bootstrap when clarification requires a revised plan", async (t) => {
@@ -1217,7 +1357,7 @@ test("uses a fresh Arbiter only for a recorded bootstrap disagreement", async (t
 
   const result = await fixture.run();
 
-  assert.equal(result.pipelineState.workflowState, "COMMIT");
+  assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(result.pipelineState.bootstrapArbitrationUsed, true);
   assert.equal(result.pipelineState.bootstrapDisagreement, null);
   assert.equal(result.pipelineState.backendVersions.arbiter, "fake-1.0.0");
@@ -1263,7 +1403,7 @@ test("starts a fresh Arbiter for a new bootstrap dispute", async (t) => {
 
   const result = await fixture.run();
 
-  assert.equal(result.pipelineState.workflowState, "COMMIT");
+  assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(fixture.calls.arbiter.length, 2);
   assert.equal(fixture.calls.arbiter[0].session, undefined);
   assert.equal(fixture.calls.arbiter[1].session, undefined);
@@ -1297,7 +1437,7 @@ test("checks plan compatibility after a bootstrap product decision", async (t) =
 
   const resumed = await fixture.run();
 
-  assert.equal(resumed.pipelineState.workflowState, "COMMIT");
+  assert.equal(resumed.pipelineState.workflowState, "DONE");
   assert.equal(resumed.counters.productDecisions, 1);
   assert.match(fixture.calls.worker[2].prompt, /Review the updated clarifications/u);
   assert.equal(resumed.pipelineState.compatibilityCheckRequired, false);
@@ -1331,7 +1471,7 @@ test("restarts independent bootstrap after a reconciliation product decision", a
 
   const resumed = await fixture.run();
 
-  assert.equal(resumed.pipelineState.workflowState, "COMMIT");
+  assert.equal(resumed.pipelineState.workflowState, "DONE");
   assert.deepEqual(fixture.calls.worker[4].session, {
     mode: "fork",
     id: SOURCE_SESSION,
@@ -1407,17 +1547,23 @@ test("preserves settings while retrying a preflight pause", async (t) => {
 
   const resumed = await fixture.run({ maxFixRoundsPerStep: 99 });
 
-  assert.equal(resumed.pipelineState.workflowState, "COMMIT");
+  assert.equal(resumed.pipelineState.workflowState, "DONE");
   assert.deepEqual(resumed.pipelineState.settings, SETTINGS);
 });
 
-test("verifies frozen inputs when an implementation-boundary run resumes", async (t) => {
-  const fixture = await createFixture(t);
-  await fixture.run();
-  await writeFile(
-    join(fixture.taskPath, "plan.md"),
-    `${PLAN}\n\nChanged after bootstrap.`,
-  );
+test("verifies frozen inputs at the implementation boundary", async (t) => {
+  let changed = false;
+  const fixture = await createFixture(t, {
+    async onTransition(run) {
+      if (!changed && run.pipelineState.workflowState === "IMPLEMENT") {
+        changed = true;
+        await writeFile(
+          join(run.taskPath, "plan.md"),
+          `${PLAN}\n\nChanged after bootstrap.`,
+        );
+      }
+    },
+  });
 
   const result = await fixture.run();
 
@@ -1430,9 +1576,15 @@ test("verifies frozen inputs when an implementation-boundary run resumes", async
 test("treats emptied required inputs as drift on resume", async (t) => {
   for (const file of ["task.md", "plan.md"]) {
     await t.test(file, async (t) => {
-      const fixture = await createFixture(t);
-      await fixture.run();
-      await writeFile(join(fixture.taskPath, file), "");
+      let changed = false;
+      const fixture = await createFixture(t, {
+        async onTransition(run) {
+          if (!changed && run.pipelineState.workflowState === "IMPLEMENT") {
+            changed = true;
+            await writeFile(join(run.taskPath, file), "");
+          }
+        },
+      });
 
       const result = await fixture.run();
 
@@ -1445,9 +1597,15 @@ test("treats emptied required inputs as drift on resume", async (t) => {
 });
 
 test("pauses when the repository changes at the implementation boundary", async (t) => {
-  const fixture = await createFixture(t);
-  await fixture.run();
-  await writeFile(join(fixture.projectPath, "source.js"), "externally changed\n");
+  let changed = false;
+  const fixture = await createFixture(t, {
+    async onTransition(run) {
+      if (!changed && run.pipelineState.workflowState === "IMPLEMENT") {
+        changed = true;
+        await writeFile(join(run.projectPath, "source.js"), "externally changed\n");
+      }
+    },
+  });
 
   const result = await fixture.run();
 
@@ -1462,6 +1620,11 @@ test("rejects inconsistent persisted workflow state", async (t) => {
     await t.test(name, async (t) => {
       const fixture = await createFixture(t);
       await fixture.run();
+      const commitTransition = fixture.transitions.findLast(
+        ({ patch }) => patch?.pipelineState?.workflowState === "COMMIT",
+      );
+      assert.notEqual(commitTransition, undefined);
+      Object.assign(fixture.currentRun, commitTransition.patch);
       mutate(fixture.currentRun);
 
       await assert.rejects(
@@ -1654,8 +1817,8 @@ test("retries an unavailable bootstrap Arbiter without repeating bootstrap", asy
 
   const resumed = await fixture.run();
 
-  assert.equal(resumed.pipelineState.workflowState, "COMMIT");
-  assert.equal(fixture.calls.worker.length, 5);
+  assert.equal(resumed.pipelineState.workflowState, "DONE");
+  assert.equal(fixture.calls.worker.length, 6);
   assert.equal(fixture.calls.reviewer.length, 2);
   assert.equal(fixture.calls.arbiter.length, 1);
   assert.equal(fixture.probeCalls.arbiter, 2);
@@ -1667,7 +1830,7 @@ test("retries an unavailable bootstrap Arbiter without repeating bootstrap", asy
   );
 });
 
-test("implements, finalizes, and reviews one step without creating a commit", async (t) => {
+test("implements, finalizes, reviews, and commits one step", async (t) => {
   let initialHead;
   const fixture = await createFixture(t, {
     async onRoleRun(role, request) {
@@ -1691,16 +1854,175 @@ test("implements, finalizes, and reviews one step without creating a commit", as
     await executeFile("git", ["-C", fixture.projectPath, "rev-parse", "HEAD"])
   ).stdout.trim();
 
-  assert.equal(result.pipelineState.workflowState, "COMMIT");
+  assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(result.pipelineState.finalizationResult.status, "PASS");
   assert.equal(
     result.pipelineState.finalizedFingerprint,
     result.pipelineState.reviewedFingerprint,
   );
-  assert.equal(head, initialHead);
+  assert.notEqual(head, initialHead);
+  assert.equal(result.pipelineState.completedCommits[0], head);
+  assert.equal(fixture.calls.worker.at(-3).access, "workspace-write");
   assert.equal(fixture.calls.worker.at(-2).access, "workspace-write");
-  assert.equal(fixture.calls.worker.at(-1).access, "workspace-write");
+  assert.equal(fixture.calls.worker.at(-1).access, "local-commit");
   assert.equal(fixture.calls.reviewer.at(-1).access, "read-only");
+});
+
+test("creates one verified local commit for every plan step", async (t) => {
+  const plan = `## Commit 1: feat(test): add first behavior
+
+Implement the first behavior.
+
+## Commit 2: fix(test): add second behavior
+
+Implement the second behavior.`;
+  const fixture = await createFixture(t, {
+    plan,
+    sourceSession: SOURCE_SESSION,
+    sessionIds: {
+      ...ROLE_SESSIONS,
+      reviewer: [ROLE_SESSIONS.reviewer, RESTARTED_ROLE_SESSIONS.reviewer],
+    },
+    workReviewer: [reviewApproved(), reviewApproved()],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      implementationCompleted(),
+      finalizationPassed(),
+    ],
+  });
+
+  const result = await fixture.run();
+  const { stdout } = await executeFile("git", [
+    "-C",
+    fixture.projectPath,
+    "log",
+    "-2",
+    "--pretty=%s",
+  ]);
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.pipelineState.currentStep, null);
+  assert.equal(result.pipelineState.completedCommits.length, 2);
+  assert.deepEqual(stdout.trim().split("\n"), [
+    "fix(test): add second behavior",
+    "feat(test): add first behavior",
+  ]);
+  assert.deepEqual(
+    fixture.calls.worker
+      .filter(({ access }) => access === "local-commit")
+      .map(({ commit }) => commit.message),
+    ["feat(test): add first behavior", "fix(test): add second behavior"],
+  );
+  assert.deepEqual(fixture.calls.reviewer.at(-1).session, {
+    mode: "fork",
+    id: SOURCE_SESSION,
+  });
+});
+
+test("accepts a verified commit after an interrupted adapter result", async (t) => {
+  const fixture = await createFixture(t, {
+    async onCommitRun(request) {
+      await executeFile("git", ["-C", request.cwd, "add", "-A"]);
+      await executeFile("git", [
+        "-C",
+        request.cwd,
+        "commit",
+        "-qm",
+        request.commit.message,
+      ]);
+      const error = new Error("Commit result was lost.");
+      error.code = "ERR_FAKE_LOCAL_COMMIT_INTERRUPTED";
+      error.ambiguous = true;
+      throw error;
+    },
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.pipelineState.completedCommits.length, 1);
+  assert.equal(
+    fixture.calls.worker.filter(({ access }) => access === "local-commit")
+      .length,
+    1,
+  );
+});
+
+test("resumes commit verification without replaying the Worker", async (t) => {
+  let verificationUnavailable = true;
+  const fixture = await createFixture(t, {
+    onCommitVerify() {
+      if (verificationUnavailable) {
+        verificationUnavailable = false;
+        const error = new Error("Git verification was interrupted.");
+        error.code = "ERR_FAKE_COMMIT_VERIFICATION";
+        throw error;
+      }
+    },
+  });
+
+  const paused = await fixture.run();
+  const resumed = await fixture.run();
+
+  assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(paused.pause.reason, "commit_failed");
+  assert.equal(resumed.pipelineState.workflowState, "DONE");
+  assert.equal(resumed.pipelineState.completedCommits.length, 1);
+  assert.equal(
+    fixture.calls.worker.filter(({ access }) => access === "local-commit")
+      .length,
+    1,
+  );
+});
+
+test("never replays a consumed authorization when no commit was created", async (t) => {
+  const fixture = await createFixture(t, {
+    onCommitRun() {
+      const error = new Error("Commit process was interrupted.");
+      error.code = "ERR_FAKE_LOCAL_COMMIT_INTERRUPTED";
+      error.ambiguous = true;
+      throw error;
+    },
+  });
+
+  const paused = await fixture.run();
+  const resumed = await fixture.run();
+
+  assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(paused.pause.reason, "commit_failed");
+  assert.equal(paused.pipelineState.pendingCommit.status, "consumed");
+  assert.equal(resumed.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(resumed.pause.reason, "commit_failed");
+  assert.ok(resumed.revision > paused.revision);
+  assert.equal(
+    fixture.calls.worker.filter(({ access }) => access === "local-commit")
+      .length,
+    1,
+  );
+});
+
+test("pauses without rewriting a commit that violates its authorization", async (t) => {
+  const fixture = await createFixture(t, {
+    async onCommitRun(request) {
+      await executeFile("git", ["-C", request.cwd, "add", "-A"]);
+      await executeFile("git", [
+        "-C",
+        request.cwd,
+        "commit",
+        "-qm",
+        `${request.commit.message}\n\nCo-authored-by: Other <other@example.com>`,
+      ]);
+    },
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(result.pause.reason, "commit_contract_violated");
+  assert.ok(result.pause.changes.includes("co-author"));
+  assert.deepEqual(result.pipelineState.completedCommits, []);
+  assert.equal(result.pipelineState.pendingCommit.status, "consumed");
 });
 
 test("resumes a workspace-write turn after a backend interruption", async (t) => {
@@ -1733,7 +2055,7 @@ test("resumes a workspace-write turn after a backend interruption", async (t) =>
 
   const resumed = await fixture.run();
 
-  assert.equal(resumed.pipelineState.workflowState, "COMMIT");
+  assert.equal(resumed.pipelineState.workflowState, "DONE");
   assert.equal(
     await readFile(join(fixture.projectPath, "source.js"), "utf8"),
     "export const value = 2;\n",
@@ -1783,9 +2105,11 @@ test("re-finalizes a partial correction after a backend interruption", async (t)
 
   const resumed = await fixture.run();
 
-  assert.equal(resumed.pipelineState.workflowState, "COMMIT");
+  assert.equal(resumed.pipelineState.workflowState, "DONE");
   assert.match(
-    fixture.calls.worker.at(-1).prompt,
+    fixture.calls.worker.findLast(({ prompt }) =>
+      prompt.includes("Locate and validate the project's finalization skill"),
+    ).prompt,
     /Locate and validate the project's finalization skill/u,
   );
   assert.match(
@@ -1811,7 +2135,7 @@ test("retries implementation after an environment blocker clears", async (t) => 
 
   const resumed = await fixture.run();
 
-  assert.equal(resumed.pipelineState.workflowState, "COMMIT");
+  assert.equal(resumed.pipelineState.workflowState, "DONE");
 });
 
 test("routes finalization failures through a fix and the complete gate", async (t) => {
@@ -1831,7 +2155,7 @@ test("routes finalization failures through a fix and the complete gate", async (
 
   const result = await fixture.run();
 
-  assert.equal(result.pipelineState.workflowState, "COMMIT");
+  assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(result.counters.fixRounds, 1);
   assert.equal(result.counters.correctionRounds, 0);
   assert.equal(result.pipelineState.finalizationResult.status, "PASS");
@@ -1866,7 +2190,7 @@ test("invalidates finalization and review after fixing a review finding", async 
 
   const result = await fixture.run();
 
-  assert.equal(result.pipelineState.workflowState, "COMMIT");
+  assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(result.counters.fixRounds, 1);
   assert.ok(
     validationStates.every(
@@ -1899,7 +2223,7 @@ test("preserves disputes while accepted findings are fixed", async (t) => {
 
   const result = await fixture.run();
 
-  assert.equal(result.pipelineState.workflowState, "COMMIT");
+  assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(result.counters.fixRounds, 1);
   assert.equal(result.pipelineState.disputeCounts.R2, 1);
   assert.equal(result.pipelineState.disputeHistory.at(-1).findingId, "R2");
@@ -1958,7 +2282,7 @@ test("resumes the complete review after reconsidering a deferred dispute", async
 
   const resumed = await fixture.run();
 
-  assert.equal(resumed.pipelineState.workflowState, "COMMIT");
+  assert.equal(resumed.pipelineState.workflowState, "DONE");
   assert.equal(resumed.pipelineState.disputeHistory.at(-1).direction, "WITHDRAW");
   assert.match(
     fixture.calls.reviewer.at(-1).prompt,
@@ -2010,7 +2334,7 @@ test("preserves a mixed dispute through a finalization fix", async (t) => {
 
   const result = await fixture.run();
 
-  assert.equal(result.pipelineState.workflowState, "COMMIT");
+  assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(result.counters.fixRounds, 2);
   assert.equal(result.counters.correctionRounds, 1);
   assert.equal(result.pipelineState.disputeHistory.at(-1).findingId, "R2");
@@ -2043,7 +2367,7 @@ test("preserves a mixed dispute through stagnation rework", async (t) => {
     stagnationWindowRounds: 1,
   });
 
-  assert.equal(result.pipelineState.workflowState, "COMMIT");
+  assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(result.counters.fixRounds, 2);
   assert.equal(result.pipelineState.disputeHistory.at(-1).findingId, "R2");
   assert.equal(result.pipelineState.disputeHistory.at(-1).direction, "WITHDRAW");
@@ -2075,7 +2399,7 @@ test("arbitrates an upheld mixed dispute after the complete re-review", async (t
 
   const result = await fixture.run({ maxDisputesPerFinding: 1 });
 
-  assert.equal(result.pipelineState.workflowState, "COMMIT");
+  assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(result.pipelineState.disputeCounts.R2, 1);
   assert.equal(result.pipelineState.disputeHistory.at(-1).direction, "UPHOLD");
   assert.equal(result.pipelineState.findingArbitrations.at(-1).findingId, "R2");
@@ -2094,7 +2418,7 @@ test("lets the Reviewer withdraw an evidenced Worker dispute", async (t) => {
 
   const result = await fixture.run();
 
-  assert.equal(result.pipelineState.workflowState, "COMMIT");
+  assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(result.counters.fixRounds, 0);
   assert.equal(result.pipelineState.disputeCounts.R1, 1);
   assert.equal(result.pipelineState.disputeHistory.at(-1).direction, "WITHDRAW");
@@ -2119,7 +2443,7 @@ test("arbitrates an upheld finding only after its dispute budget", async (t) => 
 
   const result = await fixture.run();
 
-  assert.equal(result.pipelineState.workflowState, "COMMIT");
+  assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(result.pipelineState.disputeCounts.R1, 2);
   assert.equal(result.pipelineState.findingArbitrations[0].direction, "WORKER_CORRECT");
   assert.equal(fixture.calls.arbiter.length, 1);
@@ -2158,7 +2482,7 @@ test("requires a fix after the Arbiter upholds the Reviewer", async (t) => {
 
   const result = await fixture.run();
 
-  assert.equal(result.pipelineState.workflowState, "COMMIT");
+  assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(result.counters.fixRounds, 1);
   assert.equal(
     result.pipelineState.findingArbitrations[0].direction,
@@ -2253,7 +2577,7 @@ test("uses one stagnation arbitration for finding churn", async (t) => {
     stagnationWindowRounds: 2,
   });
 
-  assert.equal(result.pipelineState.workflowState, "COMMIT");
+  assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(result.pipelineState.stagnationArbitrationUsed, true);
   assert.equal(
     result.pipelineState.stagnationDirection.direction,
@@ -2288,14 +2612,16 @@ test("routes stagnation rework through Worker, finalization, and review", async 
     stagnationWindowRounds: 1,
   });
 
-  assert.equal(result.pipelineState.workflowState, "COMMIT");
+  assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(result.counters.fixRounds, 2);
   assert.equal(
     result.pipelineState.stagnationDirection.direction,
     "REWORK_IMPLEMENTATION",
   );
   assert.match(
-    fixture.calls.worker.at(-2).prompt,
+    fixture.calls.worker.findLast(({ prompt }) =>
+      prompt.includes("Required rework direction"),
+    ).prompt,
     /Required rework direction/u,
   );
 });
@@ -2339,7 +2665,7 @@ test("preserves stagnation rework while waiting for fix budget", async (t) => {
     { type: "extra-fix-rounds", amount: 1 },
   );
 
-  assert.equal(result.pipelineState.workflowState, "COMMIT");
+  assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(result.counters.fixRounds, 2);
   assert.equal(fixture.calls.arbiter.length, 1);
 });
@@ -2396,7 +2722,7 @@ test("accepts a finite extra fix budget only after exhaustion", async (t) => {
 
   const result = await fixture.run({}, { type: "extra-fix-rounds", amount: 1 });
 
-  assert.equal(result.pipelineState.workflowState, "COMMIT");
+  assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(result.pipelineState.additionalFixRounds, 1);
   assert.equal(result.counters.fixRounds, 2);
 });
@@ -2425,7 +2751,7 @@ test("overrides one current finding only for its reviewed fingerprint", async (t
     { type: "override-finding", findingId: "R1" },
   );
 
-  assert.equal(result.pipelineState.workflowState, "COMMIT");
+  assert.equal(result.pipelineState.workflowState, "DONE");
   assert.deepEqual(result.pipelineState.findingOverrides, [
     {
       findingId: "R1",
@@ -2503,7 +2829,7 @@ test("checks plan compatibility after a post-start product decision", async (t) 
 
   const result = await fixture.run();
 
-  assert.equal(result.pipelineState.workflowState, "COMMIT");
+  assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(result.counters.productDecisions, 1);
   assert.match(fixture.calls.worker[4].prompt, /Review the updated clarifications/u);
 });
@@ -2538,7 +2864,7 @@ test("preserves previous findings across a review product decision", async (t) =
 
   const result = await fixture.run();
 
-  assert.equal(result.pipelineState.workflowState, "COMMIT");
+  assert.equal(result.pipelineState.workflowState, "DONE");
   assert.match(fixture.calls.reviewer[3].prompt, /Previous findings[\s\S]*"id": "R1"/u);
 });
 
@@ -2574,7 +2900,7 @@ test("starts a new dispute episode after a product decision", async (t) => {
 
   const result = await fixture.run();
 
-  assert.equal(result.pipelineState.workflowState, "COMMIT");
+  assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(result.pipelineState.disputeCounts.R1, 1);
   assert.equal(result.pipelineState.disputeHistory.length, 1);
   assert.equal(result.pipelineState.disputeHistory[0].attempt, 1);
@@ -2662,7 +2988,7 @@ test("retries finalization after its environment blocker clears", async (t) => {
 
   const resumed = await fixture.run();
 
-  assert.equal(resumed.pipelineState.workflowState, "COMMIT");
+  assert.equal(resumed.pipelineState.workflowState, "DONE");
 });
 
 test("rejects finalization changes made before skill validation", async (t) => {

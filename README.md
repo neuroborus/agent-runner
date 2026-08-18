@@ -9,7 +9,7 @@ small runner.
 > configuration, deterministic commit-plan contract, external run store,
 > clarification and Git-safety services, Codex and Claude adapters, the complete
 > plan-authoring state machine, and plan-execution through implementation,
-> finalization, review, finding resolution, and the commit gate are present.
+> finalization, review, finding resolution, and verified local commits are present.
 > Two pipeline descriptors, tests, and agent guidance are included. The `run`,
 > `resume`, and `status` workflows are not wired yet and deliberately return a
 > non-zero exit code.

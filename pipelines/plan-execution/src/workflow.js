@@ -11,6 +11,7 @@ import {
   BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
+  COMMIT_INSTRUCTIONS,
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
   FINDING_ARBITRATION_INSTRUCTIONS,
@@ -289,6 +290,7 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
         reviewReconsideration: [],
         additionalFixRounds: 0,
         findingOverrides: [],
+        pendingCommit: null,
       },
       {
         nextCounters: {
@@ -2152,6 +2154,244 @@ ${JSON.stringify(
     return true;
   }
 
+  async function runCommitTurn() {
+    const current = state();
+    const step = planStep();
+    let pendingCommit = current.pendingCommit;
+
+    if (pendingCommit === null) {
+      if ((await readCurrentInputs()) === null) {
+        return false;
+      }
+      const fingerprint = await contentFingerprint();
+      if (
+        fingerprint !== current.finalizedFingerprint ||
+        fingerprint !== current.reviewedFingerprint ||
+        !(await verifyPersistedRepository())
+      ) {
+        if (state().workflowState !== "WAITING_FOR_USER") {
+          await pause("unsafe_git_state", {
+            code: "ERR_COMMIT_GATE_CHANGED",
+          });
+        }
+        return false;
+      }
+      let authorization;
+      try {
+        authorization = await runtime.git.prepareCommit({
+          expectedSnapshot: current.repositoryBaseline,
+          subject: step.subject,
+          persistPendingCommit: async (preparedAuthorization) => {
+            await transition(
+              {
+                ...state(),
+                pendingCommit: {
+                  status: "prepared",
+                  authorization: preparedAuthorization,
+                },
+              },
+              {
+                publicActivity: activity(
+                  "runner",
+                  "commit",
+                  "authorized",
+                  `Commit ${current.currentStep} authorized.`,
+                ),
+              },
+            );
+          },
+        });
+      } catch (cause) {
+        if (cause?.code === "ERR_COMMIT_GATE_CHANGED") {
+          await pause("unsafe_git_state", { code: cause.code });
+          return false;
+        }
+        throw cause;
+      }
+      pendingCommit = { status: "prepared", authorization };
+    }
+
+    let agentError;
+    if (pendingCommit.status === "prepared") {
+      const previousSession = [...currentRun.sessionLineage.children]
+        .reverse()
+        .find((child) => child.role === "worker")?.sessionId;
+      let baseRequest;
+      try {
+        baseRequest = await runtime.git.consumeCommit(
+          pendingCommit.authorization,
+          {
+            consumePendingCommit: async () => {
+              await transition(
+                {
+                  ...state(),
+                  pendingCommit: {
+                    status: "consumed",
+                    authorization: pendingCommit.authorization,
+                  },
+                },
+                {
+                  publicActivity: activity(
+                    "runner",
+                    "commit",
+                    "started",
+                    `Commit ${current.currentStep} authorization consumed.`,
+                  ),
+                },
+              );
+            },
+          },
+        );
+      } catch (cause) {
+        if (cause?.code === "ERR_COMMIT_GATE_CHANGED") {
+          await transition(
+            {
+              ...state(),
+              workflowState: "WAITING_FOR_USER",
+              pendingCommit: null,
+            },
+            {
+              pause: { reason: "unsafe_git_state", code: cause.code },
+              publicActivity: activity(
+                "runner",
+                "commit",
+                "paused",
+                "Plan execution paused: unsafe_git_state.",
+              ),
+            },
+          );
+          return false;
+        }
+        throw cause;
+      }
+      const roleConfiguration = currentRun.roles.worker;
+      const request = {
+        ...baseRequest,
+        prompt: `${COMMIT_INSTRUCTIONS}
+
+Authorized planned commit:
+${step.subject}`,
+        ...(roleConfiguration.model === null
+          ? {}
+          : { model: roleConfiguration.model }),
+        ...(previousSession === undefined
+          ? {}
+          : { session: { id: previousSession, mode: "continue" } }),
+      };
+      try {
+        await runtime.adapters.worker.run(request);
+      } catch (cause) {
+        agentError = cause;
+      }
+      pendingCommit = {
+        status: "consumed",
+        authorization: pendingCommit.authorization,
+      };
+    }
+
+    let verified;
+    try {
+      verified = await runtime.git.verifyCommit(pendingCommit.authorization);
+    } catch (cause) {
+      if (
+        ![
+          "ERR_COMMIT_NOT_CREATED",
+          "ERR_COMMIT_CONTRACT_VIOLATED",
+        ].includes(cause?.code)
+      ) {
+        throw cause;
+      }
+      const contractViolation =
+        cause?.code === "ERR_COMMIT_CONTRACT_VIOLATED";
+      await pause(
+        contractViolation ? "commit_contract_violated" : "commit_failed",
+        {
+          code: diagnosticCode(cause, "ERR_COMMIT_FAILED"),
+          ...(Array.isArray(cause?.changes)
+            ? { changes: cause.changes }
+            : {}),
+          ...(agentError === undefined
+            ? {}
+            : {
+                adapterCode: diagnosticCode(
+                  agentError,
+                  "ERR_COMMIT_ADAPTER_FAILED",
+                ),
+              }),
+        },
+      );
+      return false;
+    }
+
+    const nextRepositoryBaseline = await runtime.git.snapshot({
+      allowedPaths: current.repositoryBaseline.allowedPaths,
+      projectPath: current.repositoryBaseline.projectPath,
+    });
+    if (
+      nextRepositoryBaseline.head !== verified.head ||
+      nextRepositoryBaseline.clean !== true
+    ) {
+      await pause("commit_contract_violated", {
+        code: "ERR_COMMIT_CONTRACT_VIOLATED",
+      });
+      return false;
+    }
+    const completedCommits = [...current.completedCommits, verified.head];
+    const stepCount = parseCommitPlan(current.canonicalPlan).steps.length;
+    const done = current.currentStep === stepCount;
+    const nextStepState = done
+      ? {}
+      : {
+          implementationDirection: null,
+          finalizationResult: null,
+          finalizedFingerprint: null,
+          reviewedFingerprint: null,
+          findings: [],
+          previousFindings: [],
+          pendingDisputes: [],
+          disputeCounts: {},
+          disputeHistory: [],
+          findingArbitrations: [],
+          correctionHistory: [],
+          sameFindingRounds: {},
+          pendingCorrection: false,
+          blockedSinceStagnation: 0,
+          stagnationArbitrationUsed: false,
+          stagnationDirection: null,
+          reviewReconsideration: [],
+          additionalFixRounds: 0,
+          findingOverrides: [],
+        };
+    await transition(
+      {
+        ...state(),
+        ...nextStepState,
+        workflowState: done ? "DONE" : "IMPLEMENT",
+        repositoryBaseline: nextRepositoryBaseline,
+        currentStep: done ? null : current.currentStep + 1,
+        reviewerStep: null,
+        pendingCommit: null,
+        completedCommits,
+      },
+      {
+        nextCounters: done
+          ? counters()
+          : {
+              ...counters(),
+              fixRounds: 0,
+              correctionRounds: 0,
+            },
+        publicActivity: activity(
+          "worker",
+          "commit",
+          "created",
+          `Commit ${current.currentStep} created: ${verified.head}.`,
+        ),
+      },
+    );
+    return true;
+  }
+
   try {
     if (state().settings === null) {
       await transition({ ...state(), settings }, { pause: null });
@@ -2164,6 +2404,14 @@ ${JSON.stringify(
         if (!(await resumeEdit())) {
           return currentRun;
         }
+      } else if (
+        currentRun.pause.reason === "commit_failed" &&
+        state().pendingCommit?.status === "consumed"
+      ) {
+        await transition(
+          { ...state(), workflowState: "COMMIT" },
+          { pause: null },
+        );
       } else if (
         RETRYABLE_PAUSE_REASONS.has(currentRun.pause.reason) &&
         (!state().preflightComplete ||
@@ -2197,11 +2445,15 @@ ${JSON.stringify(
     if (["DONE", "FAILED"].includes(state().workflowState)) {
       return currentRun;
     }
+    const commitVerificationPending =
+      state().workflowState === "COMMIT" &&
+      state().pendingCommit?.status === "consumed";
     if (
       state().preflightComplete &&
       !["WAITING_FOR_USER", "FAILED", "DONE"].includes(state().workflowState) &&
-      ((await readCurrentInputs()) === null ||
-        !(await verifyPersistedRepository()))
+      (!commitVerificationPending &&
+        ((await readCurrentInputs()) === null ||
+          !(await verifyPersistedRepository())))
     ) {
       return currentRun;
     }
@@ -2411,9 +2663,15 @@ ${evidence}`,
         continue;
       }
 
+      if (current.workflowState === "COMMIT") {
+        if (!(await runCommitTurn())) {
+          return currentRun;
+        }
+        continue;
+      }
+
       if (
         [
-          "COMMIT",
           "WAITING_FOR_USER",
           "DONE",
           "FAILED",
@@ -2436,6 +2694,14 @@ ${evidence}`,
       join(currentRun.taskPath, "clarifications.md"),
       join(currentRun.taskPath, "context.md"),
     ];
+    if (
+      state().workflowState === "COMMIT" &&
+      state().pendingCommit?.status === "consumed"
+    ) {
+      return pause("commit_failed", {
+        code: diagnosticCode(cause, "ERR_COMMIT_VERIFICATION_FAILED"),
+      });
+    }
     if (cause?.code === "ERR_READ_ONLY_REPOSITORY_CHANGED") {
       return invalidateInputs("read_only_agent_mutated_repository", {
         code: cause.code,

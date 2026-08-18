@@ -49,6 +49,9 @@ Run only that finalization procedure, including project-required formatting or g
 Do not perform unrelated fixes or create a commit.
 ${PRODUCT_DECISION_INSTRUCTIONS}`;
 
+export const COMMIT_INSTRUCTIONS = `Complete the authorized local commit using the exact supplied subject.
+Do not modify project content, amend history, bypass hooks, change Git identity or configuration, create other refs, or perform any remote write.`;
+
 export const DISPUTE_RECONSIDERATION_INSTRUCTIONS = `Reconsider the disputed findings against the task, plan, repository, diff, and Worker evidence.
 
 Do not modify the repository. Return WITHDRAW or UPHOLD with a concise reason for every disputed finding using the provided schema.

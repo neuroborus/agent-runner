@@ -6,6 +6,7 @@ import {
   BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
+  COMMIT_INSTRUCTIONS,
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
   FINDING_ARBITRATION_INSTRUCTIONS,
@@ -113,6 +114,14 @@ test("finalization and dispute prompts preserve their narrow roles", () => {
 
 Do not modify the repository. Return WITHDRAW or UPHOLD with a concise reason for every disputed finding using the provided schema.
 ${PRODUCT_DECISION_INSTRUCTIONS}`,
+  );
+});
+
+test("commit instructions preserve the one-shot local boundary", () => {
+  assert.equal(
+    COMMIT_INSTRUCTIONS,
+    `Complete the authorized local commit using the exact supplied subject.
+Do not modify project content, amend history, bypass hooks, change Git identity or configuration, create other refs, or perform any remote write.`,
   );
 });
 

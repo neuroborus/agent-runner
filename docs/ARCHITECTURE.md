@@ -115,6 +115,10 @@ optional source-session reference and every direct child role/session ID, but
 native session resume remains an optimization rather than a correctness
 dependency.
 
+Plan execution persists each prepared or consumed one-shot commit authorization
+and every verified commit SHA. After an ambiguous commit turn, resume verifies
+the recorded authorization against Git state and never replays the effect.
+
 ## Agent Context Recovery
 
 Backend sessions are disposable execution context, not durable workflow state.

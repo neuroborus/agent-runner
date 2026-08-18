@@ -60,6 +60,8 @@ const PIPELINE_STATE_FIELDS = new Set([
   "reviewReconsideration",
   "additionalFixRounds",
   "findingOverrides",
+  "pendingCommit",
+  "completedCommits",
 ]);
 const COUNTER_FIELDS = Object.freeze([
   "clarificationRounds",
@@ -77,6 +79,7 @@ const PENDING_EDIT_FIELDS = new Set([
   "preEditorHash",
 ]);
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
+const OBJECT_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 const RUN_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/u;
 const REVIEW_FINDING_ID_PATTERN = /^R[1-9][0-9]{0,8}$/u;
 const FINALIZATION_ISSUE_ID_PATTERN = /^F[1-9][0-9]{0,8}$/u;
@@ -114,6 +117,22 @@ const PAUSE_RESUME_STATES = Object.freeze({
   fix_limit_reached: Object.freeze(["IMPLEMENT", "RESOLVE_FINDINGS"]),
   no_progress: Object.freeze(["RESOLVE_FINDINGS"]),
 });
+const COMMIT_AUTHORIZATION_FIELDS = Object.freeze([
+  "schemaVersion",
+  "id",
+  "projectPath",
+  "expectedHead",
+  "expectedBranch",
+  "expectedRefsFingerprint",
+  "expectedOtherRefsFingerprint",
+  "expectedContentFingerprint",
+  "expectedIndexFingerprint",
+  "expectedRemoteConfigurationFingerprint",
+  "expectedIdentityFingerprint",
+  "expectedAuthorIdentityFingerprint",
+  "expectedCommitterIdentityFingerprint",
+  "subject",
+]);
 
 export class PlanExecutionWorkflowError extends Error {
   constructor(message, { cause, code = "ERR_PLAN_EXECUTION_WORKFLOW" } = {}) {
@@ -1351,6 +1370,67 @@ function normalizeFindingOverrides(value) {
   return value;
 }
 
+function normalizePendingCommit(value) {
+  if (value === null) {
+    return null;
+  }
+  assertExactFields(
+    value,
+    ["status", "authorization"],
+    "Plan-execution pending commit",
+  );
+  if (!["prepared", "consumed"].includes(value.status)) {
+    throw workflowError("Plan-execution pending commit is invalid.");
+  }
+  const authorization = value.authorization;
+  assertExactFields(
+    authorization,
+    COMMIT_AUTHORIZATION_FIELDS,
+    "Plan-execution commit authorization",
+  );
+  if (
+    authorization.schemaVersion !== 1 ||
+    typeof authorization.id !== "string" ||
+    authorization.id.length === 0 ||
+    typeof authorization.projectPath !== "string" ||
+    !isAbsolute(authorization.projectPath) ||
+    resolve(authorization.projectPath) !== authorization.projectPath ||
+    !OBJECT_ID_PATTERN.test(authorization.expectedHead) ||
+    (authorization.expectedBranch !== null &&
+      (typeof authorization.expectedBranch !== "string" ||
+        authorization.expectedBranch.length === 0)) ||
+    [
+      "expectedRefsFingerprint",
+      "expectedOtherRefsFingerprint",
+      "expectedContentFingerprint",
+      "expectedIndexFingerprint",
+      "expectedRemoteConfigurationFingerprint",
+      "expectedIdentityFingerprint",
+      "expectedAuthorIdentityFingerprint",
+      "expectedCommitterIdentityFingerprint",
+    ].some((field) => !HASH_PATTERN.test(authorization[field])) ||
+    typeof authorization.subject !== "string" ||
+    authorization.subject.length === 0 ||
+    authorization.subject.trim() !== authorization.subject ||
+    /[\0\r\n]/u.test(authorization.subject) ||
+    [...authorization.subject].length > 72
+  ) {
+    throw workflowError("Plan-execution commit authorization is invalid.");
+  }
+  return value;
+}
+
+function normalizeCompletedCommits(value) {
+  if (
+    !Array.isArray(value) ||
+    value.some((commit) => !OBJECT_ID_PATTERN.test(commit)) ||
+    new Set(value).size !== value.length
+  ) {
+    throw workflowError("Plan-execution completed commits are invalid.");
+  }
+  return value;
+}
+
 export function normalizePipelineState(value) {
   if (!isRecord(value)) {
     throw workflowError("Plan-execution state must be an object.");
@@ -1446,10 +1526,13 @@ export function normalizePipelineState(value) {
   ) {
     throw workflowError("Plan-execution canonical plan is invalid.");
   }
+  let planSteps = null;
   if (value.canonicalPlan !== null) {
     let canonical;
     try {
-      canonical = serializeCommitPlan(parseCommitPlan(value.canonicalPlan));
+      const plan = parseCommitPlan(value.canonicalPlan);
+      canonical = serializeCommitPlan(plan);
+      planSteps = plan.steps;
     } catch {
       throw workflowError("Plan-execution canonical plan is invalid.");
     }
@@ -1584,6 +1667,45 @@ export function normalizePipelineState(value) {
     throw workflowError("Plan-execution review reconsideration is invalid.");
   }
   normalizeFindingOverrides(value.findingOverrides);
+  const pendingCommit = normalizePendingCommit(value.pendingCommit);
+  const completedCommits = normalizeCompletedCommits(value.completedCommits);
+  if (
+    completedCommits.length > (planSteps?.length ?? 0) ||
+    (value.currentStep !== null &&
+      completedCommits.length !== value.currentStep - 1) ||
+    (value.workflowState === "DONE" &&
+      completedCommits.length !== planSteps?.length) ||
+    (!value.preflightComplete && completedCommits.length !== 0) ||
+    (completedCommits.length > 0 &&
+      value.repositoryBaseline?.head !== completedCommits.at(-1))
+  ) {
+    throw workflowError("Plan-execution completed-commit progress is invalid.");
+  }
+  if (
+    pendingCommit !== null &&
+    (!["COMMIT", "WAITING_FOR_USER", "FAILED"].includes(value.workflowState) ||
+      value.currentStep === null ||
+      pendingCommit.authorization.projectPath !==
+        value.repositoryBaseline?.projectPath ||
+      pendingCommit.authorization.expectedHead !==
+        value.repositoryBaseline?.head ||
+      pendingCommit.authorization.expectedBranch !==
+        value.repositoryBaseline?.branch ||
+      pendingCommit.authorization.expectedRefsFingerprint !==
+        value.repositoryBaseline?.refsFingerprint ||
+      pendingCommit.authorization.expectedContentFingerprint !==
+        value.reviewedFingerprint ||
+      pendingCommit.authorization.expectedIndexFingerprint !==
+        value.repositoryBaseline?.indexFingerprint ||
+      pendingCommit.authorization.expectedRemoteConfigurationFingerprint !==
+        value.repositoryBaseline?.remoteConfigurationFingerprint ||
+      pendingCommit.authorization.expectedIdentityFingerprint !==
+        value.repositoryBaseline?.identityFingerprint ||
+      pendingCommit.authorization.subject !==
+        planSteps?.[value.currentStep - 1]?.subject)
+  ) {
+    throw workflowError("Plan-execution pending commit is inconsistent.");
+  }
   const currentFindingIds = new Set(findings.map(({ id }) => id));
   const previousFindingIds = new Set(previousFindings.map(({ id }) => id));
   const deferredDisputes =
@@ -1672,6 +1794,7 @@ export function normalizePipelineState(value) {
       "REVIEW",
       "RESOLVE_FINDINGS",
       "COMMIT",
+      "DONE",
       "WAITING_FOR_USER",
       "FAILED",
     ].includes(value.workflowState)
@@ -1710,7 +1833,9 @@ export function normalizePipelineState(value) {
       stagnationDirection !== null ||
       value.reviewReconsideration.length !== 0 ||
       value.additionalFixRounds !== 0 ||
-      value.findingOverrides.length !== 0)
+      value.findingOverrides.length !== 0 ||
+      pendingCommit !== null ||
+      completedCommits.length !== 0)
   ) {
     throw workflowError("Plan-execution preflight state is inconsistent.");
   }
@@ -1732,7 +1857,9 @@ export function normalizePipelineState(value) {
       stagnationDirection !== null ||
       value.reviewReconsideration.length !== 0 ||
       value.additionalFixRounds !== 0 ||
-      value.findingOverrides.length !== 0)
+      value.findingOverrides.length !== 0 ||
+      pendingCommit !== null ||
+      completedCommits.length !== 0)
   ) {
     throw workflowError("Plan-execution work progress is not applicable.");
   }
@@ -1814,6 +1941,19 @@ export function normalizePipelineState(value) {
     throw workflowError("Plan-execution commit gate is inconsistent.");
   }
   if (
+    value.workflowState === "DONE" &&
+    (value.currentStep !== null ||
+      pendingCommit !== null ||
+      finalizationResult?.status !== "PASS" ||
+      value.finalizedFingerprint === null ||
+      value.reviewedFingerprint !== value.finalizedFingerprint ||
+      findings.length !== 0 ||
+      pendingDisputes.length !== 0 ||
+      value.reviewReconsideration.length !== 0)
+  ) {
+    throw workflowError("Plan-execution completion state is inconsistent.");
+  }
+  if (
     !["CLARIFY", "WAITING_FOR_USER", "FAILED"].includes(value.workflowState) &&
     !value.preflightComplete
   ) {
@@ -1865,6 +2005,8 @@ export function createPlanExecutionState({ proactiveClarification = false } = {}
     reviewReconsideration: Object.freeze([]),
     additionalFixRounds: 0,
     findingOverrides: Object.freeze([]),
+    pendingCommit: null,
+    completedCommits: Object.freeze([]),
   });
 }
 
@@ -2059,6 +2201,16 @@ export function assertRun(run) {
         workflowState: run.pause.resumeState,
       });
     }
+    if (
+      (state.pendingCommit !== null) !==
+        ["commit_failed", "commit_contract_violated"].includes(
+          run.pause.reason,
+        ) ||
+      (state.pendingCommit !== null &&
+        state.pendingCommit.status !== "consumed")
+    ) {
+      throw workflowError("Plan-execution pending commit pause is invalid.");
+    }
   }
   const hashFields = [
     "task",
@@ -2177,9 +2329,12 @@ export function assertRuntime(runtime) {
   }
   for (const name of [
     "assertUnchanged",
+    "consumeCommit",
     "contentFingerprint",
     "preflight",
+    "prepareCommit",
     "snapshot",
+    "verifyCommit",
   ]) {
     if (typeof runtime.git[name] !== "function") {
       throw workflowError(`Plan-execution Git service.${name} is invalid.`);

@@ -287,6 +287,7 @@ Persist at least:
 - expected branch/ref context and local-ref fingerprint;
 - expected effective remote-configuration fingerprint;
 - expected effective Git-identity fingerprint;
+- prepared or consumed one-shot commit authorization while `COMMIT` is pending;
 - completed commit SHAs;
 - current findings;
 - fix/dispute counters;
