@@ -75,7 +75,7 @@ async function createFixture(t) {
     "user.email",
     "fixture@example.com",
   );
-  await writeFile(join(repositoryPath, ".gitignore"), ".agent-runner.json\n");
+  await writeFile(join(repositoryPath, ".gitignore"), "ignored.txt\n");
   await writeFile(join(repositoryPath, "tracked.txt"), "initial\n");
   await runGit(repositoryPath, env, "add", ".gitignore", "tracked.txt");
   await runGit(repositoryPath, env, "commit", "-qm", "chore(test): initialize");

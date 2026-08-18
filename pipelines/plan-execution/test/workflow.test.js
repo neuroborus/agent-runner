@@ -563,7 +563,7 @@ async function createFixture(
   await writeFile(join(taskPath, "plan.md"), plan);
   await writeFile(
     join(projectPath, ".gitignore"),
-    `/.agent-runner.json\n${clarificationIgnored ? "/LOCAL_ARTIFACTS/\n" : ""}`,
+    clarificationIgnored ? "/LOCAL_ARTIFACTS/\n" : "",
   );
   await writeFile(join(projectPath, "source.js"), "export const value = 1;\n");
   await executeFile("git", ["-C", projectPath, "add", "."]);

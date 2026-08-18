@@ -18,6 +18,7 @@ import {
   createGitService,
   createRunner,
   createRunStore,
+  parseRunnerConfiguration,
   RunnerError,
 } from "../src/index.js";
 
@@ -27,6 +28,7 @@ const PLANNER_SESSION = "22222222-2222-4222-8222-222222222222";
 const REVIEWER_SESSION = "33333333-3333-4333-8333-333333333333";
 const ARBITER_SESSION = "44444444-4444-4444-8444-444444444444";
 const PREPARED_RUN = "55555555-5555-4555-8555-555555555555";
+const RUNNER_CONFIGURATION = { schemaVersion: 1, defaultBackend: "codex" };
 const PLAN = `## Commit 1: feat(test): add behavior
 
 Implement the requested behavior.`;
@@ -298,28 +300,32 @@ async function createFixture(t) {
   const stateRoot = join(workspace, "state");
   await Promise.all([mkdir(projectPath), mkdir(taskPath)]);
   await executeFile("git", ["init", "-q", projectPath]);
-  await Promise.all([
-    writeFile(join(projectPath, ".gitignore"), "/.agent-runner.json\n"),
-    writeFile(
-      join(projectPath, ".agent-runner.json"),
-      '{"schemaVersion":1,"defaultBackend":"codex"}\n',
-    ),
-    writeFile(join(taskPath, "task.md"), "Implement the requested behavior.\n"),
-  ]);
+  await writeFile(
+    join(taskPath, "task.md"),
+    "Implement the requested behavior.\n",
+  );
   t.after(() => rm(workspace, { recursive: true, force: true }));
   return { projectPath, stateRoot, taskPath, workspace };
+}
+
+function configurationLoader(configuration = RUNNER_CONFIGURATION) {
+  return async () => parseRunnerConfiguration(JSON.stringify(configuration));
 }
 
 function runnerFor(
   fixture,
   adapters,
-  activities = [],
-  runStore = createRunStore({ stateRoot: fixture.stateRoot }),
+  {
+    activities = [],
+    configuration = RUNNER_CONFIGURATION,
+    runStore = createRunStore({ stateRoot: fixture.stateRoot }),
+  } = {},
 ) {
   return createRunner({
     adapters,
     clarifications: createClarificationService({ interactive: false }),
     git: createGitService(),
+    loadConfiguration: configurationLoader(configuration),
     onActivity(activity) {
       activities.push(activity);
     },
@@ -335,8 +341,7 @@ test("validates the canonical Git root before creating external state", async (t
   const runner = runnerFor(
     fixture,
     { codex: createAdapter() },
-    [],
-    createRunStore({ stateRoot: unsafeStateRoot }),
+    { runStore: createRunStore({ stateRoot: unsafeStateRoot }) },
   );
 
   await assert.rejects(
@@ -353,7 +358,7 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
   const fixture = await createFixture(t);
   const adapter = createAdapter({ questionFirst: true });
   const activities = [];
-  const firstRunner = runnerFor(fixture, { codex: adapter }, activities);
+  const firstRunner = runnerFor(fixture, { codex: adapter }, { activities });
 
   const paused = await firstRunner.run({
     pipelineId: "plan-authoring",
@@ -385,12 +390,14 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
     clarificationPath,
     `${await readFile(clarificationPath, "utf8")}\nUse behavior A.\n`,
   );
-  await writeFile(
-    join(fixture.projectPath, ".agent-runner.json"),
-    '{"schemaVersion":1,"defaultBackend":"claude"}\n',
+  const secondRunner = runnerFor(
+    fixture,
+    { codex: adapter },
+    {
+      activities,
+      configuration: { schemaVersion: 1, defaultBackend: "claude" },
+    },
   );
-
-  const secondRunner = runnerFor(fixture, { codex: adapter }, activities);
   const beforeResume = await secondRunner.status(paused.run.runId);
   const completed = await secondRunner.resume({
     runId: paused.run.runId,
@@ -529,20 +536,21 @@ test("rejects incompatible or unsupported source sessions before creating a run"
 
 test("does not require an unused Arbiter backend", async (t) => {
   const fixture = await createFixture(t);
-  await writeFile(
-    join(fixture.projectPath, ".agent-runner.json"),
-    JSON.stringify({
-      schemaVersion: 1,
-      defaultBackend: "codex",
-      pipelines: {
-        "plan-authoring": {
-          roles: { arbiter: { backend: "claude" } },
+  const adapter = createAdapter();
+  const runner = runnerFor(
+    fixture,
+    { codex: adapter },
+    {
+      configuration: {
+        ...RUNNER_CONFIGURATION,
+        pipelines: {
+          "plan-authoring": {
+            roles: { arbiter: { backend: "claude" } },
+          },
         },
       },
-    }),
+    },
   );
-  const adapter = createAdapter();
-  const runner = runnerFor(fixture, { codex: adapter });
 
   const result = await runner.run({
     pipelineId: "plan-authoring",
@@ -559,6 +567,36 @@ test("does not require an unused Arbiter backend", async (t) => {
   });
 });
 
+test("never reads an Agent Runner configuration file in the target repository", async (t) => {
+  const fixture = await createFixture(t);
+  await writeFile(
+    join(fixture.projectPath, ".agent-runner.json"),
+    '{"schemaVersion":99}\n',
+  );
+  const roleOverrides = {
+    planner: { backend: "codex", model: "planner-model" },
+    reviewer: { backend: "codex", model: "reviewer-model" },
+    arbiter: { backend: "codex", model: "arbiter-model" },
+  };
+  const runner = createRunner({
+    adapters: { codex: createAdapter() },
+    clarifications: createClarificationService({ interactive: false }),
+    git: createGitService(),
+    runStore: createRunStore({ stateRoot: fixture.stateRoot }),
+  });
+
+  const result = await runner.run({
+    pipelineId: "plan-authoring",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+    roleOverrides,
+    sourceSession: null,
+  });
+
+  assert.equal(result.run.pipelineState.workflowState, "DONE");
+  assert.deepEqual(result.run.roles, roleOverrides);
+});
+
 test("releases a new run lease when activity delivery fails", async (t) => {
   const fixture = await createFixture(t);
   const runStore = createRunStore({ stateRoot: fixture.stateRoot });
@@ -567,6 +605,7 @@ test("releases a new run lease when activity delivery fails", async (t) => {
     adapters: { codex: createAdapter() },
     clarifications: createClarificationService({ interactive: false }),
     git: createGitService(),
+    loadConfiguration: configurationLoader(),
     onActivity() {
       throw deliveryError;
     },
@@ -592,10 +631,7 @@ test("releases a new run lease when activity delivery fails", async (t) => {
 test("dispatches plan execution through the root Git and state services", async (t) => {
   const fixture = await createFixture(t);
   await Promise.all([
-    writeFile(
-      join(fixture.projectPath, ".gitignore"),
-      "/.agent-runner.json\n/LOCAL_ARTIFACTS/\n",
-    ),
+    writeFile(join(fixture.projectPath, ".gitignore"), "/LOCAL_ARTIFACTS/\n"),
     writeFile(join(fixture.projectPath, "source.js"), "export const value = 0;\n"),
     writeFile(join(fixture.taskPath, "plan.md"), PLAN),
   ]);
@@ -627,25 +663,23 @@ test("dispatches plan execution through the root Git and state services", async 
     "-qm",
     "chore(test): initialize",
   ]);
-  await writeFile(
-    join(fixture.projectPath, ".agent-runner.json"),
-    JSON.stringify({
-      schemaVersion: 1,
-      defaultBackend: "codex",
-      pipelines: {
-        "plan-execution": {
-          roles: { arbiter: { backend: "claude" } },
-        },
-      },
-    }),
-  );
   const adapter = createExecutionAdapter({ bootstrapDisagreement: true });
   const arbiter = createArbiterAdapter();
   const activities = [];
   const runner = runnerFor(
     fixture,
     { codex: adapter, claude: arbiter },
-    activities,
+    {
+      activities,
+      configuration: {
+        ...RUNNER_CONFIGURATION,
+        pipelines: {
+          "plan-execution": {
+            roles: { arbiter: { backend: "claude" } },
+          },
+        },
+      },
+    },
   );
 
   const result = await runner.run({

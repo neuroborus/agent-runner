@@ -240,16 +240,16 @@ Claude worker + Codex reviewer
 The Arbiter must also support either backend.
 
 The pipeline descriptor declares the `worker`, `reviewer`, and `arbiter` roles.
-Role objects under `pipelines.plan-execution.roles` in `.agent-runner.json` may
-provide an optional `backend` and backend-specific `model`. Backend precedence
-is CLI role override, repository pipeline-role value, repository-wide default,
-then preflight failure. Model precedence is CLI role override, repository
-pipeline-role value, then the selected backend's native default. Do not
-hard-code model names into workflow logic.
+Role objects under `pipelines.plan-execution.roles` in the runner's
+`.agent-runner.json` may provide an optional `backend` and backend-specific
+`model`. Backend precedence is CLI role override, runner pipeline-role value,
+runner-wide default, then preflight failure. Model precedence is CLI role
+override, runner pipeline-role value, then the selected backend's native
+default. Do not hard-code model names into workflow logic.
 
 The descriptor also owns the positive-integer settings and built-in defaults
 listed under [Retry Limits and No-Progress Detection](#14-retry-limits-and-no-progress-detection).
-Repository overrides live directly under `pipelines.plan-execution`. The root
+Runner overrides live directly under `pipelines.plan-execution`. The root
 loader strictly validates the versioned envelope and delegates these values to
 the descriptor rather than duplicating pipeline policy.
 

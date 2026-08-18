@@ -20,6 +20,7 @@ import {
   createRunner,
   createRunStore,
   main,
+  parseRunnerConfiguration,
 } from "../src/index.js";
 
 const executeFile = promisify(execFile);
@@ -317,11 +318,7 @@ function createBackend(
   };
 }
 
-async function fixture(
-  t,
-  configuration,
-  { autoCleanup = true, plan = TWO_STEP_PLAN } = {},
-) {
+async function fixture(t, { autoCleanup = true, plan = TWO_STEP_PLAN } = {}) {
   const workspace = await mkdtemp(join(tmpdir(), "agent-runner-workflows-"));
   const projectPath = join(workspace, "project");
   const taskPath = join(workspace, "task");
@@ -346,10 +343,7 @@ async function fixture(
     "test@example.com",
   ]);
   await Promise.all([
-    writeFile(
-      join(projectPath, ".gitignore"),
-      "/.agent-runner.json\n/LOCAL_ARTIFACTS/\n",
-    ),
+    writeFile(join(projectPath, ".gitignore"), "/LOCAL_ARTIFACTS/\n"),
     writeFile(join(projectPath, "src", "base.js"), "export const base = 1;\n"),
     writeFile(join(taskPath, "task.md"), "Implement the requested value.\n"),
   ]);
@@ -372,10 +366,6 @@ async function fixture(
     "origin",
     "https://example.invalid/repository.git",
   ]);
-  await writeFile(
-    join(projectPath, ".agent-runner.json"),
-    `${JSON.stringify(configuration)}\n`,
-  );
   const cleanup = () => rm(workspace, { recursive: true, force: true });
   if (autoCleanup) {
     t.after(cleanup);
@@ -383,12 +373,14 @@ async function fixture(
   return { cleanup, projectPath, stateRoot, taskPath };
 }
 
-function runtime(paths, adapters) {
+function runtime(paths, adapters, configuration) {
   const runStore = createRunStore({ stateRoot: paths.stateRoot });
   const runner = createRunner({
     adapters,
     clarifications: createClarificationService({ interactive: false }),
     git: createGitService(),
+    loadConfiguration: async () =>
+      parseRunnerConfiguration(JSON.stringify(configuration)),
     runStore,
   });
   return { runner, runStore };
@@ -448,14 +440,14 @@ function detached(runner) {
 }
 
 test("authors a complete plan through mixed CLI roles", async (t) => {
-  const paths = await fixture(
-    t,
-    { schemaVersion: 1, defaultBackend: "codex" },
-    { plan: null },
-  );
+  const paths = await fixture(t, { plan: null });
   const codex = createBackend("codex");
   const claude = createBackend("claude");
-  const { runner, runStore } = runtime(paths, { claude, codex });
+  const { runner, runStore } = runtime(
+    paths,
+    { claude, codex },
+    { schemaVersion: 1, defaultBackend: "codex" },
+  );
   const stdout = sink();
   const stderr = sink();
 
@@ -497,21 +489,21 @@ test("authors a complete plan through mixed CLI roles", async (t) => {
 test("executes every planned commit across backend configurations", async (t) => {
   const cases = [
     {
-      name: "Codex repository default",
+      name: "Codex runner default",
       configuration: { schemaVersion: 1, defaultBackend: "codex" },
       args: ["--fork-from", "codex:source-codex"],
       roles: { worker: "codex", reviewer: "codex", arbiter: "codex" },
       source: "source-codex",
     },
     {
-      name: "Claude repository default",
+      name: "Claude runner default",
       configuration: { schemaVersion: 1, defaultBackend: "claude" },
       args: ["--fork-from", "claude:source-claude"],
       roles: { worker: "claude", reviewer: "claude", arbiter: "claude" },
       source: "source-claude",
     },
     {
-      name: "repository role overrides",
+      name: "runner role overrides",
       configuration: {
         schemaVersion: 1,
         defaultBackend: "codex",
@@ -546,14 +538,18 @@ test("executes every planned commit across backend configurations", async (t) =>
 
   for (const scenario of cases) {
     await t.test(scenario.name, async (t) => {
-      const paths = await fixture(t, scenario.configuration);
+      const paths = await fixture(t);
       const codex = createBackend("codex", {
         bootstrapDisagreement: scenario.bootstrapDisagreement,
       });
       const claude = createBackend("claude", {
         bootstrapDisagreement: scenario.bootstrapDisagreement,
       });
-      const { runner, runStore } = runtime(paths, { claude, codex });
+      const { runner, runStore } = runtime(
+        paths,
+        { claude, codex },
+        scenario.configuration,
+      );
       const stdout = sink();
       const stderr = sink();
 
@@ -663,12 +659,13 @@ test("executes every planned commit across backend configurations", async (t) =>
 test("does not replace an unavailable source session", async (t) => {
   for (const backend of ["codex", "claude"]) {
     await t.test(backend, async (t) => {
-      const paths = await fixture(t, {
-        schemaVersion: 1,
-        defaultBackend: backend,
-      });
+      const paths = await fixture(t);
       const adapter = createBackend(backend, { rejectSource: true });
-      const { runner } = runtime(paths, { [backend]: adapter });
+      const { runner } = runtime(
+        paths,
+        { [backend]: adapter },
+        { schemaVersion: 1, defaultBackend: backend },
+      );
       const result = await runner.run({
         pipelineId: "plan-execution",
         projectPath: paths.projectPath,
@@ -689,11 +686,7 @@ test("does not replace an unavailable source session", async (t) => {
 });
 
 test("runs both pipelines through recoverable MCP controls", async (t) => {
-  const paths = await fixture(
-    t,
-    { schemaVersion: 1, defaultBackend: "codex" },
-    { autoCleanup: false, plan: null },
-  );
+  const paths = await fixture(t, { autoCleanup: false, plan: null });
   const implementationGate = {
     entered: deferred(),
     release: deferred(),
@@ -703,7 +696,11 @@ test("runs both pipelines through recoverable MCP controls", async (t) => {
     failExecutionClarification: true,
     implementationGate,
   });
-  const { runner, runStore } = runtime(paths, { codex });
+  const { runner, runStore } = runtime(
+    paths,
+    { codex },
+    { schemaVersion: 1, defaultBackend: "codex" },
+  );
   const pipelineProcess = detached(runner);
   t.after(async () => {
     implementationGate.release.resolve();

@@ -1,10 +1,13 @@
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { BACKEND_IDS } from "./agents/index.js";
 import { getPipeline, listPipelines } from "./pipeline-registry.js";
 
 export const CONFIG_FILENAME = ".agent-runner.json";
+const CONFIG_PATH = fileURLToPath(
+  new URL(`../${CONFIG_FILENAME}`, import.meta.url),
+);
 export const CONFIG_SCHEMA_VERSION = 1;
 
 const BACKENDS = new Set(BACKEND_IDS);
@@ -173,7 +176,7 @@ function normalizeConfiguration(input) {
   return Object.freeze(normalized);
 }
 
-export function parseRepositoryConfiguration(source) {
+export function parseRunnerConfiguration(source) {
   if (typeof source !== "string") {
     throw new ConfigurationError("Configuration source must be a string.");
   }
@@ -190,27 +193,22 @@ export function parseRepositoryConfiguration(source) {
   return normalizeConfiguration(parsed);
 }
 
-export async function loadRepositoryConfiguration(projectPath) {
-  if (typeof projectPath !== "string" || projectPath.trim().length === 0) {
-    throw new ConfigurationError("Project path must be a non-empty string.");
-  }
-
-  const configurationPath = resolve(projectPath, CONFIG_FILENAME);
+export async function loadRunnerConfiguration() {
   let source;
   try {
-    source = await readFile(configurationPath, "utf8");
+    source = await readFile(CONFIG_PATH, "utf8");
   } catch (cause) {
     if (cause?.code === "ENOENT") {
       return normalizeConfiguration({ schemaVersion: CONFIG_SCHEMA_VERSION });
     }
 
     throw new ConfigurationError(
-      `Cannot read repository configuration at ${configurationPath}.`,
+      `Cannot read runner configuration at ${CONFIG_PATH}.`,
       { cause, code: "ERR_CONFIGURATION_READ" },
     );
   }
 
-  return parseRepositoryConfiguration(source);
+  return parseRunnerConfiguration(source);
 }
 
 export function resolvePipelineConfiguration(
@@ -244,10 +242,10 @@ export function resolvePipelineConfiguration(
         roleOverrides[role] === undefined ? {} : roleOverrides[role],
         `roleOverrides.${role}`,
       );
-      const repositoryRole = pipelineConfiguration.roles[role] ?? {};
+      const configuredRole = pipelineConfiguration.roles[role] ?? {};
       const backend =
         override.backend ??
-        repositoryRole.backend ??
+        configuredRole.backend ??
         normalizedConfiguration.defaultBackend;
       if (backend === undefined) {
         throw new ConfigurationError(
@@ -260,7 +258,7 @@ export function resolvePipelineConfiguration(
         role,
         Object.freeze({
           backend,
-          model: override.model ?? repositoryRole.model ?? null,
+          model: override.model ?? configuredRole.model ?? null,
         }),
       ];
     }),

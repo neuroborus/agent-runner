@@ -31,14 +31,14 @@ may change.
 ## Configuration
 
 The pipeline descriptor declares the `planner`, `reviewer`, and on-demand
-`arbiter` roles and owns these positive-integer repository settings:
+`arbiter` roles and owns these positive-integer runner settings:
 
 ```text
 maxRevisionRounds = 15
 stagnationWindowRounds = 3
 ```
 
-Values may be overridden under `pipelines.plan-authoring` in the repository's
+Values may be overridden under `pipelines.plan-authoring` in the runner's
 versioned `.agent-runner.json` contract. Role objects live under
 `pipelines.plan-authoring.roles` and may contain an optional `backend` and
 backend-specific `model`. The root runtime applies the shared precedence rules

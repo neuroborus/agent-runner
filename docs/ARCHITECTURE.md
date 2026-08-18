@@ -21,7 +21,7 @@ declare an internal runtime dependency before an actual import needs it.
 
 - CLI parsing, pipeline selection, and concise terminal output.
 - Local STDIO MCP tool schemas, projections, and detached-run dispatch.
-- Versioned repository configuration loading, validation, and role resolution.
+- Versioned runner configuration loading, validation, and role resolution.
 - Run IDs, atomic state, append-only events, resume, and status.
 - Clarification files, editor invocation, transcript updates, and input hashes.
 - Codex and Claude adapter execution and access-mode enforcement.
@@ -59,14 +59,15 @@ V1 registers:
 The registry is static. V1 has no dynamic plugins, workflow DSL, or generic DAG
 executor.
 
-## Repository Configuration
+## Runner Configuration
 
-The root runtime reads an optional `.agent-runner.json` from the canonical
-target repository root. The file requires `schemaVersion: 1`; unknown versions,
-pipelines, roles, settings, and fields are errors. The loader never rewrites it.
-A tracked `.agent-runner.example.json` documents the contract, while the local
-runtime file must remain ignored and untracked. Git preflight enforces that
-repository boundary before a workflow starts.
+The root runtime reads an optional `.agent-runner.json` from the Agent Runner
+repository root, beside its tracked `.agent-runner.example.json`, independently
+of the target repository. The file requires `schemaVersion: 1`; unknown
+versions, pipelines, roles, settings, and fields are errors. The loader never
+rewrites it, and the local runtime file remains ignored and untracked. Backends,
+models, and pipeline limits are settings of the installed runner, so a target
+repository neither provides nor ignores an Agent Runner configuration file.
 
 The V1 shape is:
 
@@ -89,10 +90,10 @@ The V1 shape is:
 ```
 
 `defaultBackend` is optional. A role backend resolves from its CLI override,
-pipeline-role repository value, then `defaultBackend`; absence after those
-steps is a preflight error. A role model resolves from its CLI override, then
-its pipeline-role repository value, otherwise the selected backend uses its
-native default. There is no repository-wide model because model identifiers are
+pipeline-role runner value, then `defaultBackend`; absence after those steps is
+a preflight error. A role model resolves from its CLI override, then its
+pipeline-role runner value. Otherwise, the selected backend uses its native default.
+There is no runner-wide model because model identifiers are
 backend-specific. The selected adapter validates every explicit model before
 that role's first agent turn.
 
@@ -103,7 +104,7 @@ lists.
 
 ## Run Lifecycle
 
-The root runner resolves the canonical Git root, loads repository configuration,
+The root runner resolves the canonical Git root, loads runner configuration,
 applies CLI role and model overrides, and persists the resolved roles, settings,
 and optional source-session reference before pipeline work begins. `run` then
 holds the new run's lease while invoking its statically registered workflow;

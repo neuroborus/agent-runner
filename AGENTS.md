@@ -27,7 +27,7 @@ contracts. `packages/commit-plan/README.md` owns the shared plan contract.
 - Use `node:test`; keep real Codex and Claude smoke tests opt-in.
 - Prefer small functional modules and split them only when they become meaningfully large.
 - Keep backend-specific flags and output normalization inside `src/agents/`.
-- Keep repository configuration loading and precedence in `src/config.js`; let
+- Keep runner configuration loading and precedence in `src/config.js`; let
   pipeline descriptors own their roles, settings, defaults, and persisted-run
   validation.
 - Keep shared plan parsing and structural and subject validation in
@@ -97,7 +97,7 @@ All pipelines additionally require:
 | `src/index.js` | Public root source boundary |
 | `src/cli.js` | Argument parsing and terminal-facing command dispatch |
 | `src/mcp.js` | STDIO MCP schemas, projections, waits, and detached dispatch |
-| `src/config.js` | Repository configuration loading, validation, and role resolution |
+| `src/config.js` | Runner configuration loading, validation, and role resolution |
 | `src/clarifications.js` | Public clarification-service coordination |
 | `src/clarification-*.js` | Internal confined-file and editor helpers |
 | `src/pipeline-registry.js` | Explicit registry of built-in pipelines |

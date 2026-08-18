@@ -8,8 +8,8 @@ export {
   CONFIG_FILENAME,
   CONFIG_SCHEMA_VERSION,
   ConfigurationError,
-  loadRepositoryConfiguration,
-  parseRepositoryConfiguration,
+  loadRunnerConfiguration,
+  parseRunnerConfiguration,
   resolvePipelineConfiguration,
 } from "./config.js";
 export { createGitService, GitSafetyError } from "./git.js";

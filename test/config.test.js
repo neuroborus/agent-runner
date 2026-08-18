@@ -8,19 +8,32 @@ import {
   CONFIG_FILENAME,
   CONFIG_SCHEMA_VERSION,
   ConfigurationError,
-  loadRepositoryConfiguration,
-  parseRepositoryConfiguration,
+  loadRunnerConfiguration,
+  parseRunnerConfiguration,
   resolvePipelineConfiguration,
 } from "../src/index.js";
 
-const EXAMPLE_URL = new URL("../.agent-runner.example.json", import.meta.url);
+const RUNNER_ROOT_URL = new URL("../", import.meta.url);
+const EXAMPLE_URL = new URL(".agent-runner.example.json", RUNNER_ROOT_URL);
+const CONFIG_URL = new URL(CONFIG_FILENAME, RUNNER_ROOT_URL);
+
+async function readIfPresent(path) {
+  try {
+    return await readFile(path, "utf8");
+  } catch (cause) {
+    if (cause?.code === "ENOENT") {
+      return null;
+    }
+    throw cause;
+  }
+}
 
 test("tracked example is valid and local configuration is ignored", async () => {
   const [source, gitignore] = await Promise.all([
     readFile(EXAMPLE_URL, "utf8"),
-    readFile(new URL("../.gitignore", import.meta.url), "utf8"),
+    readFile(new URL(".gitignore", RUNNER_ROOT_URL), "utf8"),
   ]);
-  const configuration = parseRepositoryConfiguration(source);
+  const configuration = parseRunnerConfiguration(source);
 
   assert.equal(CONFIG_FILENAME, ".agent-runner.json");
   assert.equal(CONFIG_SCHEMA_VERSION, 1);
@@ -42,11 +55,10 @@ test("tracked example is valid and local configuration is ignored", async () => 
   );
 });
 
-test("absent configuration uses pipeline-owned setting defaults", async (t) => {
-  const projectPath = await mkdtemp(join(tmpdir(), "agent-runner-config-"));
-  t.after(() => rm(projectPath, { recursive: true, force: true }));
-
-  const configuration = await loadRepositoryConfiguration(projectPath);
+test("minimal configuration uses pipeline-owned setting defaults", () => {
+  const configuration = parseRunnerConfiguration(
+    JSON.stringify({ schemaVersion: CONFIG_SCHEMA_VERSION }),
+  );
 
   assert.equal(configuration.defaultBackend, undefined);
   assert.deepEqual(configuration.pipelines["plan-authoring"], {
@@ -150,7 +162,7 @@ test("configuration rejects unsupported shapes and values", () => {
 
   for (const [source, expectedMessage] of invalidConfigurations) {
     assert.throws(
-      () => parseRepositoryConfiguration(source),
+      () => parseRunnerConfiguration(source),
       (error) =>
         error instanceof ConfigurationError &&
         expectedMessage.test(error.message),
@@ -158,29 +170,41 @@ test("configuration rejects unsupported shapes and values", () => {
     );
   }
   assert.throws(
-    () => parseRepositoryConfiguration({ schemaVersion: 1 }),
+    () => parseRunnerConfiguration({ schemaVersion: 1 }),
     /source must be a string/u,
   );
 });
 
-test("invalid files are rejected without being rewritten", async (t) => {
+test("configuration loads from the runner root without reading the target", async (t) => {
   const projectPath = await mkdtemp(join(tmpdir(), "agent-runner-config-"));
-  const configurationPath = join(projectPath, CONFIG_FILENAME);
-  const source = '{"schemaVersion":2}\n';
   t.after(() => rm(projectPath, { recursive: true, force: true }));
-  await writeFile(configurationPath, source);
+  await writeFile(join(projectPath, CONFIG_FILENAME), '{"schemaVersion":2}\n');
+  const source = await readIfPresent(CONFIG_URL);
 
-  await assert.rejects(
-    loadRepositoryConfiguration(projectPath),
+  const configuration = await loadRunnerConfiguration();
+
+  assert.deepEqual(
+    configuration,
+    source === null
+      ? parseRunnerConfiguration(
+          JSON.stringify({ schemaVersion: CONFIG_SCHEMA_VERSION }),
+        )
+      : parseRunnerConfiguration(source),
+  );
+  assert.equal(await readIfPresent(CONFIG_URL), source);
+});
+
+test("invalid configuration is rejected", () => {
+  assert.throws(
+    () => parseRunnerConfiguration('{"schemaVersion":2}\n'),
     (error) =>
       error instanceof ConfigurationError &&
       error.code === "ERR_UNSUPPORTED_CONFIGURATION_VERSION",
   );
-  assert.equal(await readFile(configurationPath, "utf8"), source);
 });
 
-test("role resolution applies CLI, role, repository, and native defaults", () => {
-  const configuration = parseRepositoryConfiguration(
+test("role resolution applies CLI, role, runner, and native defaults", () => {
+  const configuration = parseRunnerConfiguration(
     JSON.stringify({
       schemaVersion: 1,
       defaultBackend: "codex",
@@ -188,8 +212,8 @@ test("role resolution applies CLI, role, repository, and native defaults", () =>
         "plan-execution": {
           maxFixRoundsPerStep: 8,
           roles: {
-            worker: { backend: "claude", model: "repo-worker" },
-            reviewer: { backend: "claude", model: "repo-reviewer" },
+            worker: { backend: "claude", model: "runner-worker" },
+            reviewer: { backend: "claude", model: "runner-reviewer" },
           },
         },
       },
@@ -206,7 +230,7 @@ test("role resolution applies CLI, role, repository, and native defaults", () =>
 
   assert.deepEqual(resolved.roles, {
     worker: { backend: "codex", model: "cli-worker" },
-    reviewer: { backend: "claude", model: "repo-reviewer" },
+    reviewer: { backend: "claude", model: "runner-reviewer" },
     arbiter: { backend: "codex", model: null },
   });
   assert.deepEqual(resolved.settings, {
@@ -254,7 +278,7 @@ test("role resolution normalizes configuration objects", () => {
 });
 
 test("role resolution rejects missing backends and invalid overrides", () => {
-  const configuration = parseRepositoryConfiguration(
+  const configuration = parseRunnerConfiguration(
     JSON.stringify({ schemaVersion: 1 }),
   );
 

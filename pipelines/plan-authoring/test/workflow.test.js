@@ -339,7 +339,7 @@ async function createFixture(
   await writeFile(join(taskPath, "task.md"), "Implement the requested behavior.\n");
   await writeFile(
     join(projectPath, ".gitignore"),
-    `/.agent-runner.json\n${clarificationIgnored ? "/task/clarifications.md\n" : ""}`,
+    clarificationIgnored ? "/task/clarifications.md\n" : "",
   );
   if (emptyClarification) {
     await writeFile(clarificationPath, "");

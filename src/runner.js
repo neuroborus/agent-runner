@@ -9,7 +9,7 @@ import {
 } from "./agents/index.js";
 import { createClarificationService } from "./clarifications.js";
 import {
-  loadRepositoryConfiguration,
+  loadRunnerConfiguration,
   resolvePipelineConfiguration,
 } from "./config.js";
 import { createGitService } from "./git.js";
@@ -462,7 +462,7 @@ export function createRunner(options = {}) {
     options.clarifications ?? createClarificationService();
   const git = options.git ?? createGitService();
   const loadConfiguration =
-    options.loadConfiguration ?? loadRepositoryConfiguration;
+    options.loadConfiguration ?? loadRunnerConfiguration;
   const onActivity = options.onActivity ?? (async () => {});
   const runStore = options.runStore ?? createRunStore();
   if (
@@ -592,7 +592,7 @@ export function createRunner(options = {}) {
       });
     }
     const { projectPath, taskPath } = await validateBoundary(normalized);
-    const configuration = await loadConfiguration(projectPath);
+    const configuration = await loadConfiguration();
     const resolved = resolvePipelineConfiguration(
       pipeline.id,
       configuration,

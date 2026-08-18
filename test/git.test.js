@@ -78,7 +78,7 @@ async function createFixture(t, { identity = true } = {}) {
       "fixture@example.com",
     );
   }
-  await writeFile(join(repositoryPath, ".gitignore"), ".agent-runner.json\n");
+  await writeFile(join(repositoryPath, ".gitignore"), "ignored.txt\n");
   await writeFile(join(repositoryPath, "tracked.txt"), "initial\n");
   await runGit(repositoryPath, env, "add", ".gitignore", "tracked.txt");
   await runGit(
@@ -222,50 +222,25 @@ test("enforces caller-selected cleanliness and identity requirements", async (t)
   );
 });
 
-test("requires local runner configuration to be ignored and untracked", async (t) => {
+test("ignores target-repository runner configuration files", async (t) => {
   const { env, repositoryPath, service } = await createFixture(t);
-  const configurationPath = join(repositoryPath, ".agent-runner.json");
-  const absent = await service.preflight({ projectPath: repositoryPath });
-  assert.equal(absent.configuration.exists, false);
-  assert.equal(absent.configuration.ignored, true);
-
-  await writeFile(join(repositoryPath, ".gitignore"), "");
-  await runGit(repositoryPath, env, "add", ".gitignore");
-  await runGit(repositoryPath, env, "commit", "-qm", "expose local config");
-
-  await assert.rejects(
-    service.preflight({ projectPath: repositoryPath }),
-    isGitError("ERR_UNIGNORED_RUNNER_CONFIGURATION"),
+  await writeFile(
+    join(repositoryPath, ".agent-runner.json"),
+    '{"schemaVersion":99}\n',
   );
 
-  await writeFile(configurationPath, '{"schemaVersion":1}\n');
-  await assert.rejects(
-    service.preflight({ projectPath: repositoryPath }),
-    isGitError("ERR_UNIGNORED_RUNNER_CONFIGURATION"),
-  );
+  const untracked = await service.preflight({ projectPath: repositoryPath });
+  assert.equal(untracked.configuration, undefined);
 
-  await writeFile(join(repositoryPath, ".gitignore"), ".agent-runner.json\n");
-  await runGit(repositoryPath, env, "add", ".gitignore");
-  await runGit(repositoryPath, env, "commit", "-qm", "ignore local config");
-  const ignored = await service.preflight({ projectPath: repositoryPath });
-  assert.equal(ignored.configuration.exists, true);
-  assert.equal(ignored.configuration.ignored, true);
-  assert.equal(ignored.configuration.tracked, false);
-
-  await runGit(repositoryPath, env, "add", "-f", ".agent-runner.json");
+  await runGit(repositoryPath, env, "add", ".agent-runner.json");
   await runGit(repositoryPath, env, "commit", "-qm", "track local config");
-  await assert.rejects(
-    service.preflight({ projectPath: repositoryPath }),
-    isGitError("ERR_TRACKED_RUNNER_CONFIGURATION"),
-  );
+  const tracked = await service.preflight({ projectPath: repositoryPath });
+  assert.equal(tracked.snapshot.clean, true);
 });
 
 test("validates ignored repository-local artifact paths without creating them", async (t) => {
   const { env, repositoryPath, service, workspace } = await createFixture(t);
-  await writeFile(
-    join(repositoryPath, ".gitignore"),
-    ".agent-runner.json\nLOCAL_ARTIFACTS/\n",
-  );
+  await writeFile(join(repositoryPath, ".gitignore"), "LOCAL_ARTIFACTS/\n");
   await runGit(repositoryPath, env, "add", ".gitignore");
   await runGit(repositoryPath, env, "commit", "-qm", "ignore local artifacts");
   const clarificationPath = join(
@@ -322,12 +297,6 @@ test("validates ignored repository-local artifact paths without creating them", 
 
 test("content fingerprints ignore staging placement and ignored files", async (t) => {
   const { env, repositoryPath, service } = await createFixture(t);
-  await writeFile(
-    join(repositoryPath, ".gitignore"),
-    ".agent-runner.json\nignored.txt\n",
-  );
-  await runGit(repositoryPath, env, "add", ".gitignore");
-  await runGit(repositoryPath, env, "commit", "-qm", "add ignores");
   const initial = await service.contentFingerprint({
     projectPath: repositoryPath,
   });

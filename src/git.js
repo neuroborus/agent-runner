@@ -19,7 +19,6 @@ import {
 export { GitSafetyError };
 
 const GIT_SNAPSHOT_SCHEMA_VERSION = 1;
-const LOCAL_CONFIGURATION_PATH = ".agent-runner.json";
 const SNAPSHOT_COMPARISONS = Object.freeze([
   ["head", "head"],
   ["branch", "branch"],
@@ -399,23 +398,6 @@ export function createGitService(options = {}) {
     assertBoolean(requireIdentity, "requireIdentity");
     assertPathList(requiredIgnoredPaths, "requiredIgnoredPaths");
     const repositoryPath = await resolveRepository(runGit, projectPath);
-    const configuration = await inspectPathAtRoot(
-      contentContext,
-      repositoryPath,
-      LOCAL_CONFIGURATION_PATH,
-    );
-    if (configuration.tracked) {
-      throw new GitSafetyError(
-        `${LOCAL_CONFIGURATION_PATH} must remain untracked.`,
-        { code: "ERR_TRACKED_RUNNER_CONFIGURATION" },
-      );
-    }
-    if (!configuration.ignored) {
-      throw new GitSafetyError(
-        `${LOCAL_CONFIGURATION_PATH} must be ignored by the repository.`,
-        { code: "ERR_UNIGNORED_RUNNER_CONFIGURATION" },
-      );
-    }
     const ignoredPaths = [];
     for (const path of requiredIgnoredPaths) {
       const inspected = await inspectPathAtRoot(
@@ -447,7 +429,6 @@ export function createGitService(options = {}) {
       );
     }
     return Object.freeze({
-      configuration,
       ignoredPaths: Object.freeze(ignoredPaths),
       snapshot: repositorySnapshot,
     });

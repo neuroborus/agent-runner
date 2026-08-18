@@ -63,10 +63,11 @@ authoring pipeline produces that artifact; the execution pipeline consumes it.
 
 ## Configuration
 
-Copy the tracked [example](.agent-runner.example.json) to an ignored,
-untracked `.agent-runner.json` at the target repository root. The runner never
-rewrites this local file, and Git preflight rejects it if it is not ignored or
-has been tracked.
+Backends, models, and pipeline limits belong to the installed runner. Copy the
+tracked [example](.agent-runner.example.json) to an ignored, untracked
+`.agent-runner.json` beside it at the Agent Runner repository root. The runner
+never rewrites this local file and never reads configuration from a target
+repository, so a target repository needs no Agent Runner configuration file.
 
 When present, the file requires `"schemaVersion": 1`; unknown versions, fields,
 pipelines, roles, and settings are errors. `defaultBackend` is optional. Each
