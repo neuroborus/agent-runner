@@ -14,7 +14,8 @@ Do not ask questions or modify the repository.
 Using the provided schema, return READY when compatible; otherwise return PLAN_REVISION_REQUIRED with concise evidence.`;
 
 export const BOOTSTRAP_INSTRUCTIONS = `Study the repository, task, validated plan, clarifications, project instructions, the project's finalization skill, other relevant skills, tests, and Git history independently and without modifying the repository.
-Return a concise bootstrap summary covering the task, relevant architecture and files, invariants, planned commits, risks, and the project's finalization procedure using the provided schema.`;
+Return a concise bootstrap summary covering the task, relevant architecture and files, invariants, planned commits, risks, and the project's finalization procedure using the provided schema.
+For READY, put all analysis in summary; set reason, question, and whyBlocked to "", and options and evidence to [].`;
 
 export const BOOTSTRAP_RECONCILIATION_INSTRUCTIONS = `Reconcile the independent Worker and Reviewer bootstrap summaries using the task, validated plan, repository, and evidence.
 Do not force agreement or modify the repository. Return a concise resolved summary, or the remaining material disagreement, using the provided schema.`;

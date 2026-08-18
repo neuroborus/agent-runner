@@ -1075,7 +1075,7 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
       }
 
 ${PRODUCT_DECISION_INSTRUCTIONS}
-Use READY with a concise summary and empty blocking fields, PLAN_REVISION_REQUIRED with concise reason and evidence, or PRODUCT_DECISION_REQUIRED with an empty summary and reason.
+Use PLAN_REVISION_REQUIRED with concise reason and evidence, or PRODUCT_DECISION_REQUIRED with an empty summary and reason.
 
 ${evidence}`,
       { freshSession: restartIndependentBootstrap },

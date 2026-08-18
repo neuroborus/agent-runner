@@ -22,7 +22,8 @@ test("bootstrap instructions preserve independent evidence and arbitration", () 
   assert.equal(
     BOOTSTRAP_INSTRUCTIONS,
     `Study the repository, task, validated plan, clarifications, project instructions, the project's finalization skill, other relevant skills, tests, and Git history independently and without modifying the repository.
-Return a concise bootstrap summary covering the task, relevant architecture and files, invariants, planned commits, risks, and the project's finalization procedure using the provided schema.`,
+Return a concise bootstrap summary covering the task, relevant architecture and files, invariants, planned commits, risks, and the project's finalization procedure using the provided schema.
+For READY, put all analysis in summary; set reason, question, and whyBlocked to "", and options and evidence to [].`,
   );
   assert.equal(
     BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
