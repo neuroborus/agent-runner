@@ -6,11 +6,15 @@ import {
   BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
+  DISPUTE_RECONSIDERATION_INSTRUCTIONS,
+  FINALIZATION_INSTRUCTIONS,
+  FINDING_ARBITRATION_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
   IMPLEMENTATION_INSTRUCTIONS,
   PLAN_COMPATIBILITY_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
   REVIEW_INSTRUCTIONS,
+  STAGNATION_INSTRUCTIONS,
 } from "../src/index.js";
 
 test("bootstrap instructions preserve independent evidence and arbitration", () => {
@@ -94,5 +98,33 @@ Do not ask questions after clarification closes.
 Return PRODUCT_DECISION_REQUIRED using the provided schema only when the task, plan, repository, conventions, and prior clarifications leave a choice between materially different product requirements or behaviors unresolved and progress is otherwise impossible.
 Do not use it for technical choices, implementation difficulty, naming, or ordinary review findings.
 Otherwise, return each FIX or DISPUTE decision using the provided schema.`,
+  );
+});
+
+test("finalization and dispute prompts preserve their narrow roles", () => {
+  assert.match(
+    FINALIZATION_INSTRUCTIONS,
+    /^Locate and validate the project's finalization skill before following it in this dedicated turn\./u,
+  );
+  assert.match(FINALIZATION_INSTRUCTIONS, /Do not perform unrelated fixes/u);
+  assert.equal(
+    DISPUTE_RECONSIDERATION_INSTRUCTIONS,
+    `Reconsider the disputed findings against the task, plan, repository, diff, and Worker evidence.
+
+Do not modify the repository. Return WITHDRAW or UPHOLD with a concise reason for every disputed finding using the provided schema.
+${PRODUCT_DECISION_INSTRUCTIONS}`,
+  );
+});
+
+test("arbitration prompts preserve the mandatory cores", () => {
+  assert.equal(
+    FINDING_ARBITRATION_INSTRUCTIONS,
+    `Resolve the disputed finding from the task, plan, repository, diff, and evidence, choosing the correct outcome using the provided schema.
+
+Do not modify the repository or rewrite requirements.`,
+  );
+  assert.equal(
+    STAGNATION_INSTRUCTIONS,
+    "Diagnose why the implementation correction loop is not converging and choose the minimal valid next direction using the provided schema.",
   );
 });

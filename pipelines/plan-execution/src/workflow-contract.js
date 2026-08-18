@@ -40,10 +40,32 @@ const PIPELINE_STATE_FIELDS = new Set([
   "bootstrapArbitrationUsed",
   "compatibilityCheckRequired",
   "currentStep",
+  "reviewerStep",
+  "implementationDirection",
+  "finalizationResult",
+  "finalizedFingerprint",
+  "reviewedFingerprint",
+  "findings",
+  "previousFindings",
+  "pendingDisputes",
+  "disputeCounts",
+  "disputeHistory",
+  "findingArbitrations",
+  "correctionHistory",
+  "sameFindingRounds",
+  "pendingCorrection",
+  "blockedSinceStagnation",
+  "stagnationArbitrationUsed",
+  "stagnationDirection",
+  "reviewReconsideration",
+  "additionalFixRounds",
+  "findingOverrides",
 ]);
 const COUNTER_FIELDS = Object.freeze([
   "clarificationRounds",
   "productDecisions",
+  "fixRounds",
+  "correctionRounds",
 ]);
 const PENDING_EDIT_FIELDS = new Set([
   "schemaVersion",
@@ -56,11 +78,14 @@ const PENDING_EDIT_FIELDS = new Set([
 ]);
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const RUN_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/u;
+const REVIEW_FINDING_ID_PATTERN = /^R[1-9][0-9]{0,8}$/u;
+const FINALIZATION_ISSUE_ID_PATTERN = /^F[1-9][0-9]{0,8}$/u;
 const MAX_TEXT_LENGTH = 4_000;
 const MAX_SUMMARY_LENGTH = 20_000;
 export const MAX_PLAN_LENGTH = 100_000;
 const MAX_ITEMS = 32;
 const MAX_OPTIONS = 16;
+export const MAX_DIAGNOSTIC_ITEMS = 32;
 const MAX_STRUCTURED_RESULT_BYTES = 256 * 1024;
 const INVALID_OUTPUT_CODE = "ERR_INVALID_PLAN_EXECUTION_OUTPUT";
 export const INVALID_EXECUTION_INPUT_CODE = "ERR_INVALID_EXECUTION_INPUT";
@@ -74,6 +99,20 @@ const EDIT_PAUSE_REASONS = Object.freeze({
   "clarification-answers": "clarification_answers_required",
   "product-decision": "product_decision_required",
   "proactive-clarification": "proactive_clarification",
+});
+const PAUSE_RESUME_STATES = Object.freeze({
+  backend_unavailable: Object.freeze([
+    "CLARIFY",
+    "BOOTSTRAP",
+    "IMPLEMENT",
+    "FINALIZE",
+    "REVIEW",
+    "RESOLVE_FINDINGS",
+  ]),
+  environment_blocked: Object.freeze(["IMPLEMENT"]),
+  finalization_cannot_pass: Object.freeze(["FINALIZE"]),
+  fix_limit_reached: Object.freeze(["IMPLEMENT", "RESOLVE_FINDINGS"]),
+  no_progress: Object.freeze(["RESOLVE_FINDINGS"]),
 });
 
 export class PlanExecutionWorkflowError extends Error {
@@ -497,6 +536,548 @@ export function normalizeBootstrapArbitration(payload) {
   });
 }
 
+function normalizeOptionalEvidence(value, name, code = INVALID_OUTPUT_CODE) {
+  return normalizeTextList(value, name, {
+    allowEmpty: true,
+    code,
+  });
+}
+
+function normalizeRelativePath(value, name, code = INVALID_OUTPUT_CODE) {
+  const path = normalizeText(value, name, MAX_TEXT_LENGTH, code);
+  if (
+    isAbsolute(path) ||
+    path === "." ||
+    path.split(/[\\/]/u).some((part) => part === "..")
+  ) {
+    throw workflowError(`${name} must be repository-relative.`, code);
+  }
+  return path;
+}
+
+function normalizeReviewFinding(value, code = INVALID_OUTPUT_CODE) {
+  if (!isRecord(value) || !REVIEW_FINDING_ID_PATTERN.test(value.id)) {
+    throw workflowError("Reviewer finding has an invalid ID.", code);
+  }
+  return Object.freeze({
+    id: value.id,
+    file: normalizeRelativePath(value.file, `finding ${value.id} file`, code),
+    problem: normalizeText(
+      value.problem,
+      `finding ${value.id} problem`,
+      MAX_TEXT_LENGTH,
+      code,
+    ),
+    reason: normalizeText(
+      value.reason,
+      `finding ${value.id} reason`,
+      MAX_TEXT_LENGTH,
+      code,
+    ),
+    suggestedAction: normalizeText(
+      value.suggestedAction,
+      `finding ${value.id} suggested action`,
+      MAX_TEXT_LENGTH,
+      code,
+    ),
+  });
+}
+
+function normalizeReviewFindings(value, code = INVALID_OUTPUT_CODE) {
+  if (!Array.isArray(value) || value.length > MAX_ITEMS) {
+    throw workflowError("Reviewer findings have an invalid number of items.", code);
+  }
+  const findings = Object.freeze(
+    value.map((finding) => normalizeReviewFinding(finding, code)),
+  );
+  if (new Set(findings.map(({ id }) => id)).size !== findings.length) {
+    throw workflowError("Reviewer finding IDs must be unique.", code);
+  }
+  return findings;
+}
+
+function normalizeFinalizationIssues(value, code = INVALID_OUTPUT_CODE) {
+  if (!Array.isArray(value) || value.length > MAX_ITEMS) {
+    throw workflowError(
+      "Finalization issues have an invalid number of items.",
+      code,
+    );
+  }
+  const issues = Object.freeze(
+    value.map((issue) => {
+      if (!isRecord(issue) || !FINALIZATION_ISSUE_ID_PATTERN.test(issue.id)) {
+        throw workflowError("Finalization issue has an invalid ID.", code);
+      }
+      return Object.freeze({
+        id: issue.id,
+        command: normalizeText(
+          issue.command,
+          `finalization issue ${issue.id} command`,
+          MAX_TEXT_LENGTH,
+          code,
+        ),
+        problem: normalizeText(
+          issue.problem,
+          `finalization issue ${issue.id} problem`,
+          MAX_TEXT_LENGTH,
+          code,
+        ),
+        evidence: normalizeTextList(
+          issue.evidence,
+          `finalization issue ${issue.id} evidence`,
+          { code },
+        ),
+      });
+    }),
+  );
+  if (new Set(issues.map(({ id }) => id)).size !== issues.length) {
+    throw workflowError("Finalization issue IDs must be unique.", code);
+  }
+  return issues;
+}
+
+export function normalizeImplementationResult(payload) {
+  if (
+    !isRecord(payload) ||
+    !["COMPLETED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"].includes(
+      payload.status,
+    )
+  ) {
+    throw outputError("Worker returned an invalid implementation result.");
+  }
+  assertStructuredResultSize(payload);
+  if (payload.status === "PRODUCT_DECISION_REQUIRED") {
+    if (payload.summary !== "" || payload.reason !== "") {
+      throw outputError("Product decision contains inapplicable fields.");
+    }
+    return Object.freeze({
+      status: payload.status,
+      decision: normalizeProductDecision(payload),
+    });
+  }
+  if (payload.status === "BLOCKED") {
+    if (
+      payload.summary !== "" ||
+      payload.question !== "" ||
+      payload.whyBlocked !== "" ||
+      !emptyArray(payload.options)
+    ) {
+      throw outputError("Blocked implementation contains inapplicable fields.");
+    }
+    return Object.freeze({
+      status: payload.status,
+      reason: normalizeText(
+        payload.reason,
+        "implementation blocker",
+        MAX_TEXT_LENGTH,
+        INVALID_OUTPUT_CODE,
+      ),
+      evidence: normalizeTextList(payload.evidence, "implementation evidence", {
+        code: INVALID_OUTPUT_CODE,
+      }),
+    });
+  }
+  if (payload.reason !== "" || !emptyDecision(payload)) {
+    throw outputError("Completed implementation contains inapplicable fields.");
+  }
+  return Object.freeze({
+    status: payload.status,
+    summary: normalizeSummary(
+      payload.summary,
+      "implementation summary",
+      INVALID_OUTPUT_CODE,
+    ),
+  });
+}
+
+export function normalizeFinalizationResult(payload) {
+  const statuses = [
+    "PASS",
+    "FAIL",
+    "SKILL_MISSING",
+    "SKILL_INVALID",
+    "BLOCKED",
+    "PRODUCT_DECISION_REQUIRED",
+  ];
+  if (!isRecord(payload) || !statuses.includes(payload.status)) {
+    throw outputError("Worker returned an invalid finalization result.");
+  }
+  assertStructuredResultSize(payload);
+  if (payload.status === "PRODUCT_DECISION_REQUIRED") {
+    if (
+      payload.skillPath !== "" ||
+      payload.summary !== "" ||
+      !emptyArray(payload.issues) ||
+      payload.reason !== ""
+    ) {
+      throw outputError("Product decision contains inapplicable fields.");
+    }
+    return Object.freeze({
+      status: payload.status,
+      decision: normalizeProductDecision(payload),
+    });
+  }
+  if (["SKILL_MISSING", "SKILL_INVALID", "BLOCKED"].includes(payload.status)) {
+    if (
+      payload.summary !== "" ||
+      !emptyArray(payload.issues) ||
+      payload.question !== "" ||
+      payload.whyBlocked !== "" ||
+      !emptyArray(payload.options)
+    ) {
+      throw outputError("Unavailable finalization contains inapplicable fields.");
+    }
+    if (
+      (payload.status === "SKILL_MISSING" && payload.skillPath !== "") ||
+      (payload.status !== "SKILL_MISSING" && payload.skillPath === "")
+    ) {
+      throw outputError("Finalization skill path is inapplicable.");
+    }
+    return Object.freeze({
+      status: payload.status,
+      skillPath:
+        payload.skillPath === ""
+          ? null
+          : normalizeRelativePath(
+              payload.skillPath,
+              "finalization skill path",
+              INVALID_OUTPUT_CODE,
+            ),
+      reason: normalizeText(
+        payload.reason,
+        "finalization blocker",
+        MAX_TEXT_LENGTH,
+        INVALID_OUTPUT_CODE,
+      ),
+      evidence: normalizeOptionalEvidence(
+        payload.evidence,
+        "finalization blocker evidence",
+      ),
+    });
+  }
+  if (payload.reason !== "" || !emptyDecision(payload)) {
+    throw outputError("Finalization result contains inapplicable fields.");
+  }
+  const issues = normalizeFinalizationIssues(payload.issues);
+  if (
+    (payload.status === "PASS" && issues.length !== 0) ||
+    (payload.status === "FAIL" && issues.length === 0)
+  ) {
+    throw outputError("Finalization status does not match its issues.");
+  }
+  return Object.freeze({
+    status: payload.status,
+    skillPath: normalizeRelativePath(
+      payload.skillPath,
+      "finalization skill path",
+      INVALID_OUTPUT_CODE,
+    ),
+    summary: normalizeSummary(
+      payload.summary,
+      "finalization summary",
+      INVALID_OUTPUT_CODE,
+    ),
+    issues,
+  });
+}
+
+export function normalizeReviewResult(payload, previousFindings = []) {
+  if (
+    !isRecord(payload) ||
+    !["APPROVED", "FINDINGS", "PRODUCT_DECISION_REQUIRED"].includes(
+      payload.status,
+    )
+  ) {
+    throw outputError("Reviewer returned an invalid review result.");
+  }
+  assertStructuredResultSize(payload);
+  if (payload.status === "PRODUCT_DECISION_REQUIRED") {
+    if (!emptyArray(payload.findings)) {
+      throw outputError("Product decision must not include findings.");
+    }
+    return Object.freeze({
+      status: payload.status,
+      decision: normalizeProductDecision(payload),
+    });
+  }
+  if (!emptyDecision(payload)) {
+    throw outputError("Review result contains inapplicable fields.");
+  }
+  const findings = normalizeReviewFindings(payload.findings);
+  if (
+    (payload.status === "APPROVED" && findings.length !== 0) ||
+    (payload.status === "FINDINGS" && findings.length === 0)
+  ) {
+    throw outputError("Review status does not match its findings.");
+  }
+  for (const finding of findings) {
+    const previous = previousFindings.find(
+      (candidate) =>
+        candidate.file === finding.file && candidate.problem === finding.problem,
+    );
+    if (previous !== undefined && previous.id !== finding.id) {
+      throw outputError("Reviewer changed the ID of an unchanged finding.");
+    }
+  }
+  return Object.freeze({ status: payload.status, findings });
+}
+
+export function normalizeResolutionResult(payload, blockers, arbitratedIds) {
+  if (
+    !isRecord(payload) ||
+    !["RESOLVED", "PRODUCT_DECISION_REQUIRED"].includes(payload.status)
+  ) {
+    throw outputError("Worker returned an invalid finding resolution.");
+  }
+  assertStructuredResultSize(payload);
+  if (payload.status === "PRODUCT_DECISION_REQUIRED") {
+    if (!emptyArray(payload.decisions)) {
+      throw outputError("Product decision must not include finding decisions.");
+    }
+    return Object.freeze({
+      status: payload.status,
+      decision: normalizeProductDecision(payload),
+    });
+  }
+  if (!emptyDecision(payload) || !Array.isArray(payload.decisions)) {
+    throw outputError("Finding resolution contains inapplicable fields.");
+  }
+  const expectedIds = blockers.map(({ id }) => id).sort();
+  const decisions = Object.freeze(
+    payload.decisions.map((decision) => {
+      if (
+        !isRecord(decision) ||
+        !["FIX", "DISPUTE"].includes(decision.decision) ||
+        !expectedIds.includes(decision.id)
+      ) {
+        throw outputError("Worker returned an invalid finding decision.");
+      }
+      if (
+        decision.decision === "DISPUTE" &&
+        (decision.id.startsWith("F") || arbitratedIds.has(decision.id))
+      ) {
+        throw outputError("This blocker cannot be disputed.");
+      }
+      return Object.freeze({
+        id: decision.id,
+        decision: decision.decision,
+        reason: normalizeText(
+          decision.reason,
+          `resolution ${decision.id} reason`,
+          MAX_TEXT_LENGTH,
+          INVALID_OUTPUT_CODE,
+        ),
+        evidence:
+          decision.decision === "DISPUTE"
+            ? normalizeTextList(
+                decision.evidence,
+                `dispute ${decision.id} evidence`,
+                { code: INVALID_OUTPUT_CODE },
+              )
+            : normalizeOptionalEvidence(
+                decision.evidence,
+                `fix ${decision.id} evidence`,
+              ),
+      });
+    }),
+  );
+  const actualIds = decisions.map(({ id }) => id).sort();
+  if (
+    decisions.length !== blockers.length ||
+    new Set(actualIds).size !== actualIds.length ||
+    actualIds.some((id, index) => id !== expectedIds[index])
+  ) {
+    throw outputError("Worker must resolve every current blocker exactly once.");
+  }
+  return Object.freeze({ status: payload.status, decisions });
+}
+
+export function normalizeReconsiderationResult(payload, disputes) {
+  if (
+    !isRecord(payload) ||
+    !["RESOLVED", "PRODUCT_DECISION_REQUIRED"].includes(payload.status)
+  ) {
+    throw outputError("Reviewer returned an invalid dispute reconsideration.");
+  }
+  assertStructuredResultSize(payload);
+  if (payload.status === "PRODUCT_DECISION_REQUIRED") {
+    if (!emptyArray(payload.decisions)) {
+      throw outputError("Product decision must not include dispute decisions.");
+    }
+    return Object.freeze({
+      status: payload.status,
+      decision: normalizeProductDecision(payload),
+    });
+  }
+  if (!emptyDecision(payload) || !Array.isArray(payload.decisions)) {
+    throw outputError("Dispute reconsideration contains inapplicable fields.");
+  }
+  const expectedIds = disputes.map(({ findingId }) => findingId).sort();
+  const decisions = Object.freeze(
+    payload.decisions.map((decision) => {
+      if (
+        !isRecord(decision) ||
+        !["WITHDRAW", "UPHOLD"].includes(decision.direction) ||
+        !expectedIds.includes(decision.id)
+      ) {
+        throw outputError("Reviewer returned an invalid dispute decision.");
+      }
+      return Object.freeze({
+        findingId: decision.id,
+        direction: decision.direction,
+        reason: normalizeText(
+          decision.reason,
+          `dispute ${decision.id} reconsideration`,
+          MAX_TEXT_LENGTH,
+          INVALID_OUTPUT_CODE,
+        ),
+        evidence: normalizeOptionalEvidence(
+          decision.evidence,
+          `dispute ${decision.id} reconsideration evidence`,
+        ),
+      });
+    }),
+  );
+  const actualIds = decisions.map(({ findingId }) => findingId).sort();
+  if (
+    decisions.length !== disputes.length ||
+    new Set(actualIds).size !== actualIds.length ||
+    actualIds.some((id, index) => id !== expectedIds[index])
+  ) {
+    throw outputError("Reviewer must reconsider every dispute exactly once.");
+  }
+  return Object.freeze({ status: payload.status, decisions });
+}
+
+export function normalizeFindingArbitration(payload) {
+  const directions = [
+    "WORKER_CORRECT",
+    "REVIEWER_CORRECT",
+    "REQUIREMENT_AMBIGUOUS",
+  ];
+  if (!isRecord(payload) || !directions.includes(payload.direction)) {
+    throw outputError("Arbiter returned an invalid finding direction.");
+  }
+  assertStructuredResultSize(payload);
+  const rationale = normalizeText(
+    payload.rationale,
+    "finding arbitration rationale",
+    MAX_TEXT_LENGTH,
+    INVALID_OUTPUT_CODE,
+  );
+  if (payload.direction === "REQUIREMENT_AMBIGUOUS") {
+    return Object.freeze({
+      direction: payload.direction,
+      rationale,
+      decision: normalizeProductDecision(payload),
+    });
+  }
+  if (!emptyDecision(payload)) {
+    throw outputError("Finding arbitration contains inapplicable fields.");
+  }
+  return Object.freeze({ direction: payload.direction, rationale });
+}
+
+export function normalizeStagnationResult(payload, pipelineState) {
+  const directions = [
+    "CONTINUE_FIXES",
+    "REWORK_IMPLEMENTATION",
+    "RECONSIDER_FINDINGS",
+    "PLAN_REVISION_REQUIRED",
+    "PRODUCT_DECISION_REQUIRED",
+  ];
+  if (!isRecord(payload) || !directions.includes(payload.direction)) {
+    throw outputError("Arbiter returned an invalid stagnation direction.");
+  }
+  assertStructuredResultSize(payload);
+  const rationale = normalizeText(
+    payload.rationale,
+    "stagnation rationale",
+    MAX_TEXT_LENGTH,
+    INVALID_OUTPUT_CODE,
+  );
+  if (payload.direction === "PRODUCT_DECISION_REQUIRED") {
+    if (!emptyArray(payload.findingIds) || payload.reason !== "") {
+      throw outputError("Product decision contains inapplicable fields.");
+    }
+    return Object.freeze({
+      direction: payload.direction,
+      rationale,
+      decision: normalizeProductDecision(payload),
+    });
+  }
+  if (payload.direction === "PLAN_REVISION_REQUIRED") {
+    if (!emptyArray(payload.findingIds) || !emptyDecision(payload, { ignoreEvidence: true })) {
+      throw outputError("Plan revision contains inapplicable fields.");
+    }
+    return Object.freeze({
+      direction: payload.direction,
+      rationale,
+      reason: normalizeText(
+        payload.reason,
+        "plan-revision reason",
+        MAX_TEXT_LENGTH,
+        INVALID_OUTPUT_CODE,
+      ),
+      evidence: normalizeTextList(payload.evidence, "plan-revision evidence", {
+        code: INVALID_OUTPUT_CODE,
+      }),
+    });
+  }
+  if (payload.reason !== "" || !emptyDecision(payload)) {
+    throw outputError("Stagnation result contains inapplicable fields.");
+  }
+  if (!Array.isArray(payload.findingIds)) {
+    throw outputError("Stagnation finding IDs are invalid.");
+  }
+  const findingIds = payload.findingIds.map((id) => {
+    if (!REVIEW_FINDING_ID_PATTERN.test(id)) {
+      throw outputError("Stagnation finding ID is invalid.");
+    }
+    return id;
+  });
+  const currentFindingIds = new Set(pipelineState.findings.map(({ id }) => id));
+  if (
+    (payload.direction === "RECONSIDER_FINDINGS" &&
+      (findingIds.length === 0 ||
+        new Set(findingIds).size !== findingIds.length ||
+        findingIds.some((id) => !currentFindingIds.has(id)))) ||
+    (payload.direction !== "RECONSIDER_FINDINGS" && findingIds.length !== 0)
+  ) {
+    throw outputError("Stagnation direction names inapplicable findings.");
+  }
+  return Object.freeze({
+    direction: payload.direction,
+    rationale,
+    findingIds: Object.freeze(findingIds),
+  });
+}
+
+export function normalizeResumeAction(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (!isRecord(value) || !["extra-fix-rounds", "override-finding"].includes(value.type)) {
+    throw workflowError("Plan-execution resume action is invalid.");
+  }
+  if (
+    value.type === "extra-fix-rounds" &&
+    Object.keys(value).length === 2 &&
+    Number.isSafeInteger(value.amount) &&
+    value.amount > 0
+  ) {
+    return Object.freeze({ type: value.type, amount: value.amount });
+  }
+  if (
+    value.type === "override-finding" &&
+    Object.keys(value).length === 2 &&
+    REVIEW_FINDING_ID_PATTERN.test(value.findingId)
+  ) {
+    return Object.freeze({ type: value.type, findingId: value.findingId });
+  }
+  throw workflowError("Plan-execution resume action is invalid.");
+}
+
 function normalizePendingEdit(value) {
   if (value === null) {
     return null;
@@ -521,7 +1102,7 @@ function normalizePendingEdit(value) {
   }
   const expectedStates = {
     "clarification-answers": ["CLARIFY"],
-    "product-decision": ["CLARIFY", "BOOTSTRAP"],
+    "product-decision": ["CLARIFY", "BOOTSTRAP", "IMPLEMENT"],
     "proactive-clarification": ["CLARIFY"],
   }[value.action];
   if (!expectedStates?.includes(value.suspendedState)) {
@@ -552,6 +1133,224 @@ function normalizedSummary(value, name) {
   return value === null ? null : normalizeSummary(value, name);
 }
 
+function assertExactFields(value, fields, name) {
+  if (
+    !isRecord(value) ||
+    Object.keys(value).length !== fields.length ||
+    fields.some((field) => !Object.hasOwn(value, field))
+  ) {
+    throw workflowError(`${name} is invalid.`);
+  }
+}
+
+function normalizePersistedFindings(value, name = "Plan-execution findings") {
+  try {
+    return normalizeReviewFindings(value, "ERR_INVALID_PLAN_EXECUTION_STATE");
+  } catch (cause) {
+    throw new PlanExecutionWorkflowError(`${name} are invalid.`, {
+      cause,
+      code: "ERR_INVALID_PLAN_EXECUTION_STATE",
+    });
+  }
+}
+
+function normalizePersistedFinalization(value) {
+  if (value === null) {
+    return null;
+  }
+  assertExactFields(
+    value,
+    ["status", "skillPath", "summary", "issues", "fingerprint"],
+    "Plan-execution finalization result",
+  );
+  if (
+    !["PASS", "FAIL"].includes(value.status) ||
+    !HASH_PATTERN.test(value.fingerprint)
+  ) {
+    throw workflowError("Plan-execution finalization result is invalid.");
+  }
+  normalizeRelativePath(
+    value.skillPath,
+    "finalization skill path",
+    "ERR_INVALID_PLAN_EXECUTION_STATE",
+  );
+  normalizeSummary(value.summary, "finalization summary");
+  const issues = normalizeFinalizationIssues(
+    value.issues,
+    "ERR_INVALID_PLAN_EXECUTION_STATE",
+  );
+  if (
+    (value.status === "PASS" && issues.length !== 0) ||
+    (value.status === "FAIL" && issues.length === 0)
+  ) {
+    throw workflowError("Plan-execution finalization result is inconsistent.");
+  }
+  return value;
+}
+
+function normalizeStringCountRecord(value, name) {
+  if (!isRecord(value) || Object.keys(value).length > MAX_DIAGNOSTIC_ITEMS) {
+    throw workflowError(`${name} is invalid.`);
+  }
+  for (const [id, count] of Object.entries(value)) {
+    if (
+      !REVIEW_FINDING_ID_PATTERN.test(id) ||
+      !Number.isSafeInteger(count) ||
+      count < 1
+    ) {
+      throw workflowError(`${name} is invalid.`);
+    }
+  }
+  return value;
+}
+
+function normalizePendingDisputes(value) {
+  if (!Array.isArray(value) || value.length > MAX_ITEMS) {
+    throw workflowError("Plan-execution pending disputes are invalid.");
+  }
+  const disputes = value.map((dispute) => {
+    assertExactFields(
+      dispute,
+      ["findingId", "reason", "evidence"],
+      "Plan-execution pending dispute",
+    );
+    if (!REVIEW_FINDING_ID_PATTERN.test(dispute.findingId)) {
+      throw workflowError("Plan-execution pending dispute is invalid.");
+    }
+    normalizeText(dispute.reason, `dispute ${dispute.findingId} reason`);
+    normalizeTextList(dispute.evidence, `dispute ${dispute.findingId} evidence`);
+    return dispute;
+  });
+  if (new Set(disputes.map(({ findingId }) => findingId)).size !== disputes.length) {
+    throw workflowError("Plan-execution pending disputes must be unique.");
+  }
+  return value;
+}
+
+function normalizeDisputeHistory(value) {
+  if (!Array.isArray(value) || value.length > MAX_DIAGNOSTIC_ITEMS) {
+    throw workflowError("Plan-execution dispute history is invalid.");
+  }
+  for (const entry of value) {
+    assertExactFields(
+      entry,
+      [
+        "findingId",
+        "attempt",
+        "direction",
+        "workerReason",
+        "workerEvidence",
+        "reviewerReason",
+        "reviewerEvidence",
+      ],
+      "Plan-execution dispute history entry",
+    );
+    if (
+      !REVIEW_FINDING_ID_PATTERN.test(entry.findingId) ||
+      !Number.isSafeInteger(entry.attempt) ||
+      entry.attempt < 1 ||
+      !["WITHDRAW", "UPHOLD"].includes(entry.direction)
+    ) {
+      throw workflowError("Plan-execution dispute history entry is invalid.");
+    }
+    normalizeText(entry.workerReason, "dispute Worker reason");
+    normalizeTextList(entry.workerEvidence, "dispute Worker evidence");
+    normalizeText(entry.reviewerReason, "dispute Reviewer reason");
+    normalizeTextList(entry.reviewerEvidence, "dispute Reviewer evidence", {
+      allowEmpty: true,
+    });
+  }
+  return value;
+}
+
+function normalizeFindingArbitrations(value) {
+  if (!Array.isArray(value) || value.length > MAX_DIAGNOSTIC_ITEMS) {
+    throw workflowError("Plan-execution finding arbitrations are invalid.");
+  }
+  for (const entry of value) {
+    assertExactFields(
+      entry,
+      ["findingId", "direction", "rationale"],
+      "Plan-execution finding arbitration",
+    );
+    if (
+      !REVIEW_FINDING_ID_PATTERN.test(entry.findingId) ||
+      !["WORKER_CORRECT", "REVIEWER_CORRECT"].includes(entry.direction)
+    ) {
+      throw workflowError("Plan-execution finding arbitration is invalid.");
+    }
+    normalizeText(entry.rationale, "finding arbitration rationale");
+  }
+  if (new Set(value.map(({ findingId }) => findingId)).size !== value.length) {
+    throw workflowError("Plan-execution finding arbitrations must be unique.");
+  }
+  return value;
+}
+
+function normalizeCorrectionHistory(value) {
+  if (!Array.isArray(value) || value.length > MAX_DIAGNOSTIC_ITEMS) {
+    throw workflowError("Plan-execution correction history is invalid.");
+  }
+  for (const entry of value) {
+    assertExactFields(
+      entry,
+      ["round", "fingerprint", "finalizationIssueIds", "findingIds"],
+      "Plan-execution correction history entry",
+    );
+    if (
+      !Number.isSafeInteger(entry.round) ||
+      entry.round < 1 ||
+      !HASH_PATTERN.test(entry.fingerprint) ||
+      !Array.isArray(entry.finalizationIssueIds) ||
+      !Array.isArray(entry.findingIds) ||
+      entry.finalizationIssueIds.some(
+        (id) => !FINALIZATION_ISSUE_ID_PATTERN.test(id),
+      ) ||
+      entry.findingIds.some((id) => !REVIEW_FINDING_ID_PATTERN.test(id)) ||
+      new Set(entry.finalizationIssueIds).size !==
+        entry.finalizationIssueIds.length ||
+      new Set(entry.findingIds).size !== entry.findingIds.length ||
+      (entry.finalizationIssueIds.length === 0) ===
+        (entry.findingIds.length === 0)
+    ) {
+      throw workflowError("Plan-execution correction history entry is invalid.");
+    }
+  }
+  return value;
+}
+
+function normalizeDirection(value, name, directions) {
+  if (value === null) {
+    return null;
+  }
+  assertExactFields(value, ["direction", "rationale"], name);
+  if (!directions.includes(value.direction)) {
+    throw workflowError(`${name} is invalid.`);
+  }
+  normalizeText(value.rationale, `${name} rationale`);
+  return value;
+}
+
+function normalizeFindingOverrides(value) {
+  if (!Array.isArray(value) || value.length > MAX_DIAGNOSTIC_ITEMS) {
+    throw workflowError("Plan-execution finding overrides are invalid.");
+  }
+  for (const entry of value) {
+    assertExactFields(
+      entry,
+      ["findingId", "fingerprint"],
+      "Plan-execution finding override",
+    );
+    if (
+      !REVIEW_FINDING_ID_PATTERN.test(entry.findingId) ||
+      !HASH_PATTERN.test(entry.fingerprint)
+    ) {
+      throw workflowError("Plan-execution finding override is invalid.");
+    }
+  }
+  return value;
+}
+
 export function normalizePipelineState(value) {
   if (!isRecord(value)) {
     throw workflowError("Plan-execution state must be an object.");
@@ -570,6 +1369,8 @@ export function normalizePipelineState(value) {
     "clarificationFrozen",
     "bootstrapArbitrationUsed",
     "compatibilityCheckRequired",
+    "pendingCorrection",
+    "stagnationArbitrationUsed",
   ]) {
     if (typeof value[field] !== "boolean") {
       throw workflowError(`Plan-execution state field ${field} is invalid.`);
@@ -684,15 +1485,16 @@ export function normalizePipelineState(value) {
   }
   if (
     value.compatibilityCheckRequired &&
-    (!["BOOTSTRAP", "WAITING_FOR_USER", "FAILED"].includes(
+    (!["BOOTSTRAP", "IMPLEMENT", "WAITING_FOR_USER", "FAILED"].includes(
       value.workflowState,
     ) ||
       value.clarificationFrozen ||
-      workerSummary !== null ||
-      reviewerSummary !== null ||
-      resolvedSummary !== null ||
       disagreement !== null ||
-      value.currentStep !== null)
+      (value.currentStep === null
+        ? workerSummary !== null ||
+          reviewerSummary !== null ||
+          resolvedSummary !== null
+        : resolvedSummary === null))
   ) {
     throw workflowError("Plan-execution compatibility state is invalid.");
   }
@@ -701,6 +1503,186 @@ export function normalizePipelineState(value) {
     (!Number.isSafeInteger(value.currentStep) || value.currentStep < 1)
   ) {
     throw workflowError("Plan-execution current step is invalid.");
+  }
+  if (
+    value.reviewerStep !== null &&
+    (!Number.isSafeInteger(value.reviewerStep) ||
+      value.reviewerStep < 1 ||
+      value.currentStep === null ||
+      value.reviewerStep > value.currentStep)
+  ) {
+    throw workflowError("Plan-execution Reviewer step is invalid.");
+  }
+  const implementationDirection = normalizeDirection(
+    value.implementationDirection,
+    "Plan-execution implementation direction",
+    ["REWORK_IMPLEMENTATION"],
+  );
+  const finalizationResult = normalizePersistedFinalization(
+    value.finalizationResult,
+  );
+  const findings = normalizePersistedFindings(value.findings);
+  const previousFindings = normalizePersistedFindings(
+    value.previousFindings,
+    "Plan-execution previous findings",
+  );
+  const pendingDisputes = normalizePendingDisputes(value.pendingDisputes);
+  const disputeCounts = normalizeStringCountRecord(
+    value.disputeCounts,
+    "Plan-execution dispute counts",
+  );
+  normalizeDisputeHistory(value.disputeHistory);
+  const findingArbitrations = normalizeFindingArbitrations(
+    value.findingArbitrations,
+  );
+  normalizeCorrectionHistory(value.correctionHistory);
+  const sameFindingRounds = normalizeStringCountRecord(
+    value.sameFindingRounds,
+    "Plan-execution same-finding rounds",
+  );
+  const stagnationDirection = normalizeDirection(
+    value.stagnationDirection,
+    "Plan-execution stagnation direction",
+    ["CONTINUE_FIXES", "REWORK_IMPLEMENTATION", "RECONSIDER_FINDINGS"],
+  );
+  if (value.stagnationArbitrationUsed !== (stagnationDirection !== null)) {
+    throw workflowError("Plan-execution stagnation arbitration is inconsistent.");
+  }
+  if (
+    !Number.isSafeInteger(value.blockedSinceStagnation) ||
+    value.blockedSinceStagnation < 0 ||
+    !Number.isSafeInteger(value.additionalFixRounds) ||
+    value.additionalFixRounds < 0 ||
+    (value.settings !== null &&
+      !Number.isSafeInteger(
+        value.settings.maxFixRoundsPerStep + value.additionalFixRounds,
+      ))
+  ) {
+    throw workflowError("Plan-execution correction progress is invalid.");
+  }
+  if (
+    value.finalizedFingerprint !== null &&
+    !HASH_PATTERN.test(value.finalizedFingerprint)
+  ) {
+    throw workflowError("Plan-execution finalized fingerprint is invalid.");
+  }
+  if (
+    value.reviewedFingerprint !== null &&
+    !HASH_PATTERN.test(value.reviewedFingerprint)
+  ) {
+    throw workflowError("Plan-execution reviewed fingerprint is invalid.");
+  }
+  if (
+    !Array.isArray(value.reviewReconsideration) ||
+    value.reviewReconsideration.length > MAX_ITEMS ||
+    value.reviewReconsideration.some(
+      (id) => !REVIEW_FINDING_ID_PATTERN.test(id),
+    ) ||
+    new Set(value.reviewReconsideration).size !==
+      value.reviewReconsideration.length
+  ) {
+    throw workflowError("Plan-execution review reconsideration is invalid.");
+  }
+  normalizeFindingOverrides(value.findingOverrides);
+  const currentFindingIds = new Set(findings.map(({ id }) => id));
+  const previousFindingIds = new Set(previousFindings.map(({ id }) => id));
+  const deferredDisputes =
+    pendingDisputes.length > 0 &&
+    findings.length === 0 &&
+    pendingDisputes.every(({ findingId }) =>
+      previousFindingIds.has(findingId),
+    ) &&
+    ([
+      "IMPLEMENT",
+      "FINALIZE",
+      "REVIEW",
+      "WAITING_FOR_USER",
+      "FAILED",
+    ].includes(value.workflowState) ||
+      (value.workflowState === "RESOLVE_FINDINGS" &&
+        finalizationResult?.status === "FAIL"));
+  if (
+    (pendingDisputes.some(
+      ({ findingId }) => !currentFindingIds.has(findingId),
+    ) &&
+      !deferredDisputes) ||
+    (["FINALIZE", "REVIEW"].includes(value.workflowState) &&
+      pendingDisputes.length > 0 &&
+      !deferredDisputes) ||
+    value.reviewReconsideration.some((id) => !currentFindingIds.has(id)) ||
+    Object.keys(disputeCounts).some(
+      (id) =>
+        !currentFindingIds.has(id) &&
+        !pendingDisputes.some(({ findingId }) => findingId === id) &&
+        !value.disputeHistory.some((entry) => entry.findingId === id) &&
+        !value.findingOverrides.some((entry) => entry.findingId === id),
+    )
+  ) {
+    throw workflowError("Plan-execution finding progress is inconsistent.");
+  }
+  if (
+    finalizationResult === null &&
+    (value.finalizedFingerprint !== null ||
+      value.reviewedFingerprint !== null ||
+      findings.length !== 0 ||
+      (pendingDisputes.length !== 0 && !deferredDisputes))
+  ) {
+    throw workflowError("Plan-execution validation progress is inconsistent.");
+  }
+  if (
+    finalizationResult !== null &&
+    ((finalizationResult.status === "PASS") !==
+      (value.finalizedFingerprint === finalizationResult.fingerprint) ||
+      (value.reviewedFingerprint !== null &&
+        value.reviewedFingerprint !== value.finalizedFingerprint) ||
+      (finalizationResult.status === "FAIL" &&
+        (value.reviewedFingerprint !== null || findings.length !== 0)))
+  ) {
+    throw workflowError("Plan-execution finalization progress is inconsistent.");
+  }
+  if (
+    (findings.length > 0 || pendingDisputes.length > 0) &&
+    value.reviewedFingerprint === null &&
+    !deferredDisputes
+  ) {
+    throw workflowError("Plan-execution review progress is inconsistent.");
+  }
+  if (
+    implementationDirection !== null &&
+    (!["IMPLEMENT", "WAITING_FOR_USER", "FAILED"].includes(
+      value.workflowState,
+    ) ||
+      stagnationDirection?.direction !== "REWORK_IMPLEMENTATION")
+  ) {
+    throw workflowError("Plan-execution implementation direction is inapplicable.");
+  }
+  if (
+    value.pendingCorrection &&
+    !["FINALIZE", "REVIEW", "WAITING_FOR_USER", "FAILED"].includes(
+      value.workflowState,
+    )
+  ) {
+    throw workflowError("Plan-execution pending correction is inapplicable.");
+  }
+  if (
+    stagnationDirection !== null &&
+    ![
+      "IMPLEMENT",
+      "FINALIZE",
+      "REVIEW",
+      "RESOLVE_FINDINGS",
+      "COMMIT",
+      "WAITING_FOR_USER",
+      "FAILED",
+    ].includes(value.workflowState)
+  ) {
+    throw workflowError("Plan-execution stagnation direction is inapplicable.");
+  }
+  if (
+    value.reviewReconsideration.length > 0 &&
+    !["REVIEW", "WAITING_FOR_USER", "FAILED"].includes(value.workflowState)
+  ) {
+    throw workflowError("Plan-execution review reconsideration is inapplicable.");
   }
   if (
     !value.preflightComplete &&
@@ -712,15 +1694,47 @@ export function normalizePipelineState(value) {
       disagreement !== null ||
       value.bootstrapArbitrationUsed ||
       value.compatibilityCheckRequired ||
-      value.currentStep !== null)
+      value.currentStep !== null ||
+      value.reviewerStep !== null ||
+      implementationDirection !== null ||
+      finalizationResult !== null ||
+      previousFindings.length !== 0 ||
+      Object.keys(disputeCounts).length !== 0 ||
+      value.disputeHistory.length !== 0 ||
+      findingArbitrations.length !== 0 ||
+      value.correctionHistory.length !== 0 ||
+      Object.keys(sameFindingRounds).length !== 0 ||
+      value.pendingCorrection ||
+      value.blockedSinceStagnation !== 0 ||
+      value.stagnationArbitrationUsed ||
+      stagnationDirection !== null ||
+      value.reviewReconsideration.length !== 0 ||
+      value.additionalFixRounds !== 0 ||
+      value.findingOverrides.length !== 0)
   ) {
     throw workflowError("Plan-execution preflight state is inconsistent.");
   }
   if (
     ["CLARIFY", "BOOTSTRAP"].includes(value.workflowState) &&
-    value.currentStep !== null
+    (value.currentStep !== null ||
+      value.reviewerStep !== null ||
+      implementationDirection !== null ||
+      finalizationResult !== null ||
+      previousFindings.length !== 0 ||
+      Object.keys(disputeCounts).length !== 0 ||
+      value.disputeHistory.length !== 0 ||
+      findingArbitrations.length !== 0 ||
+      value.correctionHistory.length !== 0 ||
+      Object.keys(sameFindingRounds).length !== 0 ||
+      value.pendingCorrection ||
+      value.blockedSinceStagnation !== 0 ||
+      value.stagnationArbitrationUsed ||
+      stagnationDirection !== null ||
+      value.reviewReconsideration.length !== 0 ||
+      value.additionalFixRounds !== 0 ||
+      value.findingOverrides.length !== 0)
   ) {
-    throw workflowError("Plan-execution current step is not applicable.");
+    throw workflowError("Plan-execution work progress is not applicable.");
   }
   if (
     value.workflowState === "CLARIFY" &&
@@ -741,9 +1755,63 @@ export function normalizePipelineState(value) {
   }
   if (
     value.workflowState === "IMPLEMENT" &&
-    (!value.clarificationFrozen || resolvedSummary === null || value.currentStep !== 1)
+    ((!value.clarificationFrozen && !value.compatibilityCheckRequired) ||
+      resolvedSummary === null ||
+      value.currentStep === null ||
+      finalizationResult !== null ||
+      findings.length !== 0 ||
+      (pendingDisputes.length !== 0 && !deferredDisputes) ||
+      value.reviewReconsideration.length !== 0)
   ) {
     throw workflowError("Plan-execution implementation state is inconsistent.");
+  }
+  if (
+    ["FINALIZE", "REVIEW", "RESOLVE_FINDINGS", "COMMIT"].includes(
+      value.workflowState,
+    ) &&
+    (!value.clarificationFrozen ||
+      resolvedSummary === null ||
+      value.currentStep === null ||
+      value.compatibilityCheckRequired)
+  ) {
+    throw workflowError("Plan-execution active step state is inconsistent.");
+  }
+  if (
+    value.workflowState === "FINALIZE" &&
+    (finalizationResult !== null ||
+      findings.length !== 0 ||
+      value.reviewReconsideration.length !== 0)
+  ) {
+    throw workflowError("Plan-execution finalization state is inconsistent.");
+  }
+  if (
+    value.workflowState === "REVIEW" &&
+    (finalizationResult?.status !== "PASS" ||
+      value.finalizedFingerprint === null)
+  ) {
+    throw workflowError("Plan-execution review state is inconsistent.");
+  }
+  const finalizationBlocked =
+    finalizationResult?.status === "FAIL" &&
+    finalizationResult.issues.length > 0;
+  if (
+    value.workflowState === "RESOLVE_FINDINGS" &&
+    !finalizationBlocked &&
+    findings.length === 0 &&
+    pendingDisputes.length === 0
+  ) {
+    throw workflowError("Plan-execution finding resolution has no blockers.");
+  }
+  if (
+    value.workflowState === "COMMIT" &&
+    (finalizationResult?.status !== "PASS" ||
+      value.finalizedFingerprint === null ||
+      value.reviewedFingerprint !== value.finalizedFingerprint ||
+      findings.length !== 0 ||
+      pendingDisputes.length !== 0 ||
+      value.reviewReconsideration.length !== 0)
+  ) {
+    throw workflowError("Plan-execution commit gate is inconsistent.");
   }
   if (
     !["CLARIFY", "WAITING_FOR_USER", "FAILED"].includes(value.workflowState) &&
@@ -777,6 +1845,26 @@ export function createPlanExecutionState({ proactiveClarification = false } = {}
     bootstrapArbitrationUsed: false,
     compatibilityCheckRequired: false,
     currentStep: null,
+    reviewerStep: null,
+    implementationDirection: null,
+    finalizationResult: null,
+    finalizedFingerprint: null,
+    reviewedFingerprint: null,
+    findings: Object.freeze([]),
+    previousFindings: Object.freeze([]),
+    pendingDisputes: Object.freeze([]),
+    disputeCounts: Object.freeze({}),
+    disputeHistory: Object.freeze([]),
+    findingArbitrations: Object.freeze([]),
+    correctionHistory: Object.freeze([]),
+    sameFindingRounds: Object.freeze({}),
+    pendingCorrection: false,
+    blockedSinceStagnation: 0,
+    stagnationArbitrationUsed: false,
+    stagnationDirection: null,
+    reviewReconsideration: Object.freeze([]),
+    additionalFixRounds: 0,
+    findingOverrides: Object.freeze([]),
   });
 }
 
@@ -942,6 +2030,35 @@ export function assertRun(run) {
     ) {
       throw workflowError("Plan-execution pending edit pause is invalid.");
     }
+    const hasResumeState = Object.hasOwn(run.pause, "resumeState");
+    const allowedResumeStates = Object.hasOwn(
+      PAUSE_RESUME_STATES,
+      run.pause.reason,
+    )
+      ? PAUSE_RESUME_STATES[run.pause.reason]
+      : undefined;
+    const requiresResumeState =
+      ["fix_limit_reached", "no_progress"].includes(run.pause.reason) ||
+      (state.preflightComplete &&
+        ["backend_unavailable", "environment_blocked"].includes(
+          run.pause.reason,
+        )) ||
+      (run.pause.reason === "finalization_cannot_pass" &&
+        run.pause.code !== "ERR_FINALIZATION_MODIFIED_BEFORE_VALIDATION");
+    if (
+      (hasResumeState &&
+        (!allowedResumeStates?.includes(run.pause.resumeState) ||
+          !state.preflightComplete)) ||
+      (requiresResumeState && !hasResumeState)
+    ) {
+      throw workflowError("Plan-execution pause resume state is invalid.");
+    }
+    if (hasResumeState) {
+      normalizePipelineState({
+        ...state,
+        workflowState: run.pause.resumeState,
+      });
+    }
   }
   const hashFields = [
     "task",
@@ -967,8 +2084,46 @@ export function assertRun(run) {
   }
   assertCounterRecord(run.counters);
   const counters = normalizedCounters(run.counters);
-  if (counters.clarificationRounds > MAX_CLARIFICATION_ROUNDS) {
+  const correctionHistory = state.correctionHistory;
+  const lastCorrection = correctionHistory.at(-1)?.round ?? 0;
+  const lastCorrectionFindingIds = new Set(
+    correctionHistory.at(-1)?.findingIds ?? [],
+  );
+  if (
+    counters.clarificationRounds > MAX_CLARIFICATION_ROUNDS ||
+    counters.correctionRounds > counters.fixRounds ||
+    counters.fixRounds >
+      (state.settings?.maxFixRoundsPerStep ?? 0) + state.additionalFixRounds ||
+    lastCorrection !== counters.correctionRounds ||
+    correctionHistory.some(
+      (entry, index) =>
+        index > 0 &&
+        entry.round !== correctionHistory[index - 1].round + 1,
+    ) ||
+    state.blockedSinceStagnation > counters.correctionRounds ||
+    Object.keys(state.sameFindingRounds).some(
+      (id) => !lastCorrectionFindingIds.has(id),
+    ) ||
+    Object.values(state.sameFindingRounds).some(
+      (count) => count > counters.correctionRounds,
+    )
+  ) {
     throw workflowError("Plan-execution persisted progress is invalid.");
+  }
+  for (const [findingId, count] of Object.entries(state.disputeCounts)) {
+    const recorded = state.disputeHistory.filter(
+      (entry) => entry.findingId === findingId,
+    );
+    if (
+      count > state.settings.maxDisputesPerFinding ||
+      recorded.some(
+        (entry, index) =>
+          entry.attempt > count ||
+          (index > 0 && entry.attempt <= recorded[index - 1].attempt),
+      )
+    ) {
+      throw workflowError("Plan-execution dispute progress is invalid.");
+    }
   }
   if (state.canonicalPlan !== null) {
     const stepCount = parseCommitPlan(state.canonicalPlan).steps.length;
@@ -1020,7 +2175,12 @@ export function assertRuntime(runtime) {
       throw workflowError(`Plan-execution runtime.${name} is invalid.`);
     }
   }
-  for (const name of ["assertUnchanged", "preflight", "snapshot"]) {
+  for (const name of [
+    "assertUnchanged",
+    "contentFingerprint",
+    "preflight",
+    "snapshot",
+  ]) {
     if (typeof runtime.git[name] !== "function") {
       throw workflowError(`Plan-execution Git service.${name} is invalid.`);
     }

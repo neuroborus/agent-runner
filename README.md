@@ -8,10 +8,11 @@ small runner.
 > **Status:** the public command shape, module boundaries, versioned repository
 > configuration, deterministic commit-plan contract, external run store,
 > clarification and Git-safety services, Codex and Claude adapters, the complete
-> plan-authoring state machine, plan-execution preflight, clarification, and
-> independent bootstrap, two pipeline descriptors, tests, and agent guidance
-> are present. The `run`, `resume`, and `status` workflows are not wired yet and
-> deliberately return a non-zero exit code.
+> plan-authoring state machine, and plan-execution through implementation,
+> finalization, review, finding resolution, and the commit gate are present.
+> Two pipeline descriptors, tests, and agent guidance are included. The `run`,
+> `resume`, and `status` workflows are not wired yet and deliberately return a
+> non-zero exit code.
 
 Architecture is documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 Each pipeline owns its specification under its workspace.

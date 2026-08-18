@@ -302,7 +302,8 @@ root runtime to interpret them. Native backend session resume is optional; the
 persisted task, plan, decisions, summaries, and lineage must be sufficient to
 continue with a new native session.
 
-Write state atomically using temporary-file + rename.
+Validate the complete next pipeline state before handing a transition to the
+root state service. Write state atomically using temporary-file + rename.
 
 ### `events.jsonl`
 
@@ -402,6 +403,11 @@ A request should contain only runner-level concepts such as:
 ```
 
 Backend-specific CLI flags belong only inside the adapter.
+
+For non-commit turns, an adapter error may set `recoverable: true` only when
+reconstructing and retrying the durable request is safe. Safety, protocol, and
+isolation failures are not recoverable; an ambiguous `local-commit` outcome is
+never retried and must instead return to Git-state verification.
 
 `local-commit` is a one-turn capability used only after the runner's commit gate
 and requires the `commit` constraint. It allows the Worker to stage and create
@@ -955,6 +961,14 @@ Run the project's `finalization` skill in a dedicated Worker turn.
 
 The finalization turn should execute the validation procedure and report its result. It should not perform unrelated discretionary fixes in the same turn.
 
+Before invocation, the Worker reports a missing or invalid resolved skill and
+does not execute it. A safe structured result is one of `PASS`, `FAIL`,
+`SKILL_MISSING`, `SKILL_INVALID`, `BLOCKED`, or the narrowly permitted
+`PRODUCT_DECISION_REQUIRED`. `FAIL` supplies stable `F`-prefixed issue IDs for
+the current procedure output; `PASS`, `FAIL`, `SKILL_INVALID`, and `BLOCKED`
+identify the resolved repository-relative skill path. Missing, invalid, or
+blocked finalization pauses without advancing.
+
 The finalization procedure may legitimately modify files when the project itself requires this, for example formatting or generated output.
 
 Therefore:
@@ -1002,7 +1016,7 @@ Machine-actionable review output:
 
 ```json
 {
-  "approved": false,
+  "status": "FINDINGS",
   "findings": [
     {
       "id": "R3",
@@ -1011,7 +1025,11 @@ Machine-actionable review output:
       "reason": "...",
       "suggestedAction": "..."
     }
-  ]
+  ],
+  "question": "",
+  "options": [],
+  "whyBlocked": "",
+  "evidence": []
 }
 ```
 
@@ -1050,6 +1068,10 @@ If the Worker agrees:
 2. return control;
 3. run finalization again;
 4. run a complete re-review.
+
+When one resolution batch mixes `FIX` and `DISPUTE`, preserve the disputes
+through finalization, let the Reviewer reconsider them after finalization
+passes, then run the complete re-review.
 
 #### DISPUTE
 
@@ -1121,6 +1143,28 @@ REQUIREMENT_AMBIGUOUS
 ```
 
 The Arbiter never rewrites requirements.
+
+Per-finding arbitration preserves this mandatory core:
+
+```text
+Resolve the disputed finding from the task, plan, repository, diff, and evidence, choosing the correct outcome using the provided schema.
+```
+
+Correction-loop stagnation is a separate arbitration episode for correction
+churn that has not already reached the stable-finding limit. After the first
+`stagnationWindowRounds` consecutive blocked correction rounds, invoke one
+fresh read-only Arbiter with compact persisted history and this mandatory core:
+
+```text
+Diagnose why the implementation correction loop is not converging and choose the minimal valid next direction using the provided schema.
+```
+
+Its structured directions are `CONTINUE_FIXES`, `REWORK_IMPLEMENTATION`,
+`RECONSIDER_FINDINGS`, `PLAN_REVISION_REQUIRED`, and
+`PRODUCT_DECISION_REQUIRED`. The result cannot approve work, resolve a finding,
+reset a budget, or satisfy the commit gate. Content changes remain Worker-only,
+and finding reconsideration remains Reviewer-only. If another complete blocked
+window accumulates after this arbitration, pause instead of invoking it again.
 
 ### 13.6 Commit gate
 
@@ -1229,10 +1273,23 @@ A fix round is one Worker fix response followed by the required finalization/rev
 
 Finalization failures that require code changes consume fix rounds too.
 
+A blocked correction round is recorded after a completed fix when finalization
+fails, or when finalization passes and the subsequent review returns to finding
+resolution. Persist its content fingerprint and exact finalization issue or
+Reviewer finding IDs. This diagnostic history is bounded and uses exact IDs;
+do not add fuzzy or semantic finding matching. Track consecutive exact-ID
+counts separately so the configured stable-finding limit remains enforceable
+beyond the retained diagnostic-history window.
+
 No-progress detection in V1 is intentionally simple:
 
 - if the same stable finding ID remains open for `maxSameFindingRounds` consecutive rounds, pause;
 - do not implement fuzzy/semantic similarity detection.
+
+Disputes do not consume fix rounds. After `maxDisputesPerFinding` upheld
+disputes, invoke one read-only per-finding arbitration. An Arbiter decision in
+the Reviewer's favor leaves the finding blocking and requires a fix or explicit
+user override; it does not permit another dispute of the same reviewed finding.
 
 Reaching any limit **never** means accept-and-continue.
 
@@ -1259,6 +1316,7 @@ fix_limit_reached
 dispute_limit_reached
 no_progress
 finalization_skill_missing
+finalization_skill_invalid
 finalization_cannot_pass
 read_only_agent_mutated_repository
 unexpected_git_ref_change
@@ -1311,6 +1369,19 @@ agent-run resume \
 
 Do not reset previous counters/history.
 
+Also support one explicit override of a currently open finding for the exact
+current reviewed fingerprint:
+
+```bash
+agent-run resume \
+  --run <run-id> \
+  --override-finding R7
+```
+
+Both resume actions are valid only for an applicable paused run. The override
+removes only the named finding, does not approve any other finding, and becomes
+stale as soon as the reviewed content fingerprint changes.
+
 A user override must be explicitly recorded in `events.jsonl` and `progress.md`.
 
 ---
@@ -1328,6 +1399,10 @@ Before continuing:
 4. verify project path;
 5. verify current HEAD;
 6. verify current working-tree content/state against persisted expectations.
+
+Reject a persisted resume target unless the exact pause reason permits it and
+the suspended pipeline state is valid for that target in the current preflight
+phase.
 
 If task inputs changed while paused:
 
@@ -1453,6 +1528,8 @@ pipelines/plan-execution/
 ├── src/
 │   ├── index.js
 │   ├── prompts.js
+│   ├── schemas.js
+│   ├── workflow-contract.js
 │   └── workflow.js
 └── test/
 ```

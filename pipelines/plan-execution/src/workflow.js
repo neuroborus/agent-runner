@@ -11,19 +11,34 @@ import {
   BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
+  DISPUTE_RECONSIDERATION_INSTRUCTIONS,
+  FINALIZATION_INSTRUCTIONS,
+  FINDING_ARBITRATION_INSTRUCTIONS,
+  FINDING_RESOLUTION_INSTRUCTIONS,
+  IMPLEMENTATION_INSTRUCTIONS,
   PLAN_COMPATIBILITY_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
+  REVIEW_INSTRUCTIONS,
+  STAGNATION_INSTRUCTIONS,
 } from "./prompts.js";
 import {
   BOOTSTRAP_ARBITRATION_SCHEMA,
   BOOTSTRAP_RECONCILIATION_SCHEMA,
   BOOTSTRAP_SCHEMA,
   CLARIFICATION_SCHEMA,
+  DISPUTE_RECONSIDERATION_SCHEMA,
+  FINALIZATION_SCHEMA,
+  FINDING_ARBITRATION_SCHEMA,
+  FINDING_RESOLUTION_SCHEMA,
+  IMPLEMENTATION_SCHEMA,
   PLAN_COMPATIBILITY_SCHEMA,
+  REVIEW_SCHEMA,
+  STAGNATION_SCHEMA,
 } from "./schemas.js";
 import {
   INVALID_EXECUTION_INPUT_CODE,
   MAX_CLARIFICATION_ROUNDS,
+  MAX_DIAGNOSTIC_ITEMS,
   MAX_PLAN_LENGTH,
   PlanExecutionWorkflowError,
   WORKFLOW_STATES,
@@ -37,9 +52,17 @@ import {
   normalizeBootstrapResult,
   normalizeClarificationResult,
   normalizeCompatibilityResult,
+  normalizeFinalizationResult,
+  normalizeFindingArbitration,
   normalizeInputSnapshot,
+  normalizeImplementationResult,
   normalizePipelineState,
+  normalizeReconsiderationResult,
   normalizeReconciliationResult,
+  normalizeResolutionResult,
+  normalizeResumeAction,
+  normalizeReviewResult,
+  normalizeStagnationResult,
   normalizedCounters,
   workflowError,
 } from "./workflow-contract.js";
@@ -59,8 +82,10 @@ const INPUT_DRIFT_ERROR_CODES = new Set([
   "ENOTDIR",
   "EPERM",
 ]);
-const RETRYABLE_PREFLIGHT_REASONS = new Set([
+const RETRYABLE_PAUSE_REASONS = new Set([
   "backend_unavailable",
+  "environment_blocked",
+  "finalization_cannot_pass",
   "local_artifacts_not_ignored",
   "unsafe_git_state",
 ]);
@@ -148,9 +173,10 @@ function diagnosticCode(cause, fallback) {
     : fallback;
 }
 
-export async function runPlanExecution({ run, runtime, settings }) {
+export async function runPlanExecution({ action, run, runtime, settings }) {
   assertRun(run);
   assertRuntime(runtime);
+  const resumeAction = normalizeResumeAction(action);
   if (run.pipelineState.settings === null) {
     assertSettings(settings);
   }
@@ -174,15 +200,14 @@ export async function runPlanExecution({ run, runtime, settings }) {
       publicActivity,
     } = {},
   ) {
-    currentRun = await runtime.transition(
-      {
-        counters: nextCounters,
-        hashes: nextHashes,
-        pause,
-        pipelineState: nextPipelineState,
-      },
-      { activity: publicActivity },
-    );
+    const patch = {
+      counters: nextCounters,
+      hashes: nextHashes,
+      pause,
+      pipelineState: nextPipelineState,
+    };
+    assertRun({ ...currentRun, ...patch });
+    currentRun = await runtime.transition(patch, { activity: publicActivity });
     assertRun(currentRun);
     return currentRun;
   }
@@ -244,8 +269,33 @@ export async function runPlanExecution({ run, runtime, settings }) {
         bootstrapArbitrationUsed: false,
         compatibilityCheckRequired: false,
         currentStep: null,
+        reviewerStep: null,
+        implementationDirection: null,
+        finalizationResult: null,
+        finalizedFingerprint: null,
+        reviewedFingerprint: null,
+        findings: [],
+        previousFindings: [],
+        pendingDisputes: [],
+        disputeCounts: {},
+        disputeHistory: [],
+        findingArbitrations: [],
+        correctionHistory: [],
+        sameFindingRounds: {},
+        pendingCorrection: false,
+        blockedSinceStagnation: 0,
+        stagnationArbitrationUsed: false,
+        stagnationDirection: null,
+        reviewReconsideration: [],
+        additionalFixRounds: 0,
+        findingOverrides: [],
       },
       {
+        nextCounters: {
+          ...counters(),
+          fixRounds: 0,
+          correctionRounds: 0,
+        },
         pause: { reason, ...(code === undefined ? {} : { code }) },
         publicActivity: activity("runner", phase, "changed", message),
       },
@@ -400,11 +450,33 @@ export async function runPlanExecution({ run, runtime, settings }) {
     );
   }
 
+  function workspaceControlChange(before, after) {
+    if (
+      before.projectPath !== after.projectPath ||
+      before.head !== after.head ||
+      before.branch !== after.branch ||
+      before.detached !== after.detached ||
+      before.refsFingerprint !== after.refsFingerprint
+    ) {
+      return "unexpected_git_ref_change";
+    }
+    if (
+      before.remoteConfigurationFingerprint !==
+      after.remoteConfigurationFingerprint
+    ) {
+      return "unexpected_remote_configuration_change";
+    }
+    if (before.identityFingerprint !== after.identityFingerprint) {
+      return "unexpected_git_identity_change";
+    }
+    return null;
+  }
+
   async function runRole(
     role,
     schema,
     buildPrompt,
-    { freshSession = false } = {},
+    { access = "read-only", freshSession = false } = {},
   ) {
     await ensureRoleCapabilities(role);
     const evidence = await readCurrentInputs();
@@ -433,7 +505,7 @@ export async function runPlanExecution({ run, runtime, settings }) {
           : undefined;
     const roleConfiguration = currentRun.roles[role];
     const request = {
-      access: "read-only",
+      access,
       cwd: currentRun.projectPath,
       prompt: buildPrompt(
         inputEvidence(evidence.inputs, evidence.canonicalPlan, evidence.clarification),
@@ -451,10 +523,63 @@ export async function runPlanExecution({ run, runtime, settings }) {
     } catch (cause) {
       agentError = cause;
     }
-    await runtime.git.assertUnchanged(turnSnapshot);
-    await runtime.git.assertUnchanged(baseline);
+    let nextRepositoryBaseline = baseline;
+    if (access === "read-only") {
+      await runtime.git.assertUnchanged(turnSnapshot);
+      await runtime.git.assertUnchanged(baseline);
+    } else {
+      nextRepositoryBaseline = await runtime.git.snapshot({
+        allowedPaths: baseline.allowedPaths,
+        projectPath: baseline.projectPath,
+      });
+      const reason = workspaceControlChange(
+        turnSnapshot,
+        nextRepositoryBaseline,
+      );
+      if (reason !== null) {
+        await pause(reason);
+        return null;
+      }
+    }
     if ((await readCurrentInputs()) === null) {
       return null;
+    }
+    if (access !== "read-only") {
+      const current = state();
+      const changedCorrection =
+        current.workflowState === "RESOLVE_FINDINGS" &&
+        turnSnapshot.contentFingerprint !==
+          nextRepositoryBaseline.contentFingerprint;
+      await transition(
+        changedCorrection
+          ? {
+              ...current,
+              workflowState: "FINALIZE",
+              repositoryBaseline: nextRepositoryBaseline,
+              finalizationResult: null,
+              finalizedFingerprint: null,
+              reviewedFingerprint: null,
+              previousFindings:
+                current.findings.length === 0
+                  ? current.previousFindings
+                  : current.findings,
+              findings: [],
+              pendingCorrection: true,
+              reviewReconsideration: [],
+            }
+          : {
+              ...current,
+              repositoryBaseline: nextRepositoryBaseline,
+            },
+        changedCorrection
+          ? {
+              nextCounters: {
+                ...counters(),
+                fixRounds: counters().fixRounds + 1,
+              },
+            }
+          : {},
+      );
     }
     if (agentError !== undefined) {
       throw agentError;
@@ -536,6 +661,8 @@ export async function runPlanExecution({ run, runtime, settings }) {
       return;
     }
     const productDecision = result.action === "product-decision";
+    const bootstrapDecision =
+      productDecision && result.suspendedState === "BOOTSTRAP";
     await transition(
       {
         ...current,
@@ -546,18 +673,19 @@ export async function runPlanExecution({ run, runtime, settings }) {
             ? true
             : current.proactiveClarificationComplete,
         clarificationFrozen: false,
-        workerSummary: productDecision ? null : current.workerSummary,
-        reviewerSummary: productDecision ? null : current.reviewerSummary,
-        resolvedSummary: productDecision ? null : current.resolvedSummary,
-        bootstrapDisagreement: productDecision
+        workerSummary: bootstrapDecision ? null : current.workerSummary,
+        reviewerSummary: bootstrapDecision ? null : current.reviewerSummary,
+        resolvedSummary: bootstrapDecision ? null : current.resolvedSummary,
+        bootstrapDisagreement: bootstrapDecision
           ? null
           : current.bootstrapDisagreement,
-        bootstrapArbitrationUsed: productDecision
+        bootstrapArbitrationUsed: bootstrapDecision
           ? false
           : current.bootstrapArbitrationUsed,
         compatibilityCheckRequired:
-          productDecision && result.suspendedState === "BOOTSTRAP",
-        currentStep: productDecision ? null : current.currentStep,
+          productDecision &&
+          ["BOOTSTRAP", "IMPLEMENT"].includes(result.suspendedState),
+        currentStep: bootstrapDecision ? null : current.currentStep,
       },
       {
         nextHashes: {
@@ -612,6 +740,7 @@ export async function runPlanExecution({ run, runtime, settings }) {
       ...decision,
     });
     const current = state();
+    const bootstrapDecision = suspendedState === "BOOTSTRAP";
     return requestEdit(
       "product-decision",
       suspendedState,
@@ -621,13 +750,36 @@ export async function runPlanExecution({ run, runtime, settings }) {
         nextPipelineState: {
           ...current,
           clarificationFrozen: false,
-          workerSummary: null,
-          reviewerSummary: null,
-          resolvedSummary: null,
-          bootstrapDisagreement: null,
-          bootstrapArbitrationUsed: false,
+          workerSummary: bootstrapDecision ? null : current.workerSummary,
+          reviewerSummary: bootstrapDecision ? null : current.reviewerSummary,
+          resolvedSummary: bootstrapDecision ? null : current.resolvedSummary,
+          bootstrapDisagreement: bootstrapDecision
+            ? null
+            : current.bootstrapDisagreement,
+          bootstrapArbitrationUsed: bootstrapDecision
+            ? false
+            : current.bootstrapArbitrationUsed,
           compatibilityCheckRequired: false,
-          currentStep: null,
+          currentStep: bootstrapDecision ? null : current.currentStep,
+          implementationDirection: null,
+          finalizationResult: null,
+          finalizedFingerprint: null,
+          reviewedFingerprint: null,
+          findings: [],
+          previousFindings:
+            current.findings.length === 0
+              ? current.previousFindings
+              : current.findings,
+          pendingDisputes: [],
+          disputeCounts: {},
+          disputeHistory: [],
+          findingArbitrations: [],
+          sameFindingRounds: {},
+          pendingCorrection: false,
+          blockedSinceStagnation: 0,
+          stagnationArbitrationUsed: false,
+          stagnationDirection: null,
+          reviewReconsideration: [],
         },
         nextCounters: { ...counters(), productDecisions: count },
         nextHashes: {
@@ -653,6 +805,106 @@ export async function runPlanExecution({ run, runtime, settings }) {
 
   async function writeContext(path, content) {
     await runtime.writeRunArtifact({ path, content: `${content.trim()}\n` });
+  }
+
+  function planStep() {
+    return parseCommitPlan(state().canonicalPlan).steps[state().currentStep - 1];
+  }
+
+  function fixBudget() {
+    return state().settings.maxFixRoundsPerStep + state().additionalFixRounds;
+  }
+
+  function activeBlockers() {
+    if (state().finalizationResult?.status === "FAIL") {
+      return state().finalizationResult.issues.map((issue) => ({
+        ...issue,
+        source: "finalization",
+      }));
+    }
+    return state().findings.map((finding) => ({
+      ...finding,
+      source: "review",
+    }));
+  }
+
+  async function contentFingerprint() {
+    return runtime.git.contentFingerprint({
+      allowedPaths: [state().clarificationPath],
+      projectPath: state().repositoryBaseline.projectPath,
+    });
+  }
+
+  function correctionUpdate({ fingerprint, finalizationIssueIds, findingIds }) {
+    const current = state();
+    const currentCounters = counters();
+    if (!current.pendingCorrection) {
+      return Object.freeze({
+        counters: currentCounters,
+        history: current.correctionHistory,
+        sameFindingRounds: current.sameFindingRounds,
+        blockedSinceStagnation: current.blockedSinceStagnation,
+      });
+    }
+    const correctionRounds = currentCounters.correctionRounds + 1;
+    return Object.freeze({
+      counters: {
+        ...currentCounters,
+        correctionRounds,
+      },
+      history: [
+        ...current.correctionHistory,
+        {
+          round: correctionRounds,
+          fingerprint,
+          finalizationIssueIds,
+          findingIds,
+        },
+      ].slice(-MAX_DIAGNOSTIC_ITEMS),
+      sameFindingRounds: Object.fromEntries(
+        findingIds.map((id) => [id, (current.sameFindingRounds[id] ?? 0) + 1]),
+      ),
+      blockedSinceStagnation: current.blockedSinceStagnation + 1,
+    });
+  }
+
+  function exhaustedStableFindingIds() {
+    return state().findings
+      .map(({ id }) => id)
+      .filter(
+        (id) =>
+          (state().sameFindingRounds[id] ?? 0) >=
+          state().settings.maxSameFindingRounds,
+      );
+  }
+
+  function latestDispute(findingId) {
+    return [...state().disputeHistory]
+      .reverse()
+      .find((entry) => entry.findingId === findingId);
+  }
+
+  function priorFindingDecisions(findingIds) {
+    const relevantIds =
+      findingIds === undefined ? null : new Set(findingIds);
+    return {
+      disputes: state().disputeHistory.filter(({ findingId }) =>
+        relevantIds === null || relevantIds.has(findingId),
+      ),
+      arbitrations: state().findingArbitrations.filter(({ findingId }) =>
+        relevantIds === null || relevantIds.has(findingId),
+      ),
+    };
+  }
+
+  function disputeNeedsArbitration(dispute) {
+    const count = state().disputeCounts[dispute.findingId] ?? 0;
+    const latest = latestDispute(dispute.findingId);
+    return (
+      count >= state().settings.maxDisputesPerFinding &&
+      latest?.attempt === count &&
+      latest.direction === "UPHOLD"
+    );
   }
 
   async function initializeInputs() {
@@ -940,9 +1192,972 @@ ${JSON.stringify(state().bootstrapDisagreement, null, 2)}`,
     return true;
   }
 
+  async function applyResumeAction() {
+    if (resumeAction === null) {
+      return true;
+    }
+    if (
+      state().workflowState !== "WAITING_FOR_USER" ||
+      state().pendingEdit !== null
+    ) {
+      throw workflowError("Resume action is not applicable to this run.");
+    }
+    if (
+      (await readCurrentInputs()) === null ||
+      !(await verifyPersistedRepository())
+    ) {
+      return false;
+    }
+    if (resumeAction.type === "extra-fix-rounds") {
+      if (
+        currentRun.pause.reason !== "fix_limit_reached" ||
+        !["IMPLEMENT", "RESOLVE_FINDINGS"].includes(
+          currentRun.pause.resumeState,
+        )
+      ) {
+        throw workflowError("Additional fix rounds are not applicable.");
+      }
+      const additionalFixRounds =
+        state().additionalFixRounds + resumeAction.amount;
+      if (
+        !Number.isSafeInteger(additionalFixRounds) ||
+        !Number.isSafeInteger(
+          state().settings.maxFixRoundsPerStep + additionalFixRounds,
+        )
+      ) {
+        throw workflowError("Additional fix-round budget is too large.");
+      }
+      await transition(
+        {
+          ...state(),
+          workflowState: currentRun.pause.resumeState,
+          additionalFixRounds,
+        },
+        {
+          pause: null,
+          publicActivity: activity(
+            "runner",
+            "resolution",
+            "extra-fix-rounds",
+            `${resumeAction.amount} additional fix rounds granted.`,
+          ),
+        },
+      );
+      return true;
+    }
+    if (
+      !["fix_limit_reached", "no_progress", "dispute_limit_reached"].includes(
+        currentRun.pause.reason,
+      ) ||
+      state().finalizationResult?.status !== "PASS" ||
+      state().reviewedFingerprint === null
+    ) {
+      throw workflowError("Finding override is not applicable.");
+    }
+    const finding = state().findings.find(
+      ({ id }) => id === resumeAction.findingId,
+    );
+    if (
+      finding === undefined ||
+      (await contentFingerprint()) !== state().reviewedFingerprint
+    ) {
+      throw workflowError("Finding override is stale or inapplicable.");
+    }
+    const findings = state().findings.filter(
+      ({ id }) => id !== resumeAction.findingId,
+    );
+    const pendingDisputes = state().pendingDisputes.filter(
+      ({ findingId }) => findingId !== resumeAction.findingId,
+    );
+    await transition(
+      {
+        ...state(),
+        workflowState:
+          findings.length === 0 && pendingDisputes.length === 0
+            ? "COMMIT"
+            : "RESOLVE_FINDINGS",
+        findings,
+        pendingDisputes,
+        reviewReconsideration: state().reviewReconsideration.filter(
+          (id) => id !== resumeAction.findingId,
+        ),
+        findingOverrides: [
+          ...state().findingOverrides,
+          {
+            findingId: resumeAction.findingId,
+            fingerprint: state().reviewedFingerprint,
+          },
+        ].slice(-MAX_DIAGNOSTIC_ITEMS),
+      },
+      {
+        pause: null,
+        publicActivity: activity(
+          "runner",
+          "resolution",
+          "finding-overridden",
+          `Finding ${resumeAction.findingId} explicitly overridden.`,
+        ),
+      },
+    );
+    return true;
+  }
+
+  async function runImplementationTurn() {
+    const current = state();
+    const correction = current.implementationDirection !== null;
+    if (correction && counters().fixRounds >= fixBudget()) {
+      await pause("fix_limit_reached", {
+        fixRounds: counters().fixRounds,
+        resumeState: "IMPLEMENT",
+      });
+      return false;
+    }
+    const step = planStep();
+    const output = await runRole(
+      "worker",
+      IMPLEMENTATION_SCHEMA,
+      (evidence) => `${IMPLEMENTATION_INSTRUCTIONS}
+
+Use COMPLETED with a concise summary, BLOCKED only for an external environment blocker, or PRODUCT_DECISION_REQUIRED for the narrowly permitted product exception. Use empty fields that do not apply.
+
+${evidence}
+
+Resolved bootstrap context:
+${current.resolvedSummary}
+
+Current planned commit:
+## Commit ${step.number}: ${step.subject}
+
+${step.body}${
+        current.implementationDirection === null
+          ? ""
+          : `\n\nRequired rework direction:\n${JSON.stringify(current.implementationDirection, null, 2)}\n\nPersisted correction context:\n${JSON.stringify(
+              {
+                previousFindings: current.previousFindings,
+                pendingDisputes: current.pendingDisputes,
+                correctionHistory: current.correctionHistory,
+                priorDecisions: priorFindingDecisions(),
+              },
+              null,
+              2,
+            )}`
+      }`,
+      { access: "workspace-write" },
+    );
+    if (output === null) {
+      return false;
+    }
+    const result = normalizeImplementationResult(output);
+    if (result.status === "PRODUCT_DECISION_REQUIRED") {
+      return productDecision(result.decision, "IMPLEMENT");
+    }
+    if (result.status === "BLOCKED") {
+      await pause("environment_blocked", {
+        explanation: result.reason,
+        evidence: result.evidence,
+        resumeState: "IMPLEMENT",
+      });
+      return false;
+    }
+    const nextCounters = correction
+      ? { ...counters(), fixRounds: counters().fixRounds + 1 }
+      : counters();
+    await transition(
+      {
+        ...state(),
+        workflowState: "FINALIZE",
+        implementationDirection: null,
+        finalizationResult: null,
+        finalizedFingerprint: null,
+        reviewedFingerprint: null,
+        findings: [],
+        pendingDisputes: correction ? current.pendingDisputes : [],
+        pendingCorrection: correction,
+        reviewReconsideration: [],
+      },
+      {
+        nextCounters,
+        publicActivity: activity(
+          "worker",
+          "implementation",
+          correction ? "reworked" : "completed",
+          correction
+            ? "Implementation rework completed."
+            : "Planned implementation completed.",
+        ),
+      },
+    );
+    return true;
+  }
+
+  async function runFinalizationTurn() {
+    const step = planStep();
+    const beforeFingerprint = await contentFingerprint();
+    const output = await runRole(
+      "worker",
+      FINALIZATION_SCHEMA,
+      (evidence) => `${FINALIZATION_INSTRUCTIONS}
+
+Use PASS only after the complete resolved skill succeeds, FAIL with stable F-prefixed issue IDs for validation failures, SKILL_MISSING or SKILL_INVALID before invoking an unavailable skill, BLOCKED only when the procedure cannot complete safely, or PRODUCT_DECISION_REQUIRED for the narrowly permitted product exception. Use empty fields that do not apply.
+
+${evidence}
+
+Current planned commit:
+## Commit ${step.number}: ${step.subject}
+
+${step.body}
+
+Resolved bootstrap context:
+${state().resolvedSummary}`,
+      { access: "workspace-write" },
+    );
+    if (output === null) {
+      return false;
+    }
+    const result = normalizeFinalizationResult(output);
+    if (result.status === "PRODUCT_DECISION_REQUIRED") {
+      return productDecision(result.decision, "IMPLEMENT");
+    }
+    if (["SKILL_MISSING", "SKILL_INVALID", "BLOCKED"].includes(result.status)) {
+      const modifiedBeforeValidation =
+        result.status !== "BLOCKED" &&
+        (await contentFingerprint()) !== beforeFingerprint;
+      const reasons = {
+        SKILL_MISSING: "finalization_skill_missing",
+        SKILL_INVALID: "finalization_skill_invalid",
+        BLOCKED: "finalization_cannot_pass",
+      };
+      await pause(
+        modifiedBeforeValidation
+          ? "finalization_cannot_pass"
+          : reasons[result.status],
+        {
+          explanation: result.reason,
+          evidence: result.evidence,
+          ...(modifiedBeforeValidation
+            ? { code: "ERR_FINALIZATION_MODIFIED_BEFORE_VALIDATION" }
+            : {}),
+          ...(result.skillPath === null ? {} : { skillPath: result.skillPath }),
+          ...(result.status === "BLOCKED" ? { resumeState: "FINALIZE" } : {}),
+        },
+      );
+      return false;
+    }
+    const fingerprint = await contentFingerprint();
+    const finalizationResult = { ...result, fingerprint };
+    if (result.status === "FAIL") {
+      const correction = correctionUpdate({
+        fingerprint,
+        finalizationIssueIds: result.issues.map(({ id }) => id),
+        findingIds: [],
+      });
+      await transition(
+        {
+          ...state(),
+          workflowState: "RESOLVE_FINDINGS",
+          finalizationResult,
+          finalizedFingerprint: null,
+          reviewedFingerprint: null,
+          findings: [],
+          pendingDisputes: state().pendingDisputes,
+          correctionHistory: correction.history,
+          sameFindingRounds: correction.sameFindingRounds,
+          pendingCorrection: false,
+          blockedSinceStagnation: correction.blockedSinceStagnation,
+          reviewReconsideration: [],
+        },
+        {
+          nextCounters: correction.counters,
+          publicActivity: activity(
+            "worker",
+            "finalization",
+            "failed",
+            `Finalization reported ${result.issues.length} blocking issues.`,
+          ),
+        },
+      );
+      return true;
+    }
+    await transition(
+      {
+        ...state(),
+        workflowState: "REVIEW",
+        finalizationResult,
+        finalizedFingerprint: fingerprint,
+        reviewedFingerprint: null,
+        findings: [],
+        pendingDisputes: state().pendingDisputes,
+        reviewReconsideration: [],
+      },
+      {
+        publicActivity: activity(
+          "worker",
+          "finalization",
+          "passed",
+          "Project finalization passed.",
+        ),
+      },
+    );
+    return true;
+  }
+
+  async function runReviewTurn() {
+    const current = state();
+    const fingerprint = await contentFingerprint();
+    if (fingerprint !== current.finalizedFingerprint) {
+      throw workflowError("Finalized content changed before review.");
+    }
+    const step = planStep();
+    const freshSession =
+      current.currentStep > 1 && current.reviewerStep !== current.currentStep;
+    const output = await runRole(
+      "reviewer",
+      REVIEW_SCHEMA,
+      (evidence) => `${REVIEW_INSTRUCTIONS}
+
+Use stable R-prefixed numeric finding IDs, reusing an existing ID for the same finding. Use APPROVED with no findings, FINDINGS with every actionable blocker, or PRODUCT_DECISION_REQUIRED for the narrowly permitted product exception. Use empty fields that do not apply.
+
+${evidence}
+
+Resolved bootstrap context:
+${current.resolvedSummary}
+
+Current planned commit:
+## Commit ${step.number}: ${step.subject}
+
+${step.body}
+
+Finalization result:
+${JSON.stringify(current.finalizationResult, null, 2)}
+
+Previous findings for this step:
+${JSON.stringify(current.previousFindings, null, 2)}${
+        current.reviewReconsideration.length === 0
+          ? ""
+          : `\n\nReconsider these current finding IDs as requested by the Arbiter:\n${current.reviewReconsideration.join(", ")}`
+      }
+
+Prior decisions for this step:
+${JSON.stringify(priorFindingDecisions(), null, 2)}`,
+      { freshSession },
+    );
+    if (output === null) {
+      return false;
+    }
+    const result = normalizeReviewResult(output, current.previousFindings);
+    if (result.status === "PRODUCT_DECISION_REQUIRED") {
+      return productDecision(result.decision, "IMPLEMENT");
+    }
+    const reviewedFingerprint = await contentFingerprint();
+    if (reviewedFingerprint !== fingerprint) {
+      throw workflowError("Reviewed content fingerprint changed unexpectedly.");
+    }
+    if (result.status === "FINDINGS") {
+      const correction = correctionUpdate({
+        fingerprint,
+        finalizationIssueIds: [],
+        findingIds: result.findings.map(({ id }) => id),
+      });
+      const pendingDisputes = result.findings.flatMap(({ id }) => {
+        const latest = latestDispute(id);
+        return latest?.direction === "UPHOLD" &&
+          latest.attempt === current.disputeCounts[id] &&
+          current.disputeCounts[id] >= current.settings.maxDisputesPerFinding &&
+          !current.findingArbitrations.some(
+            ({ findingId }) => findingId === id,
+          )
+          ? [
+              {
+                findingId: id,
+                reason: latest.workerReason,
+                evidence: latest.workerEvidence,
+              },
+            ]
+          : [];
+      });
+      await transition(
+        {
+          ...state(),
+          workflowState: "RESOLVE_FINDINGS",
+          reviewedFingerprint,
+          findings: result.findings,
+          previousFindings: result.findings,
+          pendingDisputes,
+          correctionHistory: correction.history,
+          sameFindingRounds: correction.sameFindingRounds,
+          pendingCorrection: false,
+          blockedSinceStagnation: correction.blockedSinceStagnation,
+          reviewerStep: current.currentStep,
+          reviewReconsideration: [],
+        },
+        {
+          nextCounters: correction.counters,
+          publicActivity: activity(
+            "reviewer",
+            "review",
+            "findings",
+            `Review reported ${result.findings.length} blocking findings.`,
+          ),
+        },
+      );
+      return true;
+    }
+    await transition(
+      {
+        ...state(),
+        workflowState: "COMMIT",
+        reviewedFingerprint,
+        findings: [],
+        previousFindings: [],
+        pendingDisputes: [],
+        pendingCorrection: false,
+        reviewerStep: current.currentStep,
+        reviewReconsideration: [],
+      },
+      {
+        publicActivity: activity(
+          "reviewer",
+          "review",
+          "approved",
+          "Review approved the finalized content.",
+        ),
+      },
+    );
+    return true;
+  }
+
+  async function reconsiderDisputes() {
+    const current = state();
+    const disputedFindings =
+      current.findings.length === 0
+        ? current.previousFindings.filter((finding) =>
+            current.pendingDisputes.some(
+              ({ findingId }) => findingId === finding.id,
+            ),
+          )
+        : current.findings;
+    const output = await runRole(
+      "reviewer",
+      DISPUTE_RECONSIDERATION_SCHEMA,
+      (evidence) => `${DISPUTE_RECONSIDERATION_INSTRUCTIONS}
+
+Use empty product-decision fields unless status is PRODUCT_DECISION_REQUIRED.
+
+${evidence}
+
+Current findings:
+${JSON.stringify(disputedFindings, null, 2)}
+
+Worker disputes:
+${JSON.stringify(current.pendingDisputes, null, 2)}`,
+    );
+    if (output === null) {
+      return false;
+    }
+    const result = normalizeReconsiderationResult(
+      output,
+      current.pendingDisputes,
+    );
+    if (result.status === "PRODUCT_DECISION_REQUIRED") {
+      return productDecision(result.decision, "IMPLEMENT");
+    }
+    const decisions = new Map(
+      result.decisions.map((decision) => [decision.findingId, decision]),
+    );
+    const reviewPending = current.reviewedFingerprint === null;
+    const findings = disputedFindings.filter((finding) => {
+      return decisions.get(finding.id)?.direction !== "WITHDRAW";
+    });
+    const pendingDisputes = current.pendingDisputes.filter((dispute) => {
+      const decision = decisions.get(dispute.findingId);
+      return (
+        decision.direction === "UPHOLD" &&
+        current.disputeCounts[dispute.findingId] >=
+          current.settings.maxDisputesPerFinding
+      );
+    });
+    const history = [
+      ...current.disputeHistory,
+      ...current.pendingDisputes.map((dispute) => {
+        const decision = decisions.get(dispute.findingId);
+        return {
+          findingId: dispute.findingId,
+          attempt: current.disputeCounts[dispute.findingId],
+          direction: decision.direction,
+          workerReason: dispute.reason,
+          workerEvidence: dispute.evidence,
+          reviewerReason: decision.reason,
+          reviewerEvidence: decision.evidence,
+        };
+      }),
+    ].slice(-MAX_DIAGNOSTIC_ITEMS);
+    await transition(
+      {
+        ...current,
+        workflowState: reviewPending
+          ? "REVIEW"
+          : findings.length === 0 && pendingDisputes.length === 0
+            ? "COMMIT"
+            : "RESOLVE_FINDINGS",
+        findings: reviewPending ? [] : findings,
+        pendingDisputes: reviewPending ? [] : pendingDisputes,
+        disputeHistory: history,
+      },
+      {
+        publicActivity: activity(
+          "reviewer",
+          "resolution",
+          "disputes-reconsidered",
+          "Reviewer reconsidered the Worker disputes.",
+        ),
+      },
+    );
+    return true;
+  }
+
+  async function arbitrateFinding(dispute) {
+    const current = state();
+    const finding = current.findings.find(
+      ({ id }) => id === dispute.findingId,
+    );
+    const reviewerResponse = latestDispute(dispute.findingId);
+    const output = await runRole(
+      "arbiter",
+      FINDING_ARBITRATION_SCHEMA,
+      (evidence) => `${FINDING_ARBITRATION_INSTRUCTIONS}
+
+${PRODUCT_DECISION_INSTRUCTIONS}
+Use REQUIREMENT_AMBIGUOUS only with a complete blocking product decision. Otherwise use empty product-decision fields.
+
+${evidence}
+
+Finding:
+${JSON.stringify(finding, null, 2)}
+
+Worker dispute:
+${JSON.stringify(dispute, null, 2)}
+
+Reviewer response:
+${JSON.stringify(reviewerResponse, null, 2)}
+
+Prior decisions for this finding:
+${JSON.stringify(priorFindingDecisions([dispute.findingId]), null, 2)}`,
+      { freshSession: true },
+    );
+    if (output === null) {
+      return false;
+    }
+    const result = normalizeFindingArbitration(output);
+    if (result.direction === "REQUIREMENT_AMBIGUOUS") {
+      return productDecision(result.decision, "IMPLEMENT");
+    }
+    const findings =
+      result.direction === "WORKER_CORRECT"
+        ? current.findings.filter(({ id }) => id !== dispute.findingId)
+        : current.findings;
+    const pendingDisputes = current.pendingDisputes.filter(
+      ({ findingId }) => findingId !== dispute.findingId,
+    );
+    await transition(
+      {
+        ...state(),
+        workflowState:
+          findings.length === 0 && pendingDisputes.length === 0
+            ? "COMMIT"
+            : "RESOLVE_FINDINGS",
+        findings,
+        pendingDisputes,
+        findingArbitrations: [
+          ...current.findingArbitrations,
+          {
+            findingId: dispute.findingId,
+            direction: result.direction,
+            rationale: result.rationale,
+          },
+        ].slice(-MAX_DIAGNOSTIC_ITEMS),
+      },
+      {
+        publicActivity: activity(
+          "arbiter",
+          "resolution",
+          "finding-arbitrated",
+          `Arbiter selected ${result.direction} for ${dispute.findingId}.`,
+        ),
+      },
+    );
+    return true;
+  }
+
+  async function arbitrateStagnation() {
+    const current = state();
+    const output = await runRole(
+      "arbiter",
+      STAGNATION_SCHEMA,
+      (evidence) => `${STAGNATION_INSTRUCTIONS}
+
+${PRODUCT_DECISION_INSTRUCTIONS}
+Do not modify the repository. This result cannot approve the implementation or satisfy review.
+Name only current Reviewer finding IDs for RECONSIDER_FINDINGS; otherwise leave findingIds empty. Use empty fields that do not apply.
+
+${evidence}
+
+Current blockers and compact correction history:
+${JSON.stringify(
+  {
+    currentStep: current.currentStep,
+    finalizationResult: current.finalizationResult,
+    findings: current.findings,
+    pendingDisputes: current.pendingDisputes,
+    correctionHistory: current.correctionHistory,
+  },
+  null,
+  2,
+)}`,
+      { freshSession: true },
+    );
+    if (output === null) {
+      return false;
+    }
+    const result = normalizeStagnationResult(output, current);
+    if (result.direction === "PRODUCT_DECISION_REQUIRED") {
+      return productDecision(result.decision, "IMPLEMENT");
+    }
+    if (result.direction === "PLAN_REVISION_REQUIRED") {
+      await pauseForPlanRevision(result);
+      return false;
+    }
+    const direction = {
+      direction: result.direction,
+      rationale: result.rationale,
+    };
+    if (result.direction === "REWORK_IMPLEMENTATION") {
+      const nextState = {
+        ...state(),
+        implementationDirection: direction,
+        finalizationResult: null,
+        finalizedFingerprint: null,
+        reviewedFingerprint: null,
+        previousFindings:
+          current.findings.length === 0
+            ? current.previousFindings
+            : current.findings,
+        findings: [],
+        pendingDisputes: current.pendingDisputes,
+        pendingCorrection: false,
+        blockedSinceStagnation: 0,
+        stagnationArbitrationUsed: true,
+        stagnationDirection: direction,
+        reviewReconsideration: [],
+      };
+      if (counters().fixRounds >= fixBudget()) {
+        await transition(
+          { ...nextState, workflowState: "WAITING_FOR_USER" },
+          {
+            pause: {
+              reason: "fix_limit_reached",
+              fixRounds: counters().fixRounds,
+              resumeState: "IMPLEMENT",
+            },
+            publicActivity: activity(
+              "runner",
+              "resolution",
+              "paused",
+              "Plan execution paused: fix_limit_reached.",
+            ),
+          },
+        );
+        return false;
+      }
+      await transition(
+        {
+          ...nextState,
+          workflowState: "IMPLEMENT",
+        },
+        {
+          publicActivity: activity(
+            "arbiter",
+            "resolution",
+            "rework-implementation",
+            "Stagnation Arbiter requested implementation rework.",
+          ),
+        },
+      );
+      return true;
+    }
+    if (result.direction === "RECONSIDER_FINDINGS") {
+      await transition(
+        {
+          ...state(),
+          workflowState: "REVIEW",
+          blockedSinceStagnation: 0,
+          stagnationArbitrationUsed: true,
+          stagnationDirection: direction,
+          reviewReconsideration: result.findingIds,
+        },
+        {
+          publicActivity: activity(
+            "arbiter",
+            "resolution",
+            "reconsider-findings",
+            "Stagnation Arbiter requested Reviewer reconsideration.",
+          ),
+        },
+      );
+      return true;
+    }
+    await transition(
+      {
+        ...state(),
+        blockedSinceStagnation: 0,
+        stagnationArbitrationUsed: true,
+        stagnationDirection: direction,
+      },
+      {
+        publicActivity: activity(
+          "arbiter",
+          "resolution",
+          "continue-fixes",
+          "Stagnation Arbiter requested continued fixes.",
+        ),
+      },
+    );
+    return true;
+  }
+
+  async function runResolutionTurn() {
+    const current = state();
+    if (current.finalizationResult?.status === "PASS") {
+      const arbitration = current.pendingDisputes.find(
+        disputeNeedsArbitration,
+      );
+      if (arbitration !== undefined) {
+        return arbitrateFinding(arbitration);
+      }
+      if (current.pendingDisputes.length > 0) {
+        return reconsiderDisputes();
+      }
+    }
+    const stableFindingIds = exhaustedStableFindingIds();
+    if (stableFindingIds.length > 0) {
+      await pause("no_progress", {
+        findingIds: stableFindingIds,
+        reason: "stable_findings",
+        resumeState: "RESOLVE_FINDINGS",
+      });
+      return false;
+    }
+    if (
+      current.blockedSinceStagnation >=
+      current.settings.stagnationWindowRounds
+    ) {
+      if (current.stagnationArbitrationUsed) {
+        await pause("no_progress", {
+          correctionRounds: counters().correctionRounds,
+          reason: "recurrent_stagnation",
+          resumeState: "RESOLVE_FINDINGS",
+        });
+        return false;
+      }
+      return arbitrateStagnation();
+    }
+    const budgetExhausted = counters().fixRounds >= fixBudget();
+    const blockers = activeBlockers();
+    const disputableFindingIds = new Set(
+      current.findings
+        .filter(
+          ({ id }) =>
+            !current.findingArbitrations.some(
+              (entry) =>
+                entry.findingId === id &&
+                entry.direction === "REVIEWER_CORRECT",
+            ),
+        )
+        .map(({ id }) => id),
+    );
+    if (budgetExhausted && disputableFindingIds.size === 0) {
+      await pause("fix_limit_reached", {
+        fixRounds: counters().fixRounds,
+        resumeState: "RESOLVE_FINDINGS",
+      });
+      return false;
+    }
+    const beforeFingerprint = await contentFingerprint();
+    const output = await runRole(
+      "worker",
+      FINDING_RESOLUTION_SCHEMA,
+      (evidence) => `${FINDING_RESOLUTION_INSTRUCTIONS}
+
+Return exactly one decision for every current blocker. Finalization failures must be fixed and cannot be disputed. A finding already upheld by the Arbiter must be fixed. Use empty product-decision fields unless status is PRODUCT_DECISION_REQUIRED.${
+        budgetExhausted
+          ? "\nThe fix budget is exhausted: do not modify the repository and return DISPUTE only where supported by evidence; a required FIX will pause for additional budget."
+          : ""
+      }
+
+${evidence}
+
+Current blockers:
+${JSON.stringify(blockers, null, 2)}${
+        current.stagnationDirection?.direction === "CONTINUE_FIXES"
+          ? `\n\nStagnation Arbiter direction:\n${JSON.stringify(current.stagnationDirection, null, 2)}`
+          : ""
+      }
+
+Prior decisions for these blockers:
+${JSON.stringify(
+  priorFindingDecisions(blockers.map(({ id }) => id)),
+  null,
+  2,
+)}`,
+      { access: budgetExhausted ? "read-only" : "workspace-write" },
+    );
+    if (output === null) {
+      return false;
+    }
+    const result = normalizeResolutionResult(
+      output,
+      blockers,
+      new Set(
+        [
+          ...current.findingArbitrations
+            .filter(({ direction }) => direction === "REVIEWER_CORRECT")
+            .map(({ findingId }) => findingId),
+          ...Object.entries(current.disputeCounts)
+            .filter(
+              ([, count]) => count >= current.settings.maxDisputesPerFinding,
+            )
+            .map(([findingId]) => findingId),
+        ],
+      ),
+    );
+    if (result.status === "PRODUCT_DECISION_REQUIRED") {
+      return productDecision(result.decision, "IMPLEMENT");
+    }
+    if (
+      budgetExhausted &&
+      result.decisions.some(({ decision }) => decision === "FIX")
+    ) {
+      const disputes = result.decisions
+        .filter(({ decision }) => decision === "DISPUTE")
+        .map((decision) => ({
+          findingId: decision.id,
+          reason: decision.reason,
+          evidence: decision.evidence,
+        }));
+      const disputeCounts = { ...current.disputeCounts };
+      for (const { findingId } of disputes) {
+        disputeCounts[findingId] = (disputeCounts[findingId] ?? 0) + 1;
+      }
+      await transition(
+        {
+          ...state(),
+          workflowState: "WAITING_FOR_USER",
+          pendingDisputes: disputes,
+          disputeCounts,
+        },
+        {
+          pause: {
+            reason: "fix_limit_reached",
+            fixRounds: counters().fixRounds,
+            resumeState: "RESOLVE_FINDINGS",
+          },
+          publicActivity: activity(
+            "runner",
+            "resolution",
+            "paused",
+            "Plan execution paused: fix_limit_reached.",
+          ),
+        },
+      );
+      return false;
+    }
+    const changed = (await contentFingerprint()) !== beforeFingerprint;
+    const correction =
+      changed || result.decisions.some(({ decision }) => decision === "FIX");
+    if (correction) {
+      const newDisputes = result.decisions
+        .filter(({ decision }) => decision === "DISPUTE")
+        .map((decision) => ({
+          findingId: decision.id,
+          reason: decision.reason,
+          evidence: decision.evidence,
+        }));
+      const disputes = [
+        ...new Map(
+          [...current.pendingDisputes, ...newDisputes].map((dispute) => [
+            dispute.findingId,
+            dispute,
+          ]),
+        ).values(),
+      ];
+      const disputeCounts = { ...current.disputeCounts };
+      for (const { findingId } of newDisputes) {
+        disputeCounts[findingId] = (disputeCounts[findingId] ?? 0) + 1;
+      }
+      await transition(
+        {
+          ...state(),
+          workflowState: "FINALIZE",
+          finalizationResult: null,
+          finalizedFingerprint: null,
+          reviewedFingerprint: null,
+          previousFindings:
+            current.findings.length === 0
+              ? current.previousFindings
+              : current.findings,
+          findings: [],
+          pendingDisputes: disputes,
+          disputeCounts,
+          pendingCorrection: true,
+          reviewReconsideration: [],
+        },
+        {
+          nextCounters: {
+            ...counters(),
+            fixRounds: counters().fixRounds + (changed ? 0 : 1),
+          },
+          publicActivity: activity(
+            "worker",
+            "resolution",
+            "fixed",
+            "Worker completed a finding-resolution fix round.",
+          ),
+        },
+      );
+      return true;
+    }
+    const disputes = result.decisions.map((decision) => ({
+      findingId: decision.id,
+      reason: decision.reason,
+      evidence: decision.evidence,
+    }));
+    const disputeCounts = { ...current.disputeCounts };
+    for (const { findingId } of disputes) {
+      disputeCounts[findingId] = (disputeCounts[findingId] ?? 0) + 1;
+    }
+    await transition(
+      {
+        ...state(),
+        pendingDisputes: disputes,
+        disputeCounts,
+      },
+      {
+        publicActivity: activity(
+          "worker",
+          "resolution",
+          "disputed",
+          `Worker disputed ${disputes.length} findings with evidence.`,
+        ),
+      },
+    );
+    return true;
+  }
+
   try {
     if (state().settings === null) {
       await transition({ ...state(), settings }, { pause: null });
+    }
+    if (!(await applyResumeAction())) {
+      return currentRun;
     }
     if (state().workflowState === "WAITING_FOR_USER") {
       if (state().pendingEdit !== null) {
@@ -950,15 +2165,28 @@ ${JSON.stringify(state().bootstrapDisagreement, null, 2)}`,
           return currentRun;
         }
       } else if (
-        RETRYABLE_PREFLIGHT_REASONS.has(currentRun.pause.reason) &&
+        RETRYABLE_PAUSE_REASONS.has(currentRun.pause.reason) &&
         (!state().preflightComplete ||
-          (currentRun.pause.reason === "backend_unavailable" &&
-            currentRun.pause.resumeState === "BOOTSTRAP"))
+          ([
+            "backend_unavailable",
+            "environment_blocked",
+            "finalization_cannot_pass",
+          ].includes(currentRun.pause.reason) &&
+            [
+              "CLARIFY",
+              "BOOTSTRAP",
+              "IMPLEMENT",
+              "FINALIZE",
+              "REVIEW",
+              "RESOLVE_FINDINGS",
+            ].includes(currentRun.pause.resumeState)))
       ) {
         await transition(
           {
             ...state(),
-            workflowState: state().preflightComplete ? "BOOTSTRAP" : "CLARIFY",
+            workflowState: state().preflightComplete
+              ? currentRun.pause.resumeState
+              : "CLARIFY",
           },
           { pause: null },
         );
@@ -980,6 +2208,48 @@ ${JSON.stringify(state().bootstrapDisagreement, null, 2)}`,
 
     while (true) {
       const current = state();
+
+      if (current.compatibilityCheckRequired) {
+        const output = await runRole(
+          "worker",
+          PLAN_COMPATIBILITY_SCHEMA,
+          (evidence) => `${PLAN_COMPATIBILITY_INSTRUCTIONS}
+
+${evidence}`,
+        );
+        if (output === null) {
+          return currentRun;
+        }
+        const result = normalizeCompatibilityResult(output);
+        if (result.status === "PLAN_REVISION_REQUIRED") {
+          return pauseForPlanRevision(result);
+        }
+        const frozen = await runtime.clarifications.freezeTranscript({
+          artifactRoot: state().repositoryBaseline.projectPath,
+          transcriptPath: state().clarificationPath,
+          expectedHash: currentRun.hashes.executionClarifications,
+        });
+        await transition(
+          {
+            ...state(),
+            clarificationFrozen: true,
+            compatibilityCheckRequired: false,
+          },
+          {
+            nextHashes: {
+              ...currentRun.hashes,
+              executionClarifications: frozen.hash,
+            },
+            publicActivity: activity(
+              "worker",
+              "clarification",
+              "compatible",
+              "Product decision remains compatible with the plan.",
+            ),
+          },
+        );
+        continue;
+      }
 
       if (current.workflowState === "CLARIFY") {
         if (!current.preflightComplete && !(await initializeInputs())) {
@@ -1083,47 +2353,6 @@ ${evidence}`,
       }
 
       if (current.workflowState === "BOOTSTRAP") {
-        if (current.compatibilityCheckRequired) {
-          const output = await runRole(
-            "worker",
-            PLAN_COMPATIBILITY_SCHEMA,
-            (evidence) => `${PLAN_COMPATIBILITY_INSTRUCTIONS}
-
-${evidence}`,
-          );
-          if (output === null) {
-            return currentRun;
-          }
-          const result = normalizeCompatibilityResult(output);
-          if (result.status === "PLAN_REVISION_REQUIRED") {
-            return pauseForPlanRevision(result);
-          }
-          const frozen = await runtime.clarifications.freezeTranscript({
-            artifactRoot: state().repositoryBaseline.projectPath,
-            transcriptPath: state().clarificationPath,
-            expectedHash: currentRun.hashes.executionClarifications,
-          });
-          await transition(
-            {
-              ...state(),
-              clarificationFrozen: true,
-              compatibilityCheckRequired: false,
-            },
-            {
-              nextHashes: {
-                ...currentRun.hashes,
-                executionClarifications: frozen.hash,
-              },
-              publicActivity: activity(
-                "worker",
-                "clarification",
-                "compatible",
-                "Product decision remains compatible with the plan.",
-              ),
-            },
-          );
-          continue;
-        }
         if (current.workerSummary === null) {
           if (!(await bootstrapRole("worker"))) {
             return currentRun;
@@ -1145,7 +2374,38 @@ ${evidence}`,
         if (!(await reconcileBootstrap())) {
           return currentRun;
         }
-        if (state().workflowState === "IMPLEMENT") {
+        continue;
+      }
+
+      if (current.workflowState === "IMPLEMENT") {
+        if (!(await runImplementationTurn())) {
+          return currentRun;
+        }
+        continue;
+      }
+
+      if (current.workflowState === "FINALIZE") {
+        if (!(await runFinalizationTurn())) {
+          return currentRun;
+        }
+        continue;
+      }
+
+      if (current.workflowState === "REVIEW") {
+        if (current.pendingDisputes.length > 0) {
+          if (!(await reconsiderDisputes())) {
+            return currentRun;
+          }
+          continue;
+        }
+        if (!(await runReviewTurn())) {
+          return currentRun;
+        }
+        continue;
+      }
+
+      if (current.workflowState === "RESOLVE_FINDINGS") {
+        if (!(await runResolutionTurn())) {
           return currentRun;
         }
         continue;
@@ -1153,10 +2413,6 @@ ${evidence}`,
 
       if (
         [
-          "IMPLEMENT",
-          "FINALIZE",
-          "REVIEW",
-          "RESOLVE_FINDINGS",
           "COMMIT",
           "WAITING_FOR_USER",
           "DONE",
@@ -1187,9 +2443,12 @@ ${evidence}`,
         message: "Repository changed during a read-only plan-execution turn.",
       });
     }
-    if (cause?.code === "ERR_PLAN_EXECUTION_BACKEND_UNAVAILABLE") {
+    if (
+      cause?.code === "ERR_PLAN_EXECUTION_BACKEND_UNAVAILABLE" ||
+      cause?.recoverable === true
+    ) {
       return pause("backend_unavailable", {
-        code: cause.code,
+        code: diagnosticCode(cause, "ERR_BACKEND_UNAVAILABLE"),
         resumeState: state().workflowState,
       });
     }

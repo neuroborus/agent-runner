@@ -42,3 +42,22 @@ If a finding is incorrect, dispute it with concise evidence instead of changing 
 Do not create a commit in this turn.
 ${PRODUCT_DECISION_INSTRUCTIONS}
 Otherwise, return each FIX or DISPUTE decision using the provided schema.`;
+
+export const FINALIZATION_INSTRUCTIONS = `Locate and validate the project's finalization skill before following it in this dedicated turn.
+Run only that finalization procedure, including project-required formatting or generated output, and report its result using the provided schema.
+
+Do not perform unrelated fixes or create a commit.
+${PRODUCT_DECISION_INSTRUCTIONS}`;
+
+export const DISPUTE_RECONSIDERATION_INSTRUCTIONS = `Reconsider the disputed findings against the task, plan, repository, diff, and Worker evidence.
+
+Do not modify the repository. Return WITHDRAW or UPHOLD with a concise reason for every disputed finding using the provided schema.
+${PRODUCT_DECISION_INSTRUCTIONS}`;
+
+export const FINDING_ARBITRATION_INSTRUCTIONS = `Resolve the disputed finding from the task, plan, repository, diff, and evidence, choosing the correct outcome using the provided schema.
+
+Do not modify the repository or rewrite requirements.`;
+
+export const STAGNATION_INSTRUCTIONS =
+  "Diagnose why the implementation correction loop is not converging and " +
+  "choose the minimal valid next direction using the provided schema.";
