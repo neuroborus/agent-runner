@@ -9,18 +9,21 @@ const SOURCE_DIRECTORIES = [
   new URL("../packages/commit-plan/src/", import.meta.url),
   new URL("../pipelines/plan-authoring/src/", import.meta.url),
   new URL("../pipelines/plan-execution/src/", import.meta.url),
+  new URL("../pipelines/polishing/src/", import.meta.url),
 ];
 const PACKAGE_METADATA_FILES = [
   new URL("../package.json", import.meta.url),
   new URL("../packages/commit-plan/package.json", import.meta.url),
   new URL("../pipelines/plan-authoring/package.json", import.meta.url),
   new URL("../pipelines/plan-execution/package.json", import.meta.url),
+  new URL("../pipelines/polishing/package.json", import.meta.url),
 ];
 const SKILLS_DIRECTORY = new URL("../.agents/skills/", import.meta.url);
 const NODE_RANGE_DOCUMENTS = [
   new URL("../AGENTS.md", import.meta.url),
   new URL("../README.md", import.meta.url),
   new URL("../pipelines/plan-execution/docs/SPEC.md", import.meta.url),
+  new URL("../pipelines/polishing/docs/SPEC.md", import.meta.url),
 ];
 
 async function findJavaScriptModules(directoryUrl) {
@@ -98,7 +101,7 @@ test("documented Node range matches package metadata", async () => {
 });
 
 test("workspace topology keeps pipelines independent", async () => {
-  const [commitPlan, planAuthoring, planExecution] = await Promise.all(
+  const [commitPlan, planAuthoring, planExecution, polishing] = await Promise.all(
     PACKAGE_METADATA_FILES.slice(1).map(async (metadataUrl) =>
       JSON.parse(await readFile(metadataUrl, "utf8")),
     ),
@@ -114,7 +117,12 @@ test("workspace topology keeps pipelines independent", async () => {
   ]);
   assert.equal(commitPlan.dependencies, undefined);
 
-  for (const workspace of [commitPlan, planAuthoring, planExecution]) {
+  for (const workspace of [
+    commitPlan,
+    planAuthoring,
+    planExecution,
+    polishing,
+  ]) {
     assert.equal(workspace.exports, "./src/index.js");
   }
 
@@ -124,6 +132,7 @@ test("workspace topology keeps pipelines independent", async () => {
   assert.deepEqual(planExecution.dependencies, {
     "@agent-runner/commit-plan": "0.0.0",
   });
+  assert.equal(polishing.dependencies, undefined);
 });
 
 test("project skills have valid metadata", async () => {
@@ -206,6 +215,10 @@ test("all pipelines define the bounded clarification lifecycle", async () => {
       new URL("../pipelines/plan-execution/docs/SPEC.md", import.meta.url),
       "utf8",
     ),
+    readFile(
+      new URL("../pipelines/polishing/docs/SPEC.md", import.meta.url),
+      "utf8",
+    ),
   ]);
 
   for (const document of documents) {
@@ -243,6 +256,10 @@ test("run-state durability and lease ownership are documented", async () => {
     ),
     readFile(
       new URL("../pipelines/plan-execution/docs/SPEC.md", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../pipelines/polishing/docs/SPEC.md", import.meta.url),
       "utf8",
     ),
   ]);

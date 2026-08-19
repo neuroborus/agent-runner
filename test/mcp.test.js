@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import test from "node:test";
 
 import { Client } from "@modelcontextprotocol/client";
@@ -19,6 +21,21 @@ const SECOND_RUN_ID = "22222222-2222-4222-8222-222222222222";
 const THIRD_RUN_ID = "33333333-3333-4333-8333-333333333333";
 const FOURTH_RUN_ID = "44444444-4444-4444-8444-444444444444";
 const RESPONSE_HASH = "a".repeat(64);
+const executeFile = promisify(execFile);
+
+async function childNodeStdoutIsAvailable() {
+  const marker = "agent-runner-child-stdio-probe";
+  try {
+    const { stdout } = await executeFile(
+      process.execPath,
+      ["-e", `process.stdout.write(${JSON.stringify(marker)})`],
+      { encoding: "utf8" },
+    );
+    return stdout === marker;
+  } catch {
+    return false;
+  }
+}
 
 async function workspace(t, prefix = "agent-runner-mcp-") {
   const root = await mkdtemp(join(tmpdir(), prefix));
@@ -130,6 +147,10 @@ function storedRunner(store, paths) {
 }
 
 test("serves protocol-clean STDIO discovery through the official SDK", async (t) => {
+  if (!(await childNodeStdoutIsAvailable())) {
+    t.skip("Nested Node stdout is unavailable in this environment.");
+    return;
+  }
   const paths = await workspace(t, "agent-runner-mcp-protocol-");
   const transport = new StdioClientTransport({
     command: process.execPath,

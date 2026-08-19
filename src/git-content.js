@@ -40,6 +40,8 @@ function hashEntries(entries) {
   return hash.digest("hex");
 }
 
+const EMPTY_CONTENT_FINGERPRINT = hashEntries([]);
+
 function literalPathspec(relativePath) {
   return `:(top,literal)${relativePath}`;
 }
@@ -312,8 +314,29 @@ export async function inspectPathAtRoot(
     ["check-ignore", "--no-index", "-q", "--", location.relativePath],
     { allowedExitCodes: [0, 1] },
   );
+  const changedResult = await runGit(repositoryPath, [
+    "status",
+    "--porcelain=v1",
+    "-z",
+    "--untracked-files=all",
+    "--ignore-submodules=none",
+    "--",
+    pathspec,
+  ]);
+  const { changedPaths } = await contentChangesAtRoot(
+    { currentHead, runGit },
+    repositoryPath,
+    [],
+    { baseHead: head },
+  );
+  const prefix = `${location.relativePath}/`;
   return Object.freeze({
     ...location,
+    changed:
+      changedResult.stdout.length > 0 ||
+      changedPaths.some(
+        (path) => path === location.relativePath || path.startsWith(prefix),
+      ),
     exists: await pathExists(location.path),
     ignored: ignoredResult.exitCode === 0,
     tracked,
@@ -446,7 +469,73 @@ async function contentEntry(
   });
 }
 
-export async function contentFingerprintsAtRoot(
+async function headContentEntry(
+  { runGit },
+  repositoryPath,
+  head,
+  path,
+) {
+  const result = await runGit(repositoryPath, [
+    "ls-tree",
+    "-z",
+    head,
+    "--",
+    literalPathspec(path),
+  ]);
+  const records = decodeNullList(result.stdout, "Git tree entries");
+  const record = records.find((entry) => entry.endsWith(`\t${path}`));
+  if (record === undefined) {
+    return null;
+  }
+  const separator = record.indexOf("\t");
+  const [mode, type, objectId, ...extra] = record
+    .slice(0, separator)
+    .split(" ");
+  if (
+    separator === -1 ||
+    extra.length > 0 ||
+    !/^[0-7]{6}$/u.test(mode) ||
+    !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(objectId)
+  ) {
+    throw new GitSafetyError("Git tree entry is invalid.", {
+      code: "ERR_UNSUPPORTED_GIT_PATH",
+    });
+  }
+  if (type === "commit" && mode === "160000") {
+    return Object.freeze({
+      hash: hashBuffer(`${objectId}\0${EMPTY_CONTENT_FINGERPRINT}`),
+      kind: "gitlink",
+      mode,
+      path,
+      size: objectId.length,
+    });
+  }
+  if (type !== "blob" || !["100644", "100755", "120000"].includes(mode)) {
+    throw new GitSafetyError("Git tree entry has unsupported type.", {
+      code: "ERR_UNSUPPORTED_GIT_PATH",
+    });
+  }
+  const blob = await runGit(repositoryPath, ["cat-file", "blob", objectId]);
+  return Object.freeze({
+    hash: hashBuffer(blob.stdout),
+    kind: mode === "120000" ? "symlink" : "file",
+    mode,
+    path,
+    size: blob.stdout.length,
+  });
+}
+
+function entriesMatch(left, right) {
+  return (
+    right !== null &&
+    left.hash === right.hash &&
+    left.kind === right.kind &&
+    left.mode === right.mode &&
+    left.size === right.size
+  );
+}
+
+export async function contentChangesAtRoot(
   context,
   repositoryPath,
   allowedPaths,
@@ -483,12 +572,33 @@ export async function contentFingerprintsAtRoot(
     "-v",
     "-z",
   ]);
-  const trackedPaths = [
-    ...new Set([
-      ...decodeNullList(trackedResult.stdout, "Tracked Git paths"),
-      ...hiddenIndexPaths(indexResult.stdout),
-    ]),
-  ].filter((path) => !excludedPaths.has(path));
+  const trackedPaths = new Set(
+    decodeNullList(trackedResult.stdout, "Tracked Git paths").filter(
+      (path) => !excludedPaths.has(path),
+    ),
+  );
+  for (const path of hiddenIndexPaths(indexResult.stdout)) {
+    if (excludedPaths.has(path) || trackedPaths.has(path)) {
+      continue;
+    }
+    if (head === null) {
+      trackedPaths.add(path);
+      continue;
+    }
+    const entry = await contentEntry(context, repositoryPath, path, {
+      allowedPaths,
+      missingAllowed: true,
+    });
+    const headEntry = await headContentEntry(
+      context,
+      repositoryPath,
+      head,
+      path,
+    );
+    if (!entriesMatch(entry, headEntry)) {
+      trackedPaths.add(path);
+    }
+  }
   const untrackedPaths = [
     ...new Set(
       decodeNullList(untrackedResult.stdout, "Untracked Git paths").map(
@@ -520,8 +630,27 @@ export async function contentFingerprintsAtRoot(
     combinedEntries.set(entry.path, entry);
   }
   return Object.freeze({
+    changedPaths: Object.freeze(
+      [...new Set([...trackedPaths, ...untrackedPaths])].sort(),
+    ),
     contentFingerprint: hashEntries(combinedEntries.values()),
     trackedContentFingerprint: hashEntries(trackedEntries),
     untrackedContentFingerprint: hashEntries(untrackedEntries),
   });
+}
+
+export async function contentFingerprintsAtRoot(
+  context,
+  repositoryPath,
+  allowedPaths,
+  options,
+) {
+  const { changedPaths: _changedPaths, ...fingerprints } =
+    await contentChangesAtRoot(
+      context,
+      repositoryPath,
+      allowedPaths,
+      options,
+    );
+  return Object.freeze(fingerprints);
 }

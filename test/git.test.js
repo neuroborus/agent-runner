@@ -133,8 +133,10 @@ test("preflights clean repositories and records branch or detached state", async
   assert.equal(detached.branch, null);
   assert.equal(detached.detached, true);
 
+  const nonWorkingTree = join(workspace, "bare.git");
+  await runGit(workspace, env, "init", "--bare", "-q", nonWorkingTree);
   await assert.rejects(
-    service.snapshot({ projectPath: workspace }),
+    service.snapshot({ projectPath: nonWorkingTree }),
     isGitError("ERR_NOT_GIT_REPOSITORY"),
   );
   await assert.rejects(
@@ -256,6 +258,7 @@ test("validates ignored repository-local artifact paths without creating them", 
     requiredIgnoredPaths: [clarificationPath],
   });
   assert.equal(accepted.ignoredPaths[0].exists, false);
+  assert.equal(accepted.ignoredPaths[0].changed, false);
   assert.equal(accepted.ignoredPaths[0].ignored, true);
   assert.equal(accepted.ignoredPaths[0].tracked, false);
 
@@ -293,6 +296,32 @@ test("validates ignored repository-local artifact paths without creating them", 
     }),
     isGitError("ERR_UNSAFE_REPOSITORY_PATH"),
   );
+});
+
+test("identifies paths that belong to a dirty worktree change set", async (t) => {
+  const { repositoryPath, service } = await createFixture(t);
+  const trackedPath = join(repositoryPath, "tracked.txt");
+  const untrackedPath = join(repositoryPath, "untracked.txt");
+  const ignoredPath = join(repositoryPath, "ignored.txt");
+
+  await writeFile(trackedPath, "changed\n");
+  await writeFile(untrackedPath, "untracked\n");
+  await writeFile(ignoredPath, "ignored\n");
+
+  const [tracked, untracked, ignored] = await Promise.all(
+    [trackedPath, untrackedPath, ignoredPath].map((path) =>
+      service.inspectPath({ path, projectPath: repositoryPath }),
+    ),
+  );
+
+  assert.equal(tracked.tracked, true);
+  assert.equal(tracked.changed, true);
+  assert.equal(untracked.tracked, false);
+  assert.equal(untracked.ignored, false);
+  assert.equal(untracked.changed, true);
+  assert.equal(ignored.tracked, false);
+  assert.equal(ignored.ignored, true);
+  assert.equal(ignored.changed, false);
 });
 
 test("content fingerprints ignore staging placement and ignored files", async (t) => {
@@ -355,6 +384,17 @@ test("content fingerprints follow worktree content when index content diverges",
     await service.contentFingerprint({ projectPath: repositoryPath }),
     initial,
   );
+  assert.equal(
+    (await service.snapshot({ projectPath: repositoryPath })).clean,
+    false,
+  );
+  await assert.rejects(
+    service.preflight({
+      projectPath: repositoryPath,
+      requireClean: true,
+    }),
+    isGitError("ERR_REPOSITORY_NOT_CLEAN"),
+  );
 
   await writeFile(join(repositoryPath, "new.txt"), "staged new\n");
   await runGit(repositoryPath, env, "add", "new.txt");
@@ -403,7 +443,19 @@ test("content fingerprints guard index-hidden tracked paths", async (t) => {
     "tracked.txt",
   );
   const assumed = await service.snapshot({ projectPath: repositoryPath });
+  assert.equal(assumed.clean, true);
   await writeFile(trackedPath, "changed while assumed\n");
+  assert.equal(
+    (await service.inspectPath({
+      path: trackedPath,
+      projectPath: repositoryPath,
+    })).changed,
+    true,
+  );
+  assert.equal(
+    (await service.snapshot({ projectPath: repositoryPath })).clean,
+    false,
+  );
   await assert.rejects(
     service.assertUnchanged(assumed),
     (error) =>
@@ -421,7 +473,19 @@ test("content fingerprints guard index-hidden tracked paths", async (t) => {
     "tracked.txt",
   );
   const skipped = await service.snapshot({ projectPath: repositoryPath });
+  assert.equal(skipped.clean, true);
   await writeFile(trackedPath, "changed while skipped\n");
+  assert.equal(
+    (await service.inspectPath({
+      path: trackedPath,
+      projectPath: repositoryPath,
+    })).changed,
+    true,
+  );
+  assert.equal(
+    (await service.snapshot({ projectPath: repositoryPath })).clean,
+    false,
+  );
   await assert.rejects(
     service.assertUnchanged(skipped),
     (error) =>

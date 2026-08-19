@@ -11,6 +11,7 @@ import {
 } from "./git-command.js";
 import { createGitCommitService } from "./git-commit.js";
 import {
+  contentChangesAtRoot,
   contentFingerprintsAtRoot,
   inspectPathAtRoot,
   normalizeAllowedPaths,
@@ -331,7 +332,7 @@ export function createGitService(options = {}) {
       "--untracked-files=all",
       "--ignore-submodules=none",
     ]);
-    const content = await contentFingerprintsAtRoot(
+    const { changedPaths, ...content } = await contentChangesAtRoot(
       contentContext,
       repositoryPath,
       normalizedAllowedPaths,
@@ -344,7 +345,7 @@ export function createGitService(options = {}) {
       head,
       branch,
       detached: branch === null && head !== null,
-      clean: status.stdout.length === 0,
+      clean: status.stdout.length === 0 && changedPaths.length === 0,
       refsFingerprint: (await refsFingerprints(repositoryPath)).all,
       ...content,
       indexFingerprint: await indexFingerprint(repositoryPath),

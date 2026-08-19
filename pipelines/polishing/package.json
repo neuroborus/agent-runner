@@ -1,0 +1,14 @@
+{
+  "name": "@agent-runner/polishing",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Polish and review an existing dirty worktree without committing it",
+  "type": "module",
+  "exports": "./src/index.js",
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=24 <25"
+  }
+}
