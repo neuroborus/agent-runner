@@ -6,7 +6,11 @@ export const WORKFLOW_STATES = Object.freeze([
   "CLARIFY",
   "BOOTSTRAP",
   "POLISH",
+  "FINALIZE",
+  "REVIEW",
+  "RESOLVE_FINDINGS",
   "WAITING_FOR_USER",
+  "DONE",
   "FAILED",
 ]);
 
@@ -20,6 +24,8 @@ const SETTINGS_FIELDS = Object.freeze([
 const COUNTER_FIELDS = Object.freeze([
   "clarificationRounds",
   "productDecisions",
+  "fixRounds",
+  "correctionRounds",
 ]);
 const PIPELINE_STATE_FIELDS = new Set([
   "workflowState",
@@ -38,6 +44,25 @@ const PIPELINE_STATE_FIELDS = new Set([
   "resolvedSummary",
   "bootstrapDisagreement",
   "bootstrapArbitrationUsed",
+  "polishSummary",
+  "finalizationResult",
+  "finalizedFingerprint",
+  "reviewedFingerprint",
+  "findings",
+  "previousFindings",
+  "pendingDisputes",
+  "disputeCounts",
+  "disputeHistory",
+  "findingArbitrations",
+  "correctionHistory",
+  "sameFindingRounds",
+  "pendingCorrection",
+  "blockedSinceStagnation",
+  "stagnationArbitrationUsed",
+  "stagnationDirection",
+  "reviewReconsideration",
+  "additionalFixRounds",
+  "findingOverrides",
 ]);
 const PENDING_EDIT_FIELDS = new Set([
   "schemaVersion",
@@ -67,17 +92,37 @@ const SNAPSHOT_FIELDS = new Set([
 ]);
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const RUN_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/u;
+const REVIEW_FINDING_ID_PATTERN = /^R[1-9][0-9]{0,8}$/u;
+const FINALIZATION_ISSUE_ID_PATTERN = /^F[1-9][0-9]{0,8}$/u;
 const MAX_TEXT_LENGTH = 4_000;
 const MAX_SUMMARY_LENGTH = 20_000;
 const MAX_ITEMS = 32;
 const MAX_OPTIONS = 16;
 const MAX_STRUCTURED_RESULT_BYTES = 256 * 1024;
+export const MAX_DURABLE_RUN_BYTES = 960 * 1024;
+export const MAX_DIAGNOSTIC_ITEMS = 32;
+export const MAX_DISPUTE_HISTORY_BYTES = 64 * 1024;
+export const MAX_DISPUTES_PER_FINDING = 2;
 const INVALID_OUTPUT_CODE = "ERR_INVALID_POLISHING_OUTPUT";
 export const INVALID_POLISHING_INPUT_CODE = "ERR_INVALID_POLISHING_INPUT";
 const EDIT_PAUSE_REASONS = Object.freeze({
   "clarification-answers": "clarification_answers_required",
   "product-decision": "product_decision_required",
   "proactive-clarification": "proactive_clarification",
+});
+const PAUSE_RESUME_STATES = Object.freeze({
+  backend_unavailable: Object.freeze([
+    "CLARIFY",
+    "BOOTSTRAP",
+    "POLISH",
+    "FINALIZE",
+    "REVIEW",
+    "RESOLVE_FINDINGS",
+  ]),
+  environment_blocked: Object.freeze(["POLISH"]),
+  finalization_cannot_pass: Object.freeze(["FINALIZE"]),
+  fix_limit_reached: Object.freeze(["POLISH", "RESOLVE_FINDINGS"]),
+  no_progress: Object.freeze(["RESOLVE_FINDINGS"]),
 });
 
 export class PolishingWorkflowError extends Error {
@@ -105,6 +150,33 @@ export function workflowError(
 
 export function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function serializedBytes(value) {
+  try {
+    const serialized = JSON.stringify(value);
+    return typeof serialized === "string"
+      ? Buffer.byteLength(serialized)
+      : Number.POSITIVE_INFINITY;
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+export function disputeHistoryFits(value) {
+  return serializedBytes(value) <= MAX_DISPUTE_HISTORY_BYTES;
+}
+
+export function assertDisputeHistoryFits(
+  value,
+  code = "ERR_INVALID_POLISHING_STATE",
+) {
+  if (!disputeHistoryFits(value)) {
+    throw workflowError(
+      "Polishing dispute evidence exceeds its durable history limit.",
+      code,
+    );
+  }
 }
 
 function outputError(message) {
@@ -447,6 +519,521 @@ export function normalizeBootstrapArbitration(payload) {
   });
 }
 
+function normalizeOptionalEvidence(value, name, code = INVALID_OUTPUT_CODE) {
+  return normalizeTextList(value, name, { allowEmpty: true, code });
+}
+
+function normalizeRelativePath(value, name, code = INVALID_OUTPUT_CODE) {
+  const path = normalizeText(value, name, code);
+  if (
+    isAbsolute(path) ||
+    path === "." ||
+    path.split(/[\\/]/u).some((part) => part === "..")
+  ) {
+    throw workflowError(`${name} must be repository-relative.`, code);
+  }
+  return path;
+}
+
+function normalizeReviewFinding(value, code = INVALID_OUTPUT_CODE) {
+  if (!isRecord(value) || !REVIEW_FINDING_ID_PATTERN.test(value.id)) {
+    throw workflowError("Reviewer finding has an invalid ID.", code);
+  }
+  assertExactFields(
+    value,
+    ["id", "file", "problem", "reason", "suggestedAction"],
+    `finding ${value.id}`,
+    code,
+  );
+  return Object.freeze({
+    id: value.id,
+    file: normalizeRelativePath(value.file, `finding ${value.id} file`, code),
+    problem: normalizeText(value.problem, `finding ${value.id} problem`, code),
+    reason: normalizeText(value.reason, `finding ${value.id} reason`, code),
+    suggestedAction: normalizeText(
+      value.suggestedAction,
+      `finding ${value.id} suggested action`,
+      code,
+    ),
+  });
+}
+
+function normalizeReviewFindings(value, code = INVALID_OUTPUT_CODE) {
+  if (!Array.isArray(value) || value.length > MAX_ITEMS) {
+    throw workflowError("Reviewer findings have an invalid number of items.", code);
+  }
+  const findings = Object.freeze(
+    value.map((finding) => normalizeReviewFinding(finding, code)),
+  );
+  if (new Set(findings.map(({ id }) => id)).size !== findings.length) {
+    throw workflowError("Reviewer finding IDs must be unique.", code);
+  }
+  return findings;
+}
+
+function normalizeFinalizationIssues(value, code = INVALID_OUTPUT_CODE) {
+  if (!Array.isArray(value) || value.length > MAX_ITEMS) {
+    throw workflowError("Finalization issues have an invalid number of items.", code);
+  }
+  const issues = Object.freeze(
+    value.map((issue) => {
+      if (!isRecord(issue) || !FINALIZATION_ISSUE_ID_PATTERN.test(issue.id)) {
+        throw workflowError("Finalization issue has an invalid ID.", code);
+      }
+      assertExactFields(
+        issue,
+        ["id", "command", "problem", "evidence"],
+        `finalization issue ${issue.id}`,
+        code,
+      );
+      return Object.freeze({
+        id: issue.id,
+        command: normalizeText(
+          issue.command,
+          `finalization issue ${issue.id} command`,
+          code,
+        ),
+        problem: normalizeText(
+          issue.problem,
+          `finalization issue ${issue.id} problem`,
+          code,
+        ),
+        evidence: normalizeTextList(
+          issue.evidence,
+          `finalization issue ${issue.id} evidence`,
+          { code },
+        ),
+      });
+    }),
+  );
+  if (new Set(issues.map(({ id }) => id)).size !== issues.length) {
+    throw workflowError("Finalization issue IDs must be unique.", code);
+  }
+  return issues;
+}
+
+export function normalizePolishResult(payload) {
+  const fields = [
+    "status",
+    "summary",
+    "reason",
+    "question",
+    "options",
+    "whyBlocked",
+    "evidence",
+  ];
+  assertExactFields(payload, fields, "Polishing result", INVALID_OUTPUT_CODE);
+  assertStructuredResult(payload);
+  if (
+    !["COMPLETED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"].includes(
+      payload.status,
+    )
+  ) {
+    throw outputError("Worker returned an invalid polishing result.");
+  }
+  if (payload.status === "PRODUCT_DECISION_REQUIRED") {
+    if (payload.summary !== "" || payload.reason !== "") {
+      throw outputError("Product decision contains inapplicable fields.");
+    }
+    return Object.freeze({ status: payload.status, decision: normalizeProductDecision(payload) });
+  }
+  if (payload.status === "BLOCKED") {
+    if (
+      payload.summary !== "" ||
+      payload.question !== "" ||
+      payload.whyBlocked !== "" ||
+      !emptyArray(payload.options)
+    ) {
+      throw outputError("Blocked polishing result contains inapplicable fields.");
+    }
+    return Object.freeze({
+      status: payload.status,
+      reason: normalizeText(payload.reason, "polishing blocker", INVALID_OUTPUT_CODE),
+      evidence: normalizeTextList(payload.evidence, "polishing blocker evidence"),
+    });
+  }
+  if (payload.reason !== "" || !emptyDecision(payload)) {
+    throw outputError("Completed polishing result contains inapplicable fields.");
+  }
+  return Object.freeze({
+    status: payload.status,
+    summary: normalizeSummary(payload.summary, "polishing summary", INVALID_OUTPUT_CODE),
+  });
+}
+
+export function normalizeFinalizationResult(payload) {
+  const fields = [
+    "status",
+    "skillPath",
+    "summary",
+    "issues",
+    "reason",
+    "question",
+    "options",
+    "whyBlocked",
+    "evidence",
+  ];
+  assertExactFields(payload, fields, "Finalization result", INVALID_OUTPUT_CODE);
+  assertStructuredResult(payload);
+  const statuses = [
+    "PASS",
+    "FAIL",
+    "SKILL_MISSING",
+    "SKILL_INVALID",
+    "BLOCKED",
+    "PRODUCT_DECISION_REQUIRED",
+  ];
+  if (!statuses.includes(payload.status)) {
+    throw outputError("Worker returned an invalid finalization result.");
+  }
+  if (payload.status === "PRODUCT_DECISION_REQUIRED") {
+    if (
+      payload.skillPath !== "" ||
+      payload.summary !== "" ||
+      !emptyArray(payload.issues) ||
+      payload.reason !== ""
+    ) {
+      throw outputError("Product decision contains inapplicable fields.");
+    }
+    return Object.freeze({ status: payload.status, decision: normalizeProductDecision(payload) });
+  }
+  if (["SKILL_MISSING", "SKILL_INVALID", "BLOCKED"].includes(payload.status)) {
+    if (
+      payload.summary !== "" ||
+      !emptyArray(payload.issues) ||
+      payload.question !== "" ||
+      payload.whyBlocked !== "" ||
+      !emptyArray(payload.options)
+    ) {
+      throw outputError("Unavailable finalization contains inapplicable fields.");
+    }
+    if (
+      (payload.status === "SKILL_MISSING" && payload.skillPath !== "") ||
+      (payload.status !== "SKILL_MISSING" && payload.skillPath === "")
+    ) {
+      throw outputError("Finalization skill path is inapplicable.");
+    }
+    return Object.freeze({
+      status: payload.status,
+      skillPath:
+        payload.skillPath === ""
+          ? null
+          : normalizeRelativePath(payload.skillPath, "finalization skill path"),
+      reason: normalizeText(payload.reason, "finalization blocker", INVALID_OUTPUT_CODE),
+      evidence: normalizeOptionalEvidence(payload.evidence, "finalization evidence"),
+    });
+  }
+  if (payload.reason !== "" || !emptyDecision(payload)) {
+    throw outputError("Finalization result contains inapplicable fields.");
+  }
+  const issues = normalizeFinalizationIssues(payload.issues);
+  if (
+    (payload.status === "PASS" && issues.length !== 0) ||
+    (payload.status === "FAIL" && issues.length === 0)
+  ) {
+    throw outputError("Finalization status does not match its issues.");
+  }
+  return Object.freeze({
+    status: payload.status,
+    skillPath: normalizeRelativePath(payload.skillPath, "finalization skill path"),
+    summary: normalizeSummary(payload.summary, "finalization summary", INVALID_OUTPUT_CODE),
+    issues,
+  });
+}
+
+export function normalizeReviewResult(payload, previousFindings = []) {
+  const fields = [
+    "status",
+    "findings",
+    "question",
+    "options",
+    "whyBlocked",
+    "evidence",
+  ];
+  assertExactFields(payload, fields, "Review result", INVALID_OUTPUT_CODE);
+  assertStructuredResult(payload);
+  if (!["APPROVED", "FINDINGS", "PRODUCT_DECISION_REQUIRED"].includes(payload.status)) {
+    throw outputError("Reviewer returned an invalid review result.");
+  }
+  if (payload.status === "PRODUCT_DECISION_REQUIRED") {
+    if (!emptyArray(payload.findings)) {
+      throw outputError("Product decision must not include findings.");
+    }
+    return Object.freeze({ status: payload.status, decision: normalizeProductDecision(payload) });
+  }
+  if (!emptyDecision(payload)) {
+    throw outputError("Review result contains inapplicable fields.");
+  }
+  const findings = normalizeReviewFindings(payload.findings);
+  if (
+    (payload.status === "APPROVED" && findings.length !== 0) ||
+    (payload.status === "FINDINGS" && findings.length === 0)
+  ) {
+    throw outputError("Review status does not match its findings.");
+  }
+  for (const finding of findings) {
+    const previous = previousFindings.find(
+      (candidate) => candidate.file === finding.file && candidate.problem === finding.problem,
+    );
+    if (previous !== undefined && previous.id !== finding.id) {
+      throw outputError("Reviewer changed the ID of an unchanged finding.");
+    }
+  }
+  return Object.freeze({ status: payload.status, findings });
+}
+
+export function normalizeResolutionResult(
+  payload,
+  blockers,
+  nonDisputableIds,
+) {
+  assertExactFields(
+    payload,
+    ["status", "decisions", "question", "options", "whyBlocked", "evidence"],
+    "Finding resolution",
+    INVALID_OUTPUT_CODE,
+  );
+  assertStructuredResult(payload);
+  if (!isRecord(payload) || !["RESOLVED", "PRODUCT_DECISION_REQUIRED"].includes(payload.status)) {
+    throw outputError("Worker returned an invalid finding resolution.");
+  }
+  if (payload.status === "PRODUCT_DECISION_REQUIRED") {
+    if (!emptyArray(payload.decisions)) {
+      throw outputError("Product decision must not include finding decisions.");
+    }
+    return Object.freeze({ status: payload.status, decision: normalizeProductDecision(payload) });
+  }
+  if (!emptyDecision(payload) || !Array.isArray(payload.decisions)) {
+    throw outputError("Finding resolution contains inapplicable fields.");
+  }
+  const expectedIds = blockers.map(({ id }) => id).sort();
+  const decisions = Object.freeze(
+    payload.decisions.map((decision) => {
+      if (
+        !isRecord(decision) ||
+        !["FIX", "DISPUTE"].includes(decision.decision) ||
+        !expectedIds.includes(decision.id)
+      ) {
+        throw outputError("Worker returned an invalid finding decision.");
+      }
+      assertExactFields(
+        decision,
+        ["id", "decision", "reason", "evidence"],
+        `finding decision ${decision.id}`,
+        INVALID_OUTPUT_CODE,
+      );
+      if (
+        decision.decision === "DISPUTE" &&
+        (decision.id.startsWith("F") || nonDisputableIds.has(decision.id))
+      ) {
+        throw outputError("This blocker cannot be disputed.");
+      }
+      return Object.freeze({
+        id: decision.id,
+        decision: decision.decision,
+        reason: normalizeText(
+          decision.reason,
+          `resolution ${decision.id} reason`,
+          INVALID_OUTPUT_CODE,
+        ),
+        evidence:
+          decision.decision === "DISPUTE"
+            ? normalizeTextList(decision.evidence, `dispute ${decision.id} evidence`)
+            : normalizeOptionalEvidence(decision.evidence, `fix ${decision.id} evidence`),
+      });
+    }),
+  );
+  const actualIds = decisions.map(({ id }) => id).sort();
+  if (
+    decisions.length !== blockers.length ||
+    new Set(actualIds).size !== actualIds.length ||
+    actualIds.some((id, index) => id !== expectedIds[index])
+  ) {
+    throw outputError("Worker must resolve every current blocker exactly once.");
+  }
+  return Object.freeze({ status: payload.status, decisions });
+}
+
+export function normalizeReconsiderationResult(payload, disputes) {
+  assertExactFields(
+    payload,
+    ["status", "decisions", "question", "options", "whyBlocked", "evidence"],
+    "Dispute reconsideration",
+    INVALID_OUTPUT_CODE,
+  );
+  assertStructuredResult(payload);
+  if (!isRecord(payload) || !["RESOLVED", "PRODUCT_DECISION_REQUIRED"].includes(payload.status)) {
+    throw outputError("Reviewer returned an invalid dispute reconsideration.");
+  }
+  if (payload.status === "PRODUCT_DECISION_REQUIRED") {
+    if (!emptyArray(payload.decisions)) {
+      throw outputError("Product decision must not include dispute decisions.");
+    }
+    return Object.freeze({ status: payload.status, decision: normalizeProductDecision(payload) });
+  }
+  if (!emptyDecision(payload) || !Array.isArray(payload.decisions)) {
+    throw outputError("Dispute reconsideration contains inapplicable fields.");
+  }
+  const expectedIds = disputes.map(({ findingId }) => findingId).sort();
+  const decisions = Object.freeze(
+    payload.decisions.map((decision) => {
+      if (
+        !isRecord(decision) ||
+        !["WITHDRAW", "UPHOLD"].includes(decision.direction) ||
+        !expectedIds.includes(decision.id)
+      ) {
+        throw outputError("Reviewer returned an invalid dispute decision.");
+      }
+      assertExactFields(
+        decision,
+        ["id", "direction", "reason", "evidence"],
+        `dispute decision ${decision.id}`,
+        INVALID_OUTPUT_CODE,
+      );
+      return Object.freeze({
+        findingId: decision.id,
+        direction: decision.direction,
+        reason: normalizeText(
+          decision.reason,
+          `dispute ${decision.id} reconsideration`,
+          INVALID_OUTPUT_CODE,
+        ),
+        evidence: normalizeOptionalEvidence(decision.evidence, `dispute ${decision.id} evidence`),
+      });
+    }),
+  );
+  const actualIds = decisions.map(({ findingId }) => findingId).sort();
+  if (
+    decisions.length !== disputes.length ||
+    new Set(actualIds).size !== actualIds.length ||
+    actualIds.some((id, index) => id !== expectedIds[index])
+  ) {
+    throw outputError("Reviewer must reconsider every dispute exactly once.");
+  }
+  return Object.freeze({ status: payload.status, decisions });
+}
+
+export function normalizeFindingArbitration(payload) {
+  assertExactFields(
+    payload,
+    ["direction", "rationale", "question", "options", "whyBlocked", "evidence"],
+    "Finding arbitration",
+    INVALID_OUTPUT_CODE,
+  );
+  assertStructuredResult(payload);
+  if (
+    !isRecord(payload) ||
+    !["WORKER_CORRECT", "REVIEWER_CORRECT", "REQUIREMENT_AMBIGUOUS"].includes(payload.direction)
+  ) {
+    throw outputError("Arbiter returned an invalid finding direction.");
+  }
+  const rationale = normalizeText(
+    payload.rationale,
+    "finding arbitration rationale",
+    INVALID_OUTPUT_CODE,
+  );
+  if (payload.direction === "REQUIREMENT_AMBIGUOUS") {
+    return Object.freeze({
+      direction: payload.direction,
+      rationale,
+      decision: normalizeProductDecision(payload),
+    });
+  }
+  if (!emptyDecision(payload)) {
+    throw outputError("Finding arbitration contains inapplicable fields.");
+  }
+  return Object.freeze({ direction: payload.direction, rationale });
+}
+
+export function normalizeStagnationResult(payload, pipelineState) {
+  assertExactFields(
+    payload,
+    [
+      "direction",
+      "rationale",
+      "findingIds",
+      "question",
+      "options",
+      "whyBlocked",
+      "evidence",
+    ],
+    "Stagnation arbitration",
+    INVALID_OUTPUT_CODE,
+  );
+  assertStructuredResult(payload);
+  if (
+    !isRecord(payload) ||
+    ![
+      "CONTINUE_FIXES",
+      "REWORK_IMPLEMENTATION",
+      "RECONSIDER_FINDINGS",
+      "PRODUCT_DECISION_REQUIRED",
+    ].includes(payload.direction)
+  ) {
+    throw outputError("Arbiter returned an invalid stagnation direction.");
+  }
+  const rationale = normalizeText(payload.rationale, "stagnation rationale", INVALID_OUTPUT_CODE);
+  if (payload.direction === "PRODUCT_DECISION_REQUIRED") {
+    if (!emptyArray(payload.findingIds)) {
+      throw outputError("Product decision contains inapplicable fields.");
+    }
+    return Object.freeze({
+      direction: payload.direction,
+      rationale,
+      decision: normalizeProductDecision(payload),
+    });
+  }
+  if (!emptyDecision(payload) || !Array.isArray(payload.findingIds)) {
+    throw outputError("Stagnation result contains inapplicable fields.");
+  }
+  const findingIds = payload.findingIds.map((id) => {
+    if (!REVIEW_FINDING_ID_PATTERN.test(id)) {
+      throw outputError("Stagnation finding ID is invalid.");
+    }
+    return id;
+  });
+  const currentIds = new Set(pipelineState.findings.map(({ id }) => id));
+  if (
+    (payload.direction === "RECONSIDER_FINDINGS" &&
+      (findingIds.length === 0 ||
+        new Set(findingIds).size !== findingIds.length ||
+        findingIds.some((id) => !currentIds.has(id)))) ||
+    (payload.direction !== "RECONSIDER_FINDINGS" && findingIds.length !== 0)
+  ) {
+    throw outputError("Stagnation direction names inapplicable findings.");
+  }
+  return Object.freeze({
+    direction: payload.direction,
+    rationale,
+    findingIds: Object.freeze(findingIds),
+  });
+}
+
+export function normalizeResumeAction(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (!isRecord(value) || !["extra-fix-rounds", "override-finding"].includes(value.type)) {
+    throw workflowError("Polishing resume action is invalid.");
+  }
+  if (
+    value.type === "extra-fix-rounds" &&
+    Object.keys(value).length === 2 &&
+    Number.isSafeInteger(value.amount) &&
+    value.amount > 0
+  ) {
+    return Object.freeze({ type: value.type, amount: value.amount });
+  }
+  if (
+    value.type === "override-finding" &&
+    Object.keys(value).length === 2 &&
+    REVIEW_FINDING_ID_PATTERN.test(value.findingId)
+  ) {
+    return Object.freeze({ type: value.type, findingId: value.findingId });
+  }
+  throw workflowError("Polishing resume action is invalid.");
+}
+
 export function assertSettings(settings) {
   assertExactFields(settings, SETTINGS_FIELDS, "Polishing settings");
   for (const field of SETTINGS_FIELDS) {
@@ -454,6 +1041,27 @@ export function assertSettings(settings) {
       throw workflowError(`Polishing setting ${field} is invalid.`);
     }
   }
+  if (settings.maxDisputesPerFinding > MAX_DISPUTES_PER_FINDING) {
+    throw workflowError(
+      `Polishing setting maxDisputesPerFinding must not exceed ${MAX_DISPUTES_PER_FINDING}.`,
+    );
+  }
+  disputeHistoryCapacity(settings);
+}
+
+export function disputeHistoryCapacity(settings) {
+  const capacity =
+    MAX_DIAGNOSTIC_ITEMS * settings?.maxDisputesPerFinding;
+  if (
+    !Number.isSafeInteger(capacity) ||
+    capacity < 1 ||
+    settings.maxDisputesPerFinding > MAX_DISPUTES_PER_FINDING
+  ) {
+    throw workflowError(
+      "Polishing setting maxDisputesPerFinding is too large.",
+    );
+  }
+  return capacity;
 }
 
 function normalizeOptionalSummary(value, name) {
@@ -497,6 +1105,216 @@ function normalizeDisagreement(value) {
       code: "ERR_INVALID_POLISHING_STATE",
     }),
   });
+}
+
+function normalizePersistedFindings(value, name = "Polishing findings") {
+  try {
+    return normalizeReviewFindings(value, "ERR_INVALID_POLISHING_STATE");
+  } catch (cause) {
+    throw new PolishingWorkflowError(`${name} are invalid.`, {
+      cause,
+      code: "ERR_INVALID_POLISHING_STATE",
+    });
+  }
+}
+
+function normalizePersistedFinalization(value) {
+  if (value === null) {
+    return null;
+  }
+  assertExactFields(
+    value,
+    ["status", "skillPath", "summary", "issues", "fingerprint"],
+    "Polishing finalization result",
+  );
+  if (!["PASS", "FAIL"].includes(value.status) || !HASH_PATTERN.test(value.fingerprint)) {
+    throw workflowError("Polishing finalization result is invalid.");
+  }
+  normalizeRelativePath(value.skillPath, "finalization skill path", "ERR_INVALID_POLISHING_STATE");
+  normalizeSummary(value.summary, "finalization summary");
+  const issues = normalizeFinalizationIssues(value.issues, "ERR_INVALID_POLISHING_STATE");
+  if (
+    (value.status === "PASS" && issues.length !== 0) ||
+    (value.status === "FAIL" && issues.length === 0)
+  ) {
+    throw workflowError("Polishing finalization result is inconsistent.");
+  }
+  return value;
+}
+
+function normalizeCountRecord(value, name) {
+  if (!isRecord(value) || Object.keys(value).length > MAX_DIAGNOSTIC_ITEMS) {
+    throw workflowError(`${name} is invalid.`);
+  }
+  for (const [id, count] of Object.entries(value)) {
+    if (
+      !REVIEW_FINDING_ID_PATTERN.test(id) ||
+      !Number.isSafeInteger(count) ||
+      count < 1
+    ) {
+      throw workflowError(`${name} is invalid.`);
+    }
+  }
+  return value;
+}
+
+function normalizePendingDisputes(value) {
+  if (!Array.isArray(value) || value.length > MAX_ITEMS) {
+    throw workflowError("Polishing pending disputes are invalid.");
+  }
+  for (const dispute of value) {
+    assertExactFields(dispute, ["findingId", "reason", "evidence"], "Polishing pending dispute");
+    if (!REVIEW_FINDING_ID_PATTERN.test(dispute.findingId)) {
+      throw workflowError("Polishing pending dispute is invalid.");
+    }
+    normalizeText(dispute.reason, `dispute ${dispute.findingId} reason`);
+    normalizeTextList(dispute.evidence, `dispute ${dispute.findingId} evidence`);
+  }
+  if (new Set(value.map(({ findingId }) => findingId)).size !== value.length) {
+    throw workflowError("Polishing pending disputes must be unique.");
+  }
+  return value;
+}
+
+function normalizeDisputeHistory(value, capacity) {
+  if (
+    !Array.isArray(value) ||
+    value.length > capacity
+  ) {
+    throw workflowError("Polishing dispute history is invalid.");
+  }
+  assertDisputeHistoryFits(value);
+  for (const entry of value) {
+    assertExactFields(
+      entry,
+      [
+        "findingId",
+        "attempt",
+        "direction",
+        "workerReason",
+        "workerEvidence",
+        "reviewerReason",
+        "reviewerEvidence",
+      ],
+      "Polishing dispute history entry",
+    );
+    if (
+      !REVIEW_FINDING_ID_PATTERN.test(entry.findingId) ||
+      !Number.isSafeInteger(entry.attempt) ||
+      entry.attempt < 1 ||
+      !["WITHDRAW", "UPHOLD"].includes(entry.direction)
+    ) {
+      throw workflowError("Polishing dispute history entry is invalid.");
+    }
+    normalizeText(entry.workerReason, "dispute Worker reason");
+    normalizeTextList(entry.workerEvidence, "dispute Worker evidence");
+    normalizeText(entry.reviewerReason, "dispute Reviewer reason");
+    normalizeTextList(entry.reviewerEvidence, "dispute Reviewer evidence", { allowEmpty: true });
+  }
+  return value;
+}
+
+function normalizeFindingArbitrations(value) {
+  if (!Array.isArray(value) || value.length > MAX_DIAGNOSTIC_ITEMS) {
+    throw workflowError("Polishing finding arbitrations are invalid.");
+  }
+  for (const entry of value) {
+    assertExactFields(
+      entry,
+      ["findingId", "direction", "rationale"],
+      "Polishing finding arbitration",
+    );
+    if (
+      !REVIEW_FINDING_ID_PATTERN.test(entry.findingId) ||
+      !["WORKER_CORRECT", "REVIEWER_CORRECT"].includes(entry.direction)
+    ) {
+      throw workflowError("Polishing finding arbitration is invalid.");
+    }
+    normalizeText(entry.rationale, "finding arbitration rationale");
+  }
+  if (new Set(value.map(({ findingId }) => findingId)).size !== value.length) {
+    throw workflowError("Polishing finding arbitrations must be unique.");
+  }
+  return value;
+}
+
+function normalizeCorrectionHistory(value) {
+  if (!Array.isArray(value) || value.length > MAX_DIAGNOSTIC_ITEMS) {
+    throw workflowError("Polishing correction history is invalid.");
+  }
+  for (const entry of value) {
+    assertExactFields(
+      entry,
+      ["round", "fingerprint", "finalizationIssueIds", "findingIds"],
+      "Polishing correction history entry",
+    );
+    if (
+      !Number.isSafeInteger(entry.round) ||
+      entry.round < 1 ||
+      !HASH_PATTERN.test(entry.fingerprint) ||
+      !Array.isArray(entry.finalizationIssueIds) ||
+      !Array.isArray(entry.findingIds) ||
+      entry.finalizationIssueIds.some((id) => !FINALIZATION_ISSUE_ID_PATTERN.test(id)) ||
+      entry.findingIds.some((id) => !REVIEW_FINDING_ID_PATTERN.test(id)) ||
+      new Set(entry.finalizationIssueIds).size !==
+        entry.finalizationIssueIds.length ||
+      new Set(entry.findingIds).size !== entry.findingIds.length ||
+      (entry.finalizationIssueIds.length === 0) ===
+        (entry.findingIds.length === 0)
+    ) {
+      throw workflowError("Polishing correction history entry is invalid.");
+    }
+  }
+  return value;
+}
+
+function normalizeStagnationDirection(value) {
+  if (value === null) {
+    return null;
+  }
+  assertExactFields(
+    value,
+    ["direction", "rationale"],
+    "Polishing stagnation direction",
+  );
+  if (![
+    "CONTINUE_FIXES",
+    "REWORK_IMPLEMENTATION",
+    "RECONSIDER_FINDINGS",
+  ].includes(value.direction)) {
+    throw workflowError("Polishing stagnation direction is invalid.");
+  }
+  normalizeText(value.rationale, "stagnation direction rationale");
+  return value;
+}
+
+function normalizeFindingOverrides(value) {
+  if (!Array.isArray(value) || value.length > MAX_DIAGNOSTIC_ITEMS) {
+    throw workflowError("Polishing finding overrides are invalid.");
+  }
+  for (const entry of value) {
+    assertExactFields(
+      entry,
+      ["findingId", "fingerprint"],
+      "Polishing finding override",
+    );
+    if (
+      !REVIEW_FINDING_ID_PATTERN.test(entry.findingId) ||
+      !HASH_PATTERN.test(entry.fingerprint)
+    ) {
+      throw workflowError("Polishing finding override is invalid.");
+    }
+  }
+  if (
+    new Set(
+      value.map(
+        ({ findingId, fingerprint }) => `${findingId}:${fingerprint}`,
+      ),
+    ).size !== value.length
+  ) {
+    throw workflowError("Polishing finding overrides must be unique.");
+  }
+  return value;
 }
 
 function assertSnapshot(value) {
@@ -548,6 +1366,8 @@ export function normalizePipelineState(value) {
     "clarificationFrozen",
     "refreezeRequired",
     "bootstrapArbitrationUsed",
+    "pendingCorrection",
+    "stagnationArbitrationUsed",
   ]) {
     if (typeof value[field] !== "boolean") {
       throw workflowError(`Polishing state field ${field} is invalid.`);
@@ -622,6 +1442,65 @@ export function normalizePipelineState(value) {
     "resolved summary",
   );
   const disagreement = normalizeDisagreement(value.bootstrapDisagreement);
+  const polishSummary = normalizeOptionalSummary(
+    value.polishSummary,
+    "polishing summary",
+  );
+  const finalizationResult = normalizePersistedFinalization(
+    value.finalizationResult,
+  );
+  const findings = normalizePersistedFindings(value.findings);
+  const previousFindings = normalizePersistedFindings(
+    value.previousFindings,
+    "Polishing previous findings",
+  );
+  const pendingDisputes = normalizePendingDisputes(value.pendingDisputes);
+  const disputeCounts = normalizeCountRecord(
+    value.disputeCounts,
+    "Polishing dispute counts",
+  );
+  const sameFindingRounds = normalizeCountRecord(
+    value.sameFindingRounds,
+    "Polishing same-finding rounds",
+  );
+  normalizeDisputeHistory(
+    value.disputeHistory,
+    value.settings === null ? 0 : disputeHistoryCapacity(value.settings),
+  );
+  const findingArbitrations = normalizeFindingArbitrations(
+    value.findingArbitrations,
+  );
+  normalizeCorrectionHistory(value.correctionHistory);
+  const stagnationDirection = normalizeStagnationDirection(
+    value.stagnationDirection,
+  );
+  normalizeFindingOverrides(value.findingOverrides);
+  if (
+    (value.finalizedFingerprint !== null &&
+      !HASH_PATTERN.test(value.finalizedFingerprint)) ||
+    (value.reviewedFingerprint !== null &&
+      !HASH_PATTERN.test(value.reviewedFingerprint)) ||
+    !Number.isSafeInteger(value.blockedSinceStagnation) ||
+    value.blockedSinceStagnation < 0 ||
+    !Number.isSafeInteger(value.additionalFixRounds) ||
+    value.additionalFixRounds < 0 ||
+    (value.settings !== null &&
+      !Number.isSafeInteger(
+        value.settings.maxFixRounds + value.additionalFixRounds,
+      )) ||
+    !Array.isArray(value.reviewReconsideration) ||
+    value.reviewReconsideration.length > MAX_ITEMS ||
+    value.reviewReconsideration.some(
+      (id) => !REVIEW_FINDING_ID_PATTERN.test(id),
+    ) ||
+    new Set(value.reviewReconsideration).size !==
+      value.reviewReconsideration.length
+  ) {
+    throw workflowError("Polishing correction state is invalid.");
+  }
+  if (value.stagnationArbitrationUsed !== (stagnationDirection !== null)) {
+    throw workflowError("Polishing stagnation arbitration is inconsistent.");
+  }
   if (
     (reviewerSummary !== null && workerSummary === null) ||
     ((resolvedSummary !== null || disagreement !== null) &&
@@ -638,6 +1517,126 @@ export function normalizePipelineState(value) {
   ) {
     throw workflowError("Polishing bootstrap arbitration is inconsistent.");
   }
+  const currentFindingIds = new Set(findings.map(({ id }) => id));
+  const previousFindingIds = new Set(previousFindings.map(({ id }) => id));
+  const deferredDisputes =
+    pendingDisputes.length > 0 &&
+    findings.length === 0 &&
+    pendingDisputes.every(({ findingId }) =>
+      previousFindingIds.has(findingId),
+    ) &&
+    (["POLISH", "FINALIZE", "REVIEW", "WAITING_FOR_USER", "FAILED"].includes(
+      value.workflowState,
+    ) ||
+      (value.workflowState === "RESOLVE_FINDINGS" &&
+        finalizationResult?.status === "FAIL"));
+  if (
+    (pendingDisputes.some(
+      ({ findingId }) => !currentFindingIds.has(findingId),
+    ) &&
+      !deferredDisputes) ||
+    value.reviewReconsideration.some((id) => !currentFindingIds.has(id)) ||
+    Object.keys(disputeCounts).some(
+      (id) =>
+        !currentFindingIds.has(id) &&
+        !pendingDisputes.some(({ findingId }) => findingId === id) &&
+        !value.disputeHistory.some((entry) => entry.findingId === id) &&
+        !value.findingOverrides.some((entry) => entry.findingId === id),
+    )
+  ) {
+    throw workflowError("Polishing finding progress is inconsistent.");
+  }
+  if (
+    finalizationResult === null &&
+    (value.finalizedFingerprint !== null ||
+      value.reviewedFingerprint !== null ||
+      findings.length !== 0 ||
+      (pendingDisputes.length !== 0 && !deferredDisputes))
+  ) {
+    throw workflowError("Polishing validation progress is inconsistent.");
+  }
+  if (
+    finalizationResult !== null &&
+    ((finalizationResult.status === "PASS") !==
+      (value.finalizedFingerprint === finalizationResult.fingerprint) ||
+      (value.reviewedFingerprint !== null &&
+        value.reviewedFingerprint !== value.finalizedFingerprint) ||
+      (finalizationResult.status === "FAIL" &&
+        (value.reviewedFingerprint !== null || findings.length !== 0)))
+  ) {
+    throw workflowError("Polishing finalization progress is inconsistent.");
+  }
+  if (
+    value.repositoryBaseline !== null &&
+    ((finalizationResult !== null &&
+      finalizationResult.fingerprint !==
+        value.repositoryBaseline.contentFingerprint) ||
+      (value.finalizedFingerprint !== null &&
+        value.finalizedFingerprint !==
+          value.repositoryBaseline.contentFingerprint) ||
+      (value.reviewedFingerprint !== null &&
+        value.reviewedFingerprint !==
+          value.repositoryBaseline.contentFingerprint))
+  ) {
+    throw workflowError("Polishing content fingerprints are inconsistent.");
+  }
+  if (
+    (findings.length > 0 || pendingDisputes.length > 0) &&
+    value.reviewedFingerprint === null &&
+    !deferredDisputes
+  ) {
+    throw workflowError("Polishing review progress is inconsistent.");
+  }
+  if (
+    value.pendingCorrection &&
+    !["POLISH", "FINALIZE", "REVIEW", "WAITING_FOR_USER", "FAILED"].includes(
+      value.workflowState,
+    )
+  ) {
+    throw workflowError("Polishing pending correction is inapplicable.");
+  }
+  if (
+    stagnationDirection !== null &&
+    ![
+      "POLISH",
+      "FINALIZE",
+      "REVIEW",
+      "RESOLVE_FINDINGS",
+      "DONE",
+      "WAITING_FOR_USER",
+      "FAILED",
+    ].includes(value.workflowState)
+  ) {
+    throw workflowError("Polishing stagnation direction is inapplicable.");
+  }
+  if (
+    value.reviewReconsideration.length > 0 &&
+    !["REVIEW", "WAITING_FOR_USER", "FAILED"].includes(value.workflowState)
+  ) {
+    throw workflowError("Polishing review reconsideration is inapplicable.");
+  }
+  const hasCorrectionProgress =
+    Object.keys(disputeCounts).length !== 0 ||
+    value.disputeHistory.length !== 0 ||
+    findingArbitrations.length !== 0 ||
+    value.correctionHistory.length !== 0 ||
+    Object.keys(sameFindingRounds).length !== 0 ||
+    value.pendingCorrection ||
+    value.blockedSinceStagnation !== 0 ||
+    value.stagnationArbitrationUsed ||
+    stagnationDirection !== null ||
+    value.reviewReconsideration.length !== 0 ||
+    value.additionalFixRounds !== 0 ||
+    value.findingOverrides.length !== 0;
+  const hasWorkProgress =
+    polishSummary !== null ||
+    finalizationResult !== null ||
+    value.finalizedFingerprint !== null ||
+    value.reviewedFingerprint !== null ||
+    findings.length !== 0 ||
+    previousFindings.length !== 0 ||
+    pendingDisputes.length !== 0 ||
+    hasCorrectionProgress;
   if (
     !value.preflightComplete &&
     (value.clarificationFrozen ||
@@ -647,9 +1646,16 @@ export function normalizePipelineState(value) {
       reviewerSummary !== null ||
       resolvedSummary !== null ||
       disagreement !== null ||
-      value.bootstrapArbitrationUsed)
+      value.bootstrapArbitrationUsed ||
+      hasWorkProgress)
   ) {
     throw workflowError("Polishing preflight state is inconsistent.");
+  }
+  if (
+    ["CLARIFY", "BOOTSTRAP"].includes(value.workflowState) &&
+    hasWorkProgress
+  ) {
+    throw workflowError("Polishing work progress is not applicable.");
   }
   if (
     value.workflowState === "CLARIFY" &&
@@ -670,13 +1676,62 @@ export function normalizePipelineState(value) {
     throw workflowError("Polishing bootstrap state is inconsistent.");
   }
   if (
-    value.workflowState === "POLISH" &&
+    ["POLISH", "FINALIZE", "REVIEW", "RESOLVE_FINDINGS", "DONE"].includes(
+      value.workflowState,
+    ) &&
     (!value.clarificationFrozen ||
       value.refreezeRequired ||
       resolvedSummary === null ||
       disagreement !== null)
   ) {
     throw workflowError("Polishing prepared state is inconsistent.");
+  }
+  if (
+    (["FINALIZE", "REVIEW", "RESOLVE_FINDINGS", "DONE"].includes(
+      value.workflowState,
+    ) &&
+      polishSummary === null)
+  ) {
+    throw workflowError("Polishing result state is inconsistent.");
+  }
+  if (
+    value.workflowState === "FINALIZE" &&
+    (finalizationResult !== null ||
+      findings.length !== 0 ||
+      value.reviewReconsideration.length !== 0)
+  ) {
+    throw workflowError("Polishing finalization state is inconsistent.");
+  }
+  if (
+    value.workflowState === "REVIEW" &&
+    (finalizationResult?.status !== "PASS" ||
+      value.finalizedFingerprint === null)
+  ) {
+    throw workflowError("Polishing review state is inconsistent.");
+  }
+  const completionReady =
+    finalizationResult?.status === "PASS" &&
+    value.finalizedFingerprint !== null &&
+    value.reviewedFingerprint === value.finalizedFingerprint &&
+    findings.length === 0 &&
+    pendingDisputes.length === 0;
+  const finalizationBlocked =
+    finalizationResult?.status === "FAIL" &&
+    finalizationResult.issues.length > 0;
+  if (
+    value.workflowState === "RESOLVE_FINDINGS" &&
+    !completionReady &&
+    !finalizationBlocked &&
+    findings.length === 0 &&
+    pendingDisputes.length === 0
+  ) {
+    throw workflowError("Polishing finding resolution has no blockers.");
+  }
+  if (
+    value.workflowState === "DONE" &&
+    (!completionReady || value.reviewReconsideration.length !== 0)
+  ) {
+    throw workflowError("Completed polishing state is inconsistent.");
   }
   if (
     !["CLARIFY", "WAITING_FOR_USER", "FAILED"].includes(
@@ -716,6 +1771,25 @@ export function createPolishingState({
     resolvedSummary: null,
     bootstrapDisagreement: null,
     bootstrapArbitrationUsed: false,
+    polishSummary: null,
+    finalizationResult: null,
+    finalizedFingerprint: null,
+    reviewedFingerprint: null,
+    findings: [],
+    previousFindings: [],
+    pendingDisputes: [],
+    disputeCounts: {},
+    disputeHistory: [],
+    findingArbitrations: [],
+    correctionHistory: [],
+    sameFindingRounds: {},
+    pendingCorrection: false,
+    blockedSinceStagnation: 0,
+    stagnationArbitrationUsed: false,
+    stagnationDirection: null,
+    reviewReconsideration: [],
+    additionalFixRounds: 0,
+    findingOverrides: [],
   });
 }
 
@@ -879,14 +1953,45 @@ export function assertRun(run) {
   }
   if (state.workflowState === "WAITING_FOR_USER") {
     const expectedReason = EDIT_PAUSE_REASONS[state.pendingEdit?.action];
+    const hasAuthorizationId = Object.hasOwn(run.pause, "authorizationId");
     if (
       (state.pendingEdit === null &&
-        Object.values(EDIT_PAUSE_REASONS).includes(run.pause.reason)) ||
+        (hasAuthorizationId ||
+          Object.values(EDIT_PAUSE_REASONS).includes(run.pause.reason))) ||
       (state.pendingEdit !== null &&
         (run.pause.authorizationId !== state.pendingEdit.id ||
           run.pause.reason !== expectedReason))
     ) {
       throw workflowError("Polishing pending edit pause is invalid.");
+    }
+    const hasResumeState = Object.hasOwn(run.pause, "resumeState");
+    const allowedResumeStates = Object.hasOwn(
+      PAUSE_RESUME_STATES,
+      run.pause.reason,
+    )
+      ? PAUSE_RESUME_STATES[run.pause.reason]
+      : undefined;
+    const requiresResumeState =
+      ["fix_limit_reached", "no_progress"].includes(run.pause.reason) ||
+      (state.preflightComplete &&
+        ["backend_unavailable", "environment_blocked"].includes(
+          run.pause.reason,
+        )) ||
+      (run.pause.reason === "finalization_cannot_pass" &&
+        run.pause.code !== "ERR_FINALIZATION_MODIFIED_BEFORE_VALIDATION");
+    if (
+      (hasResumeState &&
+        (!allowedResumeStates?.includes(run.pause.resumeState) ||
+          !state.preflightComplete)) ||
+      (requiresResumeState && !hasResumeState)
+    ) {
+      throw workflowError("Polishing pause resume state is invalid.");
+    }
+    if (hasResumeState) {
+      normalizePipelineState({
+        ...state,
+        workflowState: run.pause.resumeState,
+      });
     }
   }
   assertInputRequest(run, state);
@@ -912,8 +2017,110 @@ export function assertRun(run) {
     throw workflowError("Polishing input hashes are invalid.");
   }
   const counters = normalizedCounters(run.counters);
-  if (counters.clarificationRounds > MAX_CLARIFICATION_ROUNDS) {
-    throw workflowError("Polishing clarification progress is invalid.");
+  const fixBudget =
+    (state.settings?.maxFixRounds ?? 0) + state.additionalFixRounds;
+  const correctionHistory = state.correctionHistory;
+  const lastCorrection = correctionHistory.at(-1)?.round ?? 0;
+  const lastCorrectionFindingIds = new Set(
+    correctionHistory.at(-1)?.findingIds ?? [],
+  );
+  if (
+    counters.clarificationRounds > MAX_CLARIFICATION_ROUNDS ||
+    counters.correctionRounds > counters.fixRounds ||
+    counters.fixRounds > fixBudget ||
+    (run.pause?.reason === "fix_limit_reached" &&
+      (counters.fixRounds !== fixBudget ||
+        run.pause.fixRounds !== counters.fixRounds)) ||
+    lastCorrection !== counters.correctionRounds ||
+    correctionHistory.some(
+      (entry, index) =>
+        index > 0 &&
+        entry.round !== correctionHistory[index - 1].round + 1,
+    ) ||
+    state.blockedSinceStagnation > counters.correctionRounds ||
+    (state.stagnationArbitrationUsed && counters.correctionRounds === 0) ||
+    Object.keys(state.sameFindingRounds).some(
+      (id) => !lastCorrectionFindingIds.has(id),
+    ) ||
+    Object.values(state.sameFindingRounds).some(
+      (count) => count > counters.correctionRounds,
+    )
+  ) {
+    throw workflowError("Polishing persisted progress is invalid.");
+  }
+  if (
+    state.pendingDisputes.some(
+      ({ findingId }) => !Object.hasOwn(state.disputeCounts, findingId),
+    ) ||
+    state.disputeHistory.some(
+      ({ findingId }) => !Object.hasOwn(state.disputeCounts, findingId),
+    ) ||
+    state.findingArbitrations.some(
+      ({ findingId }) =>
+        !state.disputeHistory.some((entry) => entry.findingId === findingId),
+    )
+  ) {
+    throw workflowError("Polishing dispute progress is invalid.");
+  }
+  for (const [findingId, count] of Object.entries(state.disputeCounts)) {
+    const recorded = state.disputeHistory.filter(
+      (entry) => entry.findingId === findingId,
+    );
+    const pending = state.pendingDisputes.find(
+      (entry) => entry.findingId === findingId,
+    );
+    const arbitration = state.findingArbitrations.find(
+      (entry) => entry.findingId === findingId,
+    );
+    const latest = recorded.at(-1);
+    const exhaustedUpheld =
+      count === state.settings.maxDisputesPerFinding &&
+      recorded.length === count &&
+      latest?.direction === "UPHOLD";
+    if (
+      count > state.settings.maxDisputesPerFinding ||
+      recorded.some((entry, index) => entry.attempt !== index + 1) ||
+      (!pending && recorded.length !== count) ||
+      (pending &&
+        recorded.length !== count - 1 &&
+        !(
+          recorded.length === count &&
+          count === state.settings.maxDisputesPerFinding &&
+          latest.direction === "UPHOLD"
+        )) ||
+      (pending !== undefined &&
+        recorded.length === count &&
+        (pending.reason !== latest.workerReason ||
+          pending.evidence.length !== latest.workerEvidence.length ||
+          pending.evidence.some(
+            (evidence, index) => evidence !== latest.workerEvidence[index],
+          ))) ||
+      (state.findings.some(({ id }) => id === findingId) &&
+        exhaustedUpheld &&
+        pending === undefined &&
+        arbitration === undefined)
+    ) {
+      throw workflowError("Polishing dispute progress is invalid.");
+    }
+  }
+  for (const arbitration of state.findingArbitrations) {
+    const count = state.disputeCounts[arbitration.findingId];
+    const recorded = state.disputeHistory.filter(
+      (entry) => entry.findingId === arbitration.findingId,
+    );
+    if (
+      count !== state.settings.maxDisputesPerFinding ||
+      recorded.length !== count ||
+      recorded.at(-1)?.direction !== "UPHOLD" ||
+      state.pendingDisputes.some(
+        (entry) => entry.findingId === arbitration.findingId,
+      )
+    ) {
+      throw workflowError("Polishing arbitration history is incomplete.");
+    }
+  }
+  if (serializedBytes(run) > MAX_DURABLE_RUN_BYTES) {
+    throw workflowError("Polishing run exceeds its durable size budget.");
   }
 }
 
@@ -946,6 +2153,7 @@ export function assertRuntime(runtime) {
   }
   for (const name of [
     "assertUnchanged",
+    "contentFingerprint",
     "inspectPath",
     "preflight",
     "snapshot",

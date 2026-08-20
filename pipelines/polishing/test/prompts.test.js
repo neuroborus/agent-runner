@@ -6,13 +6,27 @@ import {
   BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
+  DISPUTE_RECONSIDERATION_INSTRUCTIONS,
+  FINALIZATION_INSTRUCTIONS,
+  FINDING_ARBITRATION_INSTRUCTIONS,
+  FINDING_RESOLUTION_INSTRUCTIONS,
+  POLISH_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
+  REVIEW_INSTRUCTIONS,
+  STAGNATION_INSTRUCTIONS,
 } from "../src/index.js";
 import {
   BOOTSTRAP_ARBITRATION_SCHEMA,
   BOOTSTRAP_RECONCILIATION_SCHEMA,
   BOOTSTRAP_SCHEMA,
   CLARIFICATION_SCHEMA,
+  DISPUTE_RECONSIDERATION_SCHEMA,
+  FINALIZATION_SCHEMA,
+  FINDING_ARBITRATION_SCHEMA,
+  FINDING_RESOLUTION_SCHEMA,
+  POLISH_SCHEMA,
+  REVIEW_SCHEMA,
+  STAGNATION_SCHEMA,
 } from "../src/schemas.js";
 
 function assertStrictSchema(schema) {
@@ -31,14 +45,31 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
   assert.match(BOOTSTRAP_ARBITRATION_INSTRUCTIONS, /Do not modify/u);
   assert.match(PRODUCT_DECISION_INSTRUCTIONS, /Do not ask questions/u);
   assert.match(PRODUCT_DECISION_INSTRUCTIONS, /materially different product/u);
+  assert.match(POLISH_INSTRUCTIONS, /Do not create a commit/u);
+  assert.match(POLISH_INSTRUCTIONS, /self-review/u);
+  assert.match(FINALIZATION_INSTRUCTIONS, /finalization skill/u);
+  assert.match(FINALIZATION_INSTRUCTIONS, /Do not.*stage/u);
+  assert.match(REVIEW_INSTRUCTIONS, /Do not modify/u);
+  assert.match(REVIEW_INSTRUCTIONS, /stable IDs/u);
+  assert.match(FINDING_RESOLUTION_INSTRUCTIONS, /one batch/u);
+  assert.match(DISPUTE_RECONSIDERATION_INSTRUCTIONS, /Withdraw/u);
+  assert.match(FINDING_ARBITRATION_INSTRUCTIONS, /WORKER_CORRECT/u);
+  assert.match(STAGNATION_INSTRUCTIONS, /cannot approve/u);
 });
 
-test("polishing preparation schemas are strict and deeply frozen", () => {
+test("polishing schemas are strict and deeply frozen", () => {
   for (const schema of [
     CLARIFICATION_SCHEMA,
     BOOTSTRAP_SCHEMA,
     BOOTSTRAP_RECONCILIATION_SCHEMA,
     BOOTSTRAP_ARBITRATION_SCHEMA,
+    POLISH_SCHEMA,
+    FINALIZATION_SCHEMA,
+    REVIEW_SCHEMA,
+    FINDING_RESOLUTION_SCHEMA,
+    DISPUTE_RECONSIDERATION_SCHEMA,
+    FINDING_ARBITRATION_SCHEMA,
+    STAGNATION_SCHEMA,
   ]) {
     assertStrictSchema(schema);
   }

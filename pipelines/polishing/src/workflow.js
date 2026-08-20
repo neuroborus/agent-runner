@@ -6,13 +6,27 @@ import {
   BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
+  DISPUTE_RECONSIDERATION_INSTRUCTIONS,
+  FINALIZATION_INSTRUCTIONS,
+  FINDING_ARBITRATION_INSTRUCTIONS,
+  FINDING_RESOLUTION_INSTRUCTIONS,
+  POLISH_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
+  REVIEW_INSTRUCTIONS,
+  STAGNATION_INSTRUCTIONS,
 } from "./prompts.js";
 import {
   BOOTSTRAP_ARBITRATION_SCHEMA,
   BOOTSTRAP_RECONCILIATION_SCHEMA,
   BOOTSTRAP_SCHEMA,
   CLARIFICATION_SCHEMA,
+  DISPUTE_RECONSIDERATION_SCHEMA,
+  FINALIZATION_SCHEMA,
+  FINDING_ARBITRATION_SCHEMA,
+  FINDING_RESOLUTION_SCHEMA,
+  POLISH_SCHEMA,
+  REVIEW_SCHEMA,
+  STAGNATION_SCHEMA,
 } from "./schemas.js";
 import {
   activity,
@@ -21,16 +35,27 @@ import {
   assertSettings,
   createPolishingState,
   diagnosticCode,
+  disputeHistoryCapacity,
+  disputeHistoryFits,
   INVALID_POLISHING_INPUT_CODE,
   isRecord,
+  MAX_DIAGNOSTIC_ITEMS,
   MAX_CLARIFICATION_ROUNDS,
   normalizeAdapterCapabilities,
   normalizeBootstrapArbitration,
   normalizeBootstrapResult,
   normalizeClarificationResult,
+  normalizeFinalizationResult,
+  normalizeFindingArbitration,
   normalizeInputSnapshot,
   normalizePipelineState,
+  normalizePolishResult,
   normalizeReconciliationResult,
+  normalizeReconsiderationResult,
+  normalizeResolutionResult,
+  normalizeResumeAction,
+  normalizeReviewResult,
+  normalizeStagnationResult,
   normalizedCounters,
   PolishingWorkflowError,
   workflowError,
@@ -95,9 +120,7 @@ ${executionClarifications}`;
 export async function runPolishing({ action, run, runtime, settings }) {
   assertRun(run);
   assertRuntime(runtime);
-  if (action !== undefined && action !== null) {
-    throw workflowError("Resume actions are not available before polishing begins.");
-  }
+  const resumeAction = normalizeResumeAction(action);
   if (run.pipelineState.settings === null) {
     assertSettings(settings);
   }
@@ -110,6 +133,40 @@ export async function runPolishing({ action, run, runtime, settings }) {
 
   function counters() {
     return normalizedCounters(currentRun.counters);
+  }
+
+  function clearedWorkState(current, { clearBootstrap = false } = {}) {
+    return {
+      ...current,
+      ...(clearBootstrap
+        ? {
+            workerSummary: null,
+            reviewerSummary: null,
+            resolvedSummary: null,
+            bootstrapDisagreement: null,
+            bootstrapArbitrationUsed: false,
+          }
+        : {}),
+      polishSummary: null,
+      finalizationResult: null,
+      finalizedFingerprint: null,
+      reviewedFingerprint: null,
+      findings: [],
+      previousFindings: [],
+      pendingDisputes: [],
+      disputeCounts: {},
+      disputeHistory: [],
+      findingArbitrations: [],
+      correctionHistory: [],
+      sameFindingRounds: {},
+      pendingCorrection: false,
+      blockedSinceStagnation: 0,
+      stagnationArbitrationUsed: false,
+      stagnationDirection: null,
+      reviewReconsideration: [],
+      additionalFixRounds: clearBootstrap ? 0 : current.additionalFixRounds,
+      findingOverrides: [],
+    };
   }
 
   async function transition(
@@ -127,7 +184,11 @@ export async function runPolishing({ action, run, runtime, settings }) {
       pause,
       pipelineState: nextPipelineState,
     };
-    assertRun({ ...currentRun, ...patch });
+    assertRun({
+      ...currentRun,
+      ...patch,
+      revision: currentRun.revision + 1,
+    });
     currentRun = await runtime.transition(patch, { activity: publicActivity });
     assertRun(currentRun);
     return currentRun;
@@ -171,18 +232,18 @@ export async function runPolishing({ action, run, runtime, settings }) {
   async function invalidateInputs(reason, message) {
     await transition(
       {
-        ...state(),
+        ...clearedWorkState(state(), { clearBootstrap: true }),
         workflowState: "WAITING_FOR_USER",
         clarificationFrozen: false,
         pendingEdit: null,
         refreezeRequired: false,
-        workerSummary: null,
-        reviewerSummary: null,
-        resolvedSummary: null,
-        bootstrapDisagreement: null,
-        bootstrapArbitrationUsed: false,
       },
       {
+        nextCounters: {
+          ...counters(),
+          fixRounds: 0,
+          correctionRounds: 0,
+        },
         pause: { reason },
         publicActivity: activity("runner", "inputs", "changed", message),
       },
@@ -295,6 +356,17 @@ export async function runPolishing({ action, run, runtime, settings }) {
         "ERR_INVALID_POLISHING_OUTPUT",
       );
     }
+    assertRun({
+      ...currentRun,
+      revision: currentRun.revision + 1,
+      sessionLineage: {
+        ...currentRun.sessionLineage,
+        children: [
+          ...currentRun.sessionLineage.children,
+          { role, sessionId },
+        ],
+      },
+    });
     currentRun = await runtime.recordChildSession(
       { role, sessionId },
       {
@@ -340,11 +412,37 @@ export async function runPolishing({ action, run, runtime, settings }) {
     );
   }
 
+  function workspaceControlChange(before, after) {
+    if (
+      before.projectPath !== after.projectPath ||
+      before.head !== after.head ||
+      before.branch !== after.branch ||
+      before.detached !== after.detached ||
+      before.refsFingerprint !== after.refsFingerprint
+    ) {
+      return "unexpected_git_ref_change";
+    }
+    if (
+      before.remoteConfigurationFingerprint !==
+      after.remoteConfigurationFingerprint
+    ) {
+      return "unexpected_remote_configuration_change";
+    }
+    if (before.identityFingerprint !== after.identityFingerprint) {
+      return "unexpected_git_identity_change";
+    }
+    return null;
+  }
+
   async function runRole(
     role,
     schema,
     buildPrompt,
-    { freshSession = false } = {},
+    {
+      access = "read-only",
+      freshSession = false,
+      reportWorkspaceChange = false,
+    } = {},
   ) {
     await ensureRoleCapabilities(role);
     const evidence = await readCurrentInputs();
@@ -370,7 +468,7 @@ export async function runPolishing({ action, run, runtime, settings }) {
           : undefined;
     const configuration = currentRun.roles[role];
     const request = {
-      access: "read-only",
+      access,
       cwd: currentRun.projectPath,
       prompt: buildPrompt(inputEvidence(evidence.inputs, evidence.clarification)),
       schema,
@@ -384,8 +482,75 @@ export async function runPolishing({ action, run, runtime, settings }) {
     } catch (cause) {
       agentError = cause;
     }
-    await runtime.git.assertUnchanged(turnSnapshot);
-    await runtime.git.assertUnchanged(baseline);
+    let nextRepositoryBaseline = baseline;
+    if (access === "read-only") {
+      await runtime.git.assertUnchanged(turnSnapshot);
+      await runtime.git.assertUnchanged(baseline);
+    } else {
+      nextRepositoryBaseline = await runtime.git.snapshot({
+        allowedPaths: baseline.allowedPaths,
+        projectPath: baseline.projectPath,
+      });
+      const reason = workspaceControlChange(turnSnapshot, nextRepositoryBaseline);
+      if (reason !== null) {
+        await pause(reason);
+        return null;
+      }
+      const contentChanged =
+        baseline.contentFingerprint !== nextRepositoryBaseline.contentFingerprint;
+      const workspaceChanged = [
+        "clean",
+        "trackedContentFingerprint",
+        "untrackedContentFingerprint",
+        "contentFingerprint",
+        "indexFingerprint",
+      ].some((field) => baseline[field] !== nextRepositoryBaseline[field]);
+      if (workspaceChanged) {
+        const current = state();
+        const changedDuringFailure = agentError !== undefined;
+        const contentChangingCorrection =
+          contentChanged && current.workflowState === "RESOLVE_FINDINGS";
+        await transition(
+          contentChangingCorrection
+            ? {
+                ...current,
+                workflowState: "FINALIZE",
+                repositoryBaseline: nextRepositoryBaseline,
+                finalizationResult: null,
+                finalizedFingerprint: null,
+                reviewedFingerprint: null,
+                previousFindings:
+                  current.findings.length === 0
+                    ? current.previousFindings
+                    : current.findings,
+                findings: [],
+                pendingCorrection: true,
+                reviewReconsideration: [],
+              }
+            : {
+                ...current,
+                repositoryBaseline: nextRepositoryBaseline,
+                ...(changedDuringFailure && contentChanged
+                  ? {
+                      finalizationResult: null,
+                      finalizedFingerprint: null,
+                      reviewedFingerprint: null,
+                      findings: [],
+                      reviewReconsideration: [],
+                    }
+                  : {}),
+              },
+          contentChangingCorrection
+            ? {
+                nextCounters: {
+                  ...counters(),
+                  fixRounds: counters().fixRounds + 1,
+                },
+              }
+            : undefined,
+        );
+      }
+    }
     if ((await readCurrentInputs()) === null) {
       return null;
     }
@@ -399,7 +564,14 @@ export async function runPolishing({ action, run, runtime, settings }) {
       );
     }
     await recordSession(role, response.sessionId, previousSession);
-    return response.structured;
+    return reportWorkspaceChange
+      ? Object.freeze({
+          output: response.structured,
+          workspaceChanged:
+            baseline.contentFingerprint !==
+            nextRepositoryBaseline.contentFingerprint,
+        })
+      : response.structured;
   }
 
   async function persistEdit(
@@ -477,9 +649,12 @@ export async function runPolishing({ action, run, runtime, settings }) {
     const productDecision = result.action === "product-decision";
     const bootstrapDecision =
       productDecision && result.suspendedState === "BOOTSTRAP";
+    const resumedState = bootstrapDecision
+      ? clearedWorkState(current, { clearBootstrap: true })
+      : current;
     await transition(
       {
-        ...current,
+        ...resumedState,
         workflowState: result.suspendedState,
         pendingEdit: null,
         proactiveClarificationComplete:
@@ -488,15 +663,15 @@ export async function runPolishing({ action, run, runtime, settings }) {
             : current.proactiveClarificationComplete,
         clarificationFrozen: false,
         refreezeRequired: bootstrapDecision,
-        workerSummary: bootstrapDecision ? null : current.workerSummary,
-        reviewerSummary: bootstrapDecision ? null : current.reviewerSummary,
-        resolvedSummary: bootstrapDecision ? null : current.resolvedSummary,
+        workerSummary: bootstrapDecision ? null : resumedState.workerSummary,
+        reviewerSummary: bootstrapDecision ? null : resumedState.reviewerSummary,
+        resolvedSummary: bootstrapDecision ? null : resumedState.resolvedSummary,
         bootstrapDisagreement: bootstrapDecision
           ? null
-          : current.bootstrapDisagreement,
+          : resumedState.bootstrapDisagreement,
         bootstrapArbitrationUsed: bootstrapDecision
           ? false
-          : current.bootstrapArbitrationUsed,
+          : resumedState.bootstrapArbitrationUsed,
       },
       {
         nextHashes: {
@@ -569,16 +744,20 @@ export async function runPolishing({ action, run, runtime, settings }) {
           rationale: decision.whyBlocked,
         },
         nextPipelineState: {
-          ...state(),
+          ...clearedWorkState(state(), { clearBootstrap: bootstrapDecision }),
           clarificationFrozen: false,
           refreezeRequired: false,
-          workerSummary: bootstrapDecision ? null : state().workerSummary,
-          reviewerSummary: bootstrapDecision ? null : state().reviewerSummary,
           resolvedSummary: null,
           bootstrapDisagreement: null,
           bootstrapArbitrationUsed: false,
         },
-        nextCounters: { ...counters(), productDecisions: number },
+        nextCounters: {
+          ...counters(),
+          productDecisions: number,
+          ...(bootstrapDecision
+            ? { fixRounds: 0, correctionRounds: 0 }
+            : {}),
+        },
         nextHashes: {
           ...currentRun.hashes,
           executionClarifications: transcript.hash,
@@ -595,6 +774,325 @@ export async function runPolishing({ action, run, runtime, settings }) {
 
   async function writeContext(path, content) {
     await runtime.writeRunArtifact({ path, content: `${content.trim()}\n` });
+  }
+
+  async function contentFingerprint() {
+    return runtime.git.contentFingerprint({
+      allowedPaths: [state().clarificationPath],
+      projectPath: state().repositoryBaseline.projectPath,
+    });
+  }
+
+  function fixBudget() {
+    return state().settings.maxFixRounds + state().additionalFixRounds;
+  }
+
+  function activeBlockers() {
+    if (state().finalizationResult?.status === "FAIL") {
+      return state().finalizationResult.issues.map((issue) => ({
+        ...issue,
+        source: "finalization",
+      }));
+    }
+    return state().findings.map((finding) => ({
+      ...finding,
+      source: "review",
+    }));
+  }
+
+  function priorFindingDecisions(ids) {
+    const wanted = ids === undefined ? null : new Set(ids);
+    const includes = ({ findingId }) =>
+      wanted === null || wanted.has(findingId);
+    return {
+      disputes: state().disputeHistory.filter(includes),
+      arbitrations: state().findingArbitrations.filter(includes),
+      overrides: state().findingOverrides.filter(includes),
+    };
+  }
+
+  function latestFindingEntries(entries) {
+    const byFinding = new Map();
+    for (const entry of entries) {
+      byFinding.delete(entry.findingId);
+      byFinding.set(entry.findingId, entry);
+    }
+    return [...byFinding.values()];
+  }
+
+  function compactFindingDecisions(
+    current,
+    updates = {},
+    { additionalDisputeHistory = [], overflowCode } = {},
+  ) {
+    const next = { ...current, ...updates };
+    const disputeCounts = { ...next.disputeCounts };
+    let disputeHistory = [...next.disputeHistory];
+    let findingArbitrations = latestFindingEntries(next.findingArbitrations);
+    let findingOverrides = latestFindingEntries(next.findingOverrides);
+    const protectedIds = new Set([
+      ...next.findings.map(({ id }) => id),
+      ...next.previousFindings.map(({ id }) => id),
+      ...next.pendingDisputes.map(({ findingId }) => findingId),
+      ...next.reviewReconsideration,
+    ]);
+    const recordedIds = new Set([
+      ...protectedIds,
+      ...disputeHistory.map(({ findingId }) => findingId),
+      ...findingArbitrations.map(({ findingId }) => findingId),
+      ...findingOverrides.map(({ findingId }) => findingId),
+    ]);
+    for (const findingId of Object.keys(disputeCounts)) {
+      if (!recordedIds.has(findingId)) {
+        delete disputeCounts[findingId];
+      }
+    }
+    const orderedIds = [
+      ...new Set([
+        ...Object.keys(disputeCounts),
+        ...disputeHistory.map(({ findingId }) => findingId),
+        ...findingArbitrations.map(({ findingId }) => findingId),
+        ...findingOverrides.map(({ findingId }) => findingId),
+      ]),
+    ];
+    const historyCapacity = disputeHistoryCapacity(next.settings);
+    const capacityExceeded = () =>
+      orderedIds.length > MAX_DIAGNOSTIC_ITEMS ||
+      Object.keys(disputeCounts).length > MAX_DIAGNOSTIC_ITEMS ||
+      disputeHistory.length + additionalDisputeHistory.length >
+        historyCapacity ||
+      !disputeHistoryFits([
+        ...disputeHistory,
+        ...additionalDisputeHistory,
+      ]) ||
+      findingArbitrations.length > MAX_DIAGNOSTIC_ITEMS ||
+      findingOverrides.length > MAX_DIAGNOSTIC_ITEMS;
+    while (capacityExceeded()) {
+      const removableIndex = orderedIds.findIndex(
+        (findingId) => !protectedIds.has(findingId),
+      );
+      if (removableIndex === -1) {
+        throw workflowError(
+          overflowCode === "ERR_INVALID_POLISHING_OUTPUT"
+            ? "Polishing dispute evidence exceeds its durable history limit."
+            : "Polishing finding-decision capacity is exhausted.",
+          overflowCode,
+        );
+      }
+      const [findingId] = orderedIds.splice(removableIndex, 1);
+      delete disputeCounts[findingId];
+      disputeHistory = disputeHistory.filter(
+        (entry) => entry.findingId !== findingId,
+      );
+      findingArbitrations = findingArbitrations.filter(
+        (entry) => entry.findingId !== findingId,
+      );
+      findingOverrides = findingOverrides.filter(
+        (entry) => entry.findingId !== findingId,
+      );
+    }
+    return {
+      disputeCounts,
+      disputeHistory,
+      findingArbitrations,
+      findingOverrides,
+    };
+  }
+
+  function correctionUpdate({ fingerprint, finalizationIssueIds, findingIds }) {
+    const current = state();
+    if (!current.pendingCorrection) {
+      return Object.freeze({
+        counters: counters(),
+        history: current.correctionHistory,
+        sameFindingRounds: current.sameFindingRounds,
+        blockedSinceStagnation: current.blockedSinceStagnation,
+      });
+    }
+    const correctionRounds = counters().correctionRounds + 1;
+    const findingSet = new Set(findingIds);
+    const sameFindingRounds = Object.fromEntries(
+      findingIds.map((id) => [id, (current.sameFindingRounds[id] ?? 0) + 1]),
+    );
+    for (const id of Object.keys(current.sameFindingRounds)) {
+      if (!findingSet.has(id)) {
+        delete sameFindingRounds[id];
+      }
+    }
+    return Object.freeze({
+      counters: { ...counters(), correctionRounds },
+      history: [
+        ...current.correctionHistory,
+        { round: correctionRounds, fingerprint, finalizationIssueIds, findingIds },
+      ].slice(-MAX_DIAGNOSTIC_ITEMS),
+      sameFindingRounds,
+      blockedSinceStagnation: current.blockedSinceStagnation + 1,
+    });
+  }
+
+  async function completeIfReady() {
+    const current = state();
+    if (
+      current.finalizationResult?.status !== "PASS" ||
+      current.findings.length !== 0 ||
+      current.pendingDisputes.length !== 0 ||
+      current.finalizedFingerprint === null ||
+      current.reviewedFingerprint !== current.finalizedFingerprint
+    ) {
+      return false;
+    }
+    if ((await contentFingerprint()) !== current.finalizedFingerprint) {
+      await transition({
+        ...current,
+        workflowState: "FINALIZE",
+        finalizationResult: null,
+        finalizedFingerprint: null,
+        reviewedFingerprint: null,
+        previousFindings: current.previousFindings,
+        pendingCorrection: true,
+      });
+      return false;
+    }
+    if (!(await verifyPersistedRepository())) {
+      return false;
+    }
+    await transition(
+      { ...current, workflowState: "DONE" },
+      {
+        publicActivity: activity(
+          "runner",
+          "polishing",
+          "completed",
+          "Polishing completed with finalized, reviewed, uncommitted changes.",
+        ),
+      },
+    );
+    return true;
+  }
+
+  async function applyResumeAction() {
+    if (resumeAction === null) {
+      return;
+    }
+    const current = state();
+    if (current.workflowState !== "WAITING_FOR_USER" || current.pendingEdit !== null) {
+      throw workflowError("Polishing resume action is not applicable.");
+    }
+    if (resumeAction.type === "extra-fix-rounds") {
+      const additionalFixRounds =
+        current.additionalFixRounds + resumeAction.amount;
+      const totalFixRounds =
+        current.settings.maxFixRounds + additionalFixRounds;
+      if (
+        currentRun.pause.reason !== "fix_limit_reached" ||
+        !["POLISH", "RESOLVE_FINDINGS"].includes(
+          currentRun.pause.resumeState,
+        )
+      ) {
+        throw workflowError("Additional fix rounds are not applicable.");
+      }
+      if (
+        !Number.isSafeInteger(additionalFixRounds) ||
+        !Number.isSafeInteger(totalFixRounds)
+      ) {
+        throw workflowError("Additional fix-round budget is too large.");
+      }
+      await transition(
+        {
+          ...current,
+          workflowState: currentRun.pause.resumeState,
+          additionalFixRounds,
+        },
+        {
+          pause: null,
+          publicActivity: activity(
+            "runner",
+            "resolution",
+            "budget-extended",
+            `Added ${resumeAction.amount} polishing fix rounds.`,
+          ),
+        },
+      );
+      return;
+    }
+    const finding = current.findings.find(
+      ({ id }) => id === resumeAction.findingId,
+    );
+    if (
+      finding === undefined ||
+      current.reviewedFingerprint === null ||
+      !["fix_limit_reached", "no_progress"].includes(currentRun.pause.reason)
+    ) {
+      throw workflowError("Finding override is not applicable.");
+    }
+    if (!(await verifyPersistedRepository())) {
+      return;
+    }
+    if ((await contentFingerprint()) !== current.reviewedFingerprint) {
+      await pause("unsafe_git_state", {
+        code: "ERR_OVERRIDE_FINGERPRINT_CHANGED",
+      });
+      return;
+    }
+    const findings = current.findings.filter(({ id }) => id !== finding.id);
+    const pendingDisputes = current.pendingDisputes.filter(
+      ({ findingId }) => findingId !== finding.id,
+    );
+    const findingDecisions = compactFindingDecisions(current, {
+      findings,
+      pendingDisputes,
+      findingOverrides: [
+        ...current.findingOverrides.filter(
+          ({ findingId }) => findingId !== finding.id,
+        ),
+        { findingId: finding.id, fingerprint: current.reviewedFingerprint },
+      ],
+    });
+    await transition(
+      {
+        ...current,
+        workflowState: "RESOLVE_FINDINGS",
+        findings,
+        pendingDisputes,
+        ...findingDecisions,
+      },
+      {
+        pause: null,
+        publicActivity: activity(
+          "runner",
+          "resolution",
+          "finding-overridden",
+          `Finding ${finding.id} explicitly overridden.`,
+        ),
+      },
+    );
+  }
+
+  function assertResumeActionApplicable() {
+    if (resumeAction?.type !== "extra-fix-rounds") {
+      return;
+    }
+    const current = state();
+    const additionalFixRounds =
+      current.additionalFixRounds + resumeAction.amount;
+    const totalFixRounds =
+      (current.settings?.maxFixRounds ?? 0) + additionalFixRounds;
+    if (
+      current.workflowState !== "WAITING_FOR_USER" ||
+      current.pendingEdit !== null ||
+      currentRun.pause?.reason !== "fix_limit_reached" ||
+      !["POLISH", "RESOLVE_FINDINGS"].includes(
+        currentRun.pause?.resumeState,
+      )
+    ) {
+      throw workflowError("Additional fix rounds are not applicable.");
+    }
+    if (
+      !Number.isSafeInteger(additionalFixRounds) ||
+      !Number.isSafeInteger(totalFixRounds)
+    ) {
+      throw workflowError("Additional fix-round budget is too large.");
+    }
   }
 
   async function initializeInputs() {
@@ -893,16 +1391,849 @@ ${JSON.stringify(state().bootstrapDisagreement, null, 2)}`,
     return true;
   }
 
+  async function runPolishTurn() {
+    const current = state();
+    if (current.pendingCorrection && counters().fixRounds >= fixBudget()) {
+      await pause("fix_limit_reached", {
+        fixRounds: counters().fixRounds,
+        resumeState: "POLISH",
+      });
+      return false;
+    }
+    const output = await runRole(
+      "worker",
+      POLISH_SCHEMA,
+      (evidence) => `${POLISH_INSTRUCTIONS}
+
+${PRODUCT_DECISION_INSTRUCTIONS}
+
+${evidence}
+
+Resolved bootstrap context:
+${current.resolvedSummary}${
+        current.stagnationDirection?.direction === "REWORK_IMPLEMENTATION"
+          ? `\n\nStagnation Arbiter direction:\n${JSON.stringify(current.stagnationDirection, null, 2)}`
+          : ""
+      }`,
+      { access: "workspace-write" },
+    );
+    if (output === null) {
+      return false;
+    }
+    const result = normalizePolishResult(output);
+    if (result.status === "PRODUCT_DECISION_REQUIRED") {
+      return productDecision(result.decision, "BOOTSTRAP");
+    }
+    if (result.status === "BLOCKED") {
+      await pause("environment_blocked", {
+        explanation: result.reason,
+        evidence: result.evidence,
+        resumeState: "POLISH",
+      });
+      return false;
+    }
+    await transition(
+      {
+        ...state(),
+        workflowState: "FINALIZE",
+        polishSummary: result.summary,
+        finalizationResult: null,
+        finalizedFingerprint: null,
+        reviewedFingerprint: null,
+        previousFindings:
+          current.findings.length === 0
+            ? current.previousFindings
+            : current.findings,
+        findings: [],
+        pendingDisputes: [],
+        pendingCorrection: current.pendingCorrection,
+        reviewReconsideration: [],
+      },
+      {
+        nextCounters: current.pendingCorrection
+          ? { ...counters(), fixRounds: counters().fixRounds + 1 }
+          : counters(),
+        publicActivity: activity(
+          "worker",
+          "polishing",
+          "completed",
+          "Worker polishing and self-review completed.",
+        ),
+      },
+    );
+    return true;
+  }
+
+  async function runFinalizationTurn() {
+    const beforeFingerprint = await contentFingerprint();
+    const output = await runRole(
+      "worker",
+      FINALIZATION_SCHEMA,
+      (evidence) => `${FINALIZATION_INSTRUCTIONS}
+
+${PRODUCT_DECISION_INSTRUCTIONS}
+Use FAIL for validation failures, SKILL_MISSING or SKILL_INVALID before invoking an unavailable skill, and BLOCKED only when the procedure cannot complete safely.
+
+${evidence}
+
+Resolved bootstrap context:
+${state().resolvedSummary}
+
+Worker polishing summary:
+${state().polishSummary}`,
+      { access: "workspace-write" },
+    );
+    if (output === null) {
+      return false;
+    }
+    const result = normalizeFinalizationResult(output);
+    if (result.status === "PRODUCT_DECISION_REQUIRED") {
+      return productDecision(result.decision, "BOOTSTRAP");
+    }
+    if (["SKILL_MISSING", "SKILL_INVALID", "BLOCKED"].includes(result.status)) {
+      const modifiedBeforeValidation =
+        result.status !== "BLOCKED" &&
+        (await contentFingerprint()) !== beforeFingerprint;
+      const reasons = {
+        SKILL_MISSING: "finalization_skill_missing",
+        SKILL_INVALID: "finalization_skill_invalid",
+        BLOCKED: "finalization_cannot_pass",
+      };
+      await pause(
+        modifiedBeforeValidation
+          ? "finalization_cannot_pass"
+          : reasons[result.status],
+        {
+          explanation: result.reason,
+          evidence: result.evidence,
+          ...(modifiedBeforeValidation
+            ? { code: "ERR_FINALIZATION_MODIFIED_BEFORE_VALIDATION" }
+            : {}),
+          ...(result.skillPath === null ? {} : { skillPath: result.skillPath }),
+          ...(result.status === "BLOCKED" ? { resumeState: "FINALIZE" } : {}),
+        },
+      );
+      return false;
+    }
+    const fingerprint = await contentFingerprint();
+    const finalizationResult = { ...result, fingerprint };
+    if (result.status === "FAIL") {
+      const correction = correctionUpdate({
+        fingerprint,
+        finalizationIssueIds: result.issues.map(({ id }) => id),
+        findingIds: [],
+      });
+      await transition(
+        {
+          ...state(),
+          workflowState: "RESOLVE_FINDINGS",
+          finalizationResult,
+          finalizedFingerprint: null,
+          reviewedFingerprint: null,
+          findings: [],
+          correctionHistory: correction.history,
+          sameFindingRounds: correction.sameFindingRounds,
+          pendingCorrection: false,
+          blockedSinceStagnation: correction.blockedSinceStagnation,
+          reviewReconsideration: [],
+        },
+        {
+          nextCounters: correction.counters,
+          publicActivity: activity(
+            "worker",
+            "finalization",
+            "failed",
+            `Finalization reported ${result.issues.length} blocking issues.`,
+          ),
+        },
+      );
+      return true;
+    }
+    await transition(
+      {
+        ...state(),
+        workflowState: "REVIEW",
+        finalizationResult,
+        finalizedFingerprint: fingerprint,
+        reviewedFingerprint: null,
+        findings: [],
+        reviewReconsideration: [],
+      },
+      {
+        publicActivity: activity(
+          "worker",
+          "finalization",
+          "passed",
+          "Project finalization passed.",
+        ),
+      },
+    );
+    return true;
+  }
+
+  async function runReviewTurn() {
+    const current = state();
+    const fingerprint = await contentFingerprint();
+    if (fingerprint !== current.finalizedFingerprint) {
+      await transition({
+        ...current,
+        workflowState: "FINALIZE",
+        finalizationResult: null,
+        finalizedFingerprint: null,
+        reviewedFingerprint: null,
+        findings: [],
+        pendingCorrection: true,
+      });
+      return true;
+    }
+    const output = await runRole(
+      "reviewer",
+      REVIEW_SCHEMA,
+      (evidence) => `${REVIEW_INSTRUCTIONS}
+
+${PRODUCT_DECISION_INSTRUCTIONS}
+
+${evidence}
+
+Resolved bootstrap context:
+${current.resolvedSummary}
+
+Worker polishing summary:
+${current.polishSummary}
+
+Finalization result:
+${JSON.stringify(current.finalizationResult, null, 2)}
+
+Previous findings:
+${JSON.stringify(current.previousFindings, null, 2)}${
+        current.reviewReconsideration.length === 0
+          ? ""
+          : `\n\nReconsider these current finding IDs as requested by the Arbiter:\n${current.reviewReconsideration.join(", ")}`
+      }
+
+Prior decisions:
+${JSON.stringify(priorFindingDecisions(), null, 2)}`,
+    );
+    if (output === null) {
+      return false;
+    }
+    const result = normalizeReviewResult(output, current.previousFindings);
+    if (result.status === "PRODUCT_DECISION_REQUIRED") {
+      return productDecision(result.decision, "BOOTSTRAP");
+    }
+    const reviewedFingerprint = await contentFingerprint();
+    if (reviewedFingerprint !== fingerprint) {
+      throw workflowError("Reviewed content fingerprint changed unexpectedly.");
+    }
+    if (result.status === "FINDINGS") {
+      const correction = correctionUpdate({
+        fingerprint,
+        finalizationIssueIds: [],
+        findingIds: result.findings.map(({ id }) => id),
+      });
+      const findingIds = new Set(result.findings.map(({ id }) => id));
+      const pendingDisputes = current.pendingDisputes.filter(({ findingId }) =>
+        findingIds.has(findingId),
+      );
+      const findingDecisions = compactFindingDecisions(current, {
+        findings: result.findings,
+        previousFindings: result.findings,
+        pendingDisputes,
+        reviewReconsideration: [],
+      });
+      await transition(
+        {
+          ...state(),
+          workflowState: "RESOLVE_FINDINGS",
+          reviewedFingerprint,
+          findings: result.findings,
+          previousFindings: result.findings,
+          pendingDisputes,
+          ...findingDecisions,
+          correctionHistory: correction.history,
+          sameFindingRounds: correction.sameFindingRounds,
+          pendingCorrection: false,
+          blockedSinceStagnation: correction.blockedSinceStagnation,
+          reviewReconsideration: [],
+        },
+        {
+          nextCounters: correction.counters,
+          publicActivity: activity(
+            "reviewer",
+            "review",
+            "findings",
+            `Review reported ${result.findings.length} blocking findings.`,
+          ),
+        },
+      );
+      return true;
+    }
+    const findingDecisions = compactFindingDecisions(current, {
+      findings: [],
+      previousFindings: [],
+      pendingDisputes: [],
+      reviewReconsideration: [],
+    });
+    await transition(
+      {
+        ...state(),
+        workflowState: "RESOLVE_FINDINGS",
+        reviewedFingerprint,
+        findings: [],
+        previousFindings: [],
+        pendingDisputes: [],
+        ...findingDecisions,
+        pendingCorrection: false,
+        reviewReconsideration: [],
+      },
+      {
+        publicActivity: activity(
+          "reviewer",
+          "review",
+          "approved",
+          "Independent review approved the finalized content.",
+        ),
+      },
+    );
+    return true;
+  }
+
+  async function reconsiderDisputes() {
+    const current = state();
+    const output = await runRole(
+      "reviewer",
+      DISPUTE_RECONSIDERATION_SCHEMA,
+      (evidence) => `${DISPUTE_RECONSIDERATION_INSTRUCTIONS}
+
+${PRODUCT_DECISION_INSTRUCTIONS}
+
+${evidence}
+
+Current findings:
+${JSON.stringify(current.findings, null, 2)}
+
+Worker disputes:
+${JSON.stringify(current.pendingDisputes, null, 2)}`,
+    );
+    if (output === null) {
+      return false;
+    }
+    const result = normalizeReconsiderationResult(output, current.pendingDisputes);
+    if (result.status === "PRODUCT_DECISION_REQUIRED") {
+      return productDecision(result.decision, "BOOTSTRAP");
+    }
+    const decisions = new Map(
+      result.decisions.map((decision) => [decision.findingId, decision]),
+    );
+    const findings = current.findings.filter(
+      ({ id }) => decisions.get(id)?.direction !== "WITHDRAW",
+    );
+    const pendingDisputes = current.pendingDisputes.filter((dispute) => {
+      const decision = decisions.get(dispute.findingId);
+      return (
+        decision.direction === "UPHOLD" &&
+        current.disputeCounts[dispute.findingId] >=
+          current.settings.maxDisputesPerFinding
+      );
+    });
+    const disputeHistory = [
+      ...current.disputeHistory,
+      ...current.pendingDisputes.map((dispute) => {
+        const decision = decisions.get(dispute.findingId);
+        return {
+          findingId: dispute.findingId,
+          attempt: current.disputeCounts[dispute.findingId],
+          direction: decision.direction,
+          workerReason: dispute.reason,
+          workerEvidence: dispute.evidence,
+          reviewerReason: decision.reason,
+          reviewerEvidence: decision.evidence,
+        };
+      }),
+    ];
+    const findingDecisions = compactFindingDecisions(
+      current,
+      {
+        findings,
+        pendingDisputes,
+        disputeHistory,
+      },
+      { overflowCode: "ERR_INVALID_POLISHING_OUTPUT" },
+    );
+    await transition(
+      {
+        ...current,
+        findings,
+        pendingDisputes,
+        ...findingDecisions,
+      },
+      {
+        publicActivity: activity(
+          "reviewer",
+          "resolution",
+          "disputes-reconsidered",
+          "Reviewer reconsidered the Worker disputes.",
+        ),
+      },
+    );
+    return true;
+  }
+
+  async function arbitrateFinding(dispute) {
+    const current = state();
+    const finding = current.findings.find(({ id }) => id === dispute.findingId);
+    const reviewerResponse = [...current.disputeHistory]
+      .reverse()
+      .find(({ findingId }) => findingId === dispute.findingId);
+    const output = await runRole(
+      "arbiter",
+      FINDING_ARBITRATION_SCHEMA,
+      (evidence) => `${FINDING_ARBITRATION_INSTRUCTIONS}
+
+${PRODUCT_DECISION_INSTRUCTIONS}
+
+${evidence}
+
+Finding:
+${JSON.stringify(finding, null, 2)}
+
+Worker dispute:
+${JSON.stringify(dispute, null, 2)}
+
+Reviewer response:
+${JSON.stringify(reviewerResponse, null, 2)}
+
+Prior decisions:
+${JSON.stringify(priorFindingDecisions([dispute.findingId]), null, 2)}`,
+      { freshSession: true },
+    );
+    if (output === null) {
+      return false;
+    }
+    const result = normalizeFindingArbitration(output);
+    if (result.direction === "REQUIREMENT_AMBIGUOUS") {
+      return productDecision(result.decision, "BOOTSTRAP");
+    }
+    const findings =
+      result.direction === "WORKER_CORRECT"
+        ? current.findings.filter(({ id }) => id !== dispute.findingId)
+        : current.findings;
+    const pendingDisputes = current.pendingDisputes.filter(
+      ({ findingId }) => findingId !== dispute.findingId,
+    );
+    const findingDecisions = compactFindingDecisions(current, {
+      findings,
+      pendingDisputes,
+      findingArbitrations: [
+        ...current.findingArbitrations,
+        {
+          findingId: dispute.findingId,
+          direction: result.direction,
+          rationale: result.rationale,
+        },
+      ],
+    });
+    await transition(
+      {
+        ...state(),
+        findings,
+        pendingDisputes,
+        ...findingDecisions,
+      },
+      {
+        publicActivity: activity(
+          "arbiter",
+          "resolution",
+          "finding-arbitrated",
+          `Arbiter selected ${result.direction} for ${dispute.findingId}.`,
+        ),
+      },
+    );
+    return true;
+  }
+
+  async function arbitrateStagnation() {
+    const current = state();
+    const output = await runRole(
+      "arbiter",
+      STAGNATION_SCHEMA,
+      (evidence) => `${STAGNATION_INSTRUCTIONS}
+
+${PRODUCT_DECISION_INSTRUCTIONS}
+
+${evidence}
+
+Current blockers and correction history:
+${JSON.stringify(
+  {
+    finalizationResult: current.finalizationResult,
+    findings: current.findings,
+    pendingDisputes: current.pendingDisputes,
+    correctionHistory: current.correctionHistory,
+  },
+  null,
+  2,
+)}`,
+      { freshSession: true },
+    );
+    if (output === null) {
+      return false;
+    }
+    const result = normalizeStagnationResult(output, current);
+    if (result.direction === "PRODUCT_DECISION_REQUIRED") {
+      return productDecision(result.decision, "BOOTSTRAP");
+    }
+    const direction = { direction: result.direction, rationale: result.rationale };
+    if (result.direction === "REWORK_IMPLEMENTATION") {
+      await transition(
+        {
+          ...current,
+          workflowState: "POLISH",
+          finalizationResult: null,
+          finalizedFingerprint: null,
+          reviewedFingerprint: null,
+          previousFindings: current.findings,
+          findings: [],
+          pendingDisputes: [],
+          pendingCorrection: true,
+          blockedSinceStagnation: 0,
+          stagnationArbitrationUsed: true,
+          stagnationDirection: direction,
+          reviewReconsideration: [],
+        },
+        {
+          publicActivity: activity(
+            "arbiter",
+            "resolution",
+            "rework-polishing",
+            "Stagnation Arbiter requested full polishing rework.",
+          ),
+        },
+      );
+      return true;
+    }
+    if (result.direction === "RECONSIDER_FINDINGS") {
+      await transition(
+        {
+          ...current,
+          workflowState: "REVIEW",
+          blockedSinceStagnation: 0,
+          stagnationArbitrationUsed: true,
+          stagnationDirection: direction,
+          reviewReconsideration: result.findingIds,
+        },
+        {
+          publicActivity: activity(
+            "arbiter",
+            "resolution",
+            "reconsider-findings",
+            "Stagnation Arbiter requested Reviewer reconsideration.",
+          ),
+        },
+      );
+      return true;
+    }
+    await transition(
+      {
+        ...current,
+        blockedSinceStagnation: 0,
+        stagnationArbitrationUsed: true,
+        stagnationDirection: direction,
+      },
+      {
+        publicActivity: activity(
+          "arbiter",
+          "resolution",
+          "continue-fixes",
+          "Stagnation Arbiter requested continued fixes.",
+        ),
+      },
+    );
+    return true;
+  }
+
+  async function runResolutionTurn() {
+    const current = state();
+    if (current.findings.length === 0 && current.finalizationResult?.status === "PASS") {
+      if (await completeIfReady()) {
+        return false;
+      }
+      return true;
+    }
+    if (current.finalizationResult?.status !== "FAIL") {
+      const arbitration = current.pendingDisputes.find(({ findingId }) => {
+        const latest = [...current.disputeHistory]
+          .reverse()
+          .find((entry) => entry.findingId === findingId);
+        return (
+          current.disputeCounts[findingId] >=
+            current.settings.maxDisputesPerFinding &&
+          latest?.attempt === current.disputeCounts[findingId] &&
+          latest.direction === "UPHOLD"
+        );
+      });
+      if (arbitration !== undefined) {
+        return arbitrateFinding(arbitration);
+      }
+      if (current.pendingDisputes.length > 0) {
+        return reconsiderDisputes();
+      }
+    }
+    const stableFindingIds = current.findings
+      .filter(
+        ({ id }) =>
+          (current.sameFindingRounds[id] ?? 0) >=
+          current.settings.maxSameFindingRounds,
+      )
+      .map(({ id }) => id);
+    if (stableFindingIds.length > 0) {
+      await pause("no_progress", {
+        findingIds: stableFindingIds,
+        reason: "stable_findings",
+        resumeState: "RESOLVE_FINDINGS",
+      });
+      return false;
+    }
+    if (
+      current.blockedSinceStagnation >= current.settings.stagnationWindowRounds
+    ) {
+      if (current.stagnationArbitrationUsed) {
+        await pause("no_progress", {
+          correctionRounds: counters().correctionRounds,
+          reason: "recurrent_stagnation",
+          resumeState: "RESOLVE_FINDINGS",
+        });
+        return false;
+      }
+      return arbitrateStagnation();
+    }
+    const budgetExhausted = counters().fixRounds >= fixBudget();
+    const blockers = activeBlockers();
+    const blockerIds = new Set(blockers.map(({ id }) => id));
+    const nonDisputableIds = new Set([
+      ...current.findingArbitrations
+        .filter(
+          ({ findingId, direction }) =>
+            blockerIds.has(findingId) && direction === "REVIEWER_CORRECT",
+        )
+        .map(({ findingId }) => findingId),
+      ...Object.entries(current.disputeCounts)
+        .filter(
+          ([findingId, count]) =>
+            blockerIds.has(findingId) &&
+            count >= current.settings.maxDisputesPerFinding,
+        )
+        .map(([findingId]) => findingId),
+    ]);
+    if (
+      budgetExhausted &&
+      blockers.every(
+        ({ id }) => id.startsWith("F") || nonDisputableIds.has(id),
+      )
+    ) {
+      await pause("fix_limit_reached", {
+        fixRounds: counters().fixRounds,
+        resumeState: "RESOLVE_FINDINGS",
+      });
+      return false;
+    }
+    const beforeFingerprint = await contentFingerprint();
+    const turn = await runRole(
+      "worker",
+      FINDING_RESOLUTION_SCHEMA,
+      (evidence) => `${FINDING_RESOLUTION_INSTRUCTIONS}${
+        budgetExhausted
+          ? "\nThe fix budget is exhausted: do not modify the repository and return DISPUTE only where valid; a required FIX will pause for additional budget."
+          : ""
+      }
+
+${PRODUCT_DECISION_INSTRUCTIONS}
+
+${evidence}
+
+Current blockers:
+${JSON.stringify(blockers, null, 2)}${
+        nonDisputableIds.size === 0
+          ? ""
+          : `\n\nThese finding IDs cannot be disputed and must be fixed:\n${[
+              ...nonDisputableIds,
+            ].join(", ")}`
+      }${
+        current.stagnationDirection?.direction === "CONTINUE_FIXES"
+          ? `\n\nStagnation Arbiter direction:\n${JSON.stringify(current.stagnationDirection, null, 2)}`
+          : ""
+      }
+
+Prior decisions:
+${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`,
+      {
+        access: budgetExhausted ? "read-only" : "workspace-write",
+        reportWorkspaceChange: true,
+      },
+    );
+    if (turn === null) {
+      return false;
+    }
+    const { output, workspaceChanged } = turn;
+    const result = normalizeResolutionResult(
+      output,
+      blockers,
+      nonDisputableIds,
+    );
+    if (result.status === "PRODUCT_DECISION_REQUIRED") {
+      return productDecision(result.decision, "BOOTSTRAP");
+    }
+    const requiresFix = result.decisions.some(({ decision }) => decision === "FIX");
+    const newDisputes = result.decisions
+      .filter(({ decision }) => decision === "DISPUTE")
+      .map((decision) => ({
+        findingId: decision.id,
+        reason: decision.reason,
+        evidence: decision.evidence,
+      }));
+    const pendingDisputes =
+      current.finalizationResult?.status === "FAIL"
+        ? current.pendingDisputes
+        : newDisputes;
+    const disputeCounts = { ...current.disputeCounts };
+    for (const { findingId } of newDisputes) {
+      disputeCounts[findingId] = (disputeCounts[findingId] ?? 0) + 1;
+    }
+    const reservedDisputeHistory = newDisputes.map((dispute) => ({
+      findingId: dispute.findingId,
+      attempt: disputeCounts[dispute.findingId],
+      direction: "UPHOLD",
+      workerReason: dispute.reason,
+      workerEvidence: dispute.evidence,
+      reviewerReason: ".",
+      reviewerEvidence: [],
+    }));
+    const findingDecisions = compactFindingDecisions(
+      current,
+      {
+        pendingDisputes,
+        disputeCounts,
+      },
+      {
+        additionalDisputeHistory: reservedDisputeHistory,
+        overflowCode: "ERR_INVALID_POLISHING_OUTPUT",
+      },
+    );
+    if (budgetExhausted && requiresFix) {
+      await transition(
+        {
+          ...state(),
+          workflowState: "WAITING_FOR_USER",
+          pendingDisputes,
+          ...findingDecisions,
+        },
+        {
+          pause: {
+            reason: "fix_limit_reached",
+            fixRounds: counters().fixRounds,
+            resumeState: "RESOLVE_FINDINGS",
+          },
+          publicActivity: activity(
+            "runner",
+            "polishing",
+            "paused",
+            "Polishing paused: fix_limit_reached.",
+          ),
+        },
+      );
+      return false;
+    }
+    const changed = (await contentFingerprint()) !== beforeFingerprint;
+    if (workspaceChanged) {
+      if (newDisputes.length > 0) {
+        await transition({
+          ...state(),
+          pendingDisputes,
+          ...findingDecisions,
+        });
+      }
+      return true;
+    }
+    if (requiresFix || changed) {
+      await transition(
+        {
+          ...state(),
+          workflowState: "FINALIZE",
+          finalizationResult: null,
+          finalizedFingerprint: null,
+          reviewedFingerprint: null,
+          previousFindings:
+            current.findings.length === 0
+              ? current.previousFindings
+              : current.findings,
+          findings: [],
+          pendingDisputes,
+          ...findingDecisions,
+          pendingCorrection: true,
+          reviewReconsideration: [],
+        },
+        {
+          nextCounters: { ...counters(), fixRounds: counters().fixRounds + 1 },
+          publicActivity: activity(
+            "worker",
+            "resolution",
+            "fixed",
+            "Worker completed a batched blocker fix round.",
+          ),
+        },
+      );
+      return true;
+    }
+    await transition(
+      {
+        ...state(),
+        pendingDisputes,
+        ...findingDecisions,
+      },
+      {
+        publicActivity: activity(
+          "worker",
+          "resolution",
+          "disputed",
+          `Worker disputed ${newDisputes.length} findings with evidence.`,
+        ),
+      },
+    );
+    return true;
+  }
+
+  assertResumeActionApplicable();
   try {
-    if (state().workflowState === "FAILED") {
+    if (["DONE", "FAILED"].includes(state().workflowState)) {
+      if (resumeAction !== null) {
+        throw workflowError("Polishing resume action is not applicable.");
+      }
       return currentRun;
+    }
+    if (resumeAction !== null) {
+      await applyResumeAction();
     }
     if (state().workflowState === "WAITING_FOR_USER") {
       if (state().pendingEdit !== null) {
         if (!(await resumeEdit())) {
           return currentRun;
         }
-      } else if (currentRun.pause.reason === "backend_unavailable") {
+      } else if (
+        [
+          "backend_unavailable",
+          "environment_blocked",
+          "finalization_cannot_pass",
+        ].includes(currentRun.pause.reason) &&
+        (!state().preflightComplete ||
+          [
+            "CLARIFY",
+            "BOOTSTRAP",
+            "POLISH",
+            "FINALIZE",
+            "REVIEW",
+            "RESOLVE_FINDINGS",
+          ].includes(currentRun.pause.resumeState))
+      ) {
         await transition(
           {
             ...state(),
@@ -915,9 +2246,6 @@ ${JSON.stringify(state().bootstrapDisagreement, null, 2)}`,
       } else {
         return currentRun;
       }
-    }
-    if (state().workflowState === "POLISH") {
-      return currentRun;
     }
     if (
       state().preflightComplete &&
@@ -1088,8 +2416,36 @@ ${evidence}`,
         continue;
       }
 
+      if (current.workflowState === "POLISH") {
+        if (!(await runPolishTurn())) {
+          return currentRun;
+        }
+        continue;
+      }
+
+      if (current.workflowState === "FINALIZE") {
+        if (!(await runFinalizationTurn())) {
+          return currentRun;
+        }
+        continue;
+      }
+
+      if (current.workflowState === "REVIEW") {
+        if (!(await runReviewTurn())) {
+          return currentRun;
+        }
+        continue;
+      }
+
+      if (current.workflowState === "RESOLVE_FINDINGS") {
+        if (!(await runResolutionTurn())) {
+          return currentRun;
+        }
+        continue;
+      }
+
       if (
-        ["POLISH", "WAITING_FOR_USER", "FAILED"].includes(
+        ["WAITING_FOR_USER", "DONE", "FAILED"].includes(
           current.workflowState,
         )
       ) {
@@ -1099,10 +2455,9 @@ ${evidence}`,
     }
   } catch (cause) {
     if (cause?.code === "ERR_READ_ONLY_REPOSITORY_CHANGED") {
-      return invalidateInputs(
-        "read_only_agent_mutated_repository",
-        "Repository changed during a read-only polishing turn.",
-      );
+      return pause("read_only_agent_mutated_repository", {
+        code: cause.code,
+      });
     }
     if (
       cause?.code === "ERR_POLISHING_BACKEND_UNAVAILABLE" ||
