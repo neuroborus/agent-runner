@@ -956,27 +956,32 @@ export function createCodexAdapter(options = {}) {
 
   async function appServerLaunch(cwd) {
     let result;
-    try {
-      result = await execute(
-        codexBinary,
-        ["-C", cwd, "mcp", "list", "--json"],
-        {
-          encoding: "utf8",
-          env: processEnvironment,
-          maxBuffer: 1024 * 1024,
-          timeout: MCP_DISCOVERY_TIMEOUT_MS,
-        },
-      );
-    } catch (cause) {
-      throw new CodexAdapterError(
-        "Codex MCP configuration is temporarily unavailable.",
-        {
-          cause,
-          code: "ERR_CODEX_UNAVAILABLE",
-          method: "mcp/list",
-          recoverable: true,
-        },
-      );
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        result = await execute(
+          codexBinary,
+          ["-C", cwd, "mcp", "list", "--json"],
+          {
+            encoding: "utf8",
+            env: processEnvironment,
+            maxBuffer: 1024 * 1024,
+            timeout: MCP_DISCOVERY_TIMEOUT_MS,
+          },
+        );
+        break;
+      } catch (cause) {
+        if (attempt === 1) {
+          throw new CodexAdapterError(
+            "Codex MCP configuration is temporarily unavailable.",
+            {
+              cause,
+              code: "ERR_CODEX_UNAVAILABLE",
+              method: "mcp/list",
+              recoverable: true,
+            },
+          );
+        }
+      }
     }
     const mcpServerNames = parseMcpServerNames(processOutput(result.stdout));
     const argumentsList = [...APP_SERVER_BASE_ARGUMENTS];
@@ -1115,7 +1120,7 @@ export function createCodexAdapter(options = {}) {
         cause.recoverable &&
         cause.method === "mcp/list"
       ) {
-        return runAttempt(request);
+        throw cause;
       }
       if (
         request.access === "local-commit" &&

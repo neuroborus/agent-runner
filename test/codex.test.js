@@ -804,6 +804,38 @@ test("reports persistent MCP discovery failure as recoverable", async () => {
   assert.equal(fixture.processes.length, 0);
 });
 
+test("preserves session recovery after transient MCP discovery", async () => {
+  let discoveryCalls = 0;
+  const fixture = createFixture({
+    executeHandle({ argumentsList }) {
+      if (argumentsList.includes("mcp")) {
+        discoveryCalls += 1;
+        if (discoveryCalls === 1) {
+          throw new Error("MCP discovery timed out");
+        }
+      }
+      return undefined;
+    },
+    handle({ message }) {
+      if (message.method === "thread/resume") {
+        return { error: { code: -32000, message: "missing" } };
+      }
+      return undefined;
+    },
+  });
+
+  const result = await fixture.adapter.run(
+    request({
+      access: "workspace-write",
+      session: { mode: "continue", id: "source-thread" },
+    }),
+  );
+
+  assert.equal(discoveryCalls, 3);
+  assert.equal(fixture.processes.length, 2);
+  assert.equal(result.sessionId, "thread-1");
+});
+
 test("validates strict schemas and structured output", async () => {
   const fixture = createFixture({
     handle({ message }) {
