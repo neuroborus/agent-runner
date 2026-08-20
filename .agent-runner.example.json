@@ -26,6 +26,19 @@
         },
         "arbiter": {}
       }
+    },
+    "polishing": {
+      "maxFixRounds": 5,
+      "maxDisputesPerFinding": 2,
+      "maxSameFindingRounds": 3,
+      "stagnationWindowRounds": 3,
+      "roles": {
+        "worker": {},
+        "reviewer": {
+          "backend": "claude"
+        },
+        "arbiter": {}
+      }
     }
   }
 }

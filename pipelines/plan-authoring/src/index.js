@@ -1,3 +1,5 @@
+import { join } from "node:path";
+
 import {
   createPlanAuthoringState,
   MAX_CLARIFICATION_ROUNDS,
@@ -38,15 +40,61 @@ const SETTINGS = Object.freeze({
   maxRevisionRounds: positiveIntegerSetting(15),
   stagnationWindowRounds: positiveIntegerSetting(3),
 });
+const TASK_INPUTS = Object.freeze({
+  task: Object.freeze({ filename: "task.md", optional: false }),
+  context: Object.freeze({ filename: "context.md", optional: true }),
+});
+
+function projectClarification(run) {
+  return Object.freeze({
+    path: join(run.taskPath, "clarifications.md"),
+    hash: run.hashes?.clarifications ?? null,
+  });
+}
+
+function projectStatus(run) {
+  const state = run.pipelineState;
+  return Object.freeze({
+    currentStep: null,
+    planPath: state.planPath ?? join(run.taskPath, "plan.md"),
+    findings: Object.freeze(
+      Array.isArray(state.findings)
+        ? state.findings.map(({ id, description }) =>
+            Object.freeze({ id, summary: description }),
+          )
+        : [],
+    ),
+    completedCommits: Object.freeze([]),
+    stagnationDirection: state.arbiterDirection?.direction ?? null,
+    finalizedFingerprint: null,
+    reviewedFingerprint: null,
+  });
+}
+
+function validateResumeAction(run, action) {
+  if (
+    run.pipelineState.workflowState !== "WAITING_FOR_USER" ||
+    action !== null ||
+    run.pipelineState.pendingEdit === null
+  ) {
+    throw new Error("Resume action is not valid for this paused run.");
+  }
+}
 
 export const planAuthoringPipeline = Object.freeze({
   id: PLAN_AUTHORING_PIPELINE_ID,
   stateVersion: 1,
   roles: ROLES,
   settings: SETTINGS,
+  taskInputs: TASK_INPUTS,
   runOptions: Object.freeze(["project", "task", ...ROLES]),
   requiredRunOptions: Object.freeze(["project", "task"]),
   description: "Analyze a task, draft a commit plan, review it, and write plan.md.",
+  projections: Object.freeze({
+    clarification: projectClarification,
+    status: projectStatus,
+  }),
+  validateResumeAction,
   workflow: Object.freeze({
     createState: createPlanAuthoringState,
     run: runPlanAuthoring,

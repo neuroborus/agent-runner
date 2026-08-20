@@ -139,24 +139,21 @@ async function inputFile(path, { optional = false } = {}) {
   return Object.freeze({ path, content, hash: fileHash(content) });
 }
 
-async function readInputs(pipelineId, taskPath) {
-  const task = await inputFile(join(taskPath, "task.md"));
-  const context = await inputFile(join(taskPath, "context.md"), {
-    optional: true,
-  });
-  if (pipelineId === "plan-authoring") {
-    return Object.freeze({ task, context });
-  }
-  if (pipelineId === "plan-execution") {
-    const [plan, taskClarifications] = await Promise.all([
-      inputFile(join(taskPath, "plan.md")),
-      inputFile(join(taskPath, "clarifications.md"), { optional: true }),
-    ]);
-    return Object.freeze({ task, plan, taskClarifications, context });
-  }
-  throw new RunnerError(`Unknown pipeline: ${pipelineId}.`, {
-    code: "ERR_UNKNOWN_PIPELINE",
-  });
+async function readInputs(pipeline, taskPath) {
+  return Object.freeze(
+    Object.fromEntries(
+      await Promise.all(
+        Object.entries(pipeline.taskInputs).map(
+          async ([name, definition]) => [
+            name,
+            await inputFile(join(taskPath, definition.filename), {
+              optional: definition.optional,
+            }),
+          ],
+        ),
+      ),
+    ),
+  );
 }
 
 async function writePlan(taskPath, options) {
@@ -497,7 +494,7 @@ export function createRunner(options = {}) {
       adapters: selectedAdapters,
       clarifications,
       git,
-      readInputs: ({ taskPath }) => readInputs(pipeline.id, taskPath),
+      readInputs: ({ taskPath }) => readInputs(pipeline, taskPath),
       async recordChildSession(child, { activity } = {}) {
         const next = await runStore.recordChildSession(lease, child, {
           activity,
@@ -675,11 +672,19 @@ export function createRunner(options = {}) {
           code: "ERR_UNKNOWN_PIPELINE",
         });
       }
-      if (normalized.action !== null && pipeline.id !== "plan-execution") {
-        throw new RunnerError(
-          `Resume actions are not supported for ${pipeline.id}.`,
-          { code: "ERR_INAPPLICABLE_RESUME_ACTION" },
-        );
+      pipelineForRun(recovered, pipeline);
+      if (
+        recovered.pipelineState.workflowState === "WAITING_FOR_USER" ||
+        normalized.action !== null
+      ) {
+        try {
+          pipeline.validateResumeAction(recovered, normalized.action);
+        } catch (cause) {
+          throw new RunnerError(cause.message, {
+            cause,
+            code: "ERR_INAPPLICABLE_RESUME_ACTION",
+          });
+        }
       }
       return await result(
         await execute(pipeline, recovered, lease, normalized.action),

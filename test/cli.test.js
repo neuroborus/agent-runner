@@ -80,6 +80,7 @@ test("help describes the required commands", async () => {
   assert.match(stdout.read(), /agent-run mcp/);
   assert.match(stdout.read(), /plan-authoring/);
   assert.match(stdout.read(), /plan-execution/);
+  assert.match(stdout.read(), /polishing/);
   assert.match(stdout.read(), /--clarify/);
   assert.equal(stderr.read(), "");
 });
@@ -257,7 +258,7 @@ test("status dispatches and renders concise persisted state", async () => {
   assert.equal(stderr.read(), "");
 });
 
-for (const pipeline of ["plan-authoring", "plan-execution"]) {
+for (const pipeline of ["plan-authoring", "plan-execution", "polishing"]) {
   test(`run ${pipeline} dispatches --clarify`, async () => {
     const stdout = createSink();
     const stderr = createSink();
@@ -497,5 +498,6 @@ test("pipelines lists the statically registered pipelines", async () => {
   assert.equal(exitCode, 0);
   assert.match(stdout.read(), /^plan-authoring\t/mu);
   assert.match(stdout.read(), /^plan-execution\t/mu);
+  assert.match(stdout.read(), /^polishing\t/mu);
   assert.equal(stderr.read(), "");
 });

@@ -157,7 +157,10 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
       let structured;
       let sessionId =
         request.session?.mode === "continue" ? request.session.id : undefined;
-      if (request.prompt.includes("Study the task, validated plan")) {
+      if (
+        request.prompt.includes("Study the task, validated plan") ||
+        request.prompt.includes("Study the task, existing changes")
+      ) {
         structured = {
           status: "READY",
           questions: [],
@@ -206,7 +209,10 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
               whyBlocked: "",
               evidence: [],
             };
-      } else if (request.prompt.includes("Implement the changes described")) {
+      } else if (
+        request.prompt.includes("Implement the changes described") ||
+        request.prompt.includes("Polish the existing local repository changes")
+      ) {
         await writeFile(
           join(request.cwd, "feature.js"),
           "export const value = 1;\n",
@@ -223,6 +229,9 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
       } else if (
         request.prompt.includes(
           "Locate and validate the project's finalization skill",
+        ) ||
+        request.prompt.includes(
+          "Locate and validate the target project's finalization skill",
         )
       ) {
         structured = {
@@ -236,7 +245,10 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
           whyBlocked: "",
           evidence: [],
         };
-      } else if (request.prompt.includes("Review the changes and verify")) {
+      } else if (
+        request.prompt.includes("Review the changes and verify") ||
+        request.prompt.includes("Review the complete current change set")
+      ) {
         structured = {
           status: "APPROVED",
           findings: [],
@@ -318,13 +330,14 @@ function runnerFor(
   {
     activities = [],
     configuration = RUNNER_CONFIGURATION,
+    git = createGitService(),
     runStore = createRunStore({ stateRoot: fixture.stateRoot }),
   } = {},
 ) {
   return createRunner({
     adapters,
     clarifications: createClarificationService({ interactive: false }),
-    git: createGitService(),
+    git,
     loadConfiguration: configurationLoader(configuration),
     onActivity(activity) {
       activities.push(activity);
@@ -710,3 +723,102 @@ test("dispatches plan execution through the root Git and state services", async 
     ),
   );
 });
+
+for (const pauseReason of [
+  "local_artifacts_not_ignored",
+  "unsafe_git_state",
+]) {
+  test(`resumes polishing after ${pauseReason} preflight is corrected`, async (t) => {
+    const fixture = await createFixture(t);
+    const ignoreArtifacts = pauseReason === "unsafe_git_state";
+    await Promise.all([
+      writeFile(
+        join(fixture.projectPath, ".gitignore"),
+        ignoreArtifacts ? "/LOCAL_ARTIFACTS/\n" : "/ignored/\n",
+      ),
+      writeFile(join(fixture.projectPath, "source.js"), "export const value = 0;\n"),
+    ]);
+    await executeFile("git", [
+      "-C",
+      fixture.projectPath,
+      "config",
+      "user.name",
+      "Test User",
+    ]);
+    await executeFile("git", [
+      "-C",
+      fixture.projectPath,
+      "config",
+      "user.email",
+      "test@example.com",
+    ]);
+    await executeFile("git", [
+      "-C",
+      fixture.projectPath,
+      "add",
+      ".gitignore",
+      "source.js",
+    ]);
+    await executeFile("git", [
+      "-C",
+      fixture.projectPath,
+      "commit",
+      "-qm",
+      "chore(test): initialize",
+    ]);
+    await writeFile(
+      join(fixture.projectPath, "source.js"),
+      "export const value = 1;\n",
+    );
+
+    const baseGit = createGitService();
+    let preflightCalls = 0;
+    const git =
+      pauseReason === "unsafe_git_state"
+        ? {
+            ...baseGit,
+            async preflight(options) {
+              preflightCalls += 1;
+              if (preflightCalls === 2) {
+                const error = new Error(
+                  "Git snapshot raced with another process.",
+                );
+                error.code = "ERR_GIT_SNAPSHOT_RACE";
+                throw error;
+              }
+              return baseGit.preflight(options);
+            },
+          }
+        : baseGit;
+    const runner = runnerFor(
+      fixture,
+      { codex: createExecutionAdapter() },
+      { git },
+    );
+
+    const paused = await runner.run({
+      pipelineId: "polishing",
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+      roleOverrides: {},
+      sourceSession: null,
+    });
+    assert.equal(paused.run.pipelineState.workflowState, "WAITING_FOR_USER");
+    assert.equal(paused.run.pipelineState.preflightComplete, false);
+    assert.equal(paused.run.pause.reason, pauseReason);
+
+    if (!ignoreArtifacts) {
+      await writeFile(
+        join(fixture.projectPath, ".gitignore"),
+        "/ignored/\n/LOCAL_ARTIFACTS/\n",
+      );
+    }
+    const completed = await runner.resume({
+      runId: paused.run.runId,
+      action: null,
+    });
+
+    assert.equal(completed.run.pipelineState.workflowState, "DONE");
+    assert.equal(completed.run.pause, null);
+  });
+}

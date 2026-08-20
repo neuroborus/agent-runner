@@ -112,6 +112,7 @@ test("workspace topology keeps pipelines independent", async () => {
   assert.deepEqual(Object.keys(packageMetadata.dependencies).sort(), [
     "@agent-runner/plan-authoring",
     "@agent-runner/plan-execution",
+    "@agent-runner/polishing",
     "@modelcontextprotocol/server",
     "zod",
   ]);

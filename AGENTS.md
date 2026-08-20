@@ -6,6 +6,7 @@
 - Resolve material ambiguity in a bounded clarification phase before work begins.
 - Author reviewed commit-by-commit coding plans with the `plan-authoring` pipeline.
 - Execute predefined coding plans one verified local commit at a time with the `plan-execution` pipeline.
+- Polish and independently review existing workspace changes without committing them with the `polishing` pipeline.
 - Support Codex CLI and Claude Code as independent pipeline role backends.
 - Stay autonomous during normal execution and pause only for explicit escalation conditions.
 - Make workflow correctness, Git safety, and resumable state more important than convenience.
@@ -89,6 +90,18 @@ All pipelines additionally require:
 - Keep MCP on STDIO, reserve stdout for protocol traffic, never open an editor,
   and treat wait cancellation as cancellation of the wait only.
 
+`polishing` additionally requires:
+
+- Run Worker and Reviewer bootstrap independently and read-only.
+- Allow only Worker polishing and finding-resolution turns to change workspace
+  content or staging; every other role turn remains read-only.
+- Never request `local-commit`, create a commit, or change `HEAD`, refs, remotes,
+  or Git identity.
+- Tie successful finalization and independent review to the same
+  staging-independent content fingerprint and invalidate both after content
+  changes.
+- Leave the finalized and reviewed workspace changes uncommitted.
+
 ## Repository Map
 
 | Path | Ownership |
@@ -111,6 +124,7 @@ All pipelines additionally require:
 | `packages/commit-plan/` | Shared deterministic commit-plan contract |
 | `pipelines/plan-authoring/` | Plan-authoring workflow, prompts, tests, and specification |
 | `pipelines/plan-execution/` | Plan-execution workflow, prompts, tests, and specification |
+| `pipelines/polishing/` | Polishing workflow, prompts, tests, and specification |
 | `test/` | Root CLI, registry, adapter, and repository-boundary tests |
 | `docs/` | Cross-cutting architecture documentation |
 | `.agents/skills/` | Shared repository workflow skills |

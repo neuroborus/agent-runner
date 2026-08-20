@@ -2219,12 +2219,17 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
           return currentRun;
         }
       } else if (
-        [
+        (!state().preflightComplete &&
+          [
+            "backend_unavailable",
+            "local_artifacts_not_ignored",
+            "unsafe_git_state",
+          ].includes(currentRun.pause.reason)) ||
+        ([
           "backend_unavailable",
           "environment_blocked",
           "finalization_cannot_pass",
         ].includes(currentRun.pause.reason) &&
-        (!state().preflightComplete ||
           [
             "CLARIFY",
             "BOOTSTRAP",

@@ -5,7 +5,7 @@ pipelines. It is designed to orchestrate local Codex CLI and Claude Code
 processes while keeping persistence, Git safety, and backend execution in one
 small runner.
 
-Both registered pipelines are runnable through the CLI and the local STDIO MCP
+All registered pipelines are runnable through the CLI and the local STDIO MCP
 control plane.
 
 Architecture is documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
@@ -21,6 +21,8 @@ Each pipeline owns its specification under its workspace.
 - Read-only agent turns are checked for repository mutations.
 - `plan-authoring` keeps project content read-only except for its resolved `clarifications.md` and `plan.md` artifact paths, even when the task directory is inside the target repository.
 - In `plan-execution`, only the Worker may create the exact planned local commit, and only after runner authorization and successful finalization/review gates.
+- `polishing` finalizes and independently reviews existing workspace changes
+  while preserving `HEAD` and leaving those changes uncommitted.
 - Commit messages never contain a `Co-authored-by` trailer or replace the repository's configured Git identity.
 - Retry exhaustion and unsafe states pause for the user instead of accepting unresolved work.
 - Persistent state lives outside both the target repository and task directory.
@@ -56,10 +58,12 @@ global link.
 | --- | --- | --- |
 | `plan-authoring` | Analyze a task, review a draft, and atomically write `plan.md` | [`pipelines/plan-authoring/docs/SPEC.md`](pipelines/plan-authoring/docs/SPEC.md) |
 | `plan-execution` | Implement, finalize, review, and locally commit every plan step | [`pipelines/plan-execution/docs/SPEC.md`](pipelines/plan-execution/docs/SPEC.md) |
+| `polishing` | Polish, finalize, and independently review existing dirty-worktree changes without committing | [`pipelines/polishing/docs/SPEC.md`](pipelines/polishing/docs/SPEC.md) |
 
-Both pipelines share the deterministic
+Plan authoring and execution share the deterministic
 [`@agent-runner/commit-plan`](packages/commit-plan/README.md) contract. The
 authoring pipeline produces that artifact; the execution pipeline consumes it.
+Polishing is independently owned and does not consume a commit plan.
 
 ## Configuration
 
@@ -87,6 +91,10 @@ Pipeline settings use these defaults:
 | `plan-execution` | `maxDisputesPerFinding` | 2 |
 | `plan-execution` | `maxSameFindingRounds` | 3 |
 | `plan-execution` | `stagnationWindowRounds` | 3 |
+| `polishing` | `maxFixRounds` | 5 |
+| `polishing` | `maxDisputesPerFinding` | 2 |
+| `polishing` | `maxSameFindingRounds` | 3 |
+| `polishing` | `stagnationWindowRounds` | 3 |
 
 The stagnation window detects consecutive blocked correction rounds. Unless a
 harder limit preempts it, the first full window invokes one fresh Arbiter; a
@@ -121,6 +129,15 @@ task/
 └── context.md          # optional
 ```
 
+Polishing accepts the existing dirty worktree plus:
+
+```text
+task/
+├── task.md
+├── clarifications.md  # optional authoring transcript
+└── context.md          # optional
+```
+
 Each plan step begins with:
 
 ```markdown
@@ -145,6 +162,7 @@ commit subject.
 ```bash
 agent-run run plan-authoring --project /path/to/repository --task /path/to/task
 agent-run run plan-execution --project /path/to/repository --task /path/to/task
+agent-run run polishing --project /path/to/repository --task /path/to/task
 agent-run resume --run <run-id>
 agent-run status --run <run-id>
 agent-run pipelines
@@ -166,15 +184,16 @@ agent-run run plan-execution \
 
 The primary and review backends must match the source backend. Their first
 turns fork the source independently: Planner and Plan Reviewer for authoring,
-or Worker and Reviewer for execution. The source may intentionally contain
-context shared before the fork, but its children are direct siblings and do not
-share later turns. The source is never resumed in place, and every arbitration
-uses a fresh Arbiter that is not constrained by the source backend. The runner
-persists the resolved source reference and child lineage, so recovery uses
-durable run state and `resume` needs no source flag. An unavailable or
-backend-incompatible source fails instead of falling back to a fresh session.
+or Worker and Reviewer for execution and polishing. The source may
+intentionally contain context shared before the fork, but its children are
+direct siblings and do not share later turns. The source is never resumed in
+place, and every arbitration uses a fresh Arbiter that is not constrained by
+the source backend. The runner persists the resolved source reference and child
+lineage, so recovery uses durable run state and `resume` needs no source flag.
+An unavailable or backend-incompatible source fails instead of falling back to
+a fresh session.
 
-Add `--clarify` to either `run` command to open `$VISUAL` or `$EDITOR` before
+Add `--clarify` to any `run` command to open `$VISUAL` or `$EDITOR` before
 the primary agent checks whether more information is needed. Without the flag,
 the clarification phase still runs but opens the editor only when the agent asks
 a material question. In a non-interactive environment, the run pauses and
@@ -182,8 +201,8 @@ prints the clarification path instead. An empty clarification artifact and
 closing the proactive editor without changes are valid; neither consumes an
 agent question round. Unanswered agent questions still pause the run.
 
-Authoring uses `<task-dir>/clarifications.md`. Execution keeps its run-specific
-transcript under
+Authoring uses `<task-dir>/clarifications.md`. Execution and polishing keep
+their run-specific transcript under
 `<project>/LOCAL_ARTIFACTS/agent-runner/<run-id>/clarifications.md`. Preflight
 requires the target repository to ignore that resolved path; the runner never
 edits ignore rules automatically. The artifact is hashed separately and is
@@ -211,7 +230,7 @@ while status and bounded public activity reads remain lock-free. `run` and
 current state, pause, artifact paths, findings, fingerprints, commit SHAs, and
 state directory without exposing model transcripts.
 
-Plan execution accepts one applicable resume action at a time:
+Plan execution and polishing accept one applicable resume action at a time:
 
 ```bash
 agent-run resume --run <run-id> --extra-fix-rounds 3
@@ -233,6 +252,13 @@ repository's `finalization` skill, and passes an independent review of the same
 content fingerprint before receiving one-shot authorization to create the
 exact planned local commit. Commits are not pushed, no remote is changed, and
 remote writes remain permanently prohibited.
+
+Polishing follows the same fingerprint-bound finalization and independent
+review gate, but it has no commit turn or commit authorization. Successful
+polishing leaves the reviewed workspace content and staging state uncommitted.
+Its dedicated `FINALIZE` turn runs only the target project's finalization-skill
+validation procedure, including required formatting or generated output; it
+does not perform handoff staging or draft a commit.
 
 ## MCP
 
@@ -313,11 +339,12 @@ complete model transcripts.
 
 The registry is static in V1. A pipeline descriptor exports an ID, a state
 version, roles, configuration settings and defaults, pipeline-specific accepted
-and required `run` options, persisted-run validation, and a description; the
-root CLI owns the common `--clarify` lifecycle option. Each workspace owns its
-explicit JavaScript workflow. The runner provides state, events, agents, and
-Git services; it does not provide a workflow DSL or duplicate pipeline-owned
-policy.
+and required `run` options, task-input definitions, clarification and status
+projections, resume-action validation, persisted-run validation, and a
+description; the root CLI owns the common `--clarify` lifecycle option. Each
+workspace owns its explicit JavaScript workflow. The runner provides state,
+events, agents, and Git services; it does not provide a workflow DSL or
+duplicate pipeline-owned policy.
 
 ## Repository Layout
 
@@ -357,7 +384,8 @@ policy.
 │   └── commit-plan/
 ├── pipelines/
 │   ├── plan-authoring/
-│   └── plan-execution/
+│   ├── plan-execution/
+│   └── polishing/
 ├── test/
 ├── docs/
 │   └── ARCHITECTURE.md

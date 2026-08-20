@@ -1,4 +1,3 @@
-import { join } from "node:path";
 import { parseArgs } from "node:util";
 
 import packageMetadata from "../package.json" with { type: "json" };
@@ -88,41 +87,37 @@ function shortFingerprint(value) {
 
 function runSummary({ directoryPath, run }) {
   const state = run.pipelineState;
+  const pipeline = getPipeline(run.pipelineId);
+  const status = pipeline.projections.status(run);
+  const clarification = pipeline.projections.clarification(run);
   const lines = [
     `Run: ${run.runId}`,
     `Pipeline: ${run.pipelineId}`,
     `State: ${state.workflowState}`,
   ];
-  if (state.currentStep !== undefined && state.currentStep !== null) {
-    lines.push(`Step: ${state.currentStep}`);
+  if (status.currentStep !== null) {
+    lines.push(`Step: ${status.currentStep}`);
   }
   if (run.pause?.reason !== undefined) {
     lines.push(`Pause: ${run.pause.reason}`);
   }
-  const clarificationPath =
-    state.clarificationPath ??
-    (run.pipelineId === "plan-authoring"
-      ? join(run.taskPath, "clarifications.md")
-      : null);
-  if (clarificationPath !== null) {
-    lines.push(`Clarifications: ${clarificationPath}`);
+  if (clarification.path !== null) {
+    lines.push(`Clarifications: ${clarification.path}`);
   }
-  lines.push(`Plan: ${state.planPath ?? join(run.taskPath, "plan.md")}`);
-  if (Array.isArray(state.findings) && state.findings.length > 0) {
+  if (status.planPath !== null) {
+    lines.push(`Plan: ${status.planPath}`);
+  }
+  if (status.findings.length > 0) {
     lines.push("Open findings:");
-    for (const finding of state.findings) {
-      lines.push(
-        `  ${finding.id}: ${finding.problem ?? finding.description ?? "open"}`,
-      );
+    for (const finding of status.findings) {
+      lines.push(`  ${finding.id}: ${finding.summary}`);
     }
   }
-  const stagnation =
-    state.stagnationDirection?.direction ?? state.arbiterDirection?.direction;
-  if (stagnation !== undefined) {
-    lines.push(`Stagnation direction: ${stagnation}`);
+  if (status.stagnationDirection !== null) {
+    lines.push(`Stagnation direction: ${status.stagnationDirection}`);
   }
-  const finalized = shortFingerprint(state.finalizedFingerprint);
-  const reviewed = shortFingerprint(state.reviewedFingerprint);
+  const finalized = shortFingerprint(status.finalizedFingerprint);
+  const reviewed = shortFingerprint(status.reviewedFingerprint);
   if (finalized !== null) {
     lines.push(`Finalized fingerprint: ${finalized}`);
   }
@@ -130,11 +125,10 @@ function runSummary({ directoryPath, run }) {
     lines.push(`Reviewed fingerprint: ${reviewed}`);
   }
   if (
-    Array.isArray(state.completedCommits) &&
-    state.completedCommits.length > 0
+    status.completedCommits.length > 0
   ) {
     lines.push(
-      `Commits: ${state.completedCommits.map(shortFingerprint).join(", ")}`,
+      `Commits: ${status.completedCommits.map(shortFingerprint).join(", ")}`,
     );
   }
   lines.push(`State directory: ${directoryPath}`);

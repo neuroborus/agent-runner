@@ -20,6 +20,9 @@ const RUN_ID = "11111111-1111-4111-8111-111111111111";
 const SECOND_RUN_ID = "22222222-2222-4222-8222-222222222222";
 const THIRD_RUN_ID = "33333333-3333-4333-8333-333333333333";
 const FOURTH_RUN_ID = "44444444-4444-4444-8444-444444444444";
+const FIFTH_RUN_ID = "55555555-5555-4555-8555-555555555555";
+const SIXTH_RUN_ID = "66666666-6666-4666-8666-666666666666";
+const SEVENTH_RUN_ID = "77777777-7777-4777-8777-777777777777";
 const RESPONSE_HASH = "a".repeat(64);
 const executeFile = promisify(execFile);
 
@@ -195,7 +198,19 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
   });
   assert.deepEqual(
     pipelines.structuredContent.pipelines.map(({ id }) => id),
-    ["plan-authoring", "plan-execution"],
+    ["plan-authoring", "plan-execution", "polishing"],
+  );
+  assert.deepEqual(
+    pipelines.structuredContent.pipelines.find(({ id }) => id === "polishing")
+      .taskInputs,
+    {
+      task: { filename: "task.md", optional: false },
+      taskClarifications: {
+        filename: "clarifications.md",
+        optional: true,
+      },
+      context: { filename: "context.md", optional: true },
+    },
   );
   const invalid = await client.callTool({
     name: "run_status",
@@ -501,6 +516,72 @@ test("resumes only an action valid for the persisted pause", async (t) => {
     action: extraFixAction,
     id: FOURTH_RUN_ID,
   });
+  await createStoredRun(store, paths, {
+    id: FIFTH_RUN_ID,
+    pipelineId: "polishing",
+    pause: { reason: "fix_limit_reached", resumeState: "POLISH" },
+    state: {
+      additionalFixRounds: 0,
+      findings: [],
+      settings: { maxFixRounds: 5 },
+    },
+    workflowState: "WAITING_FOR_USER",
+  });
+  assert.deepEqual(
+    await control.runStatus({ runId: FIFTH_RUN_ID }),
+    {
+      runId: FIFTH_RUN_ID,
+      pipelineId: "polishing",
+      revision: 1,
+      activityCursor: 1,
+      status: "WAITING_FOR_USER",
+      currentStep: null,
+      pause: "fix_limit_reached",
+      clarificationPath: null,
+      planPath: null,
+      pendingInput: null,
+      findings: [],
+      completedCommits: [],
+      stagnationDirection: null,
+      finalizedFingerprint: null,
+      reviewedFingerprint: null,
+      stateDirectory: await store.getRunDirectory(FIFTH_RUN_ID),
+    },
+  );
+  assert.deepEqual(
+    await control.runResume({
+      ...input,
+      idempotencyKey: "valid-polishing-fix-budget",
+      runId: FIFTH_RUN_ID,
+      action: extraFixAction,
+    }),
+    { runId: FIFTH_RUN_ID },
+  );
+  assert.deepEqual(launches.at(-1), {
+    action: extraFixAction,
+    id: FIFTH_RUN_ID,
+  });
+  for (const [runId, reason] of [
+    [SIXTH_RUN_ID, "local_artifacts_not_ignored"],
+    [SEVENTH_RUN_ID, "unsafe_git_state"],
+  ]) {
+    await createStoredRun(store, paths, {
+      id: runId,
+      pipelineId: "polishing",
+      pause: { reason },
+      state: { preflightComplete: false },
+      workflowState: "WAITING_FOR_USER",
+    });
+    assert.deepEqual(
+      await control.runResume({
+        ...input,
+        idempotencyKey: `retry-${reason}`,
+        runId,
+      }),
+      { runId },
+    );
+    assert.deepEqual(launches.at(-1), { action: null, id: runId });
+  }
   await assert.rejects(
     control.runResume({
       ...input,

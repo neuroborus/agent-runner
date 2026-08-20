@@ -1,6 +1,5 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { McpServer } from "@modelcontextprotocol/server";
@@ -9,28 +8,13 @@ import * as z from "zod/v4";
 
 import packageMetadata from "../package.json" with { type: "json" };
 import { createClarificationService } from "./clarifications.js";
-import { listPipelines } from "./pipeline-registry.js";
+import { getPipeline, listPipelines } from "./pipeline-registry.js";
 import { createRunner } from "./runner.js";
 import { createRunStore } from "./state.js";
 
 const MAX_WAIT_MS = 24 * 60 * 60 * 1_000;
 const DEFAULT_WAIT_MS = 30_000;
 const RETRY_DELAY_MS = 25;
-const RETRYABLE_PAUSE_REASONS = new Set([
-  "backend_unavailable",
-  "environment_blocked",
-  "finalization_cannot_pass",
-  "local_artifacts_not_ignored",
-  "unsafe_git_state",
-]);
-const RESUMABLE_WORKFLOW_STATES = new Set([
-  "CLARIFY",
-  "BOOTSTRAP",
-  "IMPLEMENT",
-  "FINALIZE",
-  "REVIEW",
-  "RESOLVE_FINDINGS",
-]);
 const EXECUTABLE_PATH = fileURLToPath(
   new URL("../bin/agent-run.js", import.meta.url),
 );
@@ -153,37 +137,25 @@ function shortFingerprint(value) {
 }
 
 function statusProjection({ directoryPath, run }) {
-  const pipelineState = run.pipelineState;
+  const pipeline = getPipeline(run.pipelineId);
+  const status = pipeline.projections.status(run);
+  const clarification = pipeline.projections.clarification(run);
   return {
     runId: run.runId,
     pipelineId: run.pipelineId,
     revision: run.revision,
     activityCursor: run.revision,
-    status: pipelineState.workflowState,
-    currentStep: pipelineState.currentStep ?? null,
+    status: run.pipelineState.workflowState,
+    currentStep: status.currentStep,
     pause: run.pause?.reason ?? null,
-    clarificationPath:
-      pipelineState.clarificationPath ??
-      (run.pipelineId === "plan-authoring"
-        ? join(run.taskPath, "clarifications.md")
-        : null),
-    planPath: pipelineState.planPath ?? join(run.taskPath, "plan.md"),
+    clarificationPath: clarification.path,
+    planPath: status.planPath,
     pendingInput: pendingInput(run),
-    findings: Array.isArray(pipelineState.findings)
-      ? pipelineState.findings.map((finding) => ({
-          id: finding.id,
-          summary: finding.problem ?? finding.description ?? "open",
-        }))
-      : [],
-    completedCommits: pipelineState.completedCommits ?? [],
-    stagnationDirection:
-      pipelineState.stagnationDirection?.direction ??
-      pipelineState.arbiterDirection?.direction ??
-      null,
-    finalizedFingerprint: shortFingerprint(
-      pipelineState.finalizedFingerprint,
-    ),
-    reviewedFingerprint: shortFingerprint(pipelineState.reviewedFingerprint),
+    findings: status.findings,
+    completedCommits: status.completedCommits,
+    stagnationDirection: status.stagnationDirection,
+    finalizedFingerprint: shortFingerprint(status.finalizedFingerprint),
+    reviewedFingerprint: shortFingerprint(status.reviewedFingerprint),
     stateDirectory: directoryPath,
   };
 }
@@ -197,75 +169,7 @@ function waitIsTerminal(run) {
 }
 
 function clarificationHash(run) {
-  return run.pipelineId === "plan-authoring"
-    ? run.hashes.clarifications
-    : run.hashes.executionClarifications;
-}
-
-function assertResumeAllowed(run, action) {
-  if (run.pipelineState.workflowState !== "WAITING_FOR_USER") {
-    throw new Error("Only a persisted paused run can be resumed.");
-  }
-  if (run.pipelineId === "plan-authoring") {
-    if (action !== null || run.pipelineState.pendingEdit === null) {
-      throw new Error("Resume action is not valid for this paused run.");
-    }
-    return;
-  }
-  if (run.pipelineId !== "plan-execution") {
-    throw new Error(`Unknown pipeline: ${run.pipelineId}.`);
-  }
-  if (run.pipelineState.pendingEdit !== null) {
-    if (action !== null) {
-      throw new Error("A pending input edit does not accept a resume action.");
-    }
-    return;
-  }
-  if (action?.type === "extra-fix-rounds") {
-    const additionalFixRounds =
-      run.pipelineState.additionalFixRounds + action.amount;
-    if (
-      run.pause?.reason !== "fix_limit_reached" ||
-      !["IMPLEMENT", "RESOLVE_FINDINGS"].includes(run.pause.resumeState) ||
-      !Number.isSafeInteger(additionalFixRounds) ||
-      !Number.isSafeInteger(
-        run.pipelineState.settings.maxFixRoundsPerStep + additionalFixRounds,
-      )
-    ) {
-      throw new Error("Additional fix rounds are not applicable.");
-    }
-    return;
-  }
-  if (action?.type === "override-finding") {
-    const state = run.pipelineState;
-    if (
-      !["fix_limit_reached", "no_progress", "dispute_limit_reached"].includes(
-        run.pause?.reason,
-      ) ||
-      state.finalizationResult?.status !== "PASS" ||
-      state.reviewedFingerprint === null ||
-      !state.findings?.some((finding) => finding.id === action.findingId)
-    ) {
-      throw new Error("Finding override is not applicable.");
-    }
-    return;
-  }
-  if (
-    action === null &&
-    ((run.pause?.reason === "commit_failed" &&
-      run.pipelineState.pendingCommit?.status === "consumed") ||
-      (RETRYABLE_PAUSE_REASONS.has(run.pause?.reason) &&
-        (!run.pipelineState.preflightComplete ||
-          ([
-            "backend_unavailable",
-            "environment_blocked",
-            "finalization_cannot_pass",
-          ].includes(run.pause?.reason) &&
-            RESUMABLE_WORKFLOW_STATES.has(run.pause?.resumeState)))))
-  ) {
-    return;
-  }
-  throw new Error("Resume action is not valid for this paused run.");
+  return getPipeline(run.pipelineId).projections.clarification(run).hash;
 }
 
 function delay(milliseconds, signal) {
@@ -391,6 +295,7 @@ export function createMcpControlPlane(options = {}) {
         id: pipeline.id,
         description: pipeline.description,
         roles: pipeline.roles,
+        taskInputs: pipeline.taskInputs,
         runOptions: pipeline.runOptions,
         requiredRunOptions: pipeline.requiredRunOptions,
       })),
@@ -632,7 +537,7 @@ export function createMcpControlPlane(options = {}) {
       }
       const run = (await runner.status(input.runId)).run;
       if (run.revision === input.expectedRevision) {
-        assertResumeAllowed(run, input.action);
+        getPipeline(run.pipelineId).validateResumeAction(run, input.action);
       } else if (action.created || run.revision < input.expectedRevision) {
         throw new Error("Resume request revision is stale.");
       }

@@ -58,15 +58,119 @@ const SETTINGS = Object.freeze({
   maxSameFindingRounds: positiveIntegerSetting(3),
   stagnationWindowRounds: positiveIntegerSetting(3),
 });
+const TASK_INPUTS = Object.freeze({
+  task: Object.freeze({ filename: "task.md", optional: false }),
+  taskClarifications: Object.freeze({
+    filename: "clarifications.md",
+    optional: true,
+  }),
+  context: Object.freeze({ filename: "context.md", optional: true }),
+});
+const RETRYABLE_PAUSE_REASONS = new Set([
+  "backend_unavailable",
+  "environment_blocked",
+  "finalization_cannot_pass",
+]);
+const RETRYABLE_PREFLIGHT_PAUSE_REASONS = new Set([
+  "local_artifacts_not_ignored",
+  "unsafe_git_state",
+]);
+const RESUMABLE_WORKFLOW_STATES = new Set([
+  "CLARIFY",
+  "BOOTSTRAP",
+  "POLISH",
+  "FINALIZE",
+  "REVIEW",
+  "RESOLVE_FINDINGS",
+]);
+
+function projectClarification(run) {
+  return Object.freeze({
+    path: run.pipelineState.clarificationPath ?? null,
+    hash: run.hashes?.executionClarifications ?? null,
+  });
+}
+
+function projectStatus(run) {
+  const state = run.pipelineState;
+  return Object.freeze({
+    currentStep: null,
+    planPath: null,
+    findings: Object.freeze(
+      Array.isArray(state.findings)
+        ? state.findings.map(({ id, problem }) =>
+            Object.freeze({ id, summary: problem }),
+          )
+        : [],
+    ),
+    completedCommits: Object.freeze([]),
+    stagnationDirection: state.stagnationDirection?.direction ?? null,
+    finalizedFingerprint: state.finalizedFingerprint,
+    reviewedFingerprint: state.reviewedFingerprint,
+  });
+}
+
+function validateResumeAction(run, action) {
+  const state = run.pipelineState;
+  if (state.workflowState !== "WAITING_FOR_USER") {
+    throw new Error("Only a persisted paused run can be resumed.");
+  }
+  if (state.pendingEdit !== null) {
+    if (action !== null) {
+      throw new Error("A pending input edit does not accept a resume action.");
+    }
+    return;
+  }
+  if (action?.type === "extra-fix-rounds") {
+    const additionalFixRounds = state.additionalFixRounds + action.amount;
+    if (
+      run.pause?.reason !== "fix_limit_reached" ||
+      !["POLISH", "RESOLVE_FINDINGS"].includes(run.pause.resumeState) ||
+      !Number.isSafeInteger(additionalFixRounds) ||
+      !Number.isSafeInteger(state.settings.maxFixRounds + additionalFixRounds)
+    ) {
+      throw new Error("Additional fix rounds are not applicable.");
+    }
+    return;
+  }
+  if (action?.type === "override-finding") {
+    if (
+      !["fix_limit_reached", "no_progress"].includes(run.pause?.reason) ||
+      state.finalizationResult?.status !== "PASS" ||
+      state.reviewedFingerprint === null ||
+      !state.findings?.some(({ id }) => id === action.findingId)
+    ) {
+      throw new Error("Finding override is not applicable.");
+    }
+    return;
+  }
+  if (
+    action === null &&
+    ((RETRYABLE_PREFLIGHT_PAUSE_REASONS.has(run.pause?.reason) &&
+      !state.preflightComplete) ||
+      (RETRYABLE_PAUSE_REASONS.has(run.pause?.reason) &&
+        (!state.preflightComplete ||
+          RESUMABLE_WORKFLOW_STATES.has(run.pause?.resumeState))))
+  ) {
+    return;
+  }
+  throw new Error("Resume action is not valid for this paused run.");
+}
 
 export const polishingPipeline = Object.freeze({
   id: POLISHING_PIPELINE_ID,
   stateVersion: 1,
   roles: ROLES,
   settings: SETTINGS,
+  taskInputs: TASK_INPUTS,
   runOptions: Object.freeze(["project", "task", ...ROLES]),
   requiredRunOptions: Object.freeze(["project", "task"]),
   description: "Polish and review an existing dirty worktree without committing it.",
+  projections: Object.freeze({
+    clarification: projectClarification,
+    status: projectStatus,
+  }),
+  validateResumeAction,
   workflow: Object.freeze({
     createState: createPolishingState,
     run: runPolishing,

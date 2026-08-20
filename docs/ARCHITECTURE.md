@@ -13,9 +13,10 @@ root CLI/runtime ──static registry──▶ pipeline workspaces
 
 The root runner imports registered pipelines. Pipelines do not import the root
 application; the runner supplies state, event, agent, and Git services through a
-runtime context. Both pipelines may depend on `@agent-runner/commit-plan` once
-their implementation imports it, but they never depend on each other. Do not
-declare an internal runtime dependency before an actual import needs it.
+runtime context. Plan authoring and execution consume
+`@agent-runner/commit-plan`; polishing has no shared-package dependency, and
+pipelines never depend on each other. Do not declare an internal runtime
+dependency before an actual import needs it.
 
 ## Root Runner Ownership
 
@@ -42,9 +43,10 @@ keep ownership visible and avoid barrel cycles.
 Each pipeline owns its input interpretation, roles, configuration settings and
 defaults, accepted `run` options, prompts, structured-output schemas, explicit
 JavaScript state machine, retry policy, and completion criteria. Roles, settings,
-accepted and required options, and persisted-run validation are exposed through
-its static descriptor; pipeline states remain workspace-owned rather than
-becoming root runtime policy.
+accepted and required options, task-input definitions, clarification and status
+projections, resume-action validation, and persisted-run validation are exposed
+through its static descriptor; pipeline states remain workspace-owned rather
+than becoming root runtime policy.
 
 The root CLI owns `--clarify` as a common run-lifecycle option. Role and
 pipeline-specific options remain in pipeline descriptors.
@@ -55,6 +57,8 @@ V1 registers:
   history.
 - `plan-execution`: consumes `plan.md` and implements one reviewed local commit
   per step.
+- `polishing`: polishes, finalizes, and independently reviews an existing dirty
+  worktree while leaving its changes uncommitted.
 
 The registry is static. V1 has no dynamic plugins, workflow DSL, or generic DAG
 executor.
@@ -180,6 +184,8 @@ than a correctness dependency.
 Plan execution persists each prepared or consumed one-shot commit authorization
 and every verified commit SHA. After an ambiguous commit turn, resume verifies
 the recorded authorization against Git state and never replays the effect.
+Polishing has no commit authorization and preserves the initial `HEAD`, refs,
+remotes, and Git identity through completion.
 
 ## Agent Context Recovery
 

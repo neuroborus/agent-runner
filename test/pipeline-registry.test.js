@@ -3,6 +3,7 @@ import test from "node:test";
 
 import * as planAuthoringApi from "@agent-runner/plan-authoring";
 import * as planExecutionApi from "@agent-runner/plan-execution";
+import * as polishingApi from "@agent-runner/polishing";
 
 import { getPipeline, listPipelines } from "../src/index.js";
 
@@ -11,7 +12,7 @@ test("registry exposes explicit immutable pipeline descriptors", () => {
 
   assert.deepEqual(
     pipelines.map((pipeline) => pipeline.id),
-    ["plan-authoring", "plan-execution"],
+    ["plan-authoring", "plan-execution", "polishing"],
   );
 
   for (const pipeline of pipelines) {
@@ -21,8 +22,18 @@ test("registry exposes explicit immutable pipeline descriptors", () => {
     assert.ok(Object.isFrozen(pipeline));
     assert.ok(Object.isFrozen(pipeline.roles));
     assert.ok(Object.isFrozen(pipeline.settings));
+    assert.ok(Object.isFrozen(pipeline.taskInputs));
+    assert.ok(Object.isFrozen(pipeline.projections));
     assert.ok(Object.isFrozen(pipeline.runOptions));
     assert.ok(Object.isFrozen(pipeline.requiredRunOptions));
+    assert.equal(typeof pipeline.projections.clarification, "function");
+    assert.equal(typeof pipeline.projections.status, "function");
+    assert.equal(typeof pipeline.validateResumeAction, "function");
+    for (const definition of Object.values(pipeline.taskInputs)) {
+      assert.ok(Object.isFrozen(definition));
+      assert.equal(typeof definition.filename, "string");
+      assert.equal(typeof definition.optional, "boolean");
+    }
     for (const role of pipeline.roles) {
       assert.ok(pipeline.runOptions.includes(role));
     }
@@ -48,6 +59,11 @@ test("pipelines own their pipeline-specific run options", () => {
     "reviewer",
     "arbiter",
   ]);
+  assert.deepEqual(getPipeline("polishing").roles, [
+    "worker",
+    "reviewer",
+    "arbiter",
+  ]);
   assert.deepEqual(getPipeline("plan-authoring").runOptions, [
     "project",
     "task",
@@ -56,6 +72,13 @@ test("pipelines own their pipeline-specific run options", () => {
     "arbiter",
   ]);
   assert.deepEqual(getPipeline("plan-execution").runOptions, [
+    "project",
+    "task",
+    "worker",
+    "reviewer",
+    "arbiter",
+  ]);
+  assert.deepEqual(getPipeline("polishing").runOptions, [
     "project",
     "task",
     "worker",
@@ -90,10 +113,22 @@ test("pipelines own their pipeline-specific run options", () => {
     "function",
   );
   assert.ok(Object.isFrozen(getPipeline("plan-execution").workflow));
+  assert.deepEqual(getPipeline("polishing").requiredRunOptions, [
+    "project",
+    "task",
+  ]);
+  assert.equal(typeof getPipeline("polishing").workflow.createState, "function");
+  assert.equal(typeof getPipeline("polishing").workflow.run, "function");
+  assert.equal(
+    typeof getPipeline("polishing").workflow.validateRun,
+    "function",
+  );
+  assert.ok(Object.isFrozen(getPipeline("polishing").workflow));
   assert.equal(getPipeline("unknown"), undefined);
 });
 
 test("pipelines do not duplicate the shared validation API", () => {
   assert.equal("assertCommitSubject" in planAuthoringApi, false);
   assert.equal("assertCommitSubject" in planExecutionApi, false);
+  assert.equal("assertCommitSubject" in polishingApi, false);
 });

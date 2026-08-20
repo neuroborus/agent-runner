@@ -224,6 +224,12 @@ function createBackend(
         }
         structured = readyForExecution();
       } else if (
+        request.prompt.includes(
+          "Study the task, existing changes, task-level clarifications",
+        )
+      ) {
+        structured = readyForExecution();
+      } else if (
         request.prompt.includes("Return a concise bootstrap summary")
       ) {
         const reviewer = request.prompt.includes("As Reviewer");
@@ -280,8 +286,23 @@ function createBackend(
       } else if (request.prompt.includes("Implement the changes described")) {
         structured = await implement(request);
       } else if (
+        request.prompt.includes("Polish the existing local repository changes")
+      ) {
+        structured = {
+          status: "COMPLETED",
+          summary: "The existing dirty change is already idiomatic and minimal.",
+          reason: "",
+          question: "",
+          options: [],
+          whyBlocked: "",
+          evidence: [],
+        };
+      } else if (
         request.prompt.includes(
           "Locate and validate the project's finalization skill",
+        ) ||
+        request.prompt.includes(
+          "Locate and validate the target project's finalization skill",
         )
       ) {
         structured = {
@@ -295,7 +316,10 @@ function createBackend(
           whyBlocked: "",
           evidence: [],
         };
-      } else if (request.prompt.includes("Review the changes and verify")) {
+      } else if (
+        request.prompt.includes("Review the changes and verify") ||
+        request.prompt.includes("Review the complete current change set")
+      ) {
         role = "reviewer";
         structured = {
           status: "APPROVED",
@@ -483,6 +507,63 @@ test("authors a complete plan through mixed CLI roles", async (t) => {
   assert.equal(
     await gitOutput(paths.projectPath, ["log", "-1", "--pretty=%s"]),
     "chore(test): initialize",
+  );
+});
+
+test("polishes a dirty worktree through mixed CLI roles without committing", async (t) => {
+  const paths = await fixture(t, { plan: null });
+  await writeFile(
+    join(paths.projectPath, "src", "base.js"),
+    "export const base = 2;\n",
+  );
+  const initialHead = await gitOutput(paths.projectPath, ["rev-parse", "HEAD"]);
+  const codex = createBackend("codex");
+  const claude = createBackend("claude");
+  const { runner, runStore } = runtime(
+    paths,
+    { claude, codex },
+    { schemaVersion: 1, defaultBackend: "codex" },
+  );
+  const stdout = sink();
+  const stderr = sink();
+
+  const exitCode = await main(
+    [
+      "run",
+      "polishing",
+      "--project",
+      paths.projectPath,
+      "--task",
+      paths.taskPath,
+      "--worker",
+      "codex",
+      "--reviewer",
+      "claude",
+      "--arbiter",
+      "codex",
+    ],
+    { runner, stderr: stderr.stream, stdout: stdout.stream },
+  );
+
+  assert.equal(exitCode, 0);
+  assert.equal(stderr.value(), "");
+  assert.match(stdout.value(), /Pipeline: polishing/u);
+  assert.match(stdout.value(), /State: DONE/u);
+  assert.doesNotMatch(stdout.value(), /^Plan:/mu);
+  const run = await onlyRun(runStore);
+  assert.equal(run.pipelineState.workflowState, "DONE");
+  assert.equal(run.roles.worker.backend, "codex");
+  assert.equal(run.roles.reviewer.backend, "claude");
+  assert.equal(
+    [...codex.calls, ...claude.calls].some(
+      (call) => call.access === "local-commit",
+    ),
+    false,
+  );
+  assert.equal(await gitOutput(paths.projectPath, ["rev-parse", "HEAD"]), initialHead);
+  assert.equal(
+    await gitOutput(paths.projectPath, ["status", "--porcelain"]),
+    "M src/base.js",
   );
 });
 
@@ -685,7 +766,7 @@ test("does not replace an unavailable source session", async (t) => {
   }
 });
 
-test("runs both pipelines through recoverable MCP controls", async (t) => {
+test("runs registered workflows through recoverable MCP controls", async (t) => {
   const paths = await fixture(t, { autoCleanup: false, plan: null });
   const implementationGate = {
     entered: deferred(),
@@ -851,5 +932,58 @@ test("runs both pipelines through recoverable MCP controls", async (t) => {
   assert.equal(
     await gitOutput(paths.projectPath, ["remote", "get-url", "origin"]),
     "https://example.invalid/repository.git",
+  );
+
+  await writeFile(
+    join(paths.projectPath, "src", "base.js"),
+    "export const base = 2;\n",
+  );
+  const polishingHead = await gitOutput(paths.projectPath, [
+    "rev-parse",
+    "HEAD",
+  ]);
+  const callCount = codex.calls.length;
+  const polishing = await afterDisconnect.runStart({
+    idempotencyKey: "polishing-start",
+    pipelineId: "polishing",
+    projectPath: paths.projectPath,
+    taskPath: paths.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    sourceSession: null,
+  });
+  assert.deepEqual(
+    await afterDisconnect.runStart({
+      idempotencyKey: "polishing-start",
+      pipelineId: "polishing",
+      projectPath: paths.projectPath,
+      taskPath: paths.taskPath,
+      proactiveClarification: false,
+      roleOverrides: {},
+      sourceSession: null,
+    }),
+    polishing,
+  );
+  const polishingDone = await afterDisconnect.runWait({
+    runId: polishing.runId,
+    cursor: 0,
+    timeoutMs: 5_000,
+    progress: false,
+  });
+  await pipelineProcess.settle();
+  assert.equal(polishingDone.status, "DONE");
+  assert.equal(polishingDone.planPath, null);
+  assert.equal(polishingDone.completedCommits.length, 0);
+  assert.equal(
+    codex.calls.slice(callCount).some(({ access }) => access === "local-commit"),
+    false,
+  );
+  assert.equal(
+    await gitOutput(paths.projectPath, ["rev-parse", "HEAD"]),
+    polishingHead,
+  );
+  assert.equal(
+    await gitOutput(paths.projectPath, ["status", "--porcelain"]),
+    "M src/base.js",
   );
 });

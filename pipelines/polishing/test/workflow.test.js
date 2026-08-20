@@ -1058,18 +1058,49 @@ test("pauses clean repositories before creating a clarification artifact", async
   assert.equal(result.pipelineState.clarificationPath, null);
 });
 
-test("requires the repository-local clarification path to be ignored", async (t) => {
+test("resumes preflight after the clarification path becomes ignored", async (t) => {
   const fixture = await createFixture(t, {
     ignoreArtifacts: false,
-    reviewer: [],
-    worker: [],
   });
 
-  const result = await fixture.run();
+  const paused = await fixture.run();
 
-  assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
-  assert.equal(result.pause.reason, "local_artifacts_not_ignored");
-  assert.equal(result.pipelineState.clarificationPath, null);
+  assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(paused.pause.reason, "local_artifacts_not_ignored");
+  assert.equal(paused.pipelineState.clarificationPath, null);
+
+  await appendFile(join(fixture.projectPath, ".gitignore"), "LOCAL_ARTIFACTS/\n");
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.pause, null);
+});
+
+test("resumes preflight after a transient unsafe Git state", async (t) => {
+  const fixture = await createFixture(t);
+  const git = fixture.runtime.git;
+  let preflightCalls = 0;
+  fixture.runtime.git = {
+    ...git,
+    async preflight(options) {
+      preflightCalls += 1;
+      if (preflightCalls === 1) {
+        const error = new Error("Git snapshot raced with another process.");
+        error.code = "ERR_GIT_SNAPSHOT_RACE";
+        throw error;
+      }
+      return git.preflight(options);
+    },
+  };
+
+  const paused = await fixture.run();
+  assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(paused.pause.reason, "unsafe_git_state");
+  assert.equal(paused.pipelineState.preflightComplete, false);
+
+  const completed = await fixture.run();
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.pause, null);
 });
 
 for (const taskLocation of [

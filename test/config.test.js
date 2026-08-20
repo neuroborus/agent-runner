@@ -46,6 +46,9 @@ test("tracked example is valid and local configuration is ignored", async () => 
     configuration.pipelines["plan-authoring"].roles.arbiter,
     {},
   );
+  assert.deepEqual(configuration.pipelines.polishing.roles.reviewer, {
+    backend: "claude",
+  });
   assert.match(gitignore, /^\/\.agent-runner\.json$/mu);
   assert.ok(Object.isFrozen(configuration));
   assert.ok(Object.isFrozen(configuration.pipelines));
@@ -68,6 +71,13 @@ test("minimal configuration uses pipeline-owned setting defaults", () => {
   });
   assert.deepEqual(configuration.pipelines["plan-execution"], {
     maxFixRoundsPerStep: 5,
+    maxDisputesPerFinding: 2,
+    maxSameFindingRounds: 3,
+    stagnationWindowRounds: 3,
+    roles: {},
+  });
+  assert.deepEqual(configuration.pipelines.polishing, {
+    maxFixRounds: 5,
     maxDisputesPerFinding: 2,
     maxSameFindingRounds: 3,
     stagnationWindowRounds: 3,
@@ -125,6 +135,14 @@ test("configuration rejects unsupported shapes and values", () => {
     [
       '{"schemaVersion":1,"pipelines":{"plan-execution":{"stagnationWindowRounds":0}}}',
       /stagnationWindowRounds must be a positive integer/u,
+    ],
+    [
+      '{"schemaVersion":1,"pipelines":{"polishing":{"maxFixRounds":0}}}',
+      /maxFixRounds must be a positive integer/u,
+    ],
+    [
+      '{"schemaVersion":1,"pipelines":{"polishing":{"maxDisputesPerFinding":0}}}',
+      /maxDisputesPerFinding must be a positive integer/u,
     ],
     [
       '{"schemaVersion":1,"pipelines":{"plan-authoring":{"roles":[]}}}',
@@ -323,6 +341,7 @@ test("configuration ownership and defaults are documented", async () => {
     architecture,
     authoringSpecification,
     executionSpecification,
+    polishingSpecification,
     agents,
   ] = await Promise.all([
     readFile(new URL("../README.md", import.meta.url), "utf8"),
@@ -333,6 +352,10 @@ test("configuration ownership and defaults are documented", async () => {
     ),
     readFile(
       new URL("../pipelines/plan-execution/docs/SPEC.md", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../pipelines/polishing/docs/SPEC.md", import.meta.url),
       "utf8",
     ),
     readFile(new URL("../AGENTS.md", import.meta.url), "utf8"),
@@ -348,5 +371,9 @@ test("configuration ownership and defaults are documented", async () => {
   assert.match(executionSpecification, /maxDisputesPerFinding = 2/u);
   assert.match(executionSpecification, /maxSameFindingRounds = 3/u);
   assert.match(executionSpecification, /stagnationWindowRounds = 3/u);
+  assert.match(polishingSpecification, /maxFixRounds = 5/u);
+  assert.match(polishingSpecification, /maxDisputesPerFinding = 2/u);
+  assert.match(polishingSpecification, /maxSameFindingRounds = 3/u);
+  assert.match(polishingSpecification, /stagnationWindowRounds = 3/u);
   assert.match(agents, /`src\/config\.js`/u);
 });
