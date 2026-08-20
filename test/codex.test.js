@@ -751,6 +751,59 @@ test("rejects MCP names that cannot be overridden safely", async () => {
   assert.equal(fixture.processes.length, 0);
 });
 
+test("retries transient MCP discovery before forking a source", async () => {
+  let discoveryCalls = 0;
+  const fixture = createFixture({
+    executeHandle({ argumentsList, options }) {
+      if (!argumentsList.includes("mcp")) {
+        return undefined;
+      }
+      discoveryCalls += 1;
+      assert.equal(options.timeout, 30_000);
+      if (discoveryCalls === 1) {
+        throw new Error("MCP discovery timed out");
+      }
+      return undefined;
+    },
+  });
+
+  const result = await fixture.adapter.run(
+    request({ session: { mode: "fork", id: "source-thread" } }),
+  );
+  assert.equal(discoveryCalls, 2);
+  assert.equal(fixture.processes.length, 1);
+  assert.equal(result.sessionId, "child-0");
+  assert.deepEqual(
+    fixture.processes[0].messages
+      .map(({ method }) => method)
+      .filter((method) => method?.startsWith("thread/")),
+    ["thread/fork"],
+  );
+});
+
+test("reports persistent MCP discovery failure as recoverable", async () => {
+  let discoveryCalls = 0;
+  const fixture = createFixture({
+    executeHandle({ argumentsList }) {
+      if (argumentsList.includes("mcp")) {
+        discoveryCalls += 1;
+        throw new Error("MCP discovery timed out");
+      }
+      return undefined;
+    },
+  });
+
+  await assert.rejects(fixture.adapter.run(request()), (error) => {
+    assert.ok(error instanceof CodexAdapterError);
+    assert.equal(error.code, "ERR_CODEX_UNAVAILABLE");
+    assert.equal(error.method, "mcp/list");
+    assert.equal(error.recoverable, true);
+    return true;
+  });
+  assert.equal(discoveryCalls, 2);
+  assert.equal(fixture.processes.length, 0);
+});
+
 test("validates strict schemas and structured output", async () => {
   const fixture = createFixture({
     handle({ message }) {

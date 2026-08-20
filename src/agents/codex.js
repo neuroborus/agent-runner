@@ -23,6 +23,7 @@ export const CODEX_BACKEND_ID = "codex";
 const executeFile = promisify(executeFileCallback);
 const MINIMUM_CODEX_VERSION = Object.freeze([0, 147, 0]);
 const MAX_MCP_SERVERS = 256;
+const MCP_DISCOVERY_TIMEOUT_MS = 30_000;
 const MCP_SERVER_NAME_PATTERN = /^[A-Za-z0-9_-]+$/u;
 const MAX_MODEL_PAGES = 32;
 const DISABLED_FEATURES = Object.freeze([
@@ -963,14 +964,18 @@ export function createCodexAdapter(options = {}) {
           encoding: "utf8",
           env: processEnvironment,
           maxBuffer: 1024 * 1024,
-          timeout: 10_000,
+          timeout: MCP_DISCOVERY_TIMEOUT_MS,
         },
       );
     } catch (cause) {
-      throw processError(
-        "Cannot inspect Codex MCP configuration.",
-        cause,
-        "ERR_CODEX_ISOLATION",
+      throw new CodexAdapterError(
+        "Codex MCP configuration is temporarily unavailable.",
+        {
+          cause,
+          code: "ERR_CODEX_UNAVAILABLE",
+          method: "mcp/list",
+          recoverable: true,
+        },
       );
     }
     const mcpServerNames = parseMcpServerNames(processOutput(result.stdout));
@@ -1105,6 +1110,13 @@ export function createCodexAdapter(options = {}) {
     try {
       return await runAttempt(request);
     } catch (cause) {
+      if (
+        cause instanceof CodexAdapterError &&
+        cause.recoverable &&
+        cause.method === "mcp/list"
+      ) {
+        return runAttempt(request);
+      }
       if (
         request.access === "local-commit" &&
         cause instanceof CodexAdapterError &&
