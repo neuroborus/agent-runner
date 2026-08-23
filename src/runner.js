@@ -23,6 +23,7 @@ const RUN_FIELDS = new Set([
   "taskPath",
   "proactiveClarification",
   "roleOverrides",
+  "executionOverrides",
   "sourceSession",
 ]);
 const RESUME_FIELDS = new Set(["runId", "action"]);
@@ -35,7 +36,7 @@ const INPUT_FIELDS = new Set([
   "responseHash",
 ]);
 const ANSWER_FIELDS = new Set(["questionId", "answer"]);
-const SOURCE_SESSION_FIELDS = new Set(["backend", "id"]);
+const SOURCE_SESSION_FIELDS = new Set(["backend", "id", "profile"]);
 const RUNNER_OPTION_FIELDS = new Set([
   "adapters",
   "clarifications",
@@ -119,7 +120,19 @@ function normalizeSourceSession(value) {
       code: "ERR_INVALID_SOURCE_SESSION",
     });
   }
-  return Object.freeze({ backend: value.backend, id: value.id });
+  if (
+    value.profile !== undefined &&
+    (typeof value.profile !== "string" || value.profile.trim().length === 0)
+  ) {
+    throw new RunnerError("sourceSession is invalid.", {
+      code: "ERR_INVALID_SOURCE_SESSION",
+    });
+  }
+  return Object.freeze({
+    backend: value.backend,
+    id: value.id,
+    ...(value.profile === undefined ? {} : { profile: value.profile }),
+  });
 }
 
 function fileHash(content) {
@@ -229,6 +242,14 @@ function validateCapabilities(
   return capabilities;
 }
 
+function executionOptions(configuration) {
+  return Object.freeze({
+    profile: configuration.profile,
+    model: configuration.model,
+    contextSize: configuration.contextSize,
+  });
+}
+
 function lazyArbiterAdapter(run, configuration, adapters) {
   let adapter;
   let capabilitiesPromise;
@@ -243,7 +264,7 @@ function lazyArbiterAdapter(run, configuration, adapters) {
   };
   const resolveCapabilities = async () => {
     capabilitiesPromise ??= Promise.resolve()
-      .then(() => resolve().probe())
+      .then(() => resolve().probe(executionOptions(configuration)))
       .then((capabilities) =>
         validateCapabilities(capabilities, {
           backend: configuration.backend,
@@ -268,6 +289,19 @@ function lazyArbiterAdapter(run, configuration, adapters) {
   });
 }
 
+function configuredAdapter(run, role, configuration, adapters) {
+  const adapter = resolveAdapter(
+    adapters,
+    run.pipelineId,
+    role,
+    configuration.backend,
+  );
+  return Object.freeze({
+    probe: () => adapter.probe(executionOptions(configuration)),
+    run: (request) => adapter.run(request),
+  });
+}
+
 function roleAdapters(run, adapters) {
   return Object.freeze(
     Object.fromEntries(
@@ -275,12 +309,7 @@ function roleAdapters(run, adapters) {
         role,
         role === "arbiter"
           ? lazyArbiterAdapter(run, configuration, adapters)
-          : resolveAdapter(
-              adapters,
-              run.pipelineId,
-              role,
-              configuration.backend,
-            ),
+          : configuredAdapter(run, role, configuration, adapters),
       ]),
     ),
   );
@@ -303,14 +332,19 @@ function validateSourceRoles(pipeline, roles, sourceSession) {
 
 async function probeRequiredRoles(pipeline, roles, adapters, sourceSession) {
   const requiredRoles = pipeline.roles.filter((role) => role !== "arbiter");
-  const capabilitiesByBackend = new Map();
+  const capabilitiesByConfiguration = new Map();
   for (const role of requiredRoles) {
-    const backend = roles[role].backend;
-    if (!capabilitiesByBackend.has(backend)) {
+    const configuration = roles[role];
+    const backend = configuration.backend;
+    const key = JSON.stringify(configuration);
+    if (!capabilitiesByConfiguration.has(key)) {
       const adapter = resolveAdapter(adapters, pipeline.id, role, backend);
-      capabilitiesByBackend.set(backend, await adapter.probe());
+      capabilitiesByConfiguration.set(
+        key,
+        await adapter.probe(executionOptions(configuration)),
+      );
     }
-    validateCapabilities(capabilitiesByBackend.get(backend), {
+    validateCapabilities(capabilitiesByConfiguration.get(key), {
       backend,
       pipelineId: pipeline.id,
       role,
@@ -330,6 +364,7 @@ function normalizeRunInput(input) {
         ? false
         : input.proactiveClarification,
     roleOverrides: input.roleOverrides ?? {},
+    executionOverrides: input.executionOverrides ?? {},
     sourceSession: normalizeSourceSession(input.sourceSession),
   });
 }
@@ -582,6 +617,11 @@ export function createRunner(options = {}) {
         code: "ERR_INVALID_RUNNER_INPUT",
       });
     }
+    if (!isRecord(normalized.executionOverrides)) {
+      throw new RunnerError("run.executionOverrides must be an object.", {
+        code: "ERR_INVALID_RUNNER_INPUT",
+      });
+    }
     const pipeline = getPipeline(normalized.pipelineId);
     if (pipeline === undefined) {
       throw new RunnerError(`Unknown pipeline: ${normalized.pipelineId}.`, {
@@ -590,11 +630,24 @@ export function createRunner(options = {}) {
     }
     const { projectPath, taskPath } = await validateBoundary(normalized);
     const configuration = await loadConfiguration();
-    const resolved = resolvePipelineConfiguration(
-      pipeline.id,
-      configuration,
-      normalized.roleOverrides,
-    );
+    let resolved;
+    try {
+      resolved = resolvePipelineConfiguration(
+        pipeline.id,
+        configuration,
+        normalized.roleOverrides,
+        normalized.executionOverrides,
+        normalized.sourceSession,
+      );
+    } catch (cause) {
+      if (cause?.code !== "ERR_SOURCE_BACKEND_MISMATCH") {
+        throw cause;
+      }
+      throw new RunnerError(cause.message, {
+        cause,
+        code: "ERR_SOURCE_BACKEND_MISMATCH",
+      });
+    }
     validateSourceRoles(pipeline, resolved.roles, normalized.sourceSession);
     await probeRequiredRoles(
       pipeline,
@@ -616,6 +669,7 @@ export function createRunner(options = {}) {
       taskPath,
       roles: resolved.roles,
       sourceSession: normalized.sourceSession?.id ?? null,
+      sourceProfile: resolved.sourceProfile,
       pipelineState,
       activity: {
         actor: "runner",

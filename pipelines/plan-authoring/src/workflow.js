@@ -357,6 +357,14 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
           : undefined;
     const roleConfiguration = currentRun.roles[role];
     const recoveryPrompt = buildPrompt(evidenceContext);
+    const executionPreferences = Object.fromEntries(
+      ["profile", "model", "contextSize"].flatMap((field) =>
+        typeof roleConfiguration[field] === "string" &&
+        roleConfiguration[field] !== "current"
+          ? [[field, roleConfiguration[field]]]
+          : [],
+      ),
+    );
     const request = {
       access: "read-only",
       cwd: currentRun.projectPath,
@@ -364,9 +372,7 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
         session?.mode === "continue" ? buildPrompt("") : recoveryPrompt,
       recoveryPrompt,
       schema,
-      ...(roleConfiguration.model === null
-        ? {}
-        : { model: roleConfiguration.model }),
+      ...executionPreferences,
       ...(session === undefined ? {} : { session }),
     };
     let response;

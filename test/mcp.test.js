@@ -59,6 +59,8 @@ async function createStoredRun(
     workflowState = "CLARIFY",
     pendingEdit = null,
     pause = null,
+    sourceSession = null,
+    sourceProfile = null,
     state = {},
   } = {},
 ) {
@@ -72,7 +74,8 @@ async function createStoredRun(
     counters: {},
     hashes: {},
     pause,
-    sourceSession: null,
+    sourceSession,
+    sourceProfile,
     pipelineState: {
       workflowState,
       pendingEdit,
@@ -93,7 +96,16 @@ function storedRunner(store, paths) {
       const run = await createStoredRun(
         store,
         { projectPath: input.projectPath, taskPath: input.taskPath },
-        { id: runId, pipelineId: input.pipelineId },
+        {
+          id: runId,
+          pipelineId: input.pipelineId,
+          sourceSession: input.sourceSession?.id ?? null,
+          sourceProfile:
+            input.sourceSession?.profile === undefined ||
+            input.sourceSession.profile === "current"
+              ? null
+              : input.sourceSession.profile,
+        },
       );
       return { directoryPath: await store.getRunDirectory(run.runId), run };
     },
@@ -310,6 +322,62 @@ test("reconciles an incomplete start intent after run creation", async (t) => {
     control.runStart({ ...input, pipelineId: "plan-execution" }),
     (error) => error.code === "ERR_MCP_IDEMPOTENCY_CONFLICT",
   );
+});
+
+test("forwards additive run-wide, role, and source profile selections", async (t) => {
+  const paths = await workspace(t, "agent-runner-mcp-preferences-");
+  const store = createRunStore({ stateRoot: paths.stateRoot });
+  const baseRunner = storedRunner(store, paths);
+  let createdInput;
+  const control = createMcpControlPlane({
+    launchRun() {},
+    runIdFactory: () => RUN_ID,
+    runner: {
+      ...baseRunner,
+      async create(input, options) {
+        createdInput = input;
+        return baseRunner.create(input, options);
+      },
+    },
+    runStore: store,
+  });
+  const input = {
+    idempotencyKey: "preference-start",
+    pipelineId: "plan-authoring",
+    projectPath: paths.projectPath,
+    taskPath: paths.taskPath,
+    proactiveClarification: false,
+    profile: "claude-personal",
+    model: "sonnet",
+    contextSize: "200000",
+    roleOverrides: {
+      planner: {
+        profile: "claude-personal",
+        model: "opus",
+        contextSize: "300000",
+      },
+    },
+    sourceSession: {
+      backend: "claude",
+      id: "opaque:source:id",
+      profile: "claude-personal",
+    },
+  };
+
+  assert.deepEqual(await control.runStart(input), { runId: RUN_ID });
+  assert.deepEqual(createdInput, {
+    pipelineId: "plan-authoring",
+    projectPath: paths.projectPath,
+    taskPath: paths.taskPath,
+    proactiveClarification: false,
+    roleOverrides: input.roleOverrides,
+    sourceSession: input.sourceSession,
+    executionOverrides: {
+      profile: "claude-personal",
+      model: "sonnet",
+      contextSize: "200000",
+    },
+  });
 });
 
 test("records complete pending answers before detached continuation", async (t) => {

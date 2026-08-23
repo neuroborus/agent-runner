@@ -38,8 +38,12 @@ test("tracked example is valid and local configuration is ignored", async () => 
   assert.equal(CONFIG_FILENAME, ".agent-runner.json");
   assert.equal(CONFIG_SCHEMA_VERSION, 1);
   assert.equal(configuration.defaultBackend, "codex");
+  assert.equal(configuration.defaultProfile, "current");
+  assert.equal(configuration.defaultModel, "current");
+  assert.equal(configuration.defaultContextSize, "current");
   assert.deepEqual(configuration.pipelines["plan-authoring"].roles.reviewer, {
     backend: "claude",
+    profile: "claude-personal",
     model: "sonnet",
   });
   assert.deepEqual(
@@ -48,6 +52,9 @@ test("tracked example is valid and local configuration is ignored", async () => 
   );
   assert.deepEqual(configuration.pipelines.polishing.roles.reviewer, {
     backend: "claude",
+    profile: "claude-personal",
+    model: "current",
+    contextSize: "current",
   });
   assert.match(gitignore, /^\/\.agent-runner\.json$/mu);
   assert.ok(Object.isFrozen(configuration));
@@ -64,6 +71,7 @@ test("minimal configuration uses pipeline-owned setting defaults", () => {
   );
 
   assert.equal(configuration.defaultBackend, undefined);
+  assert.deepEqual(configuration.profiles, {});
   assert.deepEqual(configuration.pipelines["plan-authoring"], {
     maxRevisionRounds: 15,
     stagnationWindowRounds: 3,
@@ -94,6 +102,24 @@ test("configuration rejects unsupported shapes and values", () => {
     ['{"schemaVersion":1,"extra":true}', /configuration\.extra/u],
     ['{"schemaVersion":1,"defaultBackend":null}', /defaultBackend/u],
     ['{"schemaVersion":1,"defaultBackend":"other"}', /codex, claude/u],
+    ['{"schemaVersion":1,"defaultProfile":null}', /defaultProfile/u],
+    [
+      '{"schemaVersion":1,"defaultProfile":"missing"}',
+      /defaultProfile selects unknown profile/u,
+    ],
+    ['{"schemaVersion":1,"profiles":[]}', /profiles must be an object/u],
+    [
+      '{"schemaVersion":1,"profiles":{"current":{"backend":"codex","profile":"work"}}}',
+      /profile names/u,
+    ],
+    [
+      '{"schemaVersion":1,"profiles":{"codex-work":{"backend":"codex","configDirectory":"/profiles/work"}}}',
+      /configDirectory/u,
+    ],
+    [
+      '{"schemaVersion":1,"profiles":{"claude-work":{"backend":"claude","configDirectory":"relative"}}}',
+      /absolute normalized path/u,
+    ],
     ['{"schemaVersion":1,"pipelines":null}', /pipelines must be an object/u],
     ['{"schemaVersion":1,"pipelines":[]}', /pipelines must be an object/u],
     [
@@ -176,6 +202,10 @@ test("configuration rejects unsupported shapes and values", () => {
       '{"schemaVersion":1,"pipelines":{"plan-authoring":{"roles":{"planner":{"model":null}}}}}',
       /planner\.model/u,
     ],
+    [
+      '{"schemaVersion":1,"pipelines":{"plan-authoring":{"roles":{"planner":{"contextSize":null}}}}}',
+      /planner\.contextSize/u,
+    ],
   ];
 
   for (const [source, expectedMessage] of invalidConfigurations) {
@@ -247,9 +277,24 @@ test("role resolution applies CLI, role, runner, and native defaults", () => {
   );
 
   assert.deepEqual(resolved.roles, {
-    worker: { backend: "codex", model: "cli-worker" },
-    reviewer: { backend: "claude", model: "runner-reviewer" },
-    arbiter: { backend: "codex", model: null },
+    worker: {
+      backend: "codex",
+      profile: "current",
+      model: "cli-worker",
+      contextSize: "current",
+    },
+    reviewer: {
+      backend: "claude",
+      profile: "current",
+      model: "runner-reviewer",
+      contextSize: "current",
+    },
+    arbiter: {
+      backend: "codex",
+      profile: "current",
+      model: "current",
+      contextSize: "current",
+    },
   });
   assert.deepEqual(resolved.settings, {
     maxFixRoundsPerStep: 8,
@@ -276,14 +321,30 @@ test("role resolution normalizes configuration objects", () => {
   assert.deepEqual(resolved, {
     pipelineId: "plan-authoring",
     roles: {
-      planner: { backend: "codex", model: null },
-      reviewer: { backend: "codex", model: null },
-      arbiter: { backend: "codex", model: null },
+      planner: {
+        backend: "codex",
+        profile: "current",
+        model: "current",
+        contextSize: "current",
+      },
+      reviewer: {
+        backend: "codex",
+        profile: "current",
+        model: "current",
+        contextSize: "current",
+      },
+      arbiter: {
+        backend: "codex",
+        profile: "current",
+        model: "current",
+        contextSize: "current",
+      },
     },
     settings: {
       maxRevisionRounds: 4,
       stagnationWindowRounds: 3,
     },
+    sourceProfile: null,
   });
   assert.throws(
     () =>
@@ -292,6 +353,173 @@ test("role resolution normalizes configuration objects", () => {
         defaultBackend: "other",
       }),
     /defaultBackend/u,
+  );
+});
+
+test("trusted profiles pin backends and resolve execution precedence", () => {
+  const configuration = parseRunnerConfiguration(
+    JSON.stringify({
+      schemaVersion: 1,
+      defaultBackend: "codex",
+      profiles: {
+        "codex-work": { backend: "codex", profile: "native-work" },
+        "claude-personal": {
+          backend: "claude",
+          configDirectory: "/profiles/claude-personal",
+        },
+      },
+      defaultProfile: "codex-work",
+      defaultModel: "runner-model",
+      defaultContextSize: "200000",
+      pipelines: {
+        polishing: {
+          roles: {
+            reviewer: {
+              profile: "claude-personal",
+              model: "review-model",
+              contextSize: "300000",
+            },
+          },
+        },
+      },
+    }),
+  );
+
+  const resolved = resolvePipelineConfiguration(
+    "polishing",
+    configuration,
+    {
+      worker: { model: "role-model", contextSize: "400000" },
+    },
+    { model: "run-model", contextSize: "350000" },
+  );
+
+  assert.deepEqual(resolved.roles, {
+    worker: {
+      backend: "codex",
+      profile: "native-work",
+      model: "role-model",
+      contextSize: "400000",
+    },
+    reviewer: {
+      backend: "claude",
+      profile: "/profiles/claude-personal",
+      model: "run-model",
+      contextSize: "350000",
+    },
+    arbiter: {
+      backend: "codex",
+      profile: "native-work",
+      model: "run-model",
+      contextSize: "350000",
+    },
+  });
+});
+
+test("source profiles inherit safely while unknown source profiles stay current", () => {
+  const configuration = parseRunnerConfiguration(
+    JSON.stringify({
+      schemaVersion: 1,
+      profiles: {
+        "claude-personal": {
+          backend: "claude",
+          configDirectory: "/profiles/claude-personal",
+        },
+        "codex-arbiter": { backend: "codex", profile: "arbiter" },
+      },
+      pipelines: {
+        "plan-authoring": {
+          roles: { arbiter: { profile: "codex-arbiter" } },
+        },
+      },
+    }),
+  );
+  const source = {
+    backend: "claude",
+    id: "opaque:source:id",
+    profile: "claude-personal",
+  };
+
+  const resolved = resolvePipelineConfiguration(
+    "plan-authoring",
+    configuration,
+    {},
+    {},
+    source,
+  );
+  assert.equal(resolved.sourceProfile, "claude-personal");
+  assert.equal(resolved.roles.planner.profile, "/profiles/claude-personal");
+  assert.equal(resolved.roles.reviewer.profile, "/profiles/claude-personal");
+  assert.deepEqual(resolved.roles.arbiter, {
+    backend: "codex",
+    profile: "arbiter",
+    model: "current",
+    contextSize: "current",
+  });
+
+  const unknownProfile = resolvePipelineConfiguration(
+    "plan-authoring",
+    { schemaVersion: 1 },
+    {
+      planner: { backend: "claude" },
+      reviewer: { backend: "claude" },
+      arbiter: { backend: "codex" },
+    },
+    {},
+    { backend: "claude", id: "opaque" },
+  );
+  assert.equal(unknownProfile.sourceProfile, null);
+  assert.equal(unknownProfile.roles.planner.profile, "current");
+  assert.equal(unknownProfile.roles.reviewer.profile, "current");
+  assert.equal(unknownProfile.roles.planner.backend, "claude");
+});
+
+test("profile and source conflicts fail closed", () => {
+  const configuration = parseRunnerConfiguration(
+    JSON.stringify({
+      schemaVersion: 1,
+      profiles: {
+        "claude-personal": {
+          backend: "claude",
+          configDirectory: "/profiles/claude-personal",
+        },
+        "codex-work": { backend: "codex", profile: "work" },
+      },
+    }),
+  );
+
+  assert.throws(
+    () =>
+      resolvePipelineConfiguration("polishing", configuration, {
+        worker: { backend: "codex", profile: "claude-personal" },
+      }),
+    (error) => error.code === "ERR_PROFILE_BACKEND_MISMATCH",
+  );
+  assert.throws(
+    () =>
+      resolvePipelineConfiguration(
+        "polishing",
+        configuration,
+        { worker: { profile: "codex-work" } },
+        {},
+        { backend: "claude", id: "opaque" },
+      ),
+    (error) => error.code === "ERR_SOURCE_PROFILE_MISMATCH",
+  );
+  assert.throws(
+    () =>
+      resolvePipelineConfiguration(
+        "polishing",
+        configuration,
+        {},
+        {},
+        {
+          backend: "codex",
+          id: "opaque",
+          profile: "claude-personal",
+        },
+      ),
+    (error) => error.code === "ERR_SOURCE_PROFILE_BACKEND_MISMATCH",
   );
 });
 

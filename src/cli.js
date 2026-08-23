@@ -11,7 +11,14 @@ const COMMAND_OPTIONS = Object.freeze({
   pipelines: Object.freeze([]),
   mcp: Object.freeze([]),
 });
-const COMMON_RUN_OPTIONS = Object.freeze(["clarify", "fork-from"]);
+const COMMON_RUN_OPTIONS = Object.freeze([
+  "clarify",
+  "context-size",
+  "fork-from",
+  "fork-profile",
+  "model",
+  "profile",
+]);
 const REQUIRED_COMMAND_OPTIONS = Object.freeze({
   resume: Object.freeze(["run"]),
   status: Object.freeze(["run"]),
@@ -25,7 +32,9 @@ const PIPELINES = listPipelines();
 const PIPELINE_RUN_OPTIONS = new Set(
   PIPELINES.flatMap((pipeline) => [
     ...pipeline.runOptions,
+    ...pipeline.roles.map((role) => `${role}-context-size`),
     ...pipeline.roles.map((role) => `${role}-model`),
+    ...pipeline.roles.map((role) => `${role}-profile`),
   ]),
 );
 
@@ -36,6 +45,10 @@ const OPTIONS = Object.freeze({
   "extra-fix-rounds": { type: "string" },
   "override-finding": { type: "string" },
   "fork-from": { type: "string" },
+  "fork-profile": { type: "string" },
+  "context-size": { type: "string" },
+  model: { type: "string" },
+  profile: { type: "string" },
   ...Object.fromEntries(
     [...PIPELINE_RUN_OPTIONS].map((option) => [option, { type: "string" }]),
   ),
@@ -49,7 +62,7 @@ const PIPELINE_USAGE = PIPELINES.map(
 const USAGE = `Agent Runner
 
 Usage:
-  agent-run run <pipeline> --project <repo> --task <task-dir> [--clarify] [--fork-from <backend>:<session-id>]
+  agent-run run <pipeline> --project <repo> --task <task-dir> [--clarify] [--profile <alias>] [--fork-from <backend>:<session-id>]
   agent-run resume --run <run-id> [--extra-fix-rounds <count> | --override-finding <finding-id>]
   agent-run status --run <run-id>
   agent-run pipelines
@@ -61,8 +74,14 @@ ${PIPELINE_USAGE}
 Options:
       --clarify            Open the clarification editor before agent questions
       --fork-from          Fork primary and review roles from a backend session
+      --fork-profile       Trusted profile alias used by the source session
+      --profile            Set the run-wide trusted profile alias
+      --model              Set the run-wide backend-native model
+      --context-size       Set the run-wide decimal token context size
       --<role>             Override a role backend
+      --<role>-profile     Override a role trusted profile alias
       --<role>-model       Override a role model
+      --<role>-context-size Override a role decimal token context size
       --extra-fix-rounds   Grant a positive additional fix budget on resume
       --override-finding   Override one applicable open finding on resume
   -h, --help               Show this help
@@ -146,8 +165,15 @@ function roleOverrides(pipeline, values) {
   return Object.fromEntries(
     pipeline.roles.flatMap((role) => {
       const backend = values[role];
+      const profile = values[`${role}-profile`];
       const model = values[`${role}-model`];
-      if (backend === undefined && model === undefined) {
+      const contextSize = values[`${role}-context-size`];
+      if (
+        backend === undefined &&
+        profile === undefined &&
+        model === undefined &&
+        contextSize === undefined
+      ) {
         return [];
       }
       return [
@@ -155,12 +181,24 @@ function roleOverrides(pipeline, values) {
           role,
           {
             ...(backend === undefined ? {} : { backend }),
+            ...(profile === undefined ? {} : { profile }),
             ...(model === undefined ? {} : { model }),
+            ...(contextSize === undefined ? {} : { contextSize }),
           },
         ],
       ];
     }),
   );
+}
+
+function executionOverrides(values) {
+  return Object.freeze({
+    ...(values.profile === undefined ? {} : { profile: values.profile }),
+    ...(values.model === undefined ? {} : { model: values.model }),
+    ...(values["context-size"] === undefined
+      ? {}
+      : { contextSize: values["context-size"] }),
+  });
 }
 
 function resumeAction(values) {
@@ -268,7 +306,9 @@ export async function main(
     supportedOptions = [
       ...COMMON_RUN_OPTIONS,
       ...pipeline.runOptions,
+      ...pipeline.roles.map((role) => `${role}-context-size`),
       ...pipeline.roles.map((role) => `${role}-model`),
+      ...pipeline.roles.map((role) => `${role}-profile`),
     ];
     requiredOptions = pipeline.requiredRunOptions;
     commandLabel = `${command} ${pipelineId}`;
@@ -321,16 +361,32 @@ export async function main(
         },
       });
     if (command === "run") {
+      if (
+        values["fork-profile"] !== undefined &&
+        values["fork-from"] === undefined
+      ) {
+        throw new Error("--fork-profile requires --fork-from.");
+      }
+      const parsedSource =
+        values["fork-from"] === undefined
+          ? null
+          : parseSourceSession(values["fork-from"]);
       const result = await commandRunner.run({
         pipelineId: pipeline.id,
         projectPath: values.project,
         taskPath: values.task,
         proactiveClarification: values.clarify ?? false,
         roleOverrides: roleOverrides(pipeline, values),
+        executionOverrides: executionOverrides(values),
         sourceSession:
-          values["fork-from"] === undefined
+          parsedSource === null
             ? null
-            : parseSourceSession(values["fork-from"]),
+            : {
+                ...parsedSource,
+                ...(values["fork-profile"] === undefined
+                  ? {}
+                  : { profile: values["fork-profile"] }),
+              },
       });
       stdout.write(runSummary(result));
       return workflowExitCode(result.run);

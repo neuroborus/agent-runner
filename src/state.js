@@ -43,6 +43,7 @@ const CREATE_RUN_FIELDS = new Set([
   "hashes",
   "pause",
   "sourceSession",
+  "sourceProfile",
   "childSessions",
   "pipelineState",
   "activity",
@@ -392,6 +393,8 @@ export function createRunStore({
           sessionLineage: {
             source:
               input.sourceSession === undefined ? null : input.sourceSession,
+            sourceProfile:
+              input.sourceProfile === undefined ? null : input.sourceProfile,
             children:
               input.childSessions === undefined ? [] : input.childSessions,
           },

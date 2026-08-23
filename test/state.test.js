@@ -110,6 +110,7 @@ test("resolves the external state root and creates a complete run", async (t) =>
   assert.equal(created.state.taskPath, taskPath);
   assert.deepEqual(created.state.sessionLineage, {
     source: "codex:source-session",
+    sourceProfile: null,
     children: [],
   });
   assert.deepEqual(persistedState, created.state);
@@ -131,6 +132,76 @@ test("resolves the external state root and creates a complete run", async (t) =>
   );
   assert.match(progress, /Revision: 1/u);
   assert.match(progress, /runner\/run\/created: Run created\./u);
+});
+
+test("normalizes legacy role records for every pipeline without rewriting history", async (t) => {
+  const roleNames = {
+    "plan-authoring": ["planner", "reviewer", "arbiter"],
+    "plan-execution": ["worker", "reviewer", "arbiter"],
+    polishing: ["worker", "reviewer", "arbiter"],
+  };
+
+  for (const [pipelineId, roles] of Object.entries(roleNames)) {
+    const workspace = await mkdtemp(
+      join(tmpdir(), `agent-runner-legacy-${pipelineId}-`),
+    );
+    t.after(() => rm(workspace, { recursive: true, force: true }));
+    const projectPath = join(workspace, "project");
+    const taskPath = join(workspace, "task");
+    await Promise.all([mkdir(projectPath), mkdir(taskPath)]);
+    const store = createRunStore({ stateRoot: join(workspace, "state") });
+    const created = await store.createRun({
+      pipelineId,
+      pipelineStateVersion: 1,
+      projectPath,
+      taskPath,
+      roles: Object.fromEntries(
+        roles.map((role, index) => [
+          role,
+          {
+            backend: "codex",
+            profile: "current",
+            model: index === 0 ? "current" : "model",
+            contextSize: "current",
+          },
+        ]),
+      ),
+      pipelineState: { workflowState: "CLARIFY" },
+    });
+    await created.lease.release();
+
+    const statePath = join(created.directoryPath, "state.json");
+    const eventsPath = join(created.directoryPath, "events.jsonl");
+    const legacyState = JSON.parse(await readFile(statePath, "utf8"));
+    delete legacyState.sessionLineage.sourceProfile;
+    for (const [index, role] of roles.entries()) {
+      delete legacyState.roles[role].profile;
+      delete legacyState.roles[role].contextSize;
+      if (index === 0) {
+        legacyState.roles[role].model = null;
+      } else if (index === 1) {
+        delete legacyState.roles[role].model;
+      }
+    }
+    const legacyEvent = JSON.parse((await readFile(eventsPath, "utf8")).trim());
+    legacyEvent.state = legacyState;
+    const legacyStateSource = `${JSON.stringify(legacyState, null, 2)}\n`;
+    const legacyEventSource = `${JSON.stringify(legacyEvent)}\n`;
+    await Promise.all([
+      writeFile(statePath, legacyStateSource),
+      writeFile(eventsPath, legacyEventSource),
+    ]);
+
+    const loaded = await store.loadRun(created.state.runId);
+    for (const [index, role] of roles.entries()) {
+      assert.equal(loaded.roles[role].profile, "current");
+      assert.equal(loaded.roles[role].model, index === 2 ? "model" : "current");
+      assert.equal(loaded.roles[role].contextSize, "current");
+    }
+    assert.equal(loaded.sessionLineage.sourceProfile, null);
+    assert.equal(await readFile(statePath, "utf8"), legacyStateSource);
+    assert.equal(await readFile(eventsPath, "utf8"), legacyEventSource);
+  }
 });
 
 test("rejects a state root inside the project before creating it", async (t) => {

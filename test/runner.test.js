@@ -75,6 +75,7 @@ function approved() {
 
 function createAdapter({ fork = true, questionFirst = false } = {}) {
   const calls = [];
+  const probes = [];
   let clarificationCalls = 0;
   let freshPlannerSessions = 0;
   function plannerSession() {
@@ -87,7 +88,9 @@ function createAdapter({ fork = true, questionFirst = false } = {}) {
   }
   return {
     calls,
-    async probe() {
+    probes,
+    async probe(options) {
+      probes.push(options);
       return {
         version: "fake-1.0.0",
         structuredOutput: true,
@@ -133,6 +136,7 @@ function createAdapter({ fork = true, questionFirst = false } = {}) {
 
 function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
   const calls = [];
+  const probes = [];
   let freshSessionCount = 0;
   function freshSession() {
     const index = freshSessionCount;
@@ -141,7 +145,9 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
   }
   return {
     calls,
-    async probe() {
+    probes,
+    async probe(options) {
+      probes.push(options);
       return {
         version: "fake-1.0.0",
         structuredOutput: true,
@@ -400,9 +406,12 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
   assert.equal(paused.run.pipelineState.workflowState, "WAITING_FOR_USER");
   assert.equal(paused.run.pause.reason, "clarification_answers_required");
   assert.equal(paused.run.sessionLineage.source, SOURCE_SESSION);
+  assert.equal(paused.run.sessionLineage.sourceProfile, null);
   assert.deepEqual(paused.run.roles.planner, {
     backend: "codex",
+    profile: "current",
     model: "planner-model",
+    contextSize: "current",
   });
   assert.deepEqual(paused.run.pipelineState.settings, {
     maxRevisionRounds: 15,
@@ -529,7 +538,10 @@ test("rejects incompatible or unsupported source sessions before creating a run"
       pipelineId: "plan-authoring",
       projectPath: fixture.projectPath,
       taskPath: fixture.taskPath,
-      roleOverrides: {},
+      roleOverrides: {
+        planner: { backend: "codex" },
+        reviewer: { backend: "codex" },
+      },
       sourceSession: { backend: "claude", id: SOURCE_SESSION },
     }),
     (error) =>
@@ -564,6 +576,73 @@ test("rejects incompatible or unsupported source sessions before creating a run"
   );
 });
 
+test("persists a trusted source profile and applies resolved turn preferences", async (t) => {
+  const fixture = await createFixture(t);
+  const adapter = createAdapter();
+  const profileDirectory = join(fixture.workspace, "claude-profile");
+  const runner = runnerFor(
+    fixture,
+    { claude: adapter },
+    {
+      configuration: {
+        schemaVersion: 1,
+        profiles: {
+          "claude-personal": {
+            backend: "claude",
+            configDirectory: profileDirectory,
+          },
+        },
+        pipelines: {
+          "plan-authoring": {
+            roles: { arbiter: { profile: "claude-personal" } },
+          },
+        },
+      },
+    },
+  );
+
+  const result = await runner.run({
+    pipelineId: "plan-authoring",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+    roleOverrides: {},
+    executionOverrides: { model: "sonnet", contextSize: "200000" },
+    sourceSession: {
+      backend: "claude",
+      id: SOURCE_SESSION,
+      profile: "claude-personal",
+    },
+  });
+
+  assert.equal(result.run.pipelineState.workflowState, "DONE");
+  assert.equal(result.run.sessionLineage.sourceProfile, "claude-personal");
+  assert.deepEqual(result.run.roles.planner, {
+    backend: "claude",
+    profile: profileDirectory,
+    model: "sonnet",
+    contextSize: "200000",
+  });
+  assert.deepEqual(adapter.probes, [
+    {
+      profile: profileDirectory,
+      model: "sonnet",
+      contextSize: "200000",
+    },
+  ]);
+  assert.ok(
+    adapter.calls.every(
+      ({ profile, model, contextSize }) =>
+        profile === profileDirectory &&
+        model === "sonnet" &&
+        contextSize === "200000",
+    ),
+  );
+  assert.deepEqual(adapter.calls[0].session, {
+    mode: "fork",
+    id: SOURCE_SESSION,
+  });
+});
+
 test("does not require an unused Arbiter backend", async (t) => {
   const fixture = await createFixture(t);
   const adapter = createAdapter();
@@ -593,7 +672,9 @@ test("does not require an unused Arbiter backend", async (t) => {
   assert.equal(result.run.pipelineState.workflowState, "DONE");
   assert.deepEqual(result.run.roles.arbiter, {
     backend: "claude",
-    model: null,
+    profile: "current",
+    model: "current",
+    contextSize: "current",
   });
 });
 
@@ -624,7 +705,23 @@ test("never reads an Agent Runner configuration file in the target repository", 
   });
 
   assert.equal(result.run.pipelineState.workflowState, "DONE");
-  assert.deepEqual(result.run.roles, roleOverrides);
+  assert.deepEqual(result.run.roles, {
+    planner: {
+      ...roleOverrides.planner,
+      profile: "current",
+      contextSize: "current",
+    },
+    reviewer: {
+      ...roleOverrides.reviewer,
+      profile: "current",
+      contextSize: "current",
+    },
+    arbiter: {
+      ...roleOverrides.arbiter,
+      profile: "current",
+      contextSize: "current",
+    },
+  });
 });
 
 test("releases a new run lease when activity delivery fails", async (t) => {
@@ -703,6 +800,9 @@ test("dispatches plan execution through the root Git and state services", async 
       activities,
       configuration: {
         ...RUNNER_CONFIGURATION,
+        profiles: {
+          "codex-work": { backend: "codex", profile: "work" },
+        },
         pipelines: {
           "plan-execution": {
             roles: { arbiter: { backend: "claude" } },
@@ -716,7 +816,12 @@ test("dispatches plan execution through the root Git and state services", async 
     pipelineId: "plan-execution",
     projectPath: fixture.projectPath,
     taskPath: fixture.taskPath,
-    roleOverrides: {},
+    roleOverrides: { arbiter: { profile: "current" } },
+    executionOverrides: {
+      profile: "codex-work",
+      model: "execution-model",
+      contextSize: "200000",
+    },
     sourceSession: null,
   });
   const { stdout } = await executeFile("git", [
@@ -733,6 +838,14 @@ test("dispatches plan execution through the root Git and state services", async 
   assert.equal(arbiter.probeCalls, 1);
   assert.equal(arbiter.calls.length, 1);
   assert.ok(adapter.calls.some(({ access }) => access === "local-commit"));
+  assert.deepEqual(
+    adapter.probes,
+    Array.from({ length: 3 }, () => ({
+      profile: "work",
+      model: "execution-model",
+      contextSize: "200000",
+    })),
+  );
   assert.ok(
     activities.some(
       ({ actor, phase, kind }) =>
@@ -807,10 +920,19 @@ for (const pauseReason of [
             },
           }
         : baseGit;
+    const adapter = createExecutionAdapter();
     const runner = runnerFor(
       fixture,
-      { codex: createExecutionAdapter() },
-      { git },
+      { codex: adapter },
+      {
+        git,
+        configuration: {
+          ...RUNNER_CONFIGURATION,
+          profiles: {
+            "codex-work": { backend: "codex", profile: "work" },
+          },
+        },
+      },
     );
 
     const paused = await runner.run({
@@ -818,6 +940,11 @@ for (const pauseReason of [
       projectPath: fixture.projectPath,
       taskPath: fixture.taskPath,
       roleOverrides: {},
+      executionOverrides: {
+        profile: "codex-work",
+        model: "polishing-model",
+        contextSize: "200000",
+      },
       sourceSession: null,
     });
     assert.equal(paused.run.pipelineState.workflowState, "WAITING_FOR_USER");
@@ -837,5 +964,13 @@ for (const pauseReason of [
 
     assert.equal(completed.run.pipelineState.workflowState, "DONE");
     assert.equal(completed.run.pause, null);
+    assert.deepEqual(
+      adapter.probes,
+      Array.from({ length: 3 }, () => ({
+        profile: "work",
+        model: "polishing-model",
+        contextSize: "200000",
+      })),
+    );
   });
 }

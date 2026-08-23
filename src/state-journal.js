@@ -125,6 +125,8 @@ function assertEventContinuity(events) {
     );
     const lineageChanged =
       state.sessionLineage.source !== previousState.sessionLineage.source ||
+      state.sessionLineage.sourceProfile !==
+        previousState.sessionLineage.sourceProfile ||
       children.length < previousChildren.length ||
       children.length > previousChildren.length + 1 ||
       previousChildren.some(

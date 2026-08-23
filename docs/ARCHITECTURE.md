@@ -70,8 +70,9 @@ repository root, beside its tracked `.agent-runner.example.json`, independently
 of the target repository. The file requires `schemaVersion: 1`; unknown
 versions, pipelines, roles, settings, and fields are errors. The loader never
 rewrites it, and the local runtime file remains ignored and untracked. Backends,
-models, and pipeline limits are settings of the installed runner, so a target
-repository neither provides nor ignores an Agent Runner configuration file.
+trusted provider profiles, execution preferences, and pipeline limits are
+settings of the installed runner, so a target repository neither provides nor
+ignores an Agent Runner configuration file.
 
 The V1 shape is:
 
@@ -79,13 +80,28 @@ The V1 shape is:
 {
   "schemaVersion": 1,
   "defaultBackend": "codex",
+  "defaultProfile": "current",
+  "defaultModel": "current",
+  "defaultContextSize": "current",
+  "profiles": {
+    "codex-work": {
+      "backend": "codex",
+      "profile": "work"
+    },
+    "claude-personal": {
+      "backend": "claude",
+      "configDirectory": "/home/you/.claude-personal"
+    }
+  },
   "pipelines": {
     "plan-execution": {
       "maxFixRoundsPerStep": 5,
       "roles": {
         "worker": {
           "backend": "claude",
-          "model": "sonnet"
+          "profile": "claude-personal",
+          "model": "sonnet",
+          "contextSize": "200000"
         }
       }
     }
@@ -93,13 +109,24 @@ The V1 shape is:
 }
 ```
 
-`defaultBackend` is optional. A role backend resolves from its CLI override,
-pipeline-role runner value, then `defaultBackend`; absence after those steps is
-a preflight error. A role model resolves from its CLI override, then its
-pipeline-role runner value. Otherwise, the selected backend uses its native default.
-There is no runner-wide model because model identifiers are
-backend-specific. The selected adapter validates every explicit model before
-that role's first agent turn.
+`defaultBackend` is optional. A role's `profile`, `model`, and `contextSize`
+resolve from its role-specific CLI/MCP override, the run-wide override, its
+pipeline-role runner value, the corresponding runner-wide default, then the
+built-in string `current`; a role-specific CLI override has highest precedence.
+A profile alias is trusted runner configuration, pins one backend, and maps
+only to a native Codex profile name or an isolated Claude configuration
+directory. A conflicting explicit backend is invalid; profile configuration
+cannot inject credentials, binaries, or arbitrary environment variables.
+Without a selected profile, the backend resolves from the role override,
+pipeline-role value, then `defaultBackend`; absence is a preflight error.
+
+`current` omits that native override. For models this means both Codex and
+Claude use the model selected by their effective native profile, process, or
+backend native default; Agent Runner does not hard-code a backend model ID. An
+explicit context size is a decimal token string validated by the selected
+adapter and mapped to Codex's context-window setting or Claude's
+auto-compaction token window. These controls are not treated as otherwise
+equivalent.
 
 Pipeline descriptors validate their own settings and supply built-in defaults.
 The root loader owns only the versioned envelope, strict field validation, and
@@ -109,19 +136,25 @@ lists.
 ## Run Lifecycle
 
 The root runner resolves the canonical Git root, loads runner configuration,
-applies CLI role and model overrides, and persists the resolved roles, settings,
-and optional source-session reference before pipeline work begins. `run` then
+applies run-wide and role-specific execution overrides, and persists the
+resolved roles, settings, and optional source-session reference and profile
+before pipeline work begins. `run` then
 holds the new run's lease while invoking its statically registered workflow;
 `resume` recovers the durable event history and reconstructs the same runtime
 from persisted state without reloading role configuration or requiring a live
 native session. `status` remains lock-free.
 
 `--fork-from <backend>:<session-id>` is accepted only on a new run. The session
-ID remains opaque after the first separator. The pipeline's primary and review
-roles must use that backend and support native forking; each checkpoint's first
-eligible role turns fork the source independently, while the Arbiter is not
-constrained by it. Resume uses the persisted source and child lineage and never
-asks for the flag again.
+ID remains opaque after the first separator; `--fork-profile <alias>` supplies
+its optional trusted profile without changing that syntax. The pipeline's
+primary and review roles must use the source backend and support native forking.
+When the source profile is known, their `current` profile selections inherit it
+and every explicit selection must match. When it is unknown, they must remain
+`current`, no native profile override is supplied, and unavailable native
+forking fails closed. Each checkpoint's first eligible role turns fork the
+source independently, while the Arbiter remains unconstrained. Resume uses the
+persisted source, resolved source profile, and child lineage and never asks for
+the flags again.
 
 The CLI renders only persisted public activity and a concise current-state
 projection. A user-action pause has a distinct exit status from an internal
@@ -178,10 +211,12 @@ pipeline ID and state version, canonical paths, resolved roles, counters,
 hashes, pause state, session lineage, timestamps, and opaque pipeline-owned
 state, including its resolved settings from the initial revision. The root
 validates JSON shape and size without interpreting workflow roles or outcomes.
-Session lineage records an optional source-session reference and every direct
-child role/session ID with its accepted-input and pipeline-checkpoint context
-key, but native session resume remains an optimization rather than a
-correctness dependency.
+Session lineage records an optional source-session reference, its resolved
+trusted profile when known, and every direct child role/session ID with its
+accepted-input and pipeline-checkpoint context key. Legacy role records missing
+`profile` or `contextSize`, and missing or nullable `model`, normalize to
+`current` in memory without rewriting state or event history. Native session
+resume remains an optimization rather than a correctness dependency.
 
 Plan execution persists each prepared or consumed one-shot commit authorization
 and every verified commit SHA. After an ambiguous commit turn, resume verifies

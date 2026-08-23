@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { BACKEND_IDS } from "./agents/index.js";
@@ -11,12 +12,23 @@ const CONFIG_PATH = fileURLToPath(
 export const CONFIG_SCHEMA_VERSION = 1;
 
 const BACKENDS = new Set(BACKEND_IDS);
+const CURRENT = "current";
+const PROFILE_NAME_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const TOP_LEVEL_FIELDS = new Set([
   "schemaVersion",
   "defaultBackend",
+  "defaultContextSize",
+  "defaultModel",
+  "defaultProfile",
   "pipelines",
+  "profiles",
 ]);
-const ROLE_FIELDS = new Set(["backend", "model"]);
+const ROLE_FIELDS = new Set(["backend", "contextSize", "model", "profile"]);
+const EXECUTION_FIELDS = new Set(["contextSize", "model", "profile"]);
+const PROFILE_FIELDS = Object.freeze({
+  claude: new Set(["backend", "configDirectory"]),
+  codex: new Set(["backend", "profile"]),
+});
 
 export class ConfigurationError extends Error {
   constructor(message, { cause, code = "ERR_INVALID_CONFIGURATION" } = {}) {
@@ -54,7 +66,7 @@ function assertBackend(value, path) {
   }
 }
 
-function assertModel(value, path) {
+function assertSelection(value, path) {
   if (typeof value !== "string" || value.trim().length === 0) {
     throw new ConfigurationError(`${path} must be a non-empty string.`);
   }
@@ -69,12 +81,54 @@ function normalizeRole(role, path) {
     assertBackend(role.backend, `${path}.backend`);
     normalized.backend = role.backend;
   }
-  if (role.model !== undefined) {
-    assertModel(role.model, `${path}.model`);
-    normalized.model = role.model;
+  for (const field of ["profile", "model", "contextSize"]) {
+    if (role[field] !== undefined) {
+      assertSelection(role[field], `${path}.${field}`);
+      normalized[field] = role[field];
+    }
   }
 
   return Object.freeze(normalized);
+}
+
+function normalizeExecution(value, path) {
+  assertRecord(value, path);
+  rejectUnknownFields(value, EXECUTION_FIELDS, path);
+  return normalizeRole(value, path);
+}
+
+function normalizeProfile(name, value) {
+  const path = `configuration.profiles.${name}`;
+  if (!PROFILE_NAME_PATTERN.test(name) || name === CURRENT) {
+    throw new ConfigurationError(
+      "configuration profile names must be lowercase kebab-case aliases other than current.",
+    );
+  }
+  assertRecord(value, path);
+  assertBackend(value.backend, `${path}.backend`);
+  rejectUnknownFields(value, PROFILE_FIELDS[value.backend], path);
+
+  if (value.backend === "codex") {
+    assertSelection(value.profile, `${path}.profile`);
+    if (value.profile === CURRENT) {
+      throw new ConfigurationError(`${path}.profile must not be current.`);
+    }
+    return Object.freeze({ backend: value.backend, profile: value.profile });
+  }
+
+  assertSelection(value.configDirectory, `${path}.configDirectory`);
+  if (
+    !isAbsolute(value.configDirectory) ||
+    resolve(value.configDirectory) !== value.configDirectory
+  ) {
+    throw new ConfigurationError(
+      `${path}.configDirectory must be an absolute normalized path.`,
+    );
+  }
+  return Object.freeze({
+    backend: value.backend,
+    configDirectory: value.configDirectory,
+  });
 }
 
 function normalizePipeline(pipeline, input) {
@@ -139,6 +193,26 @@ function normalizeConfiguration(input) {
   if (input.defaultBackend !== undefined) {
     assertBackend(input.defaultBackend, "configuration.defaultBackend");
   }
+  for (const field of [
+    "defaultProfile",
+    "defaultModel",
+    "defaultContextSize",
+  ]) {
+    if (input[field] !== undefined) {
+      assertSelection(input[field], `configuration.${field}`);
+    }
+  }
+
+  const inputProfiles = input.profiles === undefined ? {} : input.profiles;
+  assertRecord(inputProfiles, "configuration.profiles");
+  const profiles = Object.freeze(
+    Object.fromEntries(
+      Object.entries(inputProfiles).map(([name, value]) => [
+        name,
+        normalizeProfile(name, value),
+      ]),
+    ),
+  );
 
   const inputPipelines = input.pipelines === undefined ? {} : input.pipelines;
   assertRecord(inputPipelines, "configuration.pipelines");
@@ -155,6 +229,10 @@ function normalizeConfiguration(input) {
 
   const normalized = {
     schemaVersion: CONFIG_SCHEMA_VERSION,
+    defaultProfile: input.defaultProfile ?? CURRENT,
+    defaultModel: input.defaultModel ?? CURRENT,
+    defaultContextSize: input.defaultContextSize ?? CURRENT,
+    profiles,
     pipelines: Object.freeze(
       Object.fromEntries(
         pipelines.map((pipeline) => [
@@ -173,7 +251,74 @@ function normalizeConfiguration(input) {
     normalized.defaultBackend = input.defaultBackend;
   }
 
+  for (const [selection, path] of [
+    [normalized.defaultProfile, "configuration.defaultProfile"],
+    ...pipelines.flatMap((pipeline) =>
+      Object.entries(normalized.pipelines[pipeline.id].roles).map(
+        ([role, configuration]) => [
+          configuration.profile,
+          `configuration.pipelines.${pipeline.id}.roles.${role}.profile`,
+        ],
+      ),
+    ),
+  ]) {
+    if (
+      selection !== undefined &&
+      selection !== CURRENT &&
+      !Object.hasOwn(profiles, selection)
+    ) {
+      throw new ConfigurationError(
+        `${path} selects unknown profile: ${selection}.`,
+        { code: "ERR_UNKNOWN_PROFILE" },
+      );
+    }
+  }
+
   return Object.freeze(normalized);
+}
+
+function selectedProfile(configuration, selection, path) {
+  if (selection === CURRENT) {
+    return null;
+  }
+  const profile = configuration.profiles[selection];
+  if (profile === undefined) {
+    throw new ConfigurationError(
+      `${path} selects unknown profile: ${selection}.`,
+      { code: "ERR_UNKNOWN_PROFILE" },
+    );
+  }
+  return profile;
+}
+
+function profileImplementation(profile) {
+  return profile === null
+    ? CURRENT
+    : profile.backend === "codex"
+      ? profile.profile
+      : profile.configDirectory;
+}
+
+function normalizeSourceSession(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  assertRecord(value, "sourceSession");
+  rejectUnknownFields(
+    value,
+    new Set(["backend", "id", "profile"]),
+    "sourceSession",
+  );
+  assertBackend(value.backend, "sourceSession.backend");
+  assertSelection(value.id, "sourceSession.id");
+  if (value.profile !== undefined) {
+    assertSelection(value.profile, "sourceSession.profile");
+  }
+  return Object.freeze({
+    backend: value.backend,
+    id: value.id,
+    profile: value.profile ?? CURRENT,
+  });
 }
 
 export function parseRunnerConfiguration(source) {
@@ -215,6 +360,8 @@ export function resolvePipelineConfiguration(
   pipelineId,
   configuration,
   roleOverrides = {},
+  executionOverrides = {},
+  sourceSession = null,
 ) {
   const pipeline = getPipeline(pipelineId);
   if (pipeline === undefined) {
@@ -224,6 +371,11 @@ export function resolvePipelineConfiguration(
   }
   const normalizedConfiguration = normalizeConfiguration(configuration);
   assertRecord(roleOverrides, "roleOverrides");
+  const normalizedExecutionOverrides = normalizeExecution(
+    executionOverrides,
+    "executionOverrides",
+  );
+  const normalizedSourceSession = normalizeSourceSession(sourceSession);
 
   const unknownRole = Object.keys(roleOverrides).find(
     (role) => !pipeline.roles.includes(role),
@@ -236,6 +388,24 @@ export function resolvePipelineConfiguration(
 
   const pipelineConfiguration = normalizedConfiguration.pipelines[pipelineId];
 
+  let sourceProfile = null;
+  if (
+    normalizedSourceSession !== null &&
+    normalizedSourceSession.profile !== CURRENT
+  ) {
+    sourceProfile = selectedProfile(
+      normalizedConfiguration,
+      normalizedSourceSession.profile,
+      "sourceSession.profile",
+    );
+    if (sourceProfile.backend !== normalizedSourceSession.backend) {
+      throw new ConfigurationError(
+        `Source profile ${normalizedSourceSession.profile} uses ${sourceProfile.backend}, not ${normalizedSourceSession.backend}.`,
+        { code: "ERR_SOURCE_PROFILE_BACKEND_MISMATCH" },
+      );
+    }
+  }
+
   const resolvedRoles = Object.fromEntries(
     pipeline.roles.map((role) => {
       const override = normalizeRole(
@@ -243,9 +413,58 @@ export function resolvePipelineConfiguration(
         `roleOverrides.${role}`,
       );
       const configuredRole = pipelineConfiguration.roles[role] ?? {};
+      const explicitRoleBackend = override.backend ?? configuredRole.backend;
+      let profileSelection =
+        override.profile ??
+        normalizedExecutionOverrides.profile ??
+        configuredRole.profile ??
+        normalizedConfiguration.defaultProfile;
+
+      if (normalizedSourceSession !== null && role !== "arbiter") {
+        if (sourceProfile === null) {
+          if (profileSelection !== CURRENT) {
+            throw new ConfigurationError(
+              `${pipelineId}.${role} must use current when the source profile is unknown.`,
+              { code: "ERR_SOURCE_PROFILE_MISMATCH" },
+            );
+          }
+        } else if (profileSelection === CURRENT) {
+          profileSelection = normalizedSourceSession.profile;
+        } else if (profileSelection !== normalizedSourceSession.profile) {
+          throw new ConfigurationError(
+            `${pipelineId}.${role} profile does not match source profile ${normalizedSourceSession.profile}.`,
+            { code: "ERR_SOURCE_PROFILE_MISMATCH" },
+          );
+        }
+      }
+
+      const profile = selectedProfile(
+        normalizedConfiguration,
+        profileSelection,
+        `${pipelineId}.${role}.profile`,
+      );
+      const pinnedBackend =
+        normalizedSourceSession !== null && role !== "arbiter"
+          ? normalizedSourceSession.backend
+          : profile?.backend;
+      if (
+        explicitRoleBackend !== undefined &&
+        pinnedBackend !== undefined &&
+        explicitRoleBackend !== pinnedBackend
+      ) {
+        throw new ConfigurationError(
+          `Backend ${explicitRoleBackend} conflicts with the selected profile for ${pipelineId}.${role}.`,
+          {
+            code:
+              normalizedSourceSession !== null && role !== "arbiter"
+                ? "ERR_SOURCE_BACKEND_MISMATCH"
+                : "ERR_PROFILE_BACKEND_MISMATCH",
+          },
+        );
+      }
       const backend =
-        override.backend ??
-        configuredRole.backend ??
+        pinnedBackend ??
+        explicitRoleBackend ??
         normalizedConfiguration.defaultBackend;
       if (backend === undefined) {
         throw new ConfigurationError(
@@ -258,7 +477,17 @@ export function resolvePipelineConfiguration(
         role,
         Object.freeze({
           backend,
-          model: override.model ?? configuredRole.model ?? null,
+          profile: profileImplementation(profile),
+          model:
+            override.model ??
+            normalizedExecutionOverrides.model ??
+            configuredRole.model ??
+            normalizedConfiguration.defaultModel,
+          contextSize:
+            override.contextSize ??
+            normalizedExecutionOverrides.contextSize ??
+            configuredRole.contextSize ??
+            normalizedConfiguration.defaultContextSize,
         }),
       ];
     }),
@@ -269,5 +498,7 @@ export function resolvePipelineConfiguration(
     pipelineId,
     roles: Object.freeze(resolvedRoles),
     settings: Object.freeze(settings),
+    sourceProfile:
+      sourceProfile === null ? null : normalizedSourceSession.profile,
   });
 }

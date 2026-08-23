@@ -41,12 +41,18 @@ const idempotencyKey = boundedSingleLine(1_024)
 const roleOverride = z
   .object({
     backend: z.enum(["codex", "claude"]).optional(),
+    profile: z.string().min(1).max(4_096).optional(),
     model: z.string().min(1).max(256).optional(),
+    contextSize: z.string().min(1).max(64).optional(),
   })
   .strict()
-  .refine((value) => value.backend !== undefined || value.model !== undefined);
+  .refine((value) => Object.values(value).some((entry) => entry !== undefined));
 const sourceSession = z
-  .object({ backend: z.enum(["codex", "claude"]), id: sessionReference })
+  .object({
+    backend: z.enum(["codex", "claude"]),
+    id: sessionReference,
+    profile: z.string().min(1).max(4_096).optional(),
+  })
   .strict();
 const resumeAction = z.discriminatedUnion("type", [
   z
@@ -69,6 +75,9 @@ const runStartSchema = z
     projectPath: z.string().min(1),
     taskPath: z.string().min(1),
     proactiveClarification: z.boolean().default(false),
+    profile: z.string().min(1).max(4_096).optional(),
+    model: z.string().min(1).max(256).optional(),
+    contextSize: z.string().min(1).max(64).optional(),
     roleOverrides: z.record(identifier, roleOverride).default({}),
     sourceSession: sourceSession.nullable().default(null),
   })
@@ -110,6 +119,24 @@ function result(value) {
 function actionArguments(input) {
   const { idempotencyKey: _idempotencyKey, ...argumentsWithoutKey } = input;
   return argumentsWithoutKey;
+}
+
+function runnerStartInput(input) {
+  const {
+    idempotencyKey: _idempotencyKey,
+    profile,
+    model,
+    contextSize,
+    ...runInput
+  } = input;
+  return {
+    ...runInput,
+    executionOverrides: {
+      ...(profile === undefined ? {} : { profile }),
+      ...(model === undefined ? {} : { model }),
+      ...(contextSize === undefined ? {} : { contextSize }),
+    },
+  };
 }
 
 function pendingInput(run) {
@@ -336,7 +363,7 @@ export function createMcpControlPlane(options = {}) {
         if (cause?.code !== "ERR_RUN_NOT_FOUND") {
           throw cause;
         }
-        ({ run } = await runner.create(actionArguments(input), {
+        ({ run } = await runner.create(runnerStartInput(input), {
           runId: reservedRunId,
         }));
       }
@@ -345,6 +372,11 @@ export function createMcpControlPlane(options = {}) {
         run.projectPath !== boundary.projectPath ||
         run.taskPath !== boundary.taskPath ||
         run.sessionLineage.source !== (input.sourceSession?.id ?? null) ||
+        run.sessionLineage.sourceProfile !==
+          (input.sourceSession?.profile === undefined ||
+          input.sourceSession.profile === "current"
+            ? null
+            : input.sourceSession.profile) ||
         run.pipelineState.proactiveClarification !==
           input.proactiveClarification
       ) {

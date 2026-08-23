@@ -294,7 +294,7 @@ for (const pipeline of ["plan-authoring", "plan-execution", "polishing"]) {
   });
 }
 
-test("run derives role, model, and source-session inputs", async () => {
+test("run derives execution, role, and opaque source-session inputs", async () => {
   const stdout = createSink();
   const stderr = createSink();
   let request;
@@ -311,12 +311,26 @@ test("run derives role, model, and source-session inputs", async () => {
       "claude",
       "--worker-model",
       "sonnet",
+      "--worker-profile",
+      "claude-personal",
+      "--worker-context-size",
+      "300000",
       "--reviewer",
       "claude",
+      "--reviewer-profile",
+      "claude-personal",
       "--arbiter",
       "codex",
+      "--profile",
+      "claude-personal",
+      "--model",
+      "run-model",
+      "--context-size",
+      "200000",
       "--fork-from",
       "claude:source:opaque",
+      "--fork-profile",
+      "claude-personal",
     ],
     {
       stdout: stdout.stream,
@@ -332,15 +346,52 @@ test("run derives role, model, and source-session inputs", async () => {
 
   assert.equal(exitCode, 0);
   assert.deepEqual(request.roleOverrides, {
-    worker: { backend: "claude", model: "sonnet" },
-    reviewer: { backend: "claude" },
+    worker: {
+      backend: "claude",
+      profile: "claude-personal",
+      model: "sonnet",
+      contextSize: "300000",
+    },
+    reviewer: { backend: "claude", profile: "claude-personal" },
     arbiter: { backend: "codex" },
+  });
+  assert.deepEqual(request.executionOverrides, {
+    profile: "claude-personal",
+    model: "run-model",
+    contextSize: "200000",
   });
   assert.deepEqual(request.sourceSession, {
     backend: "claude",
     id: "source:opaque",
+    profile: "claude-personal",
   });
   assert.equal(stderr.read(), "");
+});
+
+test("fork profile requires a source session", async () => {
+  const stderr = createSink();
+
+  assert.equal(
+    await main(
+      [
+        "run",
+        "plan-authoring",
+        "--project",
+        "/tmp/project",
+        "--task",
+        "/tmp/task",
+        "--fork-profile",
+        "codex-work",
+      ],
+      {
+        stdout: createSink().stream,
+        stderr: stderr.stream,
+        runner: fakeRunner(),
+      },
+    ),
+    1,
+  );
+  assert.match(stderr.read(), /--fork-profile requires --fork-from/u);
 });
 
 test("resume dispatches one validated action and preserves pause exit", async () => {

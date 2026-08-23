@@ -517,6 +517,14 @@ export async function runPolishing({ action, run, runtime, settings }) {
           : undefined;
     const configuration = currentRun.roles[role];
     const recoveryPrompt = buildPrompt(context);
+    const executionPreferences = Object.fromEntries(
+      ["profile", "model", "contextSize"].flatMap((field) =>
+        typeof configuration[field] === "string" &&
+        configuration[field] !== "current"
+          ? [[field, configuration[field]]]
+          : [],
+      ),
+    );
     const request = {
       access,
       cwd: currentRun.projectPath,
@@ -524,7 +532,7 @@ export async function runPolishing({ action, run, runtime, settings }) {
         session?.mode === "continue" ? buildPrompt("") : recoveryPrompt,
       recoveryPrompt,
       schema,
-      ...(configuration.model === null ? {} : { model: configuration.model }),
+      ...executionPreferences,
       ...(session === undefined ? {} : { session }),
     };
     let response;

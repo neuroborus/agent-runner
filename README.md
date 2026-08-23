@@ -67,19 +67,37 @@ Polishing is independently owned and does not consume a commit plan.
 
 ## Configuration
 
-Backends, models, and pipeline limits belong to the installed runner. Copy the
+Backends, trusted provider profiles, execution preferences, and pipeline limits
+belong to the installed runner. Copy the
 tracked [example](.agent-runner.example.json) to an ignored, untracked
 `.agent-runner.json` beside it at the Agent Runner repository root. The runner
 never rewrites this local file and never reads configuration from a target
 repository, so a target repository needs no Agent Runner configuration file.
 
 When present, the file requires `"schemaVersion": 1`; unknown versions, fields,
-pipelines, roles, and settings are errors. `defaultBackend` is optional. Each
-role resolves its backend from the CLI role flag, then its pipeline role entry,
-then `defaultBackend`; a missing result is a preflight error. Its model resolves
-from the CLI role-model flag, then the pipeline role entry, otherwise the
-selected backend uses its native default. Explicit models are optional and are
-validated by the selected adapter.
+pipelines, roles, profiles, and settings are errors. `profiles` defines trusted
+aliases pinned to one backend: Codex aliases map to native profile names and
+Claude aliases map to absolute isolated configuration directories. The schema
+does not accept profile-supplied credentials, binaries, or arbitrary
+environment variables. A selected alias supplies its backend; a conflicting
+explicit backend is invalid.
+
+Every role accepts string `profile`, `model`, and `contextSize` selections.
+Role-specific CLI/MCP values win over run-wide values, then pipeline-role
+runner values, runner-wide defaults, and finally the built-in `current` value.
+`defaultBackend` remains optional and is used only when no profile supplies the
+backend; a missing backend is a preflight error. Explicit decimal context sizes
+are validated by the chosen adapter and map to Codex's context window or
+Claude's auto-compaction token window.
+
+| Backend | `model: "current"` | `profile: "current"` |
+| --- | --- | --- |
+| Codex | Omit the model override and use the effective native Codex default | Omit `--profile` and inherit the current process/profile |
+| Claude | Omit `--model` and use the effective Claude configuration/account default | Omit `CLAUDE_CONFIG_DIR` and inherit the current process configuration |
+
+Agent Runner intentionally does not hard-code either backend's changing native
+model ID. The tracked [example](.agent-runner.example.json) makes these native
+defaults explicit and shows `claude-personal` and `claude-ngrave` aliases.
 
 Pipeline settings use these defaults:
 
@@ -169,9 +187,22 @@ agent-run pipelines
 agent-run mcp
 ```
 
-Role models use the corresponding derived flags, for example
-`--worker-model`, `--reviewer-model`, or `--planner-model`. A run may seed its
-primary and review roles from one existing backend session:
+Run-wide preferences use `--profile`, `--model`, and `--context-size`.
+Role-specific values use derived flags such as `--worker-profile`,
+`--reviewer-model`, or `--planner-context-size`; role-specific values win. Use
+the trusted alias, backend-native model ID, and decimal token string
+respectively:
+
+```bash
+agent-run run polishing \
+  --project /path/to/repository \
+  --task /path/to/task \
+  --profile claude-personal \
+  --model sonnet \
+  --worker-context-size 200000
+```
+
+A run may seed its primary and review roles from one existing backend session:
 
 ```bash
 agent-run run plan-execution \
@@ -179,10 +210,16 @@ agent-run run plan-execution \
   --task /path/to/task \
   --worker codex \
   --reviewer codex \
-  --fork-from codex:<session-id>
+  --fork-from codex:<session-id> \
+  --fork-profile codex-work
 ```
 
-The primary and review backends must match the source backend. The first
+`--fork-profile` is separate so the text after the first separator in
+`--fork-from` remains an opaque native ID. The primary and review backends must
+match the source backend. A known source profile supplies `current` for those
+roles and every explicit role profile must match it. If the source profile is
+unknown, those roles must remain `current` and no native profile override is
+guessed. The first
 eligible turn in each pipeline-owned primary or review checkpoint forks the
 source independently. Checkpoints separate clarification, bootstrap, and work;
 plan execution also isolates every commit's Worker and Reviewer contexts. The
@@ -190,9 +227,10 @@ source may intentionally contain context shared before the fork, but its
 children are direct siblings and do not share later turns. The source is never
 resumed in place, and every arbitration uses a fresh Arbiter that is not
 constrained by the source backend. The runner persists the resolved source
-reference and child lineage, so recovery uses durable run state and `resume`
-needs no source flag. An unavailable or backend-incompatible source fails
-instead of falling back to a fresh session.
+reference, resolved source profile, and child lineage, so recovery uses durable
+run state and `resume` needs no source flag. The Arbiter remains independent.
+An unavailable or backend/profile-incompatible source fails instead of falling
+back to a fresh session.
 
 Add `--clarify` to any `run` command to open `$VISUAL` or `$EDITOR` before
 the primary agent checks whether more information is needed. Without the flag,
@@ -296,10 +334,13 @@ exposes:
 
 Use `pipelines_list` to discover the registry, then start with `run_start` and a
 unique opaque idempotency key. It persists the run, returns a durable `runId`,
-and launches detached execution. When a compatible current Codex or Claude
-session ID is available, pass it by default so the primary and review roles
-fork independently. Omit it only for an explicit fresh start and never
-fabricate an ID.
+and launches detached execution. Its additive `profile`, `model`, and
+`contextSize` fields set run-wide selections; the same fields inside a
+`roleOverrides` entry take precedence. `sourceSession.profile` carries a known
+trusted source alias while its `id` remains opaque. When a compatible current
+Codex or Claude session ID is available, pass it by default so the primary and
+review roles fork independently. Omit it only for an explicit fresh start and
+never fabricate an ID.
 
 Call `run_wait` once for the desired interval. Its `timeoutMs` accepts up to 24
 hours; the MCP client's tool timeout must be longer than the requested wait.

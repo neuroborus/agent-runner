@@ -567,6 +567,14 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
           : undefined;
     const roleConfiguration = currentRun.roles[role];
     const recoveryPrompt = buildPrompt(context);
+    const executionPreferences = Object.fromEntries(
+      ["profile", "model", "contextSize"].flatMap((field) =>
+        typeof roleConfiguration[field] === "string" &&
+        roleConfiguration[field] !== "current"
+          ? [[field, roleConfiguration[field]]]
+          : [],
+      ),
+    );
     const request = {
       access,
       cwd: currentRun.projectPath,
@@ -574,9 +582,7 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
         session?.mode === "continue" ? buildPrompt("") : recoveryPrompt,
       recoveryPrompt,
       schema,
-      ...(roleConfiguration.model === null
-        ? {}
-        : { model: roleConfiguration.model }),
+      ...executionPreferences,
       ...(session === undefined ? {} : { session }),
     };
     let response;
@@ -2365,15 +2371,21 @@ ${JSON.stringify(
         throw cause;
       }
       const roleConfiguration = currentRun.roles.worker;
+      const executionPreferences = Object.fromEntries(
+        ["profile", "model", "contextSize"].flatMap((field) =>
+          typeof roleConfiguration[field] === "string" &&
+          roleConfiguration[field] !== "current"
+            ? [[field, roleConfiguration[field]]]
+            : [],
+        ),
+      );
       const request = {
         ...baseRequest,
         prompt: `${COMMIT_INSTRUCTIONS}
 
 Authorized planned commit:
 ${step.subject}`,
-        ...(roleConfiguration.model === null
-          ? {}
-          : { model: roleConfiguration.model }),
+        ...executionPreferences,
         ...(previousSession === undefined
           ? {}
           : { session: { id: previousSession, mode: "continue" } }),

@@ -1,6 +1,23 @@
 {
   "schemaVersion": 1,
   "defaultBackend": "codex",
+  "defaultProfile": "current",
+  "defaultModel": "current",
+  "defaultContextSize": "current",
+  "profiles": {
+    "codex-work": {
+      "backend": "codex",
+      "profile": "work"
+    },
+    "claude-personal": {
+      "backend": "claude",
+      "configDirectory": "/home/you/.claude-personal"
+    },
+    "claude-ngrave": {
+      "backend": "claude",
+      "configDirectory": "/home/you/.claude-ngrave"
+    }
+  },
   "pipelines": {
     "plan-authoring": {
       "maxRevisionRounds": 15,
@@ -9,6 +26,7 @@
         "planner": {},
         "reviewer": {
           "backend": "claude",
+          "profile": "claude-personal",
           "model": "sonnet"
         },
         "arbiter": {}
@@ -22,7 +40,10 @@
       "roles": {
         "worker": {},
         "reviewer": {
-          "backend": "claude"
+          "backend": "claude",
+          "profile": "claude-personal",
+          "model": "current",
+          "contextSize": "current"
         },
         "arbiter": {}
       }
@@ -35,7 +56,10 @@
       "roles": {
         "worker": {},
         "reviewer": {
-          "backend": "claude"
+          "backend": "claude",
+          "profile": "claude-personal",
+          "model": "current",
+          "contextSize": "current"
         },
         "arbiter": {}
       }

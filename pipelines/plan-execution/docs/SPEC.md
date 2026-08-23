@@ -181,16 +181,21 @@ Without the flag, `CLARIFY` still runs but opens the editor only if the Worker
 returns questions. In a non-interactive environment, persist the pause and print
 the clarification artifact path instead of attempting terminal dialogue.
 
-Use role-specific model flags when an explicit backend model is required:
+Use run-wide or role-specific execution flags when native overrides are
+required:
 
 ```bash
 agent-run run plan-execution \
   --project /path/to/repo \
   --task /path/to/task \
   --worker codex \
+  --worker-profile codex-work \
   --worker-model <codex-model-id> \
+  --worker-context-size 200000 \
   --reviewer claude \
-  --reviewer-model <claude-model-id>
+  --reviewer-profile claude-personal \
+  --reviewer-model <claude-model-id> \
+  --reviewer-context-size 200000
 ```
 
 A new run may seed Worker and Reviewer from one existing session only when both
@@ -202,13 +207,17 @@ agent-run run plan-execution \
   --task /path/to/task \
   --worker codex \
   --reviewer codex \
-  --fork-from codex:<session-id>
+  --fork-from codex:<session-id> \
+  --fork-profile codex-work
 ```
 
 The runner splits only the backend prefix, keeps the session ID opaque, probes
-native fork support, and persists the resolved source. Worker and Reviewer fork
-it independently; the Arbiter remains independent and `resume` never requires
-the flag again.
+native fork support, and persists the resolved source and known trusted
+profile. A known source profile supplies `current` for Worker and Reviewer and
+requires every explicit backend/profile selection to match. An unknown source
+profile requires both profiles to remain `current` and omits the native profile
+override. Worker and Reviewer fork it independently; the Arbiter remains
+independent and `resume` never requires either flag again.
 
 Role backends must be independently configurable:
 
@@ -241,11 +250,14 @@ The Arbiter must also support either backend.
 
 The pipeline descriptor declares the `worker`, `reviewer`, and `arbiter` roles.
 Role objects under `pipelines.plan-execution.roles` in the runner's
-`.agent-runner.json` may provide an optional `backend` and backend-specific
-`model`. Backend precedence is CLI role override, runner pipeline-role value,
-runner-wide default, then preflight failure. Model precedence is CLI role
-override, runner pipeline-role value, then the selected backend's native
-default. Do not hard-code model names into workflow logic.
+`.agent-runner.json` may provide optional string `backend`, trusted `profile`,
+backend-specific `model`, and decimal `contextSize` selections. Role-specific
+CLI/MCP values take precedence over run-wide values, pipeline-role runner
+values, runner-wide defaults, and built-in `current`. A trusted profile pins
+its backend; conflicting explicit backend selection is invalid. `current`
+omits the corresponding native override and uses the effective source-session,
+process, profile, or backend default. Do not hard-code model names into
+workflow logic.
 
 The descriptor also owns the positive-integer settings and built-in defaults
 listed under [Retry Limits and No-Progress Detection](#14-retry-limits-and-no-progress-detection).
@@ -330,7 +342,8 @@ Persist at least:
 - escalation reason when paused.
 
 The common envelope also persists an optional opaque source-session reference,
-every direct Worker, Reviewer, or Arbiter child session ID with its
+its resolved trusted profile when known, and every direct Worker, Reviewer, or
+Arbiter child session ID with its
 accepted-input and pipeline-checkpoint context key, monotonic revision and
 timestamps, and an opaque pipeline-owned state object. Store
 correction-round snapshots and arbitration episodes there without asking the
@@ -524,6 +537,11 @@ a supplied source session uses `thread/fork`, with the returned child thread ID
 persisted as role lineage. Unavailable continuation may fall back to a fresh
 reconstructed turn, while an unavailable fork source is an error.
 
+Map a trusted Codex alias only to its configured native profile name and pass
+it with `--profile`. Map an explicit decimal context size to
+`model_context_window`. Omit both controls for `current`; do not derive them
+from native session storage.
+
 On native context exhaustion, request thread compaction and retry the turn once.
 If the context remains full, start a fresh turn reconstructed from durable
 runner input and the current workspace. Never replay an interrupted
@@ -588,6 +606,12 @@ Reject permission denials from a non-interactive turn instead of treating a
 partial response as success. Pass an explicit model without a fallback chain
 and reject a full model ID when the result's model usage reports a different
 model.
+
+Map a trusted Claude alias only to its configured absolute isolated
+configuration directory through `CLAUDE_CONFIG_DIR`. Map an explicit decimal
+context size to the native `--autocompact` token window. Omit both controls for
+`current`, and never accept profile-provided arbitrary environment or
+credential material.
 
 Fresh turns omit resume flags. Continuation uses `--resume <session-id>`, and a
 supplied source session uses `--resume <session-id> --fork-session`; persist the

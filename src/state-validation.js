@@ -24,7 +24,11 @@ const STATE_FIELDS = new Set([
   "createdAt",
   "updatedAt",
 ]);
-const SESSION_LINEAGE_FIELDS = new Set(["source", "children"]);
+const SESSION_LINEAGE_FIELDS = new Set([
+  "source",
+  "sourceProfile",
+  "children",
+]);
 const CHILD_SESSION_FIELDS = new Set(["role", "sessionId", "contextKey"]);
 const ACTIVITY_FIELDS = new Set(["actor", "phase", "kind", "message"]);
 const INPUT_REQUEST_FIELDS = new Set([
@@ -343,6 +347,16 @@ function normalizeSessionLineage(value) {
     value.source === null
       ? null
       : assertSessionReference(value.source, "run.sessionLineage.source");
+  const sourceProfile =
+    value.sourceProfile === undefined || value.sourceProfile === null
+      ? null
+      : assertIdentifier(
+          value.sourceProfile,
+          "run.sessionLineage.sourceProfile",
+        );
+  if (source === null && sourceProfile !== null) {
+    fail("run.sessionLineage.sourceProfile requires a source session.");
+  }
   if (!Array.isArray(value.children)) {
     fail("run.sessionLineage.children must be an array.");
   }
@@ -364,7 +378,24 @@ function normalizeSessionLineage(value) {
     fail("run.sessionLineage.children must contain unique session IDs.");
   }
 
-  return { source, children };
+  return { source, sourceProfile, children };
+}
+
+function normalizeRoles(value) {
+  assertRecord(value, "run.roles");
+  const roles = cloneRecord(value, "run.roles");
+  for (const [role, configuration] of Object.entries(roles)) {
+    assertRecord(configuration, `run.roles.${role}`);
+    for (const field of ["profile", "model", "contextSize"]) {
+      if (
+        !Object.hasOwn(configuration, field) ||
+        (field === "model" && configuration[field] === null)
+      ) {
+        configuration[field] = "current";
+      }
+    }
+  }
+  return roles;
 }
 
 export function normalizeRunState(value, expectedRunId) {
@@ -417,7 +448,7 @@ export function normalizeRunState(value, expectedRunId) {
     pipelineStateVersion: value.pipelineStateVersion,
     projectPath: value.projectPath,
     taskPath: value.taskPath,
-    roles: cloneRecord(value.roles, "run.roles"),
+    roles: normalizeRoles(value.roles),
     counters: cloneRecord(value.counters, "run.counters"),
     hashes: cloneRecord(value.hashes, "run.hashes"),
     pause,

@@ -878,11 +878,22 @@ export function assertRun(run) {
   for (const role of ["planner", "reviewer", "arbiter"]) {
     if (
       !isRecord(run.roles[role]) ||
+      Object.keys(run.roles[role]).some(
+        (field) =>
+          !["backend", "profile", "model", "contextSize"].includes(field),
+      ) ||
       typeof run.roles[role].backend !== "string" ||
       run.roles[role].backend.length === 0 ||
-      (run.roles[role].model !== null &&
+      (run.roles[role].model !== undefined &&
+        run.roles[role].model !== null &&
         (typeof run.roles[role].model !== "string" ||
-          run.roles[role].model.length === 0))
+          run.roles[role].model.length === 0)) ||
+      ["profile", "contextSize"].some(
+        (field) =>
+          run.roles[role][field] !== undefined &&
+          (typeof run.roles[role][field] !== "string" ||
+            run.roles[role][field].length === 0),
+      )
     ) {
       throw workflowError(`Plan-authoring role ${role} is invalid.`);
     }
@@ -893,6 +904,15 @@ export function assertRun(run) {
       run.sessionLineage.source.length === 0)
   ) {
     throw workflowError("Plan-authoring source session is invalid.");
+  }
+  if (
+    run.sessionLineage.sourceProfile !== undefined &&
+    run.sessionLineage.sourceProfile !== null &&
+    (run.sessionLineage.source === null ||
+      typeof run.sessionLineage.sourceProfile !== "string" ||
+      run.sessionLineage.sourceProfile.length === 0)
+  ) {
+    throw workflowError("Plan-authoring source profile is invalid.");
   }
   for (const child of run.sessionLineage.children) {
     if (

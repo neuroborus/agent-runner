@@ -40,17 +40,22 @@ stagnationWindowRounds = 3
 
 Values may be overridden under `pipelines.plan-authoring` in the runner's
 versioned `.agent-runner.json` contract. Role objects live under
-`pipelines.plan-authoring.roles` and may contain an optional `backend` and
-backend-specific `model`. The root runtime applies the shared precedence rules
+`pipelines.plan-authoring.roles` and may contain optional string `backend`,
+trusted `profile`, backend-specific `model`, and decimal `contextSize`
+selections. The root runtime applies the shared precedence rules
 documented in [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md); this
 pipeline owns only its roles, setting validation, and defaults.
 
 CLI overrides use `--planner`, `--reviewer`, and `--arbiter`, with corresponding
-`--planner-model`, `--reviewer-model`, and `--arbiter-model` flags. A new run may
-also use `--fork-from <backend>:<session-id>` when Planner and Plan Reviewer both
-use that backend. Each role's first eligible turn in a pipeline-owned checkpoint
-forks the source independently; the Arbiter remains fresh and `resume` uses the
-persisted lineage without another flag.
+derived profile, model, and context-size flags. Run-wide `--profile`, `--model`,
+and `--context-size` defaults apply below role-specific CLI values. A new run
+may also use `--fork-from <backend>:<session-id>` and optional separate
+`--fork-profile <trusted-alias>` when Planner and Plan Reviewer match the
+source. Known source profiles supply their `current` profile; unknown source
+profiles require `current` and omit the native override. Each role's first
+eligible turn in a pipeline-owned checkpoint forks the source independently;
+the Arbiter remains fresh and independent, and `resume` uses the persisted
+lineage without another flag.
 
 ## Persistent Run State
 
@@ -59,9 +64,9 @@ directories using the common contract in
 [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md). Its versioned envelope
 records canonical inputs, resolved Planner, Reviewer, and Arbiter configuration,
 resolved pipeline settings, the initial repository baseline, hashes, revision
-and clarification counters, pause state, optional source-session reference,
-direct child role/session IDs with accepted-input and pipeline-checkpoint
-context keys, and opaque plan-authoring state.
+and clarification counters, pause state, optional source-session reference and
+resolved profile, direct child role/session IDs with accepted-input and
+pipeline-checkpoint context keys, and opaque plan-authoring state.
 Drafts, findings, correction-round snapshots, and stagnation evidence remain
 pipeline-owned structured data in the external run state rather than task
 artifacts.

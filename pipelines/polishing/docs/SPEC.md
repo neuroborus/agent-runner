@@ -72,8 +72,11 @@ tracked input is allowed and remains protected by input-drift checks.
 
 The descriptor declares independently configurable `worker`, `reviewer`, and
 on-demand `arbiter` roles. CLI and runner configuration use the common backend
-and model precedence rules. Worker and Reviewer may use any Codex/Claude
-combination; Arbiter supports either backend.
+and execution-preference precedence rules. Each role accepts string trusted
+`profile`, backend-native `model`, and decimal `contextSize` selections;
+role-specific CLI/MCP values win over run-wide and runner values, with
+`current` omitting the native override. Worker and Reviewer may use any
+Codex/Claude combination; Arbiter supports either backend.
 
 The pipeline owns these positive-integer settings and defaults:
 
@@ -146,9 +149,12 @@ Worker and Reviewer bootstrap independently and read-only. Both study the
 repository, task, complete current changes, clarifications, instructions,
 relevant skills including `finalization`, tests, and useful Git history. They
 must not see each other's interpretation before both summaries exist. A source
-session supplied with `--fork-from` is forked directly and independently for
-the first eligible turn of each Worker and Reviewer checkpoint; the Arbiter
-remains fresh.
+session supplied with `--fork-from` and optional separate `--fork-profile` is
+forked directly and independently for the first eligible turn of each Worker
+and Reviewer checkpoint. A known source profile supplies their `current`
+selection and every explicit backend/profile must match; an unknown source
+profile requires `current` and omits a native override. The Arbiter remains
+fresh and independent.
 
 Each direct child session is persisted with a key over its accepted inputs and
 pipeline-owned role checkpoint. Clarification, bootstrap, Worker work, and
