@@ -87,8 +87,11 @@ Clarifications (${clarification.transcriptPath}):
 ${clarifications}`;
 }
 
-function contextKeyFor(role, context) {
-  return sha256(`${role}\0${context}`);
+function contextKeyFor(role, checkpoint, context) {
+  if (typeof checkpoint !== "string" || checkpoint.length === 0) {
+    throw workflowError("Plan-authoring session checkpoint is invalid.");
+  }
+  return sha256(`${role}\0${checkpoint}\0${context}`);
 }
 
 function findingPrompt(pipelineState) {
@@ -323,7 +326,7 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
     assertRun(currentRun);
   }
 
-  async function runRole(role, schema, buildPrompt) {
+  async function runRole(role, schema, buildPrompt, { checkpoint }) {
     const evidence = await readCurrentInputs();
     if (evidence === null) {
       return null;
@@ -337,21 +340,19 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
       evidence.inputs,
       evidence.clarification,
     );
-    const contextKey = contextKeyFor(role, evidenceContext);
+    const contextKey = contextKeyFor(role, checkpoint, evidenceContext);
     const latestSession = [...currentRun.sessionLineage.children]
       .reverse()
       .find((child) => child.role === role);
     const previousSession =
-      latestSession?.contextKey === contextKey
+      role !== "arbiter" && latestSession?.contextKey === contextKey
         ? latestSession.sessionId
         : undefined;
     const sourceSession = currentRun.sessionLineage.source;
     const session =
       previousSession !== undefined
         ? { id: previousSession, mode: "continue" }
-        : latestSession === undefined &&
-            sourceSession !== null &&
-            role !== "arbiter"
+        : sourceSession !== null && role !== "arbiter"
           ? { id: sourceSession, mode: "fork" }
           : undefined;
     const roleConfiguration = currentRun.roles[role];
@@ -611,6 +612,7 @@ ${JSON.stringify(
   null,
   2,
 )}`,
+      { checkpoint: "arbitration" },
     );
     if (output === null) {
       return false;
@@ -827,6 +829,7 @@ ${JSON.stringify(
           (evidence) => `${CLARIFICATION_INSTRUCTIONS}
 
 ${evidence}`,
+          { checkpoint: "clarification" },
         );
         if (output === null) {
           return currentRun;
@@ -949,6 +952,7 @@ ${evidence}`,
           (evidence) => `${DRAFT_INSTRUCTIONS}
 
 ${evidence}`,
+          { checkpoint: "planning" },
         );
         if (output === null) {
           return currentRun;
@@ -995,6 +999,7 @@ ${evidence}
 
 Plan under review:
 ${pipelineState().draft}${reviewDirectionPrompt(pipelineState())}`,
+          { checkpoint: "planning" },
         );
         if (output === null) {
           return currentRun;
@@ -1066,6 +1071,7 @@ ${pipelineState().draft}
 
 Blocking correction input:
 ${findingPrompt(pipelineState())}`,
+          { checkpoint: "planning" },
         );
         if (output === null) {
           return currentRun;

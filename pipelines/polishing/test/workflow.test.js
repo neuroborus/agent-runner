@@ -999,7 +999,7 @@ test("prepares a dirty worktree through independent source-session bootstraps", 
   });
   assert.deepEqual(
     result.sessionLineage.children.map(({ role }) => role),
-    ["worker", "reviewer"],
+    ["worker", "worker", "reviewer", "worker", "reviewer"],
   );
   assert.deepEqual(fixture.calls.worker[0].session, {
     mode: "fork",
@@ -1009,15 +1009,37 @@ test("prepares a dirty worktree through independent source-session bootstraps", 
     mode: "fork",
     id: SOURCE_SESSION,
   });
+  assert.deepEqual(fixture.calls.worker[1].session, {
+    mode: "fork",
+    id: SOURCE_SESSION,
+  });
+  assert.deepEqual(fixture.calls.worker[2].session, {
+    mode: "continue",
+    id: result.sessionLineage.children[1].sessionId,
+  });
+  assert.deepEqual(fixture.calls.worker[3].session, {
+    mode: "fork",
+    id: SOURCE_SESSION,
+  });
+  assert.deepEqual(fixture.calls.reviewer[1].session, {
+    mode: "fork",
+    id: SOURCE_SESSION,
+  });
   for (const heading of [
     /Task \(/u,
     /Task-level clarifications:/u,
     /Context:/u,
     /Execution clarifications \(/u,
   ]) {
-    assert.doesNotMatch(fixture.calls.worker[1].prompt, heading);
-    assert.match(fixture.calls.worker[1].recoveryPrompt, heading);
+    assert.match(fixture.calls.worker[1].prompt, heading);
+    assert.doesNotMatch(fixture.calls.worker[2].prompt, heading);
+    assert.match(fixture.calls.worker[2].recoveryPrompt, heading);
   }
+  assert.match(
+    fixture.calls.worker[3].prompt,
+    /Change-set fingerprint before this turn:/u,
+  );
+  assert.match(fixture.calls.worker[3].prompt, /Resolved bootstrap context:/u);
   assert.doesNotMatch(fixture.calls.reviewer[0].prompt, /Worker independently/u);
   assert.doesNotMatch(fixture.calls.worker[1].prompt, /Reviewer independently/u);
   assert.match(fixture.calls.worker[2].prompt, /Reviewer bootstrap summary/u);
@@ -1025,13 +1047,31 @@ test("prepares a dirty worktree through independent source-session bootstraps", 
     prompt.includes("Locate and validate the target project's finalization skill"),
   );
   assert.ok(finalizationCall);
+  assert.deepEqual(finalizationCall.session, {
+    mode: "continue",
+    id: result.sessionLineage.children[3].sessionId,
+  });
   assert.doesNotMatch(finalizationCall.prompt, /Resolved bootstrap context:/u);
   assert.doesNotMatch(finalizationCall.prompt, /Worker polishing summary:/u);
   assert.match(finalizationCall.recoveryPrompt, /Resolved bootstrap context:/u);
   assert.match(finalizationCall.recoveryPrompt, /Worker polishing summary:/u);
+  assert.match(fixture.calls.reviewer[1].prompt, /Resolved bootstrap context:/u);
+  assert.match(fixture.calls.reviewer[1].prompt, /Worker polishing summary:/u);
+  assert.equal(
+    fixture.calls.reviewer[1].prompt,
+    fixture.calls.reviewer[1].recoveryPrompt,
+  );
   for (const child of result.sessionLineage.children) {
     assert.match(child.contextKey, /^[a-f0-9]{64}$/u);
   }
+  const workerKeys = result.sessionLineage.children
+    .filter(({ role }) => role === "worker")
+    .map(({ contextKey }) => contextKey);
+  const reviewerKeys = result.sessionLineage.children
+    .filter(({ role }) => role === "reviewer")
+    .map(({ contextKey }) => contextKey);
+  assert.equal(new Set(workerKeys).size, 3);
+  assert.equal(new Set(reviewerKeys).size, 2);
   for (const call of [
     ...fixture.calls.worker.slice(0, 3),
     ...fixture.calls.reviewer,
@@ -1411,12 +1451,23 @@ test("persists complete transitions and resumes after recoverable interruption",
 });
 
 test("binds finalization changes and review to one fingerprint without committing", async (t) => {
+  let beforeFinalizationFingerprint;
+  let beforePolishFingerprint;
   const fixture = await createFixture(t, {
     async onRoleRun(role, request, _turn, { projectPath }) {
       if (role === "worker" && /Polish the existing local/u.test(request.prompt)) {
+        beforePolishFingerprint = await createGitService().contentFingerprint({
+          allowedPaths: [],
+          projectPath,
+        });
         await writeFile(join(projectPath, "tracked.txt"), "polished\n");
       }
       if (role === "worker" && /Locate and validate/u.test(request.prompt)) {
+        beforeFinalizationFingerprint =
+          await createGitService().contentFingerprint({
+            allowedPaths: [],
+            projectPath,
+          });
         await writeFile(join(projectPath, "generated.txt"), "generated\n");
       }
     },
@@ -1434,6 +1485,18 @@ test("binds finalization changes and review to one fingerprint without committin
   assert.equal(result.pipelineState.finalizationResult.status, "PASS");
   assert.equal(beforeHead, afterHead);
   assert.equal(await readFile(join(fixture.projectPath, "generated.txt"), "utf8"), "generated\n");
+  assert.notEqual(beforePolishFingerprint, beforeFinalizationFingerprint);
+  const polishCall = fixture.calls.worker.find(({ prompt }) =>
+    /Polish the existing local/u.test(prompt),
+  );
+  const finalizationCall = fixture.calls.worker.find(({ prompt }) =>
+    /Locate and validate/u.test(prompt),
+  );
+  assert.match(polishCall.prompt, new RegExp(beforePolishFingerprint, "u"));
+  assert.match(
+    finalizationCall.recoveryPrompt,
+    new RegExp(beforeFinalizationFingerprint, "u"),
+  );
 });
 
 test("fixes finalization failures in one batch and reruns the complete gate", async (t) => {
@@ -2053,17 +2116,69 @@ test("invalidates dependent work before product-decision bootstrap re-entry", as
     reviewer: [
       bootstrapReady("Reviewer"),
       productDecision({ status: "PRODUCT_DECISION_REQUIRED", findings: [] }),
+      bootstrapReady("Reviewer"),
+      reviewApproved(),
+    ],
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationPassed(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationPassed(),
     ],
   });
 
-  const result = await fixture.run();
+  const waiting = await fixture.run();
 
-  assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
-  assert.equal(result.pause.reason, "product_decision_required");
-  assert.equal(result.pipelineState.pendingEdit.suspendedState, "BOOTSTRAP");
-  assert.equal(result.pipelineState.polishSummary, null);
-  assert.equal(result.pipelineState.finalizationResult, null);
-  assert.equal(result.pipelineState.resolvedSummary, null);
+  assert.equal(waiting.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(waiting.pause.reason, "product_decision_required");
+  assert.equal(waiting.pipelineState.pendingEdit.suspendedState, "BOOTSTRAP");
+  assert.equal(waiting.pipelineState.polishSummary, null);
+  assert.equal(waiting.pipelineState.finalizationResult, null);
+  assert.equal(waiting.pipelineState.resolvedSummary, null);
+  const { clarificationPath } = waiting.pipelineState;
+  const previousWorkerKey = waiting.sessionLineage.children
+    .filter(({ role }) => role === "worker")
+    .at(-1).contextKey;
+  const previousReviewerKey = waiting.sessionLineage.children
+    .filter(({ role }) => role === "reviewer")
+    .at(-1).contextKey;
+  await writeFile(
+    clarificationPath,
+    `${await readFile(clarificationPath, "utf8")}Behavior A.\n`,
+  );
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  const resumedWork = [
+    fixture.calls.worker
+      .filter(({ prompt }) => /Polish the existing local/u.test(prompt))
+      .at(-1),
+    fixture.calls.reviewer
+      .filter(({ prompt }) => /Review the complete current/u.test(prompt))
+      .at(-1),
+  ];
+  for (const request of resumedWork) {
+    assert.equal(request.session, undefined);
+    assert.equal(request.prompt, request.recoveryPrompt);
+  }
+  assert.notEqual(
+    previousWorkerKey,
+    completed.sessionLineage.children
+      .filter(({ role }) => role === "worker")
+      .at(-1).contextKey,
+  );
+  assert.notEqual(
+    previousReviewerKey,
+    completed.sessionLineage.children
+      .filter(({ role }) => role === "reviewer")
+      .at(-1).contextKey,
+  );
 });
 
 test("preserves safe writable changes across a recoverable interruption", async (t) => {

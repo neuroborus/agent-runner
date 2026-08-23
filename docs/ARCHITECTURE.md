@@ -118,9 +118,10 @@ native session. `status` remains lock-free.
 
 `--fork-from <backend>:<session-id>` is accepted only on a new run. The session
 ID remains opaque after the first separator. The pipeline's primary and review
-roles must use that backend and support native forking; their first turns fork
-the source independently, while the Arbiter is not constrained by it. Resume
-uses the persisted source and child lineage and never asks for the flag again.
+roles must use that backend and support native forking; each checkpoint's first
+eligible role turns fork the source independently, while the Arbiter is not
+constrained by it. Resume uses the persisted source and child lineage and never
+asks for the flag again.
 
 The CLI renders only persisted public activity and a concise current-state
 projection. A user-action pause has a distinct exit status from an internal
@@ -178,8 +179,9 @@ hashes, pause state, session lineage, timestamps, and opaque pipeline-owned
 state, including its resolved settings from the initial revision. The root
 validates JSON shape and size without interpreting workflow roles or outcomes.
 Session lineage records an optional source-session reference and every direct
-child role/session ID with its accepted-input context key, but native session
-resume remains an optimization rather than a correctness dependency.
+child role/session ID with its accepted-input and pipeline-checkpoint context
+key, but native session resume remains an optimization rather than a
+correctness dependency.
 
 Plan execution persists each prepared or consumed one-shot commit authorization
 and every verified commit SHA. After an ambiguous commit turn, resume verifies
@@ -193,19 +195,27 @@ Backend sessions are disposable execution context, not durable workflow state.
 Every retryable request carries a turn prompt and a complete recovery prompt
 reconstructed from validated run state, durable artifacts, and the observed
 workspace. A role session is continued only when its persisted key matches the
-accepted inputs and role context. Compatible continuations receive only the
-current instruction and state delta; first, forked, fresh, and
-context-invalidated turns receive the complete prompt.
+accepted inputs, role, and pipeline-owned checkpoint. Clarification and normal
+work use distinct checkpoints; plan execution also isolates Worker and Reviewer
+by planned commit, while polishing isolates bootstrap from Worker and Reviewer
+work. Compatible continuations receive only the current instruction and state
+delta; first, forked, fresh, and context-invalidated turns receive the complete
+prompt. Arbiters remain fresh.
+
+A checkpoint's complete prompt is reconstructed from validated inputs, durable
+resolved summaries, its current plan step or change-set fingerprint, active
+blockers, and the pipeline's bounded decision history. These inputs remain
+durable even when the native session is gone.
 
 When a native context is full, an adapter may compact it and retry the complete
 recovery prompt once. If continuation still fails, writable and read-only work
 can resume in a fresh session with the same complete prompt and a concise
 recovery preface.
 
-An explicitly supplied source session is different: the adapter must create a
-direct child and return its ID without resuming or mutating the source. If the
-source cannot be forked, the turn fails before agent work rather than silently
-losing lineage.
+An explicitly supplied source session is different: the first eligible turn of
+each new primary or review checkpoint creates a direct child and returns its ID
+without resuming or mutating the source. If the source cannot be forked, the
+turn fails before agent work rather than silently losing lineage.
 
 Interrupted one-shot effects are also different. In particular, a
 `local-commit` turn is never replayed; control returns to the runner for pending

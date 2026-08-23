@@ -124,8 +124,11 @@ function durableContext(evidence, recoveryContext) {
     : `${evidence}\n\n${recoveryContext}`;
 }
 
-function contextKeyFor(role, context) {
-  return sha256(`${role}\0${context}`);
+function contextKeyFor(role, checkpoint, context) {
+  if (typeof checkpoint !== "string" || checkpoint.length === 0) {
+    throw workflowError("Polishing session checkpoint is invalid.");
+  }
+  return sha256(`${role}\0${checkpoint}\0${context}`);
 }
 
 export async function runPolishing({ action, run, runtime, settings }) {
@@ -470,7 +473,7 @@ export async function runPolishing({ action, run, runtime, settings }) {
     buildPrompt,
     {
       access = "read-only",
-      freshSession = false,
+      checkpoint,
       recoveryContext = "",
       reportWorkspaceChange = false,
     } = {},
@@ -489,22 +492,27 @@ export async function runPolishing({ action, run, runtime, settings }) {
       evidence.inputs,
       evidence.clarification,
     );
-    const context = durableContext(evidenceContext, recoveryContext);
-    const contextKey = contextKeyFor(role, evidenceContext);
+    const checkpointContext =
+      checkpoint === "clarification"
+        ? recoveryContext
+        : durableContext(
+            `Change-set fingerprint before this turn:\n${turnSnapshot.contentFingerprint}`,
+            recoveryContext,
+          );
+    const context = durableContext(evidenceContext, checkpointContext);
+    const contextKey = contextKeyFor(role, checkpoint, evidenceContext);
     const latestSession = [...currentRun.sessionLineage.children]
       .reverse()
       .find((child) => child.role === role);
     const previousSession =
-      !freshSession && latestSession?.contextKey === contextKey
+      role !== "arbiter" && latestSession?.contextKey === contextKey
         ? latestSession.sessionId
         : undefined;
     const sourceSession = currentRun.sessionLineage.source;
     const session =
       previousSession !== undefined
         ? { id: previousSession, mode: "continue" }
-        : sourceSession !== null &&
-            role !== "arbiter" &&
-            (latestSession === undefined || freshSession)
+        : sourceSession !== null && role !== "arbiter"
           ? { id: sourceSession, mode: "fork" }
           : undefined;
     const configuration = currentRun.roles[role];
@@ -1295,11 +1303,6 @@ export async function runPolishing({ action, run, runtime, settings }) {
   }
 
   async function bootstrapRole(role) {
-    const restartIndependentReviewer =
-      role === "reviewer" &&
-      currentRun.sessionLineage.children.some(
-        (child) => child.role === "reviewer",
-      );
     const output = await runRole(
       role,
       BOOTSTRAP_SCHEMA,
@@ -1312,7 +1315,7 @@ export async function runPolishing({ action, run, runtime, settings }) {
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
 ${evidence}`,
-      { freshSession: restartIndependentReviewer },
+      { checkpoint: "bootstrap", recoveryContext: workContext() },
     );
     if (output === null) {
       return false;
@@ -1351,6 +1354,7 @@ ${state().workerSummary}
 
 Reviewer bootstrap summary:
 ${state().reviewerSummary}`,
+      { checkpoint: "bootstrap", recoveryContext: workContext() },
     );
     if (output === null) {
       return false;
@@ -1410,7 +1414,10 @@ ${state().reviewerSummary}
 
 Recorded disagreement:
 ${JSON.stringify(state().bootstrapDisagreement, null, 2)}`,
-      { freshSession: true },
+      {
+        checkpoint: "arbitration",
+        recoveryContext: workContext(),
+      },
     );
     if (output === null) {
       return false;
@@ -1457,20 +1464,14 @@ ${JSON.stringify(state().bootstrapDisagreement, null, 2)}`,
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
 ${evidence}${
-        current.bootstrapArbitrationUsed && !current.pendingCorrection
-          ? `\n\n${workContext()}`
-          : ""
-      }${
         current.stagnationDirection?.direction === "REWORK_IMPLEMENTATION"
           ? `\n\nStagnation Arbiter direction:\n${JSON.stringify(current.stagnationDirection, null, 2)}`
           : ""
       }`,
       {
         access: "workspace-write",
-        recoveryContext:
-          current.bootstrapArbitrationUsed && !current.pendingCorrection
-            ? ""
-            : workContext(),
+        checkpoint: "work",
+        recoveryContext: workContext(),
       },
     );
     if (output === null) {
@@ -1533,6 +1534,7 @@ Use FAIL for validation failures, SKILL_MISSING or SKILL_INVALID before invoking
 ${evidence}`,
       {
         access: "workspace-write",
+        checkpoint: "work",
         recoveryContext: workContext({ includePolishSummary: true }),
       },
     );
@@ -1626,7 +1628,6 @@ ${evidence}`,
 
   async function runReviewTurn() {
     const current = state();
-    const needsWorkContext = current.previousFindings.length === 0;
     const fingerprint = await contentFingerprint();
     if (fingerprint !== current.finalizedFingerprint) {
       await transition({
@@ -1647,11 +1648,7 @@ ${evidence}`,
 
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
-${evidence}${
-        needsWorkContext
-          ? `\n\n${workContext({ includePolishSummary: true })}`
-          : ""
-      }
+${evidence}
 
 Finalization result:
 ${JSON.stringify(current.finalizationResult, null, 2)}
@@ -1666,9 +1663,8 @@ ${JSON.stringify(current.previousFindings, null, 2)}${
 Prior decisions:
 ${JSON.stringify(priorFindingDecisions(), null, 2)}`,
       {
-        recoveryContext: needsWorkContext
-          ? ""
-          : workContext({ includePolishSummary: true }),
+        checkpoint: "review",
+        recoveryContext: workContext({ includePolishSummary: true }),
       },
     );
     if (output === null) {
@@ -1771,7 +1767,10 @@ ${JSON.stringify(current.findings, null, 2)}
 
 Worker disputes:
 ${JSON.stringify(current.pendingDisputes, null, 2)}`,
-      { recoveryContext: workContext({ includePolishSummary: true }) },
+      {
+        checkpoint: "review",
+        recoveryContext: workContext({ includePolishSummary: true }),
+      },
     );
     if (output === null) {
       return false;
@@ -1864,7 +1863,7 @@ ${JSON.stringify(reviewerResponse, null, 2)}
 Prior decisions:
 ${JSON.stringify(priorFindingDecisions([dispute.findingId]), null, 2)}`,
       {
-        freshSession: true,
+        checkpoint: "arbitration",
         recoveryContext: workContext({ includePolishSummary: true }),
       },
     );
@@ -1936,7 +1935,7 @@ ${JSON.stringify(
   2,
 )}`,
       {
-        freshSession: true,
+        checkpoint: "arbitration",
         recoveryContext: workContext({ includePolishSummary: true }),
       },
     );
@@ -2132,6 +2131,7 @@ Prior decisions:
 ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`,
       {
         access: budgetExhausted ? "read-only" : "workspace-write",
+        checkpoint: "work",
         recoveryContext: workContext({ includePolishSummary: true }),
         reportWorkspaceChange: true,
       },
@@ -2353,6 +2353,7 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
 ${evidence}`,
+          { checkpoint: "clarification" },
         );
         if (output === null) {
           return currentRun;

@@ -331,8 +331,8 @@ Persist at least:
 
 The common envelope also persists an optional opaque source-session reference,
 every direct Worker, Reviewer, or Arbiter child session ID with its
-accepted-input context key, monotonic revision and timestamps, and an opaque
-pipeline-owned state object. Store
+accepted-input and pipeline-checkpoint context key, monotonic revision and
+timestamps, and an opaque pipeline-owned state object. Store
 correction-round snapshots and arbitration episodes there without asking the
 root runtime to interpret them. Native backend session resume is optional; the
 persisted task, plan, decisions, summaries, and lineage must be sufficient to
@@ -457,9 +457,10 @@ Native session continuation is optional. Runner correctness must not depend on
 it. `prompt` is the compact instruction and state delta for a compatible
 continuation. `recoveryPrompt` is the complete durable request used for first,
 forked, fresh, context-invalidated, compacted, or reconstructed turns. Continue
-a persisted child only when its context key matches the accepted inputs and
-role context. A supplied fork source must be forked directly; never resume it
-or silently replace an unavailable source.
+a persisted child only when its context key matches the accepted inputs, role,
+and pipeline-owned checkpoint. The first eligible turn of each new primary or
+review checkpoint forks a supplied source directly; never resume it or silently
+replace an unavailable source.
 
 Use structured output for all machine-actionable decisions:
 
@@ -889,6 +890,8 @@ context.
 No implementation changes may occur before bootstrap completes.
 
 Run Worker bootstrap and Reviewer bootstrap independently and in read-only mode.
+Clarification and bootstrap use distinct role checkpoints. Reconciliation may
+continue the Worker bootstrap session, but implementation and review never do.
 
 Both study:
 
@@ -953,6 +956,17 @@ reason: product_decision_required
 
 ## 13. Per-Commit Workflow
 
+Start one fresh Worker checkpoint and one fresh Reviewer checkpoint for every
+planned commit. Reuse those role sessions for implementation, finalization,
+finding resolution, complete re-review, and dispute reconsideration within that
+commit. Never carry either work checkpoint into the next commit, and keep every
+Arbiter turn fresh.
+
+Reconstruct each checkpoint from the validated inputs, resolved bootstrap
+summary, current plan step, active blockers, and bounded prior decisions. A
+product-decision edit invalidates the affected work checkpoint before execution
+resumes. Native continuation remains optional.
+
 For each plan step:
 
 Keep role prompts short. Their mandatory English cores are:
@@ -984,7 +998,7 @@ findings do not qualify.
 
 ### 13.1 Worker implementation
 
-Start or continue the Worker implementation context.
+Start or continue the current commit's Worker checkpoint.
 
 Before editing, the Worker refreshes:
 
@@ -1034,7 +1048,8 @@ Any later content change invalidates the previous finalization result.
 
 After finalization passes, use an independent Reviewer context for the current commit.
 
-Prefer one Reviewer session per planned commit, reused for re-review/dispute handling within that commit.
+Use one Reviewer checkpoint per planned commit, reused for complete re-review
+and dispute handling within that commit.
 
 The Reviewer receives:
 

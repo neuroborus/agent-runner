@@ -26,6 +26,7 @@ const executeFile = promisify(execFile);
 const SOURCE_SESSION = "11111111-1111-4111-8111-111111111111";
 const PLANNER_SESSION = "22222222-2222-4222-8222-222222222222";
 const POST_CLARIFICATION_PLANNER_SESSION = `${PLANNER_SESSION}:1`;
+const PLANNING_SESSION = `${PLANNER_SESSION}:2`;
 const REVIEWER_SESSION = "33333333-3333-4333-8333-333333333333";
 const ARBITER_SESSION = "44444444-4444-4444-8444-444444444444";
 const PREPARED_RUN = "55555555-5555-4555-8555-555555555555";
@@ -132,6 +133,12 @@ function createAdapter({ fork = true, questionFirst = false } = {}) {
 
 function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
   const calls = [];
+  let freshSessionCount = 0;
+  function freshSession() {
+    const index = freshSessionCount;
+    freshSessionCount += 1;
+    return index === 0 ? PLANNER_SESSION : `${PLANNER_SESSION}:${index}`;
+  }
   return {
     calls,
     async probe() {
@@ -180,7 +187,6 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
           whyBlocked: "",
           evidence: [],
         };
-        sessionId ??= PLANNER_SESSION;
       } else if (request.prompt.includes("Return a concise bootstrap summary")) {
         const reviewer = request.prompt.includes("As Reviewer");
         structured = {
@@ -194,7 +200,6 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
           whyBlocked: "",
           evidence: [],
         };
-        sessionId ??= reviewer ? REVIEWER_SESSION : PLANNER_SESSION;
       } else if (
         request.prompt.includes("Reconcile the independent Worker and Reviewer")
       ) {
@@ -267,10 +272,10 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
           whyBlocked: "",
           evidence: [],
         };
-        sessionId ??= REVIEWER_SESSION;
       } else {
         throw new Error("Unexpected fake execution turn.");
       }
+      sessionId ??= freshSession();
       return { output: "structured", structured, sessionId };
     },
   };
@@ -443,6 +448,7 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
     [
       { role: "planner", sessionId: PLANNER_SESSION },
       { role: "planner", sessionId: POST_CLARIFICATION_PLANNER_SESSION },
+      { role: "planner", sessionId: PLANNING_SESSION },
       { role: "reviewer", sessionId: REVIEWER_SESSION },
     ],
   );

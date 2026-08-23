@@ -147,13 +147,17 @@ repository, task, complete current changes, clarifications, instructions,
 relevant skills including `finalization`, tests, and useful Git history. They
 must not see each other's interpretation before both summaries exist. A source
 session supplied with `--fork-from` is forked directly and independently for
-the first Worker and Reviewer contexts; the Arbiter remains fresh.
+the first eligible turn of each Worker and Reviewer checkpoint; the Arbiter
+remains fresh.
 
 Each direct child session is persisted with a key over its accepted inputs and
-role context. First, forked, fresh, and context-invalidated turns receive the
-complete durable request. Compatible continuations receive only the current
-instruction and state delta while retaining the complete request for adapter
-recovery after unavailable continuation or failed compaction.
+pipeline-owned role checkpoint. Clarification, bootstrap, Worker work, and
+Reviewer work are distinct checkpoints. Reconciliation may continue the Worker
+bootstrap session, but polishing and review never continue bootstrap sessions.
+First, forked, fresh, and context-invalidated turns receive the complete durable
+request. Compatible continuations receive only the current instruction and
+state delta while retaining the complete request for adapter recovery after
+unavailable continuation or failed compaction.
 
 The pipeline stores concise summaries as external run artifacts:
 
@@ -191,12 +195,14 @@ behavior follows the remaining sections of this specification.
 
 ### Polish
 
-The Worker receives workspace-write access and the resolved context. It brings
-the whole existing change set to a correct, idiomatic, minimal result, follows
-the task and project conventions, and performs a concise self-review. It may
-add or remove content when correctness requires it. It must not create a commit,
-change `HEAD` or refs, reconfigure remotes or Git identity, or perform a remote
-write.
+The Worker starts a fresh work checkpoint with the validated inputs, current
+change-set fingerprint, resolved context, active blockers, and bounded decision
+history. It receives workspace-write access and brings the whole existing
+change set to a correct, idiomatic, minimal result, follows the task and project
+conventions, and performs a concise self-review. Finalization and finding fixes
+reuse this checkpoint. The Worker may add or remove content when correctness
+requires it. It must not create a commit, change `HEAD` or refs, reconfigure
+remotes or Git identity, or perform a remote write.
 
 ### Finalize
 
@@ -216,8 +222,9 @@ finalization pauses.
 
 After finalization passes, an independent read-only Reviewer checks the task,
 resolved context, entire current diff, tests, architecture, edge cases,
-minimality, and conventions. Findings use stable `R`-prefixed IDs and remain
-blocking.
+minimality, and conventions. Its first review starts a separate work checkpoint
+seeded from the same durable evidence; re-review and dispute reconsideration
+reuse it. Findings use stable `R`-prefixed IDs and remain blocking.
 
 The Worker resolves all current blockers in one batch by `FIX` or evidence-based
 `DISPUTE`. Fixes rerun complete finalization and review. The Reviewer reconsiders

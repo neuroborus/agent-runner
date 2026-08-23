@@ -146,8 +146,11 @@ function durableContext(evidence, recoveryContext) {
     : `${evidence}\n\n${recoveryContext}`;
 }
 
-function contextKeyFor(role, context) {
-  return sha256(`${role}\0${context}`);
+function contextKeyFor(role, checkpoint, context) {
+  if (typeof checkpoint !== "string" || checkpoint.length === 0) {
+    throw workflowError("Plan-execution session checkpoint is invalid.");
+  }
+  return sha256(`${role}\0${checkpoint}\0${context}`);
 }
 
 function canonicalPlan(source) {
@@ -500,7 +503,7 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
     buildPrompt,
     {
       access = "read-only",
-      freshSession = false,
+      checkpoint,
       recoveryContext = "",
     } = {},
   ) {
@@ -523,21 +526,19 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
       evidence.clarification,
     );
     const context = durableContext(evidenceContext, recoveryContext);
-    const contextKey = contextKeyFor(role, evidenceContext);
+    const contextKey = contextKeyFor(role, checkpoint, evidenceContext);
     const latestSession = [...currentRun.sessionLineage.children]
       .reverse()
       .find((child) => child.role === role);
     const previousSession =
-      !freshSession && latestSession?.contextKey === contextKey
+      role !== "arbiter" && latestSession?.contextKey === contextKey
         ? latestSession.sessionId
         : undefined;
     const sourceSession = currentRun.sessionLineage.source;
     const session =
       previousSession !== undefined
         ? { id: previousSession, mode: "continue" }
-        : sourceSession !== null &&
-            role !== "arbiter" &&
-            (latestSession === undefined || freshSession)
+        : sourceSession !== null && role !== "arbiter"
           ? { id: sourceSession, mode: "fork" }
           : undefined;
     const roleConfiguration = currentRun.roles[role];
@@ -1102,9 +1103,6 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
   }
 
   async function bootstrapRole(role) {
-    const restartIndependentBootstrap = currentRun.sessionLineage.children.some(
-      (child) => child.role === "reviewer",
-    );
     const output = await runRole(
       role,
       BOOTSTRAP_SCHEMA,
@@ -1117,7 +1115,7 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
 ${evidence}`,
-      { freshSession: restartIndependentBootstrap },
+      { checkpoint: "bootstrap" },
     );
     if (output === null) {
       return false;
@@ -1160,6 +1158,7 @@ ${state().workerSummary}
 
 Reviewer bootstrap summary:
 ${state().reviewerSummary}`,
+      { checkpoint: "bootstrap" },
     );
     if (output === null) {
       return false;
@@ -1224,7 +1223,7 @@ ${state().reviewerSummary}
 
 Recorded disagreement:
 ${JSON.stringify(state().bootstrapDisagreement, null, 2)}`,
-      { freshSession: true },
+      { checkpoint: "arbitration" },
     );
     if (output === null) {
       return false;
@@ -1387,11 +1386,7 @@ ${JSON.stringify(state().bootstrapDisagreement, null, 2)}`,
 
 Use BLOCKED only for an external environment blocker.
 
-${evidence}${
-        current.bootstrapArbitrationUsed && !correction
-          ? `\n\n${resolvedContext()}`
-          : ""
-      }
+${evidence}
 
 Current planned commit:
 ## Commit ${step.number}: ${step.subject}
@@ -1412,10 +1407,8 @@ ${step.body}${
       }`,
       {
         access: "workspace-write",
-        recoveryContext:
-          current.bootstrapArbitrationUsed && !correction
-            ? ""
-            : resolvedContext(),
+        checkpoint: `commit:${current.currentStep}`,
+        recoveryContext: resolvedContext(),
       },
     );
     if (output === null) {
@@ -1483,6 +1476,7 @@ ${step.body}
 `,
       {
         access: "workspace-write",
+        checkpoint: `commit:${state().currentStep}`,
         recoveryContext: resolvedContext(),
       },
     );
@@ -1583,10 +1577,6 @@ ${step.body}
       throw workflowError("Finalized content changed before review.");
     }
     const step = planStep();
-    const freshSession =
-      current.currentStep > 1 && current.reviewerStep !== current.currentStep;
-    const needsResolvedContext =
-      current.currentStep === 1 && current.reviewerStep === null;
     const output = await runRole(
       "reviewer",
       REVIEW_SCHEMA,
@@ -1594,7 +1584,7 @@ ${step.body}
 
 Reuse an existing ID for an unchanged finding. Use FINDINGS with every actionable blocker.
 
-${evidence}${needsResolvedContext ? `\n\n${resolvedContext()}` : ""}
+${evidence}
 
 Current planned commit:
 ## Commit ${step.number}: ${step.subject}
@@ -1614,8 +1604,8 @@ ${JSON.stringify(current.previousFindings, null, 2)}${
 Prior decisions for this step:
 ${JSON.stringify(priorFindingDecisions(), null, 2)}`,
       {
-        freshSession,
-        recoveryContext: needsResolvedContext ? "" : resolvedContext(),
+        checkpoint: `commit:${current.currentStep}`,
+        recoveryContext: resolvedContext(),
       },
     );
     if (output === null) {
@@ -1725,7 +1715,10 @@ ${JSON.stringify(disputedFindings, null, 2)}
 
 Worker disputes:
 ${JSON.stringify(current.pendingDisputes, null, 2)}`,
-      { recoveryContext: resolvedContext() },
+      {
+        checkpoint: `commit:${current.currentStep}`,
+        recoveryContext: resolvedContext(),
+      },
     );
     if (output === null) {
       return false;
@@ -1817,7 +1810,10 @@ ${JSON.stringify(reviewerResponse, null, 2)}
 
 Prior decisions for this finding:
 ${JSON.stringify(priorFindingDecisions([dispute.findingId]), null, 2)}`,
-      { freshSession: true, recoveryContext: resolvedContext() },
+      {
+        checkpoint: "arbitration",
+        recoveryContext: resolvedContext(),
+      },
     );
     if (output === null) {
       return false;
@@ -1888,7 +1884,10 @@ ${JSON.stringify(
   null,
   2,
 )}`,
-      { freshSession: true, recoveryContext: resolvedContext() },
+      {
+        checkpoint: "arbitration",
+        recoveryContext: resolvedContext(),
+      },
     );
     if (output === null) {
       return false;
@@ -2085,6 +2084,7 @@ ${JSON.stringify(
 )}`,
       {
         access: budgetExhausted ? "read-only" : "workspace-write",
+        checkpoint: `commit:${current.currentStep}`,
         recoveryContext: resolvedContext(),
       },
     );
@@ -2544,6 +2544,7 @@ ${step.subject}`,
           (evidence) => `${PLAN_COMPATIBILITY_INSTRUCTIONS}
 
 ${evidence}`,
+          { checkpoint: "compatibility" },
         );
         if (output === null) {
           return currentRun;
@@ -2605,6 +2606,7 @@ ${evidence}`,
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
 ${evidence}`,
+          { checkpoint: "clarification" },
         );
         if (output === null) {
           return currentRun;

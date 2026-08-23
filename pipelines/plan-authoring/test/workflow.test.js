@@ -525,25 +525,29 @@ test("writes one validated plan through independent source-session forks", async
   assert.equal(await readFile(fixture.planPath, "utf8"), PLAN);
   assert.deepEqual(
     result.sessionLineage.children.map(({ role }) => role),
-    ["planner", "reviewer"],
+    ["planner", "planner", "reviewer"],
   );
   assert.deepEqual(fixture.calls.planner[0].session, {
     id: SOURCE_SESSION,
     mode: "fork",
   });
   assert.deepEqual(fixture.calls.planner[1].session, {
-    id: ROLE_SESSIONS.planner,
-    mode: "continue",
+    id: SOURCE_SESSION,
+    mode: "fork",
   });
   assert.match(fixture.calls.planner[0].prompt, /Task \(/u);
   assert.equal(
     fixture.calls.planner[0].recoveryPrompt,
     fixture.calls.planner[0].prompt,
   );
-  for (const heading of [/Task \(/u, /Context \(/u, /Clarifications \(/u]) {
-    assert.doesNotMatch(fixture.calls.planner[1].prompt, heading);
-    assert.match(fixture.calls.planner[1].recoveryPrompt, heading);
-  }
+  assert.equal(
+    fixture.calls.planner[1].recoveryPrompt,
+    fixture.calls.planner[1].prompt,
+  );
+  assert.notEqual(
+    result.sessionLineage.children[0].contextKey,
+    result.sessionLineage.children[1].contextKey,
+  );
   assert.deepEqual(fixture.calls.reviewer[0].session, {
     id: SOURCE_SESSION,
     mode: "fork",
@@ -924,6 +928,14 @@ test("invalid deterministic plans return to the Planner", async (t) => {
   assert.equal(result.counters.revisionRounds, 1);
   assert.equal(result.counters.correctionRounds, 0);
   assert.match(fixture.calls.planner[2].prompt, /must contain at least one/u);
+  assert.deepEqual(fixture.calls.planner[2].session, {
+    id: fixture.currentRun.sessionLineage.children[1].sessionId,
+    mode: "continue",
+  });
+  for (const heading of [/Task \(/u, /Context \(/u, /Clarifications \(/u]) {
+    assert.doesNotMatch(fixture.calls.planner[2].prompt, heading);
+    assert.match(fixture.calls.planner[2].recoveryPrompt, heading);
+  }
 });
 
 test("rejects reviewer finding IDs that are not kebab-case", async (t) => {
@@ -984,6 +996,16 @@ test("routes product decisions through the transcript and invalidates inputs", a
 
   assert.equal(completed.pipelineState.workflowState, "DONE");
   assert.equal(fixture.calls.planner.length, 3);
+  assert.equal(fixture.calls.planner[2].session, undefined);
+  assert.equal(
+    fixture.calls.planner[2].prompt,
+    fixture.calls.planner[2].recoveryPrompt,
+  );
+  const planningKeys = completed.sessionLineage.children
+    .filter(({ role }) => role === "planner")
+    .slice(-2)
+    .map(({ contextKey }) => contextKey);
+  assert.notEqual(planningKeys[0], planningKeys[1]);
 });
 
 test("rejects product decisions that exceed the transcript contract", async (t) => {
@@ -1088,7 +1110,7 @@ test("records finding churn and invokes one fresh stagnation Arbiter", async (t)
   );
 });
 
-test("continues a recorded Arbiter after an interrupted result transition", async (t) => {
+test("restarts the Arbiter after an interrupted result transition", async (t) => {
   const fixture = await createFixture(t, {
     planner: [
       ready(),
@@ -1123,10 +1145,11 @@ test("continues a recorded Arbiter after an interrupted result transition", asyn
   const result = await fixture.run({ stagnationWindowRounds: 2 });
 
   assert.equal(result.pause.reason, "product_decision_required");
-  assert.deepEqual(fixture.calls.arbiter[1].session, {
-    id: ROLE_SESSIONS.arbiter,
-    mode: "continue",
-  });
+  assert.equal(fixture.calls.arbiter[1].session, undefined);
+  assert.notEqual(
+    result.sessionLineage.children.at(-2).sessionId,
+    result.sessionLineage.children.at(-1).sessionId,
+  );
 });
 
 test("routes applicable finding reconsideration back to the Reviewer", async (t) => {

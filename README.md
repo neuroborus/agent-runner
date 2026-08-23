@@ -182,16 +182,17 @@ agent-run run plan-execution \
   --fork-from codex:<session-id>
 ```
 
-The primary and review backends must match the source backend. Their first
-turns fork the source independently: Planner and Plan Reviewer for authoring,
-or Worker and Reviewer for execution and polishing. The source may
-intentionally contain context shared before the fork, but its children are
-direct siblings and do not share later turns. The source is never resumed in
-place, and every arbitration uses a fresh Arbiter that is not constrained by
-the source backend. The runner persists the resolved source reference and child
-lineage, so recovery uses durable run state and `resume` needs no source flag.
-An unavailable or backend-incompatible source fails instead of falling back to
-a fresh session.
+The primary and review backends must match the source backend. The first
+eligible turn in each pipeline-owned primary or review checkpoint forks the
+source independently. Checkpoints separate clarification, bootstrap, and work;
+plan execution also isolates every commit's Worker and Reviewer contexts. The
+source may intentionally contain context shared before the fork, but its
+children are direct siblings and do not share later turns. The source is never
+resumed in place, and every arbitration uses a fresh Arbiter that is not
+constrained by the source backend. The runner persists the resolved source
+reference and child lineage, so recovery uses durable run state and `resume`
+needs no source flag. An unavailable or backend-incompatible source fails
+instead of falling back to a fresh session.
 
 Add `--clarify` to any `run` command to open `$VISUAL` or `$EDITOR` before
 the primary agent checks whether more information is needed. Without the flag,

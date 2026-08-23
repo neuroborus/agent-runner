@@ -707,16 +707,16 @@ test("executes every planned commit across backend configurations", async (t) =>
           call.prompt.includes("Review the changes and verify"),
         );
         assert.equal(stepReviews.length, 2);
-        assert.equal(stepReviews[0].session?.mode, "continue");
-        assert.notEqual(stepReviews[0].session?.id, scenario.source);
-        assert.deepEqual(stepReviews[1].session, {
-          mode: "fork",
-          id: scenario.source,
-        });
+        assert.ok(
+          stepReviews.every(
+            ({ session }) =>
+              session?.mode === "fork" && session.id === scenario.source,
+          ),
+        );
         assert.equal(
           run.sessionLineage.children.filter(({ role }) => role === "reviewer")
             .length,
-          2,
+          3,
         );
       }
       if (scenario.bootstrapDisagreement) {

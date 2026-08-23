@@ -994,15 +994,15 @@ test("clarifies and bootstraps through independent source-session forks", async 
   assert.equal(fixture.preflights[1].requireIdentity, true);
   assert.deepEqual(
     result.sessionLineage.children.map(({ role }) => role),
-    ["worker", "reviewer"],
+    ["worker", "worker", "reviewer", "worker", "reviewer"],
   );
   assert.deepEqual(fixture.calls.worker[0].session, {
     mode: "fork",
     id: SOURCE_SESSION,
   });
   assert.deepEqual(fixture.calls.worker[1].session, {
-    mode: "continue",
-    id: ROLE_SESSIONS.worker,
+    mode: "fork",
+    id: SOURCE_SESSION,
   });
   for (const heading of [
     /Task \(/u,
@@ -1011,10 +1011,23 @@ test("clarifies and bootstraps through independent source-session forks", async 
     /Context \(/u,
     /Execution clarifications \(/u,
   ]) {
-    assert.doesNotMatch(fixture.calls.worker[1].prompt, heading);
-    assert.match(fixture.calls.worker[1].recoveryPrompt, heading);
+    assert.match(fixture.calls.worker[1].prompt, heading);
+    assert.match(fixture.calls.worker[2].recoveryPrompt, heading);
+    assert.doesNotMatch(fixture.calls.worker[2].prompt, heading);
   }
+  assert.deepEqual(fixture.calls.worker[2].session, {
+    mode: "continue",
+    id: result.sessionLineage.children[1].sessionId,
+  });
   assert.deepEqual(fixture.calls.reviewer[0].session, {
+    mode: "fork",
+    id: SOURCE_SESSION,
+  });
+  assert.deepEqual(fixture.calls.worker[3].session, {
+    mode: "fork",
+    id: SOURCE_SESSION,
+  });
+  assert.deepEqual(fixture.calls.reviewer[1].session, {
     mode: "fork",
     id: SOURCE_SESSION,
   });
@@ -1034,13 +1047,30 @@ test("clarifies and bootstraps through independent source-session forks", async 
     prompt.includes("Locate and validate the project's finalization skill"),
   );
   assert.ok(finalizationCall);
+  assert.deepEqual(finalizationCall.session, {
+    mode: "continue",
+    id: result.sessionLineage.children[3].sessionId,
+  });
   assert.doesNotMatch(finalizationCall.prompt, /Resolved bootstrap context:/u);
   assert.match(finalizationCall.recoveryPrompt, /Resolved bootstrap context:/u);
+  assert.match(fixture.calls.reviewer[1].prompt, /Resolved bootstrap context:/u);
+  assert.equal(
+    fixture.calls.reviewer[1].prompt,
+    fixture.calls.reviewer[1].recoveryPrompt,
+  );
   assert.equal(fixture.calls.worker[0].model, "worker-model");
   assert.equal(fixture.calls.reviewer[0].model, "reviewer-model");
   for (const child of result.sessionLineage.children) {
     assert.match(child.contextKey, /^[a-f0-9]{64}$/u);
   }
+  const workerKeys = result.sessionLineage.children
+    .filter(({ role }) => role === "worker")
+    .map(({ contextKey }) => contextKey);
+  const reviewerKeys = result.sessionLineage.children
+    .filter(({ role }) => role === "reviewer")
+    .map(({ contextKey }) => contextKey);
+  assert.equal(new Set(workerKeys).size, 3);
+  assert.equal(new Set(reviewerKeys).size, 2);
   for (const call of [...fixture.calls.worker, ...fixture.calls.reviewer]) {
     assertStrictSchema(call.schema);
   }
@@ -1073,10 +1103,11 @@ test("accepts an unchanged proactive clarification and uses fresh role sessions"
   assert.equal(result.pipelineState.proactiveClarificationComplete, true);
   assert.equal(await readFile(fixture.clarificationPath, "utf8"), "");
   assert.equal(fixture.calls.worker[0].session, undefined);
-  assert.deepEqual(fixture.calls.worker[1].session, {
-    mode: "continue",
-    id: ROLE_SESSIONS.worker,
-  });
+  assert.equal(fixture.calls.worker[1].session, undefined);
+  assert.notEqual(
+    result.sessionLineage.children[0].contextKey,
+    result.sessionLineage.children[1].contextKey,
+  );
   assert.equal(fixture.calls.reviewer[0].session, undefined);
   assert.equal(result.counters.clarificationRounds, 0);
 });
@@ -1408,7 +1439,7 @@ test("uses a fresh Arbiter only for a recorded bootstrap disagreement", async (t
   );
   assert.deepEqual(
     result.sessionLineage.children.map(({ role }) => role),
-    ["worker", "reviewer", "arbiter"],
+    ["worker", "worker", "reviewer", "arbiter", "worker", "reviewer"],
   );
 });
 
@@ -1418,13 +1449,8 @@ test("starts a fresh Arbiter for a new bootstrap dispute", async (t) => {
     arbiter: [arbitrationProductDecision(), arbitrationResolved()],
     reviewer: [bootstrapReady("Reviewer"), bootstrapReady("Reviewer")],
     sessionIds: {
+      ...ROLE_SESSIONS,
       arbiter: [ROLE_SESSIONS.arbiter, secondArbiterSession],
-      reviewer: [ROLE_SESSIONS.reviewer, RESTARTED_ROLE_SESSIONS.reviewer],
-      worker: [
-        ROLE_SESSIONS.worker,
-        RESTARTED_ROLE_SESSIONS.worker,
-        REBOOTSTRAPPED_WORKER_SESSION,
-      ],
     },
     worker: [
       clarificationReady(),
@@ -1501,15 +1527,6 @@ test("checks plan compatibility after a bootstrap product decision", async (t) =
 test("restarts independent bootstrap after a reconciliation product decision", async (t) => {
   const fixture = await createFixture(t, {
     reviewer: [bootstrapReady("Reviewer"), bootstrapReady("Reviewer")],
-    sessionIds: {
-      arbiter: ROLE_SESSIONS.arbiter,
-      reviewer: [ROLE_SESSIONS.reviewer, RESTARTED_ROLE_SESSIONS.reviewer],
-      worker: [
-        ROLE_SESSIONS.worker,
-        RESTARTED_ROLE_SESSIONS.worker,
-        REBOOTSTRAPPED_WORKER_SESSION,
-      ],
-    },
     sourceSession: SOURCE_SESSION,
     worker: [
       clarificationReady(),
@@ -1541,7 +1558,9 @@ test("restarts independent bootstrap after a reconciliation product decision", a
   });
   assert.deepEqual(fixture.calls.worker[5].session, {
     mode: "continue",
-    id: REBOOTSTRAPPED_WORKER_SESSION,
+    id: resumed.sessionLineage.children.filter(
+      ({ role }) => role === "worker",
+    )[3].sessionId,
   });
 });
 
@@ -1831,7 +1850,12 @@ test("rejects a fresh role turn that reuses its previous session", async (t) => 
   const fixture = await createFixture(t, {
     sessionIds: {
       ...ROLE_SESSIONS,
-      worker: [ROLE_SESSIONS.worker, ROLE_SESSIONS.worker],
+      worker: [
+        ROLE_SESSIONS.worker,
+        RESTARTED_ROLE_SESSIONS.worker,
+        REBOOTSTRAPPED_WORKER_SESSION,
+        REBOOTSTRAPPED_WORKER_SESSION,
+      ],
     },
     worker: [
       clarificationReady(),
@@ -1938,10 +1962,6 @@ Implement the second behavior.`;
   const fixture = await createFixture(t, {
     plan,
     sourceSession: SOURCE_SESSION,
-    sessionIds: {
-      ...ROLE_SESSIONS,
-      reviewer: [ROLE_SESSIONS.reviewer, RESTARTED_ROLE_SESSIONS.reviewer],
-    },
     workReviewer: [reviewApproved(), reviewApproved()],
     workWorker: [
       implementationCompleted(),
@@ -1973,6 +1993,28 @@ Implement the second behavior.`;
       .map(({ commit }) => commit.message),
     ["feat(test): add first behavior", "fix(test): add second behavior"],
   );
+  const implementationCalls = fixture.calls.worker.filter(({ prompt }) =>
+    prompt.includes("Implement the changes described"),
+  );
+  const reviewCalls = fixture.calls.reviewer.filter(({ prompt }) =>
+    prompt.includes("Review the changes and verify"),
+  );
+  assert.equal(implementationCalls.length, 2);
+  assert.equal(reviewCalls.length, 2);
+  for (const request of [...implementationCalls, ...reviewCalls]) {
+    assert.deepEqual(request.session, { mode: "fork", id: SOURCE_SESSION });
+    assert.equal(request.prompt, request.recoveryPrompt);
+  }
+  const workerCheckpointKeys = result.sessionLineage.children
+    .filter(({ role }) => role === "worker")
+    .slice(-2)
+    .map(({ contextKey }) => contextKey);
+  const reviewerCheckpointKeys = result.sessionLineage.children
+    .filter(({ role }) => role === "reviewer")
+    .slice(-2)
+    .map(({ contextKey }) => contextKey);
+  assert.notEqual(workerCheckpointKeys[0], workerCheckpointKeys[1]);
+  assert.notEqual(reviewerCheckpointKeys[0], reviewerCheckpointKeys[1]);
   assert.deepEqual(fixture.calls.reviewer.at(-1).session, {
     mode: "fork",
     id: SOURCE_SESSION,
@@ -2881,6 +2923,9 @@ test("checks plan compatibility after a post-start product decision", async (t) 
   assert.equal(paused.pipelineState.pendingEdit.suspendedState, "IMPLEMENT");
   assert.equal(paused.pipelineState.currentStep, 1);
   assert.notEqual(paused.pipelineState.resolvedSummary, null);
+  const initialImplementationKey = paused.sessionLineage.children
+    .filter(({ role }) => role === "worker")
+    .at(-1).contextKey;
   await writeFile(
     fixture.clarificationPath,
     `${await readFile(fixture.clarificationPath, "utf8")}Behavior A.\n`,
@@ -2891,6 +2936,18 @@ test("checks plan compatibility after a post-start product decision", async (t) 
   assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(result.counters.productDecisions, 1);
   assert.match(fixture.calls.worker[4].prompt, /Review the updated clarifications/u);
+  const resumedImplementation = fixture.calls.worker
+    .filter(({ prompt }) => prompt.includes("Implement the changes described"))
+    .at(-1);
+  assert.equal(resumedImplementation.session, undefined);
+  assert.equal(
+    resumedImplementation.prompt,
+    resumedImplementation.recoveryPrompt,
+  );
+  const resumedImplementationKey = result.sessionLineage.children
+    .filter(({ role }) => role === "worker")
+    .at(-1).contextKey;
+  assert.notEqual(initialImplementationKey, resumedImplementationKey);
 });
 
 test("preserves previous findings across a review product decision", async (t) => {

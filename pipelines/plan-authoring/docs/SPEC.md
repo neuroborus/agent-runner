@@ -48,8 +48,9 @@ pipeline owns only its roles, setting validation, and defaults.
 CLI overrides use `--planner`, `--reviewer`, and `--arbiter`, with corresponding
 `--planner-model`, `--reviewer-model`, and `--arbiter-model` flags. A new run may
 also use `--fork-from <backend>:<session-id>` when Planner and Plan Reviewer both
-use that backend. Their first turns fork the source independently; the Arbiter
-remains fresh and `resume` uses the persisted lineage without another flag.
+use that backend. Each role's first eligible turn in a pipeline-owned checkpoint
+forks the source independently; the Arbiter remains fresh and `resume` uses the
+persisted lineage without another flag.
 
 ## Persistent Run State
 
@@ -59,8 +60,8 @@ directories using the common contract in
 records canonical inputs, resolved Planner, Reviewer, and Arbiter configuration,
 resolved pipeline settings, the initial repository baseline, hashes, revision
 and clarification counters, pause state, optional source-session reference,
-direct child role/session IDs with accepted-input context keys, and opaque
-plan-authoring state.
+direct child role/session IDs with accepted-input and pipeline-checkpoint
+context keys, and opaque plan-authoring state.
 Drafts, findings, correction-round snapshots, and stagnation evidence remain
 pipeline-owned structured data in the external run state rather than task
 artifacts.
@@ -180,12 +181,14 @@ Unrecoverable internal failure              → FAILED
 ```
 
 The Planner and Plan Reviewer study the finalized inputs, repository
-instructions, relevant architecture, tests, and Git history independently. If
-a compatible source session was supplied, their first turns are separate direct
-forks of that source and only the returned child IDs are persisted. Neither role
-ever continues the source in place or forks from the other role. The on-demand
-Arbiter always starts fresh. The Reviewer checks scope, ordering, atomic commit
-boundaries, dependencies, acceptance criteria, and commit-subject validity.
+instructions, relevant architecture, tests, and Git history independently.
+Planner clarification and planning are separate checkpoints; correction turns
+reuse the planning checkpoint. If a compatible source session was supplied,
+the first eligible turn of each checkpoint forks it directly and only the
+returned child IDs are persisted. Neither role ever continues the source in
+place or forks from the other role. Every on-demand Arbiter turn starts fresh.
+The Reviewer checks scope, ordering, atomic commit boundaries, dependencies,
+acceptance criteria, and commit-subject validity.
 
 Keep role prompts short. Their mandatory English cores are:
 
@@ -209,6 +212,9 @@ First, forked, fresh, and context-invalidated turns receive that complete
 durable context. A compatible role continuation receives only its current
 instruction and state delta; the complete prompt remains attached for adapter
 recovery after unavailable continuation or failed compaction.
+The planning checkpoint is seeded from the validated inputs and its current
+draft, blockers, and bounded correction history. A product-decision edit
+invalidates it before planning resumes.
 The Reviewer returns structured actionable findings instead of editing the
 draft. When findings exist, the pipeline sends them to the Planner together
 with the finding-resolution core. The Planner returns a revised draft, and the
