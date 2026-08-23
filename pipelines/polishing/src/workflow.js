@@ -559,7 +559,6 @@ export async function runPolishing({ action, run, runtime, settings }) {
       ].some((field) => baseline[field] !== nextRepositoryBaseline[field]);
       if (workspaceChanged) {
         const current = state();
-        const changedDuringFailure = agentError !== undefined;
         const contentChangingCorrection =
           contentChanged && current.workflowState === "RESOLVE_FINDINGS";
         await transition(
@@ -582,7 +581,7 @@ export async function runPolishing({ action, run, runtime, settings }) {
             : {
                 ...current,
                 repositoryBaseline: nextRepositoryBaseline,
-                ...(changedDuringFailure && contentChanged
+                ...(contentChanged
                   ? {
                       finalizationResult: null,
                       finalizedFingerprint: null,

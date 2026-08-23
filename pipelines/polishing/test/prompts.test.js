@@ -28,12 +28,48 @@ import {
   REVIEW_SCHEMA,
   STAGNATION_SCHEMA,
 } from "../src/schemas.js";
+import {
+  MAX_ITEMS,
+  MAX_OPTIONS,
+  MAX_SUMMARY_LENGTH,
+  MAX_TEXT_LENGTH,
+} from "../src/workflow-contract.js";
 
 function assertStrictSchema(schema) {
   assert.equal(schema.type, "object");
   assert.equal(schema.additionalProperties, false);
   assert.deepEqual([...schema.required].sort(), Object.keys(schema.properties).sort());
   assert.ok(Object.isFrozen(schema));
+}
+
+function assertSchemaBounds(schema, propertyName = null) {
+  if (schema.type === "object") {
+    assertStrictSchema(schema);
+    for (const [name, property] of Object.entries(schema.properties)) {
+      assertSchemaBounds(property, name);
+    }
+    return;
+  }
+  if (schema.type === "array") {
+    assert.equal(
+      schema.maxItems,
+      propertyName === "options" ? MAX_OPTIONS : MAX_ITEMS,
+      `${propertyName} must have the deterministic collection bound`,
+    );
+    assertSchemaBounds(schema.items, propertyName);
+    return;
+  }
+  if (
+    schema.type === "string" &&
+    schema.enum === undefined &&
+    schema.pattern === undefined
+  ) {
+    assert.equal(
+      schema.maxLength,
+      propertyName === "summary" ? MAX_SUMMARY_LENGTH : MAX_TEXT_LENGTH,
+      `${propertyName} must have the deterministic text bound`,
+    );
+  }
 }
 
 test("polishing prompts preserve role and product-decision boundaries", () => {
@@ -57,7 +93,7 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
   assert.match(STAGNATION_INSTRUCTIONS, /cannot approve/u);
 });
 
-test("polishing schemas are strict and deeply frozen", () => {
+test("polishing schemas are strict, bounded, and deeply frozen", () => {
   for (const schema of [
     CLARIFICATION_SCHEMA,
     BOOTSTRAP_SCHEMA,
@@ -71,7 +107,6 @@ test("polishing schemas are strict and deeply frozen", () => {
     FINDING_ARBITRATION_SCHEMA,
     STAGNATION_SCHEMA,
   ]) {
-    assertStrictSchema(schema);
+    assertSchemaBounds(schema);
   }
-  assert.equal(CLARIFICATION_SCHEMA.properties.questions.items.additionalProperties, false);
 });

@@ -1,3 +1,10 @@
+import {
+  MAX_ITEMS,
+  MAX_OPTIONS,
+  MAX_SUMMARY_LENGTH,
+  MAX_TEXT_LENGTH,
+} from "./workflow-contract.js";
+
 function deepFreeze(value) {
   if (value === null || typeof value !== "object" || Object.isFrozen(value)) {
     return value;
@@ -9,8 +16,10 @@ function deepFreeze(value) {
   return value;
 }
 
-const TEXT = { type: "string" };
-const TEXT_LIST = { type: "array", items: TEXT };
+const TEXT = { type: "string", maxLength: MAX_TEXT_LENGTH };
+const SUMMARY = { type: "string", maxLength: MAX_SUMMARY_LENGTH };
+const TEXT_LIST = { type: "array", maxItems: MAX_ITEMS, items: TEXT };
+const OPTION_LIST = { type: "array", maxItems: MAX_OPTIONS, items: TEXT };
 const QUESTION = {
   type: "object",
   properties: {
@@ -22,7 +31,7 @@ const QUESTION = {
 };
 const DECISION_PROPERTIES = {
   question: TEXT,
-  options: TEXT_LIST,
+  options: OPTION_LIST,
   whyBlocked: TEXT,
   evidence: TEXT_LIST,
 };
@@ -57,7 +66,7 @@ export const CLARIFICATION_SCHEMA = deepFreeze({
       type: "string",
       enum: ["READY", "QUESTIONS", "PRODUCT_DECISION_REQUIRED"],
     },
-    questions: { type: "array", items: QUESTION },
+    questions: { type: "array", maxItems: MAX_ITEMS, items: QUESTION },
     reason: TEXT,
     ...DECISION_PROPERTIES,
   },
@@ -80,7 +89,7 @@ export const BOOTSTRAP_SCHEMA = deepFreeze({
       type: "string",
       enum: ["READY", "PRODUCT_DECISION_REQUIRED"],
     },
-    summary: TEXT,
+    summary: SUMMARY,
     reason: TEXT,
     ...DECISION_PROPERTIES,
   },
@@ -103,7 +112,7 @@ export const BOOTSTRAP_RECONCILIATION_SCHEMA = deepFreeze({
       type: "string",
       enum: ["RESOLVED", "DISAGREEMENT", "PRODUCT_DECISION_REQUIRED"],
     },
-    summary: TEXT,
+    summary: SUMMARY,
     disagreement: TEXT,
     reason: TEXT,
     ...DECISION_PROPERTIES,
@@ -133,7 +142,7 @@ export const BOOTSTRAP_ARBITRATION_SCHEMA = deepFreeze({
         "PRODUCT_DECISION_REQUIRED",
       ],
     },
-    summary: TEXT,
+    summary: SUMMARY,
     rationale: TEXT,
     reason: TEXT,
     ...DECISION_PROPERTIES,
@@ -158,7 +167,7 @@ export const POLISH_SCHEMA = deepFreeze({
       type: "string",
       enum: ["COMPLETED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"],
     },
-    summary: TEXT,
+    summary: SUMMARY,
     reason: TEXT,
     ...DECISION_PROPERTIES,
   },
@@ -189,8 +198,8 @@ export const FINALIZATION_SCHEMA = deepFreeze({
       ],
     },
     skillPath: TEXT,
-    summary: TEXT,
-    issues: { type: "array", items: FINALIZATION_ISSUE },
+    summary: SUMMARY,
+    issues: { type: "array", maxItems: MAX_ITEMS, items: FINALIZATION_ISSUE },
     reason: TEXT,
     ...DECISION_PROPERTIES,
   },
@@ -215,7 +224,7 @@ export const REVIEW_SCHEMA = deepFreeze({
       type: "string",
       enum: ["APPROVED", "FINDINGS", "PRODUCT_DECISION_REQUIRED"],
     },
-    findings: { type: "array", items: REVIEW_FINDING },
+    findings: { type: "array", maxItems: MAX_ITEMS, items: REVIEW_FINDING },
     ...DECISION_PROPERTIES,
   },
   required: [
@@ -238,6 +247,7 @@ export const FINDING_RESOLUTION_SCHEMA = deepFreeze({
     },
     decisions: {
       type: "array",
+      maxItems: MAX_ITEMS,
       items: {
         type: "object",
         properties: {
@@ -272,6 +282,7 @@ export const DISPUTE_RECONSIDERATION_SCHEMA = deepFreeze({
     },
     decisions: {
       type: "array",
+      maxItems: MAX_ITEMS,
       items: {
         type: "object",
         properties: {
@@ -333,6 +344,7 @@ export const STAGNATION_SCHEMA = deepFreeze({
     rationale: TEXT,
     findingIds: {
       type: "array",
+      maxItems: MAX_ITEMS,
       items: { type: "string", pattern: "^R[1-9][0-9]{0,8}$" },
     },
     ...DECISION_PROPERTIES,

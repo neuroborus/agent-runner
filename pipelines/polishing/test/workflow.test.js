@@ -123,6 +123,20 @@ function polishingCompleted() {
   };
 }
 
+function polishingBlocked() {
+  return {
+    status: "BLOCKED",
+    summary: "",
+    reason: "The required local compiler is temporarily unavailable.",
+    question: "",
+    options: [],
+    whyBlocked: "",
+    evidence: [
+      "The compiler executable returned a transient availability error.",
+    ],
+  };
+}
+
 function finalizationPassed() {
   return {
     status: "PASS",
@@ -1448,6 +1462,74 @@ test("persists complete transitions and resumes after recoverable interruption",
 
   assert.equal(resumed.pipelineState.workflowState, "DONE");
   assert.ok(resumed.revision > recovered.revision);
+});
+
+test("preserves Worker changes when a valid environment blocker pauses polishing", async (t) => {
+  let polishTurns = 0;
+  const fixture = await createFixture(t, {
+    reviewer: [
+      bootstrapReady("Reviewer"),
+      reviewApproved(),
+      reviewApproved(),
+    ],
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationPassed(),
+      polishingBlocked(),
+      polishingCompleted(),
+      finalizationPassed(),
+    ],
+    async onRoleRun(role, request, _turn, { projectPath }) {
+      if (
+        role === "worker" &&
+        /Polish the existing local/u.test(request.prompt)
+      ) {
+        polishTurns += 1;
+        if (polishTurns === 2) {
+          await writeFile(join(projectPath, "tracked.txt"), "safe blocked work\n");
+        }
+      }
+    },
+  });
+
+  const completed = await fixture.run();
+  const staleFingerprint = completed.pipelineState.finalizedFingerprint;
+  await fixture.persistPipelineState({
+    ...completed.pipelineState,
+    workflowState: "POLISH",
+    pendingCorrection: true,
+  });
+
+  const paused = await fixture.run();
+
+  assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(paused.pause.reason, "environment_blocked");
+  assert.equal(paused.pause.resumeState, "POLISH");
+  assert.equal(paused.pipelineState.finalizationResult, null);
+  assert.equal(paused.pipelineState.finalizedFingerprint, null);
+  assert.equal(paused.pipelineState.reviewedFingerprint, null);
+  assert.notEqual(
+    paused.pipelineState.repositoryBaseline.contentFingerprint,
+    staleFingerprint,
+  );
+  assert.equal(
+    await readFile(join(fixture.projectPath, "tracked.txt"), "utf8"),
+    "safe blocked work\n",
+  );
+
+  const recovered = await fixture.recover();
+  assert.equal(recovered.revision, paused.revision);
+  const resumed = await fixture.run();
+
+  assert.equal(resumed.pipelineState.workflowState, "DONE");
+  assert.equal(resumed.pause, null);
+  assert.equal(
+    await readFile(join(fixture.projectPath, "tracked.txt"), "utf8"),
+    "safe blocked work\n",
+  );
 });
 
 test("binds finalization changes and review to one fingerprint without committing", async (t) => {
