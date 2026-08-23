@@ -1,6 +1,6 @@
 import { execFile as executeFileCallback } from "node:child_process";
 import { realpath } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import {
@@ -23,6 +23,9 @@ const SOCAT_BINARY = "socat";
 const MINIMUM_CLAUDE_VERSION = Object.freeze([2, 1, 233]);
 const MAX_ARGUMENT_BYTES = 128 * 1024 - 1;
 const MAX_PROCESS_OUTPUT_BYTES = 64 * 1024 * 1024;
+const DECIMAL_CONTEXT_SIZE_PATTERN = /^[1-9][0-9]*$/u;
+const MINIMUM_CONTEXT_SIZE = 100_000n;
+const MAXIMUM_CONTEXT_SIZE = 1_000_000n;
 const SESSION_ID_PATTERN =
   /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu;
 const REQUIRED_HELP_FLAGS = Object.freeze([
@@ -56,8 +59,6 @@ const BASE_OPTIONS = Object.freeze([
   "json",
   "--prompt-suggestions",
   "false",
-  "--autocompact",
-  "auto",
   "--safe-mode",
   "--no-chrome",
   "--strict-mcp-config",
@@ -138,10 +139,57 @@ export class ClaudeAdapterError extends Error {
   }
 }
 
-const { assertFields, normalizeRequest } = createAdapterContract({
+const {
+  assertFields,
+  normalizeExecutionOptions: normalizeContractExecutionOptions,
+  normalizeRequest: normalizeContractRequest,
+} = createAdapterContract({
   AdapterError: ClaudeAdapterError,
   backendName: "Claude",
 });
+
+function validateExecutionOptions(options) {
+  const resolvedProfile =
+    options.profile === undefined ? undefined : resolve(options.profile);
+  const decimalContextSize =
+    options.contextSize !== undefined &&
+    DECIMAL_CONTEXT_SIZE_PATTERN.test(options.contextSize);
+  const contextSize = decimalContextSize
+    ? BigInt(options.contextSize)
+    : undefined;
+  if (
+    (options.profile !== undefined &&
+      (!isAbsolute(options.profile) ||
+        resolvedProfile !== options.profile ||
+        dirname(resolvedProfile) === resolvedProfile)) ||
+    (options.model?.startsWith("-") ?? false) ||
+    (options.contextSize !== undefined &&
+      (!decimalContextSize ||
+        contextSize < MINIMUM_CONTEXT_SIZE ||
+        contextSize > MAXIMUM_CONTEXT_SIZE))
+  ) {
+    throw new ClaudeAdapterError("Claude execution options are invalid.", {
+      code: "ERR_INVALID_CLAUDE_OPTIONS",
+    });
+  }
+  return options;
+}
+
+function normalizeExecutionOptions(value) {
+  return validateExecutionOptions(normalizeContractExecutionOptions(value));
+}
+
+function normalizeRequest(value) {
+  return validateExecutionOptions(normalizeContractRequest(value));
+}
+
+function executionOptionsFor(request) {
+  return Object.freeze({
+    contextSize: request.contextSize,
+    model: request.model,
+    profile: request.profile,
+  });
+}
 
 function isCredentialEnvironmentName(name) {
   return (
@@ -207,6 +255,16 @@ function isolateProcessEnvironment(value) {
   environment.CLAUDE_CODE_AUTO_CONNECT_IDE = "false";
   environment.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB = "0";
   return Object.freeze(environment);
+}
+
+function executionEnvironment(environment, executionOptions) {
+  if (executionOptions.profile === undefined) {
+    return environment;
+  }
+  return Object.freeze({
+    ...environment,
+    CLAUDE_CONFIG_DIR: executionOptions.profile,
+  });
 }
 
 function parseVersion(value) {
@@ -380,6 +438,9 @@ function commandArguments(
   ];
   if (request.model !== undefined) {
     argumentsList.push("--model", request.model);
+  }
+  if (request.contextSize !== undefined) {
+    argumentsList.push("--autocompact", request.contextSize);
   }
   const schema = outputSchemaFor(request);
   if (schema !== undefined) {
@@ -557,23 +618,27 @@ export function createClaudeAdapter(options = {}) {
       .filter((name) => /^[A-Za-z_][A-Za-z0-9_]*$/u.test(name))
       .sort(),
   );
-  let probePromise;
+  const probePromises = new Map();
 
-  async function inspectCapabilities() {
+  async function inspectCapabilities(executionOptions) {
     let versionResult;
     let helpResult;
     let socatAvailable = false;
+    const selectedEnvironment = executionEnvironment(
+      processEnvironment,
+      executionOptions,
+    );
     try {
       [versionResult, helpResult] = await Promise.all([
         execute(claudeBinary, ["--version"], {
           encoding: "utf8",
-          env: processEnvironment,
+          env: selectedEnvironment,
           maxBuffer: 1024 * 1024,
           timeout: 10_000,
         }),
         execute(claudeBinary, ["--help"], {
           encoding: "utf8",
-          env: processEnvironment,
+          env: selectedEnvironment,
           maxBuffer: 1024 * 1024,
           timeout: 10_000,
         }),
@@ -625,13 +690,17 @@ export function createClaudeAdapter(options = {}) {
     });
   }
 
-  function probe() {
-    probePromise ??= inspectCapabilities();
-    return probePromise;
+  function probe(value) {
+    const executionOptions = normalizeExecutionOptions(value);
+    const key = JSON.stringify(executionOptions);
+    if (!probePromises.has(key)) {
+      probePromises.set(key, inspectCapabilities(executionOptions));
+    }
+    return probePromises.get(key);
   }
 
   async function assertCapabilities(request) {
-    const capabilities = await probe();
+    const capabilities = await probe(executionOptionsFor(request));
     const required = ["remoteWriteBlocked"];
     if (outputSchemaFor(request) !== undefined) {
       required.push("structuredOutput");
@@ -735,7 +804,7 @@ export function createClaudeAdapter(options = {}) {
         {
           cwd: request.cwd,
           encoding: "utf8",
-          env: processEnvironment,
+          env: executionEnvironment(processEnvironment, request),
           input: turnPrompt(request, recovery),
           maxBuffer: MAX_PROCESS_OUTPUT_BYTES,
         },
@@ -825,9 +894,8 @@ export function createClaudeAdapter(options = {}) {
   async function run(value) {
     const request = normalizeRequest(value);
     if (
-      (request.model?.startsWith("-") ?? false) ||
-      (request.session !== undefined &&
-        !SESSION_ID_PATTERN.test(request.session.id))
+      request.session !== undefined &&
+      !SESSION_ID_PATTERN.test(request.session.id)
     ) {
       throw new ClaudeAdapterError("Claude request is invalid.", {
         code: "ERR_INVALID_CLAUDE_OPTIONS",

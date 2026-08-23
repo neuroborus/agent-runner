@@ -270,8 +270,8 @@ test("runs strict read-only turns with isolated tools and an explicit model", as
     JSON.parse(option(turn.argumentsList, "--json-schema")),
     STRICT_SCHEMA,
   );
+  assert.equal(option(turn.argumentsList, "--autocompact"), undefined);
   for (const required of [
-    "--autocompact",
     "--no-chrome",
     "--safe-mode",
     "--strict-mcp-config",
@@ -317,6 +317,86 @@ test("runs strict read-only turns with isolated tools and an explicit model", as
   assert.equal(turn.options.env.GIT_DIR, undefined);
   assert.equal(turn.options.env.NODE_OPTIONS, undefined);
   assert.equal(turn.options.env.OTEL_LOG_USER_PROMPTS, undefined);
+});
+
+test("applies isolated profile and context selections to Claude", async () => {
+  const fixture = createFixture({
+    env: {
+      ...process.env,
+      CLAUDE_CONFIG_DIR: "/profiles/current",
+    },
+  });
+  const execution = {
+    profile: "/profiles/work",
+    model: "claude-test",
+    contextSize: "200000",
+  };
+
+  const capabilities = await fixture.adapter.probe(execution);
+  await fixture.adapter.run(request(execution));
+
+  assert.strictEqual(await fixture.adapter.probe(execution), capabilities);
+  const claudeCalls = fixture.calls.filter(({ file }) => file === "claude");
+  assert.equal(claudeCalls.length, 3);
+  for (const call of claudeCalls) {
+    assert.equal(call.options.env.CLAUDE_CONFIG_DIR, "/profiles/work");
+  }
+  const turn = turnCalls(fixture)[0];
+  assert.equal(option(turn.argumentsList, "--model"), "claude-test");
+  assert.equal(option(turn.argumentsList, "--autocompact"), "200000");
+});
+
+test("omits current Claude execution overrides", async () => {
+  const fixture = createFixture({
+    env: {
+      ...process.env,
+      CLAUDE_CONFIG_DIR: "/profiles/process-default",
+    },
+  });
+
+  await fixture.adapter.run(
+    request({ profile: "current", model: "current", contextSize: "current" }),
+  );
+
+  const turn = turnCalls(fixture)[0];
+  assert.equal(option(turn.argumentsList, "--model"), undefined);
+  assert.equal(option(turn.argumentsList, "--autocompact"), undefined);
+  assert.equal(
+    turn.options.env.CLAUDE_CONFIG_DIR,
+    "/profiles/process-default",
+  );
+});
+
+test("rejects invalid Claude profiles and context sizes", async () => {
+  const fixture = createFixture();
+
+  for (const execution of [
+    { profile: "relative-profile" },
+    { profile: "/" },
+    { profile: "/profiles/../work" },
+    { contextSize: "99999" },
+    { contextSize: "1000001" },
+    { contextSize: "0200000" },
+    { contextSize: "200k" },
+    { model: "--model" },
+  ]) {
+    assert.throws(
+      () => fixture.adapter.probe(execution),
+      hasCode("ERR_INVALID_CLAUDE_OPTIONS"),
+    );
+    await assert.rejects(
+      fixture.adapter.run(request(execution)),
+      hasCode("ERR_INVALID_CLAUDE_OPTIONS"),
+    );
+  }
+  assert.throws(
+    () =>
+      fixture.adapter.probe({
+        env: { CLAUDE_CONFIG_DIR: "/profiles/work" },
+      }),
+    hasCode("ERR_INVALID_CLAUDE_OPTIONS"),
+  );
+  assert.equal(fixture.calls.length, 0);
 });
 
 test("uses auto mode only for autonomous workspace turns", async () => {

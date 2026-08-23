@@ -111,7 +111,7 @@ function createFixture({
     if (file === "git") {
       return { stdout: `${PROJECT_PATH}/.git\n.git\n`, stderr: "" };
     }
-    if (argumentsList[0] === "--version") {
+    if (argumentsList.includes("--version")) {
       return { stdout: `codex-cli ${version}\n`, stderr: "" };
     }
     if (argumentsList.includes("mcp")) {
@@ -564,6 +564,99 @@ test("runs a structured read-only turn with an explicit model", async () => {
   });
   assert.equal(turnRequest.params.approvalsReviewer, "user");
   assert.deepEqual(turnRequest.params.outputSchema, STRICT_SCHEMA);
+});
+
+test("applies native profile and context selections to Codex", async () => {
+  const fixture = createFixture();
+  const execution = {
+    profile: "work_profile",
+    model: "gpt-test",
+    contextSize: "200000",
+  };
+
+  const capabilities = await fixture.adapter.probe(execution);
+  await fixture.adapter.run(request(execution));
+
+  assert.strictEqual(await fixture.adapter.probe(execution), capabilities);
+  const expectedPrefix = [
+    "--profile",
+    "work_profile",
+    "-c",
+    "model_context_window=200000",
+  ];
+  for (const call of fixture.executeCalls.slice(0, 2)) {
+    assert.deepEqual(call.argumentsList.slice(0, 4), expectedPrefix);
+  }
+  const discovery = fixture.executeCalls.find(({ argumentsList }) =>
+    argumentsList.includes("mcp"),
+  );
+  assert.deepEqual(discovery.argumentsList.slice(0, 4), expectedPrefix);
+  assert.deepEqual(
+    fixture.processes[0].argumentsList.slice(0, 4),
+    expectedPrefix,
+  );
+  const thread = fixture.processes[0].messages.find(
+    ({ method }) => method === "thread/start",
+  );
+  const turn = fixture.processes[0].messages.find(
+    ({ method }) => method === "turn/start",
+  );
+  assert.equal(thread.params.model, "gpt-test");
+  assert.equal(turn.params.model, "gpt-test");
+});
+
+test("omits current Codex execution overrides", async () => {
+  const fixture = createFixture();
+
+  await fixture.adapter.run(
+    request({ profile: "current", model: "current", contextSize: "current" }),
+  );
+
+  assert.equal(
+    fixture.executeCalls.some(({ argumentsList }) =>
+      argumentsList.includes("--profile"),
+    ),
+    false,
+  );
+  assert.equal(
+    fixture.processes[0].argumentsList.some((argument) =>
+      argument.startsWith("model_context_window="),
+    ),
+    false,
+  );
+  assert.equal(
+    fixture.processes[0].messages.some(
+      ({ method }) => method === "model/list",
+    ),
+    false,
+  );
+  const thread = fixture.processes[0].messages.find(
+    ({ method }) => method === "thread/start",
+  );
+  assert.equal(thread.params.model, undefined);
+});
+
+test("rejects invalid Codex profiles and context sizes", async () => {
+  const fixture = createFixture();
+
+  for (const execution of [
+    { profile: "../work" },
+    { profile: "-work" },
+    { contextSize: "0" },
+    { contextSize: "0200000" },
+    { contextSize: "200k" },
+    { contextSize: "9223372036854775808" },
+  ]) {
+    assert.throws(
+      () => fixture.adapter.probe(execution),
+      hasCode("ERR_INVALID_CODEX_OPTIONS"),
+    );
+    await assert.rejects(
+      fixture.adapter.run(request(execution)),
+      hasCode("ERR_INVALID_CODEX_OPTIONS"),
+    );
+  }
+  assert.equal(fixture.executeCalls.length, 0);
 });
 
 test("accepts the protocol-default full completed-turn view", async () => {

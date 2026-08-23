@@ -26,6 +26,9 @@ const MAX_MCP_SERVERS = 256;
 const MCP_DISCOVERY_TIMEOUT_MS = 30_000;
 const MCP_SERVER_NAME_PATTERN = /^[A-Za-z0-9_-]+$/u;
 const MAX_MODEL_PAGES = 32;
+const CODEX_PROFILE_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,255}$/u;
+const DECIMAL_CONTEXT_SIZE_PATTERN = /^[1-9][0-9]*$/u;
+const MAX_CONTEXT_SIZE = 9_223_372_036_854_775_807n;
 const DISABLED_FEATURES = Object.freeze([
   "apps",
   "artifact",
@@ -190,10 +193,57 @@ export class CodexAdapterError extends Error {
   }
 }
 
-const { assertFields, normalizeRequest } = createAdapterContract({
+const {
+  assertFields,
+  normalizeExecutionOptions: normalizeContractExecutionOptions,
+  normalizeRequest: normalizeContractRequest,
+} = createAdapterContract({
   AdapterError: CodexAdapterError,
   backendName: "Codex",
 });
+
+function validateExecutionOptions(options) {
+  if (
+    (options.profile !== undefined &&
+      !CODEX_PROFILE_PATTERN.test(options.profile)) ||
+    (options.contextSize !== undefined &&
+      (!DECIMAL_CONTEXT_SIZE_PATTERN.test(options.contextSize) ||
+        BigInt(options.contextSize) > MAX_CONTEXT_SIZE))
+  ) {
+    throw new CodexAdapterError("Codex execution options are invalid.", {
+      code: "ERR_INVALID_CODEX_OPTIONS",
+    });
+  }
+  return options;
+}
+
+function normalizeExecutionOptions(value) {
+  return validateExecutionOptions(normalizeContractExecutionOptions(value));
+}
+
+function normalizeRequest(value) {
+  return validateExecutionOptions(normalizeContractRequest(value));
+}
+
+function executionOptionsFor(request) {
+  return Object.freeze({
+    contextSize: request.contextSize,
+    model: request.model,
+    profile: request.profile,
+  });
+}
+
+function nativeArguments(options, argumentsList) {
+  const result = [];
+  if (options.profile !== undefined) {
+    result.push("--profile", options.profile);
+  }
+  if (options.contextSize !== undefined) {
+    result.push("-c", `model_context_window=${options.contextSize}`);
+  }
+  result.push(...argumentsList);
+  return result;
+}
 
 function isolateCommandEnvironment(value) {
   const environment = { ...value };
@@ -911,25 +961,29 @@ export function createCodexAdapter(options = {}) {
   }
   const processEnvironment = isolateGitEnvironment(env);
   const commandEnvironment = isolateCommandEnvironment(processEnvironment);
-  let probePromise;
+  const probePromises = new Map();
 
-  async function inspectCapabilities() {
+  async function inspectCapabilities(executionOptions) {
     let versionResult;
     let helpResult;
     try {
       [versionResult, helpResult] = await Promise.all([
-        execute(codexBinary, ["--version"], {
+        execute(codexBinary, nativeArguments(executionOptions, ["--version"]), {
           encoding: "utf8",
           env: processEnvironment,
           maxBuffer: 1024 * 1024,
           timeout: 10_000,
         }),
-        execute(codexBinary, ["app-server", "--help"], {
-          encoding: "utf8",
-          env: processEnvironment,
-          maxBuffer: 1024 * 1024,
-          timeout: 10_000,
-        }),
+        execute(
+          codexBinary,
+          nativeArguments(executionOptions, ["app-server", "--help"]),
+          {
+            encoding: "utf8",
+            env: processEnvironment,
+            maxBuffer: 1024 * 1024,
+            timeout: 10_000,
+          },
+        ),
       ]);
     } catch (cause) {
       throw processError("Codex CLI is unavailable.", cause);
@@ -962,18 +1016,28 @@ export function createCodexAdapter(options = {}) {
     });
   }
 
-  function probe() {
-    probePromise ??= inspectCapabilities();
-    return probePromise;
+  function probe(value) {
+    const executionOptions = normalizeExecutionOptions(value);
+    const key = JSON.stringify(executionOptions);
+    if (!probePromises.has(key)) {
+      probePromises.set(key, inspectCapabilities(executionOptions));
+    }
+    return probePromises.get(key);
   }
 
-  async function appServerLaunch(cwd) {
+  async function appServerLaunch(request) {
     let result;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
         result = await execute(
           codexBinary,
-          ["-C", cwd, "mcp", "list", "--json"],
+          nativeArguments(request, [
+            "-C",
+            request.cwd,
+            "mcp",
+            "list",
+            "--json",
+          ]),
           {
             encoding: "utf8",
             env: processEnvironment,
@@ -997,7 +1061,7 @@ export function createCodexAdapter(options = {}) {
       }
     }
     const mcpServerNames = parseMcpServerNames(processOutput(result.stdout));
-    const argumentsList = [...APP_SERVER_BASE_ARGUMENTS];
+    const argumentsList = nativeArguments(request, APP_SERVER_BASE_ARGUMENTS);
     for (const name of mcpServerNames) {
       argumentsList.push("-c", `mcp_servers.${name}.enabled=false`);
     }
@@ -1008,7 +1072,7 @@ export function createCodexAdapter(options = {}) {
   }
 
   async function assertCapabilities(request) {
-    const capabilities = await probe();
+    const capabilities = await probe(executionOptionsFor(request));
     const required = ["remoteWriteBlocked"];
     if (outputSchemaFor(request) !== undefined) {
       required.push("structuredOutput");
@@ -1058,7 +1122,7 @@ export function createCodexAdapter(options = {}) {
   }
 
   async function runAttempt(request, { fresh = false, recovery = false } = {}) {
-    const launch = await appServerLaunch(request.cwd);
+    const launch = await appServerLaunch(request);
     let child;
     try {
       child = spawnProcess(codexBinary, launch.argumentsList, {

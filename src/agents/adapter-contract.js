@@ -9,13 +9,16 @@ const REQUEST_FIELDS = Object.freeze([
   "access",
   "authorizationId",
   "commit",
+  "contextSize",
   "cwd",
   "model",
+  "profile",
   "prompt",
   "recoveryPrompt",
   "schema",
   "session",
 ]);
+const EXECUTION_FIELDS = Object.freeze(["contextSize", "model", "profile"]);
 const SESSION_FIELDS = Object.freeze(["id", "mode"]);
 const COMMIT_FIELDS = Object.freeze(["expectedHead", "message"]);
 const OBJECT_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
@@ -289,6 +292,28 @@ export function createAdapterContract({ AdapterError, backendName }) {
     });
   }
 
+  function normalizeExecutionOptions(value = {}) {
+    assertFields(value, EXECUTION_FIELDS, `${backendName} execution options`);
+    return Object.freeze({
+      contextSize:
+        value.contextSize === undefined || value.contextSize === "current"
+          ? undefined
+          : assertString(
+              value.contextSize,
+              `${backendName} context size`,
+              64,
+            ),
+      model:
+        value.model === undefined || value.model === "current"
+          ? undefined
+          : assertString(value.model, `${backendName} model`, 256),
+      profile:
+        value.profile === undefined || value.profile === "current"
+          ? undefined
+          : assertString(value.profile, `${backendName} profile`),
+    });
+  }
+
   function normalizeRequest(value) {
     assertFields(value, REQUEST_FIELDS, `${backendName} request`);
     if (
@@ -301,13 +326,15 @@ export function createAdapterContract({ AdapterError, backendName }) {
       throw optionsError(`${backendName} request is invalid.`);
     }
     const prompt = normalizePrompt(value.prompt, `${backendName} prompt`);
+    const execution = normalizeExecutionOptions({
+      contextSize: value.contextSize,
+      model: value.model,
+      profile: value.profile,
+    });
     const normalized = {
       access: value.access,
+      ...execution,
       cwd: value.cwd,
-      model:
-        value.model === undefined
-          ? undefined
-          : assertString(value.model, `${backendName} model`, 256),
       prompt,
       recoveryPrompt:
         value.recoveryPrompt === undefined
@@ -339,5 +366,9 @@ export function createAdapterContract({ AdapterError, backendName }) {
     return Object.freeze(normalized);
   }
 
-  return Object.freeze({ assertFields, normalizeRequest });
+  return Object.freeze({
+    assertFields,
+    normalizeExecutionOptions,
+    normalizeRequest,
+  });
 }
