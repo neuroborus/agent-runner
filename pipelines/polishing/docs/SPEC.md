@@ -149,6 +149,12 @@ must not see each other's interpretation before both summaries exist. A source
 session supplied with `--fork-from` is forked directly and independently for
 the first Worker and Reviewer contexts; the Arbiter remains fresh.
 
+Each direct child session is persisted with a key over its accepted inputs and
+role context. First, forked, fresh, and context-invalidated turns receive the
+complete durable request. Compatible continuations receive only the current
+instruction and state delta while retaining the complete request for adapter
+recovery after unavailable continuation or failed compaction.
+
 The pipeline stores concise summaries as external run artifacts:
 
 ```text

@@ -894,10 +894,19 @@ export function assertRun(run) {
       !["planner", "reviewer", "arbiter"].includes(child.role) ||
       typeof child.sessionId !== "string" ||
       child.sessionId.length === 0 ||
-      child.sessionId === run.sessionLineage.source
+      child.sessionId === run.sessionLineage.source ||
+      (Object.hasOwn(child, "contextKey") &&
+        (typeof child.contextKey !== "string" ||
+          !/^[a-f0-9]{64}$/u.test(child.contextKey)))
     ) {
       throw workflowError("Plan-authoring child session is invalid.");
     }
+  }
+  const childSessionIds = run.sessionLineage.children.map(
+    (child) => child.sessionId,
+  );
+  if (new Set(childSessionIds).size !== childSessionIds.length) {
+    throw workflowError("Plan-authoring child sessions must be unique.");
   }
   const pipelineState = normalizePipelineState(run.pipelineState);
   if (pipelineState.repositoryBaseline !== null) {

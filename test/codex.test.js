@@ -309,6 +309,10 @@ test("constructs with the native environment and probes capabilities", async () 
     ),
     hasCode("ERR_INVALID_CODEX_OPTIONS"),
   );
+  await assert.rejects(
+    invalidRequestFixture.adapter.run(request({ recoveryPrompt: "" })),
+    hasCode("ERR_INVALID_CODEX_OPTIONS"),
+  );
   assert.equal(invalidRequestFixture.executeCalls.length, 0);
   const fixture = createFixture();
 
@@ -932,6 +936,8 @@ test("falls back to a fresh session when continuation is unavailable", async () 
   const result = await fixture.adapter.run(
     request({
       access: "workspace-write",
+      prompt: "Continue from the current session.",
+      recoveryPrompt: "Inspect the complete durable request.",
       session: { mode: "continue", id: "source-thread" },
     }),
   );
@@ -947,6 +953,8 @@ test("falls back to a fresh session when continuation is unavailable", async () 
     ({ method }) => method === "turn/start",
   );
   assert.match(retry.params.input[0].text, /^The previous Codex session/u);
+  assert.match(retry.params.input[0].text, /complete durable request/u);
+  assert.doesNotMatch(retry.params.input[0].text, /current session/u);
   assert.deepEqual(retry.params.sandboxPolicy, {
     type: "workspaceWrite",
     writableRoots: [PROJECT_PATH],
@@ -1624,7 +1632,12 @@ test("hydrates summarized compaction and retries a full context once", async () 
     },
   });
 
-  const result = await fixture.adapter.run(request());
+  const result = await fixture.adapter.run(
+    request({
+      prompt: "Continue from the current session.",
+      recoveryPrompt: "Inspect the complete durable request.",
+    }),
+  );
 
   assert.equal(result.output, "Recovered.");
   assert.equal(fixture.processes.length, 1);
@@ -1636,6 +1649,13 @@ test("hydrates summarized compaction and retries a full context once", async () 
       ),
     ["turn/start", "thread/compact/start", "thread/read", "turn/start"],
   );
+  const turnPrompts = fixture.processes[0].messages
+    .filter(({ method }) => method === "turn/start")
+    .map(({ params }) => params.input[0].text);
+  assert.equal(turnPrompts[0], "Continue from the current session.");
+  assert.match(turnPrompts[1], /^Compact the existing Codex/u);
+  assert.match(turnPrompts[1], /complete durable request/u);
+  assert.doesNotMatch(turnPrompts[1], /current session/u);
 });
 
 test("reconstructs a fresh turn when compaction cannot free the context", async () => {
@@ -1672,7 +1692,13 @@ test("reconstructs a fresh turn when compaction cannot free the context", async 
     },
   });
 
-  const result = await fixture.adapter.run(request({ access: "workspace-write" }));
+  const result = await fixture.adapter.run(
+    request({
+      access: "workspace-write",
+      prompt: "Continue from the current session.",
+      recoveryPrompt: "Inspect the complete durable request.",
+    }),
+  );
 
   assert.equal(result.sessionId, "thread-1");
   assert.equal(fixture.processes.length, 2);
@@ -1680,6 +1706,8 @@ test("reconstructs a fresh turn when compaction cannot free the context", async 
     ({ method }) => method === "turn/start",
   );
   assert.match(retry.params.input[0].text, /^The previous Codex session/u);
+  assert.match(retry.params.input[0].text, /complete durable request/u);
+  assert.doesNotMatch(retry.params.input[0].text, /current session/u);
 });
 
 test(

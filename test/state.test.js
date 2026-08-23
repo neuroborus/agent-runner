@@ -152,9 +152,20 @@ test("rejects a state root inside the project before creating it", async (t) => 
 
 test("persists child sessions, opaque pipeline state, and public activity", async (t) => {
   const { created, stateRoot, store } = await createFixture(t);
+  await assert.rejects(
+    store.recordChildSession(created.lease, {
+      role: "worker",
+      sessionId: "codex:invalid-child",
+      contextKey: "invalid",
+    }),
+    (error) =>
+      error instanceof RunStoreError && error.code === "ERR_INVALID_RUN_STATE",
+  );
+  const contextKey = "a".repeat(64);
   const withWorkerSession = await store.recordChildSession(created.lease, {
     role: "worker",
     sessionId: "codex:worker-child",
+    contextKey,
   });
   assert.equal(withWorkerSession.revision, 2);
   await created.lease.release();
@@ -162,7 +173,7 @@ test("persists child sessions, opaque pipeline state, and public activity", asyn
   const resumedStore = createRunStore({ stateRoot });
   const loaded = await resumedStore.loadRun(created.state.runId);
   assert.deepEqual(loaded.sessionLineage.children, [
-    { role: "worker", sessionId: "codex:worker-child" },
+    { role: "worker", sessionId: "codex:worker-child", contextKey },
   ]);
 
   const lease = await resumedStore.acquireRunLease(created.state.runId);

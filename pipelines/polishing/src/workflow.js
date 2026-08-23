@@ -58,6 +58,7 @@ import {
   normalizeStagnationResult,
   normalizedCounters,
   PolishingWorkflowError,
+  sha256,
   workflowError,
   WORKFLOW_STATES,
 } from "./workflow-contract.js";
@@ -117,6 +118,16 @@ Execution clarifications (${clarification.transcriptPath}):
 ${executionClarifications}`;
 }
 
+function durableContext(evidence, recoveryContext) {
+  return recoveryContext.length === 0
+    ? evidence
+    : `${evidence}\n\n${recoveryContext}`;
+}
+
+function contextKeyFor(role, context) {
+  return sha256(`${role}\0${context}`);
+}
+
 export async function runPolishing({ action, run, runtime, settings }) {
   assertRun(run);
   assertRuntime(runtime);
@@ -133,6 +144,20 @@ export async function runPolishing({ action, run, runtime, settings }) {
 
   function counters() {
     return normalizedCounters(currentRun.counters);
+  }
+
+  function workContext({ includePolishSummary = false } = {}) {
+    const current = state();
+    return [
+      current.resolvedSummary === null
+        ? ""
+        : `Resolved bootstrap context:\n${current.resolvedSummary}`,
+      includePolishSummary && current.polishSummary !== null
+        ? `Worker polishing summary:\n${current.polishSummary}`
+        : "",
+    ]
+      .filter((part) => part.length > 0)
+      .join("\n\n");
   }
 
   function clearedWorkState(current, { clearBootstrap = false } = {}) {
@@ -330,7 +355,12 @@ export async function runPolishing({ action, run, runtime, settings }) {
     return true;
   }
 
-  async function recordSession(role, sessionId, continuedSessionId) {
+  async function recordSession(
+    role,
+    sessionId,
+    continuedSessionId,
+    contextKey,
+  ) {
     if (typeof sessionId !== "string" || sessionId.length === 0) {
       throw workflowError(
         `${role} returned no session ID.`,
@@ -363,12 +393,12 @@ export async function runPolishing({ action, run, runtime, settings }) {
         ...currentRun.sessionLineage,
         children: [
           ...currentRun.sessionLineage.children,
-          { role, sessionId },
+          { role, sessionId, contextKey },
         ],
       },
     });
     currentRun = await runtime.recordChildSession(
-      { role, sessionId },
+      { role, sessionId, contextKey },
       {
         activity: activity(role, "session", "started", `${role} session recorded.`),
       },
@@ -441,6 +471,7 @@ export async function runPolishing({ action, run, runtime, settings }) {
     {
       access = "read-only",
       freshSession = false,
+      recoveryContext = "",
       reportWorkspaceChange = false,
     } = {},
   ) {
@@ -454,23 +485,36 @@ export async function runPolishing({ action, run, runtime, settings }) {
       allowedPaths: baseline.allowedPaths,
       projectPath: baseline.projectPath,
     });
-    const previousSession = freshSession
-      ? undefined
-      : [...currentRun.sessionLineage.children]
-          .reverse()
-          .find((child) => child.role === role)?.sessionId;
+    const evidenceContext = inputEvidence(
+      evidence.inputs,
+      evidence.clarification,
+    );
+    const context = durableContext(evidenceContext, recoveryContext);
+    const contextKey = contextKeyFor(role, evidenceContext);
+    const latestSession = [...currentRun.sessionLineage.children]
+      .reverse()
+      .find((child) => child.role === role);
+    const previousSession =
+      !freshSession && latestSession?.contextKey === contextKey
+        ? latestSession.sessionId
+        : undefined;
     const sourceSession = currentRun.sessionLineage.source;
     const session =
       previousSession !== undefined
         ? { id: previousSession, mode: "continue" }
-        : sourceSession !== null && role !== "arbiter"
+        : sourceSession !== null &&
+            role !== "arbiter" &&
+            (latestSession === undefined || freshSession)
           ? { id: sourceSession, mode: "fork" }
           : undefined;
     const configuration = currentRun.roles[role];
+    const recoveryPrompt = buildPrompt(context);
     const request = {
       access,
       cwd: currentRun.projectPath,
-      prompt: buildPrompt(inputEvidence(evidence.inputs, evidence.clarification)),
+      prompt:
+        session?.mode === "continue" ? buildPrompt("") : recoveryPrompt,
+      recoveryPrompt,
       schema,
       ...(configuration.model === null ? {} : { model: configuration.model }),
       ...(session === undefined ? {} : { session }),
@@ -563,7 +607,12 @@ export async function runPolishing({ action, run, runtime, settings }) {
         "ERR_INVALID_POLISHING_OUTPUT",
       );
     }
-    await recordSession(role, response.sessionId, previousSession);
+    await recordSession(
+      role,
+      response.sessionId,
+      previousSession,
+      contextKey,
+    );
     return reportWorkspaceChange
       ? Object.freeze({
           output: response.structured,
@@ -1407,15 +1456,22 @@ ${JSON.stringify(state().bootstrapDisagreement, null, 2)}`,
 
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
-${evidence}
-
-Resolved bootstrap context:
-${current.resolvedSummary}${
+${evidence}${
+        current.bootstrapArbitrationUsed && !current.pendingCorrection
+          ? `\n\n${workContext()}`
+          : ""
+      }${
         current.stagnationDirection?.direction === "REWORK_IMPLEMENTATION"
           ? `\n\nStagnation Arbiter direction:\n${JSON.stringify(current.stagnationDirection, null, 2)}`
           : ""
       }`,
-      { access: "workspace-write" },
+      {
+        access: "workspace-write",
+        recoveryContext:
+          current.bootstrapArbitrationUsed && !current.pendingCorrection
+            ? ""
+            : workContext(),
+      },
     );
     if (output === null) {
       return false;
@@ -1474,14 +1530,11 @@ ${current.resolvedSummary}${
 ${PRODUCT_DECISION_INSTRUCTIONS}
 Use FAIL for validation failures, SKILL_MISSING or SKILL_INVALID before invoking an unavailable skill, and BLOCKED only when the procedure cannot complete safely.
 
-${evidence}
-
-Resolved bootstrap context:
-${state().resolvedSummary}
-
-Worker polishing summary:
-${state().polishSummary}`,
-      { access: "workspace-write" },
+${evidence}`,
+      {
+        access: "workspace-write",
+        recoveryContext: workContext({ includePolishSummary: true }),
+      },
     );
     if (output === null) {
       return false;
@@ -1573,6 +1626,7 @@ ${state().polishSummary}`,
 
   async function runReviewTurn() {
     const current = state();
+    const needsWorkContext = current.previousFindings.length === 0;
     const fingerprint = await contentFingerprint();
     if (fingerprint !== current.finalizedFingerprint) {
       await transition({
@@ -1593,13 +1647,11 @@ ${state().polishSummary}`,
 
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
-${evidence}
-
-Resolved bootstrap context:
-${current.resolvedSummary}
-
-Worker polishing summary:
-${current.polishSummary}
+${evidence}${
+        needsWorkContext
+          ? `\n\n${workContext({ includePolishSummary: true })}`
+          : ""
+      }
 
 Finalization result:
 ${JSON.stringify(current.finalizationResult, null, 2)}
@@ -1613,6 +1665,11 @@ ${JSON.stringify(current.previousFindings, null, 2)}${
 
 Prior decisions:
 ${JSON.stringify(priorFindingDecisions(), null, 2)}`,
+      {
+        recoveryContext: needsWorkContext
+          ? ""
+          : workContext({ includePolishSummary: true }),
+      },
     );
     if (output === null) {
       return false;
@@ -1714,6 +1771,7 @@ ${JSON.stringify(current.findings, null, 2)}
 
 Worker disputes:
 ${JSON.stringify(current.pendingDisputes, null, 2)}`,
+      { recoveryContext: workContext({ includePolishSummary: true }) },
     );
     if (output === null) {
       return false;
@@ -1805,7 +1863,10 @@ ${JSON.stringify(reviewerResponse, null, 2)}
 
 Prior decisions:
 ${JSON.stringify(priorFindingDecisions([dispute.findingId]), null, 2)}`,
-      { freshSession: true },
+      {
+        freshSession: true,
+        recoveryContext: workContext({ includePolishSummary: true }),
+      },
     );
     if (output === null) {
       return false;
@@ -1874,7 +1935,10 @@ ${JSON.stringify(
   null,
   2,
 )}`,
-      { freshSession: true },
+      {
+        freshSession: true,
+        recoveryContext: workContext({ includePolishSummary: true }),
+      },
     );
     if (output === null) {
       return false;
@@ -2068,6 +2132,7 @@ Prior decisions:
 ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`,
       {
         access: budgetExhausted ? "read-only" : "workspace-write",
+        recoveryContext: workContext({ includePolishSummary: true }),
         reportWorkspaceChange: true,
       },
     );

@@ -59,7 +59,8 @@ directories using the common contract in
 records canonical inputs, resolved Planner, Reviewer, and Arbiter configuration,
 resolved pipeline settings, the initial repository baseline, hashes, revision
 and clarification counters, pause state, optional source-session reference,
-direct child role/session IDs, and opaque plan-authoring state.
+direct child role/session IDs with accepted-input context keys, and opaque
+plan-authoring state.
 Drafts, findings, correction-round snapshots, and stagnation evidence remain
 pipeline-owned structured data in the external run state rather than task
 artifacts.
@@ -204,6 +205,10 @@ Diagnose why the plan revision loop is not converging and choose the minimal val
 
 The pipeline may append finalized inputs, access restrictions, output schemas,
 the concise shared plan format, and the common product-decision instructions.
+First, forked, fresh, and context-invalidated turns receive that complete
+durable context. A compatible role continuation receives only its current
+instruction and state delta; the complete prompt remains attached for adapter
+recovery after unavailable continuation or failed compaction.
 The Reviewer returns structured actionable findings instead of editing the
 draft. When findings exist, the pipeline sends them to the Planner together
 with the finding-resolution core. The Planner returns a revised draft, and the

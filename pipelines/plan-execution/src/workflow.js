@@ -66,6 +66,7 @@ import {
   normalizeReviewResult,
   normalizeStagnationResult,
   normalizedCounters,
+  sha256,
   workflowError,
 } from "./workflow-contract.js";
 
@@ -139,6 +140,16 @@ Execution clarifications (${clarification.transcriptPath}):
 ${executionClarifications}`;
 }
 
+function durableContext(evidence, recoveryContext) {
+  return recoveryContext.length === 0
+    ? evidence
+    : `${evidence}\n\n${recoveryContext}`;
+}
+
+function contextKeyFor(role, context) {
+  return sha256(`${role}\0${context}`);
+}
+
 function canonicalPlan(source) {
   if (typeof source === "string" && source.length > MAX_PLAN_LENGTH) {
     throw new PlanExecutionWorkflowError(
@@ -189,6 +200,11 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
 
   function counters() {
     return normalizedCounters(currentRun.counters);
+  }
+
+  function resolvedContext() {
+    const summary = state().resolvedSummary;
+    return summary === null ? "" : `Resolved bootstrap context:\n${summary}`;
   }
 
   async function transition(
@@ -380,7 +396,12 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
     return true;
   }
 
-  async function recordSession(role, sessionId, continuedSessionId) {
+  async function recordSession(
+    role,
+    sessionId,
+    continuedSessionId,
+    contextKey,
+  ) {
     if (typeof sessionId !== "string" || sessionId.length === 0) {
       throw workflowError(
         `${role} returned no session ID.`,
@@ -407,7 +428,7 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
       );
     }
     currentRun = await runtime.recordChildSession(
-      { role, sessionId },
+      { role, sessionId, contextKey },
       {
         activity: activity(role, "session", "started", `${role} session recorded.`),
       },
@@ -477,7 +498,11 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
     role,
     schema,
     buildPrompt,
-    { access = "read-only", freshSession = false } = {},
+    {
+      access = "read-only",
+      freshSession = false,
+      recoveryContext = "",
+    } = {},
   ) {
     await ensureRoleCapabilities(role);
     const evidence = await readCurrentInputs();
@@ -492,25 +517,37 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
       allowedPaths: [],
       projectPath: baseline.projectPath,
     });
-    const previousSession = freshSession
-      ? undefined
-      : [...currentRun.sessionLineage.children]
-          .reverse()
-          .find((child) => child.role === role)?.sessionId;
+    const evidenceContext = inputEvidence(
+      evidence.inputs,
+      evidence.canonicalPlan,
+      evidence.clarification,
+    );
+    const context = durableContext(evidenceContext, recoveryContext);
+    const contextKey = contextKeyFor(role, evidenceContext);
+    const latestSession = [...currentRun.sessionLineage.children]
+      .reverse()
+      .find((child) => child.role === role);
+    const previousSession =
+      !freshSession && latestSession?.contextKey === contextKey
+        ? latestSession.sessionId
+        : undefined;
     const sourceSession = currentRun.sessionLineage.source;
     const session =
       previousSession !== undefined
         ? { id: previousSession, mode: "continue" }
-        : sourceSession !== null && role !== "arbiter"
+        : sourceSession !== null &&
+            role !== "arbiter" &&
+            (latestSession === undefined || freshSession)
           ? { id: sourceSession, mode: "fork" }
           : undefined;
     const roleConfiguration = currentRun.roles[role];
+    const recoveryPrompt = buildPrompt(context);
     const request = {
       access,
       cwd: currentRun.projectPath,
-      prompt: buildPrompt(
-        inputEvidence(evidence.inputs, evidence.canonicalPlan, evidence.clarification),
-      ),
+      prompt:
+        session?.mode === "continue" ? buildPrompt("") : recoveryPrompt,
+      recoveryPrompt,
       schema,
       ...(roleConfiguration.model === null
         ? {}
@@ -596,7 +633,12 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
         "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
       );
     }
-    await recordSession(role, response.sessionId, previousSession);
+    await recordSession(
+      role,
+      response.sessionId,
+      previousSession,
+      contextKey,
+    );
     if (!isRecord(response.structured)) {
       throw workflowError(
         `${role} returned no structured result.`,
@@ -1345,10 +1387,11 @@ ${JSON.stringify(state().bootstrapDisagreement, null, 2)}`,
 
 Use BLOCKED only for an external environment blocker.
 
-${evidence}
-
-Resolved bootstrap context:
-${current.resolvedSummary}
+${evidence}${
+        current.bootstrapArbitrationUsed && !correction
+          ? `\n\n${resolvedContext()}`
+          : ""
+      }
 
 Current planned commit:
 ## Commit ${step.number}: ${step.subject}
@@ -1367,7 +1410,13 @@ ${step.body}${
               2,
             )}`
       }`,
-      { access: "workspace-write" },
+      {
+        access: "workspace-write",
+        recoveryContext:
+          current.bootstrapArbitrationUsed && !correction
+            ? ""
+            : resolvedContext(),
+      },
     );
     if (output === null) {
       return false;
@@ -1431,10 +1480,11 @@ Current planned commit:
 ## Commit ${step.number}: ${step.subject}
 
 ${step.body}
-
-Resolved bootstrap context:
-${state().resolvedSummary}`,
-      { access: "workspace-write" },
+`,
+      {
+        access: "workspace-write",
+        recoveryContext: resolvedContext(),
+      },
     );
     if (output === null) {
       return false;
@@ -1535,6 +1585,8 @@ ${state().resolvedSummary}`,
     const step = planStep();
     const freshSession =
       current.currentStep > 1 && current.reviewerStep !== current.currentStep;
+    const needsResolvedContext =
+      current.currentStep === 1 && current.reviewerStep === null;
     const output = await runRole(
       "reviewer",
       REVIEW_SCHEMA,
@@ -1542,10 +1594,7 @@ ${state().resolvedSummary}`,
 
 Reuse an existing ID for an unchanged finding. Use FINDINGS with every actionable blocker.
 
-${evidence}
-
-Resolved bootstrap context:
-${current.resolvedSummary}
+${evidence}${needsResolvedContext ? `\n\n${resolvedContext()}` : ""}
 
 Current planned commit:
 ## Commit ${step.number}: ${step.subject}
@@ -1564,7 +1613,10 @@ ${JSON.stringify(current.previousFindings, null, 2)}${
 
 Prior decisions for this step:
 ${JSON.stringify(priorFindingDecisions(), null, 2)}`,
-      { freshSession },
+      {
+        freshSession,
+        recoveryContext: needsResolvedContext ? "" : resolvedContext(),
+      },
     );
     if (output === null) {
       return false;
@@ -1673,6 +1725,7 @@ ${JSON.stringify(disputedFindings, null, 2)}
 
 Worker disputes:
 ${JSON.stringify(current.pendingDisputes, null, 2)}`,
+      { recoveryContext: resolvedContext() },
     );
     if (output === null) {
       return false;
@@ -1764,7 +1817,7 @@ ${JSON.stringify(reviewerResponse, null, 2)}
 
 Prior decisions for this finding:
 ${JSON.stringify(priorFindingDecisions([dispute.findingId]), null, 2)}`,
-      { freshSession: true },
+      { freshSession: true, recoveryContext: resolvedContext() },
     );
     if (output === null) {
       return false;
@@ -1835,7 +1888,7 @@ ${JSON.stringify(
   null,
   2,
 )}`,
-      { freshSession: true },
+      { freshSession: true, recoveryContext: resolvedContext() },
     );
     if (output === null) {
       return false;
@@ -2030,7 +2083,10 @@ ${JSON.stringify(
   null,
   2,
 )}`,
-      { access: budgetExhausted ? "read-only" : "workspace-write" },
+      {
+        access: budgetExhausted ? "read-only" : "workspace-write",
+        recoveryContext: resolvedContext(),
+      },
     );
     if (output === null) {
       return false;

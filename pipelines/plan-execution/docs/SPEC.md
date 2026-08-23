@@ -330,8 +330,9 @@ Persist at least:
 - escalation reason when paused.
 
 The common envelope also persists an optional opaque source-session reference,
-every direct Worker, Reviewer, or Arbiter child session ID, monotonic revision
-and timestamps, and an opaque pipeline-owned state object. Store
+every direct Worker, Reviewer, or Arbiter child session ID with its
+accepted-input context key, monotonic revision and timestamps, and an opaque
+pipeline-owned state object. Store
 correction-round snapshots and arbitration episodes there without asking the
 root runtime to interpret them. Native backend session resume is optional; the
 persisted task, plan, decisions, summaries, and lineage must be sufficient to
@@ -430,6 +431,7 @@ A request should contain only runner-level concepts such as:
   cwd,
   access: "read-only" | "workspace-write" | "local-commit",
   prompt,
+  recoveryPrompt, // optional; defaults to prompt
   schema,
   session: { mode: "fork" | "continue", id }, // optional
   authorizationId, // local-commit only
@@ -452,9 +454,12 @@ writes, and remote configuration changes. Fail preflight if the selected Worker
 backend cannot provide that boundary; do not rely on prompt compliance alone.
 
 Native session continuation is optional. Runner correctness must not depend on
-it. If a backend session cannot be continued, reconstruct the next prompt from
-persisted runner state and the observed workspace. A supplied fork source must
-be forked directly; never resume it or silently replace an unavailable source.
+it. `prompt` is the compact instruction and state delta for a compatible
+continuation. `recoveryPrompt` is the complete durable request used for first,
+forked, fresh, context-invalidated, compacted, or reconstructed turns. Continue
+a persisted child only when its context key matches the accepted inputs and
+role context. A supplied fork source must be forked directly; never resume it
+or silently replace an unavailable source.
 
 Use structured output for all machine-actionable decisions:
 

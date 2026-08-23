@@ -1009,9 +1009,29 @@ test("prepares a dirty worktree through independent source-session bootstraps", 
     mode: "fork",
     id: SOURCE_SESSION,
   });
+  for (const heading of [
+    /Task \(/u,
+    /Task-level clarifications:/u,
+    /Context:/u,
+    /Execution clarifications \(/u,
+  ]) {
+    assert.doesNotMatch(fixture.calls.worker[1].prompt, heading);
+    assert.match(fixture.calls.worker[1].recoveryPrompt, heading);
+  }
   assert.doesNotMatch(fixture.calls.reviewer[0].prompt, /Worker independently/u);
   assert.doesNotMatch(fixture.calls.worker[1].prompt, /Reviewer independently/u);
   assert.match(fixture.calls.worker[2].prompt, /Reviewer bootstrap summary/u);
+  const finalizationCall = fixture.calls.worker.find(({ prompt }) =>
+    prompt.includes("Locate and validate the target project's finalization skill"),
+  );
+  assert.ok(finalizationCall);
+  assert.doesNotMatch(finalizationCall.prompt, /Resolved bootstrap context:/u);
+  assert.doesNotMatch(finalizationCall.prompt, /Worker polishing summary:/u);
+  assert.match(finalizationCall.recoveryPrompt, /Resolved bootstrap context:/u);
+  assert.match(finalizationCall.recoveryPrompt, /Worker polishing summary:/u);
+  for (const child of result.sessionLineage.children) {
+    assert.match(child.contextKey, /^[a-f0-9]{64}$/u);
+  }
   for (const call of [
     ...fixture.calls.worker.slice(0, 3),
     ...fixture.calls.reviewer,
@@ -1213,6 +1233,12 @@ test("pauses for clarification answers and resumes without consuming an extra ro
   assert.equal(resumed.pipelineState.workflowState, "DONE");
   assert.equal(resumed.counters.clarificationRounds, 1);
   assert.equal(resumed.pipelineState.pendingEdit, null);
+  assert.equal(fixture.calls.worker[1].session, undefined);
+  assert.match(fixture.calls.worker[1].prompt, /Task \(/u);
+  assert.notEqual(
+    resumed.sessionLineage.children[0].contextKey,
+    resumed.sessionLineage.children[1].contextKey,
+  );
 });
 
 test("accepts an unchanged proactive clarification without consuming a round", async (t) => {

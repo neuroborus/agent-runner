@@ -77,6 +77,10 @@ const LOCAL_COMMIT_OUTPUT_SCHEMA = Object.freeze({
   required: Object.freeze(["ready"]),
   additionalProperties: false,
 });
+const COMPACTION_PREFIX =
+  "Compact the existing Codex session context, preserving decisions and " +
+  "valid progress. Then complete this durable request from the observed " +
+  "current workspace without repeating completed work.";
 const RECOVERY_PREFIX =
   "The previous Codex session could not continue. Reconstruct context from " +
   "this durable request and the observed current workspace. Preserve valid " +
@@ -351,7 +355,16 @@ function threadOptions(request) {
 }
 
 function turnPrompt(request, recovery) {
-  let prompt = recovery ? `${RECOVERY_PREFIX}\n\n${request.prompt}` : request.prompt;
+  const prefix =
+    recovery === "compact"
+      ? COMPACTION_PREFIX
+      : recovery === "fresh"
+        ? RECOVERY_PREFIX
+        : undefined;
+  let prompt =
+    prefix === undefined
+      ? request.prompt
+      : `${prefix}\n\n${request.recoveryPrompt}`;
   if (request.access === "local-commit") {
     prompt +=
       `\n\nConfirm that HEAD is ${request.commit.expectedHead} and that the ` +
@@ -677,7 +690,7 @@ async function compactThread(client, threadId) {
   }
 }
 
-async function runTurn(client, request, threadId, prompt) {
+async function runTurn(client, request, threadId, prompt, recoveryPrompt) {
   let turn = await startTurn(client, request, threadId, prompt);
   if (isContextWindowExceeded(turn)) {
     if (request.access === "local-commit") {
@@ -690,7 +703,7 @@ async function runTurn(client, request, threadId, prompt) {
       );
     }
     await compactThread(client, threadId);
-    turn = await startTurn(client, request, threadId, prompt);
+    turn = await startTurn(client, request, threadId, recoveryPrompt);
     if (isContextWindowExceeded(turn)) {
       throw new CodexAdapterError("Codex context remains full after compaction.", {
         code: "ERR_CODEX_CONTEXT_RECOVERY_FAILED",
@@ -1080,6 +1093,7 @@ export function createCodexAdapter(options = {}) {
         request,
         threadId,
         turnPrompt(request, recovery),
+        turnPrompt(request, "compact"),
       );
       if (
         request.model !== undefined &&
@@ -1144,7 +1158,7 @@ export function createCodexAdapter(options = {}) {
         cause.recoverable &&
         request.session?.mode !== "fork"
       ) {
-        return runAttempt(request, { fresh: true, recovery: true });
+        return runAttempt(request, { fresh: true, recovery: "fresh" });
       }
       throw cause;
     }

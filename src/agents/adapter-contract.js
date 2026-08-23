@@ -12,6 +12,7 @@ const REQUEST_FIELDS = Object.freeze([
   "cwd",
   "model",
   "prompt",
+  "recoveryPrompt",
   "schema",
   "session",
 ]);
@@ -257,6 +258,18 @@ export function createAdapterContract({ AdapterError, backendName }) {
     });
   }
 
+  function normalizePrompt(value, name) {
+    if (
+      typeof value !== "string" ||
+      value.trim().length === 0 ||
+      /\0/u.test(value) ||
+      Buffer.byteLength(value) > MAX_PROMPT_BYTES
+    ) {
+      throw optionsError(`${name} is invalid.`);
+    }
+    return value;
+  }
+
   function normalizeCommit(value) {
     assertFields(value, COMMIT_FIELDS, `${backendName} commit constraint`);
     if (
@@ -283,14 +296,11 @@ export function createAdapterContract({ AdapterError, backendName }) {
       !isAbsolute(value.cwd) ||
       isFilesystemRoot(value.cwd) ||
       /[\0\r\n]/u.test(value.cwd) ||
-      !ACCESS_MODES.has(value.access) ||
-      typeof value.prompt !== "string" ||
-      value.prompt.trim().length === 0 ||
-      /\0/u.test(value.prompt) ||
-      Buffer.byteLength(value.prompt) > MAX_PROMPT_BYTES
+      !ACCESS_MODES.has(value.access)
     ) {
       throw optionsError(`${backendName} request is invalid.`);
     }
+    const prompt = normalizePrompt(value.prompt, `${backendName} prompt`);
     const normalized = {
       access: value.access,
       cwd: value.cwd,
@@ -298,7 +308,14 @@ export function createAdapterContract({ AdapterError, backendName }) {
         value.model === undefined
           ? undefined
           : assertString(value.model, `${backendName} model`, 256),
-      prompt: value.prompt,
+      prompt,
+      recoveryPrompt:
+        value.recoveryPrompt === undefined
+          ? prompt
+          : normalizePrompt(
+              value.recoveryPrompt,
+              `${backendName} recovery prompt`,
+            ),
       schema: normalizeSchema(value.schema),
       session: normalizeSession(value.session),
     };

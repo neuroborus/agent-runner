@@ -30,6 +30,8 @@ const RESTARTED_ROLE_SESSIONS = Object.freeze({
   worker: "55555555-5555-4555-8555-555555555555",
   reviewer: "66666666-6666-4666-8666-666666666666",
 });
+const REBOOTSTRAPPED_WORKER_SESSION =
+  "88888888-8888-4888-8888-888888888888";
 const PLAN = `## Commit 1: feat(test): add behavior
 
 Implement the requested behavior.`;
@@ -586,7 +588,8 @@ async function createFixture(
   function nextFreshSessionId(role) {
     const configured = sessionIds[role];
     if (!Array.isArray(configured)) {
-      return configured;
+      const index = freshSessionIndexes[role]++;
+      return index === 0 ? configured : `${configured}-${index + 1}`;
     }
     const sessionId = configured[freshSessionIndexes[role]++];
     assert.notEqual(sessionId, undefined, `Missing fresh ${role} session ID.`);
@@ -1001,6 +1004,16 @@ test("clarifies and bootstraps through independent source-session forks", async 
     mode: "continue",
     id: ROLE_SESSIONS.worker,
   });
+  for (const heading of [
+    /Task \(/u,
+    /Validated plan \(/u,
+    /Plan-authoring clarifications \(/u,
+    /Context \(/u,
+    /Execution clarifications \(/u,
+  ]) {
+    assert.doesNotMatch(fixture.calls.worker[1].prompt, heading);
+    assert.match(fixture.calls.worker[1].recoveryPrompt, heading);
+  }
   assert.deepEqual(fixture.calls.reviewer[0].session, {
     mode: "fork",
     id: SOURCE_SESSION,
@@ -1017,8 +1030,17 @@ test("clarifies and bootstraps through independent source-session forks", async 
   );
   assert.match(fixture.calls.worker[2].prompt, /Worker bootstrap summary/u);
   assert.match(fixture.calls.worker[2].prompt, /Reviewer bootstrap summary/u);
+  const finalizationCall = fixture.calls.worker.find(({ prompt }) =>
+    prompt.includes("Locate and validate the project's finalization skill"),
+  );
+  assert.ok(finalizationCall);
+  assert.doesNotMatch(finalizationCall.prompt, /Resolved bootstrap context:/u);
+  assert.match(finalizationCall.recoveryPrompt, /Resolved bootstrap context:/u);
   assert.equal(fixture.calls.worker[0].model, "worker-model");
   assert.equal(fixture.calls.reviewer[0].model, "reviewer-model");
+  for (const child of result.sessionLineage.children) {
+    assert.match(child.contextKey, /^[a-f0-9]{64}$/u);
+  }
   for (const call of [...fixture.calls.worker, ...fixture.calls.reviewer]) {
     assertStrictSchema(call.schema);
   }
@@ -1084,6 +1106,12 @@ test("pauses for clarification answers and resumes through the authorization", a
   assert.equal(resumed.pipelineState.workflowState, "DONE");
   assert.equal(resumed.pipelineState.pendingEdit, null);
   assert.equal(resumed.pipelineState.clarificationFrozen, true);
+  assert.equal(fixture.calls.worker[1].session, undefined);
+  assert.match(fixture.calls.worker[1].prompt, /Task \(/u);
+  assert.notEqual(
+    resumed.sessionLineage.children[0].contextKey,
+    resumed.sessionLineage.children[1].contextKey,
+  );
 });
 
 test("rejects malformed persisted structured input", async (t) => {
@@ -1392,7 +1420,11 @@ test("starts a fresh Arbiter for a new bootstrap dispute", async (t) => {
     sessionIds: {
       arbiter: [ROLE_SESSIONS.arbiter, secondArbiterSession],
       reviewer: [ROLE_SESSIONS.reviewer, RESTARTED_ROLE_SESSIONS.reviewer],
-      worker: [ROLE_SESSIONS.worker, RESTARTED_ROLE_SESSIONS.worker],
+      worker: [
+        ROLE_SESSIONS.worker,
+        RESTARTED_ROLE_SESSIONS.worker,
+        REBOOTSTRAPPED_WORKER_SESSION,
+      ],
     },
     worker: [
       clarificationReady(),
@@ -1472,7 +1504,11 @@ test("restarts independent bootstrap after a reconciliation product decision", a
     sessionIds: {
       arbiter: ROLE_SESSIONS.arbiter,
       reviewer: [ROLE_SESSIONS.reviewer, RESTARTED_ROLE_SESSIONS.reviewer],
-      worker: [ROLE_SESSIONS.worker, RESTARTED_ROLE_SESSIONS.worker],
+      worker: [
+        ROLE_SESSIONS.worker,
+        RESTARTED_ROLE_SESSIONS.worker,
+        REBOOTSTRAPPED_WORKER_SESSION,
+      ],
     },
     sourceSession: SOURCE_SESSION,
     worker: [
@@ -1505,7 +1541,7 @@ test("restarts independent bootstrap after a reconciliation product decision", a
   });
   assert.deepEqual(fixture.calls.worker[5].session, {
     mode: "continue",
-    id: RESTARTED_ROLE_SESSIONS.worker,
+    id: REBOOTSTRAPPED_WORKER_SESSION,
   });
 });
 

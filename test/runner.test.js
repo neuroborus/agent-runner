@@ -25,6 +25,7 @@ import {
 const executeFile = promisify(execFile);
 const SOURCE_SESSION = "11111111-1111-4111-8111-111111111111";
 const PLANNER_SESSION = "22222222-2222-4222-8222-222222222222";
+const POST_CLARIFICATION_PLANNER_SESSION = `${PLANNER_SESSION}:1`;
 const REVIEWER_SESSION = "33333333-3333-4333-8333-333333333333";
 const ARBITER_SESSION = "44444444-4444-4444-8444-444444444444";
 const PREPARED_RUN = "55555555-5555-4555-8555-555555555555";
@@ -74,6 +75,15 @@ function approved() {
 function createAdapter({ fork = true, questionFirst = false } = {}) {
   const calls = [];
   let clarificationCalls = 0;
+  let freshPlannerSessions = 0;
+  function plannerSession() {
+    const sessionId =
+      freshPlannerSessions === 0
+        ? PLANNER_SESSION
+        : `${PLANNER_SESSION}:${freshPlannerSessions}`;
+    freshPlannerSessions += 1;
+    return sessionId;
+  }
   return {
     calls,
     async probe() {
@@ -98,12 +108,12 @@ function createAdapter({ fork = true, questionFirst = false } = {}) {
         clarificationCalls += 1;
         structured =
           questionFirst && clarificationCalls === 1 ? questions() : ready();
-        sessionId ??= PLANNER_SESSION;
+        sessionId ??= plannerSession();
       } else if (
         request.prompt.includes("Write a concise commit-by-commit plan")
       ) {
         structured = draft();
-        sessionId ??= PLANNER_SESSION;
+        sessionId ??= plannerSession();
       } else if (
         request.prompt.includes("Review the plan and verify that it is correct")
       ) {
@@ -432,6 +442,7 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
     })),
     [
       { role: "planner", sessionId: PLANNER_SESSION },
+      { role: "planner", sessionId: POST_CLARIFICATION_PLANNER_SESSION },
       { role: "reviewer", sessionId: REVIEWER_SESSION },
     ],
   );

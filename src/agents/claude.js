@@ -271,7 +271,9 @@ function turnPrompt(request, recovery) {
         ? RECOVERY_PREFIX
         : undefined;
   let prompt =
-    prefix === undefined ? request.prompt : `${prefix}\n\n${request.prompt}`;
+    prefix === undefined
+      ? request.prompt
+      : `${prefix}\n\n${request.recoveryPrompt}`;
   if (request.access === "local-commit") {
     prompt +=
       `\n\nConfirm that HEAD is ${request.commit.expectedHead} and that the ` +

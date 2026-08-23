@@ -348,6 +348,7 @@ async function createFixture(
 
   const queues = { planner: [...planner], reviewer: [...reviewer], arbiter: [...arbiter] };
   const calls = { planner: [], reviewer: [], arbiter: [] };
+  const freshSessionCounts = { planner: 0, reviewer: 0, arbiter: 0 };
   const adapters = Object.fromEntries(
     Object.keys(queues).map((role) => [
       role,
@@ -356,13 +357,19 @@ async function createFixture(
           calls[role].push(request);
           await onRoleRun?.(role, request, calls[role].length);
           assert.ok(queues[role].length > 0, `Unexpected ${role} turn.`);
+          const freshSessionCount = freshSessionCounts[role];
+          if (request.session?.mode !== "continue") {
+            freshSessionCounts[role] += 1;
+          }
           return {
             output: "structured",
             structured: queues[role].shift(),
             sessionId:
               request.session?.mode === "continue"
                 ? request.session.id
-                : sessionIds[role],
+                : freshSessionCount === 0
+                  ? sessionIds[role]
+                  : `${sessionIds[role]}-${freshSessionCount}`,
           };
         },
       },
@@ -528,11 +535,23 @@ test("writes one validated plan through independent source-session forks", async
     id: ROLE_SESSIONS.planner,
     mode: "continue",
   });
+  assert.match(fixture.calls.planner[0].prompt, /Task \(/u);
+  assert.equal(
+    fixture.calls.planner[0].recoveryPrompt,
+    fixture.calls.planner[0].prompt,
+  );
+  for (const heading of [/Task \(/u, /Context \(/u, /Clarifications \(/u]) {
+    assert.doesNotMatch(fixture.calls.planner[1].prompt, heading);
+    assert.match(fixture.calls.planner[1].recoveryPrompt, heading);
+  }
   assert.deepEqual(fixture.calls.reviewer[0].session, {
     id: SOURCE_SESSION,
     mode: "fork",
   });
   assert.equal(fixture.calls.arbiter.length, 0);
+  for (const child of result.sessionLineage.children) {
+    assert.match(child.contextKey, /^[a-f0-9]{64}$/u);
+  }
   for (const request of fixture.calls.planner) {
     assert.equal(request.access, "read-only");
     assert.equal(request.cwd, fixture.projectPath);
@@ -579,6 +598,20 @@ test("rejects persisted child lineage that reuses the source session", async (t)
   };
 
   await assert.rejects(fixture.run(), /child session is invalid/u);
+});
+
+test("rejects duplicate persisted child sessions", async (t) => {
+  const fixture = await createFixture(t);
+  await fixture.run();
+  fixture.currentRun.sessionLineage = {
+    ...fixture.currentRun.sessionLineage,
+    children: [
+      ...fixture.currentRun.sessionLineage.children,
+      fixture.currentRun.sessionLineage.children[0],
+    ],
+  };
+
+  await assert.rejects(fixture.run(), /child sessions must be unique/u);
 });
 
 test("rejects a persisted write state that bypasses review", async (t) => {
@@ -767,6 +800,12 @@ test("pauses for questions and resumes after an authorized edit", async (t) => {
 
   assert.equal(completed.pipelineState.workflowState, "DONE");
   assert.equal(completed.pause, null);
+  assert.equal(fixture.calls.planner[1].session, undefined);
+  assert.match(fixture.calls.planner[1].prompt, /Task \(/u);
+  assert.notEqual(
+    completed.sessionLineage.children[0].contextKey,
+    completed.sessionLineage.children[1].contextKey,
+  );
 });
 
 test("atomically replaces an unanswered edit authorization", async (t) => {

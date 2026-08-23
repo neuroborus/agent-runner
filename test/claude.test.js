@@ -165,6 +165,12 @@ test("constructs and probes enforceable Claude capabilities", async () => {
     () => createClaudeAdapter({ env: new Map() }),
     hasCode("ERR_INVALID_CLAUDE_OPTIONS"),
   );
+  const invalidRequestFixture = createFixture();
+  await assert.rejects(
+    invalidRequestFixture.adapter.run(request({ recoveryPrompt: "" })),
+    hasCode("ERR_INVALID_CLAUDE_OPTIONS"),
+  );
+  assert.equal(turnCalls(invalidRequestFixture).length, 0);
   const fixture = createFixture();
 
   assert.equal(fixture.adapter.id, CLAUDE_BACKEND_ID);
@@ -562,14 +568,21 @@ test("continues sessions and reconstructs when continuation is unavailable", asy
   });
 
   const response = await fixture.adapter.run(
-    request({ session: { id: SOURCE_SESSION, mode: "continue" } }),
+    request({
+      prompt: "Continue from the current session.",
+      recoveryPrompt: "Inspect the complete durable request.",
+      session: { id: SOURCE_SESSION, mode: "continue" },
+    }),
   );
 
   assert.equal(response.sessionId, FRESH_SESSION);
   const turns = turnCalls(fixture);
   assert.equal(option(turns[0].argumentsList, "--resume"), SOURCE_SESSION);
+  assert.equal(turns[0].options.input, "Continue from the current session.");
   assert.equal(option(turns[1].argumentsList, "--resume"), undefined);
   assert.match(turns[1].options.input, /could not continue/u);
+  assert.match(turns[1].options.input, /complete durable request/u);
+  assert.doesNotMatch(turns[1].options.input, /current session/u);
 });
 
 test("forks a supplied source directly and preserves child lineage", async () => {
@@ -650,15 +663,23 @@ test("retries a compacted context and then reconstructs fresh", async () => {
   });
 
   const response = await fixture.adapter.run(
-    request({ session: { id: SOURCE_SESSION, mode: "continue" } }),
+    request({
+      prompt: "Continue from the current session.",
+      recoveryPrompt: "Inspect the complete durable request.",
+      session: { id: SOURCE_SESSION, mode: "continue" },
+    }),
   );
 
   assert.equal(response.sessionId, FRESH_SESSION);
   const turns = turnCalls(fixture);
   assert.equal(option(turns[1].argumentsList, "--resume"), SOURCE_SESSION);
   assert.match(turns[1].options.input, /^Compact the existing/u);
+  assert.match(turns[1].options.input, /complete durable request/u);
+  assert.doesNotMatch(turns[1].options.input, /current session/u);
   assert.equal(option(turns[2].argumentsList, "--resume"), undefined);
   assert.match(turns[2].options.input, /^The previous Claude/u);
+  assert.match(turns[2].options.input, /complete durable request/u);
+  assert.doesNotMatch(turns[2].options.input, /current session/u);
 });
 
 test("never resumes an invalid session ID reported on failure", async () => {

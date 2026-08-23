@@ -1898,7 +1898,10 @@ export function assertRun(run) {
       !ROLES.includes(child.role) ||
       typeof child.sessionId !== "string" ||
       child.sessionId.length === 0 ||
-      child.sessionId === run.sessionLineage.source
+      child.sessionId === run.sessionLineage.source ||
+      (Object.hasOwn(child, "contextKey") &&
+        (typeof child.contextKey !== "string" ||
+          !/^[a-f0-9]{64}$/u.test(child.contextKey)))
     ) {
       throw workflowError("Polishing child session is invalid.");
     }

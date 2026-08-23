@@ -178,8 +178,8 @@ hashes, pause state, session lineage, timestamps, and opaque pipeline-owned
 state, including its resolved settings from the initial revision. The root
 validates JSON shape and size without interpreting workflow roles or outcomes.
 Session lineage records an optional source-session reference and every direct
-child role/session ID, but native session resume remains an optimization rather
-than a correctness dependency.
+child role/session ID with its accepted-input context key, but native session
+resume remains an optimization rather than a correctness dependency.
 
 Plan execution persists each prepared or consumed one-shot commit authorization
 and every verified commit SHA. After an ambiguous commit turn, resume verifies
@@ -190,10 +190,17 @@ remotes, and Git identity through completion.
 ## Agent Context Recovery
 
 Backend sessions are disposable execution context, not durable workflow state.
-Every retryable prompt can be reconstructed from validated run state, durable
-artifacts, and the observed workspace. When a native context is full, an adapter
-may compact it and retry once; if continuation still fails, writable and
-read-only work can resume in a fresh session with a concise recovery preface.
+Every retryable request carries a turn prompt and a complete recovery prompt
+reconstructed from validated run state, durable artifacts, and the observed
+workspace. A role session is continued only when its persisted key matches the
+accepted inputs and role context. Compatible continuations receive only the
+current instruction and state delta; first, forked, fresh, and
+context-invalidated turns receive the complete prompt.
+
+When a native context is full, an adapter may compact it and retry the complete
+recovery prompt once. If continuation still fails, writable and read-only work
+can resume in a fresh session with the same complete prompt and a concise
+recovery preface.
 
 An explicitly supplied source session is different: the adapter must create a
 direct child and return its ID without resuming or mutating the source. If the

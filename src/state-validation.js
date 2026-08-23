@@ -25,7 +25,7 @@ const STATE_FIELDS = new Set([
   "updatedAt",
 ]);
 const SESSION_LINEAGE_FIELDS = new Set(["source", "children"]);
-const CHILD_SESSION_FIELDS = new Set(["role", "sessionId"]);
+const CHILD_SESSION_FIELDS = new Set(["role", "sessionId", "contextKey"]);
 const ACTIVITY_FIELDS = new Set(["actor", "phase", "kind", "message"]);
 const INPUT_REQUEST_FIELDS = new Set([
   "id",
@@ -113,6 +113,14 @@ function assertSessionReference(value, path) {
     UNSAFE_TEXT_PATTERN.test(value)
   ) {
     fail(`${path} must be a concise opaque string.`);
+  }
+
+  return value;
+}
+
+function assertContextKey(value, path) {
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/u.test(value)) {
+    fail(`${path} is invalid.`);
   }
 
   return value;
@@ -316,6 +324,14 @@ export function normalizeChildSession(value, path = "childSession") {
   return {
     role: assertIdentifier(value.role, `${path}.role`),
     sessionId: assertSessionReference(value.sessionId, `${path}.sessionId`),
+    ...(value.contextKey === undefined
+      ? {}
+      : {
+          contextKey: assertContextKey(
+            value.contextKey,
+            `${path}.contextKey`,
+          ),
+        }),
   };
 }
 

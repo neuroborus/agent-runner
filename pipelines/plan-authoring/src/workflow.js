@@ -87,6 +87,10 @@ Clarifications (${clarification.transcriptPath}):
 ${clarifications}`;
 }
 
+function contextKeyFor(role, context) {
+  return sha256(`${role}\0${context}`);
+}
+
 function findingPrompt(pipelineState) {
   return JSON.stringify(
     {
@@ -274,7 +278,12 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
     return Object.freeze({ inputs, clarification });
   }
 
-  async function recordSession(role, sessionId, continuedSessionId) {
+  async function recordSession(
+    role,
+    sessionId,
+    continuedSessionId,
+    contextKey,
+  ) {
     if (typeof sessionId !== "string" || sessionId.length === 0) {
       throw workflowError(
         `${role} returned no session ID.`,
@@ -290,8 +299,18 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
     if (sessionId === continuedSessionId) {
       return;
     }
+    if (
+      currentRun.sessionLineage.children.some(
+        (child) => child.sessionId === sessionId,
+      )
+    ) {
+      throw workflowError(
+        `${role} returned an existing session ID for a fresh turn.`,
+        "ERR_INVALID_PLAN_AUTHORING_OUTPUT",
+      );
+    }
     currentRun = await runtime.recordChildSession(
-      { role, sessionId },
+      { role, sessionId, contextKey },
       {
         activity: activity(
           role,
@@ -314,21 +333,35 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
       allowedPaths: [],
       projectPath: currentRun.projectPath,
     });
-    const previousSession = [...currentRun.sessionLineage.children]
+    const evidenceContext = evidencePrompt(
+      evidence.inputs,
+      evidence.clarification,
+    );
+    const contextKey = contextKeyFor(role, evidenceContext);
+    const latestSession = [...currentRun.sessionLineage.children]
       .reverse()
-      .find((child) => child.role === role)?.sessionId;
+      .find((child) => child.role === role);
+    const previousSession =
+      latestSession?.contextKey === contextKey
+        ? latestSession.sessionId
+        : undefined;
     const sourceSession = currentRun.sessionLineage.source;
     const session =
       previousSession !== undefined
         ? { id: previousSession, mode: "continue" }
-        : sourceSession !== null && role !== "arbiter"
+        : latestSession === undefined &&
+            sourceSession !== null &&
+            role !== "arbiter"
           ? { id: sourceSession, mode: "fork" }
           : undefined;
     const roleConfiguration = currentRun.roles[role];
+    const recoveryPrompt = buildPrompt(evidenceContext);
     const request = {
       access: "read-only",
       cwd: currentRun.projectPath,
-      prompt: buildPrompt(evidencePrompt(evidence.inputs, evidence.clarification)),
+      prompt:
+        session?.mode === "continue" ? buildPrompt("") : recoveryPrompt,
+      recoveryPrompt,
       schema,
       ...(roleConfiguration.model === null
         ? {}
@@ -353,7 +386,12 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
         "ERR_INVALID_PLAN_AUTHORING_OUTPUT",
       );
     }
-    await recordSession(role, response.sessionId, previousSession);
+    await recordSession(
+      role,
+      response.sessionId,
+      previousSession,
+      contextKey,
+    );
     if (!isRecord(response.structured)) {
       throw workflowError(
         `${role} returned no structured result.`,
