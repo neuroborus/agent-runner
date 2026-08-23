@@ -75,7 +75,8 @@ function validateResumeAction(run, action) {
   if (
     run.pipelineState.workflowState !== "WAITING_FOR_USER" ||
     action !== null ||
-    run.pipelineState.pendingEdit === null
+    (run.pipelineState.pendingEdit === null &&
+      run.pause?.reason !== "backend_unavailable")
   ) {
     throw new Error("Resume action is not valid for this paused run.");
   }

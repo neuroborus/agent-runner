@@ -794,7 +794,19 @@ ${JSON.stringify(
 
   try {
     if (pipelineState().workflowState === "WAITING_FOR_USER") {
-      if (!(await resumeEdit())) {
+      if (pipelineState().pendingEdit !== null) {
+        if (!(await resumeEdit())) {
+          return currentRun;
+        }
+      } else if (currentRun.pause.reason === "backend_unavailable") {
+        await transition(
+          {
+            ...pipelineState(),
+            workflowState: currentRun.pause.resumeState,
+          },
+          { pause: null },
+        );
+      } else {
         return currentRun;
       }
     }
@@ -1222,6 +1234,16 @@ ${findingPrompt(pipelineState())}`,
     }
     if (preflightComplete && inputPathDrift) {
       return invalidateDependentWork("input_changed");
+    }
+    if (cause?.recoverable === true) {
+      const code =
+        typeof cause.code === "string" && /^[A-Z0-9_]{1,64}$/u.test(cause.code)
+          ? cause.code
+          : "ERR_BACKEND_UNAVAILABLE";
+      return pause("backend_unavailable", {
+        code,
+        resumeState: pipelineState().workflowState,
+      });
     }
     return fail(cause);
   }

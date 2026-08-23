@@ -67,6 +67,12 @@ const MAX_ITEMS = 32;
 const MAX_PRODUCT_DECISION_OPTIONS = 16;
 const MAX_STRUCTURED_RESULT_BYTES = 256 * 1024;
 const INVALID_OUTPUT_CODE = "ERR_INVALID_PLAN_AUTHORING_OUTPUT";
+const BACKEND_RESUME_STATES = Object.freeze([
+  "CLARIFY",
+  "DRAFT",
+  "REVIEW",
+  "REVISE",
+]);
 
 export const MAX_DIAGNOSTIC_ITEMS = MAX_ITEMS;
 
@@ -980,6 +986,15 @@ export function assertRun(run) {
           run.pause.reason !== expectedReason))
     ) {
       throw workflowError("Plan-authoring pending edit pause is invalid.");
+    }
+    const hasResumeState = Object.hasOwn(run.pause, "resumeState");
+    if (
+      (run.pause.reason === "backend_unavailable") !== hasResumeState ||
+      (hasResumeState &&
+        (!pipelineState.preflightComplete ||
+          !BACKEND_RESUME_STATES.includes(run.pause.resumeState)))
+    ) {
+      throw workflowError("Plan-authoring pause resume state is invalid.");
     }
   }
   const hashFields = ["task", "context", "clarifications"];

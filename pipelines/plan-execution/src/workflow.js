@@ -247,6 +247,30 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
     return currentRun;
   }
 
+  async function pauseRejectedCommit(cause) {
+    await transition(
+      {
+        ...state(),
+        workflowState: "WAITING_FOR_USER",
+        pendingCommit: null,
+      },
+      {
+        pause: {
+          reason: "backend_unavailable",
+          code: diagnosticCode(cause, "ERR_BACKEND_UNAVAILABLE"),
+          resumeState: "COMMIT",
+        },
+        publicActivity: activity(
+          "runner",
+          "plan-execution",
+          "paused",
+          "Plan execution paused: backend_unavailable.",
+        ),
+      },
+    );
+    return currentRun;
+  }
+
   async function fail(cause) {
     const code = diagnosticCode(cause, "ERR_PLAN_EXECUTION_FAILED");
     try {
@@ -2377,6 +2401,14 @@ ${step.subject}`,
       ) {
         throw cause;
       }
+      if (
+        cause.code === "ERR_COMMIT_NOT_CREATED" &&
+        agentError?.recoverable === true &&
+        agentError?.ambiguous === false
+      ) {
+        await pauseRejectedCommit(agentError);
+        return false;
+      }
       const contractViolation =
         cause?.code === "ERR_COMMIT_CONTRACT_VIOLATED";
       await pause(
@@ -2503,6 +2535,7 @@ ${step.subject}`,
               "FINALIZE",
               "REVIEW",
               "RESOLVE_FINDINGS",
+              "COMMIT",
             ].includes(currentRun.pause.resumeState)))
       ) {
         await transition(

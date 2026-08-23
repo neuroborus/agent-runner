@@ -546,6 +546,87 @@ test("rejects permission fallback and explicit model rerouting", async () => {
   );
 });
 
+test("classifies explicit usage limits without retrying the rejected turn", async (t) => {
+  for (const [message, exitsSuccessfully] of [
+    ["Rate limit exceeded.", true],
+    ["Your organization quota has been exhausted.", false],
+    ["You have exceeded your quota.", false],
+    ["Insufficient credits to complete this request.", false],
+    ["Credits exhausted.", false],
+    ["Monthly spend limit reached.", false],
+    ["You've hit your limit · resets 3pm", false],
+  ]) {
+    await t.test(message, async () => {
+      const fixture = createFixture({
+        handle({ call }) {
+          if (call.file === "claude" && call.argumentsList.includes("-p")) {
+            const payload = result({
+              error: true,
+              output: message,
+              sessionId: SOURCE_SESSION,
+            });
+            if (exitsSuccessfully) {
+              return { stdout: JSON.stringify(payload), stderr: "" };
+            }
+            throw processFailure(payload);
+          }
+          return undefined;
+        },
+      });
+
+      await assert.rejects(
+        fixture.adapter.run(
+          request({
+            prompt: "Continue from the current session.",
+            recoveryPrompt: "Inspect the complete durable request.",
+            session: { id: SOURCE_SESSION, mode: "continue" },
+          }),
+        ),
+        (error) =>
+          hasCode("ERR_CLAUDE_USAGE_LIMIT")(error) &&
+          error.recoverable === true &&
+          error.ambiguous === false,
+      );
+      assert.equal(turnCalls(fixture).length, 1);
+    });
+  }
+});
+
+test("keeps a usage-rejected local commit unambiguous", async () => {
+  const fixture = createFixture({
+    handle({ call }) {
+      if (call.file === "claude" && call.argumentsList.includes("-p")) {
+        throw processFailure(
+          result({ error: true, output: "API rate_limit_error" }),
+        );
+      }
+      return undefined;
+    },
+  });
+
+  await assert.rejects(
+    fixture.adapter.run(
+      request({
+        access: "local-commit",
+        authorizationId: "authorization-1",
+        commit: {
+          expectedHead: EXPECTED_HEAD,
+          message: "test(scope): verify usage limit",
+        },
+      }),
+    ),
+    (error) =>
+      hasCode("ERR_CLAUDE_USAGE_LIMIT")(error) &&
+      error.recoverable === true &&
+      error.ambiguous === false,
+  );
+  assert.equal(turnCalls(fixture).length, 1);
+  assert.equal(
+    fixture.calls.filter(({ file }) => file === "bwrap").length,
+    1,
+  );
+});
+
 test("continues sessions and reconstructs when continuation is unavailable", async () => {
   let attempts = 0;
   const fixture = createFixture({

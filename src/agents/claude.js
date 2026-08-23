@@ -81,6 +81,8 @@ const RECOVERY_PREFIX =
   "progress and do not repeat completed work.";
 const CONTEXT_ERROR_PATTERN =
   /(?:context(?:[_ -]window)?[^\n]{0,80}(?:exceed|full|limit)|prompt is too long)/iu;
+const USAGE_LIMIT_ERROR_PATTERN =
+  /(?:rate[_ -]?limit|(?:usage|spend(?:ing)?|credit)[_ -]?limit[^\n]{0,80}(?:exceed|exhaust|reach)|quota[^\n]{0,80}(?:exceed|exhaust|reach)|(?:exceed|exhaust|reach)[^\n]{0,80}(?:quota|(?:usage|spend(?:ing)?|credit)[_ -]?limit)|credits?[^\n]{0,80}(?:deplet|exhaust)|insufficient credits?|credit balance[^\n]{0,80}(?:deplet|exhaust|low)|out of credits?|you(?:'ve| have) hit (?:your|the) limit)/iu;
 const SESSION_ERROR_PATTERN =
   /(?:no conversation found|(?:conversation|session)[^\n]{0,80}(?:not found|unavailable|cannot|could not|invalid))/iu;
 const MODEL_ERROR_PATTERN =
@@ -411,6 +413,13 @@ function outputError(payload, fallback = "Claude turn failed.") {
     SESSION_ID_PATTERN.test(payload.session_id)
       ? payload.session_id
       : undefined;
+  if (USAGE_LIMIT_ERROR_PATTERN.test(message)) {
+    return new ClaudeAdapterError("Claude usage capacity is unavailable.", {
+      code: "ERR_CLAUDE_USAGE_LIMIT",
+      recoverable: true,
+      sessionId,
+    });
+  }
   if (CONTEXT_ERROR_PATTERN.test(message)) {
     return new ClaudeAdapterError("Claude context window is full.", {
       code: "ERR_CLAUDE_CONTEXT_EXHAUSTED",
@@ -830,6 +839,9 @@ export function createClaudeAdapter(options = {}) {
       result = await runAttempt(request);
     } catch (cause) {
       if (!(cause instanceof ClaudeAdapterError)) {
+        throw cause;
+      }
+      if (cause.code === "ERR_CLAUDE_USAGE_LIMIT") {
         throw cause;
       }
       if (request.access === "local-commit") {

@@ -2050,6 +2050,46 @@ test("accepts a verified commit after an interrupted adapter result", async (t) 
   );
 });
 
+test("re-authorizes after an unambiguous recoverable commit rejection", async (t) => {
+  let backendUnavailable = true;
+  const fixture = await createFixture(t, {
+    async onRoleRun(_role, request) {
+      if (request.access === "local-commit" && backendUnavailable) {
+        backendUnavailable = false;
+        const error = new Error("Provider capacity is unavailable.");
+        error.code = "ERR_FAKE_PROVIDER_LIMIT";
+        error.recoverable = true;
+        error.ambiguous = false;
+        throw error;
+      }
+    },
+  });
+
+  const paused = await fixture.run();
+
+  assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(paused.pause.reason, "backend_unavailable");
+  assert.equal(paused.pause.code, "ERR_FAKE_PROVIDER_LIMIT");
+  assert.equal(paused.pause.resumeState, "COMMIT");
+  assert.equal(paused.pipelineState.pendingCommit, null);
+  const rejectedRequest = fixture.calls.worker.findLast(
+    ({ access }) => access === "local-commit",
+  );
+  assert.equal(rejectedRequest.authorizationId, "commit-1");
+
+  const resumed = await fixture.run();
+  const commitRequests = fixture.calls.worker.filter(
+    ({ access }) => access === "local-commit",
+  );
+
+  assert.equal(resumed.pipelineState.workflowState, "DONE");
+  assert.equal(resumed.pipelineState.completedCommits.length, 1);
+  assert.deepEqual(
+    commitRequests.map(({ authorizationId }) => authorizationId),
+    ["commit-1", "commit-2"],
+  );
+});
+
 test("resumes commit verification without replaying the Worker", async (t) => {
   let verificationUnavailable = true;
   const fixture = await createFixture(t, {
@@ -2126,7 +2166,7 @@ test("pauses without rewriting a commit that violates its authorization", async 
   assert.equal(result.pipelineState.pendingCommit.status, "consumed");
 });
 
-test("resumes a workspace-write turn after a backend interruption", async (t) => {
+test("preserves workspace changes after a Claude usage rejection", async (t) => {
   let interruptImplementation = true;
   const fixture = await createFixture(t, {
     async onRoleRun(role, request) {
@@ -2140,8 +2180,9 @@ test("resumes a workspace-write turn after a backend interruption", async (t) =>
           join(request.cwd, "source.js"),
           "export const value = 2;\n",
         );
-        const error = new Error("Worker backend is temporarily unavailable.");
-        error.code = "ERR_PLAN_EXECUTION_BACKEND_UNAVAILABLE";
+        const error = new Error("Claude usage capacity is unavailable.");
+        error.code = "ERR_CLAUDE_USAGE_LIMIT";
+        error.recoverable = true;
         throw error;
       }
     },
@@ -2151,7 +2192,7 @@ test("resumes a workspace-write turn after a backend interruption", async (t) =>
 
   assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
   assert.equal(paused.pause.reason, "backend_unavailable");
-  assert.equal(paused.pause.code, "ERR_PLAN_EXECUTION_BACKEND_UNAVAILABLE");
+  assert.equal(paused.pause.code, "ERR_CLAUDE_USAGE_LIMIT");
   assert.equal(paused.pause.resumeState, "IMPLEMENT");
 
   const resumed = await fixture.run();

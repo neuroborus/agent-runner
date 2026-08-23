@@ -73,6 +73,7 @@ const RESUMABLE_WORKFLOW_STATES = new Set([
   "FINALIZE",
   "REVIEW",
   "RESOLVE_FINDINGS",
+  "COMMIT",
 ]);
 
 function projectClarification(run) {

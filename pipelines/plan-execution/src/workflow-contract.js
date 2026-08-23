@@ -111,6 +111,7 @@ const PAUSE_RESUME_STATES = Object.freeze({
     "FINALIZE",
     "REVIEW",
     "RESOLVE_FINDINGS",
+    "COMMIT",
   ]),
   environment_blocked: Object.freeze(["IMPLEMENT"]),
   finalization_cannot_pass: Object.freeze(["FINALIZE"]),

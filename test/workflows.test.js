@@ -85,6 +85,7 @@ function createBackend(
   {
     authoringQuestion = false,
     bootstrapDisagreement = false,
+    failAuthoringClarification = false,
     failExecutionClarification = false,
     implementationGate = null,
     rejectSource = false,
@@ -179,6 +180,12 @@ function createBackend(
       if (request.prompt.includes("Study the task, existing clarifications")) {
         role = "planner";
         authoringClarifications += 1;
+        if (failAuthoringClarification && authoringClarifications === 1) {
+          const error = new Error("Claude usage capacity is unavailable.");
+          error.code = "ERR_CLAUDE_USAGE_LIMIT";
+          error.recoverable = true;
+          throw error;
+        }
         structured =
           authoringQuestion && authoringClarifications === 1
             ? {
@@ -508,6 +515,47 @@ test("authors a complete plan through mixed CLI roles", async (t) => {
     await gitOutput(paths.projectPath, ["log", "-1", "--pretty=%s"]),
     "chore(test): initialize",
   );
+});
+
+test("persists and resumes plan authoring after a Claude usage limit", async (t) => {
+  const paths = await fixture(t, { plan: null });
+  const claude = createBackend("claude", {
+    failAuthoringClarification: true,
+  });
+  const configuration = { schemaVersion: 1, defaultBackend: "claude" };
+  const firstRuntime = runtime(paths, { claude }, configuration);
+
+  const paused = await firstRuntime.runner.run({
+    pipelineId: "plan-authoring",
+    projectPath: paths.projectPath,
+    taskPath: paths.taskPath,
+    roleOverrides: {},
+    sourceSession: null,
+  });
+
+  assert.equal(paused.run.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.deepEqual(paused.run.pause, {
+    reason: "backend_unavailable",
+    code: "ERR_CLAUDE_USAGE_LIMIT",
+    resumeState: "CLARIFY",
+  });
+  assert.equal(claude.calls.length, 1);
+  assert.equal(
+    (await firstRuntime.runStore.loadRun(paused.run.runId)).revision,
+    paused.run.revision,
+  );
+
+  const reopened = runtime(paths, { claude }, configuration);
+  const completed = await reopened.runner.resume({
+    runId: paused.run.runId,
+    action: null,
+  });
+
+  assert.equal(completed.run.pipelineState.workflowState, "DONE");
+  assert.equal(completed.run.pause, null);
+  assert.equal(claude.calls.length, 4);
+  assert.equal(await readFile(join(paths.taskPath, "plan.md"), "utf8"), TWO_STEP_PLAN);
+  assert.equal(await gitOutput(paths.projectPath, ["status", "--porcelain"]), "");
 });
 
 test("polishes a dirty worktree through mixed CLI roles without committing", async (t) => {

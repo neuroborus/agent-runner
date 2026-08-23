@@ -2263,7 +2263,7 @@ test("invalidates dependent work before product-decision bootstrap re-entry", as
   );
 });
 
-test("preserves safe writable changes across a recoverable interruption", async (t) => {
+test("preserves safe writable changes across a Claude usage rejection", async (t) => {
   let interrupted = false;
   const fixture = await createFixture(t, {
     async onRoleRun(role, request, _turn, { projectPath }) {
@@ -2274,8 +2274,8 @@ test("preserves safe writable changes across a recoverable interruption", async 
       ) {
         interrupted = true;
         await writeFile(join(projectPath, "tracked.txt"), "interrupted polish\n");
-        const error = new Error("Temporary writable interruption.");
-        error.code = "ERR_FAKE_WRITABLE_INTERRUPTED";
+        const error = new Error("Claude usage capacity is unavailable.");
+        error.code = "ERR_CLAUDE_USAGE_LIMIT";
         error.recoverable = true;
         throw error;
       }
@@ -2284,6 +2284,7 @@ test("preserves safe writable changes across a recoverable interruption", async 
 
   const paused = await fixture.run();
   assert.equal(paused.pause.reason, "backend_unavailable");
+  assert.equal(paused.pause.code, "ERR_CLAUDE_USAGE_LIMIT");
   assert.equal(paused.pause.resumeState, "POLISH");
 
   await fixture.recover();
