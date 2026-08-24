@@ -19,7 +19,7 @@ const EXECUTABLE_PATH = fileURLToPath(
   new URL("../bin/agent-run.js", import.meta.url),
 );
 
-export const MCP_INSTRUCTIONS = `Use run_start to start a durable pipeline, then use one run_wait call for the desired waiting interval. Use run_activity only for explicit or historical reads; do not poll status, activity, or wait at a fixed cadence. When a compatible current native session ID is available, pass it to run_start by default so the pipeline forks its primary and review roles independently; omit it only for an explicit fresh start and never infer or fabricate an ID. Answer pending input from explicit user context when sufficient; otherwise ask the user. Never invent a material product decision.`;
+export const MCP_INSTRUCTIONS = `Use run_start to start a durable pipeline, then use one run_wait call for the desired waiting interval. Use run_activity only for explicit or historical reads; do not poll status, activity, or wait at a fixed cadence. Leave sourceSession unset unless the user deliberately chooses to fork a compatible current native session after being offered a fresh start. Offer its known trusted profile with the fork choice; when the profile is unknown, offer only current profile inheritance and never guess an alias. Primary and review roles fork the complete source context independently, which can spend provider context and quota twice. Recommend a fresh start for a long, multi-topic, or uncertain source session. Keep native session IDs opaque; never inspect provider-private storage or infer or fabricate an ID. Answer pending input from explicit user context when sufficient; otherwise ask the user. Never invent a material product decision.`;
 
 function boundedSingleLine(maximumLength) {
   return z
@@ -49,11 +49,25 @@ const roleOverride = z
   .refine((value) => Object.values(value).some((entry) => entry !== undefined));
 const sourceSession = z
   .object({
-    backend: z.enum(["codex", "claude"]),
-    id: sessionReference,
-    profile: z.string().min(1).max(4_096).optional(),
+    backend: z
+      .enum(["codex", "claude"])
+      .describe("Backend that owns the deliberately selected source session."),
+    id: sessionReference.describe(
+      "Opaque native session ID supplied only after the user chooses a fork.",
+    ),
+    profile: z
+      .string()
+      .min(1)
+      .max(4_096)
+      .optional()
+      .describe(
+        'Known trusted source profile alias, or "current" inheritance when unknown; never guess an alias.',
+      ),
   })
-  .strict();
+  .strict()
+  .describe(
+    "Compatible current session deliberately selected for independent primary and review forks of its complete context. Leave unset for a fresh start.",
+  );
 const resumeAction = z.discriminatedUnion("type", [
   z
     .object({
@@ -631,7 +645,7 @@ export function createMcpServer(options = {}) {
     "run_start",
     {
       description:
-        "Start a durable pipeline. Pass the controlling agent's compatible current native session by default when its ID is available so primary and review roles fork independently; use null only for an explicit fresh start and never invent an ID.",
+        "Start a durable pipeline. Leave sourceSession unset unless the user deliberately selects a compatible current session after being offered a fresh start. Primary and review roles fork its complete context independently and can spend provider quota twice, so recommend fresh for a long, multi-topic, or uncertain session. Include its known trusted profile, use only current inheritance when unknown, keep native IDs opaque, and never inspect private storage or infer an ID or alias.",
       inputSchema: runStartSchema,
       annotations: mutating,
     },

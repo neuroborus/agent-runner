@@ -147,7 +147,10 @@ compacts it and retries once; if the context remains full, ordinary turns can
 continue in a fresh session reconstructed from durable run state, artifacts,
 and the current workspace. An explicitly supplied source session is never
 silently replaced, and an interrupted local-commit turn is verified from Git
-state rather than replayed.
+state rather than replayed. An explicit Claude rate, quota, credit, or spend
+limit rejection is not retried through compaction, a fresh session, or another
+provider. The run pauses as `backend_unavailable` after the one rejected turn,
+with durable workflow state and safe workspace changes preserved for resume.
 
 ## Task Inputs
 
@@ -258,7 +261,10 @@ constrained by the source backend. The runner persists the resolved source
 reference, resolved source profile, and child lineage, so recovery uses durable
 run state and `resume` needs no source flag. The Arbiter remains independent.
 An unavailable or backend/profile-incompatible source fails instead of falling
-back to a fresh session.
+back to a fresh session. Because primary and review roles each receive the
+complete source context, a fork can consume that provider context and quota
+independently. Prefer a fresh start for a long, multi-topic, or uncertain source
+session.
 
 Add `--clarify` to any `run` command to open `$VISUAL` or `$EDITOR` before
 the primary agent checks whether more information is needed. Without the flag,
@@ -370,10 +376,39 @@ and launches detached execution. Its additive `projectConfigurationPath`
 selects the same confined project file as `--project-config`; `profile`,
 `model`, and `contextSize` set run-wide selections; the same fields inside a
 `roleOverrides` entry take precedence. `sourceSession.profile` carries a known
-trusted source alias while its `id` remains opaque. When a compatible current
-Codex or Claude session ID is available, pass it by default so the primary and
-review roles fork independently. Omit it only for an explicit fresh start and
-never fabricate an ID.
+trusted source alias while its `id` remains opaque. These optional fields are
+additive, so a fresh-start request remains valid without them:
+
+```json
+{
+  "idempotencyKey": "<unique-opaque-key>",
+  "pipelineId": "plan-execution",
+  "projectPath": "/path/to/repository",
+  "taskPath": "/path/to/task"
+}
+```
+
+When a compatible current Codex or Claude session is available, offer the user
+a fresh start and a deliberate fork choice. Include the known trusted profile
+with that choice. If its profile is unknown, offer only `current` inheritance;
+never guess an alias or inspect provider-private storage. Leave `sourceSession`
+unset unless the user chooses the fork. A deliberate fork adds:
+
+```json
+{
+  "sourceSession": {
+    "backend": "codex",
+    "id": "<opaque-session-id>",
+    "profile": "codex-work"
+  }
+}
+```
+
+Primary and review roles then fork the complete source context independently,
+so each child can consume the provider context and quota. Recommend a fresh
+start for a long, multi-topic, or uncertain current session. The configured
+artifact root applies only to runner-owned execution and polishing artifacts;
+plan-authoring artifacts remain beside `task.md`.
 
 Call `run_wait` once for the desired interval. Its `timeoutMs` accepts up to 24
 hours; the MCP client's tool timeout must be longer than the requested wait.

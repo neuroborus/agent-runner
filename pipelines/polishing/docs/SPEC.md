@@ -171,7 +171,12 @@ forked directly and independently for the first eligible turn of each Worker
 and Reviewer checkpoint. A known source profile supplies their `current`
 selection and every explicit backend/profile must match; an unknown source
 profile requires `current` and omits a native override. The Arbiter remains
-fresh and independent.
+fresh and independent. MCP leaves the source unset unless the user deliberately
+selects a compatible current session after being offered a fresh start. It
+includes a known trusted profile with the fork choice, or offers only `current`
+inheritance when the profile is unknown. Worker and Reviewer each fork the
+complete source context, so prefer a fresh start for a long, multi-topic, or
+uncertain session.
 
 Each direct child session is persisted with a key over its accepted inputs and
 pipeline-owned role checkpoint. Clarification, bootstrap, Worker work, and
@@ -181,6 +186,11 @@ First, forked, fresh, and context-invalidated turns receive the complete durable
 request. Compatible continuations receive only the current instruction and
 state delta while retaining the complete request for adapter recovery after
 unavailable continuation or failed compaction.
+An explicit Claude rate, quota, credit, or spend-limit rejection is not retried
+through compaction, a fresh session, or provider fallback. Persist
+`backend_unavailable`, safe Worker workspace changes, and invalidation of stale
+fingerprint-bound results before pausing so the durable request can resume after
+capacity returns.
 
 The pipeline stores concise summaries as external run artifacts:
 
@@ -331,6 +341,9 @@ native Codex or Claude session surviving interruption.
 MCP uses the common STDIO tools, persists idempotency intents before mutation
 and receipts before returning, and launches detached continuation under the
 same lease rules. A disconnected client cannot create a second workflow owner.
+Its additive start fields leave `sourceSession` unset until the user
+deliberately selects a fork; native IDs remain opaque and an unknown source
+profile permits only `current` inheritance.
 
 On resume, verify the canonical paths, task hashes, accepted clarification hash,
 repository baseline, `HEAD`, refs, remotes, identity, and current content.
@@ -348,7 +361,8 @@ Pipeline tests use fake adapters and temporary repositories. Cover at least:
   creation and unauthorized clarification changes;
 - empty and unchanged proactive clarification behavior;
 - bounded questions and answer resume;
-- independent Worker/Reviewer bootstrap and source-session forks;
+- independent Worker/Reviewer bootstrap and deliberate MCP source-session
+  forks;
 - reconciliation, arbitration, and product-decision pauses;
 - read-only mutation plus ref, remote, and identity guards;
 - durable transitions, interrupted turns, and journal recovery;

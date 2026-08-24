@@ -64,7 +64,12 @@ source. Known source profiles supply their `current` profile; unknown source
 profiles require `current` and omit the native override. Each role's first
 eligible turn in a pipeline-owned checkpoint forks the source independently;
 the Arbiter remains fresh and independent, and `resume` uses the persisted
-lineage without another flag.
+lineage without another flag. MCP leaves the source unset unless the user
+deliberately selects a compatible current session after being offered a fresh
+start. It includes the known trusted profile with that choice, or offers only
+`current` inheritance when the profile is unknown. Because Planner and Plan
+Reviewer each fork the complete source context, prefer a fresh start for a
+long, multi-topic, or uncertain session.
 
 ## Persistent Run State
 
@@ -226,6 +231,10 @@ First, forked, fresh, and context-invalidated turns receive that complete
 durable context. A compatible role continuation receives only its current
 instruction and state delta; the complete prompt remains attached for adapter
 recovery after unavailable continuation or failed compaction.
+An explicit Claude rate, quota, credit, or spend-limit rejection is not retried
+through compaction, a fresh session, or provider fallback. Persist
+`backend_unavailable` with the current authoring state and resume the durable
+request after capacity returns.
 The planning checkpoint is seeded from the validated inputs and its current
 draft, blockers, and bounded correction history. A product-decision edit
 invalidates it before planning resumes.
@@ -291,6 +300,8 @@ path is ignored and untracked.
   invalid plan.
 - Apply safe project role and setting overrides without relocating task-owned
   artifacts under the runner artifact root.
+- Keep MCP source-session fields additive and unset until the user deliberately
+  selects a fork.
 - Do not turn clarifications into an open-ended chat after work begins.
 - Do not automatically start plan execution after authoring completes.
 - Keep MCP start, wait, response, and detached-process behavior in the root

@@ -183,6 +183,18 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
 
   await client.connect(transport);
   assert.equal(client.getInstructions(), MCP_INSTRUCTIONS);
+  assert.match(
+    MCP_INSTRUCTIONS,
+    /Leave sourceSession unset unless the user deliberately chooses/u,
+  );
+  assert.match(
+    MCP_INSTRUCTIONS,
+    /Primary and review roles fork the complete source context independently/u,
+  );
+  assert.match(
+    MCP_INSTRUCTIONS,
+    /fresh start for a long, multi-topic, or uncertain source session/u,
+  );
   const { tools } = await client.listTools();
   assert.deepEqual(
     tools.map((tool) => tool.name).sort(),
@@ -203,6 +215,25 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
   assert.equal(
     tools.find((tool) => tool.name === "run_start").annotations.destructiveHint,
     true,
+  );
+  const startTool = tools.find((tool) => tool.name === "run_start");
+  assert.match(startTool.description, /user deliberately selects/u);
+  assert.match(
+    startTool.description,
+    /recommend fresh for a long, multi-topic, or uncertain session/u,
+  );
+  assert.doesNotMatch(startTool.description, /by default/u);
+  const sourceSessionSchema = startTool.inputSchema.properties.sourceSession;
+  const sourceSessionMetadata = JSON.stringify(sourceSessionSchema);
+  assert.equal(sourceSessionSchema.default, null);
+  assert.match(sourceSessionMetadata, /Leave unset for a fresh start/u);
+  assert.match(
+    sourceSessionMetadata,
+    /Opaque native session ID supplied only after the user chooses a fork/u,
+  );
+  assert.match(
+    sourceSessionMetadata,
+    /or \\"current\\" inheritance when unknown; never guess an alias/u,
   );
   const pipelines = await client.callTool({
     name: "pipelines_list",

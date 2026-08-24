@@ -215,6 +215,16 @@ to the persisted pause. The child owns the existing per-run execution lease, so
 an MCP disconnect, tool timeout, or duplicate recovery launch cannot create a
 second workflow owner.
 
+MCP start fields remain additive, and `sourceSession` defaults to unset. When a
+compatible current native session is available, the controlling agent offers a
+fresh start and a deliberate fork choice, including its trusted source profile
+when known. An unknown profile permits only `current` inheritance; the agent
+never guesses an alias, inspects provider-private storage, or interprets the
+opaque native ID. The field is passed only after the user selects the fork.
+Primary and review roles then fork the complete source context independently,
+so a fresh start is recommended for a long, multi-topic, or uncertain source
+session to avoid unnecessary provider context and quota use.
+
 `run_wait` is one revision-driven server-side wait that ends at an unresolved
 `WAITING_FOR_USER`, `DONE`, `FAILED`, or its caller-selected timeout. Optional
 MCP progress notifications carry only bounded public activity with role labels;
@@ -275,6 +285,13 @@ When a native context is full, an adapter may compact it and retry the complete
 recovery prompt once. If continuation still fails, writable and read-only work
 can resume in a fresh session with the same complete prompt and a concise
 recovery preface.
+
+An explicit Claude rate, quota, credit, or spend-limit rejection bypasses that
+context-recovery path and all provider fallback. The rejected turn is invoked
+once, then the owning pipeline persists `backend_unavailable`, its resumable
+workflow state, reconciled one-shot authorization state, and any safe workspace
+changes before entering `WAITING_FOR_USER`. Resume reconstructs the same
+durable request after capacity returns.
 
 An explicitly supplied source session is different: the first eligible turn of
 each new primary or review checkpoint creates a direct child and returns its ID

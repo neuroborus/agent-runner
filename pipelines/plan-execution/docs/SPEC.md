@@ -219,7 +219,12 @@ profile. A known source profile supplies `current` for Worker and Reviewer and
 requires every explicit backend/profile selection to match. An unknown source
 profile requires both profiles to remain `current` and omits the native profile
 override. Worker and Reviewer fork it independently; the Arbiter remains
-independent and `resume` never requires either flag again.
+independent and `resume` never requires either flag again. MCP leaves the
+source unset unless the user deliberately selects a compatible current session
+after being offered a fresh start. It includes a known trusted profile with the
+fork choice, or offers only `current` inheritance when the profile is unknown.
+Because Worker and Reviewer each fork the complete source context, recommend a
+fresh start for a long, multi-topic, or uncertain session.
 
 Role backends must be independently configurable:
 
@@ -472,6 +477,13 @@ For non-commit turns, an adapter error may set `recoverable: true` only when
 reconstructing and retrying the durable request is safe. Safety, protocol, and
 isolation failures are not recoverable; an ambiguous `local-commit` outcome is
 never retried and must instead return to Git-state verification.
+
+An explicit Claude rate, quota, credit, or spend-limit rejection is recoverable
+backend unavailability, but the rejected turn itself is never retried through
+compaction, a fresh session, or provider fallback. Persist
+`backend_unavailable` with the resumable pipeline state, reconcile any prepared
+one-shot commit authorization, preserve safe workspace changes, and enter
+`WAITING_FOR_USER` after the single rejected invocation.
 
 `local-commit` is a one-turn capability used only after the runner's commit gate
 and requires the `commit` constraint. It allows the Worker to stage and create
@@ -888,6 +900,9 @@ through `run_respond`. A product decision requires explicit user context; the
 controlling agent asks the user when that context is absent. An external edit
 followed by `run_resume` remains an equivalent path. Detached continuation does
 not change this pipeline's lease, compatibility, Git, or commit gates.
+The additive MCP start fields leave `sourceSession` unset by default and pass it
+only after the user deliberately selects a fork; native IDs remain opaque and
+an unknown source profile offers only `current` inheritance.
 
 When the Worker returns `READY`, persist and freeze the artifact hash. `READY`
 is valid only when the clarification input is compatible with the validated
@@ -1631,6 +1646,8 @@ At minimum cover:
 41. MCP continuation cannot bypass the per-run lease or any local-commit gate.
 42. automatic, explicit, and skill-less finalization modes preserve the
     dedicated gate, resume policy, and matching finalization/review fingerprints.
+43. MCP offers fresh start and compatible current-session fork choices while
+    leaving the source unset unless the user deliberately selects the fork.
 
 Real Codex/Claude smoke tests should be opt-in integration tests.
 
