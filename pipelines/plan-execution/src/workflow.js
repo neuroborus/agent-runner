@@ -1039,7 +1039,7 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
     }
     const clarificationPath = join(
       repositoryPath,
-      "LOCAL_ARTIFACTS",
+      state().artifactRoot,
       "agent-runner",
       currentRun.runId,
       "clarifications.md",

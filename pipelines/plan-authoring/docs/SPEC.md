@@ -39,12 +39,21 @@ stagnationWindowRounds = 3
 ```
 
 Values may be overridden under `pipelines.plan-authoring` in the runner's
-versioned `.agent-runner.json` contract. Role objects live under
+versioned `.agent-runner.json` contract or its safe project overlay. Role
+objects live under
 `pipelines.plan-authoring.roles` and may contain optional string `backend`,
 trusted `profile`, backend-specific `model`, and decimal `contextSize`
 selections. The root runtime applies the shared precedence rules
 documented in [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md); this
-pipeline owns only its roles, setting validation, and defaults.
+pipeline owns only its roles, setting validation, and defaults. The root loads
+an optional ignored `LOCAL_ARTIFACTS/agent-runner.json`, or an explicitly
+selected confined project file, and permits it to select only runner-trusted
+profiles and safe execution and pipeline values. CLI/MCP values win over the
+project overlay, which wins over runner-root values. Resolved roles and settings
+are persisted and not reloaded on resume.
+
+A configured runner artifact root does not affect this pipeline. Its task-owned
+`clarifications.md` and `plan.md` remain beside `task.md`.
 
 CLI overrides use `--planner`, `--reviewer`, and `--arbiter`, with corresponding
 derived profile, model, and context-size flags. Run-wide `--profile`, `--model`,
@@ -280,6 +289,8 @@ path is ignored and untracked.
 - Keep clarification and revision budgets finite, apply the resolved
   `maxRevisionRounds`, and pause rather than accepting unresolved input or an
   invalid plan.
+- Apply safe project role and setting overrides without relocating task-owned
+  artifacts under the runner artifact root.
 - Do not turn clarifications into an open-ended chat after work begins.
 - Do not automatically start plan execution after authoring completes.
 - Keep MCP start, wait, response, and detached-process behavior in the root

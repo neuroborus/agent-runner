@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 
 export const MAX_CLARIFICATION_ROUNDS = 3;
 export const WORKFLOW_STATES = Object.freeze([
@@ -29,6 +29,7 @@ const COUNTER_FIELDS = Object.freeze([
 ]);
 const PIPELINE_STATE_FIELDS = new Set([
   "workflowState",
+  "artifactRoot",
   "preflightComplete",
   "settings",
   "repositoryBaseline",
@@ -1351,6 +1352,9 @@ function assertSnapshot(value) {
 }
 
 export function normalizePipelineState(value) {
+  if (isRecord(value) && !Object.hasOwn(value, "artifactRoot")) {
+    value = { ...value, artifactRoot: "LOCAL_ARTIFACTS" };
+  }
   if (
     !isRecord(value) ||
     Object.keys(value).length !== PIPELINE_STATE_FIELDS.size ||
@@ -1358,6 +1362,21 @@ export function normalizePipelineState(value) {
     !WORKFLOW_STATES.includes(value.workflowState)
   ) {
     throw workflowError("Polishing state is invalid.");
+  }
+  if (
+    typeof value.artifactRoot !== "string" ||
+    value.artifactRoot.includes("\\") ||
+    /^[a-zA-Z]:\//u.test(value.artifactRoot) ||
+    posix.isAbsolute(value.artifactRoot) ||
+    posix.normalize(value.artifactRoot) !== value.artifactRoot ||
+    value.artifactRoot === "." ||
+    value.artifactRoot === ".." ||
+    value.artifactRoot.startsWith("../") ||
+    value.artifactRoot === ".git" ||
+    value.artifactRoot.startsWith(".git/") ||
+    /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(value.artifactRoot)
+  ) {
+    throw workflowError("Polishing artifact root is invalid.");
   }
   for (const field of [
     "preflightComplete",
@@ -1745,6 +1764,7 @@ export function normalizePipelineState(value) {
 }
 
 export function createPolishingState({
+  artifactRoot = "LOCAL_ARTIFACTS",
   proactiveClarification = false,
   settings = null,
 } = {}) {
@@ -1754,8 +1774,9 @@ export function createPolishingState({
   if (settings !== null) {
     assertSettings(settings);
   }
-  return Object.freeze({
+  return Object.freeze(normalizePipelineState({
     workflowState: "CLARIFY",
+    artifactRoot,
     preflightComplete: false,
     settings: settings === null ? null : Object.freeze({ ...settings }),
     repositoryBaseline: null,
@@ -1790,7 +1811,7 @@ export function createPolishingState({
     reviewReconsideration: [],
     additionalFixRounds: 0,
     findingOverrides: [],
-  });
+  }));
 }
 
 export function normalizedCounters(counters) {
@@ -1936,7 +1957,7 @@ export function assertRun(run) {
     const repositoryPath = state.repositoryBaseline.projectPath;
     const expectedClarificationPath = join(
       repositoryPath,
-      "LOCAL_ARTIFACTS",
+      state.artifactRoot,
       "agent-runner",
       run.runId,
       "clarifications.md",

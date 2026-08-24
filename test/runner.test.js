@@ -404,6 +404,10 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
   });
 
   assert.equal(paused.run.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(
+    paused.run.pipelineState.pendingEdit.transcriptPath,
+    join(fixture.taskPath, "clarifications.md"),
+  );
   assert.equal(paused.run.pause.reason, "clarification_answers_required");
   assert.equal(paused.run.sessionLineage.source, SOURCE_SESSION);
   assert.equal(paused.run.sessionLineage.sourceProfile, null);
@@ -676,6 +680,119 @@ test("does not require an unused Arbiter backend", async (t) => {
     model: "current",
     contextSize: "current",
   });
+});
+
+test("persists project overrides and ignores later configuration changes", async (t) => {
+  const fixture = await createFixture(t);
+  const adapter = createAdapter({ questionFirst: true });
+  const projectConfigurationDirectory = join(
+    fixture.projectPath,
+    "LOCAL_ARTIFACTS",
+  );
+  const projectConfigurationPath = join(
+    projectConfigurationDirectory,
+    "agent-runner.json",
+  );
+  await Promise.all([
+    mkdir(projectConfigurationDirectory),
+    writeFile(join(fixture.projectPath, ".gitignore"), "/LOCAL_ARTIFACTS/\n"),
+  ]);
+  await writeFile(
+    projectConfigurationPath,
+    JSON.stringify({
+      schemaVersion: 1,
+      artifactRoot: "project-artifacts",
+      defaultProfile: "codex-work",
+      defaultModel: "project-model",
+      pipelines: {
+        "plan-authoring": {
+          maxRevisionRounds: 4,
+          roles: { reviewer: { contextSize: "200000" } },
+        },
+      },
+    }),
+  );
+  const configuration = {
+    schemaVersion: 1,
+    defaultBackend: "claude",
+    defaultModel: "runner-model",
+    profiles: {
+      "codex-work": { backend: "codex", profile: "native-work" },
+    },
+    pipelines: {
+      "plan-authoring": {
+        maxRevisionRounds: 9,
+        roles: { reviewer: { model: "runner-reviewer" } },
+      },
+    },
+  };
+  const runner = runnerFor(
+    fixture,
+    { codex: adapter },
+    { configuration },
+  );
+
+  const paused = await runner.run({
+    pipelineId: "plan-authoring",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+    proactiveClarification: false,
+    roleOverrides: { planner: { model: "cli-planner" } },
+    sourceSession: null,
+  });
+
+  assert.equal(paused.run.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.deepEqual(paused.run.pipelineState.settings, {
+    maxRevisionRounds: 4,
+    stagnationWindowRounds: 3,
+  });
+  assert.equal(
+    paused.run.pipelineState.pendingEdit.transcriptPath,
+    join(fixture.taskPath, "clarifications.md"),
+  );
+  assert.deepEqual(paused.run.roles.planner, {
+    backend: "codex",
+    profile: "native-work",
+    model: "cli-planner",
+    contextSize: "current",
+  });
+  assert.deepEqual(paused.run.roles.reviewer, {
+    backend: "codex",
+    profile: "native-work",
+    model: "project-model",
+    contextSize: "200000",
+  });
+  const preparedPolishing = await runner.create({
+    pipelineId: "polishing",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    sourceSession: null,
+  });
+  assert.equal(
+    preparedPolishing.run.pipelineState.artifactRoot,
+    "project-artifacts",
+  );
+
+  await Promise.all([
+    writeFile(projectConfigurationPath, '{"schemaVersion":2}\n'),
+    writeFile(
+      join(fixture.taskPath, "clarifications.md"),
+      `${await readFile(join(fixture.taskPath, "clarifications.md"), "utf8")}\nUse behavior A.\n`,
+    ),
+  ]);
+  const completed = await runner.resume({
+    runId: paused.run.runId,
+    action: null,
+  });
+
+  assert.equal(completed.run.pipelineState.workflowState, "DONE");
+  assert.deepEqual(completed.run.roles, paused.run.roles);
+  assert.deepEqual(
+    completed.run.pipelineState.settings,
+    paused.run.pipelineState.settings,
+  );
 });
 
 test("never reads an Agent Runner configuration file in the target repository", async (t) => {

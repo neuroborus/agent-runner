@@ -129,13 +129,15 @@ task/
 The execution run keeps its own clarification transcript at:
 
 ```text
-<project>/LOCAL_ARTIFACTS/agent-runner/<run-id>/clarifications.md
+<project>/<artifactRoot>/agent-runner/<run-id>/clarifications.md
 ```
 
 This local artifact uses the common Markdown transcript format and contains
 execution-specific questions and answers. Before creating it, preflight must
 use `git check-ignore` to verify that the target
-repository ignores the resolved `LOCAL_ARTIFACTS` path. If it does not, pause
+repository ignores the resolved path. `artifactRoot` is a persisted normalized
+repository-relative selection and defaults to `LOCAL_ARTIFACTS`. If the path is
+not ignored, pause
 with `local_artifacts_not_ignored`; never edit `.gitignore` or
 `.git/info/exclude` automatically. The artifact is not runner state and must
 never enter a planned commit. The task directory may be located inside or
@@ -250,10 +252,13 @@ The Arbiter must also support either backend.
 
 The pipeline descriptor declares the `worker`, `reviewer`, and `arbiter` roles.
 Role objects under `pipelines.plan-execution.roles` in the runner's
-`.agent-runner.json` may provide optional string `backend`, trusted `profile`,
-backend-specific `model`, and decimal `contextSize` selections. Role-specific
-CLI/MCP values take precedence over run-wide values, pipeline-role runner
-values, runner-wide defaults, and built-in `current`. A trusted profile pins
+`.agent-runner.json` or its safe project overlay may provide optional string
+`backend`, trusted `profile`, backend-specific `model`, and decimal
+`contextSize` selections. The project file may only select aliases defined by
+runner-root configuration; it cannot define profile implementations,
+credentials, binaries, or environment values. Role-specific CLI/MCP values
+take precedence over run-wide values, project values, runner values, and
+built-in `current`. A trusted profile pins
 its backend; conflicting explicit backend selection is invalid. `current`
 omits the corresponding native override and uses the effective source-session,
 process, profile, or backend default. Do not hard-code model names into
@@ -262,8 +267,12 @@ workflow logic.
 The descriptor also owns the positive-integer settings and built-in defaults
 listed under [Retry Limits and No-Progress Detection](#14-retry-limits-and-no-progress-detection).
 Runner overrides live directly under `pipelines.plan-execution`. The root
-loader strictly validates the versioned envelope and delegates these values to
-the descriptor rather than duplicating pipeline policy.
+loader strictly validates both versioned envelopes and delegates these values
+to the descriptor rather than duplicating pipeline policy. It discovers only
+the ignored `LOCAL_ARTIFACTS/agent-runner.json` project file unless CLI/MCP
+explicitly selects another confined ignored path. It never creates the file or
+changes ignore rules. Resolved roles, settings, and `artifactRoot` are persisted
+and never reloaded on resume.
 
 Codex and Claude do **not** both need to be installed for every run. Preflight validates the Worker and Reviewer selected for the run. The Arbiter backend may be validated lazily when arbitration is first needed.
 
@@ -765,7 +774,7 @@ A practical implementation may hash:
 
 Do not modify the Git index to compute the fingerprint.
 
-The ignored `LOCAL_ARTIFACTS` clarification transcript is not commit content and
+The ignored configured-root clarification transcript is not commit content and
 must not affect this fingerprint. Its independently persisted hash protects it
 as a run input.
 
@@ -1596,7 +1605,7 @@ At minimum cover:
 35. ordinary questions after `CLARIFY` are rejected;
 36. a valid `PRODUCT_DECISION_REQUIRED` pause records the answer and invalidates dependent results;
 37. a product answer that changes plan scope pauses with `plan_revision_required`;
-38. `LOCAL_ARTIFACTS` remains outside the commit-content fingerprint;
+38. the configured ignored artifact root remains outside the commit-content fingerprint;
 39. preflight rejects a clarification path that the target repository does not ignore.
 40. MCP input uses the same one-shot authorization and preserves exact answers;
 41. MCP continuation cannot bypass the per-run lease or any local-commit gate.
@@ -1708,7 +1717,7 @@ V1 is complete when:
 - `--clarify` and agent-generated questions use the declared Markdown artifact and configured text editor;
 - execution does not start when clarification input conflicts with the validated plan;
 - clarification input changes are detected and post-start questions require a blocking product decision;
-- preflight refuses to create `LOCAL_ARTIFACTS` when the target repository does not ignore it;
+- preflight refuses to create the configured artifact path when the target repository does not ignore it;
 - read-only agent-turn guarantees are actively checked;
 - task/plan input changes are detected;
 - each plan step is implemented separately;

@@ -18,6 +18,7 @@ import {
   createPlanExecutionState,
   runPlanExecution,
 } from "../src/index.js";
+import { normalizePipelineState } from "../src/workflow-contract.js";
 
 const executeFile = promisify(execFile);
 const SOURCE_SESSION = "11111111-1111-4111-8111-111111111111";
@@ -520,6 +521,7 @@ async function optionalInput(path) {
 async function createFixture(
   t,
   {
+    artifactRoot = "LOCAL_ARTIFACTS",
     arbiter = [],
     capabilities = {},
     clarificationIgnored = true,
@@ -552,7 +554,7 @@ async function createFixture(
   const runId = "run-1";
   const clarificationPath = join(
     projectPath,
-    "LOCAL_ARTIFACTS",
+    artifactRoot,
     "agent-runner",
     runId,
     "clarifications.md",
@@ -565,7 +567,7 @@ async function createFixture(
   await writeFile(join(taskPath, "plan.md"), plan);
   await writeFile(
     join(projectPath, ".gitignore"),
-    clarificationIgnored ? "/LOCAL_ARTIFACTS/\n" : "",
+    clarificationIgnored ? `/${artifactRoot}/\n` : "",
   );
   await writeFile(join(projectPath, "source.js"), "export const value = 1;\n");
   await executeFile("git", ["-C", projectPath, "add", "."]);
@@ -733,7 +735,10 @@ async function createFixture(
     hashes: {},
     pause: null,
     sessionLineage: { source: sourceSession, children: [] },
-    pipelineState: createPlanExecutionState({ proactiveClarification }),
+    pipelineState: createPlanExecutionState({
+      artifactRoot,
+      proactiveClarification,
+    }),
   };
   const preflights = [];
   const transitions = [];
@@ -1089,6 +1094,33 @@ test("clarifies and bootstraps through independent source-session forks", async 
   assert.match(fixture.artifacts.get("context/worker.md"), /Worker understands/u);
   assert.match(fixture.artifacts.get("context/reviewer.md"), /Reviewer understands/u);
   assert.match(fixture.artifacts.get("context/resolved.md"), /roles agree/u);
+});
+
+test("uses and persists a configured runner artifact root", async (t) => {
+  const fixture = await createFixture(t, {
+    artifactRoot: "IGNORED_RUNS",
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.artifactRoot, "IGNORED_RUNS");
+  assert.equal(
+    result.pipelineState.clarificationPath,
+    join(
+      fixture.projectPath,
+      "IGNORED_RUNS",
+      "agent-runner",
+      "run-1",
+      "clarifications.md",
+    ),
+  );
+});
+
+test("normalizes legacy execution state to the default artifact root", () => {
+  const state = { ...createPlanExecutionState() };
+  delete state.artifactRoot;
+
+  assert.equal(normalizePipelineState(state).artifactRoot, "LOCAL_ARTIFACTS");
 });
 
 test("accepts an unchanged proactive clarification and uses fresh role sessions", async (t) => {

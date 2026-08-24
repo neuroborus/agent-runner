@@ -29,6 +29,7 @@ import {
   MAX_DURABLE_RUN_BYTES,
   MAX_DISPUTE_HISTORY_BYTES,
   MAX_DISPUTES_PER_FINDING,
+  normalizePipelineState,
 } from "../src/workflow-contract.js";
 
 const executeFile = promisify(execFile);
@@ -323,6 +324,7 @@ async function optionalInput(path) {
 async function createFixture(
   t,
   {
+    artifactRoot = "LOCAL_ARTIFACTS",
     dirty = true,
     ignoreArtifacts = true,
     interactive = false,
@@ -354,7 +356,7 @@ async function createFixture(
   await runGit(projectPath, "config", "user.email", "polishing@example.test");
   await writeFile(
     join(projectPath, ".gitignore"),
-    `${ignoreArtifacts ? "LOCAL_ARTIFACTS/\n" : ""}ignored-task/\n`,
+    `${ignoreArtifacts ? `${artifactRoot}/\n` : ""}ignored-task/\n`,
   );
   await writeFile(join(projectPath, "tracked.txt"), "base\n");
   await writeFile(join(projectPath, "deleted.txt"), "delete me\n");
@@ -449,6 +451,7 @@ async function createFixture(
     },
     sourceSession,
     pipelineState: createPolishingState({
+      artifactRoot,
       proactiveClarification,
       settings,
     }),
@@ -1101,6 +1104,33 @@ test("prepares a dirty worktree through independent source-session bootstraps", 
     await readFile(join(fixture.directoryPath, "context", "resolved.md"), "utf8"),
     /existing change set/u,
   );
+});
+
+test("uses and persists a configured runner artifact root", async (t) => {
+  const fixture = await createFixture(t, {
+    artifactRoot: "IGNORED_RUNS",
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.artifactRoot, "IGNORED_RUNS");
+  assert.equal(
+    result.pipelineState.clarificationPath,
+    join(
+      fixture.projectPath,
+      "IGNORED_RUNS",
+      "agent-runner",
+      result.runId,
+      "clarifications.md",
+    ),
+  );
+});
+
+test("normalizes legacy polishing state to the default artifact root", () => {
+  const state = { ...createPolishingState({ settings: SETTINGS }) };
+  delete state.artifactRoot;
+
+  assert.equal(normalizePipelineState(state).artifactRoot, "LOCAL_ARTIFACTS");
 });
 
 test("accepts staged, unstaged, deleted, and untracked changes as one set", async (t) => {

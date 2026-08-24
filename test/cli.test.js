@@ -327,6 +327,8 @@ test("run derives execution, role, and opaque source-session inputs", async () =
       "run-model",
       "--context-size",
       "200000",
+      "--project-config",
+      "/tmp/project/ignored/runner.json",
       "--fork-from",
       "claude:source:opaque",
       "--fork-profile",
@@ -360,6 +362,10 @@ test("run derives execution, role, and opaque source-session inputs", async () =
     model: "run-model",
     contextSize: "200000",
   });
+  assert.equal(
+    request.projectConfigurationPath,
+    "/tmp/project/ignored/runner.json",
+  );
   assert.deepEqual(request.sourceSession, {
     backend: "claude",
     id: "source:opaque",

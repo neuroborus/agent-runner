@@ -9,6 +9,7 @@ import {
 } from "./agents/index.js";
 import { createClarificationService } from "./clarifications.js";
 import {
+  loadProjectConfiguration,
   loadRunnerConfiguration,
   resolvePipelineConfiguration,
 } from "./config.js";
@@ -24,6 +25,7 @@ const RUN_FIELDS = new Set([
   "proactiveClarification",
   "roleOverrides",
   "executionOverrides",
+  "projectConfigurationPath",
   "sourceSession",
 ]);
 const RESUME_FIELDS = new Set(["runId", "action"]);
@@ -365,6 +367,13 @@ function normalizeRunInput(input) {
         : input.proactiveClarification,
     roleOverrides: input.roleOverrides ?? {},
     executionOverrides: input.executionOverrides ?? {},
+    projectConfigurationPath:
+      input.projectConfigurationPath === undefined
+        ? undefined
+        : assertNonEmptyString(
+            input.projectConfigurationPath,
+            "run.projectConfigurationPath",
+          ),
     sourceSession: normalizeSourceSession(input.sourceSession),
   });
 }
@@ -630,6 +639,12 @@ export function createRunner(options = {}) {
     }
     const { projectPath, taskPath } = await validateBoundary(normalized);
     const configuration = await loadConfiguration();
+    const projectConfiguration = await loadProjectConfiguration({
+      configurationPath: normalized.projectConfigurationPath,
+      inspectPath: (options) => git.inspectPath(options),
+      projectPath,
+      runnerConfiguration: configuration,
+    });
     let resolved;
     try {
       resolved = resolvePipelineConfiguration(
@@ -638,6 +653,7 @@ export function createRunner(options = {}) {
         normalized.roleOverrides,
         normalized.executionOverrides,
         normalized.sourceSession,
+        projectConfiguration?.configuration ?? null,
       );
     } catch (cause) {
       if (cause?.code !== "ERR_SOURCE_BACKEND_MISMATCH") {
@@ -656,6 +672,7 @@ export function createRunner(options = {}) {
       normalized.sourceSession,
     );
     const pipelineState = pipeline.workflow.createState({
+      artifactRoot: resolved.artifactRoot,
       proactiveClarification: normalized.proactiveClarification,
       settings: resolved.settings,
     });

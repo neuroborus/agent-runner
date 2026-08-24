@@ -18,6 +18,7 @@ const COMMON_RUN_OPTIONS = Object.freeze([
   "fork-profile",
   "model",
   "profile",
+  "project-config",
 ]);
 const REQUIRED_COMMAND_OPTIONS = Object.freeze({
   resume: Object.freeze(["run"]),
@@ -49,6 +50,7 @@ const OPTIONS = Object.freeze({
   "context-size": { type: "string" },
   model: { type: "string" },
   profile: { type: "string" },
+  "project-config": { type: "string" },
   ...Object.fromEntries(
     [...PIPELINE_RUN_OPTIONS].map((option) => [option, { type: "string" }]),
   ),
@@ -76,6 +78,7 @@ Options:
       --fork-from          Fork primary and review roles from a backend session
       --fork-profile       Trusted profile alias used by the source session
       --profile            Set the run-wide trusted profile alias
+      --project-config     Load an explicit ignored project configuration
       --model              Set the run-wide backend-native model
       --context-size       Set the run-wide decimal token context size
       --<role>             Override a role backend
@@ -376,6 +379,7 @@ export async function main(
         projectPath: values.project,
         taskPath: values.task,
         proactiveClarification: values.clarify ?? false,
+        projectConfigurationPath: values["project-config"],
         roleOverrides: roleOverrides(pipeline, values),
         executionOverrides: executionOverrides(values),
         sourceSession:

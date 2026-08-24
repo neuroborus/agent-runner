@@ -345,6 +345,7 @@ test("forwards additive run-wide, role, and source profile selections", async (t
     idempotencyKey: "preference-start",
     pipelineId: "plan-authoring",
     projectPath: paths.projectPath,
+    projectConfigurationPath: join(paths.projectPath, "ignored", "runner.json"),
     taskPath: paths.taskPath,
     proactiveClarification: false,
     profile: "claude-personal",
@@ -368,6 +369,7 @@ test("forwards additive run-wide, role, and source profile selections", async (t
   assert.deepEqual(createdInput, {
     pipelineId: "plan-authoring",
     projectPath: paths.projectPath,
+    projectConfigurationPath: input.projectConfigurationPath,
     taskPath: paths.taskPath,
     proactiveClarification: false,
     roleOverrides: input.roleOverrides,

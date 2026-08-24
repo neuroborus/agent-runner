@@ -88,7 +88,14 @@ stagnationWindowRounds = 3
 ```
 
 Settings are stored in pipeline state at run creation and are not reloaded on
-resume. The Arbiter backend is probed lazily when first needed.
+resume. The root may load safe project overrides from an ignored
+`LOCAL_ARTIFACTS/agent-runner.json` or an explicitly selected confined ignored
+path. CLI/MCP execution selections win over project values, which win over
+runner-root values. A project file may select only runner-trusted profile
+aliases and safe role, setting, and repository-relative artifact-root values;
+it cannot define profile implementations, credentials, binaries, or environment
+values. The resolved roles, settings, and artifact root are persisted. The
+Arbiter backend is probed lazily when first needed.
 
 ## Clarification
 
@@ -101,11 +108,14 @@ material questions, or a narrowly valid `PRODUCT_DECISION_REQUIRED` outcome.
 The run-specific transcript is:
 
 ```text
-<repository>/LOCAL_ARTIFACTS/agent-runner/<run-id>/clarifications.md
+<repository>/<artifactRoot>/agent-runner/<run-id>/clarifications.md
 ```
 
-Before creating it, preflight requires `git check-ignore` evidence that the
-resolved path is ignored and untracked. The runner never changes ignore rules.
+`artifactRoot` is a normalized repository-relative selection that defaults to
+`LOCAL_ARTIFACTS`; a legacy run without that persisted field keeps the default.
+Before creating the transcript, preflight requires `git check-ignore` evidence
+that the resolved path is ignored and untracked. The runner never changes
+ignore rules.
 The transcript is excluded from the repository content fingerprint and hashed
 separately as immutable workflow input.
 
@@ -143,7 +153,7 @@ Preflight:
 5. records the dirty repository snapshot and requires at least one change;
 6. probes Worker and Reviewer capabilities independently;
 7. creates or preserves the run clarification transcript;
-8. stores settings, hashes, backend versions, and the repository baseline.
+8. stores the artifact root, settings, hashes, backend versions, and the repository baseline.
 
 Worker and Reviewer bootstrap independently and read-only. Both study the
 repository, task, complete current changes, clarifications, instructions,
@@ -322,7 +332,8 @@ Pipeline tests use fake adapters and temporary repositories. Cover at least:
 - staged, unstaged, deleted, and non-ignored untracked change membership;
 - dirty tracked, non-ignored untracked, ignored untracked, and clean tracked
   task-input paths;
-- ignored clarification creation and unauthorized clarification changes;
+- default, configured, and legacy artifact roots plus ignored clarification
+  creation and unauthorized clarification changes;
 - empty and unchanged proactive clarification behavior;
 - bounded questions and answer resume;
 - independent Worker/Reviewer bootstrap and source-session forks;

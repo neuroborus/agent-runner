@@ -1,20 +1,27 @@
-import { readFile } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { constants } from "node:fs";
+import { lstat, open, readFile } from "node:fs/promises";
+import { isAbsolute, join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { BACKEND_IDS } from "./agents/index.js";
 import { getPipeline, listPipelines } from "./pipeline-registry.js";
 
 export const CONFIG_FILENAME = ".agent-runner.json";
+export const DEFAULT_ARTIFACT_ROOT = "LOCAL_ARTIFACTS";
+export const PROJECT_CONFIG_FILENAME = "agent-runner.json";
 const CONFIG_PATH = fileURLToPath(
   new URL(`../${CONFIG_FILENAME}`, import.meta.url),
 );
 export const CONFIG_SCHEMA_VERSION = 1;
+const MAX_CONFIGURATION_BYTES = 1024 * 1024;
+const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
+const NONBLOCK = constants.O_NONBLOCK ?? 0;
 
 const BACKENDS = new Set(BACKEND_IDS);
 const CURRENT = "current";
 const PROFILE_NAME_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const TOP_LEVEL_FIELDS = new Set([
+  "artifactRoot",
   "schemaVersion",
   "defaultBackend",
   "defaultContextSize",
@@ -23,6 +30,9 @@ const TOP_LEVEL_FIELDS = new Set([
   "pipelines",
   "profiles",
 ]);
+const PROJECT_TOP_LEVEL_FIELDS = new Set(
+  [...TOP_LEVEL_FIELDS].filter((field) => field !== "profiles"),
+);
 const ROLE_FIELDS = new Set(["backend", "contextSize", "model", "profile"]);
 const EXECUTION_FIELDS = new Set(["contextSize", "model", "profile"]);
 const PROFILE_FIELDS = Object.freeze({
@@ -69,6 +79,26 @@ function assertBackend(value, path) {
 function assertSelection(value, path) {
   if (typeof value !== "string" || value.trim().length === 0) {
     throw new ConfigurationError(`${path} must be a non-empty string.`);
+  }
+}
+
+function assertArtifactRoot(value, path) {
+  assertSelection(value, path);
+  if (
+    value.includes("\\") ||
+    /^[a-zA-Z]:\//u.test(value) ||
+    posix.isAbsolute(value) ||
+    posix.normalize(value) !== value ||
+    value === "." ||
+    value === ".." ||
+    value.startsWith("../") ||
+    value === ".git" ||
+    value.startsWith(".git/") ||
+    /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(value)
+  ) {
+    throw new ConfigurationError(
+      `${path} must be a normalized repository-relative directory.`,
+    );
   }
 }
 
@@ -131,8 +161,12 @@ function normalizeProfile(name, value) {
   });
 }
 
-function normalizePipeline(pipeline, input) {
-  const path = `configuration.pipelines.${pipeline.id}`;
+function normalizePipeline(
+  pipeline,
+  input,
+  { applyDefaults = true, rootPath = "configuration" } = {},
+) {
+  const path = `${rootPath}.pipelines.${pipeline.id}`;
   assertRecord(input, path);
   rejectUnknownFields(
     input,
@@ -142,16 +176,18 @@ function normalizePipeline(pipeline, input) {
 
   const normalized = {};
   for (const [settingName, definition] of Object.entries(pipeline.settings)) {
-    const value =
-      input[settingName] === undefined
-        ? definition.defaultValue
-        : input[settingName];
-    if (!definition.validate(value)) {
+    const value = input[settingName];
+    if (value === undefined && !applyDefaults) {
+      continue;
+    }
+    const resolvedValue =
+      value === undefined ? definition.defaultValue : value;
+    if (!definition.validate(resolvedValue)) {
       throw new ConfigurationError(
         `${path}.${settingName} ${definition.errorMessage}.`,
       );
     }
-    normalized[settingName] = value;
+    normalized[settingName] = resolvedValue;
   }
 
   const inputRoles = input.roles === undefined ? {} : input.roles;
@@ -193,6 +229,9 @@ function normalizeConfiguration(input) {
   if (input.defaultBackend !== undefined) {
     assertBackend(input.defaultBackend, "configuration.defaultBackend");
   }
+  if (input.artifactRoot !== undefined) {
+    assertArtifactRoot(input.artifactRoot, "configuration.artifactRoot");
+  }
   for (const field of [
     "defaultProfile",
     "defaultModel",
@@ -229,6 +268,7 @@ function normalizeConfiguration(input) {
 
   const normalized = {
     schemaVersion: CONFIG_SCHEMA_VERSION,
+    artifactRoot: input.artifactRoot ?? DEFAULT_ARTIFACT_ROOT,
     defaultProfile: input.defaultProfile ?? CURRENT,
     defaultModel: input.defaultModel ?? CURRENT,
     defaultContextSize: input.defaultContextSize ?? CURRENT,
@@ -269,6 +309,109 @@ function normalizeConfiguration(input) {
     ) {
       throw new ConfigurationError(
         `${path} selects unknown profile: ${selection}.`,
+        { code: "ERR_UNKNOWN_PROFILE" },
+      );
+    }
+  }
+
+  return Object.freeze(normalized);
+}
+
+function normalizeProjectConfiguration(input, runnerConfiguration) {
+  const rootPath = "projectConfiguration";
+  assertRecord(input, rootPath);
+  rejectUnknownFields(input, PROJECT_TOP_LEVEL_FIELDS, rootPath);
+  if (!Object.hasOwn(input, "schemaVersion")) {
+    throw new ConfigurationError(
+      "projectConfiguration.schemaVersion is required.",
+    );
+  }
+  if (input.schemaVersion !== CONFIG_SCHEMA_VERSION) {
+    throw new ConfigurationError(
+      `Unsupported projectConfiguration.schemaVersion: ${String(input.schemaVersion)}.`,
+      { code: "ERR_UNSUPPORTED_CONFIGURATION_VERSION" },
+    );
+  }
+  if (input.artifactRoot !== undefined) {
+    assertArtifactRoot(input.artifactRoot, `${rootPath}.artifactRoot`);
+  }
+  if (input.defaultBackend !== undefined) {
+    assertBackend(input.defaultBackend, `${rootPath}.defaultBackend`);
+  }
+  for (const field of [
+    "defaultProfile",
+    "defaultModel",
+    "defaultContextSize",
+  ]) {
+    if (input[field] !== undefined) {
+      assertSelection(input[field], `${rootPath}.${field}`);
+    }
+  }
+
+  const inputPipelines =
+    input.pipelines === undefined ? {} : input.pipelines;
+  assertRecord(inputPipelines, `${rootPath}.pipelines`);
+  const pipelines = listPipelines();
+  const pipelineIds = new Set(pipelines.map(({ id }) => id));
+  const unknownPipeline = Object.keys(inputPipelines).find(
+    (pipelineId) => !pipelineIds.has(pipelineId),
+  );
+  if (unknownPipeline !== undefined) {
+    throw new ConfigurationError(
+      `${rootPath}.pipelines.${unknownPipeline} is not supported.`,
+    );
+  }
+
+  const normalized = {
+    schemaVersion: CONFIG_SCHEMA_VERSION,
+    pipelines: Object.freeze(
+      Object.fromEntries(
+        pipelines.flatMap((pipeline) =>
+          inputPipelines[pipeline.id] === undefined
+            ? []
+            : [
+                [
+                  pipeline.id,
+                  normalizePipeline(pipeline, inputPipelines[pipeline.id], {
+                    applyDefaults: false,
+                    rootPath,
+                  }),
+                ],
+              ],
+        ),
+      ),
+    ),
+  };
+  for (const field of [
+    "artifactRoot",
+    "defaultBackend",
+    "defaultProfile",
+    "defaultModel",
+    "defaultContextSize",
+  ]) {
+    if (input[field] !== undefined) {
+      normalized[field] = input[field];
+    }
+  }
+
+  for (const [selection, path] of [
+    [normalized.defaultProfile, `${rootPath}.defaultProfile`],
+    ...pipelines.flatMap((pipeline) =>
+      Object.entries(normalized.pipelines[pipeline.id]?.roles ?? {}).map(
+        ([role, configuration]) => [
+          configuration.profile,
+          `${rootPath}.pipelines.${pipeline.id}.roles.${role}.profile`,
+        ],
+      ),
+    ),
+  ]) {
+    if (
+      selection !== undefined &&
+      selection !== CURRENT &&
+      !Object.hasOwn(runnerConfiguration.profiles, selection)
+    ) {
+      throw new ConfigurationError(
+        `${path} selects unknown trusted profile: ${selection}.`,
         { code: "ERR_UNKNOWN_PROFILE" },
       );
     }
@@ -338,6 +481,176 @@ export function parseRunnerConfiguration(source) {
   return normalizeConfiguration(parsed);
 }
 
+export function parseProjectConfiguration(source, runnerConfiguration) {
+  if (typeof source !== "string") {
+    throw new ConfigurationError(
+      "Project configuration source must be a string.",
+    );
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(source);
+  } catch (cause) {
+    throw new ConfigurationError(
+      "Project configuration must contain valid JSON.",
+      { cause },
+    );
+  }
+
+  return normalizeProjectConfiguration(
+    parsed,
+    normalizeConfiguration(runnerConfiguration),
+  );
+}
+
+async function readConfinedConfiguration(path) {
+  let handle;
+  try {
+    const pathBefore = await lstat(path, { bigint: true });
+    if (
+      !pathBefore.isFile() ||
+      pathBefore.size > BigInt(MAX_CONFIGURATION_BYTES)
+    ) {
+      throw new ConfigurationError(
+        "Project configuration must be a bounded regular file.",
+        { code: "ERR_PROJECT_CONFIGURATION_READ" },
+      );
+    }
+    handle = await open(path, constants.O_RDONLY | NO_FOLLOW | NONBLOCK);
+    const before = await handle.stat({ bigint: true });
+    if (!before.isFile() || before.size > BigInt(MAX_CONFIGURATION_BYTES)) {
+      throw new ConfigurationError(
+        "Project configuration must be a bounded regular file.",
+        { code: "ERR_PROJECT_CONFIGURATION_READ" },
+      );
+    }
+    if (
+      pathBefore.dev !== before.dev ||
+      pathBefore.ino !== before.ino ||
+      pathBefore.size !== before.size ||
+      pathBefore.mtimeNs !== before.mtimeNs ||
+      pathBefore.ctimeNs !== before.ctimeNs
+    ) {
+      throw new ConfigurationError(
+        "Project configuration changed while it was read.",
+        { code: "ERR_PROJECT_CONFIGURATION_READ" },
+      );
+    }
+    const buffer = Buffer.allocUnsafe(MAX_CONFIGURATION_BYTES + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        length,
+        buffer.length - length,
+        null,
+      );
+      if (bytesRead === 0) {
+        break;
+      }
+      length += bytesRead;
+    }
+    const source = buffer.subarray(0, length);
+    if (source.length > MAX_CONFIGURATION_BYTES) {
+      throw new ConfigurationError(
+        "Project configuration must be a bounded regular file.",
+        { code: "ERR_PROJECT_CONFIGURATION_READ" },
+      );
+    }
+    const [after, pathAfter] = await Promise.all([
+      handle.stat({ bigint: true }),
+      lstat(path, { bigint: true }),
+    ]);
+    if (
+      !pathAfter.isFile() ||
+      before.dev !== after.dev ||
+      before.ino !== after.ino ||
+      before.size !== after.size ||
+      before.mtimeNs !== after.mtimeNs ||
+      before.ctimeNs !== after.ctimeNs ||
+      after.dev !== pathAfter.dev ||
+      after.ino !== pathAfter.ino ||
+      after.size !== pathAfter.size ||
+      after.mtimeNs !== pathAfter.mtimeNs ||
+      after.ctimeNs !== pathAfter.ctimeNs
+    ) {
+      throw new ConfigurationError(
+        "Project configuration changed while it was read.",
+        { code: "ERR_PROJECT_CONFIGURATION_READ" },
+      );
+    }
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(source);
+    } catch (cause) {
+      throw new ConfigurationError(
+        "Project configuration must contain valid UTF-8.",
+        { cause, code: "ERR_PROJECT_CONFIGURATION_READ" },
+      );
+    }
+  } catch (cause) {
+    if (cause instanceof ConfigurationError) {
+      throw cause;
+    }
+    throw new ConfigurationError(
+      `Cannot read project configuration at ${path}.`,
+      { cause, code: "ERR_PROJECT_CONFIGURATION_READ" },
+    );
+  } finally {
+    await handle?.close();
+  }
+}
+
+export async function loadProjectConfiguration({
+  configurationPath,
+  inspectPath,
+  projectPath,
+  runnerConfiguration,
+}) {
+  if (typeof inspectPath !== "function") {
+    throw new ConfigurationError(
+      "Project configuration path inspection is unavailable.",
+      { code: "ERR_PROJECT_CONFIGURATION_READ" },
+    );
+  }
+  const explicit = configurationPath !== undefined;
+  if (
+    explicit &&
+    (typeof configurationPath !== "string" ||
+      configurationPath.trim().length === 0)
+  ) {
+    throw new ConfigurationError(
+      "Project configuration path must be a non-empty string.",
+    );
+  }
+  const requestedPath =
+    configurationPath ??
+    join(projectPath, DEFAULT_ARTIFACT_ROOT, PROJECT_CONFIG_FILENAME);
+  const inspection = await inspectPath({ path: requestedPath, projectPath });
+  if (!inspection.exists) {
+    if (!explicit) {
+      return null;
+    }
+    throw new ConfigurationError(
+      `Project configuration does not exist at ${inspection.path}.`,
+      { code: "ERR_PROJECT_CONFIGURATION_READ" },
+    );
+  }
+  if (inspection.tracked || !inspection.ignored) {
+    throw new ConfigurationError(
+      "Project configuration must be ignored and untracked.",
+      { code: "ERR_PROJECT_CONFIGURATION_NOT_IGNORED" },
+    );
+  }
+  return Object.freeze({
+    path: inspection.path,
+    configuration: parseProjectConfiguration(
+      await readConfinedConfiguration(inspection.path),
+      runnerConfiguration,
+    ),
+  });
+}
+
 export async function loadRunnerConfiguration() {
   let source;
   try {
@@ -362,6 +675,7 @@ export function resolvePipelineConfiguration(
   roleOverrides = {},
   executionOverrides = {},
   sourceSession = null,
+  projectConfiguration = null,
 ) {
   const pipeline = getPipeline(pipelineId);
   if (pipeline === undefined) {
@@ -370,6 +684,13 @@ export function resolvePipelineConfiguration(
     });
   }
   const normalizedConfiguration = normalizeConfiguration(configuration);
+  const normalizedProjectConfiguration =
+    projectConfiguration === null
+      ? null
+      : normalizeProjectConfiguration(
+          projectConfiguration,
+          normalizedConfiguration,
+        );
   assertRecord(roleOverrides, "roleOverrides");
   const normalizedExecutionOverrides = normalizeExecution(
     executionOverrides,
@@ -387,6 +708,8 @@ export function resolvePipelineConfiguration(
   }
 
   const pipelineConfiguration = normalizedConfiguration.pipelines[pipelineId];
+  const projectPipelineConfiguration =
+    normalizedProjectConfiguration?.pipelines[pipelineId] ?? {};
 
   let sourceProfile = null;
   if (
@@ -413,10 +736,14 @@ export function resolvePipelineConfiguration(
         `roleOverrides.${role}`,
       );
       const configuredRole = pipelineConfiguration.roles[role] ?? {};
-      const explicitRoleBackend = override.backend ?? configuredRole.backend;
+      const projectRole = projectPipelineConfiguration.roles?.[role] ?? {};
+      const explicitRoleBackend =
+        override.backend ?? projectRole.backend ?? configuredRole.backend;
       let profileSelection =
         override.profile ??
         normalizedExecutionOverrides.profile ??
+        projectRole.profile ??
+        normalizedProjectConfiguration?.defaultProfile ??
         configuredRole.profile ??
         normalizedConfiguration.defaultProfile;
 
@@ -465,6 +792,7 @@ export function resolvePipelineConfiguration(
       const backend =
         pinnedBackend ??
         explicitRoleBackend ??
+        normalizedProjectConfiguration?.defaultBackend ??
         normalizedConfiguration.defaultBackend;
       if (backend === undefined) {
         throw new ConfigurationError(
@@ -481,11 +809,15 @@ export function resolvePipelineConfiguration(
           model:
             override.model ??
             normalizedExecutionOverrides.model ??
+            projectRole.model ??
+            normalizedProjectConfiguration?.defaultModel ??
             configuredRole.model ??
             normalizedConfiguration.defaultModel,
           contextSize:
             override.contextSize ??
             normalizedExecutionOverrides.contextSize ??
+            projectRole.contextSize ??
+            normalizedProjectConfiguration?.defaultContextSize ??
             configuredRole.contextSize ??
             normalizedConfiguration.defaultContextSize,
         }),
@@ -493,11 +825,16 @@ export function resolvePipelineConfiguration(
     }),
   );
 
-  const { roles: _roles, ...settings } = pipelineConfiguration;
+  const { roles: _roles, ...runnerSettings } = pipelineConfiguration;
+  const { roles: _projectRoles, ...projectSettings } =
+    projectPipelineConfiguration;
   return Object.freeze({
+    artifactRoot:
+      normalizedProjectConfiguration?.artifactRoot ??
+      normalizedConfiguration.artifactRoot,
     pipelineId,
     roles: Object.freeze(resolvedRoles),
-    settings: Object.freeze(settings),
+    settings: Object.freeze({ ...runnerSettings, ...projectSettings }),
     sourceProfile:
       sourceProfile === null ? null : normalizedSourceSession.profile,
   });

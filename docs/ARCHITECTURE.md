@@ -66,19 +66,29 @@ executor.
 ## Runner Configuration
 
 The root runtime reads an optional `.agent-runner.json` from the Agent Runner
-repository root, beside its tracked `.agent-runner.example.json`, independently
-of the target repository. The file requires `schemaVersion: 1`; unknown
-versions, pipelines, roles, settings, and fields are errors. The loader never
-rewrites it, and the local runtime file remains ignored and untracked. Backends,
-trusted provider profiles, execution preferences, and pipeline limits are
-settings of the installed runner, so a target repository neither provides nor
-ignores an Agent Runner configuration file.
+repository root, beside its tracked `.agent-runner.example.json`. That file is
+the only source of trusted profile implementations. It may also supply runner
+defaults for backends, execution preferences, pipeline limits, and the
+repository-relative artifact root. The loader never rewrites it, and the local
+runtime file remains ignored and untracked.
+
+For a new run, the root also discovers an optional ignored and untracked
+`<project>/LOCAL_ARTIFACTS/agent-runner.json`, or uses an explicitly selected
+confined project path from CLI/MCP. Both files require `schemaVersion: 1`;
+unknown versions, pipelines, roles, settings, and fields are errors. Project
+configuration may select runner-trusted aliases, override execution defaults,
+pipeline roles and settings, and select a normalized repository-relative
+artifact root. It cannot define profiles, credentials, binaries, or arbitrary
+environment values. Tracked, non-ignored, missing explicit, traversing, and
+symbolic-link paths are rejected without creating a file or changing ignore
+rules.
 
 The V1 shape is:
 
 ```json
 {
   "schemaVersion": 1,
+  "artifactRoot": "LOCAL_ARTIFACTS",
   "defaultBackend": "codex",
   "defaultProfile": "current",
   "defaultModel": "current",
@@ -111,8 +121,10 @@ The V1 shape is:
 
 `defaultBackend` is optional. A role's `profile`, `model`, and `contextSize`
 resolve from its role-specific CLI/MCP override, the run-wide override, its
-pipeline-role runner value, the corresponding runner-wide default, then the
-built-in string `current`; a role-specific CLI override has highest precedence.
+project-role value, the corresponding project-wide default, its pipeline-role
+runner value, the corresponding runner-wide default, then the built-in string
+`current`; a role-specific CLI override has highest precedence. Project
+pipeline settings override runner settings.
 A profile alias is trusted runner configuration, pins one backend, and maps
 only to a native Codex profile name or an isolated Claude configuration
 directory. A conflicting explicit backend is invalid; profile configuration
@@ -135,14 +147,21 @@ lists.
 
 ## Run Lifecycle
 
-The root runner resolves the canonical Git root, loads runner configuration,
-applies run-wide and role-specific execution overrides, and persists the
-resolved roles, settings, and optional source-session reference and profile
-before pipeline work begins. `run` then
+The root runner resolves the canonical Git root, safely loads runner and
+project configuration, applies run-wide and role-specific execution overrides,
+and persists the resolved roles, settings, artifact root, and optional
+source-session reference and profile before pipeline work begins. `run` then
 holds the new run's lease while invoking its statically registered workflow;
 `resume` recovers the durable event history and reconstructs the same runtime
-from persisted state without reloading role configuration or requiring a live
-native session. `status` remains lock-free.
+from persisted state without reloading either configuration source or requiring
+a live native session. `status` remains lock-free.
+
+`artifactRoot` defaults to `LOCAL_ARTIFACTS`. Plan execution and polishing use
+it only for runner-owned repository-local artifacts beneath
+`<artifactRoot>/agent-runner/<run-id>/`; ignored-path, traversal, symlink,
+overlap, and fingerprint guards apply to the resolved path. Legacy runs with no
+persisted selection retain `LOCAL_ARTIFACTS`. Plan authoring continues to keep
+its task-owned `clarifications.md` and `plan.md` beside `task.md`.
 
 `--fork-from <backend>:<session-id>` is accepted only on a new run. The session
 ID remains opaque after the first separator; `--fork-profile <alias>` supplies

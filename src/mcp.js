@@ -73,6 +73,7 @@ const runStartSchema = z
     idempotencyKey,
     pipelineId: identifier,
     projectPath: z.string().min(1),
+    projectConfigurationPath: z.string().min(1).optional(),
     taskPath: z.string().min(1),
     proactiveClarification: z.boolean().default(false),
     profile: z.string().min(1).max(4_096).optional(),

@@ -67,12 +67,11 @@ Polishing is independently owned and does not consume a commit plan.
 
 ## Configuration
 
-Backends, trusted provider profiles, execution preferences, and pipeline limits
-belong to the installed runner. Copy the
+Trusted provider-profile implementations and runner defaults belong to the
+installed runner. Copy the
 tracked [example](.agent-runner.example.json) to an ignored, untracked
 `.agent-runner.json` beside it at the Agent Runner repository root. The runner
-never rewrites this local file and never reads configuration from a target
-repository, so a target repository needs no Agent Runner configuration file.
+never rewrites this local file.
 
 When present, the file requires `"schemaVersion": 1`; unknown versions, fields,
 pipelines, roles, profiles, and settings are errors. `profiles` defines trusted
@@ -82,9 +81,22 @@ does not accept profile-supplied credentials, binaries, or arbitrary
 environment variables. A selected alias supplies its backend; a conflicting
 explicit backend is invalid.
 
+A target repository may optionally provide an ignored, untracked
+`LOCAL_ARTIFACTS/agent-runner.json`, or a new run may select another confined
+ignored path with `--project-config`. A project file may select aliases already
+trusted by the runner, set backend/model/context defaults, override pipeline
+roles and limits, and select a normalized repository-relative `artifactRoot`.
+It cannot define profiles, credentials, binaries, or environment variables.
+Traversal, symbolic-link escapes, tracked files, and non-ignored files are
+rejected; Agent Runner never creates the file or changes ignore rules.
+
+For execution preferences, CLI/MCP role values win over CLI/MCP run-wide
+values, then project-role and project-wide values, runner-role and runner-wide
+values, and finally built-in `current`. Project pipeline settings override
+runner settings. The resolved roles, settings, and artifact root are persisted,
+so `resume` never reloads either configuration file.
+
 Every role accepts string `profile`, `model`, and `contextSize` selections.
-Role-specific CLI/MCP values win over run-wide values, then pipeline-role
-runner values, runner-wide defaults, and finally the built-in `current` value.
 `defaultBackend` remains optional and is used only when no profile supplies the
 backend; a missing backend is a preflight error. Explicit decimal context sizes
 are validated by the chosen adapter and map to Codex's context window or
@@ -98,6 +110,7 @@ Claude's auto-compaction token window.
 Agent Runner intentionally does not hard-code either backend's changing native
 model ID. The tracked [example](.agent-runner.example.json) makes these native
 defaults explicit and shows `claude-personal` and `claude-ngrave` aliases.
+`artifactRoot` defaults to `LOCAL_ARTIFACTS`.
 
 Pipeline settings use these defaults:
 
@@ -202,6 +215,11 @@ agent-run run polishing \
   --worker-context-size 200000
 ```
 
+Use `--project-config <path>` to select an explicit project configuration for
+the new run. Relative paths are confined to the canonical project; the file
+must already exist and be ignored and untracked. The flag is not accepted by
+`resume` because the resolved configuration is durable run state.
+
 A run may seed its primary and review roles from one existing backend session:
 
 ```bash
@@ -242,11 +260,14 @@ agent question round. Unanswered agent questions still pause the run.
 
 Authoring uses `<task-dir>/clarifications.md`. Execution and polishing keep
 their run-specific transcript under
-`<project>/LOCAL_ARTIFACTS/agent-runner/<run-id>/clarifications.md`. Preflight
+`<project>/<artifactRoot>/agent-runner/<run-id>/clarifications.md`, where
+`artifactRoot` defaults to `LOCAL_ARTIFACTS`. Preflight
 requires the target repository to ignore that resolved path; the runner never
 edits ignore rules automatically. The artifact is hashed separately and is
 never included in a planned commit. Execution pauses for a revised plan and a
-new run if clarification input conflicts with the validated plan.
+new run if clarification input conflicts with the validated plan. Plan
+authoring's task-owned `clarifications.md` and `plan.md` always remain beside
+`task.md` and do not move under the configured runner artifact root.
 
 Role backends are configured independently:
 
@@ -334,8 +355,9 @@ exposes:
 
 Use `pipelines_list` to discover the registry, then start with `run_start` and a
 unique opaque idempotency key. It persists the run, returns a durable `runId`,
-and launches detached execution. Its additive `profile`, `model`, and
-`contextSize` fields set run-wide selections; the same fields inside a
+and launches detached execution. Its additive `projectConfigurationPath`
+selects the same confined project file as `--project-config`; `profile`,
+`model`, and `contextSize` set run-wide selections; the same fields inside a
 `roleOverrides` entry take precedence. `sourceSession.profile` carries a known
 trusted source alias while its `id` remains opaque. When a compatible current
 Codex or Claude session ID is available, pass it by default so the primary and

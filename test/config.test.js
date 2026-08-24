@@ -1,17 +1,34 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import {
+  appendFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 
 import {
   CONFIG_FILENAME,
   CONFIG_SCHEMA_VERSION,
   ConfigurationError,
+  createGitService,
+  DEFAULT_ARTIFACT_ROOT,
+  loadProjectConfiguration,
   loadRunnerConfiguration,
+  parseProjectConfiguration,
   parseRunnerConfiguration,
+  PROJECT_CONFIG_FILENAME,
   resolvePipelineConfiguration,
 } from "../src/index.js";
+
+const executeFile = promisify(execFile);
 
 const RUNNER_ROOT_URL = new URL("../", import.meta.url);
 const EXAMPLE_URL = new URL(".agent-runner.example.json", RUNNER_ROOT_URL);
@@ -37,6 +54,7 @@ test("tracked example is valid and local configuration is ignored", async () => 
 
   assert.equal(CONFIG_FILENAME, ".agent-runner.json");
   assert.equal(CONFIG_SCHEMA_VERSION, 1);
+  assert.equal(configuration.artifactRoot, "LOCAL_ARTIFACTS");
   assert.equal(configuration.defaultBackend, "codex");
   assert.equal(configuration.defaultProfile, "current");
   assert.equal(configuration.defaultModel, "current");
@@ -71,6 +89,7 @@ test("minimal configuration uses pipeline-owned setting defaults", () => {
   );
 
   assert.equal(configuration.defaultBackend, undefined);
+  assert.equal(configuration.artifactRoot, DEFAULT_ARTIFACT_ROOT);
   assert.deepEqual(configuration.profiles, {});
   assert.deepEqual(configuration.pipelines["plan-authoring"], {
     maxRevisionRounds: 15,
@@ -102,6 +121,9 @@ test("configuration rejects unsupported shapes and values", () => {
     ['{"schemaVersion":1,"extra":true}', /configuration\.extra/u],
     ['{"schemaVersion":1,"defaultBackend":null}', /defaultBackend/u],
     ['{"schemaVersion":1,"defaultBackend":"other"}', /codex, claude/u],
+    ['{"schemaVersion":1,"artifactRoot":"."}', /artifactRoot/u],
+    ['{"schemaVersion":1,"artifactRoot":"../outside"}', /artifactRoot/u],
+    ['{"schemaVersion":1,"artifactRoot":".git/config"}', /artifactRoot/u],
     ['{"schemaVersion":1,"defaultProfile":null}', /defaultProfile/u],
     [
       '{"schemaVersion":1,"defaultProfile":"missing"}',
@@ -319,6 +341,7 @@ test("role resolution normalizes configuration objects", () => {
   });
 
   assert.deepEqual(resolved, {
+    artifactRoot: "LOCAL_ARTIFACTS",
     pipelineId: "plan-authoring",
     roles: {
       planner: {
@@ -355,6 +378,268 @@ test("role resolution normalizes configuration objects", () => {
     /defaultBackend/u,
   );
 });
+
+test("project configuration is a strict partial overlay", () => {
+  const runnerConfiguration = parseRunnerConfiguration(
+    JSON.stringify({
+      schemaVersion: 1,
+      artifactRoot: "runner-artifacts",
+      defaultBackend: "codex",
+      defaultModel: "runner-model",
+      profiles: {
+        "claude-personal": {
+          backend: "claude",
+          configDirectory: "/profiles/claude-personal",
+        },
+      },
+      pipelines: {
+        polishing: {
+          maxFixRounds: 8,
+          roles: { reviewer: { model: "runner-reviewer" } },
+        },
+      },
+    }),
+  );
+  const projectConfiguration = parseProjectConfiguration(
+    JSON.stringify({
+      schemaVersion: 1,
+      artifactRoot: "project-artifacts",
+      defaultProfile: "claude-personal",
+      defaultModel: "project-model",
+      pipelines: {
+        polishing: {
+          maxFixRounds: 3,
+          roles: {
+            worker: { model: "project-worker" },
+            reviewer: { contextSize: "200000" },
+          },
+        },
+      },
+    }),
+    runnerConfiguration,
+  );
+
+  const resolved = resolvePipelineConfiguration(
+    "polishing",
+    runnerConfiguration,
+    { worker: { model: "cli-worker" } },
+    { contextSize: "300000" },
+    null,
+    projectConfiguration,
+  );
+
+  assert.equal(resolved.artifactRoot, "project-artifacts");
+  assert.equal(resolved.settings.maxFixRounds, 3);
+  assert.deepEqual(resolved.roles.worker, {
+    backend: "claude",
+    profile: "/profiles/claude-personal",
+    model: "cli-worker",
+    contextSize: "300000",
+  });
+  assert.deepEqual(resolved.roles.reviewer, {
+    backend: "claude",
+    profile: "/profiles/claude-personal",
+    model: "project-model",
+    contextSize: "300000",
+  });
+});
+
+test("project configuration rejects untrusted and unsafe fields", () => {
+  const runnerConfiguration = parseRunnerConfiguration(
+    JSON.stringify({ schemaVersion: 1, defaultBackend: "codex" }),
+  );
+  const invalidConfigurations = [
+    [{ profiles: {} }, /profiles/u],
+    [{ credentials: {} }, /credentials/u],
+    [{ binary: "/usr/bin/codex" }, /binary/u],
+    [{ environment: {} }, /environment/u],
+    [{ pipelines: null }, /pipelines must be an object/u],
+    [{ artifactRoot: "/outside" }, /artifactRoot/u],
+    [{ artifactRoot: "C:/outside" }, /artifactRoot/u],
+    [{ artifactRoot: "nested/../outside" }, /artifactRoot/u],
+    [{ defaultProfile: "untrusted" }, /unknown trusted profile/u],
+    [
+      { pipelines: { polishing: { roles: { worker: { env: {} } } } } },
+      /worker\.env/u,
+    ],
+  ];
+
+  for (const [input, message] of invalidConfigurations) {
+    assert.throws(
+      () =>
+        parseProjectConfiguration(
+          JSON.stringify({ schemaVersion: 1, ...input }),
+          runnerConfiguration,
+        ),
+      message,
+    );
+  }
+});
+
+test("loads only ignored confined project configuration files", async (t) => {
+  const projectPath = await mkdtemp(
+    join(tmpdir(), "agent-runner-project-config-"),
+  );
+  const outsidePath = await mkdtemp(
+    join(tmpdir(), "agent-runner-project-config-outside-"),
+  );
+  t.after(() => rm(projectPath, { recursive: true, force: true }));
+  t.after(() => rm(outsidePath, { recursive: true, force: true }));
+  await executeFile("git", ["init", "-q", projectPath]);
+  await Promise.all([
+    mkdir(join(projectPath, DEFAULT_ARTIFACT_ROOT)),
+    mkdir(join(projectPath, "custom")),
+  ]);
+  await writeFile(
+    join(projectPath, ".gitignore"),
+    "/LOCAL_ARTIFACTS/\n/custom/\n",
+  );
+  const defaultPath = join(
+    projectPath,
+    DEFAULT_ARTIFACT_ROOT,
+    PROJECT_CONFIG_FILENAME,
+  );
+  await writeFile(
+    defaultPath,
+    '{"schemaVersion":1,"artifactRoot":"custom"}\n',
+  );
+  const runnerConfiguration = parseRunnerConfiguration(
+    JSON.stringify({ schemaVersion: 1, defaultBackend: "codex" }),
+  );
+  const git = createGitService();
+
+  const discovered = await loadProjectConfiguration({
+    inspectPath: git.inspectPath,
+    projectPath,
+    runnerConfiguration,
+  });
+  assert.equal(discovered.path, defaultPath);
+  assert.equal(discovered.configuration.artifactRoot, "custom");
+
+  const explicitPath = join(projectPath, "custom", "runner.json");
+  await writeFile(explicitPath, '{"schemaVersion":1}\n');
+  assert.equal(
+    (
+      await loadProjectConfiguration({
+        configurationPath: "custom/runner.json",
+        inspectPath: git.inspectPath,
+        projectPath,
+        runnerConfiguration,
+      })
+    ).path,
+    explicitPath,
+  );
+
+  const unignoredPath = join(projectPath, "project.json");
+  await writeFile(unignoredPath, '{"schemaVersion":1}\n');
+  await assert.rejects(
+    loadProjectConfiguration({
+      configurationPath: unignoredPath,
+      inspectPath: git.inspectPath,
+      projectPath,
+      runnerConfiguration,
+    }),
+    (error) => error.code === "ERR_PROJECT_CONFIGURATION_NOT_IGNORED",
+  );
+
+  const outsideFile = join(outsidePath, "outside.json");
+  await writeFile(outsideFile, '{"schemaVersion":1}\n');
+  const linkedPath = join(projectPath, DEFAULT_ARTIFACT_ROOT, "linked.json");
+  await symlink(outsideFile, linkedPath);
+  await assert.rejects(
+    loadProjectConfiguration({
+      configurationPath: linkedPath,
+      inspectPath: git.inspectPath,
+      projectPath,
+      runnerConfiguration,
+    }),
+    (error) => error.code === "ERR_UNSAFE_REPOSITORY_PATH",
+  );
+});
+
+test(
+  "rejects an ignored project configuration FIFO without blocking",
+  { skip: process.platform === "win32", timeout: 5_000 },
+  async (t) => {
+    const projectPath = await mkdtemp(
+      join(tmpdir(), "agent-runner-project-config-fifo-"),
+    );
+    t.after(() => rm(projectPath, { recursive: true, force: true }));
+    await executeFile("git", ["init", "-q", projectPath]);
+    const artifactPath = join(projectPath, DEFAULT_ARTIFACT_ROOT);
+    await mkdir(artifactPath);
+    await writeFile(
+      join(projectPath, ".gitignore"),
+      "/LOCAL_ARTIFACTS/\n",
+    );
+    const configurationPath = join(artifactPath, "fifo.json");
+    await executeFile("mkfifo", [configurationPath]);
+
+    await assert.rejects(
+      loadProjectConfiguration({
+        configurationPath,
+        inspectPath: createGitService().inspectPath,
+        projectPath,
+        runnerConfiguration: parseRunnerConfiguration(
+          JSON.stringify({ schemaVersion: 1, defaultBackend: "codex" }),
+        ),
+      }),
+      (error) => error.code === "ERR_PROJECT_CONFIGURATION_READ",
+    );
+  },
+);
+
+test(
+  "rejects project configuration growth while loading",
+  { timeout: 5_000 },
+  async (t) => {
+    const projectPath = await mkdtemp(
+      join(tmpdir(), "agent-runner-project-config-growth-"),
+    );
+    t.after(() => rm(projectPath, { recursive: true, force: true }));
+    await executeFile("git", ["init", "-q", projectPath]);
+    const artifactPath = join(projectPath, DEFAULT_ARTIFACT_ROOT);
+    await mkdir(artifactPath);
+    await writeFile(join(projectPath, ".gitignore"), "/LOCAL_ARTIFACTS/\n");
+    const configurationPath = join(artifactPath, "growing.json");
+    await writeFile(
+      configurationPath,
+      '{"schemaVersion":1}\n'.padEnd(900 * 1024, " "),
+    );
+    const git = createGitService();
+    let growth;
+
+    try {
+      await assert.rejects(
+        loadProjectConfiguration({
+          configurationPath,
+          inspectPath: async (options) => {
+            const inspection = await git.inspectPath(options);
+            growth = (async () => {
+              for (let index = 0; index < 4; index += 1) {
+                await appendFile(
+                  configurationPath,
+                  Buffer.alloc(64 * 1024, " "),
+                );
+                await new Promise((resolveGrowth) =>
+                  setImmediate(resolveGrowth),
+                );
+              }
+            })();
+            return inspection;
+          },
+          projectPath,
+          runnerConfiguration: parseRunnerConfiguration(
+            JSON.stringify({ schemaVersion: 1, defaultBackend: "codex" }),
+          ),
+        }),
+        (error) => error.code === "ERR_PROJECT_CONFIGURATION_READ",
+      );
+    } finally {
+      await growth;
+    }
+  },
+);
 
 test("trusted profiles pin backends and resolve execution precedence", () => {
   const configuration = parseRunnerConfiguration(
