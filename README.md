@@ -109,7 +109,7 @@ Claude's auto-compaction token window.
 
 Agent Runner intentionally does not hard-code either backend's changing native
 model ID. The tracked [example](.agent-runner.example.json) makes these native
-defaults explicit and shows `claude-personal` and `claude-ngrave` aliases.
+defaults explicit and shows `claude-primary` and `claude-secondary` aliases.
 `artifactRoot` defaults to `LOCAL_ARTIFACTS`.
 
 Pipeline settings use these defaults:
@@ -223,7 +223,7 @@ respectively:
 agent-run run polishing \
   --project /path/to/repository \
   --task /path/to/task \
-  --profile claude-personal \
+  --profile claude-primary \
   --model sonnet \
   --worker-context-size 200000
 ```

@@ -10,13 +10,13 @@
       "backend": "codex",
       "profile": "work"
     },
-    "claude-personal": {
+    "claude-primary": {
       "backend": "claude",
-      "configDirectory": "/home/you/.claude-personal"
+      "configDirectory": "/profiles/claude-primary"
     },
-    "claude-ngrave": {
+    "claude-secondary": {
       "backend": "claude",
-      "configDirectory": "/home/you/.claude-ngrave"
+      "configDirectory": "/profiles/claude-secondary"
     }
   },
   "pipelines": {
@@ -27,7 +27,7 @@
         "planner": {},
         "reviewer": {
           "backend": "claude",
-          "profile": "claude-personal",
+          "profile": "claude-primary",
           "model": "sonnet"
         },
         "arbiter": {}
@@ -43,7 +43,7 @@
         "worker": {},
         "reviewer": {
           "backend": "claude",
-          "profile": "claude-personal",
+          "profile": "claude-primary",
           "model": "current",
           "contextSize": "current"
         },
@@ -60,7 +60,7 @@
         "worker": {},
         "reviewer": {
           "backend": "claude",
-          "profile": "claude-personal",
+          "profile": "claude-primary",
           "model": "current",
           "contextSize": "current"
         },

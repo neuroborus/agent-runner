@@ -195,7 +195,7 @@ agent-run run plan-execution \
   --worker-model <codex-model-id> \
   --worker-context-size 200000 \
   --reviewer claude \
-  --reviewer-profile claude-personal \
+  --reviewer-profile claude-primary \
   --reviewer-model <claude-model-id> \
   --reviewer-context-size 200000
 ```

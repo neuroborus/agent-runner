@@ -98,9 +98,9 @@ The V1 shape is:
       "backend": "codex",
       "profile": "work"
     },
-    "claude-personal": {
+    "claude-primary": {
       "backend": "claude",
-      "configDirectory": "/home/you/.claude-personal"
+      "configDirectory": "/profiles/claude-primary"
     }
   },
   "pipelines": {
@@ -110,7 +110,7 @@ The V1 shape is:
       "roles": {
         "worker": {
           "backend": "claude",
-          "profile": "claude-personal",
+          "profile": "claude-primary",
           "model": "sonnet",
           "contextSize": "200000"
         }

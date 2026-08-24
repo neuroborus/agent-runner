@@ -586,14 +586,14 @@ test("persists a trusted source profile and applies resolved turn preferences", 
       configuration: {
         schemaVersion: 1,
         profiles: {
-          "claude-personal": {
+          "claude-primary": {
             backend: "claude",
             configDirectory: profileDirectory,
           },
         },
         pipelines: {
           "plan-authoring": {
-            roles: { arbiter: { profile: "claude-personal" } },
+            roles: { arbiter: { profile: "claude-primary" } },
           },
         },
       },
@@ -609,12 +609,12 @@ test("persists a trusted source profile and applies resolved turn preferences", 
     sourceSession: {
       backend: "claude",
       id: SOURCE_SESSION,
-      profile: "claude-personal",
+      profile: "claude-primary",
     },
   });
 
   assert.equal(result.run.pipelineState.workflowState, "DONE");
-  assert.equal(result.run.sessionLineage.sourceProfile, "claude-personal");
+  assert.equal(result.run.sessionLineage.sourceProfile, "claude-primary");
   assert.deepEqual(result.run.roles.planner, {
     backend: "claude",
     profile: profileDirectory,

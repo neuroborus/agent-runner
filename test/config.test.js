@@ -61,7 +61,7 @@ test("tracked example is valid and local configuration is ignored", async () => 
   assert.equal(configuration.defaultContextSize, "current");
   assert.deepEqual(configuration.pipelines["plan-authoring"].roles.reviewer, {
     backend: "claude",
-    profile: "claude-personal",
+    profile: "claude-primary",
     model: "sonnet",
   });
   assert.deepEqual(
@@ -70,7 +70,7 @@ test("tracked example is valid and local configuration is ignored", async () => 
   );
   assert.deepEqual(configuration.pipelines.polishing.roles.reviewer, {
     backend: "claude",
-    profile: "claude-personal",
+    profile: "claude-primary",
     model: "current",
     contextSize: "current",
   });
@@ -404,9 +404,9 @@ test("project configuration is a strict partial overlay", () => {
       defaultBackend: "codex",
       defaultModel: "runner-model",
       profiles: {
-        "claude-personal": {
+        "claude-primary": {
           backend: "claude",
-          configDirectory: "/profiles/claude-personal",
+          configDirectory: "/profiles/claude-primary",
         },
       },
       pipelines: {
@@ -422,7 +422,7 @@ test("project configuration is a strict partial overlay", () => {
     JSON.stringify({
       schemaVersion: 1,
       artifactRoot: "project-artifacts",
-      defaultProfile: "claude-personal",
+      defaultProfile: "claude-primary",
       defaultModel: "project-model",
       pipelines: {
         polishing: {
@@ -452,13 +452,13 @@ test("project configuration is a strict partial overlay", () => {
   assert.equal(resolved.settings.maxFixRounds, 3);
   assert.deepEqual(resolved.roles.worker, {
     backend: "claude",
-    profile: "/profiles/claude-personal",
+    profile: "/profiles/claude-primary",
     model: "cli-worker",
     contextSize: "300000",
   });
   assert.deepEqual(resolved.roles.reviewer, {
     backend: "claude",
-    profile: "/profiles/claude-personal",
+    profile: "/profiles/claude-primary",
     model: "project-model",
     contextSize: "300000",
   });
@@ -668,9 +668,9 @@ test("trusted profiles pin backends and resolve execution precedence", () => {
       defaultBackend: "codex",
       profiles: {
         "codex-work": { backend: "codex", profile: "native-work" },
-        "claude-personal": {
+        "claude-primary": {
           backend: "claude",
-          configDirectory: "/profiles/claude-personal",
+          configDirectory: "/profiles/claude-primary",
         },
       },
       defaultProfile: "codex-work",
@@ -680,7 +680,7 @@ test("trusted profiles pin backends and resolve execution precedence", () => {
         polishing: {
           roles: {
             reviewer: {
-              profile: "claude-personal",
+              profile: "claude-primary",
               model: "review-model",
               contextSize: "300000",
             },
@@ -708,7 +708,7 @@ test("trusted profiles pin backends and resolve execution precedence", () => {
     },
     reviewer: {
       backend: "claude",
-      profile: "/profiles/claude-personal",
+      profile: "/profiles/claude-primary",
       model: "run-model",
       contextSize: "350000",
     },
@@ -726,9 +726,9 @@ test("source profiles inherit safely while unknown source profiles stay current"
     JSON.stringify({
       schemaVersion: 1,
       profiles: {
-        "claude-personal": {
+        "claude-primary": {
           backend: "claude",
-          configDirectory: "/profiles/claude-personal",
+          configDirectory: "/profiles/claude-primary",
         },
         "codex-arbiter": { backend: "codex", profile: "arbiter" },
       },
@@ -742,7 +742,7 @@ test("source profiles inherit safely while unknown source profiles stay current"
   const source = {
     backend: "claude",
     id: "opaque:source:id",
-    profile: "claude-personal",
+    profile: "claude-primary",
   };
 
   const resolved = resolvePipelineConfiguration(
@@ -752,9 +752,9 @@ test("source profiles inherit safely while unknown source profiles stay current"
     {},
     source,
   );
-  assert.equal(resolved.sourceProfile, "claude-personal");
-  assert.equal(resolved.roles.planner.profile, "/profiles/claude-personal");
-  assert.equal(resolved.roles.reviewer.profile, "/profiles/claude-personal");
+  assert.equal(resolved.sourceProfile, "claude-primary");
+  assert.equal(resolved.roles.planner.profile, "/profiles/claude-primary");
+  assert.equal(resolved.roles.reviewer.profile, "/profiles/claude-primary");
   assert.deepEqual(resolved.roles.arbiter, {
     backend: "codex",
     profile: "arbiter",
@@ -784,9 +784,9 @@ test("profile and source conflicts fail closed", () => {
     JSON.stringify({
       schemaVersion: 1,
       profiles: {
-        "claude-personal": {
+        "claude-primary": {
           backend: "claude",
-          configDirectory: "/profiles/claude-personal",
+          configDirectory: "/profiles/claude-primary",
         },
         "codex-work": { backend: "codex", profile: "work" },
       },
@@ -796,7 +796,7 @@ test("profile and source conflicts fail closed", () => {
   assert.throws(
     () =>
       resolvePipelineConfiguration("polishing", configuration, {
-        worker: { backend: "codex", profile: "claude-personal" },
+        worker: { backend: "codex", profile: "claude-primary" },
       }),
     (error) => error.code === "ERR_PROFILE_BACKEND_MISMATCH",
   );
@@ -821,7 +821,7 @@ test("profile and source conflicts fail closed", () => {
         {
           backend: "codex",
           id: "opaque",
-          profile: "claude-personal",
+          profile: "claude-primary",
         },
       ),
     (error) => error.code === "ERR_SOURCE_PROFILE_BACKEND_MISMATCH",

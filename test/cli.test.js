@@ -312,17 +312,17 @@ test("run derives execution, role, and opaque source-session inputs", async () =
       "--worker-model",
       "sonnet",
       "--worker-profile",
-      "claude-personal",
+      "claude-primary",
       "--worker-context-size",
       "300000",
       "--reviewer",
       "claude",
       "--reviewer-profile",
-      "claude-personal",
+      "claude-primary",
       "--arbiter",
       "codex",
       "--profile",
-      "claude-personal",
+      "claude-primary",
       "--model",
       "run-model",
       "--context-size",
@@ -332,7 +332,7 @@ test("run derives execution, role, and opaque source-session inputs", async () =
       "--fork-from",
       "claude:source:opaque",
       "--fork-profile",
-      "claude-personal",
+      "claude-primary",
     ],
     {
       stdout: stdout.stream,
@@ -350,15 +350,15 @@ test("run derives execution, role, and opaque source-session inputs", async () =
   assert.deepEqual(request.roleOverrides, {
     worker: {
       backend: "claude",
-      profile: "claude-personal",
+      profile: "claude-primary",
       model: "sonnet",
       contextSize: "300000",
     },
-    reviewer: { backend: "claude", profile: "claude-personal" },
+    reviewer: { backend: "claude", profile: "claude-primary" },
     arbiter: { backend: "codex" },
   });
   assert.deepEqual(request.executionOverrides, {
-    profile: "claude-personal",
+    profile: "claude-primary",
     model: "run-model",
     contextSize: "200000",
   });
@@ -369,7 +369,7 @@ test("run derives execution, role, and opaque source-session inputs", async () =
   assert.deepEqual(request.sourceSession, {
     backend: "claude",
     id: "source:opaque",
-    profile: "claude-personal",
+    profile: "claude-primary",
   });
   assert.equal(stderr.read(), "");
 });

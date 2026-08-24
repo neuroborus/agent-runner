@@ -379,12 +379,12 @@ test("forwards additive run-wide, role, and source profile selections", async (t
     projectConfigurationPath: join(paths.projectPath, "ignored", "runner.json"),
     taskPath: paths.taskPath,
     proactiveClarification: false,
-    profile: "claude-personal",
+    profile: "claude-primary",
     model: "sonnet",
     contextSize: "200000",
     roleOverrides: {
       planner: {
-        profile: "claude-personal",
+        profile: "claude-primary",
         model: "opus",
         contextSize: "300000",
       },
@@ -392,7 +392,7 @@ test("forwards additive run-wide, role, and source profile selections", async (t
     sourceSession: {
       backend: "claude",
       id: "opaque:source:id",
-      profile: "claude-personal",
+      profile: "claude-primary",
     },
   };
 
@@ -406,7 +406,7 @@ test("forwards additive run-wide, role, and source profile selections", async (t
     roleOverrides: input.roleOverrides,
     sourceSession: input.sourceSession,
     executionOverrides: {
-      profile: "claude-personal",
+      profile: "claude-primary",
       model: "sonnet",
       contextSize: "200000",
     },
