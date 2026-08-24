@@ -120,6 +120,28 @@ const OUTPUT_FAILURE_FIELDS = Object.freeze([
   ...LEGACY_OUTPUT_FAILURE_FIELDS,
   "diagnostic",
 ]);
+const TERMINAL_FAILURE_FIELDS = Object.freeze([
+  ...LEGACY_OUTPUT_FAILURE_FIELDS,
+  "diagnosticClass",
+]);
+const TERMINAL_TURN_DIAGNOSTIC_CLASSES = new Set([
+  "turn_active_not_steerable",
+  "turn_bad_request",
+  "turn_cyber_policy",
+  "turn_http_connection_failed",
+  "turn_internal_server_error",
+  "turn_misalignment_policy_violation",
+  "turn_other",
+  "turn_response_stream_connection_failed",
+  "turn_response_stream_disconnected",
+  "turn_response_too_many_failed_attempts",
+  "turn_sandbox_error",
+  "turn_server_overloaded",
+  "turn_session_budget_exceeded",
+  "turn_thread_rollback_failed",
+  "turn_unauthorized",
+  "turn_usage_limit_exceeded",
+]);
 const OUTPUT_DIAGNOSTIC_VALUE_PATTERN = /^[a-zA-Z0-9_.[\]-]{1,128}$/u;
 const BOOTSTRAP_RESULT_FIELDS = Object.freeze([
   "status",
@@ -263,6 +285,10 @@ export function isOutputDiagnostic(value) {
         OUTPUT_DIAGNOSTIC_VALUE_PATTERN.test(value[field]),
     )
   );
+}
+
+export function isTerminalTurnDiagnosticClass(value) {
+  return TERMINAL_TURN_DIAGNOSTIC_CLASSES.has(value);
 }
 
 function hasExactFields(value, fields) {
@@ -3042,6 +3068,29 @@ export function assertRun(run) {
       ))
   ) {
     throw workflowError("Plan-execution output diagnostic is invalid.");
+  }
+  const terminalTurnFailure =
+    state.workflowState === "FAILED" &&
+    run.pause?.reason === "internal_failure" &&
+    run.pause.code === "ERR_CODEX_TURN_FAILED";
+  const hasTerminalDiagnostic = Object.hasOwn(
+    run.pause ?? {},
+    "diagnosticClass",
+  );
+  if (
+    (hasTerminalDiagnostic &&
+      (!terminalTurnFailure ||
+        !hasExactFields(run.pause, TERMINAL_FAILURE_FIELDS) ||
+        !isTerminalTurnDiagnosticClass(run.pause.diagnosticClass))) ||
+    (terminalTurnFailure &&
+      !hasExactFields(
+        run.pause,
+        hasTerminalDiagnostic
+          ? TERMINAL_FAILURE_FIELDS
+          : LEGACY_OUTPUT_FAILURE_FIELDS,
+      ))
+  ) {
+    throw workflowError("Plan-execution terminal diagnostic is invalid.");
   }
   assertInputPause(run, state);
   if (state.workflowState === "WAITING_FOR_USER") {

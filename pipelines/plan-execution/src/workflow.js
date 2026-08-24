@@ -53,6 +53,7 @@ import {
   createPlanExecutionState,
   isRecord,
   isOutputDiagnostic,
+  isTerminalTurnDiagnosticClass,
   normalizeAdapterCapabilities,
   normalizeBootstrapArbitration,
   normalizeBootstrapResult,
@@ -405,10 +406,17 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
       cause?.code === "ERR_INVALID_PLAN_EXECUTION_OUTPUT"
         ? persistedOutputDiagnostic(cause.diagnostic)
         : undefined;
+    const diagnosticClass =
+      code === "ERR_CODEX_TURN_FAILED" &&
+      isTerminalTurnDiagnosticClass(cause?.diagnosticClass)
+        ? cause.diagnosticClass
+        : undefined;
     const message =
-      diagnostic === undefined
-        ? `Plan execution failed: ${code}.`
-        : `Plan execution failed: ${code} (${diagnostic.role}/${diagnostic.phase} ${diagnostic.field}: ${diagnostic.constraint}).`;
+      diagnostic !== undefined
+        ? `Plan execution failed: ${code} (${diagnostic.role}/${diagnostic.phase} ${diagnostic.field}: ${diagnostic.constraint}).`
+        : diagnosticClass === undefined
+          ? `Plan execution failed: ${code}.`
+          : `Plan execution failed: ${code} (${diagnosticClass}).`;
     try {
       await transition(
         { ...state(), workflowState: "FAILED" },
@@ -417,6 +425,7 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
             reason: "internal_failure",
             code,
             ...(diagnostic === undefined ? {} : { diagnostic }),
+            ...(diagnosticClass === undefined ? {} : { diagnosticClass }),
           },
           publicActivity: activity(
             "runner",

@@ -39,8 +39,27 @@ const CAPABILITY_DIAGNOSTICS = Object.freeze({
   structuredOutput: "capability_structured_output",
   workspaceWrite: "capability_workspace_write",
 });
+const TERMINAL_TURN_DIAGNOSTICS = Object.freeze({
+  activeTurnNotSteerable: "turn_active_not_steerable",
+  badRequest: "turn_bad_request",
+  cyberPolicy: "turn_cyber_policy",
+  httpConnectionFailed: "turn_http_connection_failed",
+  internalServerError: "turn_internal_server_error",
+  misalignmentPolicyViolation: "turn_misalignment_policy_violation",
+  other: "turn_other",
+  responseStreamConnectionFailed: "turn_response_stream_connection_failed",
+  responseStreamDisconnected: "turn_response_stream_disconnected",
+  responseTooManyFailedAttempts: "turn_response_too_many_failed_attempts",
+  sandboxError: "turn_sandbox_error",
+  serverOverloaded: "turn_server_overloaded",
+  sessionBudgetExceeded: "turn_session_budget_exceeded",
+  threadRollbackFailed: "turn_thread_rollback_failed",
+  unauthorized: "turn_unauthorized",
+  usageLimitExceeded: "turn_usage_limit_exceeded",
+});
 const CODEX_DIAGNOSTIC_CLASSES = new Set([
   ...Object.values(CAPABILITY_DIAGNOSTICS),
+  ...Object.values(TERMINAL_TURN_DIAGNOSTICS),
   "isolation_command_host",
   "isolation_effective_configuration",
   "isolation_feature",
@@ -641,6 +660,19 @@ function isContextWindowExceeded(turn) {
   );
 }
 
+function terminalTurnDiagnosticClass(turn) {
+  const info = turn?.error?.codexErrorInfo;
+  const variant =
+    typeof info === "string"
+      ? info
+      : isRecord(info) && Object.keys(info).length === 1
+        ? Object.keys(info)[0]
+        : undefined;
+  return Object.hasOwn(TERMINAL_TURN_DIAGNOSTICS, variant)
+    ? TERMINAL_TURN_DIAGNOSTICS[variant]
+    : undefined;
+}
+
 function hasFullItemsView(turn) {
   return turn.itemsView === undefined || turn.itemsView === "full";
 }
@@ -829,6 +861,7 @@ async function runTurn(client, request, threadId, prompt, recoveryPrompt) {
   if (turn.status !== "completed") {
     throw new CodexAdapterError("Codex turn failed.", {
       code: "ERR_CODEX_TURN_FAILED",
+      diagnosticClass: terminalTurnDiagnosticClass(turn),
     });
   }
   return turn;

@@ -47,6 +47,22 @@ function completedTurn(threadId, turnId, output = "done", items = []) {
   };
 }
 
+function failedTurn(threadId, turnId, error) {
+  return {
+    method: "turn/completed",
+    params: {
+      threadId,
+      turn: {
+        id: turnId,
+        itemsView: "full",
+        status: "failed",
+        error,
+        items: [],
+      },
+    },
+  };
+}
+
 function isolatedConfiguration() {
   return {
     features: {
@@ -1722,6 +1738,118 @@ test("never replays when a partial completed turn cannot be hydrated", async () 
   );
   assert.equal(turns, 1);
   assert.equal(fixture.processes.length, 1);
+});
+
+test("classifies recognized terminal turn failures without retaining native details", async (
+  t,
+) => {
+  const variants = [
+    [
+      { activeTurnNotSteerable: { turnKind: "review" } },
+      "turn_active_not_steerable",
+    ],
+    ["badRequest", "turn_bad_request"],
+    ["cyberPolicy", "turn_cyber_policy"],
+    [
+      { httpConnectionFailed: { httpStatusCode: 429 } },
+      "turn_http_connection_failed",
+    ],
+    ["internalServerError", "turn_internal_server_error"],
+    ["misalignmentPolicyViolation", "turn_misalignment_policy_violation"],
+    ["other", "turn_other"],
+    [
+      { responseStreamConnectionFailed: { httpStatusCode: 503 } },
+      "turn_response_stream_connection_failed",
+    ],
+    [
+      { responseStreamDisconnected: { httpStatusCode: null } },
+      "turn_response_stream_disconnected",
+    ],
+    [
+      { responseTooManyFailedAttempts: { httpStatusCode: 500 } },
+      "turn_response_too_many_failed_attempts",
+    ],
+    ["sandboxError", "turn_sandbox_error"],
+    ["serverOverloaded", "turn_server_overloaded"],
+    ["sessionBudgetExceeded", "turn_session_budget_exceeded"],
+    ["threadRollbackFailed", "turn_thread_rollback_failed"],
+    ["unauthorized", "turn_unauthorized"],
+    ["usageLimitExceeded", "turn_usage_limit_exceeded"],
+  ];
+
+  for (const [codexErrorInfo, diagnosticClass] of variants) {
+    await t.test(diagnosticClass, async () => {
+      const fixture = createFixture({
+        handle({ message }) {
+          if (message.method !== "turn/start") {
+            return undefined;
+          }
+          return {
+            result: { turn: { id: "failed-turn" } },
+            notification: failedTurn(message.params.threadId, "failed-turn", {
+              message: "DO_NOT_RETAIN_NATIVE_MESSAGE",
+              codexErrorInfo,
+              additionalDetails: "DO_NOT_RETAIN_ADDITIONAL_DETAILS",
+            }),
+          };
+        },
+      });
+
+      await assert.rejects(
+        fixture.adapter.run(request()),
+        (error) => {
+          assert.ok(
+            hasDiagnostic("ERR_CODEX_TURN_FAILED", diagnosticClass)(error),
+          );
+          assert.equal(error.cause, undefined);
+          const retainedError = JSON.stringify({
+            ...error,
+            message: error.message,
+          });
+          assert.doesNotMatch(
+            retainedError,
+            /DO_NOT_RETAIN/u,
+          );
+          assert.doesNotMatch(retainedError, /httpStatusCode|turnKind/u);
+          return true;
+        },
+      );
+    });
+  }
+});
+
+test("discards unknown terminal turn classifications", async () => {
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method !== "turn/start") {
+        return undefined;
+      }
+      return {
+        result: { turn: { id: "failed-turn" } },
+        notification: failedTurn(message.params.threadId, "failed-turn", {
+          message: "DO_NOT_RETAIN_UNKNOWN_MESSAGE",
+          codexErrorInfo: {
+            unknownProviderVariant: "DO_NOT_RETAIN_UNKNOWN_DETAILS",
+          },
+          additionalDetails: "DO_NOT_RETAIN_UNKNOWN_ADDITIONAL_DETAILS",
+        }),
+      };
+    },
+  });
+
+  await assert.rejects(
+    fixture.adapter.run(request()),
+    (error) => {
+      assert.ok(hasCode("ERR_CODEX_TURN_FAILED")(error));
+      assert.equal(error.diagnosticClass, undefined);
+      assert.equal(error.cause, undefined);
+      assert.doesNotMatch(
+        JSON.stringify({ ...error, message: error.message }),
+        /DO_NOT_RETAIN/u,
+      );
+      return true;
+    },
+  );
 });
 
 test("returns commit-executor failures for Git-state verification", async () => {

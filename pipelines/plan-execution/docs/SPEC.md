@@ -372,7 +372,9 @@ Persist at least:
 - exact per-check finalization evidence and the fingerprint-bound Reviewer
   validation-change decision;
 - latest reviewed content fingerprint;
-- escalation reason when paused.
+- escalation reason when paused;
+- an optional allowlisted terminal diagnostic class for a failed Codex turn,
+  without native provider data.
 
 The common envelope also persists an optional opaque source-session reference,
 its resolved trusted profile when known, and every direct Worker, Reviewer, or
@@ -609,6 +611,13 @@ Capability, isolation, and prohibited-operation failures expose only one
 bounded allowlisted diagnostic class identifying the rejected capability or
 operation class. Do not retain the reported command, native error response,
 credentials, or transcript as diagnostic evidence.
+For `ERR_CODEX_TURN_FAILED`, map only recognized App Server
+`codexErrorInfo` variants to finite allowlisted terminal classes. Persist the
+validated class in plan-execution failure state, but discard the native error
+message, HTTP status and other variant data, additional details, provider
+response, prompt, and transcript. Unknown variants add no diagnostic class.
+Keep context-exhaustion compaction and interruption handling on their existing
+dedicated paths.
 
 Worker:
 

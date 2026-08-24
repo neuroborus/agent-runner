@@ -2081,6 +2081,45 @@ test("accepts the advertised maximum bootstrap inventory", async (t) => {
   assert.equal(implementationStarted, true);
 });
 
+test("persists only the bounded class for a terminal Codex bootstrap failure", async (
+  t,
+) => {
+  const sensitiveMarker = "DO_NOT_PERSIST_TERMINAL_TURN_DATA";
+  const fixture = await createFixture(t, {
+    onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        request.prompt.includes("Provide a concise bootstrap summary")
+      ) {
+        const error = new Error(sensitiveMarker);
+        error.code = "ERR_CODEX_TURN_FAILED";
+        error.diagnosticClass = "turn_bad_request";
+        error.nativeResponse = { message: sensitiveMarker };
+        error.prompt = sensitiveMarker;
+        error.transcript = sensitiveMarker;
+        throw error;
+      }
+    },
+  });
+
+  await assert.rejects(
+    fixture.run(),
+    (cause) => cause.code === "ERR_CODEX_TURN_FAILED",
+  );
+
+  assert.deepEqual(fixture.currentRun.pause, {
+    reason: "internal_failure",
+    code: "ERR_CODEX_TURN_FAILED",
+    diagnosticClass: "turn_bad_request",
+  });
+  const failureActivity = fixture.transitions.find(
+    ({ options }) => options.activity?.kind === "failed",
+  )?.options.activity;
+  assert.match(failureActivity.message, /turn_bad_request/u);
+  assert.doesNotMatch(JSON.stringify(fixture.currentRun), /DO_NOT_PERSIST/u);
+  assert.doesNotMatch(JSON.stringify(fixture.transitions), /DO_NOT_PERSIST/u);
+});
+
 test("reports bounded bootstrap output diagnostics without raw values", async (t) => {
   const sensitiveField = "DO_NOT_PERSIST_THIS_FIELD";
   const sensitiveValue = "DO_NOT_PERSIST_THIS_VALUE";
@@ -3115,6 +3154,25 @@ test("rejects inconsistent persisted workflow state", async (t) => {
         field: "result",
         constraint: "x".repeat(129),
       },
+    };
+  });
+
+  await rejectsState("unknown terminal turn diagnostic", (run) => {
+    run.pipelineState.workflowState = "FAILED";
+    run.pause = {
+      reason: "internal_failure",
+      code: "ERR_CODEX_TURN_FAILED",
+      diagnosticClass: "turn_unknown_provider_value",
+    };
+  });
+
+  await rejectsState("retained raw terminal turn data", (run) => {
+    run.pipelineState.workflowState = "FAILED";
+    run.pause = {
+      reason: "internal_failure",
+      code: "ERR_CODEX_TURN_FAILED",
+      diagnosticClass: "turn_bad_request",
+      nativeResponse: "must not be persisted",
     };
   });
 

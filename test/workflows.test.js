@@ -833,6 +833,67 @@ test("does not replace an unavailable source session", async (t) => {
   }
 });
 
+test("recovers a bounded Codex terminal diagnostic from durable execution state", async (
+  t,
+) => {
+  const sensitiveMarker = "DO_NOT_PERSIST_CODEX_TERMINAL_DATA";
+  const paths = await fixture(t);
+  const codex = createBackend("codex");
+  const runCodex = codex.run.bind(codex);
+  codex.run = async (request) => {
+    if (
+      request.prompt.includes("Provide a concise bootstrap summary") &&
+      !request.prompt.includes("As Reviewer")
+    ) {
+      const error = new Error(sensitiveMarker);
+      error.code = "ERR_CODEX_TURN_FAILED";
+      error.diagnosticClass = "turn_bad_request";
+      error.nativeResponse = { message: sensitiveMarker };
+      error.prompt = sensitiveMarker;
+      error.transcript = sensitiveMarker;
+      error.credentials = sensitiveMarker;
+      throw error;
+    }
+    return runCodex(request);
+  };
+  const configuration = { schemaVersion: 1, defaultBackend: "codex" };
+  const firstRuntime = runtime(paths, { codex }, configuration);
+
+  await assert.rejects(
+    firstRuntime.runner.run({
+      pipelineId: "plan-execution",
+      projectPath: paths.projectPath,
+      taskPath: paths.taskPath,
+      roleOverrides: {},
+      sourceSession: null,
+    }),
+    (error) => error.code === "ERR_CODEX_TURN_FAILED",
+  );
+
+  const failed = await onlyRun(firstRuntime.runStore);
+  assert.equal(failed.pipelineState.workflowState, "FAILED");
+  assert.deepEqual(failed.pause, {
+    reason: "internal_failure",
+    code: "ERR_CODEX_TURN_FAILED",
+    diagnosticClass: "turn_bad_request",
+  });
+
+  const reopened = runtime(paths, { codex }, configuration);
+  const recovered = await reopened.runStore.loadRun(failed.runId);
+  assert.deepEqual(recovered.pause, failed.pause);
+  const runPath = join(paths.stateRoot, "runs", failed.runId);
+  const durableData = (
+    await Promise.all(
+      ["state.json", "events.jsonl", "progress.md"].map((filename) =>
+        readFile(join(runPath, filename), "utf8"),
+      ),
+    )
+  ).join("\n");
+  assert.match(durableData, /turn_bad_request/u);
+  assert.doesNotMatch(durableData, /DO_NOT_PERSIST/u);
+  assert.doesNotMatch(durableData, /nativeResponse|"prompt":/u);
+});
+
 test("runs registered workflows through recoverable MCP controls", async (t) => {
   const paths = await fixture(t, { autoCleanup: false, plan: null });
   const implementationGate = {

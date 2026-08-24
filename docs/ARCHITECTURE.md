@@ -422,6 +422,11 @@ than a command or native response. Claude classifies unavailable source and
 continuation sessions from the attempted session mode, and distinguishes those
 from effective-profile, authentication, and provider failures on fresh turns.
 No classification retains native output, credentials, or raw transcripts.
+For a failed Codex turn, recognized App Server `codexErrorInfo` variants map to
+a finite terminal diagnostic-class allowlist. Plan execution may persist only
+that validated class with `ERR_CODEX_TURN_FAILED`; native messages, additional
+details, provider responses, prompts, and transcripts remain excluded. Context
+exhaustion and interruption retain their dedicated recovery paths.
 
 Interrupted one-shot effects are also different. In particular, a
 `local-commit` turn is never replayed; control returns to the runner for pending
