@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { watch } from "node:fs";
 import { lstat, mkdir, realpath, rm, rmdir } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
@@ -32,6 +32,7 @@ export { RUN_STATE_SCHEMA_VERSION, RunStoreError };
 const DEFAULT_LEASE_STALE_MS = 5 * 60 * 1_000;
 
 const RUNS_DIRECTORY = "runs";
+const WORKTREES_DIRECTORY = "worktrees";
 const CREATE_RUN_FIELDS = new Set([
   "runId",
   "pipelineId",
@@ -245,11 +246,27 @@ export function createRunStore({
   }
 
   const journal = createStateJournal({ onTransitionBoundary });
-  const leases = createLeaseManager({
+  const runLeases = createLeaseManager({
     currentDate,
     hostName,
     processId,
     processIsAlive,
+    staleMs: leaseStaleMs,
+    timestamp,
+    tokenFactory: leaseTokenFactory,
+  });
+  const worktreeLeases = createLeaseManager({
+    activeLeaseDescription: "Worktree lease",
+    conflictCode: "ERR_WORKTREE_LEASED",
+    currentDate,
+    hostName,
+    invalidLeaseCode: "ERR_INVALID_WORKTREE_LEASE",
+    leaseDescription: "Worktree lease",
+    leaseSubject: (runId) => `Run ${runId}'s Git worktree`,
+    processId,
+    processIsAlive,
+    reclaimingLeaseDescription: "Reclaiming worktree lease",
+    requireMatchingRunId: false,
     staleMs: leaseStaleMs,
     timestamp,
     tokenFactory: leaseTokenFactory,
@@ -289,6 +306,52 @@ export function createRunStore({
     }
     await rootInitialization;
     return inspectRoot();
+  }
+
+  async function ensureManagedDirectory(directoryPath, description) {
+    try {
+      await mkdir(directoryPath, { mode: 0o700 });
+    } catch (cause) {
+      if (cause?.code !== "EEXIST") {
+        throw cause;
+      }
+    }
+    const metadata = await lstat(directoryPath);
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      throw new RunStoreError(`${description} must be a real directory.`, {
+        code: "ERR_UNSAFE_STATE_ROOT",
+      });
+    }
+    return directoryPath;
+  }
+
+  async function getWorktreeLeaseDirectory(projectPath) {
+    const [canonicalProjectPath, potentialStateRoot] = await Promise.all([
+      canonicalDirectory(projectPath, "Project path"),
+      canonicalPotentialPath(requestedStateRoot),
+    ]);
+    assertStateRootOutside(
+      potentialStateRoot,
+      canonicalProjectPath,
+      canonicalProjectPath,
+    );
+    const { rootPath } = await ensureRoot();
+    assertStateRootOutside(
+      rootPath,
+      canonicalProjectPath,
+      canonicalProjectPath,
+    );
+    const worktreesPath = await ensureManagedDirectory(
+      join(rootPath, WORKTREES_DIRECTORY),
+      "State worktrees path",
+    );
+    const key = createHash("sha256")
+      .update(canonicalProjectPath)
+      .digest("hex");
+    return ensureManagedDirectory(
+      join(worktreesPath, key),
+      "Worktree lease path",
+    );
   }
 
   async function getRunDirectory(runId) {
@@ -375,7 +438,7 @@ export function createRunStore({
 
     let lease;
     try {
-      lease = await leases.acquire(runDirectory, runId);
+      lease = await runLeases.acquire(runDirectory, runId);
       const createdAt = timestamp();
       const state = normalizeRunState(
         {
@@ -458,9 +521,9 @@ export function createRunStore({
   async function acquireRunLease(runId) {
     const runDirectory = await getRunDirectory(runId);
     await loadSnapshot(runDirectory, runId);
-    const lease = await leases.acquire(runDirectory, runId);
+    const lease = await runLeases.acquire(runDirectory, runId);
     try {
-      await leases.runExclusive(lease, () =>
+      await runLeases.runExclusive(lease, () =>
         loadSnapshot(runDirectory, runId),
       );
       return lease;
@@ -487,7 +550,25 @@ export function createRunStore({
 
   async function runIsLeased(runId) {
     const runDirectory = await getRunDirectory(runId);
-    return leases.isLeased(runDirectory, runId);
+    return runLeases.isLeased(runDirectory, runId);
+  }
+
+  async function acquireWorktreeLease(projectPath, runId) {
+    assertRunId(runId);
+    const worktreeDirectory = await getWorktreeLeaseDirectory(projectPath);
+    return worktreeLeases.acquire(worktreeDirectory, runId);
+  }
+
+  async function worktreeIsLeased(projectPath, runId) {
+    assertRunId(runId);
+    const worktreeDirectory = await getWorktreeLeaseDirectory(projectPath);
+    return worktreeLeases.isLeased(worktreeDirectory, runId);
+  }
+
+  async function worktreeLeaseOwner(projectPath, runId) {
+    assertRunId(runId);
+    const worktreeDirectory = await getWorktreeLeaseDirectory(projectPath);
+    return worktreeLeases.owner(worktreeDirectory, runId);
   }
 
   async function waitForRunChange(
@@ -581,7 +662,7 @@ export function createRunStore({
   }
 
   async function recoverRun(lease) {
-    return leases.runExclusive(lease, async ({ record, runDirectory }) => {
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
       await journal.recover(runDirectory, snapshot);
       return deepFreeze(snapshot.state);
@@ -601,7 +682,7 @@ export function createRunStore({
       );
     }
 
-    return leases.runExclusive(lease, async ({ record, runDirectory }) => {
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
       if (
         normalizedActivity === null &&
@@ -641,7 +722,7 @@ export function createRunStore({
     const normalizedChild = normalizeChildSession(childSession);
     const normalizedActivity = normalizePublicActivity(activity);
 
-    return leases.runExclusive(lease, async ({ record, runDirectory }) => {
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
       if (
         snapshot.state.sessionLineage.children.some(
@@ -689,7 +770,7 @@ export function createRunStore({
       );
     }
 
-    return leases.runExclusive(lease, async ({ runDirectory }) => {
+    return runLeases.runExclusive(lease, async ({ runDirectory }) => {
       const artifactPath = await resolveRunArtifactPath(
         runDirectory,
         relativePath,
@@ -749,6 +830,7 @@ export function createRunStore({
     beginAction: actions.begin,
     rootPath: requestedStateRoot,
     acquireRunLease,
+    acquireWorktreeLease,
     createRun,
     getRunDirectory,
     loadRun,
@@ -760,6 +842,8 @@ export function createRunStore({
     transitionRun,
     validateStateBoundary,
     waitForRunChange,
+    worktreeIsLeased,
+    worktreeLeaseOwner,
     writeRunArtifact,
   });
 }

@@ -9,8 +9,11 @@ import * as z from "zod/v4";
 import packageMetadata from "../package.json" with { type: "json" };
 import { createClarificationService } from "./clarifications.js";
 import { getPipeline, listPipelines } from "./pipeline-registry.js";
-import { createRunner } from "./runner.js";
-import { createRunStore } from "./state.js";
+import {
+  createRunner,
+  pipelineRequiresWorktreeLease,
+} from "./runner.js";
+import { createRunStore, RunStoreError } from "./state.js";
 
 const MAX_WAIT_MS = 24 * 60 * 60 * 1_000;
 const DEFAULT_WAIT_MS = 30_000;
@@ -236,8 +239,8 @@ function delay(milliseconds, signal) {
   });
 }
 
-export function launchDetachedRun(runIdValue, action = null) {
-  return createDetachedLauncher()(runIdValue, action);
+export function launchDetachedRun(runIdValue, action = null, options = {}) {
+  return createDetachedLauncher()(runIdValue, action, options);
 }
 
 function detachedArguments(executablePath, runIdValue, action) {
@@ -257,7 +260,7 @@ export function createDetachedLauncher({
   executablePath = EXECUTABLE_PATH,
   environment = process.env,
 } = {}) {
-  return (runIdValue, action = null) =>
+  return (runIdValue, action = null, { onExit } = {}) =>
     new Promise((resolvePromise, rejectPromise) => {
       const child = spawnProcess(
         process.execPath,
@@ -269,6 +272,9 @@ export function createDetachedLauncher({
         },
       );
       child.once("error", rejectPromise);
+      if (typeof onExit === "function") {
+        child.once("exit", onExit);
+      }
       child.once("spawn", () => {
         child.unref();
         resolvePromise(child.pid);
@@ -310,6 +316,8 @@ export function createMcpControlPlane(options = {}) {
       waitForLease = false,
     } = {},
   ) {
+    let dispatchedChildExited = false;
+    let dispatchStarted = false;
     while (true) {
       const run = (await runner.status(runIdValue)).run;
       if (
@@ -320,7 +328,49 @@ export function createMcpControlPlane(options = {}) {
       ) {
         return;
       }
-      if (!(await runStore.runIsLeased(runIdValue))) {
+      const runIsLeased = await runStore.runIsLeased(runIdValue);
+      if (pipelineRequiresWorktreeLease(run.pipelineId)) {
+        const worktreeLeaseOwner = await runStore.worktreeLeaseOwner(
+          run.projectPath,
+          run.runId,
+        );
+        if (
+          worktreeLeaseOwner !== null &&
+          worktreeLeaseOwner !== run.runId
+        ) {
+          throw new RunStoreError(
+            `Run ${run.runId} is durable, but its Git worktree is already ` +
+              "owned by another mutating run; retry this MCP request with " +
+              "the same idempotency key after that run releases it.",
+            { code: "ERR_WORKTREE_LEASED" },
+          );
+        }
+        if (dispatchedChildExited) {
+          throw new RunStoreError(
+            `Detached continuation for run ${run.runId} exited before the ` +
+              "run advanced or acquired its Git worktree; retry this MCP " +
+              "request with the same idempotency key.",
+            { code: "ERR_DETACHED_START_FAILED" },
+          );
+        }
+        if (
+          worktreeLeaseOwner === run.runId &&
+          (!waitForLease || dispatchStarted)
+        ) {
+          return;
+        }
+        if (!runIsLeased && !dispatchStarted) {
+          await launchRun(runIdValue, action, {
+            onExit() {
+              dispatchedChildExited = true;
+            },
+          });
+          dispatchStarted = true;
+        }
+        await delay(RETRY_DELAY_MS, signal);
+        continue;
+      }
+      if (!runIsLeased) {
         await launchRun(runIdValue, action);
         return;
       }
@@ -397,7 +447,7 @@ export function createMcpControlPlane(options = {}) {
       ) {
         throw new Error("Reserved run does not match its MCP action intent.");
       }
-      await launchIfNeeded(run.runId, run.revision);
+      await launchIfNeeded(run.runId, run.revision, { signal });
       const receipt = { runId: run.runId };
       await action.complete(receipt);
       return receipt;
@@ -548,6 +598,7 @@ export function createMcpControlPlane(options = {}) {
       }
       await launchIfNeeded(input.runId, submittedRevision, {
         allowWaiting: true,
+        signal,
       });
       const receipt = { runId: input.runId, requestId: input.requestId };
       await action.complete(receipt);

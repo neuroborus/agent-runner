@@ -18,6 +18,10 @@ import { getPipeline } from "./pipeline-registry.js";
 import { createRunStore } from "./state.js";
 
 const BACKENDS = new Set(BACKEND_IDS);
+const WORKTREE_LEASE_PIPELINES = new Set([
+  "plan-execution",
+  "polishing",
+]);
 const RUN_FIELDS = new Set([
   "pipelineId",
   "projectPath",
@@ -496,6 +500,10 @@ function pipelineForRun(run, knownPipeline) {
   return pipeline;
 }
 
+export function pipelineRequiresWorktreeLease(pipelineId) {
+  return WORKTREE_LEASE_PIPELINES.has(pipelineId);
+}
+
 export function createRunner(options = {}) {
   rejectUnknownFields(options, RUNNER_OPTION_FIELDS, "runnerOptions");
   const adapters = options.adapters ?? defaultAdapters();
@@ -576,6 +584,21 @@ export function createRunner(options = {}) {
       ),
       settings,
     });
+  }
+
+  async function withWorktreeLease(run, operation) {
+    if (!pipelineRequiresWorktreeLease(run.pipelineId)) {
+      return operation();
+    }
+    const worktreeLease = await runStore.acquireWorktreeLease(
+      run.projectPath,
+      run.runId,
+    );
+    try {
+      return await operation();
+    } finally {
+      await worktreeLease.release();
+    }
   }
 
   async function validateBoundary(input) {
@@ -725,7 +748,9 @@ export function createRunner(options = {}) {
     const { created, pipeline } = await prepare(input);
     try {
       return await result(
-        await execute(pipeline, created.state, created.lease),
+        await withWorktreeLease(created.state, () =>
+          execute(pipeline, created.state, created.lease),
+        ),
       );
     } finally {
       await created.lease.release();
@@ -758,7 +783,9 @@ export function createRunner(options = {}) {
         }
       }
       return await result(
-        await execute(pipeline, recovered, lease, normalized.action),
+        await withWorktreeLease(recovered, () =>
+          execute(pipeline, recovered, lease, normalized.action),
+        ),
       );
     } finally {
       await lease.release();
@@ -796,42 +823,44 @@ export function createRunner(options = {}) {
     try {
       const run = await runStore.recoverRun(lease);
       pipelineForRun(run);
-      const answers = orderedInputAnswers(run, normalized);
-      const transcript = await clarifications.writeEditAnswers(
-        run.pipelineState.pendingEdit,
-        answers,
-        { expectedHash: normalized.responseHash },
-      );
-      const next = await runStore.transitionRun(
-        lease,
-        {
-          pause: {
-            ...run.pause,
-            inputResponse: {
-              requestId: normalized.requestId,
-              transcriptHash: transcript.hash,
+      return await withWorktreeLease(run, async () => {
+        const answers = orderedInputAnswers(run, normalized);
+        const transcript = await clarifications.writeEditAnswers(
+          run.pipelineState.pendingEdit,
+          answers,
+          { expectedHash: normalized.responseHash },
+        );
+        const next = await runStore.transitionRun(
+          lease,
+          {
+            pause: {
+              ...run.pause,
+              inputResponse: {
+                requestId: normalized.requestId,
+                transcriptHash: transcript.hash,
+              },
             },
           },
-        },
-        {
-          activity: {
+          {
+            activity: {
+              actor: "runner",
+              phase: "clarification",
+              kind: "submitted",
+              message: "Pending user input was recorded.",
+            },
+          },
+        );
+        await publish(
+          {
             actor: "runner",
             phase: "clarification",
             kind: "submitted",
             message: "Pending user input was recorded.",
           },
-        },
-      );
-      await publish(
-        {
-          actor: "runner",
-          phase: "clarification",
-          kind: "submitted",
-          message: "Pending user input was recorded.",
-        },
-        next,
-      );
-      return result(next);
+          next,
+        );
+        return result(next);
+      });
     } finally {
       await lease.release();
     }

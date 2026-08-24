@@ -383,6 +383,44 @@ test("validates the canonical Git root before creating external state", async (t
   await assert.rejects(readdir(unsafeStateRoot), /ENOENT/u);
 });
 
+test("serializes execution and polishing runs for one temporary worktree", async (t) => {
+  const fixture = await createFixture(t);
+  const runStore = createRunStore({ stateRoot: fixture.stateRoot });
+  const runner = runnerFor(
+    fixture,
+    { codex: createAdapter() },
+    { runStore },
+  );
+  const preparedRuns = await Promise.all(
+    ["plan-execution", "polishing"].map((pipelineId) =>
+      runner.create({
+        pipelineId,
+        projectPath: fixture.projectPath,
+        taskPath: fixture.taskPath,
+        proactiveClarification: false,
+        roleOverrides: {},
+        sourceSession: null,
+      }),
+    ),
+  );
+  const ownerLease = await runStore.acquireWorktreeLease(
+    fixture.projectPath,
+    PREPARED_RUN,
+  );
+
+  for (const prepared of preparedRuns) {
+    await assert.rejects(
+      runner.resume({ runId: prepared.run.runId, action: null }),
+      (error) => error.code === "ERR_WORKTREE_LEASED",
+    );
+    assert.equal((await runner.status(prepared.run.runId)).run.revision, 1);
+    const runLease = await runStore.acquireRunLease(prepared.run.runId);
+    await runLease.release();
+  }
+
+  await ownerLease.release();
+});
+
 test("runs and resumes a registered pipeline from persisted configuration", async (t) => {
   const fixture = await createFixture(t);
   const adapter = createAdapter({ questionFirst: true });

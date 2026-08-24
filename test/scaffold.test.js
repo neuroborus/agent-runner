@@ -274,6 +274,15 @@ test("run-state durability and lease ownership are documented", async () => {
     assert.match(document, /source-session/iu);
     assert.match(document, /raw model\s+transcripts/iu);
   }
+  for (const document of [
+    documents[1],
+    documents[2],
+    documents[4],
+    documents[5],
+  ]) {
+    assert.match(document, /canonical[- ]worktree/iu);
+    assert.match(document, /same-host/iu);
+  }
 
   assert.match(documents[2], /actor.*phase.*kind.*message/su);
   assert.match(documents[2], /symlink escapes/iu);

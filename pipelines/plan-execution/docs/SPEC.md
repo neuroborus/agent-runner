@@ -323,12 +323,21 @@ State layout:
     └── resolved.md
 ```
 
+Worktree ownership is separate from run identity:
+
+```text
+<state-root>/worktrees/<sha256(canonical-worktree-path)>/
+└── .lease            # present only while one run owns this worktree
+```
+
 A mutating `run` or `resume` must acquire the atomic per-run execution lease
-before recovery or workflow advancement. A competing owner is rejected. Stale
-recovery requires both the configured age threshold and proof that the recorded
-same-host process is no longer alive; age alone or a foreign host is
-insufficient. `status` and public activity reads are lock-free and never acquire
-the execution lease.
+before recovery or workflow advancement, then acquire the canonical-worktree
+lease before pipeline mutation. Release occurs in reverse order. A competing
+run ID cannot own the same canonical Git worktree. Each release verifies its
+opaque owner token. Stale recovery for either lease requires both the configured
+age threshold and proof that the recorded same-host process is no longer alive;
+age alone or a foreign host is insufficient. `status` and public activity reads
+are lock-free and acquire neither lease.
 
 ### `state.json`
 
@@ -899,7 +908,14 @@ for optional proactive clarification or one exact answer per Worker question
 through `run_respond`. A product decision requires explicit user context; the
 controlling agent asks the user when that context is absent. An external edit
 followed by `run_resume` remains an equivalent path. Detached continuation does
-not change this pipeline's lease, compatibility, Git, or commit gates.
+not change this pipeline's lease, compatibility, Git, or commit gates. An MCP
+dispatch that encounters another run's canonical-worktree lease leaves its
+durable run and incomplete idempotency intent available for exact retry instead
+of launching a conflicting child. After a mutating child is spawned, MCP does
+not complete the intent until the run advances or that child owns the worktree;
+a child that loses a concurrent acquisition race leaves the intent retryable.
+The launcher's correlated exit acknowledgement preserves that result when the
+winning lease is released between MCP polls.
 The additive MCP start fields leave `sourceSession` unset by default and pass it
 only after the user deliberately selects a fork; native IDs remain opaque and
 an unknown source profile offers only `current` inheritance.
@@ -1648,6 +1664,9 @@ At minimum cover:
     dedicated gate, resume policy, and matching finalization/review fingerprints.
 43. MCP offers fresh start and compatible current-session fork choices while
     leaving the source unset unless the user deliberately selects the fork.
+44. independently identified plan-execution or polishing runs cannot own the
+    same canonical Git worktree concurrently, including through detached MCP
+    dispatch, and a demonstrably stale same-host owner is recoverable.
 
 Real Codex/Claude smoke tests should be opt-in integration tests.
 

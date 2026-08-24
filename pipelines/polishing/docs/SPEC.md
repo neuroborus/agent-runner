@@ -333,14 +333,25 @@ values.
 
 Each transition is a complete write-ahead event appended and synchronized
 before atomic state replacement. `progress.md` is derived public activity.
-Mutating run/resume operations require one recoverable execution lease; status
-reads remain lock-free. Recovery accepts only an incomplete final journal
-fragment, advances lagging state from complete events, and never depends on a
-native Codex or Claude session surviving interruption.
+Mutating run/resume operations acquire the per-run execution lease first and an
+external lease keyed by the canonical Git worktree second, then release them in
+reverse order. Separate run IDs therefore cannot mutate one worktree
+concurrently. Both leases use owner-checked release and permit stale recovery
+only after the age threshold when the recorded same-host process is
+demonstrably dead. Status reads acquire neither lease and remain lock-free.
+Recovery accepts only an incomplete final journal fragment, advances lagging
+state from complete events, and never depends on a native Codex or Claude
+session surviving interruption.
 
 MCP uses the common STDIO tools, persists idempotency intents before mutation
 and receipts before returning, and launches detached continuation under the
-same lease rules. A disconnected client cannot create a second workflow owner.
+same lease rules. A worktree conflict leaves the durable run and incomplete
+intent available for an exact retry instead of launching a conflicting child.
+After spawn, the receipt remains incomplete until the run advances or that
+child owns the worktree, so losing a concurrent acquisition race remains
+retryable. A correlated child exit acknowledgement makes this deterministic
+when the winning lease is released between MCP polls. A disconnected client
+cannot create a second workflow owner.
 Its additive start fields leave `sourceSession` unset until the user
 deliberately selects a fork; native IDs remain opaque and an unknown source
 profile permits only `current` inheritance.
@@ -371,6 +382,8 @@ Pipeline tests use fake adapters and temporary repositories. Cover at least:
   invalidation;
 - automatic discovery, explicit skill selection, skill-less fallback, invalid
   explicit paths, resume, and matching finalization/review fingerprints;
+- canonical-worktree conflicts across independently identified polishing or
+  plan-execution runs, detached MCP retry, and same-host stale recovery;
 - the invariant that `HEAD` never changes and completion never commits.
 
 Root tests cover workspace imports and metadata, static registration,

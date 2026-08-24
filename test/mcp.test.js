@@ -50,6 +50,39 @@ async function workspace(t, prefix = "agent-runner-mcp-") {
   return { projectPath, root, stateRoot, taskPath };
 }
 
+function deferred() {
+  let resolvePromise;
+  const promise = new Promise((resolve) => {
+    resolvePromise = resolve;
+  });
+  return { promise, resolve: resolvePromise };
+}
+
+async function advanceMutatingStoredRun(store, runId) {
+  const run = await store.loadRun(runId);
+  if (!["plan-execution", "polishing"].includes(run.pipelineId)) {
+    return;
+  }
+  const lease = await store.acquireRunLease(runId);
+  try {
+    await store.recoverRun(lease);
+    await store.transitionRun(
+      lease,
+      {},
+      {
+        activity: {
+          actor: "runner",
+          phase: "mcp",
+          kind: "started",
+          message: "Detached test continuation started.",
+        },
+      },
+    );
+  } finally {
+    await lease.release();
+  }
+}
+
 async function createStoredRun(
   store,
   { projectPath, taskPath },
@@ -355,6 +388,258 @@ test("reconciles an incomplete start intent after run creation", async (t) => {
   );
 });
 
+test("keeps a conflicted detached start durable for idempotent retry", async (t) => {
+  const paths = await workspace(t, "agent-runner-mcp-worktree-lease-");
+  const store = createRunStore({ stateRoot: paths.stateRoot });
+  const runner = storedRunner(store, paths);
+  const ownerLease = await store.acquireWorktreeLease(
+    paths.projectPath,
+    SECOND_RUN_ID,
+  );
+  const launches = [];
+  const control = createMcpControlPlane({
+    async launchRun(id) {
+      launches.push(id);
+      await advanceMutatingStoredRun(store, id);
+    },
+    runIdFactory: () => RUN_ID,
+    runner,
+    runStore: store,
+  });
+  const input = {
+    idempotencyKey: "worktree-conflict-start",
+    pipelineId: "plan-execution",
+    projectPath: paths.projectPath,
+    taskPath: paths.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    sourceSession: null,
+  };
+
+  await assert.rejects(
+    control.runStart(input),
+    (error) =>
+      error.code === "ERR_WORKTREE_LEASED" &&
+      /durable.*same idempotency key/iu.test(error.message),
+  );
+  assert.deepEqual(launches, []);
+  assert.equal((await store.loadRun(RUN_ID)).revision, 1);
+
+  await ownerLease.release();
+  assert.deepEqual(await control.runStart(input), { runId: RUN_ID });
+  assert.deepEqual(launches, [RUN_ID]);
+});
+
+test("retries a simultaneous detached start that loses worktree ownership", async (t) => {
+  const paths = await workspace(t, "agent-runner-mcp-worktree-race-");
+  const store = createRunStore({ stateRoot: paths.stateRoot });
+  const runner = storedRunner(store, paths);
+  const firstChildrenStarted = deferred();
+  const winnerOwnedWorktree = deferred();
+  const releaseWinner = deferred();
+  const retryOwnedWorktree = deferred();
+  const releaseRetry = deferred();
+  t.after(() => {
+    releaseWinner.resolve();
+    releaseRetry.resolve();
+  });
+  const launchCounts = new Map();
+  const children = [];
+  let firstStartCount = 0;
+
+  function launchRun(runId) {
+    const attempt = (launchCounts.get(runId) ?? 0) + 1;
+    launchCounts.set(runId, attempt);
+    if (attempt === 1) {
+      firstStartCount += 1;
+      if (firstStartCount === 2) {
+        firstChildrenStarted.resolve();
+      }
+    }
+
+    const child = (async () => {
+      const runLease = await store.acquireRunLease(runId);
+      let worktreeLease;
+      try {
+        if (runId === RUN_ID) {
+          await firstChildrenStarted.promise;
+          worktreeLease = await store.acquireWorktreeLease(
+            paths.projectPath,
+            runId,
+          );
+          winnerOwnedWorktree.resolve();
+          await releaseWinner.promise;
+          return;
+        }
+        if (attempt === 1) {
+          await winnerOwnedWorktree.promise;
+          try {
+            worktreeLease = await store.acquireWorktreeLease(
+              paths.projectPath,
+              runId,
+            );
+          } catch (cause) {
+            if (cause?.code === "ERR_WORKTREE_LEASED") {
+              return;
+            }
+            throw cause;
+          }
+          throw new Error("The losing detached child acquired the worktree.");
+        }
+        worktreeLease = await store.acquireWorktreeLease(
+          paths.projectPath,
+          runId,
+        );
+        retryOwnedWorktree.resolve();
+        await releaseRetry.promise;
+      } finally {
+        await worktreeLease?.release();
+        await runLease.release();
+      }
+    })();
+    children.push(child);
+  }
+
+  const commonInput = {
+    pipelineId: "plan-execution",
+    projectPath: paths.projectPath,
+    taskPath: paths.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    sourceSession: null,
+  };
+  const winnerInput = {
+    ...commonInput,
+    idempotencyKey: "simultaneous-start-winner",
+  };
+  const loserInput = {
+    ...commonInput,
+    idempotencyKey: "simultaneous-start-loser",
+  };
+  const winnerControl = createMcpControlPlane({
+    launchRun,
+    runIdFactory: () => RUN_ID,
+    runner,
+    runStore: store,
+  });
+  const loserControl = createMcpControlPlane({
+    launchRun,
+    runIdFactory: () => SECOND_RUN_ID,
+    runner,
+    runStore: store,
+  });
+
+  const [winner, loser] = await Promise.allSettled([
+    winnerControl.runStart(winnerInput),
+    loserControl.runStart(loserInput),
+  ]);
+  assert.deepEqual(winner, {
+    status: "fulfilled",
+    value: { runId: RUN_ID },
+  });
+  assert.equal(loser.status, "rejected");
+  assert.equal(loser.reason.code, "ERR_WORKTREE_LEASED");
+  assert.equal(
+    (
+      await store.readAction({
+        key: loserInput.idempotencyKey,
+        tool: "run_start",
+        arguments: commonInput,
+      })
+    ).status,
+    "intent",
+  );
+  assert.deepEqual(await winnerControl.runStart(winnerInput), {
+    runId: RUN_ID,
+  });
+  assert.equal(launchCounts.get(RUN_ID), 1);
+
+  releaseWinner.resolve();
+  await Promise.all(children.slice(0, 2));
+
+  const retry = loserControl.runStart(loserInput);
+  await retryOwnedWorktree.promise;
+  assert.deepEqual(await retry, { runId: SECOND_RUN_ID });
+  assert.equal(launchCounts.get(SECOND_RUN_ID), 2);
+  releaseRetry.resolve();
+  await children.at(-1);
+});
+
+test("retries when a detached loser exits after transient ownership", async (t) => {
+  const paths = await workspace(t, "agent-runner-mcp-worktree-exit-");
+  const store = createRunStore({ stateRoot: paths.stateRoot });
+  await createStoredRun(store, paths, {
+    id: SECOND_RUN_ID,
+    pipelineId: "plan-execution",
+  });
+  const runner = storedRunner(store, paths);
+  const launches = [];
+  const control = createMcpControlPlane({
+    async launchRun(runId, _action, { onExit } = {}) {
+      launches.push(runId);
+      if (launches.length > 1) {
+        await advanceMutatingStoredRun(store, runId);
+        return;
+      }
+
+      const winnerRunLease = await store.acquireRunLease(SECOND_RUN_ID);
+      let winnerWorktreeLease;
+      let loserRunLease;
+      try {
+        winnerWorktreeLease = await store.acquireWorktreeLease(
+          paths.projectPath,
+          SECOND_RUN_ID,
+        );
+        loserRunLease = await store.acquireRunLease(runId);
+        await assert.rejects(
+          store.acquireWorktreeLease(paths.projectPath, runId),
+          (error) => error.code === "ERR_WORKTREE_LEASED",
+        );
+      } finally {
+        await loserRunLease?.release();
+        await winnerWorktreeLease?.release();
+        await winnerRunLease.release();
+      }
+      onExit();
+    },
+    runIdFactory: () => RUN_ID,
+    runner,
+    runStore: store,
+  });
+  const commonInput = {
+    pipelineId: "plan-execution",
+    projectPath: paths.projectPath,
+    taskPath: paths.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    sourceSession: null,
+  };
+  const input = {
+    ...commonInput,
+    idempotencyKey: "transient-worktree-conflict",
+  };
+
+  await assert.rejects(
+    control.runStart(input),
+    (error) =>
+      error.code === "ERR_DETACHED_START_FAILED" &&
+      /retry.*same idempotency key/iu.test(error.message),
+  );
+  assert.equal(
+    (
+      await store.readAction({
+        key: input.idempotencyKey,
+        tool: "run_start",
+        arguments: commonInput,
+      })
+    ).status,
+    "intent",
+  );
+
+  assert.deepEqual(await control.runStart(input), { runId: RUN_ID });
+  assert.deepEqual(launches, [RUN_ID, RUN_ID]);
+});
+
 test("forwards additive run-wide, role, and source profile selections", async (t) => {
   const paths = await workspace(t, "agent-runner-mcp-preferences-");
   const store = createRunStore({ stateRoot: paths.stateRoot });
@@ -576,8 +861,9 @@ test("resumes only an action valid for the persisted pause", async (t) => {
   });
   const launches = [];
   const control = createMcpControlPlane({
-    launchRun(id, action) {
+    async launchRun(id, action) {
       launches.push({ action, id });
+      await advanceMutatingStoredRun(store, id);
     },
     runner: storedRunner(store, paths),
     runStore: store,
@@ -737,7 +1023,14 @@ test("waits for a pausing owner to release its lease before resuming", async (t)
     workflowState: "WAITING_FOR_USER",
   });
   const lease = await store.acquireRunLease(RUN_ID);
-  t.after(() => lease.release());
+  const worktreeLease = await store.acquireWorktreeLease(
+    paths.projectPath,
+    RUN_ID,
+  );
+  t.after(async () => {
+    await worktreeLease.release();
+    await lease.release();
+  });
 
   let observeLease;
   const leaseObserved = new Promise((resolvePromise) => {
@@ -745,8 +1038,9 @@ test("waits for a pausing owner to release its lease before resuming", async (t)
   });
   const launches = [];
   const control = createMcpControlPlane({
-    launchRun(id) {
+    async launchRun(id) {
       launches.push(id);
+      await advanceMutatingStoredRun(store, id);
     },
     runner: storedRunner(store, paths),
     runStore: {
@@ -769,6 +1063,7 @@ test("waits for a pausing owner to release its lease before resuming", async (t)
 
   await leaseObserved;
   assert.deepEqual(launches, []);
+  await worktreeLease.release();
   await lease.release();
   assert.deepEqual(await resuming, { runId: RUN_ID });
   assert.deepEqual(launches, [RUN_ID]);
@@ -871,6 +1166,7 @@ test("waits by revision, emits public progress, and leaves timeouts read-only", 
 
 test("launches continuation independently from the MCP process streams", async () => {
   const calls = [];
+  const exitCallbacks = [];
   let unreferenced = false;
   const launch = createDetachedLauncher({
     environment: { XDG_STATE_HOME: "/state" },
@@ -882,6 +1178,8 @@ test("launches continuation independently from the MCP process streams", async (
         once(event, callback) {
           if (event === "spawn") {
             queueMicrotask(callback);
+          } else if (event === "exit") {
+            exitCallbacks.push(callback);
           }
         },
         unref() {
@@ -891,7 +1189,17 @@ test("launches continuation independently from the MCP process streams", async (
     },
   });
 
-  assert.equal(await launch(RUN_ID), 42);
+  let exited = false;
+  assert.equal(
+    await launch(RUN_ID, null, {
+      onExit() {
+        exited = true;
+      },
+    }),
+    42,
+  );
+  exitCallbacks[0]();
+  assert.equal(exited, true);
   await launch(RUN_ID, { type: "extra-fix-rounds", amount: 2 });
   await launch(RUN_ID, { type: "override-finding", findingId: "finding-1" });
   assert.equal(unreferenced, true);

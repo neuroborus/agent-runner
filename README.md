@@ -300,11 +300,14 @@ Runner state uses `$XDG_STATE_HOME/agent-runner/` with
 `~/.local/state/agent-runner/` as the fallback. Every run records its pipeline
 ID and state-schema version and is addressed by an opaque run ID. Complete
 write-ahead events precede atomic state replacement; recovery repairs a lagging
-state file and derived progress. Mutating runs require one execution lease,
-while status and bounded public activity reads remain lock-free. `run` and
-`resume` print concise labeled activity as it is persisted; `status` prints the
-current state, pause, artifact paths, findings, fingerprints, commit SHAs, and
-state directory without exposing model transcripts.
+state file and derived progress. Mutating runs require one per-run execution
+lease. Plan execution and polishing also serialize ownership with an external
+lease keyed by the canonical Git worktree, so separate run IDs cannot mutate
+one worktree concurrently. Both leases support safe same-host stale recovery;
+status and bounded public activity reads remain lock-free. `run` and `resume`
+print concise labeled activity as it is persisted; `status` prints the current
+state, pause, artifact paths, findings, fingerprints, commit SHAs, and state
+directory without exposing model transcripts.
 
 Plan execution and polishing accept one applicable resume action at a time:
 
@@ -433,9 +436,15 @@ a unique idempotency key, and only an action valid for the persisted pause.
 Mutating tools persist an action intent before mutation and a receipt before
 returning. Exact retries return the original result, while reusing a key with
 different arguments is rejected. Runs continue in detached local children, so
-MCP disconnects and wait cancellation affect only the client call. The existing
-execution lease, Git safety checks, local-only policy, and one-shot commit
-authorization remain authoritative. V1 does not require MCP Tasks.
+MCP disconnects and wait cancellation affect only the client call. A detached
+start or resume rejects active canonical-worktree ownership before launch and
+withholds its receipt after launch until the run advances or the child owns the
+worktree. Losing a concurrent ownership race keeps the durable idempotency
+intent available for an exact retry, including when the competing lease is
+released before the next MCP poll because child exit is acknowledged directly.
+The existing execution leases, Git safety checks, local-only policy, and
+one-shot commit authorization remain authoritative. V1 does not require MCP
+Tasks.
 
 CLI output and MCP progress events label public activity by role. `run_status`
 returns a concise current snapshot; `run_activity` returns bounded history

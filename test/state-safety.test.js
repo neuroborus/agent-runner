@@ -164,6 +164,110 @@ test("keeps status lock-free and rejects concurrent mutating ownership", async (
   );
 });
 
+test("serializes ownership by canonical worktree without locking status", async (t) => {
+  const { created, projectPath, stateRoot, store, workspace } =
+    await createFixture(t);
+  const aliasPath = join(workspace, "project-alias");
+  const otherProjectPath = join(workspace, "other-project");
+  const competingRunId = "11111111-1111-4111-8111-111111111111";
+  await Promise.all([
+    symlink(projectPath, aliasPath, "dir"),
+    mkdir(otherProjectPath),
+  ]);
+  const competingStore = createRunStore({ stateRoot });
+  const lease = await store.acquireWorktreeLease(
+    projectPath,
+    created.state.runId,
+  );
+
+  assert.equal((await competingStore.loadRun(created.state.runId)).revision, 1);
+  assert.equal(
+    await competingStore.worktreeIsLeased(aliasPath, competingRunId),
+    true,
+  );
+  await assert.rejects(
+    competingStore.acquireWorktreeLease(aliasPath, competingRunId),
+    (error) =>
+      error instanceof RunStoreError && error.code === "ERR_WORKTREE_LEASED",
+  );
+  const unrelatedLease = await competingStore.acquireWorktreeLease(
+    otherProjectPath,
+    competingRunId,
+  );
+  await unrelatedLease.release();
+
+  await lease.release();
+  const resumedLease = await competingStore.acquireWorktreeLease(
+    aliasPath,
+    competingRunId,
+  );
+  await resumedLease.release();
+});
+
+test("recovers only stale same-host worktree ownership and checks release ownership", async (t) => {
+  const { created, projectPath, stateRoot } = await createFixture(t);
+  const initialStore = createRunStore({ stateRoot });
+  const initialLease = await initialStore.acquireWorktreeLease(
+    projectPath,
+    created.state.runId,
+  );
+  await initialLease.release();
+  const [worktreeKey] = await readdir(join(stateRoot, "worktrees"));
+  const leasePath = join(stateRoot, "worktrees", worktreeKey, ".lease");
+  const staleLease = {
+    runId: created.state.runId,
+    token: "11111111-1111-4111-8111-111111111111",
+    pid: 111,
+    hostname: "test-host",
+    acquiredAt: "2020-01-01T00:00:00.000Z",
+  };
+  await writeFile(leasePath, `${JSON.stringify(staleLease)}\n`);
+
+  const recoveringRunId = "22222222-2222-4222-8222-222222222222";
+  const recoveringStore = createRunStore({
+    stateRoot,
+    clock: () => new Date("2026-08-16T00:00:00.000Z"),
+    hostName: "test-host",
+    processId: 222,
+    processIsAlive: (pid) => pid !== 111,
+    leaseStaleMs: 0,
+  });
+  const recoveredLease = await recoveringStore.acquireWorktreeLease(
+    projectPath,
+    recoveringRunId,
+  );
+  const recoveredRecord = JSON.parse(await readFile(leasePath, "utf8"));
+  assert.equal(recoveredRecord.runId, recoveringRunId);
+  assert.equal(recoveredRecord.pid, 222);
+
+  await writeFile(
+    leasePath,
+    `${JSON.stringify({
+      ...recoveredRecord,
+      runId: "33333333-3333-4333-8333-333333333333",
+      token: "33333333-3333-4333-8333-333333333333",
+    })}\n`,
+  );
+  await assert.rejects(
+    recoveredLease.release(),
+    (error) =>
+      error instanceof RunStoreError &&
+      error.code === "ERR_INVALID_WORKTREE_LEASE",
+  );
+  await writeFile(leasePath, `${JSON.stringify(recoveredRecord)}\n`);
+  await recoveredLease.release();
+
+  await writeFile(
+    leasePath,
+    `${JSON.stringify({ ...staleLease, hostname: "other-host" })}\n`,
+  );
+  await assert.rejects(
+    recoveringStore.acquireWorktreeLease(projectPath, recoveringRunId),
+    (error) =>
+      error instanceof RunStoreError && error.code === "ERR_WORKTREE_LEASED",
+  );
+});
+
 test("reads the durable event while a state replacement is pending", async (t) => {
   let continueTransition;
   let transitionPaused;

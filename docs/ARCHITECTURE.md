@@ -161,10 +161,13 @@ The root runner resolves the canonical Git root, safely loads runner and
 project configuration, applies run-wide and role-specific execution overrides,
 and persists the resolved roles, settings, artifact root, and optional
 source-session reference and profile before pipeline work begins. `run` then
-holds the new run's lease while invoking its statically registered workflow;
-`resume` recovers the durable event history and reconstructs the same runtime
-from persisted state without reloading either configuration source or requiring
-a live native session. `status` remains lock-free.
+holds the new run's per-run lease while invoking its statically registered
+workflow. Plan execution and polishing additionally hold one external lease
+keyed by the canonical Git worktree before any workflow-owned mutation. The
+runner always acquires the per-run lease first and releases the worktree lease
+first. `resume` recovers the durable event history and reconstructs the same
+runtime from persisted state without reloading either configuration source or
+requiring a live native session. `status` remains lock-free.
 
 `artifactRoot` defaults to `LOCAL_ARTIFACTS`. Plan execution and polishing use
 it only for runner-owned repository-local artifacts beneath
@@ -211,9 +214,17 @@ hash, and execution lease before work is launched again.
 child with no inherited standard streams. `run_respond` atomically writes the
 identified answers, records their transcript hash in run state, then launches
 the same detached continuation. `run_resume` accepts only an action applicable
-to the persisted pause. The child owns the existing per-run execution lease, so
-an MCP disconnect, tool timeout, or duplicate recovery launch cannot create a
-second workflow owner.
+to the persisted pause. The child owns the existing per-run execution lease
+and, for plan execution or polishing, the canonical-worktree lease. Before
+detached dispatch, MCP rejects an already-owned worktree without completing the
+idempotency intent, leaving the reserved durable run available for an exact
+retry. After spawning a mutating continuation, MCP withholds the receipt until
+the run advances or that child owns the worktree lease. A child that loses a
+concurrent ownership race therefore leaves the intent incomplete and exactly
+retryable. The launcher reports a causally correlated child exit so this
+remains deterministic when the competing lease is released between MCP polls.
+An MCP disconnect, tool timeout, worktree conflict, or duplicate recovery
+launch cannot create a second workflow owner.
 
 MCP start fields remain additive, and `sourceSession` defaults to unset. When a
 compatible current native session is available, the controlling agent offers a
@@ -244,6 +255,13 @@ MCP action intents and receipts live under `actions/<hashed-key>/` in the same
 external root. The opaque key itself is not persisted. Action records are
 atomically replaced and protected by a same-host process lease; they never live
 inside the target or task directory.
+
+Canonical-worktree leases live under
+`worktrees/<sha256(canonical-worktree-path)>/` in that external root. The hash
+keeps filesystem-safe bounded keys while the owner record contains only the
+run ID, an opaque token, process ID, hostname, and acquisition time. Empty key
+directories may remain after release; ownership exists only while `.lease` is
+present.
 
 `state.json` contains the common versioned envelope: monotonic revision,
 pipeline ID and state version, canonical paths, resolved roles, counters,
@@ -321,13 +339,17 @@ returning private pipeline state, model output, credentials, or unhashed remote
 and identity values. Persist concise structured decisions and summaries, never
 raw model transcripts or chain-of-thought.
 
-Every mutating run or resume holds one atomic per-run execution lease. Status
-and public activity reads remain lock-free. A competing owner is rejected; a
-lease is recoverable only after its age threshold when its same-host process is
-demonstrably dead. Pipeline-declared run artifacts are atomically replaced
-beneath the run directory, with absolute paths, traversal, reserved state files,
-and symlink escapes rejected. Managed state and lease paths must be isolated
-regular files rather than symbolic or hard links.
+Every mutating run or resume holds one atomic per-run execution lease. Plan
+execution and polishing also hold one atomic lease for the canonical Git
+worktree throughout workflow execution and runner-authorized clarification
+writes, preventing independently identified runs from mutating the same
+worktree concurrently. Status and public activity reads acquire neither lease.
+A competing owner is rejected; either lease is recoverable only after its age
+threshold when its same-host process is demonstrably dead. Release verifies the
+opaque owner token before removing a lease. Pipeline-declared run artifacts are
+atomically replaced beneath the run directory, with absolute paths, traversal,
+reserved state files, and symlink escapes rejected. Managed state and lease
+paths must be isolated regular files rather than symbolic or hard links.
 
 ## Clarification Lifecycle
 
