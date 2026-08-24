@@ -27,6 +27,7 @@ import {
   BOOTSTRAP_ARBITRATION_SCHEMA,
   BOOTSTRAP_RECONCILIATION_SCHEMA,
   BOOTSTRAP_SCHEMA,
+  FINALIZATION_SCHEMA,
 } from "../src/schemas.js";
 import {
   assertRun,
@@ -357,6 +358,67 @@ test("bootstrap schemas match conditional deterministic normalization", () => {
         matchesSchemaSubset(contract.schema, { result: value }),
         false,
         `${contract.name} schema accepted invalid ${value.status ?? value.direction}`,
+      );
+      assert.throws(() => contract.normalize(value));
+    }
+  }
+});
+
+test("bootstrap schemas use portable patterns with authoritative normalization", () => {
+  const contracts = [
+    {
+      name: "bootstrap",
+      schema: BOOTSTRAP_SCHEMA,
+      normalize: (value) => normalizeBootstrapResult(value, "Worker"),
+      valid: bootstrapReady("Worker"),
+      whitespaceText: { ...bootstrapProductDecision(), question: "   " },
+    },
+    {
+      name: "reconciliation",
+      schema: BOOTSTRAP_RECONCILIATION_SCHEMA,
+      normalize: normalizeReconciliationResult,
+      valid: reconciliationResolved(),
+      whitespaceText: {
+        ...reconciliationDisagreement(),
+        disagreement: "   ",
+      },
+    },
+    {
+      name: "arbitration",
+      schema: BOOTSTRAP_ARBITRATION_SCHEMA,
+      normalize: normalizeBootstrapArbitration,
+      valid: arbitrationResolved(),
+      whitespaceText: { ...arbitrationResolved(), rationale: "   " },
+    },
+  ];
+
+  for (const schema of [
+    ...contracts.map(({ schema }) => schema),
+    FINALIZATION_SCHEMA,
+  ]) {
+    for (const pattern of schemaPatterns(schema)) {
+      assert.doesNotMatch(pattern, /\(\?(?:[=!]|<[=!])/u);
+    }
+  }
+
+  for (const contract of contracts) {
+    const invalid = [
+      { ...contract.valid, summary: "   " },
+      contract.whitespaceText,
+      {
+        ...contract.valid,
+        requiredChecks: [{ ...REQUIRED_CHECKS[0], command: " npm test" }],
+      },
+      {
+        ...contract.valid,
+        validationInfrastructure: ["../outside.js"],
+      },
+    ];
+    for (const value of invalid) {
+      assert.equal(
+        matchesSchemaSubset(contract.schema, { result: value }),
+        true,
+        `${contract.name} schema did not preserve its portable approximation`,
       );
       assert.throws(() => contract.normalize(value));
     }
@@ -1105,6 +1167,16 @@ function matchesSchemaSubset(schema, value) {
     return false;
   }
   return true;
+}
+
+function schemaPatterns(schema) {
+  if (schema === null || typeof schema !== "object") {
+    return [];
+  }
+  return [
+    ...(typeof schema.pattern === "string" ? [schema.pattern] : []),
+    ...Object.values(schema).flatMap(schemaPatterns),
+  ];
 }
 
 function assertStrictSchema(schema) {
@@ -1949,7 +2021,7 @@ test("clarifies and bootstraps through independent source-session forks", async 
   assert.equal(validationPathPattern.test("config/checks.json"), true);
   assert.equal(validationPathPattern.test("config/"), false);
   assert.equal(validationPathPattern.test("./"), false);
-  assert.equal(validationPathPattern.test("../outside.js"), false);
+  assert.equal(validationPathPattern.test("../outside.js"), true);
   for (const call of fixture.calls.worker.slice(0, 3)) {
     assert.equal(call.access, "read-only");
   }

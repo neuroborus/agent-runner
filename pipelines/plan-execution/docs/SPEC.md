@@ -1087,12 +1087,16 @@ an agent-supplied digest is never trusted.
 Exact commands and paths retain interior whitespace; validation rejects unsafe,
 non-normalized, multiline, or boundary-whitespace values rather than rewriting
 them.
-The structured-output schemas advertise the same length, item-count, command,
-path, and status-specific constraints enforced by deterministic normalization.
-Each bootstrap schema keeps a strict object root and places its discriminated
-variants in a nested `result` union. A rejected bootstrap result persists and
-publishes only its role, phase, contract field, and violated constraint; it
-never retains the rejected value or raw role output.
+Provider-facing structured-output schemas are portable approximations limited
+to the common backend Structured Outputs subset and do not use regex
+lookaround. They retain strict objects, bounds, safe lexical patterns, and
+status-specific variants. Deterministic pipeline normalization remains
+authoritative for exact nonempty text, commands, uniqueness, and safe
+repository-relative paths. Each bootstrap schema keeps a strict object root
+and places its discriminated variants in a nested `result` union. A rejected
+bootstrap result persists and publishes only its role, phase, contract field,
+and violated constraint; it never retains the rejected value or raw role
+output.
 
 The Reviewer summary additionally states what it intends to verify.
 

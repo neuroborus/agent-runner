@@ -16,14 +16,12 @@ function deepFreeze(value) {
   return value;
 }
 
-const EXACT_SINGLE_LINE_PATTERN =
-  "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$";
-const EXACT_REPOSITORY_PATH_PATTERN =
-  "^(?!\\s)(?!.*\\s$)(?!\\.git(?:/|$))(?![A-Za-z]:/)(?!\\.{1,2}(?:/|$))(?!.*\\/\\.{1,2}(?:/|$))[^\\\\/\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+(?:/[^\\\\/\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+)*$";
-const NONEMPTY_TEXT_PATTERN =
-  "^(?=[\\s\\S]*\\S)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]*$";
-const NONEMPTY_SUMMARY_PATTERN =
-  "^(?=[\\s\\S]*\\S)[^\\u0000\\u2028\\u2029]*$";
+const PORTABLE_PLAIN_TEXT_PATTERN =
+  "^[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$";
+const PORTABLE_REPOSITORY_PATH_PATTERN =
+  "^[^\\\\/\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+(?:/[^\\\\/\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+)*$";
+const PORTABLE_NONEMPTY_SUMMARY_PATTERN =
+  "^[^\\u0000\\u2028\\u2029]+$";
 const TEXT = { type: "string", maxLength: MAX_TEXT_LENGTH };
 const SUMMARY = { type: "string", maxLength: MAX_SUMMARY_LENGTH };
 const TEXT_LIST = { type: "array", items: TEXT, maxItems: MAX_ITEMS };
@@ -31,8 +29,16 @@ const OPTIONS = { type: "array", items: TEXT, maxItems: MAX_OPTIONS };
 const EMPTY_TEXT = { type: "string", maxLength: 0 };
 const EMPTY_TEXT_LIST = { ...TEXT_LIST, maxItems: 0 };
 const EMPTY_OPTIONS = { ...OPTIONS, maxItems: 0 };
-const NONEMPTY_TEXT = { ...TEXT, pattern: NONEMPTY_TEXT_PATTERN };
-const NONEMPTY_SUMMARY = { ...SUMMARY, pattern: NONEMPTY_SUMMARY_PATTERN };
+const NONEMPTY_TEXT = {
+  ...TEXT,
+  minLength: 1,
+  pattern: PORTABLE_PLAIN_TEXT_PATTERN,
+};
+const NONEMPTY_SUMMARY = {
+  ...SUMMARY,
+  minLength: 1,
+  pattern: PORTABLE_NONEMPTY_SUMMARY_PATTERN,
+};
 const NONEMPTY_TEXT_LIST = {
   ...TEXT_LIST,
   items: NONEMPTY_TEXT,
@@ -41,13 +47,15 @@ const NONEMPTY_TEXT_LIST = {
 const TEXT_OPTIONS = { ...OPTIONS, items: NONEMPTY_TEXT };
 const EXACT_COMMAND = {
   type: "string",
+  minLength: 1,
   maxLength: MAX_TEXT_LENGTH,
-  pattern: EXACT_SINGLE_LINE_PATTERN,
+  pattern: PORTABLE_PLAIN_TEXT_PATTERN,
 };
 const VALIDATION_PATH = {
   type: "string",
+  minLength: 1,
   maxLength: MAX_TEXT_LENGTH,
-  pattern: EXACT_REPOSITORY_PATH_PATTERN,
+  pattern: PORTABLE_REPOSITORY_PATH_PATTERN,
 };
 const REQUIRED_CHECK = {
   type: "object",
