@@ -89,6 +89,7 @@ test("help describes the required commands", async () => {
   assert.match(stdout.read(), /plan-execution/);
   assert.match(stdout.read(), /polishing/);
   assert.match(stdout.read(), /--clarify/);
+  assert.doesNotMatch(stdout.read(), /unexpected_issue_report|issue report/iu);
   assert.equal(stderr.read(), "");
 });
 
@@ -118,7 +119,7 @@ test("mcp reports a bounded startup failure on stderr", async () => {
   const exitCode = await main(["mcp"], {
     stdout: stdout.stream,
     stderr: stderr.stream,
-    startMcp() {
+    async startMcp() {
       throw new Error("sensitive startup detail");
     },
   });

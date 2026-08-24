@@ -305,6 +305,7 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
       "run_start",
       "run_status",
       "run_wait",
+      "unexpected_issue_report",
     ],
   );
   assert.equal(
@@ -334,6 +335,23 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
     sourceSessionMetadata,
     /or \\"current\\" inheritance when unknown; never guess an alias/u,
   );
+  const reportingTool = tools.find(
+    (tool) => tool.name === "unexpected_issue_report",
+  );
+  assert.match(reportingTool.description, /genuinely unexpectedly/u);
+  assert.match(reportingTool.description, /exhausted configured budgets/u);
+  assert.match(reportingTool.description, /documented environment blockers/u);
+  assert.match(reportingTool.description, /no logs, transcripts, prompts/u);
+  assert.equal(reportingTool.annotations.destructiveHint, false);
+  assert.deepEqual(reportingTool.inputSchema.required.sort(), [
+    "actualBehavior",
+    "expectedBehavior",
+    "idempotencyKey",
+    "occurrence",
+    "projectPath",
+    "summary",
+    "unexpectedReason",
+  ]);
   const pipelines = await client.callTool({
     name: "pipelines_list",
     arguments: {},

@@ -89,6 +89,7 @@ The V1 shape is:
 {
   "schemaVersion": 1,
   "artifactRoot": "LOCAL_ARTIFACTS",
+  "issueReporting": true,
   "defaultBackend": "codex",
   "defaultProfile": "current",
   "defaultModel": "current",
@@ -119,6 +120,12 @@ The V1 shape is:
   }
 }
 ```
+
+`issueReporting` is runner-local, defaults to `true`, and is not accepted in a
+project configuration. The MCP process loads it once at startup; applying a
+change requires a restart. A disabled server omits the reporting tool, schema,
+and related instructions from discovery. Other runner settings are reloaded
+for each fresh report and persisted through its resolved reservation.
 
 `defaultBackend` is optional. A role's `profile`, `model`, and `contextSize`
 resolve from its role-specific CLI/MCP override, the run-wide override, its
@@ -196,12 +203,34 @@ model transcripts.
 ## MCP Control Plane
 
 `agent-run mcp` exposes the same static registry and runner through the official
-Node MCP SDK over STDIO only. `src/mcp.js` owns the seven tools:
-`pipelines_list`, `run_start`, `run_status`, `run_activity`, `run_wait`,
-`run_respond`, and `run_resume`. It contains transport schemas and concise
-projections, not a second workflow implementation. Standard output belongs
-exclusively to MCP; bounded protocol diagnostics go to standard error without
-prompts or model transcripts.
+Node MCP SDK over STDIO only. `src/mcp.js` owns the seven pipeline-control
+tools: `pipelines_list`, `run_start`, `run_status`, `run_activity`, `run_wait`,
+`run_respond`, and `run_resume`, plus the conditionally registered MCP-only
+`unexpected_issue_report`. It contains transport schemas and concise
+projections, not a second workflow implementation. `src/mcp-reporting.js` owns
+the narrow local publication service. Standard output belongs exclusively to
+MCP; bounded protocol diagnostics go to standard error without prompts or model
+transcripts.
+
+Unexpected-issue reporting remains deliberate and caller-initiated. Its tool
+description and server instructions limit it to a supervising client agent
+that has explicitly concluded Agent Runner behaved genuinely unexpectedly or
+contrary to its documented contract. Expected completion, exhausted configured
+budgets, usage limits, expected user pauses, documented environment blockers,
+and invalid user or configuration input are not reportable. Runner error paths
+never invoke it, and backend role sessions are not exposed to the MCP server.
+
+The caller supplies bounded English Markdown for every diagnostic section and
+optional bounded details, run ID, and error code. The service never gathers or
+attaches logs, transcripts, prompts, environment values, credentials, secrets,
+or other diagnostic data automatically. It canonicalizes the Git project,
+validates the external-state boundary before action persistence, loads the same
+current runner and optional confined project configuration used for a new run,
+and resolves `<artifactRoot>/agent-runner/issues/`. Git and filesystem guards
+require that destination to be ignored, untracked, confined, and free of
+symbolic- or hard-link escapes. Publication uses a sortable colon-free UTC name,
+an exclusive atomic link, and collision retries without changing ignore rules
+or overwriting an existing path.
 
 Mutating MCP calls require an opaque idempotency key. The state layer hashes the
 key, binds it to the tool and canonical arguments, and durably records an action
@@ -255,6 +284,13 @@ MCP action intents and receipts live under `actions/<hashed-key>/` in the same
 external root. The opaque key itself is not persisted. Action records are
 atomically replaced and protected by a same-host process lease; they never live
 inside the target or task directory.
+
+An unexpected-issue action persists its intent and reserved report path before
+publication. It records a published phase while the temporary hard link still
+proves ownership, then removes that link and persists the path receipt before
+returning. Recovery adopts a report-only path only with that durable ownership
+proof; otherwise a matching file is a collision. An exact retry returns the
+same path, while key reuse with different arguments fails.
 
 Canonical-worktree leases live under
 `worktrees/<sha256(canonical-worktree-path)>/` in that external root. The hash

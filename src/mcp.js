@@ -8,6 +8,9 @@ import * as z from "zod/v4";
 
 import packageMetadata from "../package.json" with { type: "json" };
 import { createClarificationService } from "./clarifications.js";
+import { loadRunnerConfiguration } from "./config.js";
+import { createGitService } from "./git.js";
+import { createUnexpectedIssueReporter } from "./mcp-reporting.js";
 import { getPipeline, listPipelines } from "./pipeline-registry.js";
 import {
   createRunner,
@@ -29,7 +32,10 @@ const EXECUTABLE_PATH = fileURLToPath(
 export const DETACHED_RUNTIME_COMPATIBILITY_ENV =
   "AGENT_RUNNER_PARENT_RUNTIME_COMPATIBILITY";
 
-export const MCP_INSTRUCTIONS = `Use run_start to start a durable pipeline, then use one run_wait call for the desired waiting interval. Use run_activity only for explicit or historical reads; do not poll status, activity, or wait at a fixed cadence. Leave sourceSession unset unless the user deliberately chooses to fork a compatible current native session after being offered a fresh start. Offer its known trusted profile with the fork choice; when the profile is unknown, offer only current profile inheritance and never guess an alias. Primary and review roles fork the complete source context independently, which can spend provider context and quota twice. Recommend a fresh start for a long, multi-topic, or uncertain source session. Keep native session IDs opaque; never inspect provider-private storage or infer or fabricate an ID. Answer pending input from explicit user context when sufficient; otherwise ask the user. Never invent a material product decision.`;
+const RUN_INSTRUCTIONS = `Use run_start to start a durable pipeline, then use one run_wait call for the desired waiting interval. Use run_activity only for explicit or historical reads; do not poll status, activity, or wait at a fixed cadence. Leave sourceSession unset unless the user deliberately chooses to fork a compatible current native session after being offered a fresh start. Offer its known trusted profile with the fork choice; when the profile is unknown, offer only current profile inheritance and never guess an alias. Primary and review roles fork the complete source context independently, which can spend provider context and quota twice. Recommend a fresh start for a long, multi-topic, or uncertain source session. Keep native session IDs opaque; never inspect provider-private storage or infer or fabricate an ID. Answer pending input from explicit user context when sufficient; otherwise ask the user. Never invent a material product decision.`;
+const ISSUE_REPORTING_INSTRUCTIONS = `Use unexpected_issue_report only when you, as the supervising client agent, explicitly conclude that Agent Runner behaved genuinely unexpectedly or contrary to its documented contract. Expected completion, exhausted configured budgets, usage limits, expected user pauses, documented environment blockers, and invalid user or configuration input are not reportable issues. Supply concise English Markdown deliberately; the server never collects or attaches logs, transcripts, prompts, environment values, credentials, secrets, or other diagnostics automatically.`;
+export const MCP_INSTRUCTIONS =
+  `${RUN_INSTRUCTIONS} ${ISSUE_REPORTING_INSTRUCTIONS}`;
 
 function boundedSingleLine(maximumLength) {
   return z
@@ -131,6 +137,37 @@ const runResumeSchema = z
     runId,
     expectedRevision: z.number().int().positive().safe(),
     action: resumeAction.nullable().default(null),
+  })
+  .strict();
+const markdownContent = (maximumLength) =>
+  z
+    .string()
+    .min(1)
+    .max(maximumLength)
+    .refine(
+      (value) =>
+        value.trim().length > 0 &&
+        !/[\0\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F\p{Zl}\p{Zp}]/u.test(
+          value,
+        ),
+    )
+    .describe("Concise English Markdown supplied explicitly by the caller.");
+const unexpectedIssueReportSchema = z
+  .object({
+    idempotencyKey,
+    projectPath: z.string().min(1).max(16_384),
+    summary: markdownContent(1_000),
+    expectedBehavior: markdownContent(4_000),
+    actualBehavior: markdownContent(4_000),
+    occurrence: markdownContent(4_000),
+    unexpectedReason: markdownContent(4_000),
+    details: markdownContent(16_000).optional(),
+    runId: runId.optional(),
+    errorCode: z
+      .string()
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u)
+      .optional(),
+    projectConfigurationPath: z.string().min(1).max(16_384).optional(),
   })
   .strict();
 
@@ -320,6 +357,17 @@ export function createMcpControlPlane(options = {}) {
     });
   const launchRun = options.launchRun ?? launchDetachedRun;
   const runIdFactory = options.runIdFactory ?? randomUUID;
+  const reportingGit = options.reportingOptions?.git ?? createGitService();
+  const issueReporter =
+    options.issueReporter ??
+    createUnexpectedIssueReporter({
+      ...options.reportingOptions,
+      git: reportingGit,
+      loadConfiguration:
+        options.reportingOptions?.loadConfiguration ??
+        options.loadConfiguration ??
+        loadRunnerConfiguration,
+    });
 
   async function beginAction(input, signal) {
     while (true) {
@@ -692,6 +740,76 @@ export function createMcpControlPlane(options = {}) {
     }
   }
 
+  async function unexpectedIssueReport(input, { signal } = {}) {
+    const projectPath = await reportingGit.resolveProject(input.projectPath);
+    const boundary = await runStore.validateStateBoundary({
+      projectPath,
+      taskPath: projectPath,
+    });
+    const argumentsValue = {
+      ...actionArguments(input),
+      projectPath: boundary.projectPath,
+    };
+    const identity = {
+      key: input.idempotencyKey,
+      tool: "unexpected_issue_report",
+      arguments: argumentsValue,
+    };
+    const existing = await runStore.readAction(identity);
+    if (existing?.status === "completed") {
+      return existing.result;
+    }
+    const action = await beginAction(
+      {
+        ...identity,
+        context: {
+          issuesPath: null,
+          publicationPhase: null,
+          projectPath: null,
+          reportPath: null,
+          temporaryPath: null,
+        },
+      },
+      signal,
+    );
+    try {
+      if (action.record.status === "completed") {
+        return action.record.result;
+      }
+      const reportPath = await issueReporter.report(argumentsValue, {
+        reservedIssuesPath: action.record.context.issuesPath,
+        reservedPath: action.record.context.reportPath,
+        reservedPublicationPhase:
+          action.record.context.publicationPhase,
+        reservedProjectPath: action.record.context.projectPath,
+        reservedTemporaryPath: action.record.context.temporaryPath,
+        async prepare(identityValue) {
+          await action.updateContext({
+            ...action.record.context,
+            ...identityValue,
+          });
+        },
+        async publish(identityValue) {
+          await action.updateContext({
+            ...action.record.context,
+            ...identityValue,
+          });
+        },
+        async reserve(identityValue) {
+          await action.updateContext({
+            ...action.record.context,
+            ...identityValue,
+          });
+        },
+      });
+      const receipt = { reportPath };
+      await action.complete(receipt);
+      return receipt;
+    } finally {
+      await action.release();
+    }
+  }
+
   return Object.freeze({
     pipelinesList,
     runActivity,
@@ -700,14 +818,23 @@ export function createMcpControlPlane(options = {}) {
     runStart,
     runStatus,
     runWait,
+    unexpectedIssueReport,
   });
 }
 
 export function createMcpServer(options = {}) {
+  const issueReportingEnabled =
+    options.issueReportingEnabled ??
+    options.runnerConfiguration?.issueReporting ??
+    true;
   const control = options.control ?? createMcpControlPlane(options);
   const server = new McpServer(
     { name: "agent-runner", version: packageMetadata.version },
-    { instructions: MCP_INSTRUCTIONS },
+    {
+      instructions: issueReportingEnabled
+        ? MCP_INSTRUCTIONS
+        : RUN_INSTRUCTIONS,
+    },
   );
   const readOnly = {
     readOnlyHint: true,
@@ -720,6 +847,10 @@ export function createMcpServer(options = {}) {
     destructiveHint: true,
     idempotentHint: true,
     openWorldHint: false,
+  };
+  const localCreation = {
+    ...mutating,
+    destructiveHint: false,
   };
 
   server.registerTool(
@@ -818,14 +949,44 @@ export function createMcpServer(options = {}) {
     async (input, context) =>
       result(await control.runResume(input, { signal: context.mcpReq.signal })),
   );
+  if (issueReportingEnabled) {
+    server.registerTool(
+      "unexpected_issue_report",
+      {
+        description:
+          "Create one deliberate local report only after the supervising client agent explicitly concludes Agent Runner behaved genuinely unexpectedly or contrary to its documented contract. Expected completion, exhausted configured budgets, usage limits, expected user pauses, documented environment blockers, and invalid user or configuration input are not reportable. Supply only concise English Markdown explicitly; no logs, transcripts, prompts, environment values, credentials, secrets, or other diagnostics are collected automatically.",
+        inputSchema: unexpectedIssueReportSchema,
+        annotations: localCreation,
+      },
+      async (input, context) =>
+        result(
+          await control.unexpectedIssueReport(input, {
+            signal: context.mcpReq.signal,
+          }),
+        ),
+    );
+  }
 
   return server;
 }
 
-export function serveMcp(options = {}) {
+export async function serveMcp(options = {}) {
   const stderr = options.stderr ?? process.stderr;
-  const createServer = options.createServer ?? (() => createMcpServer(options));
+  const configuration =
+    options.runnerConfiguration ??
+    (await (options.loadConfiguration ?? loadRunnerConfiguration)());
+  const createServer =
+    options.createServer ??
+    (() =>
+      createMcpServer({
+        ...options,
+        issueReportingEnabled: configuration.issueReporting,
+        runnerConfiguration: configuration,
+      }));
   return serveStdio(createServer, {
+    ...(options.transport === undefined
+      ? {}
+      : { transport: options.transport }),
     onerror(error) {
       const code =
         typeof error?.code === "string" && /^[A-Z0-9_]{1,64}$/u.test(error.code)

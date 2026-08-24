@@ -81,6 +81,13 @@ does not accept profile-supplied credentials, binaries, or arbitrary
 environment variables. A selected alias supplies its backend; a conflicting
 explicit backend is invalid.
 
+`issueReporting` is a runner-local boolean and defaults to `true`. It controls
+the MCP-only unexpected-issue tool described below. Set it to `false` and
+restart the MCP server to remove the tool, its schema, and all related server
+instructions from discovery. Only this discovery switch is restart-scoped;
+each fresh report reloads the current runner configuration. Project
+configuration cannot set this switch.
+
 A target repository may optionally provide an ignored, untracked
 `LOCAL_ARTIFACTS/agent-runner.json`, or a new run may select another confined
 ignored path with `--project-config`. A project file may select aliases already
@@ -375,6 +382,7 @@ exposes:
 - `run_wait`
 - `run_respond`
 - `run_resume`
+- `unexpected_issue_report` when runner-local issue reporting is enabled
 
 Use `pipelines_list` to discover the registry, then start with `run_start` and a
 unique opaque idempotency key. It persists the run, returns a durable `runId`,
@@ -413,8 +421,31 @@ unset unless the user chooses the fork. A deliberate fork adds:
 Primary and review roles then fork the complete source context independently,
 so each child can consume the provider context and quota. Recommend a fresh
 start for a long, multi-topic, or uncertain current session. The configured
-artifact root applies only to runner-owned execution and polishing artifacts;
-plan-authoring artifacts remain beside `task.md`.
+artifact root applies to runner-owned execution, polishing, and issue-report
+artifacts; plan-authoring artifacts remain beside `task.md`.
+
+`unexpected_issue_report` is deliberately separate from pipeline execution.
+Use it only after the supervising client agent explicitly concludes that Agent
+Runner behaved genuinely unexpectedly or contrary to its documented contract.
+Expected completion, exhausted configured budgets, provider usage limits,
+expected user pauses, documented environment blockers, and invalid user or
+configuration input are not reportable issues. The tool is never called by
+Runner error handling and is not available to Worker, Reviewer, or Arbiter
+backend sessions.
+
+The caller supplies concise English Markdown for the summary, expected and
+actual behavior, occurrence, and reason the behavior was unexpected, with
+optional details, run ID, and error code. Agent Runner does not collect or
+attach logs, transcripts, prompts, environment values, credentials, secrets,
+or other diagnostics automatically. The same runner and optional project
+configuration rules resolve `artifactRoot`; the report is created exclusively
+under `<artifactRoot>/agent-runner/issues/` only when that destination is
+ignored, untracked, confined, and link-safe. The tool never edits ignore rules.
+The canonical project and external-state boundary are validated before its
+idempotency intent reserves the collision-safe UTC filename. Publication
+records durable ownership while the temporary hard link still proves it, so an
+exact retry or interrupted receipt recovery returns the same path without
+adopting another action's file or creating a duplicate.
 
 Call `run_wait` once for the desired interval. Its `timeoutMs` accepts up to 24
 hours; the MCP client's tool timeout must be longer than the requested wait.
@@ -438,7 +469,8 @@ a unique idempotency key, and only an action valid for the persisted pause.
 
 Mutating tools persist an action intent before mutation and a receipt before
 returning. Exact retries return the original result, while reusing a key with
-different arguments is rejected. Runs continue in detached local children, so
+different arguments is rejected. Issue reporting uses that contract for its
+single local file creation. Runs continue in detached local children, so
 MCP disconnects and wait cancellation affect only the client call. A detached
 start or resume rejects active canonical-worktree ownership before launch and
 withholds its receipt after launch until the run advances or the child owns the
@@ -498,6 +530,7 @@ duplicate pipeline-owned policy.
 │   ├── git.js
 │   ├── index.js
 │   ├── mcp.js
+│   ├── mcp-reporting.js
 │   ├── pipeline-registry.js
 │   ├── runner.js
 │   ├── state-files.js

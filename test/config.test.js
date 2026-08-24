@@ -55,6 +55,7 @@ test("tracked example is valid and local configuration is ignored", async () => 
   assert.equal(CONFIG_FILENAME, ".agent-runner.json");
   assert.equal(CONFIG_SCHEMA_VERSION, 1);
   assert.equal(configuration.artifactRoot, "LOCAL_ARTIFACTS");
+  assert.equal(configuration.issueReporting, true);
   assert.equal(configuration.defaultBackend, "codex");
   assert.equal(configuration.defaultProfile, "current");
   assert.equal(configuration.defaultModel, "current");
@@ -92,6 +93,7 @@ test("minimal configuration uses pipeline-owned setting defaults", () => {
 
   assert.equal(configuration.defaultBackend, undefined);
   assert.equal(configuration.artifactRoot, DEFAULT_ARTIFACT_ROOT);
+  assert.equal(configuration.issueReporting, true);
   assert.deepEqual(configuration.profiles, {});
   assert.deepEqual(configuration.pipelines["plan-authoring"], {
     maxRevisionRounds: 15,
@@ -124,6 +126,7 @@ test("configuration rejects unsupported shapes and values", () => {
     ['{"schemaVersion":2}', /Unsupported configuration\.schemaVersion/u],
     ['{"schemaVersion":1,"extra":true}', /configuration\.extra/u],
     ['{"schemaVersion":1,"defaultBackend":null}', /defaultBackend/u],
+    ['{"schemaVersion":1,"issueReporting":"yes"}', /issueReporting/u],
     ['{"schemaVersion":1,"defaultBackend":"other"}', /codex, claude/u],
     ['{"schemaVersion":1,"artifactRoot":"."}', /artifactRoot/u],
     ['{"schemaVersion":1,"artifactRoot":"../outside"}', /artifactRoot/u],
@@ -286,6 +289,19 @@ test("invalid configuration is rejected", () => {
     (error) =>
       error instanceof ConfigurationError &&
       error.code === "ERR_UNSUPPORTED_CONFIGURATION_VERSION",
+  );
+});
+
+test("runner issue reporting is default-enabled and explicitly disableable", () => {
+  assert.equal(
+    parseRunnerConfiguration('{"schemaVersion":1}').issueReporting,
+    true,
+  );
+  assert.equal(
+    parseRunnerConfiguration(
+      '{"schemaVersion":1,"issueReporting":false}',
+    ).issueReporting,
+    false,
   );
 });
 
@@ -470,6 +486,7 @@ test("project configuration rejects untrusted and unsafe fields", () => {
   );
   const invalidConfigurations = [
     [{ profiles: {} }, /profiles/u],
+    [{ issueReporting: false }, /issueReporting/u],
     [{ credentials: {} }, /credentials/u],
     [{ binary: "/usr/bin/codex" }, /binary/u],
     [{ environment: {} }, /environment/u],

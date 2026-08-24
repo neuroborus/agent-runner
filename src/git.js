@@ -147,6 +147,10 @@ export function createGitService(options = {}) {
 
   const contentContext = Object.freeze({ currentHead, runGit });
 
+  async function resolveProject(projectPath) {
+    return resolveRepository(runGit, projectPath);
+  }
+
   async function inspectPath(options) {
     assertOptions(options, "Path-inspection options");
     const { path, projectPath } = options;
@@ -482,6 +486,7 @@ export function createGitService(options = {}) {
     contentFingerprint,
     inspectPath,
     preflight,
+    resolveProject,
     snapshot,
     validationInfrastructureFingerprint,
   });

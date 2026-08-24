@@ -27,11 +27,14 @@ const TOP_LEVEL_FIELDS = new Set([
   "defaultContextSize",
   "defaultModel",
   "defaultProfile",
+  "issueReporting",
   "pipelines",
   "profiles",
 ]);
 const PROJECT_TOP_LEVEL_FIELDS = new Set(
-  [...TOP_LEVEL_FIELDS].filter((field) => field !== "profiles"),
+  [...TOP_LEVEL_FIELDS].filter(
+    (field) => !["issueReporting", "profiles"].includes(field),
+  ),
 );
 const ROLE_FIELDS = new Set(["backend", "contextSize", "model", "profile"]);
 const EXECUTION_FIELDS = new Set(["contextSize", "model", "profile"]);
@@ -232,6 +235,14 @@ function normalizeConfiguration(input) {
   if (input.artifactRoot !== undefined) {
     assertArtifactRoot(input.artifactRoot, "configuration.artifactRoot");
   }
+  if (
+    input.issueReporting !== undefined &&
+    typeof input.issueReporting !== "boolean"
+  ) {
+    throw new ConfigurationError(
+      "configuration.issueReporting must be a boolean.",
+    );
+  }
   for (const field of [
     "defaultProfile",
     "defaultModel",
@@ -269,6 +280,7 @@ function normalizeConfiguration(input) {
   const normalized = {
     schemaVersion: CONFIG_SCHEMA_VERSION,
     artifactRoot: input.artifactRoot ?? DEFAULT_ARTIFACT_ROOT,
+    issueReporting: input.issueReporting ?? true,
     defaultProfile: input.defaultProfile ?? CURRENT,
     defaultModel: input.defaultModel ?? CURRENT,
     defaultContextSize: input.defaultContextSize ?? CURRENT,

@@ -1,6 +1,7 @@
 {
   "schemaVersion": 1,
   "artifactRoot": "LOCAL_ARTIFACTS",
+  "issueReporting": true,
   "defaultBackend": "codex",
   "defaultProfile": "current",
   "defaultModel": "current",

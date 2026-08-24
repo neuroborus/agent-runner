@@ -352,7 +352,7 @@ export async function main(
   }
   if (command === "mcp") {
     try {
-      startMcp({ stderr });
+      await startMcp({ stderr });
       return 0;
     } catch {
       stderr.write("Agent Runner MCP failed to start.\n");
