@@ -213,6 +213,15 @@ may select the Worker summary, select the Reviewer summary, synthesize an
 evidence-supported result, or require a genuine product decision. Only a
 resolved context permits the workflow to enter `POLISH`.
 
+Each bootstrap role independently returns the complete ordered inventory of
+stable `C`-prefixed required-check IDs and exact commands, plus every
+repository-relative file that controls package scripts, test discovery, test
+runners, skill guidance, or validation configuration. Reconciliation or
+arbitration establishes the inventory from both reports, and the runner—not an
+agent—fingerprints those files.
+Commands and paths retain interior whitespace exactly; unsafe, non-normalized,
+multiline, or boundary-whitespace values are rejected instead of rewritten.
+
 ## Workflow
 
 The explicit persisted states are:
@@ -267,6 +276,14 @@ fingerprint after the procedure and bind the result to it. A failure becomes
 blocking findings for Worker resolution. Unavailable explicit guidance or a
 blocked finalization procedure pauses.
 
+Every non-availability result repeats the complete inventory actually used and
+contains exactly one ordered result with bounded direct evidence for every
+required check. `PASS` requires all of them to pass; omissions, `NOT_RUN`,
+skips, exclusions, substitutions, replacements, or weakening are invalid
+output. Host-reported results and user attestations are not trusted. The Worker
+must not weaken package scripts, test discovery, test runners, validation
+configuration, the inventory, or its file set to evade an environment blocker.
+
 `BLOCKED` is reserved for required validation that cannot execute because of an
 external environment constraint. It carries bounded reason and evidence,
 pauses as `environment_blocked`, and resumes at `FINALIZE`; an executable check
@@ -279,6 +296,13 @@ resolved context, entire current diff, tests, architecture, edge cases,
 minimality, and conventions. Its first review starts a separate work checkpoint
 seeded from the same durable evidence; re-review and dispute reconsideration
 reuse it. Findings use stable `R`-prefixed IDs and remain blocking.
+
+The Reviewer compares the established and candidate inventories,
+infrastructure file sets and runner-computed fingerprints, and the exact
+per-check evidence. The fresh review request includes both complete tuples and
+does not depend on a prior session. It records `UNCHANGED`, explicitly
+`ACCEPTED` for a complete task-authorized change, or `REJECTED` with a finding.
+This decision and evidence are bound to the reviewed content fingerprint.
 
 The Worker resolves all current blockers in one batch by `FIX` or evidence-based
 `DISPUTE`. Fixes rerun complete finalization and review. The Reviewer reconsiders
@@ -310,6 +334,7 @@ unresolved disputes == 0
 pending arbitration == false
 current content fingerprint == finalized fingerprint
 current content fingerprint == reviewed fingerprint
+review validation change == UNCHANGED or ACCEPTED
 HEAD and repository control fingerprints == recorded baseline
 ```
 
@@ -374,6 +399,14 @@ pipeline shape, and appends one atomic migration event under the per-run lease.
 Unsupported forward versions, missing migrations, and incompatible runtime
 tuples return a specific actionable version-skew error; invalid migration
 output returns a specific migration failure. Neither changes the durable run.
+
+Pipeline state version 2 adds the required-check and validation-infrastructure
+evidence. Its version-1 migration preserves safe workspace content, invalidates
+active aggregate finalization and review evidence, and marks paused legacy
+evidence provisional. Before retry, override, finalization, or review advances,
+fresh independent Worker and Reviewer checkpoints re-establish the inventory
+and the runner fingerprints it again. Completed active work returns through
+`FINALIZE`; immutable failed history is upgraded without replaying an effect.
 
 MCP uses the common STDIO tools, persists idempotency intents before mutation
 and receipts before returning, and launches detached continuation under the

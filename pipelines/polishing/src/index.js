@@ -10,6 +10,7 @@ import {
   DEFAULT_FINALIZATION_POLICY,
   isFinalizationPolicy,
   MAX_DISPUTES_PER_FINDING,
+  sha256,
 } from "./workflow-contract.js";
 
 export {
@@ -169,10 +170,111 @@ function validateResumeAction(run, action) {
   throw new Error("Resume action is not valid for this paused run.");
 }
 
+const LEGACY_REQUIRED_CHECKS = Object.freeze([
+  Object.freeze({
+    id: "C1",
+    command: "Rediscover and run the complete project validation procedure",
+  }),
+]);
+const EMPTY_INFRASTRUCTURE_FINGERPRINT = sha256("");
+
+function validationEvidence() {
+  return Object.freeze({
+    requiredChecks: LEGACY_REQUIRED_CHECKS,
+    validationInfrastructure: Object.freeze([]),
+  });
+}
+
+function upgradedLegacyFinalization(result) {
+  if (result === null) {
+    return null;
+  }
+  return Object.freeze({
+    ...result,
+    requiredChecks: LEGACY_REQUIRED_CHECKS,
+    validationInfrastructure: Object.freeze([]),
+    validationInfrastructureFingerprint: EMPTY_INFRASTRUCTURE_FINGERPRINT,
+    checks: Object.freeze([
+      Object.freeze({
+        checkId: "C1",
+        command: LEGACY_REQUIRED_CHECKS[0].command,
+        status: result.status === "PASS" ? "PASS" : "FAIL",
+        evidence: Object.freeze([
+          "Migrated legacy aggregate evidence; active runs must re-finalize.",
+        ]),
+      }),
+    ]),
+    validationChanged: false,
+  });
+}
+
+export function migratePolishingStateV1(run) {
+  const current = run.pipelineState;
+  const prepared = current.resolvedSummary !== null;
+  const immutableTerminal = current.workflowState === "FAILED";
+  const validationMigrationPending = prepared && !immutableTerminal;
+  const paused = current.workflowState === "WAITING_FOR_USER";
+  const rerunFinalization =
+    validationMigrationPending &&
+    !paused &&
+    current.polishSummary !== null &&
+    ["FINALIZE", "REVIEW", "RESOLVE_FINDINGS", "DONE"].includes(
+      current.workflowState,
+    );
+  const keepLegacyGate = immutableTerminal || paused;
+  const finalizationResult = keepLegacyGate
+    ? upgradedLegacyFinalization(current.finalizationResult)
+    : null;
+  const reviewedFingerprint = keepLegacyGate
+    ? current.reviewedFingerprint
+    : null;
+  return Object.freeze({
+    ...current,
+    workflowState: rerunFinalization ? "FINALIZE" : current.workflowState,
+    workerValidation: validationMigrationPending
+      ? null
+      : current.workerSummary === null
+        ? null
+        : validationEvidence(),
+    reviewerValidation: validationMigrationPending
+      ? null
+      : current.reviewerSummary === null
+        ? null
+        : validationEvidence(),
+    requiredChecks: prepared ? LEGACY_REQUIRED_CHECKS : null,
+    validationInfrastructure: prepared ? Object.freeze([]) : null,
+    validationInfrastructureFingerprint: prepared
+      ? EMPTY_INFRASTRUCTURE_FINGERPRINT
+      : null,
+    validationMigrationPending,
+    finalizationResult,
+    finalizedFingerprint: keepLegacyGate
+      ? current.finalizedFingerprint
+      : null,
+    reviewResult:
+      reviewedFingerprint === null
+        ? null
+        : Object.freeze({
+            status: current.findings.length === 0 ? "APPROVED" : "FINDINGS",
+            validationChange: "UNCHANGED",
+            validationEvidence: Object.freeze([]),
+            fingerprint: reviewedFingerprint,
+          }),
+    reviewedFingerprint,
+    findings: keepLegacyGate ? current.findings : Object.freeze([]),
+    pendingDisputes: keepLegacyGate
+      ? current.pendingDisputes
+      : Object.freeze([]),
+    reviewReconsideration: keepLegacyGate
+      ? current.reviewReconsideration
+      : Object.freeze([]),
+  });
+}
+
 export const polishingPipeline = Object.freeze({
   id: POLISHING_PIPELINE_ID,
-  stateVersion: 1,
-  migrations: Object.freeze({}),
+  stateVersion: 2,
+  migrations: Object.freeze({ 1: migratePolishingStateV1 }),
   roles: ROLES,
   settings: SETTINGS,
   taskInputs: TASK_INPUTS,

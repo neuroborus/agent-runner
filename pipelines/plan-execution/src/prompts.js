@@ -19,26 +19,27 @@ For READY, set reason to "" and evidence to [].
 For PLAN_REVISION_REQUIRED, provide reason and evidence.`;
 
 export const BOOTSTRAP_INSTRUCTIONS = `Study the repository, task, validated plan, clarifications, project instructions, relevant finalization guidance, other relevant skills, project checks, tests, and Git history independently and without modifying the repository.
-Return a concise bootstrap summary covering the task, relevant architecture and files, invariants, planned commits, risks, and the complete project finalization procedure using the provided schema.
-For READY, provide summary; set reason, question, and whyBlocked to "", and options and evidence to [].
-For PLAN_REVISION_REQUIRED, set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
-For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-decision fields.`;
+Return a concise bootstrap summary covering the task, relevant architecture and files, invariants, planned commits, risks, and the complete project finalization procedure using the provided schema. Independently identify every required check as a stable C-prefixed ID and exact command, plus every repository-relative file that controls those checks, package scripts, test discovery, test runners, or validation configuration.
+For READY, provide summary, requiredChecks, and validationInfrastructure; set reason, question, and whyBlocked to "", and options and evidence to [].
+For PLAN_REVISION_REQUIRED, set summary, question, and whyBlocked to "", and requiredChecks, validationInfrastructure, and options to []; provide reason and evidence.
+For PRODUCT_DECISION_REQUIRED, set summary and reason to "", and requiredChecks and validationInfrastructure to []; use the product-decision fields.`;
 
 export const BOOTSTRAP_RECONCILIATION_INSTRUCTIONS = `Reconcile the independent Worker and Reviewer bootstrap summaries using the task, validated plan, repository, and evidence.
 Do not force agreement or modify the repository. Return a concise resolved summary, or the remaining material disagreement, using the provided schema.
-For RESOLVED, provide summary; set disagreement, reason, question, and whyBlocked to "", and options and evidence to [].
-For DISAGREEMENT, provide disagreement and evidence; set summary, reason, question, and whyBlocked to "", and options to [].
-For PLAN_REVISION_REQUIRED, provide reason and evidence; set summary, disagreement, question, and whyBlocked to "", and options to [].
-For PRODUCT_DECISION_REQUIRED, set summary, disagreement, and reason to ""; use the product-decision fields.`;
+Resolve the complete required-check inventory and validation-infrastructure file list from both independent reports; do not omit a check or path merely because only one role found it.
+For RESOLVED, provide summary, requiredChecks, and validationInfrastructure; set disagreement, reason, question, and whyBlocked to "", and options and evidence to [].
+For DISAGREEMENT, provide disagreement and evidence; set summary, reason, question, and whyBlocked to "", and requiredChecks, validationInfrastructure, and options to [].
+For PLAN_REVISION_REQUIRED, provide reason and evidence; set summary, disagreement, question, and whyBlocked to "", and requiredChecks, validationInfrastructure, and options to [].
+For PRODUCT_DECISION_REQUIRED, set summary, disagreement, and reason to "", and requiredChecks and validationInfrastructure to []; use the product-decision fields.`;
 
 export const BOOTSTRAP_ARBITRATION_INSTRUCTIONS = `Resolve the bootstrap disagreement from the task, plan, repository, and evidence, choosing the minimal valid direction using the provided schema.
 
 Do not modify the repository. Resolve only the recorded disagreement and do not rewrite requirements.
 Always provide rationale.
 Choose USE_WORKER or USE_REVIEWER only when that summary is correct, and SYNTHESIZE when the evidence supports a combined summary.
-For USE_WORKER, USE_REVIEWER, or SYNTHESIZE, provide summary; set reason, question, and whyBlocked to "", and options and evidence to [].
-For PLAN_REVISION_REQUIRED, set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
-For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-decision fields.`;
+For USE_WORKER, USE_REVIEWER, or SYNTHESIZE, provide summary, the complete requiredChecks inventory, and validationInfrastructure paths; set reason, question, and whyBlocked to "", and options and evidence to [].
+For PLAN_REVISION_REQUIRED, set summary, question, and whyBlocked to "", and requiredChecks, validationInfrastructure, and options to []; provide reason and evidence.
+For PRODUCT_DECISION_REQUIRED, set summary and reason to "", and requiredChecks and validationInfrastructure to []; use the product-decision fields.`;
 
 export const IMPLEMENTATION_INSTRUCTIONS = `Implement the changes described in the following planned commit. Keep the implementation idiomatic and minimal, and follow the project's conventions.
 
@@ -56,9 +57,11 @@ ${PRODUCT_DECISION_INSTRUCTIONS}`;
 export const REVIEW_INSTRUCTIONS = `Review the changes and verify that they are correct, idiomatic, minimal, and consistent with the project's conventions.
 
 Do not modify the repository.
+Verify the exact required-check evidence and reject omissions, skips, substitutions, weakening, fingerprint mismatch, or validation-infrastructure changes that this planned commit does not authorize.
+Use validationChange UNCHANGED when no change occurred, ACCEPTED with validationEvidence when an authorized change remains complete, or REJECTED with validationEvidence and a finding when it is evasive or unauthorized.
 For APPROVED, set question and whyBlocked to "", and findings, options, and evidence to [].
 For FINDINGS, provide one or more findings with unique stable R-prefixed numeric IDs, a repository-relative file, and populated problem, reason, and suggestedAction fields; set question and whyBlocked to "", and options and evidence to [].
-For PRODUCT_DECISION_REQUIRED, set findings to []; use the product-decision fields.
+For PRODUCT_DECISION_REQUIRED, set findings and validationEvidence to [], and validationChange to UNCHANGED; use the product-decision fields.
 ${PRODUCT_DECISION_INSTRUCTIONS}
 Otherwise, return only the approval decision and actionable findings using the provided schema.`;
 
@@ -76,14 +79,14 @@ Otherwise, return each FIX or DISPUTE decision using the provided schema.`;
 export const FINALIZATION_INSTRUCTIONS = `Run the complete project finalization procedure in this dedicated turn, including project-required formatting or generated output, and report its result using the provided schema.
 
 Do not perform unrelated fixes, stage changes, or create a commit.
-Use PASS only after the complete validation procedure succeeds.
+Use PASS only after every established required check succeeds without being skipped, excluded, substituted, replaced, or weakened. Return the complete requiredChecks and validationInfrastructure actually used, and exactly one ordered checks entry for every required check with bounded direct evidence. Do not use host-reported or user-attested results.
+Changes to package scripts, test discovery, test runners, validation configuration, the check inventory, or its infrastructure paths are allowed only when this planned commit requires them; never make them merely to evade an environmental blocker.
 Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
 For PASS, provide summary; set issues, options, and evidence to []; set reason, question, and whyBlocked to "".
 For FAIL, provide summary and one or more issues with unique stable F-prefixed numeric IDs, each with command, problem, and evidence; set options and evidence to []; set reason, question, and whyBlocked to "".
-For SKILL_MISSING, provide the attempted repository-relative skillPath and reason; set summary, question, and whyBlocked to "", and issues and options to []; evidence may be [].
-For SKILL_INVALID, provide a repository-relative skillPath and reason; set summary, question, and whyBlocked to "", and issues and options to []; evidence may be [].
-For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or comparable external constraints. Use the selected skillPath or "" when no skill is selected; set summary, question, and whyBlocked to "", and issues and options to []; provide reason and evidence.
-For PRODUCT_DECISION_REQUIRED, set skillPath, summary, and reason to "", and issues to []; use the product-decision fields.
+For SKILL_MISSING or SKILL_INVALID, provide the attempted repository-relative skillPath and reason; set summary, question, and whyBlocked to "", and issues, requiredChecks, validationInfrastructure, checks, and options to []; evidence may be [].
+For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or comparable external constraints. Use the selected skillPath or "" when no skill is selected; preserve the complete inventory, report every check as PASS, BLOCKED, or NOT_RUN, set summary, question, and whyBlocked to "", and issues and options to []; provide reason and evidence.
+For PRODUCT_DECISION_REQUIRED, set skillPath, summary, and reason to "", and issues, requiredChecks, validationInfrastructure, and checks to []; use the product-decision fields.
 ${PRODUCT_DECISION_INSTRUCTIONS}`;
 
 export function finalizationBootstrapInstructions(policy) {

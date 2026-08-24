@@ -1,5 +1,6 @@
 import { realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import {
   BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
@@ -173,14 +174,21 @@ export async function runPolishing({ action, run, runtime, settings }) {
         ? {
             workerSummary: null,
             reviewerSummary: null,
+            workerValidation: null,
+            reviewerValidation: null,
             resolvedSummary: null,
             bootstrapDisagreement: null,
             bootstrapArbitrationUsed: false,
+            requiredChecks: null,
+            validationInfrastructure: null,
+            validationInfrastructureFingerprint: null,
+            validationMigrationPending: false,
           }
         : {}),
       polishSummary: null,
       finalizationResult: null,
       finalizedFingerprint: null,
+      reviewResult: null,
       reviewedFingerprint: null,
       findings: [],
       previousFindings: [],
@@ -580,6 +588,7 @@ export async function runPolishing({ action, run, runtime, settings }) {
                 repositoryBaseline: nextRepositoryBaseline,
                 finalizationResult: null,
                 finalizedFingerprint: null,
+                reviewResult: null,
                 reviewedFingerprint: null,
                 previousFindings:
                   current.findings.length === 0
@@ -596,6 +605,7 @@ export async function runPolishing({ action, run, runtime, settings }) {
                   ? {
                       finalizationResult: null,
                       finalizedFingerprint: null,
+                      reviewResult: null,
                       reviewedFingerprint: null,
                       findings: [],
                       reviewReconsideration: [],
@@ -850,6 +860,234 @@ export async function runPolishing({ action, run, runtime, settings }) {
     });
   }
 
+  async function validationInfrastructureFingerprint(paths) {
+    return runtime.git.validationInfrastructureFingerprint({
+      paths,
+      projectPath: state().repositoryBaseline.projectPath,
+    });
+  }
+
+  async function establishedValidation(result) {
+    return {
+      requiredChecks: result.requiredChecks,
+      validationInfrastructure: result.validationInfrastructure,
+      validationInfrastructureFingerprint:
+        await validationInfrastructureFingerprint(
+          result.validationInfrastructure,
+        ),
+      validationMigrationPending: false,
+    };
+  }
+
+  function invalidatedLegacyValidation(current) {
+    return {
+      ...current,
+      finalizationResult: null,
+      finalizedFingerprint: null,
+      reviewResult: null,
+      reviewedFingerprint: null,
+      previousFindings:
+        current.findings.length === 0
+          ? current.previousFindings
+          : current.findings,
+      findings: [],
+      pendingDisputes: [],
+      reviewReconsideration: [],
+    };
+  }
+
+  async function prepareValidationMigrationResume() {
+    const current = state();
+    if (
+      !current.validationMigrationPending ||
+      current.workflowState !== "WAITING_FOR_USER" ||
+      current.pendingEdit !== null
+    ) {
+      return false;
+    }
+    const resumePolishing =
+      currentRun.pause?.resumeState === "POLISH" &&
+      current.finalizationResult === null;
+    const additionalFixRounds =
+      resumeAction?.type === "extra-fix-rounds"
+        ? current.additionalFixRounds + resumeAction.amount
+        : current.additionalFixRounds;
+    await transition(
+      {
+        ...invalidatedLegacyValidation(current),
+        workflowState: resumePolishing ? "POLISH" : "FINALIZE",
+        additionalFixRounds,
+      },
+      {
+        pause: null,
+        publicActivity: activity(
+          "runner",
+          "migration",
+          "validation-invalidated",
+          "Legacy validation evidence invalidated before resume.",
+        ),
+      },
+    );
+    return resumeAction !== null;
+  }
+
+  async function rediscoverValidationRole(role) {
+    const output = await runRole(
+      role,
+      BOOTSTRAP_SCHEMA,
+      (evidence) => `${BOOTSTRAP_INSTRUCTIONS}
+
+This is a versioned-state migration checkpoint. Treat every persisted legacy check, path, fingerprint, and aggregate validation result as provisional. Independently rediscover the complete current validation inventory from repository evidence before work can advance.
+
+${finalizationBootstrapInstructions(state().settings.finalization)}
+
+${PRODUCT_DECISION_INSTRUCTIONS}
+
+${evidence}`,
+      {
+        checkpoint: "validation-migration",
+        recoveryContext: workContext({ includePolishSummary: true }),
+      },
+    );
+    if (output === null) {
+      return false;
+    }
+    const result = normalizeBootstrapResult(output, role);
+    if (result.status === "PRODUCT_DECISION_REQUIRED") {
+      throw workflowError(
+        "Validation migration cannot require a product decision.",
+        "ERR_INVALID_POLISHING_OUTPUT",
+      );
+    }
+    await transition(
+      {
+        ...state(),
+        [`${role}Validation`]: {
+          requiredChecks: result.requiredChecks,
+          validationInfrastructure: result.validationInfrastructure,
+        },
+      },
+      {
+        publicActivity: activity(
+          role,
+          "migration",
+          "validation-rediscovered",
+          `${role} independently rediscovered validation requirements.`,
+        ),
+      },
+    );
+    return true;
+  }
+
+  async function completeValidationMigration(result, actor) {
+    const validation = await establishedValidation(result);
+    await transition(
+      {
+        ...state(),
+        ...validation,
+      },
+      {
+        publicActivity: activity(
+          actor,
+          "migration",
+          "validation-established",
+          "Legacy validation evidence was replaced with independent current evidence.",
+        ),
+      },
+    );
+    return true;
+  }
+
+  async function reconcileValidationMigration() {
+    const output = await runRole(
+      "worker",
+      BOOTSTRAP_RECONCILIATION_SCHEMA,
+      (evidence) => `${BOOTSTRAP_RECONCILIATION_INSTRUCTIONS}
+
+Reconcile only the independently rediscovered validation requirements. Legacy validation evidence is provisional and must not be selected.
+
+${PRODUCT_DECISION_INSTRUCTIONS}
+
+${evidence}
+
+Independent validation evidence:
+${JSON.stringify(
+  {
+    worker: state().workerValidation,
+    reviewer: state().reviewerValidation,
+  },
+  null,
+  2,
+)}`,
+      {
+        checkpoint: "validation-migration",
+        recoveryContext: workContext({ includePolishSummary: true }),
+      },
+    );
+    if (output === null) {
+      return false;
+    }
+    const result = normalizeReconciliationResult(output);
+    if (result.status === "PRODUCT_DECISION_REQUIRED") {
+      throw workflowError(
+        "Validation migration cannot require a product decision.",
+        "ERR_INVALID_POLISHING_OUTPUT",
+      );
+    }
+    if (result.status === "RESOLVED") {
+      return completeValidationMigration(result, "worker");
+    }
+    const arbitrationOutput = await runRole(
+      "arbiter",
+      BOOTSTRAP_ARBITRATION_SCHEMA,
+      (evidence) => `${BOOTSTRAP_ARBITRATION_INSTRUCTIONS}
+
+Resolve only this validation-inventory migration disagreement. Legacy validation evidence is provisional and must not be selected.
+
+${PRODUCT_DECISION_INSTRUCTIONS}
+
+${evidence}
+
+Recorded disagreement:
+${JSON.stringify(result.disagreement, null, 2)}
+
+Independent validation evidence:
+${JSON.stringify(
+  {
+    worker: state().workerValidation,
+    reviewer: state().reviewerValidation,
+  },
+  null,
+  2,
+)}`,
+      {
+        checkpoint: "validation-migration",
+        recoveryContext: workContext({ includePolishSummary: true }),
+      },
+    );
+    if (arbitrationOutput === null) {
+      return false;
+    }
+    const arbitration = normalizeBootstrapArbitration(arbitrationOutput);
+    if (arbitration.direction === "PRODUCT_DECISION_REQUIRED") {
+      throw workflowError(
+        "Validation migration cannot require a product decision.",
+        "ERR_INVALID_POLISHING_OUTPUT",
+      );
+    }
+    return completeValidationMigration(arbitration, "arbiter");
+  }
+
+  async function runValidationMigration() {
+    if (state().workerValidation === null) {
+      return rediscoverValidationRole("worker");
+    }
+    if (state().reviewerValidation === null) {
+      return rediscoverValidationRole("reviewer");
+    }
+    return reconcileValidationMigration();
+  }
+
   async function resolveFinalizationGuidance() {
     const policy = state().settings.finalization;
     if (policy === "none") {
@@ -1063,6 +1301,7 @@ export async function runPolishing({ action, run, runtime, settings }) {
         workflowState: "FINALIZE",
         finalizationResult: null,
         finalizedFingerprint: null,
+        reviewResult: null,
         reviewedFingerprint: null,
         previousFindings: current.previousFindings,
         pendingCorrection: true,
@@ -1167,7 +1406,12 @@ export async function runPolishing({ action, run, runtime, settings }) {
     await transition(
       {
         ...current,
-        workflowState: "RESOLVE_FINDINGS",
+        workflowState:
+          findings.length === 0 &&
+          pendingDisputes.length === 0 &&
+          current.reviewResult?.validationChange === "REJECTED"
+            ? "REVIEW"
+            : "RESOLVE_FINDINGS",
         findings,
         pendingDisputes,
         ...findingDecisions,
@@ -1387,7 +1631,14 @@ ${evidence}`,
     }
     await writeContext(`context/${role}.md`, result.summary);
     await transition(
-      { ...state(), [`${role}Summary`]: result.summary },
+      {
+        ...state(),
+        [`${role}Summary`]: result.summary,
+        [`${role}Validation`]: {
+          requiredChecks: result.requiredChecks,
+          validationInfrastructure: result.validationInfrastructure,
+        },
+      },
       {
         publicActivity: activity(
           role,
@@ -1414,7 +1665,17 @@ Worker bootstrap summary:
 ${state().workerSummary}
 
 Reviewer bootstrap summary:
-${state().reviewerSummary}`,
+${state().reviewerSummary}
+
+Independent validation evidence:
+${JSON.stringify(
+  {
+    worker: state().workerValidation,
+    reviewer: state().reviewerValidation,
+  },
+  null,
+  2,
+)}`,
       { checkpoint: "bootstrap", recoveryContext: workContext() },
     );
     if (output === null) {
@@ -1439,11 +1700,13 @@ ${state().reviewerSummary}`,
       return true;
     }
     await writeContext("context/resolved.md", result.summary);
+    const validation = await establishedValidation(result);
     await transition(
       {
         ...state(),
         workflowState: "POLISH",
         resolvedSummary: result.summary,
+        ...validation,
       },
       {
         publicActivity: activity(
@@ -1474,7 +1737,17 @@ Reviewer bootstrap summary:
 ${state().reviewerSummary}
 
 Recorded disagreement:
-${JSON.stringify(state().bootstrapDisagreement, null, 2)}`,
+${JSON.stringify(state().bootstrapDisagreement, null, 2)}
+
+Independent validation evidence:
+${JSON.stringify(
+  {
+    worker: state().workerValidation,
+    reviewer: state().reviewerValidation,
+  },
+  null,
+  2,
+)}`,
       {
         checkpoint: "arbitration",
         recoveryContext: workContext(),
@@ -1488,11 +1761,13 @@ ${JSON.stringify(state().bootstrapDisagreement, null, 2)}`,
       return productDecision(result.decision, "BOOTSTRAP");
     }
     await writeContext("context/resolved.md", result.summary);
+    const validation = await establishedValidation(result);
     await transition(
       {
         ...state(),
         workflowState: "POLISH",
         resolvedSummary: result.summary,
+        ...validation,
         bootstrapDisagreement: null,
         bootstrapArbitrationUsed: true,
       },
@@ -1557,6 +1832,7 @@ ${evidence}${
         polishSummary: result.summary,
         finalizationResult: null,
         finalizedFingerprint: null,
+        reviewResult: null,
         reviewedFingerprint: null,
         previousFindings:
           current.findings.length === 0
@@ -1597,7 +1873,20 @@ ${evidence}${
 ${PRODUCT_DECISION_INSTRUCTIONS}
 ${finalizationGuidanceInstructions(selectedGuidance)}
 
-${evidence}`,
+${evidence}
+
+Established required-check inventory:
+${JSON.stringify(state().requiredChecks, null, 2)}
+
+Established validation infrastructure:
+${JSON.stringify(
+  {
+    paths: state().validationInfrastructure,
+    fingerprint: state().validationInfrastructureFingerprint,
+  },
+  null,
+  2,
+)}`,
         {
           access: "workspace-write",
           checkpoint: "work",
@@ -1690,7 +1979,24 @@ ${evidence}`,
       return false;
     }
     const fingerprint = await contentFingerprint();
-    const finalizationResult = { ...result, fingerprint };
+    const candidateValidationFingerprint =
+      await validationInfrastructureFingerprint(
+        result.validationInfrastructure,
+      );
+    const validationChanged =
+      !isDeepStrictEqual(result.requiredChecks, state().requiredChecks) ||
+      !isDeepStrictEqual(
+        result.validationInfrastructure,
+        state().validationInfrastructure,
+      ) ||
+      candidateValidationFingerprint !==
+        state().validationInfrastructureFingerprint;
+    const finalizationResult = {
+      ...result,
+      validationInfrastructureFingerprint: candidateValidationFingerprint,
+      validationChanged,
+      fingerprint,
+    };
     if (result.status === "FAIL") {
       const correction = correctionUpdate({
         fingerprint,
@@ -1703,6 +2009,7 @@ ${evidence}`,
           workflowState: "RESOLVE_FINDINGS",
           finalizationResult,
           finalizedFingerprint: null,
+          reviewResult: null,
           reviewedFingerprint: null,
           findings: [],
           correctionHistory: correction.history,
@@ -1729,6 +2036,7 @@ ${evidence}`,
         workflowState: "REVIEW",
         finalizationResult,
         finalizedFingerprint: fingerprint,
+        reviewResult: null,
         reviewedFingerprint: null,
         findings: [],
         reviewReconsideration: [],
@@ -1754,6 +2062,7 @@ ${evidence}`,
         workflowState: "FINALIZE",
         finalizationResult: null,
         finalizedFingerprint: null,
+        reviewResult: null,
         reviewedFingerprint: null,
         findings: [],
         pendingCorrection: true,
@@ -1769,8 +2078,22 @@ ${PRODUCT_DECISION_INSTRUCTIONS}
 
 ${evidence}
 
-Finalization result:
+Established validation tuple:
+${JSON.stringify(
+  {
+    requiredChecks: current.requiredChecks,
+    validationInfrastructure: current.validationInfrastructure,
+    validationInfrastructureFingerprint:
+      current.validationInfrastructureFingerprint,
+  },
+  null,
+  2,
+)}
+
+Candidate validation tuple and finalization evidence:
 ${JSON.stringify(current.finalizationResult, null, 2)}
+
+The Reviewer must return ACCEPTED only when any validation inventory or infrastructure change is authorized by the task and remains complete; return REJECTED with a finding for evasive, omitted, substituted, or weakened validation. Return UNCHANGED only when finalizationResult.validationChanged is false.
 
 Previous findings:
 ${JSON.stringify(current.previousFindings, null, 2)}${
@@ -1797,6 +2120,25 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}`,
     if (reviewedFingerprint !== fingerprint) {
       throw workflowError("Reviewed content fingerprint changed unexpectedly.");
     }
+    if (
+      (current.finalizationResult.validationChanged &&
+        result.validationChange === "UNCHANGED") ||
+      (!current.finalizationResult.validationChanged &&
+        result.validationChange !== "UNCHANGED") ||
+      (result.validationChange === "REJECTED" &&
+        result.status !== "FINDINGS")
+    ) {
+      throw workflowError(
+        "Reviewer returned an inconsistent validation-change decision.",
+        "ERR_INVALID_POLISHING_OUTPUT",
+      );
+    }
+    const reviewResult = {
+      status: result.status,
+      validationChange: result.validationChange,
+      validationEvidence: result.validationEvidence,
+      fingerprint: reviewedFingerprint,
+    };
     if (result.status === "FINDINGS") {
       const correction = correctionUpdate({
         fingerprint,
@@ -1816,8 +2158,19 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}`,
       await transition(
         {
           ...state(),
+          ...(result.validationChange === "ACCEPTED"
+            ? {
+                requiredChecks: current.finalizationResult.requiredChecks,
+                validationInfrastructure:
+                  current.finalizationResult.validationInfrastructure,
+                validationInfrastructureFingerprint:
+                  current.finalizationResult
+                    .validationInfrastructureFingerprint,
+              }
+            : {}),
           workflowState: "RESOLVE_FINDINGS",
           reviewedFingerprint,
+          reviewResult,
           findings: result.findings,
           previousFindings: result.findings,
           pendingDisputes,
@@ -1850,6 +2203,17 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}`,
       {
         ...state(),
         workflowState: "RESOLVE_FINDINGS",
+        ...(result.validationChange === "ACCEPTED"
+          ? {
+              requiredChecks: current.finalizationResult.requiredChecks,
+              validationInfrastructure:
+                current.finalizationResult.validationInfrastructure,
+              validationInfrastructureFingerprint:
+                current.finalizationResult
+                  .validationInfrastructureFingerprint,
+            }
+          : {}),
+        reviewResult,
         reviewedFingerprint,
         findings: [],
         previousFindings: [],
@@ -2015,6 +2379,12 @@ ${JSON.stringify(priorFindingDecisions([dispute.findingId]), null, 2)}`,
     await transition(
       {
         ...state(),
+        workflowState:
+          findings.length === 0 &&
+          pendingDisputes.length === 0 &&
+          current.reviewResult?.validationChange === "REJECTED"
+            ? "REVIEW"
+            : state().workflowState,
         findings,
         pendingDisputes,
         ...findingDecisions,
@@ -2073,6 +2443,7 @@ ${JSON.stringify(
           workflowState: "POLISH",
           finalizationResult: null,
           finalizedFingerprint: null,
+          reviewResult: null,
           reviewedFingerprint: null,
           previousFindings: current.findings,
           findings: [],
@@ -2356,6 +2727,7 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
           workflowState: "FINALIZE",
           finalizationResult: null,
           finalizedFingerprint: null,
+          reviewResult: null,
           reviewedFingerprint: null,
           previousFindings:
             current.findings.length === 0
@@ -2399,13 +2771,14 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
 
   assertResumeActionApplicable();
   try {
+    const resumeActionSuperseded = await prepareValidationMigrationResume();
     if (["DONE", "FAILED"].includes(state().workflowState)) {
       if (resumeAction !== null) {
         throw workflowError("Polishing resume action is not applicable.");
       }
       return currentRun;
     }
-    if (resumeAction !== null) {
+    if (resumeAction !== null && !resumeActionSuperseded) {
       await applyResumeAction();
     }
     if (state().workflowState === "WAITING_FOR_USER") {
@@ -2459,6 +2832,12 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
 
     while (true) {
       const current = state();
+      if (current.validationMigrationPending) {
+        if (!(await runValidationMigration())) {
+          return currentRun;
+        }
+        continue;
+      }
       if (current.workflowState === "CLARIFY") {
         if (!current.preflightComplete && !(await initializeInputs())) {
           return currentRun;

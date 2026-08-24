@@ -293,6 +293,18 @@ the recorded authorization against Git state and never replays the effect.
 Polishing has no commit authorization and preserves the initial `HEAD`, refs,
 remotes, and Git identity through completion.
 
+Plan execution and polishing state version 2 persist the independently
+bootstrapped required-check inventory, the repository-relative files that own
+validation infrastructure, and a runner-computed fingerprint of those files.
+The version-1 migration preserves safe workspace content while invalidating
+active aggregate finalization and review evidence. Paused legacy evidence is
+explicitly provisional: before a retry, override, finalization, or review can
+advance, fresh independent Worker and Reviewer checkpoints re-establish the
+inventory and the runner fingerprints it again. A consumed plan-execution
+commit authorization remains on the verification path until Git resolves its
+effect; migration never converts it into a replayable authorization. Immutable
+terminal history is shape-upgraded without replaying an effect.
+
 ## Agent Context Recovery
 
 Backend sessions are disposable execution context, not durable workflow state.
@@ -337,6 +349,20 @@ resolution resumes at `FINALIZE`; an unchanged turn resumes at its original
 checkpoint. Finalization always resumes at `FINALIZE`. The workflow does not
 weaken isolation or grant network or host temporary-directory access to bypass
 the unavailable validation.
+
+Finalization is fail closed. A `PASS` contains exactly one ordered result with
+bounded direct evidence for every persisted required check; omitted, skipped,
+substituted, replaced, or weakened checks are invalid output. The runner hashes
+the identified package scripts, test-discovery and runner files, skill guidance,
+and validation configuration rather than trusting an agent-supplied hash.
+Changing that inventory, its file set, or its fingerprint is provisional until
+the independent read-only Reviewer accepts that the task or current plan step
+authorizes the complete change for the same content fingerprint. Reviewer
+receives both the established and candidate tuples, so its acceptance cannot
+depend on a prior session. Reviewer rejection remains a finding. Commands and
+repository-relative infrastructure paths are validated and compared without
+rewriting interior whitespace. Host-reported results and user attestations are
+outside this trust boundary.
 
 An explicitly supplied source session is different: the first eligible turn of
 each new primary or review checkpoint creates a direct child and returns its ID

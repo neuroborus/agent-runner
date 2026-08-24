@@ -18,10 +18,15 @@ import test from "node:test";
 
 import {
   createPlanExecutionState,
+  migratePlanExecutionStateV1,
   planExecutionPipeline,
   runPlanExecution,
 } from "../src/index.js";
-import { normalizePipelineState } from "../src/workflow-contract.js";
+import {
+  assertRun,
+  normalizeFinalizationResult,
+  normalizePipelineState,
+} from "../src/workflow-contract.js";
 
 const executeFile = promisify(execFile);
 const SOURCE_SESSION = "11111111-1111-4111-8111-111111111111";
@@ -45,6 +50,218 @@ const SETTINGS = Object.freeze({
   maxDisputesPerFinding: 2,
   maxSameFindingRounds: 3,
   stagnationWindowRounds: 3,
+});
+const REQUIRED_CHECKS = Object.freeze([
+  Object.freeze({ id: "C1", command: "npm test" }),
+]);
+const VALIDATION_INFRASTRUCTURE = Object.freeze([
+  ".agents/skills/finalization/SKILL.md",
+]);
+
+function checkResults(status, evidence = "The fixture check completed.") {
+  return REQUIRED_CHECKS.map(({ id, command }) => ({
+    checkId: id,
+    command,
+    status,
+    evidence: [evidence],
+  }));
+}
+
+function versionOneState(state) {
+  const legacy = { ...state };
+  for (const field of [
+    "workerValidation",
+    "reviewerValidation",
+    "requiredChecks",
+    "validationInfrastructure",
+    "validationInfrastructureFingerprint",
+    "validationMigrationPending",
+    "reviewResult",
+  ]) {
+    delete legacy[field];
+  }
+  return legacy;
+}
+
+test("rejects incomplete or substituted finalization PASS evidence", () => {
+  const valid = finalizationPassed();
+  assert.throws(
+    () => normalizeFinalizationResult({ ...valid, checks: [] }),
+    /incomplete/u,
+  );
+  assert.throws(
+    () =>
+      normalizeFinalizationResult({
+        ...valid,
+        checks: [{ ...valid.checks[0], command: "npm test -- --exclude slow" }],
+      }),
+    /substituted/u,
+  );
+  assert.throws(
+    () =>
+      normalizeFinalizationResult({
+        ...valid,
+        checks: [{ ...valid.checks[0], status: "NOT_RUN" }],
+      }),
+    /status does not match/u,
+  );
+  const blocked = finalizationBlocked(
+    "The sandbox blocked the required check.",
+    "The subprocess was denied before validation could complete.",
+  );
+  assert.throws(
+    () =>
+      normalizeFinalizationResult({
+        ...blocked,
+        checks: [{ ...blocked.checks[0], status: "FAIL" }],
+      }),
+    /invalid check evidence/u,
+  );
+  const exactCommand = `node -e 'process.stdout.write("a  b")'`;
+  const exactPath = "config/checks  strict.json";
+  const exact = normalizeFinalizationResult({
+    ...valid,
+    requiredChecks: [{ id: "C1", command: exactCommand }],
+    validationInfrastructure: [exactPath],
+    checks: [
+      {
+        checkId: "C1",
+        command: exactCommand,
+        status: "PASS",
+        evidence: ["The exact command passed."],
+      },
+    ],
+  });
+  assert.equal(exact.requiredChecks[0].command, exactCommand);
+  assert.equal(exact.checks[0].command, exactCommand);
+  assert.equal(exact.validationInfrastructure[0], exactPath);
+});
+
+test("migrates version-1 execution state to the fail-closed shape", () => {
+  const legacy = versionOneState(createPlanExecutionState());
+  const migrated = migratePlanExecutionStateV1({ pipelineState: legacy });
+  assert.doesNotThrow(() => normalizePipelineState(migrated));
+  assert.equal(migrated.finalizationResult, null);
+  assert.equal(migrated.reviewResult, null);
+});
+
+test("invalidates version-1 validation evidence before active execution resumes", async (t) => {
+  const stop = new Error("captured active legacy state");
+  let legacy;
+  let captured = false;
+  const fixture = await createFixture(t, {
+    workReviewer: [bootstrapReady("Migrating Reviewer"), reviewApproved()],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      bootstrapReady("Migrating Worker"),
+      reconciliationResolved(),
+      finalizationPassed(),
+    ],
+    onTransition(run) {
+      if (!captured && run.pipelineState.workflowState === "REVIEW") {
+        captured = true;
+        legacy = versionOneState(run.pipelineState);
+        throw stop;
+      }
+    },
+  });
+
+  await assert.rejects(fixture.run(), (cause) => cause === stop);
+  const migrated = migratePlanExecutionStateV1({ pipelineState: legacy });
+
+  assert.doesNotThrow(() => normalizePipelineState(migrated));
+  assert.equal(migrated.workflowState, "FINALIZE");
+  assert.equal(migrated.finalizationResult, null);
+  assert.equal(migrated.finalizedFingerprint, null);
+  assert.equal(migrated.reviewResult, null);
+  assert.equal(migrated.reviewedFingerprint, null);
+  assert.equal(migrated.validationMigrationPending, true);
+
+  fixture.persistPipelineState(migrated, { pause: null });
+  const completed = await fixture.run();
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.pipelineState.validationMigrationPending, false);
+  assert.ok(
+    fixture.calls.worker.some(({ prompt }) =>
+      prompt.includes("versioned-state migration checkpoint"),
+    ),
+  );
+  assert.ok(
+    fixture.calls.reviewer.some(({ prompt }) =>
+      prompt.includes("versioned-state migration checkpoint"),
+    ),
+  );
+});
+
+test("re-establishes validation before retrying a migrated finalization pause", async (t) => {
+  const fixture = await createFixture(t, {
+    workReviewer: [bootstrapReady("Migrating Reviewer"), reviewApproved()],
+    workWorker: [
+      implementationCompleted(),
+      finalizationBlocked(
+        "The validation IPC endpoint is unavailable.",
+        "The test runner could not open its required IPC channel.",
+      ),
+      bootstrapReady("Migrating Worker"),
+      reconciliationResolved(),
+      finalizationPassed(),
+    ],
+  });
+  const paused = await fixture.run();
+  const migrated = migratePlanExecutionStateV1({
+    pipelineState: versionOneState(paused.pipelineState),
+  });
+  fixture.persistPipelineState(migrated, { pause: paused.pause });
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.pipelineState.validationMigrationPending, false);
+  assert.ok(
+    fixture.calls.worker.some(({ prompt }) =>
+      prompt.includes("versioned-state migration checkpoint"),
+    ),
+  );
+});
+
+test("invalidates migrated findings before applying an override", async (t) => {
+  const fixture = await createFixture(t, {
+    workReviewer: [
+      reviewFindings("R1"),
+      reviewFindings("R1"),
+      bootstrapReady("Migrating Reviewer"),
+      reviewApproved(),
+    ],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      resolution({ id: "R1", decision: "FIX" }),
+      finalizationPassed(),
+      resolution({ id: "R1", decision: "FIX" }),
+      bootstrapReady("Migrating Worker"),
+      reconciliationResolved(),
+      finalizationPassed(),
+    ],
+  });
+  const paused = await fixture.run({
+    maxFixRoundsPerStep: 1,
+    maxSameFindingRounds: 10,
+    stagnationWindowRounds: 10,
+  });
+  const migrated = migratePlanExecutionStateV1({
+    pipelineState: versionOneState(paused.pipelineState),
+  });
+  fixture.persistPipelineState(migrated, { pause: paused.pause });
+
+  const completed = await fixture.run(
+    {},
+    { type: "override-finding", findingId: "R1" },
+  );
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.deepEqual(completed.pipelineState.findingOverrides, []);
+  assert.equal(completed.pipelineState.validationMigrationPending, false);
 });
 
 function hash(value) {
@@ -94,6 +311,8 @@ function bootstrapReady(role) {
   return {
     status: "READY",
     summary: `${role} understands the task, architecture, plan, risks, and finalization procedure.`,
+    requiredChecks: REQUIRED_CHECKS,
+    validationInfrastructure: VALIDATION_INFRASTRUCTURE,
     reason: "",
     ...emptyDecision(),
   };
@@ -103,6 +322,8 @@ function bootstrapProductDecision() {
   return {
     status: "PRODUCT_DECISION_REQUIRED",
     summary: "",
+    requiredChecks: [],
+    validationInfrastructure: [],
     reason: "",
     question: "Which public behavior should be implemented?",
     options: ["Behavior A", "Behavior B"],
@@ -128,6 +349,8 @@ function reconciliationResolved() {
     status: "RESOLVED",
     summary: "The roles agree on the minimal implementation and finalization procedure.",
     disagreement: "",
+    requiredChecks: REQUIRED_CHECKS,
+    validationInfrastructure: VALIDATION_INFRASTRUCTURE,
     reason: "",
     ...emptyDecision(),
   };
@@ -138,6 +361,8 @@ function reconciliationDisagreement() {
     status: "DISAGREEMENT",
     summary: "",
     disagreement: "The roles disagree about the required repository boundary.",
+    requiredChecks: [],
+    validationInfrastructure: [],
     reason: "",
     question: "",
     options: [],
@@ -151,6 +376,8 @@ function reconciliationProductDecision() {
     status: "PRODUCT_DECISION_REQUIRED",
     summary: "",
     disagreement: "",
+    requiredChecks: [],
+    validationInfrastructure: [],
     reason: "",
     question: "Which public behavior should be implemented?",
     options: ["Behavior A", "Behavior B"],
@@ -163,6 +390,8 @@ function arbitrationResolved() {
   return {
     direction: "SYNTHESIZE",
     summary: "Use the existing repository boundary and keep the change local.",
+    requiredChecks: REQUIRED_CHECKS,
+    validationInfrastructure: VALIDATION_INFRASTRUCTURE,
     rationale: "Repository ownership evidence supports the existing boundary.",
     reason: "",
     ...emptyDecision(),
@@ -173,6 +402,8 @@ function arbitrationProductDecision() {
   return {
     direction: "PRODUCT_DECISION_REQUIRED",
     summary: "",
+    requiredChecks: [],
+    validationInfrastructure: [],
     rationale: "The repository evidence cannot select a product behavior.",
     reason: "",
     question: "Which public behavior should be implemented?",
@@ -223,15 +454,23 @@ function finalizationPassed(
     skillPath,
     summary: "The repository finalization procedure passed.",
     issues: [],
+    requiredChecks: REQUIRED_CHECKS,
+    validationInfrastructure: VALIDATION_INFRASTRUCTURE,
+    checks: checkResults("PASS"),
     reason: "",
     ...emptyDecision(),
   };
 }
 
-function reviewApproved() {
+function reviewApproved(validationChange = "UNCHANGED") {
   return {
     status: "APPROVED",
     findings: [],
+    validationChange,
+    validationEvidence:
+      validationChange === "UNCHANGED"
+        ? []
+        : ["The planned commit authorizes the complete validation change."],
     ...emptyDecision(),
   };
 }
@@ -259,6 +498,9 @@ function finalizationFailed(...ids) {
       problem: `Validation failed for ${id}.`,
       evidence: [`${id} failed in the test output.`],
     })),
+    requiredChecks: REQUIRED_CHECKS,
+    validationInfrastructure: VALIDATION_INFRASTRUCTURE,
+    checks: checkResults("FAIL", "The fixture check failed."),
     reason: "",
     ...emptyDecision(),
   };
@@ -270,6 +512,9 @@ function finalizationUnavailable(status) {
     skillPath: ".agents/skills/finalization/SKILL.md",
     summary: "",
     issues: [],
+    requiredChecks: [],
+    validationInfrastructure: [],
+    checks: [],
     reason: "The finalization skill cannot be used safely.",
     question: "",
     options: [],
@@ -284,6 +529,9 @@ function finalizationBlocked(reason, evidence) {
     skillPath: ".agents/skills/finalization/SKILL.md",
     summary: "",
     issues: [],
+    requiredChecks: REQUIRED_CHECKS,
+    validationInfrastructure: VALIDATION_INFRASTRUCTURE,
+    checks: checkResults("BLOCKED", evidence),
     reason,
     question: "",
     options: [],
@@ -302,6 +550,8 @@ function reviewFindings(...ids) {
       reason: `The current implementation still exhibits ${id}.`,
       suggestedAction: `Fix ${id}.`,
     })),
+    validationChange: "UNCHANGED",
+    validationEvidence: [],
     ...emptyDecision(),
   };
 }
@@ -310,6 +560,8 @@ function reviewProductDecision() {
   return {
     status: "PRODUCT_DECISION_REQUIRED",
     findings: [],
+    validationChange: "UNCHANGED",
+    validationEvidence: [],
     question: "Which public behavior should the review require?",
     options: ["Behavior A", "Behavior B"],
     whyBlocked: "Both behaviors are valid but incompatible.",
@@ -763,7 +1015,7 @@ async function createFixture(
     revision: 1,
     runId,
     pipelineId: "plan-execution",
-    pipelineStateVersion: 1,
+    pipelineStateVersion: 2,
     projectPath,
     taskPath,
     roles: {
@@ -923,6 +1175,21 @@ async function createFixture(
       async contentFingerprint() {
         return repositoryFingerprint(projectPath);
       },
+      async validationInfrastructureFingerprint({ paths }) {
+        const entries = await Promise.all(
+          paths.map(async (path) => {
+            try {
+              return [path, await readFile(join(projectPath, path), "utf8")];
+            } catch (cause) {
+              if (cause?.code === "ENOENT") {
+                return [path, null];
+              }
+              throw cause;
+            }
+          }),
+        );
+        return hash(JSON.stringify(entries));
+      },
       async preflight(options) {
         preflights.push(options);
         if (options.requireClean) {
@@ -1021,6 +1288,21 @@ async function createFixture(
     return currentRun;
   }
 
+  function persistPipelineState(
+    pipelineState,
+    { pause = currentRun.pause } = {},
+  ) {
+    currentRun = {
+      ...currentRun,
+      pipelineStateVersion: 2,
+      pipelineState,
+      pause,
+      revision: currentRun.revision + 1,
+    };
+    assertRun(currentRun);
+    return currentRun;
+  }
+
   return {
     artifacts,
     calls,
@@ -1031,6 +1313,7 @@ async function createFixture(
     preflights,
     probeCalls,
     projectPath,
+    persistPipelineState,
     run,
     taskPath,
     transitions,
@@ -2309,6 +2592,18 @@ test("accepts a verified commit after an interrupted adapter result", async (t) 
 test("re-authorizes after an unambiguous recoverable commit rejection", async (t) => {
   let backendUnavailable = true;
   const fixture = await createFixture(t, {
+    workReviewer: [
+      reviewApproved(),
+      bootstrapReady("Migrating Reviewer"),
+      reviewApproved(),
+    ],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      bootstrapReady("Migrating Worker"),
+      reconciliationResolved(),
+      finalizationPassed(),
+    ],
     async onRoleRun(_role, request) {
       if (request.access === "local-commit" && backendUnavailable) {
         backendUnavailable = false;
@@ -2333,6 +2628,12 @@ test("re-authorizes after an unambiguous recoverable commit rejection", async (t
   );
   assert.equal(rejectedRequest.authorizationId, "commit-1");
 
+  const migrated = migratePlanExecutionStateV1({
+    pipelineState: versionOneState(paused.pipelineState),
+  });
+  assert.equal(migrated.validationMigrationPending, true);
+  assert.equal(migrated.pendingCommit, null);
+  fixture.persistPipelineState(migrated, { pause: paused.pause });
   const resumed = await fixture.run();
   const commitRequests = fixture.calls.worker.filter(
     ({ access }) => access === "local-commit",
@@ -2384,6 +2685,12 @@ test("never replays a consumed authorization when no commit was created", async 
   });
 
   const paused = await fixture.run();
+  const migrated = migratePlanExecutionStateV1({
+    pipelineState: versionOneState(paused.pipelineState),
+  });
+  assert.equal(migrated.validationMigrationPending, true);
+  assert.equal(migrated.pendingCommit.status, "consumed");
+  fixture.persistPipelineState(migrated, { pause: paused.pause });
   const resumed = await fixture.run();
 
   assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
@@ -3654,4 +3961,59 @@ test("invalidates work when the Reviewer mutates the repository", async (t) => {
   assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
   assert.equal(result.pause.reason, "read_only_agent_mutated_repository");
   assert.equal(result.pipelineState.currentStep, null);
+});
+
+test("requires Reviewer acceptance for planned validation-infrastructure changes", async (t) => {
+  const skillPath = join(
+    ".agents",
+    "skills",
+    "finalization",
+    "SKILL.md",
+  );
+  const accepted = await createFixture(t, {
+    onRoleRun: async (role, request) => {
+      if (
+        role === "worker" &&
+        request.prompt.includes("Implement the changes")
+      ) {
+        await writeFile(
+          join(request.cwd, skillPath),
+          "---\nname: finalization\ndescription: Updated checks.\n---\n\nRun every required check.\n",
+        );
+      }
+    },
+    workReviewer: [reviewApproved("ACCEPTED")],
+  });
+  const completed = await accepted.run();
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(
+    completed.pipelineState.reviewResult.validationChange,
+    "ACCEPTED",
+  );
+  const reviewPrompt = accepted.calls.reviewer.find(({ prompt }) =>
+    prompt.includes("Review the changes"),
+  ).prompt;
+  assert.match(
+    reviewPrompt,
+    /Established validation tuple:[\s\S]*Candidate validation tuple and finalization evidence:/u,
+  );
+  assert.match(
+    reviewPrompt,
+    /"validationInfrastructureFingerprint": "[a-f0-9]{64}"/u,
+  );
+
+  const rejected = await createFixture(t, {
+    onRoleRun: async (role, request) => {
+      if (
+        role === "worker" &&
+        request.prompt.includes("Implement the changes")
+      ) {
+        await writeFile(join(request.cwd, skillPath), "weakened validation\n");
+      }
+    },
+  });
+  await assert.rejects(
+    rejected.run(),
+    /inconsistent validation-change decision/u,
+  );
 });

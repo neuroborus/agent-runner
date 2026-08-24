@@ -246,6 +246,8 @@ function createBackend(
           summary:
             `${reviewer ? "Reviewer" : "Worker"} understands the task, ` +
             "plan, risks, and finalization procedure.",
+          requiredChecks: [{ id: "C1", command: "git diff --check" }],
+          validationInfrastructure: [],
           reason: "",
           question: "",
           options: [],
@@ -262,6 +264,8 @@ function createBackend(
                 status: "DISAGREEMENT",
                 summary: "",
                 disagreement: "The roles selected different module boundaries.",
+                requiredChecks: [],
+                validationInfrastructure: [],
                 reason: "",
                 question: "",
                 options: [],
@@ -272,6 +276,8 @@ function createBackend(
                 status: "RESOLVED",
                 summary: "Use the existing minimal module boundary.",
                 disagreement: "",
+                requiredChecks: [{ id: "C1", command: "git diff --check" }],
+                validationInfrastructure: [],
                 reason: "",
                 question: "",
                 options: [],
@@ -283,6 +289,8 @@ function createBackend(
         structured = {
           direction: "SYNTHESIZE",
           summary: "Use the existing minimal module boundary.",
+          requiredChecks: [{ id: "C1", command: "git diff --check" }],
+          validationInfrastructure: [],
           rationale: "Repository ownership supports that boundary.",
           reason: "",
           question: "",
@@ -312,6 +320,16 @@ function createBackend(
           skillPath: "",
           summary: "The repository finalization procedure passed.",
           issues: [],
+          requiredChecks: [{ id: "C1", command: "git diff --check" }],
+          validationInfrastructure: [],
+          checks: [
+            {
+              checkId: "C1",
+              command: "git diff --check",
+              status: "PASS",
+              evidence: ["git diff --check exited successfully."],
+            },
+          ],
           reason: "",
           question: "",
           options: [],
@@ -326,6 +344,8 @@ function createBackend(
         structured = {
           status: "APPROVED",
           findings: [],
+          validationChange: "UNCHANGED",
+          validationEvidence: [],
           question: "",
           options: [],
           whyBlocked: "",

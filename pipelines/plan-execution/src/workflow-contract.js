@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isAbsolute, join, posix, relative, resolve, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import {
   parseCommitPlan,
@@ -41,6 +42,8 @@ const PIPELINE_STATE_FIELDS = new Set([
   "canonicalPlan",
   "workerSummary",
   "reviewerSummary",
+  "workerValidation",
+  "reviewerValidation",
   "resolvedSummary",
   "bootstrapDisagreement",
   "bootstrapArbitrationUsed",
@@ -50,6 +53,11 @@ const PIPELINE_STATE_FIELDS = new Set([
   "implementationDirection",
   "finalizationResult",
   "finalizedFingerprint",
+  "requiredChecks",
+  "validationInfrastructure",
+  "validationInfrastructureFingerprint",
+  "validationMigrationPending",
+  "reviewResult",
   "reviewedFingerprint",
   "findings",
   "previousFindings",
@@ -89,6 +97,7 @@ const OBJECT_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 const RUN_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/u;
 const REVIEW_FINDING_ID_PATTERN = /^R[1-9][0-9]{0,8}$/u;
 const FINALIZATION_ISSUE_ID_PATTERN = /^F[1-9][0-9]{0,8}$/u;
+const REQUIRED_CHECK_ID_PATTERN = /^C[1-9][0-9]{0,8}$/u;
 const MAX_TEXT_LENGTH = 4_000;
 const MAX_SUMMARY_LENGTH = 20_000;
 export const MAX_PLAN_LENGTH = 100_000;
@@ -465,7 +474,12 @@ export function normalizeBootstrapResult(payload, role) {
   }
   assertStructuredResultSize(payload);
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
-    if (payload.summary !== "" || payload.reason !== "") {
+    if (
+      payload.summary !== "" ||
+      payload.reason !== "" ||
+      !emptyArray(payload.requiredChecks) ||
+      !emptyArray(payload.validationInfrastructure)
+    ) {
       throw outputError("Product decision contains inapplicable fields.");
     }
     return Object.freeze({
@@ -474,7 +488,11 @@ export function normalizeBootstrapResult(payload, role) {
     });
   }
   if (payload.status === "PLAN_REVISION_REQUIRED") {
-    if (payload.summary !== "") {
+    if (
+      payload.summary !== "" ||
+      !emptyArray(payload.requiredChecks) ||
+      !emptyArray(payload.validationInfrastructure)
+    ) {
       throw outputError("Plan revision must not contain a summary.");
     }
     return normalizePlanRevision(payload);
@@ -487,6 +505,14 @@ export function normalizeBootstrapResult(payload, role) {
     summary: normalizeSummary(
       payload.summary,
       `${role} bootstrap summary`,
+      INVALID_OUTPUT_CODE,
+    ),
+    requiredChecks: normalizeRequiredChecks(
+      payload.requiredChecks,
+      INVALID_OUTPUT_CODE,
+    ),
+    validationInfrastructure: normalizeValidationInfrastructure(
+      payload.validationInfrastructure,
       INVALID_OUTPUT_CODE,
     ),
   });
@@ -507,7 +533,9 @@ export function normalizeReconciliationResult(payload) {
     if (
       payload.summary !== "" ||
       payload.disagreement !== "" ||
-      payload.reason !== ""
+      payload.reason !== "" ||
+      !emptyArray(payload.requiredChecks) ||
+      !emptyArray(payload.validationInfrastructure)
     ) {
       throw outputError("Product decision contains inapplicable fields.");
     }
@@ -517,7 +545,12 @@ export function normalizeReconciliationResult(payload) {
     });
   }
   if (payload.status === "PLAN_REVISION_REQUIRED") {
-    if (payload.summary !== "" || payload.disagreement !== "") {
+    if (
+      payload.summary !== "" ||
+      payload.disagreement !== "" ||
+      !emptyArray(payload.requiredChecks) ||
+      !emptyArray(payload.validationInfrastructure)
+    ) {
       throw outputError("Plan revision contains inapplicable fields.");
     }
     return normalizePlanRevision(payload);
@@ -537,11 +570,21 @@ export function normalizeReconciliationResult(payload) {
         "resolved bootstrap summary",
         INVALID_OUTPUT_CODE,
       ),
+      requiredChecks: normalizeRequiredChecks(
+        payload.requiredChecks,
+        INVALID_OUTPUT_CODE,
+      ),
+      validationInfrastructure: normalizeValidationInfrastructure(
+        payload.validationInfrastructure,
+        INVALID_OUTPUT_CODE,
+      ),
     });
   }
   if (
     payload.summary !== "" ||
     payload.reason !== "" ||
+    !emptyArray(payload.requiredChecks) ||
+    !emptyArray(payload.validationInfrastructure) ||
     payload.question !== "" ||
     payload.whyBlocked !== "" ||
     !emptyArray(payload.options)
@@ -585,7 +628,12 @@ export function normalizeBootstrapArbitration(payload) {
     INVALID_OUTPUT_CODE,
   );
   if (payload.direction === "PRODUCT_DECISION_REQUIRED") {
-    if (payload.summary !== "" || payload.reason !== "") {
+    if (
+      payload.summary !== "" ||
+      payload.reason !== "" ||
+      !emptyArray(payload.requiredChecks) ||
+      !emptyArray(payload.validationInfrastructure)
+    ) {
       throw outputError("Product decision contains inapplicable fields.");
     }
     return Object.freeze({
@@ -595,7 +643,11 @@ export function normalizeBootstrapArbitration(payload) {
     });
   }
   if (payload.direction === "PLAN_REVISION_REQUIRED") {
-    if (payload.summary !== "") {
+    if (
+      payload.summary !== "" ||
+      !emptyArray(payload.requiredChecks) ||
+      !emptyArray(payload.validationInfrastructure)
+    ) {
       throw outputError("Plan revision must not contain a summary.");
     }
     const revision = normalizePlanRevision(payload);
@@ -615,6 +667,14 @@ export function normalizeBootstrapArbitration(payload) {
     summary: normalizeSummary(
       payload.summary,
       "arbitrated bootstrap summary",
+      INVALID_OUTPUT_CODE,
+    ),
+    requiredChecks: normalizeRequiredChecks(
+      payload.requiredChecks,
+      INVALID_OUTPUT_CODE,
+    ),
+    validationInfrastructure: normalizeValidationInfrastructure(
+      payload.validationInfrastructure,
       INVALID_OUTPUT_CODE,
     ),
   });
@@ -637,6 +697,127 @@ function normalizeRelativePath(value, name, code = INVALID_OUTPUT_CODE) {
     throw workflowError(`${name} must be repository-relative.`, code);
   }
   return path;
+}
+
+function normalizeExactCommand(value, name, code) {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > MAX_TEXT_LENGTH ||
+    value.trim() !== value ||
+    /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(value)
+  ) {
+    throw workflowError(`${name} must be an exact single-line command.`, code);
+  }
+  return value;
+}
+
+function normalizeValidationInfrastructurePath(value, name, code) {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > MAX_TEXT_LENGTH ||
+    value.trim() !== value ||
+    value.includes("\\") ||
+    /^[a-zA-Z]:\//u.test(value) ||
+    /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(value) ||
+    posix.isAbsolute(value) ||
+    posix.normalize(value) !== value ||
+    value === "." ||
+    value === ".git" ||
+    value.startsWith(".git/") ||
+    value.split("/").some((part) => part === "..")
+  ) {
+    throw workflowError(`${name} must be an exact repository-relative path.`, code);
+  }
+  return value;
+}
+
+function normalizeRequiredChecks(value, code, { allowEmpty = false } = {}) {
+  if (
+    !Array.isArray(value) ||
+    (!allowEmpty && value.length === 0) ||
+    value.length > MAX_ITEMS
+  ) {
+    throw workflowError("Required-check inventory is invalid.", code);
+  }
+  const checks = Object.freeze(
+    value.map((check) => {
+      if (!isRecord(check) || !REQUIRED_CHECK_ID_PATTERN.test(check.id)) {
+        throw workflowError("Required check has an invalid ID.", code);
+      }
+      return Object.freeze({
+        id: check.id,
+        command: normalizeExactCommand(
+          check.command,
+          `required check ${check.id} command`,
+          code,
+        ),
+      });
+    }),
+  );
+  if (
+    new Set(checks.map(({ id }) => id)).size !== checks.length ||
+    new Set(checks.map(({ command }) => command)).size !== checks.length
+  ) {
+    throw workflowError("Required checks must have unique IDs and commands.", code);
+  }
+  return checks;
+}
+
+function normalizeValidationInfrastructure(value, code) {
+  if (!Array.isArray(value) || value.length > MAX_ITEMS) {
+    throw workflowError("Validation infrastructure is invalid.", code);
+  }
+  const paths = Object.freeze(
+    value.map((path, index) =>
+      normalizeValidationInfrastructurePath(
+        path,
+        `validation infrastructure[${index}]`,
+        code,
+      ),
+    ),
+  );
+  if (new Set(paths).size !== paths.length) {
+    throw workflowError("Validation infrastructure paths must be unique.", code);
+  }
+  return paths;
+}
+
+function normalizeCheckResults(value, requiredChecks, code) {
+  if (!Array.isArray(value) || value.length !== requiredChecks.length) {
+    throw workflowError("Finalization check evidence is incomplete.", code);
+  }
+  return Object.freeze(
+    value.map((result, index) => {
+      const required = requiredChecks[index];
+      if (
+        !isRecord(result) ||
+        result.checkId !== required.id ||
+        !["PASS", "FAIL", "BLOCKED", "NOT_RUN"].includes(result.status)
+      ) {
+        throw workflowError("Finalization check evidence was substituted.", code);
+      }
+      const command = normalizeExactCommand(
+        result.command,
+        `finalization check ${result.checkId} command`,
+        code,
+      );
+      if (command !== required.command) {
+        throw workflowError("Finalization check evidence was substituted.", code);
+      }
+      return Object.freeze({
+        checkId: result.checkId,
+        command,
+        status: result.status,
+        evidence: normalizeTextList(
+          result.evidence,
+          `finalization check ${result.checkId} evidence`,
+          { code },
+        ),
+      });
+    }),
+  );
 }
 
 function normalizeReviewFinding(value, code = INVALID_OUTPUT_CODE) {
@@ -792,6 +973,9 @@ export function normalizeFinalizationResult(payload) {
       payload.skillPath !== "" ||
       payload.summary !== "" ||
       !emptyArray(payload.issues) ||
+      !emptyArray(payload.requiredChecks) ||
+      !emptyArray(payload.validationInfrastructure) ||
+      !emptyArray(payload.checks) ||
       payload.reason !== ""
     ) {
       throw outputError("Product decision contains inapplicable fields.");
@@ -813,6 +997,40 @@ export function normalizeFinalizationResult(payload) {
     }
     if (payload.status === "SKILL_INVALID" && payload.skillPath === "") {
       throw outputError("Finalization skill path is inapplicable.");
+    }
+    const requiredChecks = normalizeRequiredChecks(
+      payload.requiredChecks,
+      INVALID_OUTPUT_CODE,
+      { allowEmpty: payload.status !== "BLOCKED" },
+    );
+    const validationInfrastructure = normalizeValidationInfrastructure(
+      payload.validationInfrastructure,
+      INVALID_OUTPUT_CODE,
+    );
+    const checks =
+      payload.status === "BLOCKED"
+        ? normalizeCheckResults(
+            payload.checks,
+            requiredChecks,
+            INVALID_OUTPUT_CODE,
+          )
+        : emptyArray(payload.checks)
+          ? Object.freeze([])
+          : (() => {
+              throw outputError("Unavailable finalization contains check evidence.");
+            })();
+    if (
+      payload.status !== "BLOCKED" &&
+      (requiredChecks.length !== 0 || validationInfrastructure.length !== 0)
+    ) {
+      throw outputError("Unavailable finalization contains validation inventory.");
+    }
+    if (
+      payload.status === "BLOCKED" &&
+      (!checks.some(({ status }) => status === "BLOCKED") ||
+        checks.some(({ status }) => status === "FAIL"))
+    ) {
+      throw outputError("Blocked finalization has invalid check evidence.");
     }
     const evidence =
       payload.status === "BLOCKED"
@@ -840,15 +1058,35 @@ export function normalizeFinalizationResult(payload) {
         INVALID_OUTPUT_CODE,
       ),
       evidence,
+      requiredChecks,
+      validationInfrastructure,
+      checks,
     });
   }
   if (payload.reason !== "" || !emptyDecision(payload)) {
     throw outputError("Finalization result contains inapplicable fields.");
   }
   const issues = normalizeFinalizationIssues(payload.issues);
+  const requiredChecks = normalizeRequiredChecks(
+    payload.requiredChecks,
+    INVALID_OUTPUT_CODE,
+  );
+  const validationInfrastructure = normalizeValidationInfrastructure(
+    payload.validationInfrastructure,
+    INVALID_OUTPUT_CODE,
+  );
+  const checks = normalizeCheckResults(
+    payload.checks,
+    requiredChecks,
+    INVALID_OUTPUT_CODE,
+  );
   if (
     (payload.status === "PASS" && issues.length !== 0) ||
-    (payload.status === "FAIL" && issues.length === 0)
+    (payload.status === "FAIL" && issues.length === 0) ||
+    (payload.status === "PASS" &&
+      checks.some(({ status }) => status !== "PASS")) ||
+    (payload.status === "FAIL" &&
+      !checks.some(({ status }) => status === "FAIL"))
   ) {
     throw outputError("Finalization status does not match its issues.");
   }
@@ -868,6 +1106,9 @@ export function normalizeFinalizationResult(payload) {
       INVALID_OUTPUT_CODE,
     ),
     issues,
+    requiredChecks,
+    validationInfrastructure,
+    checks,
   });
 }
 
@@ -882,7 +1123,11 @@ export function normalizeReviewResult(payload, previousFindings = []) {
   }
   assertStructuredResultSize(payload);
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
-    if (!emptyArray(payload.findings)) {
+    if (
+      !emptyArray(payload.findings) ||
+      payload.validationChange !== "UNCHANGED" ||
+      !emptyArray(payload.validationEvidence)
+    ) {
       throw outputError("Product decision must not include findings.");
     }
     return Object.freeze({
@@ -895,8 +1140,24 @@ export function normalizeReviewResult(payload, previousFindings = []) {
   }
   const findings = normalizeReviewFindings(payload.findings);
   if (
+    !["UNCHANGED", "ACCEPTED", "REJECTED"].includes(
+      payload.validationChange,
+    )
+  ) {
+    throw outputError("Review validation-change decision is invalid.");
+  }
+  const validationEvidence = normalizeTextList(
+    payload.validationEvidence,
+    "review validation evidence",
+    {
+      allowEmpty: payload.validationChange === "UNCHANGED",
+      code: INVALID_OUTPUT_CODE,
+    },
+  );
+  if (
     (payload.status === "APPROVED" && findings.length !== 0) ||
-    (payload.status === "FINDINGS" && findings.length === 0)
+    (payload.status === "FINDINGS" && findings.length === 0) ||
+    (payload.status === "APPROVED" && payload.validationChange === "REJECTED")
   ) {
     throw outputError("Review status does not match its findings.");
   }
@@ -909,7 +1170,12 @@ export function normalizeReviewResult(payload, previousFindings = []) {
       throw outputError("Reviewer changed the ID of an unchanged finding.");
     }
   }
-  return Object.freeze({ status: payload.status, findings });
+  return Object.freeze({
+    status: payload.status,
+    findings,
+    validationChange: payload.validationChange,
+    validationEvidence,
+  });
 }
 
 export function normalizeResolutionResult(payload, blockers, arbitratedIds) {
@@ -1280,7 +1546,18 @@ function normalizePersistedFinalization(value) {
   }
   assertExactFields(
     value,
-    ["status", "skillPath", "summary", "issues", "fingerprint"],
+    [
+      "status",
+      "skillPath",
+      "summary",
+      "issues",
+      "requiredChecks",
+      "validationInfrastructure",
+      "validationInfrastructureFingerprint",
+      "checks",
+      "validationChanged",
+      "fingerprint",
+    ],
     "Plan-execution finalization result",
   );
   if (
@@ -1303,9 +1580,80 @@ function normalizePersistedFinalization(value) {
   );
   if (
     (value.status === "PASS" && issues.length !== 0) ||
-    (value.status === "FAIL" && issues.length === 0)
+    (value.status === "FAIL" && issues.length === 0) ||
+    typeof value.validationChanged !== "boolean" ||
+    !HASH_PATTERN.test(value.validationInfrastructureFingerprint)
   ) {
     throw workflowError("Plan-execution finalization result is inconsistent.");
+  }
+  const requiredChecks = normalizeRequiredChecks(
+    value.requiredChecks,
+    "ERR_INVALID_PLAN_EXECUTION_STATE",
+  );
+  normalizeValidationInfrastructure(
+    value.validationInfrastructure,
+    "ERR_INVALID_PLAN_EXECUTION_STATE",
+  );
+  const checks = normalizeCheckResults(
+    value.checks,
+    requiredChecks,
+    "ERR_INVALID_PLAN_EXECUTION_STATE",
+  );
+  if (
+    (value.status === "PASS" &&
+      checks.some(({ status }) => status !== "PASS")) ||
+    (value.status === "FAIL" &&
+      !checks.some(({ status }) => status === "FAIL"))
+  ) {
+    throw workflowError("Plan-execution check evidence is inconsistent.");
+  }
+  return value;
+}
+
+function normalizePersistedValidation(value, name) {
+  if (value === null) {
+    return null;
+  }
+  assertExactFields(
+    value,
+    ["requiredChecks", "validationInfrastructure"],
+    name,
+  );
+  normalizeRequiredChecks(
+    value.requiredChecks,
+    "ERR_INVALID_PLAN_EXECUTION_STATE",
+  );
+  normalizeValidationInfrastructure(
+    value.validationInfrastructure,
+    "ERR_INVALID_PLAN_EXECUTION_STATE",
+  );
+  return value;
+}
+
+function normalizePersistedReview(value) {
+  if (value === null) {
+    return null;
+  }
+  assertExactFields(
+    value,
+    ["status", "validationChange", "validationEvidence", "fingerprint"],
+    "Plan-execution review result",
+  );
+  if (
+    !["APPROVED", "FINDINGS"].includes(value.status) ||
+    !["UNCHANGED", "ACCEPTED", "REJECTED"].includes(
+      value.validationChange,
+    ) ||
+    !HASH_PATTERN.test(value.fingerprint)
+  ) {
+    throw workflowError("Plan-execution review result is invalid.");
+  }
+  normalizeTextList(value.validationEvidence, "review validation evidence", {
+    allowEmpty: value.validationChange === "UNCHANGED",
+    code: "ERR_INVALID_PLAN_EXECUTION_STATE",
+  });
+  if (value.status === "APPROVED" && value.validationChange === "REJECTED") {
+    throw workflowError("Plan-execution review result is inconsistent.");
   }
   return value;
 }
@@ -1570,6 +1918,7 @@ export function normalizePipelineState(value) {
     "clarificationFrozen",
     "bootstrapArbitrationUsed",
     "compatibilityCheckRequired",
+    "validationMigrationPending",
     "pendingCorrection",
     "stagnationArbitrationUsed",
   ]) {
@@ -1670,6 +2019,14 @@ export function normalizePipelineState(value) {
     value.reviewerSummary,
     "Reviewer summary",
   );
+  const workerValidation = normalizePersistedValidation(
+    value.workerValidation,
+    "Worker validation evidence",
+  );
+  const reviewerValidation = normalizePersistedValidation(
+    value.reviewerValidation,
+    "Reviewer validation evidence",
+  );
   const resolvedSummary = normalizedSummary(
     value.resolvedSummary,
     "resolved summary",
@@ -1677,6 +2034,13 @@ export function normalizePipelineState(value) {
   const disagreement = normalizeDisagreement(value.bootstrapDisagreement);
   if (
     (reviewerSummary !== null && workerSummary === null) ||
+    (!value.validationMigrationPending &&
+      (workerValidation !== null) !== (workerSummary !== null)) ||
+    (!value.validationMigrationPending &&
+      (reviewerValidation !== null) !== (reviewerSummary !== null)) ||
+    (value.validationMigrationPending &&
+      reviewerValidation !== null &&
+      workerValidation === null) ||
     ((resolvedSummary !== null || disagreement !== null) &&
       (workerSummary === null || reviewerSummary === null)) ||
     (resolvedSummary !== null && disagreement !== null)
@@ -1690,6 +2054,16 @@ export function normalizePipelineState(value) {
       typeof value.backendVersions?.arbiter !== "string")
   ) {
     throw workflowError("Plan-execution bootstrap arbitration is inconsistent.");
+  }
+  if (
+    value.validationMigrationPending &&
+    (!value.preflightComplete ||
+      resolvedSummary === null ||
+      ["CLARIFY", "BOOTSTRAP", "DONE", "FAILED"].includes(
+        value.workflowState,
+      ))
+  ) {
+    throw workflowError("Plan-execution validation migration is inapplicable.");
   }
   if (
     value.compatibilityCheckRequired &&
@@ -1729,6 +2103,59 @@ export function normalizePipelineState(value) {
   const finalizationResult = normalizePersistedFinalization(
     value.finalizationResult,
   );
+  const requiredChecks =
+    value.requiredChecks === null
+      ? null
+      : normalizeRequiredChecks(
+          value.requiredChecks,
+          "ERR_INVALID_PLAN_EXECUTION_STATE",
+        );
+  const validationInfrastructure =
+    value.validationInfrastructure === null
+      ? null
+      : normalizeValidationInfrastructure(
+          value.validationInfrastructure,
+          "ERR_INVALID_PLAN_EXECUTION_STATE",
+        );
+  const reviewResult = normalizePersistedReview(value.reviewResult);
+  if (
+    (requiredChecks === null) !== (resolvedSummary === null) ||
+    (validationInfrastructure === null) !== (resolvedSummary === null) ||
+    (value.validationInfrastructureFingerprint === null) !==
+      (resolvedSummary === null) ||
+    (value.validationInfrastructureFingerprint !== null &&
+      !HASH_PATTERN.test(value.validationInfrastructureFingerprint))
+  ) {
+    throw workflowError("Plan-execution validation inventory is inconsistent.");
+  }
+  if (finalizationResult !== null) {
+    const matchesEstablishedValidation =
+      isDeepStrictEqual(finalizationResult.requiredChecks, requiredChecks) &&
+      isDeepStrictEqual(
+        finalizationResult.validationInfrastructure,
+        validationInfrastructure,
+      ) &&
+      finalizationResult.validationInfrastructureFingerprint ===
+        value.validationInfrastructureFingerprint;
+    const reviewedChange = reviewResult?.validationChange;
+    if (
+      (!finalizationResult.validationChanged &&
+        !matchesEstablishedValidation) ||
+      (finalizationResult.validationChanged &&
+        reviewedChange !== "ACCEPTED" &&
+        matchesEstablishedValidation) ||
+      (reviewedChange === "UNCHANGED" &&
+        finalizationResult.validationChanged) ||
+      (["ACCEPTED", "REJECTED"].includes(reviewedChange) &&
+        !finalizationResult.validationChanged) ||
+      (reviewedChange === "ACCEPTED" && !matchesEstablishedValidation) ||
+      (reviewedChange === "REJECTED" && matchesEstablishedValidation)
+    ) {
+      throw workflowError(
+        "Plan-execution validation-change evidence is inconsistent.",
+      );
+    }
+  }
   const findings = normalizePersistedFindings(value.findings);
   const previousFindings = normalizePersistedFindings(
     value.previousFindings,
@@ -1870,6 +2297,7 @@ export function normalizePipelineState(value) {
   if (
     finalizationResult === null &&
     (value.finalizedFingerprint !== null ||
+      reviewResult !== null ||
       value.reviewedFingerprint !== null ||
       findings.length !== 0 ||
       (pendingDisputes.length !== 0 && !deferredDisputes))
@@ -1883,9 +2311,19 @@ export function normalizePipelineState(value) {
       (value.reviewedFingerprint !== null &&
         value.reviewedFingerprint !== value.finalizedFingerprint) ||
       (finalizationResult.status === "FAIL" &&
-        (value.reviewedFingerprint !== null || findings.length !== 0)))
+        (reviewResult !== null ||
+          value.reviewedFingerprint !== null ||
+          findings.length !== 0)))
   ) {
     throw workflowError("Plan-execution finalization progress is inconsistent.");
+  }
+  if (
+    (reviewResult === null) !== (value.reviewedFingerprint === null) ||
+    (reviewResult !== null &&
+      reviewResult.fingerprint !== value.reviewedFingerprint) ||
+    (reviewResult?.status === "APPROVED" && findings.length !== 0)
+  ) {
+    throw workflowError("Plan-execution review evidence is inconsistent.");
   }
   if (
     (findings.length > 0 || pendingDisputes.length > 0) &&
@@ -1938,6 +2376,8 @@ export function normalizePipelineState(value) {
       pendingEdit !== null ||
       workerSummary !== null ||
       reviewerSummary !== null ||
+      workerValidation !== null ||
+      reviewerValidation !== null ||
       resolvedSummary !== null ||
       disagreement !== null ||
       value.bootstrapArbitrationUsed ||
@@ -1993,6 +2433,8 @@ export function normalizePipelineState(value) {
     (value.clarificationFrozen ||
       workerSummary !== null ||
       reviewerSummary !== null ||
+      workerValidation !== null ||
+      reviewerValidation !== null ||
       resolvedSummary !== null ||
       disagreement !== null)
   ) {
@@ -2059,6 +2501,7 @@ export function normalizePipelineState(value) {
     (finalizationResult?.status !== "PASS" ||
       value.finalizedFingerprint === null ||
       value.reviewedFingerprint !== value.finalizedFingerprint ||
+      !["UNCHANGED", "ACCEPTED"].includes(reviewResult.validationChange) ||
       findings.length !== 0 ||
       pendingDisputes.length !== 0 ||
       value.reviewReconsideration.length !== 0)
@@ -2072,6 +2515,7 @@ export function normalizePipelineState(value) {
       finalizationResult?.status !== "PASS" ||
       value.finalizedFingerprint === null ||
       value.reviewedFingerprint !== value.finalizedFingerprint ||
+      !["UNCHANGED", "ACCEPTED"].includes(reviewResult.validationChange) ||
       findings.length !== 0 ||
       pendingDisputes.length !== 0 ||
       value.reviewReconsideration.length !== 0)
@@ -2113,6 +2557,8 @@ export function createPlanExecutionState({
     canonicalPlan: null,
     workerSummary: null,
     reviewerSummary: null,
+    workerValidation: null,
+    reviewerValidation: null,
     resolvedSummary: null,
     bootstrapDisagreement: null,
     bootstrapArbitrationUsed: false,
@@ -2122,6 +2568,11 @@ export function createPlanExecutionState({
     implementationDirection: null,
     finalizationResult: null,
     finalizedFingerprint: null,
+    requiredChecks: null,
+    validationInfrastructure: null,
+    validationInfrastructureFingerprint: null,
+    validationMigrationPending: false,
+    reviewResult: null,
     reviewedFingerprint: null,
     findings: Object.freeze([]),
     previousFindings: Object.freeze([]),
@@ -2188,7 +2639,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 1 ||
+    run.pipelineStateVersion !== 2 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -2536,6 +2987,7 @@ export function assertRuntime(runtime) {
     "preflight",
     "prepareCommit",
     "snapshot",
+    "validationInfrastructureFingerprint",
     "verifyCommit",
   ]) {
     if (typeof runtime.git[name] !== "function") {

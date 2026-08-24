@@ -40,6 +40,28 @@ function hashEntries(entries) {
   return hash.digest("hex");
 }
 
+export async function pathsFingerprintAtRoot(
+  context,
+  repositoryPath,
+  requestedPaths,
+) {
+  const locations = await Promise.all(
+    requestedPaths.map((path) => normalizeRepositoryPath(repositoryPath, path)),
+  );
+  const relativePaths = [
+    ...new Set(locations.map(({ relativePath }) => relativePath)),
+  ].sort();
+  const entries = await Promise.all(
+    relativePaths.map((path) =>
+      contentEntry(context, repositoryPath, path, {
+        allowedPaths: [],
+        missingAllowed: true,
+      }),
+    ),
+  );
+  return hashEntries(entries);
+}
+
 const EMPTY_CONTENT_FINGERPRINT = hashEntries([]);
 
 function literalPathspec(relativePath) {

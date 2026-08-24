@@ -371,6 +371,34 @@ test("content fingerprints ignore staging placement and ignored files", async (t
   );
 });
 
+test("validation-infrastructure fingerprints cover only the selected files", async (t) => {
+  const { repositoryPath, service } = await createFixture(t);
+  const validationPath = "validation  strict.json";
+  await writeFile(join(repositoryPath, validationPath), "{\"strict\":true}\n");
+  const initial = await service.validationInfrastructureFingerprint({
+    paths: [validationPath],
+    projectPath: repositoryPath,
+  });
+
+  await writeFile(join(repositoryPath, "tracked.txt"), "unrelated\n");
+  assert.equal(
+    await service.validationInfrastructureFingerprint({
+      paths: [validationPath],
+      projectPath: repositoryPath,
+    }),
+    initial,
+  );
+
+  await writeFile(join(repositoryPath, validationPath), "{\"strict\":false}\n");
+  assert.notEqual(
+    await service.validationInfrastructureFingerprint({
+      paths: [validationPath],
+      projectPath: repositoryPath,
+    }),
+    initial,
+  );
+});
+
 test("content fingerprints follow worktree content when index content diverges", async (t) => {
   const { env, repositoryPath, service } = await createFixture(t);
   const initial = await service.contentFingerprint({

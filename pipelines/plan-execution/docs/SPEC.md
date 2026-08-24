@@ -367,6 +367,10 @@ Persist at least:
 - current findings;
 - fix/dispute counters;
 - latest finalized content fingerprint;
+- complete required-check inventory, validation-infrastructure file list, and
+  runner-computed infrastructure fingerprint;
+- exact per-check finalization evidence and the fingerprint-bound Reviewer
+  validation-change decision;
 - latest reviewed content fingerprint;
 - escalation reason when paused.
 
@@ -390,6 +394,15 @@ event under the per-run execution lease. An unsupported forward version or a
 missing migration returns an actionable version-skew error; invalid migration
 output returns a specific migration failure instead of treating the run as
 generically invalid.
+
+Pipeline state version 2 adds the required-check and validation-infrastructure
+evidence. Its version-1 migration preserves safe content and commit history,
+marks resumable legacy evidence provisional, and routes active validated work
+back through independent validation discovery and `FINALIZE`. A paused retry or
+finding override cannot advance until that discovery completes. A consumed
+commit authorization remains in `COMMIT` for Git verification and is never
+cleared into a replayable effect. Immutable terminal history is upgraded without
+replaying an effect.
 
 ### `events.jsonl`
 
@@ -1041,6 +1054,16 @@ Each summary should cover:
 - risks/ambiguities;
 - finalization procedure.
 
+Each role also returns an independently discovered ordered inventory of stable
+`C`-prefixed check IDs and exact commands, plus every repository-relative file
+that controls package scripts, test discovery, test runners, skill guidance, or
+validation configuration. Reconciliation or arbitration establishes the
+complete inventory from both reports. The runner fingerprints the listed files;
+an agent-supplied digest is never trusted.
+Exact commands and paths retain interior whitespace; validation rejects unsafe,
+non-normalized, multiline, or boundary-whitespace values rather than rewriting
+them.
+
 The Reviewer summary additionally states what it intends to verify.
 
 ### Reconciliation
@@ -1144,6 +1167,18 @@ every policy mode.
 
 The finalization turn should execute the validation procedure and report its result. It should not perform unrelated discretionary fixes in the same turn.
 
+Every non-availability result carries the complete inventory actually used and
+exactly one ordered result for each required check. `PASS` requires every result
+to be `PASS`; omission, `NOT_RUN`, skip, exclusion, substitution, replacement,
+or weakening is invalid structured output. Evidence is bounded and direct;
+external host results and user attestations do not satisfy the gate.
+
+The Worker must not change package scripts, test discovery, test runners,
+validation configuration, or the inventory merely to evade an environment
+blocker. A change required by the current planned commit remains possible, but
+the finalization result records the candidate inventory and current
+infrastructure fingerprint for independent review.
+
 Before invocation, the Worker reports a missing or invalid resolved skill and
 does not execute it. An explicitly configured unavailable skill pauses. An
 unavailable automatically discovered skill switches to the same dedicated gate
@@ -1203,6 +1238,15 @@ It reviews:
 - edge cases;
 - unintended scope expansion;
 - project conventions.
+
+It also compares the established and candidate check inventories,
+infrastructure file sets, runner-computed fingerprints, and exact per-check
+evidence. The fresh review request carries both complete tuples rather than
+depending on earlier session context. An unchanged gate is recorded as
+`UNCHANGED`. Any change must be
+explicitly `ACCEPTED` as authorized by the current plan step or `REJECTED` with
+a finding. The decision and its bounded evidence are bound to the same content
+fingerprint as the review.
 
 The Reviewer must not receive the Worker's private implementation reasoning.
 
@@ -1378,6 +1422,7 @@ unresolved disputes == 0
 pending arbitration == false
 current content fingerprint == finalized fingerprint
 current content fingerprint == reviewed fingerprint
+review validation change == UNCHANGED or ACCEPTED
 HEAD == expected HEAD
 current branch/ref context == expected branch/ref context
 ```

@@ -11,6 +11,28 @@ function deepFreeze(value) {
 
 const TEXT = { type: "string" };
 const TEXT_LIST = { type: "array", items: TEXT };
+const REQUIRED_CHECK = {
+  type: "object",
+  properties: {
+    id: { type: "string", maxLength: 10, pattern: "^C[1-9][0-9]{0,8}$" },
+    command: TEXT,
+  },
+  required: ["id", "command"],
+  additionalProperties: false,
+};
+const REQUIRED_CHECKS = { type: "array", items: REQUIRED_CHECK };
+const VALIDATION_INFRASTRUCTURE = { type: "array", items: TEXT };
+const CHECK_RESULT = {
+  type: "object",
+  properties: {
+    checkId: { type: "string", maxLength: 10, pattern: "^C[1-9][0-9]{0,8}$" },
+    command: TEXT,
+    status: { type: "string", enum: ["PASS", "FAIL", "BLOCKED", "NOT_RUN"] },
+    evidence: TEXT_LIST,
+  },
+  required: ["checkId", "command", "status", "evidence"],
+  additionalProperties: false,
+};
 const QUESTION = {
   type: "object",
   properties: {
@@ -115,12 +137,16 @@ export const BOOTSTRAP_SCHEMA = deepFreeze({
       ],
     },
     summary: TEXT,
+    requiredChecks: REQUIRED_CHECKS,
+    validationInfrastructure: VALIDATION_INFRASTRUCTURE,
     reason: TEXT,
     ...DECISION_PROPERTIES,
   },
   required: [
     "status",
     "summary",
+    "requiredChecks",
+    "validationInfrastructure",
     "reason",
     "question",
     "options",
@@ -144,6 +170,8 @@ export const BOOTSTRAP_RECONCILIATION_SCHEMA = deepFreeze({
     },
     summary: TEXT,
     disagreement: TEXT,
+    requiredChecks: REQUIRED_CHECKS,
+    validationInfrastructure: VALIDATION_INFRASTRUCTURE,
     reason: TEXT,
     ...DECISION_PROPERTIES,
   },
@@ -151,6 +179,8 @@ export const BOOTSTRAP_RECONCILIATION_SCHEMA = deepFreeze({
     "status",
     "summary",
     "disagreement",
+    "requiredChecks",
+    "validationInfrastructure",
     "reason",
     "question",
     "options",
@@ -174,6 +204,8 @@ export const BOOTSTRAP_ARBITRATION_SCHEMA = deepFreeze({
       ],
     },
     summary: TEXT,
+    requiredChecks: REQUIRED_CHECKS,
+    validationInfrastructure: VALIDATION_INFRASTRUCTURE,
     rationale: TEXT,
     reason: TEXT,
     ...DECISION_PROPERTIES,
@@ -181,6 +213,8 @@ export const BOOTSTRAP_ARBITRATION_SCHEMA = deepFreeze({
   required: [
     "direction",
     "summary",
+    "requiredChecks",
+    "validationInfrastructure",
     "rationale",
     "reason",
     "question",
@@ -231,6 +265,9 @@ export const FINALIZATION_SCHEMA = deepFreeze({
     skillPath: TEXT,
     summary: TEXT,
     issues: { type: "array", items: FINALIZATION_ISSUE },
+    requiredChecks: REQUIRED_CHECKS,
+    validationInfrastructure: VALIDATION_INFRASTRUCTURE,
+    checks: { type: "array", items: CHECK_RESULT },
     reason: TEXT,
     ...DECISION_PROPERTIES,
   },
@@ -239,6 +276,9 @@ export const FINALIZATION_SCHEMA = deepFreeze({
     "skillPath",
     "summary",
     "issues",
+    "requiredChecks",
+    "validationInfrastructure",
+    "checks",
     "reason",
     "question",
     "options",
@@ -256,11 +296,18 @@ export const REVIEW_SCHEMA = deepFreeze({
       enum: ["APPROVED", "FINDINGS", "PRODUCT_DECISION_REQUIRED"],
     },
     findings: { type: "array", items: REVIEW_FINDING },
+    validationChange: {
+      type: "string",
+      enum: ["UNCHANGED", "ACCEPTED", "REJECTED"],
+    },
+    validationEvidence: TEXT_LIST,
     ...DECISION_PROPERTIES,
   },
   required: [
     "status",
     "findings",
+    "validationChange",
+    "validationEvidence",
     "question",
     "options",
     "whyBlocked",

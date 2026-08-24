@@ -20,6 +20,7 @@ import { createGitService } from "../../../src/git.js";
 import { createRunStore } from "../../../src/state.js";
 import {
   createPolishingState,
+  migratePolishingStateV1,
   polishingPipeline,
   runPolishing,
 } from "../src/index.js";
@@ -29,6 +30,7 @@ import {
   MAX_DURABLE_RUN_BYTES,
   MAX_DISPUTE_HISTORY_BYTES,
   MAX_DISPUTES_PER_FINDING,
+  normalizeFinalizationResult,
   normalizePipelineState,
 } from "../src/workflow-contract.js";
 
@@ -40,6 +42,229 @@ const SETTINGS = Object.freeze({
   maxDisputesPerFinding: 2,
   maxSameFindingRounds: 3,
   stagnationWindowRounds: 3,
+});
+const REQUIRED_CHECKS = Object.freeze([
+  Object.freeze({ id: "C1", command: "npm test" }),
+]);
+const VALIDATION_INFRASTRUCTURE = Object.freeze([
+  ".agents/skills/finalization/SKILL.md",
+]);
+
+function checkResults(status, evidence = "The fixture check completed.") {
+  return REQUIRED_CHECKS.map(({ id, command }) => ({
+    checkId: id,
+    command,
+    status,
+    evidence: [evidence],
+  }));
+}
+
+function versionOneState(state) {
+  const legacy = { ...state };
+  for (const field of [
+    "workerValidation",
+    "reviewerValidation",
+    "requiredChecks",
+    "validationInfrastructure",
+    "validationInfrastructureFingerprint",
+    "validationMigrationPending",
+    "reviewResult",
+  ]) {
+    delete legacy[field];
+  }
+  return legacy;
+}
+
+test("rejects incomplete or substituted finalization PASS evidence", () => {
+  const valid = finalizationPassed();
+  assert.throws(
+    () => normalizeFinalizationResult({ ...valid, checks: [] }),
+    /incomplete/u,
+  );
+  assert.throws(
+    () =>
+      normalizeFinalizationResult({
+        ...valid,
+        checks: [{ ...valid.checks[0], command: "npm test -- --exclude slow" }],
+      }),
+    /substituted/u,
+  );
+  assert.throws(
+    () =>
+      normalizeFinalizationResult({
+        ...valid,
+        checks: [{ ...valid.checks[0], status: "NOT_RUN" }],
+      }),
+    /status does not match/u,
+  );
+  const blocked = finalizationBlocked(
+    "The sandbox blocked the required check.",
+    "The subprocess was denied before validation could complete.",
+  );
+  assert.throws(
+    () =>
+      normalizeFinalizationResult({
+        ...blocked,
+        checks: [{ ...blocked.checks[0], status: "FAIL" }],
+      }),
+    /invalid check evidence/u,
+  );
+  const exactCommand = `node -e 'process.stdout.write("a  b")'`;
+  const exactPath = "config/checks  strict.json";
+  const exact = normalizeFinalizationResult({
+    ...valid,
+    requiredChecks: [{ id: "C1", command: exactCommand }],
+    validationInfrastructure: [exactPath],
+    checks: [
+      {
+        checkId: "C1",
+        command: exactCommand,
+        status: "PASS",
+        evidence: ["The exact command passed."],
+      },
+    ],
+  });
+  assert.equal(exact.requiredChecks[0].command, exactCommand);
+  assert.equal(exact.checks[0].command, exactCommand);
+  assert.equal(exact.validationInfrastructure[0], exactPath);
+});
+
+test("migrates version-1 polishing state to the fail-closed shape", () => {
+  const legacy = versionOneState(createPolishingState());
+  const migrated = migratePolishingStateV1({ pipelineState: legacy });
+  assert.doesNotThrow(() => normalizePipelineState(migrated));
+  assert.equal(migrated.finalizationResult, null);
+  assert.equal(migrated.reviewResult, null);
+});
+
+test("invalidates version-1 validation evidence before completed polishing resumes", async (t) => {
+  const fixture = await createFixture(t, {
+    reviewer: [
+      bootstrapReady("Reviewer"),
+      reviewApproved(),
+      bootstrapReady("Migrating Reviewer"),
+      reviewApproved(),
+    ],
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationPassed(),
+      bootstrapReady("Migrating Worker"),
+      reconciliationResolved(),
+      finalizationPassed(),
+    ],
+  });
+  const completed = await fixture.run();
+  const migrated = migratePolishingStateV1({
+    pipelineState: versionOneState(completed.pipelineState),
+  });
+
+  assert.doesNotThrow(() => normalizePipelineState(migrated));
+  assert.equal(migrated.workflowState, "FINALIZE");
+  assert.equal(migrated.finalizationResult, null);
+  assert.equal(migrated.finalizedFingerprint, null);
+  assert.equal(migrated.reviewResult, null);
+  assert.equal(migrated.reviewedFingerprint, null);
+  assert.equal(migrated.validationMigrationPending, true);
+
+  await fixture.persistPipelineState(migrated);
+  const revalidated = await fixture.run();
+  assert.equal(revalidated.pipelineState.workflowState, "DONE");
+  assert.equal(revalidated.pipelineState.validationMigrationPending, false);
+  assert.ok(
+    fixture.calls.worker.some(({ prompt }) =>
+      prompt.includes("versioned-state migration checkpoint"),
+    ),
+  );
+  assert.ok(
+    fixture.calls.reviewer.some(({ prompt }) =>
+      prompt.includes("versioned-state migration checkpoint"),
+    ),
+  );
+});
+
+test("re-establishes validation before retrying a migrated finalization pause", async (t) => {
+  const fixture = await createFixture(t, {
+    reviewer: [
+      bootstrapReady("Reviewer"),
+      bootstrapReady("Migrating Reviewer"),
+      reviewApproved(),
+    ],
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationBlocked(
+        "The validation service is unavailable.",
+        "The service endpoint refused the local connection.",
+      ),
+      bootstrapReady("Migrating Worker"),
+      reconciliationResolved(),
+      finalizationPassed(),
+    ],
+  });
+  const paused = await fixture.run();
+  const migrated = migratePolishingStateV1({
+    pipelineState: versionOneState(paused.pipelineState),
+  });
+  await fixture.persistPipelineState(migrated);
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.pipelineState.validationMigrationPending, false);
+  assert.ok(
+    fixture.calls.worker.some(({ prompt }) =>
+      prompt.includes("versioned-state migration checkpoint"),
+    ),
+  );
+});
+
+test("invalidates migrated findings before applying an override", async (t) => {
+  const fixture = await createFixture(t, {
+    settings: { ...SETTINGS, maxSameFindingRounds: 1 },
+    reviewer: [
+      bootstrapReady("Reviewer"),
+      reviewFindings(),
+      reviewFindings(),
+      bootstrapReady("Migrating Reviewer"),
+      reviewApproved(),
+    ],
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationPassed(),
+      resolution("FIX", "R1"),
+      finalizationPassed(),
+      bootstrapReady("Migrating Worker"),
+      reconciliationResolved(),
+      finalizationPassed(),
+    ],
+    async onRoleRun(role, request, _turn, { projectPath }) {
+      if (role === "worker" && /Resolve every current blocker/u.test(request.prompt)) {
+        await writeFile(join(projectPath, "tracked.txt"), "reviewed correction\n");
+      }
+    },
+  });
+  const paused = await fixture.run();
+  const migrated = migratePolishingStateV1({
+    pipelineState: versionOneState(paused.pipelineState),
+  });
+  await fixture.persistPipelineState(migrated);
+
+  const completed = await fixture.run({
+    type: "override-finding",
+    findingId: "R1",
+  });
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.deepEqual(completed.pipelineState.findingOverrides, []);
+  assert.equal(completed.pipelineState.validationMigrationPending, false);
 });
 
 function hash(value) {
@@ -77,6 +302,8 @@ function bootstrapReady(role) {
   return {
     status: "READY",
     summary: `${role} independently understands the dirty change set and finalization procedure.`,
+    requiredChecks: REQUIRED_CHECKS,
+    validationInfrastructure: VALIDATION_INFRASTRUCTURE,
     reason: "",
     ...emptyDecision(),
   };
@@ -88,6 +315,8 @@ function reconciliationResolved() {
     summary:
       "Polish the existing change set within the established repository boundaries.",
     disagreement: "",
+    requiredChecks: REQUIRED_CHECKS,
+    validationInfrastructure: VALIDATION_INFRASTRUCTURE,
     reason: "",
     ...emptyDecision(),
   };
@@ -98,6 +327,8 @@ function reconciliationDisagreement() {
     status: "DISAGREEMENT",
     summary: "",
     disagreement: "The roles selected different owning modules.",
+    requiredChecks: [],
+    validationInfrastructure: [],
     reason: "",
     question: "",
     options: [],
@@ -110,6 +341,8 @@ function arbitrationResolved() {
   return {
     direction: "SYNTHESIZE",
     summary: "Use the existing narrow module boundary and preserve the public behavior.",
+    requiredChecks: REQUIRED_CHECKS,
+    validationInfrastructure: VALIDATION_INFRASTRUCTURE,
     rationale: "Repository ownership and tests support the combined interpretation.",
     reason: "",
     ...emptyDecision(),
@@ -159,15 +392,23 @@ function finalizationPassed(
     skillPath,
     summary: "The complete project validation procedure passed.",
     issues: [],
+    requiredChecks: REQUIRED_CHECKS,
+    validationInfrastructure: VALIDATION_INFRASTRUCTURE,
+    checks: checkResults("PASS"),
     reason: "",
     ...emptyDecision(),
   };
 }
 
-function reviewApproved() {
+function reviewApproved(validationChange = "UNCHANGED") {
   return {
     status: "APPROVED",
     findings: [],
+    validationChange,
+    validationEvidence:
+      validationChange === "UNCHANGED"
+        ? []
+        : ["The task authorizes the complete validation change."],
     ...emptyDecision(),
   };
 }
@@ -185,6 +426,9 @@ function finalizationFailed(id = "F1") {
         evidence: ["The fixture check failed."],
       },
     ],
+    requiredChecks: REQUIRED_CHECKS,
+    validationInfrastructure: VALIDATION_INFRASTRUCTURE,
+    checks: checkResults("FAIL", "The fixture check failed."),
     reason: "",
     ...emptyDecision(),
   };
@@ -196,6 +440,9 @@ function finalizationUnavailable(status) {
     skillPath: ".agents/skills/finalization/SKILL.md",
     summary: "",
     issues: [],
+    requiredChecks: [],
+    validationInfrastructure: [],
+    checks: [],
     reason: "The finalization skill cannot be used safely.",
     question: "",
     options: [],
@@ -210,6 +457,9 @@ function finalizationBlocked(reason, evidence) {
     skillPath: ".agents/skills/finalization/SKILL.md",
     summary: "",
     issues: [],
+    requiredChecks: REQUIRED_CHECKS,
+    validationInfrastructure: VALIDATION_INFRASTRUCTURE,
+    checks: checkResults("BLOCKED", evidence),
     reason,
     question: "",
     options: [],
@@ -232,6 +482,8 @@ function reviewFindingBatch(ids) {
       reason: "An unnecessary line remains.",
       suggestedAction: "Remove the unnecessary line.",
     })),
+    validationChange: "UNCHANGED",
+    validationEvidence: [],
     ...emptyDecision(),
   };
 }
@@ -503,7 +755,7 @@ async function createFixture(
   const store = createRunStore({ stateRoot });
   let created = await store.createRun({
     pipelineId: "polishing",
-    pipelineStateVersion: 1,
+    pipelineStateVersion: 2,
     projectPath,
     taskPath,
     roles: {
@@ -738,6 +990,10 @@ test("rejects and refuses to recover inconsistent correction progress", async (t
       fingerprint: differentFingerprint,
     },
     finalizedFingerprint: differentFingerprint,
+    reviewResult: {
+      ...completed.pipelineState.reviewResult,
+      fingerprint: differentFingerprint,
+    },
     reviewedFingerprint: differentFingerprint,
   };
   assert.throws(
@@ -768,6 +1024,10 @@ test("rejects and refuses to recover inconsistent correction progress", async (t
   const baseState = {
     ...completed.pipelineState,
     workflowState: "RESOLVE_FINDINGS",
+    reviewResult: {
+      ...completed.pipelineState.reviewResult,
+      status: "FINDINGS",
+    },
     findings: [finding],
     pendingDisputes: [pendingDispute],
     disputeCounts: { [finding.id]: 2 },
@@ -866,6 +1126,10 @@ test("rejects and refuses to recover inconsistent correction progress", async (t
   const pipelineState = {
     ...completed.pipelineState,
     workflowState: "RESOLVE_FINDINGS",
+    reviewResult: {
+      ...completed.pipelineState.reviewResult,
+      status: "FINDINGS",
+    },
     findings,
     previousFindings: findings,
     disputeCounts,
@@ -910,6 +1174,10 @@ test("rejects and refuses to recover inconsistent correction progress", async (t
   const nearCapacityBase = {
     ...completed.pipelineState,
     workflowState: "RESOLVE_FINDINGS",
+    reviewResult: {
+      ...completed.pipelineState.reviewResult,
+      status: "FINDINGS",
+    },
     backendVersions: {
       ...completed.pipelineState.backendVersions,
       arbiter: "fake-1.0.0",
@@ -981,6 +1249,7 @@ test("preflights digit-boundary transition growth before persistence", async (t)
     polishSummary: null,
     finalizationResult: null,
     finalizedFingerprint: null,
+    reviewResult: null,
     reviewedFingerprint: null,
   };
   const targetPipelineState = {
@@ -2585,7 +2854,12 @@ test("invalidates dependent work before product-decision bootstrap re-entry", as
   const fixture = await createFixture(t, {
     reviewer: [
       bootstrapReady("Reviewer"),
-      productDecision({ status: "PRODUCT_DECISION_REQUIRED", findings: [] }),
+      productDecision({
+        status: "PRODUCT_DECISION_REQUIRED",
+        findings: [],
+        validationChange: "UNCHANGED",
+        validationEvidence: [],
+      }),
       bootstrapReady("Reviewer"),
       reviewApproved(),
     ],
@@ -2826,3 +3100,40 @@ for (const [name, expectedReason, mutate] of [
     assert.equal(result.pause.reason, expectedReason);
   });
 }
+
+test("requires Reviewer acceptance for task-authorized validation changes", async (t) => {
+  const fixture = await createFixture(t, {
+    onRoleRun: async (role, request) => {
+      if (role === "worker" && request.prompt.includes("Polish the existing")) {
+        await writeFile(
+          join(
+            request.cwd,
+            ".agents",
+            "skills",
+            "finalization",
+            "SKILL.md",
+          ),
+          "---\nname: finalization\ndescription: Updated checks.\n---\n\nRun every required check.\n",
+        );
+      }
+    },
+    reviewer: [bootstrapReady("Reviewer"), reviewApproved("ACCEPTED")],
+  });
+  const completed = await fixture.run();
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(
+    completed.pipelineState.reviewResult.validationChange,
+    "ACCEPTED",
+  );
+  const reviewPrompt = fixture.calls.reviewer.find(({ prompt }) =>
+    prompt.includes("Review the complete current change set"),
+  ).prompt;
+  assert.match(
+    reviewPrompt,
+    /Established validation tuple:[\s\S]*Candidate validation tuple and finalization evidence:/u,
+  );
+  assert.match(
+    reviewPrompt,
+    /"validationInfrastructureFingerprint": "[a-f0-9]{64}"/u,
+  );
+});

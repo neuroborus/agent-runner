@@ -21,33 +21,15 @@ import {
 } from "../src/index.js";
 
 test("bootstrap instructions preserve independent evidence and arbitration", () => {
-  assert.equal(
-    BOOTSTRAP_INSTRUCTIONS,
-    `Study the repository, task, validated plan, clarifications, project instructions, relevant finalization guidance, other relevant skills, project checks, tests, and Git history independently and without modifying the repository.
-Return a concise bootstrap summary covering the task, relevant architecture and files, invariants, planned commits, risks, and the complete project finalization procedure using the provided schema.
-For READY, provide summary; set reason, question, and whyBlocked to "", and options and evidence to [].
-For PLAN_REVISION_REQUIRED, set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
-For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-decision fields.`,
-  );
-  assert.equal(
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /independently identify every required check/iu);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /validationInfrastructure/u);
+  assert.match(
     BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
-    `Reconcile the independent Worker and Reviewer bootstrap summaries using the task, validated plan, repository, and evidence.
-Do not force agreement or modify the repository. Return a concise resolved summary, or the remaining material disagreement, using the provided schema.
-For RESOLVED, provide summary; set disagreement, reason, question, and whyBlocked to "", and options and evidence to [].
-For DISAGREEMENT, provide disagreement and evidence; set summary, reason, question, and whyBlocked to "", and options to [].
-For PLAN_REVISION_REQUIRED, provide reason and evidence; set summary, disagreement, question, and whyBlocked to "", and options to [].
-For PRODUCT_DECISION_REQUIRED, set summary, disagreement, and reason to ""; use the product-decision fields.`,
+    /from both independent reports/u,
   );
-  assert.equal(
+  assert.match(
     BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
-    `Resolve the bootstrap disagreement from the task, plan, repository, and evidence, choosing the minimal valid direction using the provided schema.
-
-Do not modify the repository. Resolve only the recorded disagreement and do not rewrite requirements.
-Always provide rationale.
-Choose USE_WORKER or USE_REVIEWER only when that summary is correct, and SYNTHESIZE when the evidence supports a combined summary.
-For USE_WORKER, USE_REVIEWER, or SYNTHESIZE, provide summary; set reason, question, and whyBlocked to "", and options and evidence to [].
-For PLAN_REVISION_REQUIRED, set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
-For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-decision fields.`,
+    /complete requiredChecks inventory/u,
   );
 });
 
@@ -105,20 +87,10 @@ A blocking product-decision outcome is allowed only when the task, plan, reposit
 Do not use it for technical choices, implementation difficulty, naming, or ordinary review findings.
 For that outcome, provide question, whyBlocked, and evidence; options may be [].`,
   );
-  assert.equal(
-    REVIEW_INSTRUCTIONS,
-    `Review the changes and verify that they are correct, idiomatic, minimal, and consistent with the project's conventions.
-
-Do not modify the repository.
-For APPROVED, set question and whyBlocked to "", and findings, options, and evidence to [].
-For FINDINGS, provide one or more findings with unique stable R-prefixed numeric IDs, a repository-relative file, and populated problem, reason, and suggestedAction fields; set question and whyBlocked to "", and options and evidence to [].
-For PRODUCT_DECISION_REQUIRED, set findings to []; use the product-decision fields.
-Do not ask questions after clarification closes.
-A blocking product-decision outcome is allowed only when the task, plan, repository, conventions, and prior clarifications leave a choice between materially different product requirements or behaviors unresolved and progress is otherwise impossible.
-Do not use it for technical choices, implementation difficulty, naming, or ordinary review findings.
-For that outcome, provide question, whyBlocked, and evidence; options may be [].
-Otherwise, return only the approval decision and actionable findings using the provided schema.`,
-  );
+  assert.match(REVIEW_INSTRUCTIONS, /Do not modify the repository/u);
+  assert.match(REVIEW_INSTRUCTIONS, /reject omissions, skips, substitutions/u);
+  assert.match(REVIEW_INSTRUCTIONS, /validationChange UNCHANGED/u);
+  assert.match(REVIEW_INSTRUCTIONS, /ACCEPTED with validationEvidence/u);
   assert.equal(
     FINDING_RESOLUTION_INSTRUCTIONS,
     `For each finding below, fix it idiomatically and minimally, following the project's conventions.
@@ -148,7 +120,7 @@ test("finalization and dispute prompts preserve their narrow roles", () => {
   );
   assert.match(
     FINALIZATION_INSTRUCTIONS,
-    /Use PASS only after the complete validation procedure succeeds\./u,
+    /Use PASS only after every established required check succeeds/u,
   );
   assert.match(FINALIZATION_INSTRUCTIONS, /sandbox, IPC, loopback/u);
   assert.match(FINALIZATION_INSTRUCTIONS, /Do not weaken sandboxing/u);
@@ -162,11 +134,11 @@ test("finalization and dispute prompts preserve their narrow roles", () => {
   );
   assert.match(
     FINALIZATION_INSTRUCTIONS,
-    /For SKILL_MISSING, provide the attempted repository-relative skillPath and reason/u,
+    /For SKILL_MISSING or SKILL_INVALID, provide the attempted repository-relative skillPath and reason/u,
   );
   assert.match(
     FINALIZATION_INSTRUCTIONS,
-    /For SKILL_INVALID, provide a repository-relative skillPath and reason/u,
+    /requiredChecks, validationInfrastructure, checks/u,
   );
   assert.match(FINALIZATION_INSTRUCTIONS, /For BLOCKED, use only/u);
   assert.match(

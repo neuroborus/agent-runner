@@ -15,6 +15,7 @@ import {
   contentFingerprintsAtRoot,
   inspectPathAtRoot,
   normalizeAllowedPaths,
+  pathsFingerprintAtRoot,
 } from "./git-content.js";
 
 export { GitSafetyError };
@@ -385,6 +386,18 @@ export function createGitService(options = {}) {
     ).contentFingerprint;
   }
 
+  async function validationInfrastructureFingerprint(options) {
+    assertOptions(options, "Validation-infrastructure options");
+    const { paths, projectPath } = options;
+    assertPathList(paths, "paths");
+    const repositoryPath = await resolveRepository(runGit, projectPath);
+    return pathsFingerprintAtRoot(
+      contentContext,
+      repositoryPath,
+      paths,
+    );
+  }
+
   async function preflight(options) {
     assertOptions(options, "Git-preflight options");
     const {
@@ -470,5 +483,6 @@ export function createGitService(options = {}) {
     inspectPath,
     preflight,
     snapshot,
+    validationInfrastructureFingerprint,
   });
 }

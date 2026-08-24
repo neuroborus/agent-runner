@@ -203,6 +203,8 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
           summary:
             `${reviewer ? "Reviewer" : "Worker"} understands the task, ` +
             "plan, risks, and finalization procedure.",
+          requiredChecks: [{ id: "C1", command: "git diff --check" }],
+          validationInfrastructure: [],
           reason: "",
           question: "",
           options: [],
@@ -217,6 +219,8 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
               status: "DISAGREEMENT",
               summary: "",
               disagreement: "The roles selected different module boundaries.",
+              requiredChecks: [],
+              validationInfrastructure: [],
               reason: "",
               question: "",
               options: [],
@@ -227,6 +231,8 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
               status: "RESOLVED",
               summary: "The roles agree on the minimal implementation.",
               disagreement: "",
+              requiredChecks: [{ id: "C1", command: "git diff --check" }],
+              validationInfrastructure: [],
               reason: "",
               question: "",
               options: [],
@@ -258,6 +264,16 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
           skillPath: "",
           summary: "The repository finalization procedure passed.",
           issues: [],
+          requiredChecks: [{ id: "C1", command: "git diff --check" }],
+          validationInfrastructure: [],
+          checks: [
+            {
+              checkId: "C1",
+              command: "git diff --check",
+              status: "PASS",
+              evidence: ["git diff --check exited successfully."],
+            },
+          ],
           reason: "",
           question: "",
           options: [],
@@ -271,6 +287,8 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
         structured = {
           status: "APPROVED",
           findings: [],
+          validationChange: "UNCHANGED",
+          validationEvidence: [],
           question: "",
           options: [],
           whyBlocked: "",
@@ -311,6 +329,8 @@ function createArbiterAdapter() {
         structured: {
           direction: "SYNTHESIZE",
           summary: "Use the existing minimal module boundary.",
+          requiredChecks: [{ id: "C1", command: "git diff --check" }],
+          validationInfrastructure: [],
           rationale: "Repository ownership supports that boundary.",
           reason: "",
           question: "",
