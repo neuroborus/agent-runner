@@ -296,6 +296,10 @@ remotes, and Git identity through completion.
 ## Agent Context Recovery
 
 Backend sessions are disposable execution context, not durable workflow state.
+Adapter capability probes inspect the installed CLI and enforceable local
+isolation only. They do not apply a selected native profile and do not claim
+that its authentication or provider is usable; that is established by the
+first real turn under the effective profile.
 Every retryable request carries a turn prompt and a complete recovery prompt
 reconstructed from validated run state, durable artifacts, and the observed
 workspace. A role session is continued only when its persisted key matches the
@@ -327,6 +331,13 @@ An explicitly supplied source session is different: the first eligible turn of
 each new primary or review checkpoint creates a direct child and returns its ID
 without resuming or mutating the source. If the source cannot be forked, the
 turn fails before agent work rather than silently losing lineage.
+
+Adapter failures retain only bounded diagnostics. Codex capability, isolation,
+and prohibited-operation errors carry one allowlisted diagnostic class rather
+than a command or native response. Claude classifies unavailable source and
+continuation sessions from the attempted session mode, and distinguishes those
+from effective-profile, authentication, and provider failures on fresh turns.
+No classification retains native output, credentials, or raw transcripts.
 
 Interrupted one-shot effects are also different. In particular, a
 `local-commit` turn is never replayed; control returns to the runner for pending

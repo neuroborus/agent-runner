@@ -27,6 +27,11 @@ function hasCode(code) {
   return (error) => error instanceof CodexAdapterError && error.code === code;
 }
 
+function hasDiagnostic(code, diagnosticClass) {
+  return (error) =>
+    hasCode(code)(error) && error.diagnosticClass === diagnosticClass;
+}
+
 function completedTurn(threadId, turnId, output = "done", items = []) {
   return {
     method: "turn/completed",
@@ -294,6 +299,12 @@ function request(overrides = {}) {
 
 test("constructs with the native environment and probes capabilities", async () => {
   assert.doesNotThrow(() => createCodexAdapter());
+  assert.equal(
+    new CodexAdapterError("invalid diagnostic", {
+      diagnosticClass: "command_with_secret_value",
+    }).diagnosticClass,
+    undefined,
+  );
   assert.throws(
     () => createCodexAdapter({ env: new Map() }),
     hasCode("ERR_INVALID_CODEX_OPTIONS"),
@@ -345,7 +356,10 @@ test("fails preflight when the installed Codex cannot enforce access", async () 
 
     await assert.rejects(
       fixture.adapter.run(request()),
-      hasCode("ERR_UNSUPPORTED_CODEX_CAPABILITY"),
+      hasDiagnostic(
+        "ERR_UNSUPPORTED_CODEX_CAPABILITY",
+        "capability_remote_write_blocked",
+      ),
     );
     assert.equal(fixture.processes.length, 0);
   }
@@ -355,7 +369,10 @@ test("fails preflight when the installed Codex cannot enforce access", async () 
   });
   await assert.rejects(
     missingFlagFixture.adapter.run(request()),
-    hasCode("ERR_UNSUPPORTED_CODEX_CAPABILITY"),
+    hasDiagnostic(
+      "ERR_UNSUPPORTED_CODEX_CAPABILITY",
+      "capability_remote_write_blocked",
+    ),
   );
   assert.equal(missingFlagFixture.processes.length, 0);
 });
@@ -386,7 +403,10 @@ test(
           },
         }),
       ),
-      hasCode("ERR_UNSUPPORTED_CODEX_CAPABILITY"),
+      hasDiagnostic(
+        "ERR_UNSUPPORTED_CODEX_CAPABILITY",
+        "capability_local_commit",
+      ),
     );
     assert.equal(fixture.processes.length, 0);
   },
@@ -585,7 +605,8 @@ test("applies native profile and context selections to Codex", async () => {
     "model_context_window=200000",
   ];
   for (const call of fixture.executeCalls.slice(0, 2)) {
-    assert.deepEqual(call.argumentsList.slice(0, 4), expectedPrefix);
+    assert.ok(!call.argumentsList.includes("--profile"));
+    assert.ok(!call.argumentsList.includes("model_context_window=200000"));
   }
   const discovery = fixture.executeCalls.find(({ argumentsList }) =>
     argumentsList.includes("mcp"),
@@ -802,14 +823,29 @@ test("rejects substitution of an explicit model", async () => {
 });
 
 test("fails before starting a thread when isolation is incomplete", async () => {
-  const configurations = Array.from({ length: 5 }, isolatedConfiguration);
+  const configurations = Array.from({ length: 9 }, isolatedConfiguration);
   configurations[0].mcp_servers["configured-server"].enabled = true;
   configurations[1].features.multi_agent = true;
   configurations[2].shell_environment_policy.inherit = "all";
   delete configurations[3].mcp_servers["configured-server"];
   configurations[4].features.code_mode_host = false;
+  configurations[5] = { nativeOutput: "sensitive-native-output" };
+  configurations[6].memories.generate_memories = true;
+  configurations[7].notify.push("sensitive-native-output");
+  configurations[8].web_search = "enabled";
 
-  for (const config of configurations) {
+  const diagnostics = [
+    "isolation_mcp",
+    "isolation_feature",
+    "isolation_shell_environment",
+    "isolation_mcp",
+    "isolation_command_host",
+    "isolation_effective_configuration",
+    "isolation_memory",
+    "isolation_notification",
+    "isolation_network",
+  ];
+  for (const [index, config] of configurations.entries()) {
     const fixture = createFixture({
       handle({ message }) {
         return message.method === "config/read"
@@ -820,7 +856,16 @@ test("fails before starting a thread when isolation is incomplete", async () => 
 
     await assert.rejects(
       fixture.adapter.run(request()),
-      hasCode("ERR_CODEX_ISOLATION"),
+      (error) => {
+        assert.ok(
+          hasDiagnostic("ERR_CODEX_ISOLATION", diagnostics[index])(error),
+        );
+        assert.equal(error.message, "Codex external tools are not isolated.");
+        assert.equal(error.cause, undefined);
+        assert.equal(error.config, undefined);
+        assert.doesNotMatch(JSON.stringify(error), /sensitive-native-output/u);
+        return true;
+      },
     );
     assert.equal(
       fixture.processes[0].messages.some(
@@ -843,7 +888,7 @@ test("rejects MCP names that cannot be overridden safely", async () => {
 
   await assert.rejects(
     fixture.adapter.run(request()),
-    hasCode("ERR_CODEX_ISOLATION"),
+    hasDiagnostic("ERR_CODEX_ISOLATION", "isolation_mcp"),
   );
   assert.equal(fixture.processes.length, 0);
 });
@@ -893,6 +938,7 @@ test("reports persistent MCP discovery failure as recoverable", async () => {
   await assert.rejects(fixture.adapter.run(request()), (error) => {
     assert.ok(error instanceof CodexAdapterError);
     assert.equal(error.code, "ERR_CODEX_UNAVAILABLE");
+    assert.equal(error.diagnosticClass, "isolation_mcp_discovery");
     assert.equal(error.method, "mcp/list");
     assert.equal(error.recoverable, true);
     return true;
@@ -1296,7 +1342,20 @@ test("rejects forbidden Git and remote-write commands reported by Codex", async 
           },
         }),
       ),
-      hasCode(code),
+      (error) => {
+        assert.ok(hasCode(code)(error));
+        assert.equal(
+          error.diagnosticClass,
+          code === "ERR_CODEX_REMOTE_WRITE_ATTEMPT"
+            ? "operation_remote_write"
+            : "operation_local_commit",
+        );
+        assert.equal(error.cause, undefined);
+        assert.equal(error.command, undefined);
+        assert.ok(!error.message.includes(command));
+        assert.ok(!JSON.stringify(error).includes(command));
+        return true;
+      },
     );
   }
 });
@@ -1352,28 +1411,40 @@ test("rejects disabled hosted web search reported by Codex", async () => {
 
   await assert.rejects(
     fixture.adapter.run(request()),
-    hasCode("ERR_CODEX_NETWORK_POLICY"),
+    hasDiagnostic("ERR_CODEX_NETWORK_POLICY", "operation_hosted_tool"),
   );
 });
 
 test("rejects disabled integrations reported by Codex", async () => {
-  for (const item of [
-    {
-      type: "mcpToolCall",
-      readOnlyHint: true,
-      server: "configured-server",
-      tool: "read",
-    },
-    { type: "collabAgentToolCall", tool: "spawnAgent" },
-    { type: "subAgentActivity", kind: "spawned" },
-    { type: "hookPrompt", fragments: [] },
-    { type: "agentMessage", text: "Done.", memoryCitation: {} },
-    {
-      type: "commandExecution",
-      command: "pwd",
-      pluginId: "plugin",
-      status: "completed",
-    },
+  for (const [item, diagnosticClass] of [
+    [
+      {
+        type: "mcpToolCall",
+        readOnlyHint: true,
+        server: "configured-server",
+        tool: "read",
+      },
+      "operation_mcp_tool",
+    ],
+    [
+      { type: "collabAgentToolCall", tool: "spawnAgent" },
+      "operation_multi_agent",
+    ],
+    [{ type: "subAgentActivity", kind: "spawned" }, "operation_multi_agent"],
+    [{ type: "hookPrompt", fragments: [] }, "operation_lifecycle_hook"],
+    [
+      { type: "agentMessage", text: "Done.", memoryCitation: {} },
+      "operation_memory",
+    ],
+    [
+      {
+        type: "commandExecution",
+        command: "pwd",
+        pluginId: "plugin",
+        status: "completed",
+      },
+      "operation_plugin",
+    ],
   ]) {
     const fixture = createFixture({
       handle({ message }) {
@@ -1394,17 +1465,33 @@ test("rejects disabled integrations reported by Codex", async () => {
 
     await assert.rejects(
       fixture.adapter.run(request()),
-      hasCode("ERR_CODEX_ISOLATION"),
+      hasDiagnostic("ERR_CODEX_ISOLATION", diagnosticClass),
     );
   }
 });
 
-test("rejects disabled hosted tools and read-only file changes", async () => {
-  for (const [item, code] of [
-    [{ type: "imageGeneration" }, "ERR_CODEX_NETWORK_POLICY"],
+test("rejects hosted, dynamic, and read-only policy violations", async () => {
+  for (const [item, code, diagnosticClass, message] of [
+    [
+      { type: "imageGeneration" },
+      "ERR_CODEX_NETWORK_POLICY",
+      "operation_hosted_tool",
+      "Codex attempted a disabled hosted tool.",
+    ],
+    [
+      {
+        type: "dynamicToolCall",
+        input: "sensitive-native-output",
+      },
+      "ERR_CODEX_REMOTE_WRITE_ATTEMPT",
+      "operation_dynamic_tool",
+      "Codex attempted an untrusted dynamic tool call.",
+    ],
     [
       { type: "fileChange", changes: [], status: "completed" },
       "ERR_CODEX_READ_ONLY_POLICY",
+      "operation_read_only_write",
+      "Codex reported a file change during a read-only turn.",
     ],
   ]) {
     const fixture = createFixture({
@@ -1424,7 +1511,17 @@ test("rejects disabled hosted tools and read-only file changes", async () => {
       },
     });
 
-    await assert.rejects(fixture.adapter.run(request()), hasCode(code));
+    await assert.rejects(
+      fixture.adapter.run(request()),
+      (error) => {
+        assert.ok(hasDiagnostic(code, diagnosticClass)(error));
+        assert.equal(error.message, message);
+        assert.equal(error.cause, undefined);
+        assert.equal(error.command, undefined);
+        assert.doesNotMatch(JSON.stringify(error), /sensitive-native-output/u);
+        return true;
+      },
+    );
   }
 });
 

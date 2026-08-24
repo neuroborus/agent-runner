@@ -491,6 +491,12 @@ A request should contain only runner-level concepts such as:
 
 Backend-specific CLI flags belong only inside the adapter.
 
+`probe()` validates installed CLI features and enforceable local isolation. It
+does not apply a selected native profile or attest that the profile's
+authentication and provider are usable. The first real `run()` request uses the
+effective profile and reports a bounded classified failure when it cannot be
+used.
+
 For non-commit turns, an adapter error may set `recoverable: true` only when
 reconstructing and retrying the durable request is safe. Safety, protocol, and
 isolation failures are not recoverable; an ambiguous `local-commit` outcome is
@@ -558,6 +564,10 @@ environment, and expose only Codex's filtered core environment without injected
 values or shell-profile loading to agent commands. Remove key-, secret-, and
 token-named variables from the isolated local-commit executor while retaining
 the ordinary environment needed by Git and hooks.
+Capability, isolation, and prohibited-operation failures expose only one
+bounded allowlisted diagnostic class identifying the rejected capability or
+operation class. Do not retain the reported command, native error response,
+credentials, or transcript as diagnostic evidence.
 
 Worker:
 
@@ -661,7 +671,10 @@ Fresh turns omit resume flags. Continuation uses `--resume <session-id>`, and a
 supplied source session uses `--resume <session-id> --fork-session`; persist the
 returned child ID and reject the source ID as invalid fork lineage. An
 unavailable continuation may reconstruct a fresh turn, but an unavailable fork
-source is an error.
+source is an error. Classify source-session and continuation-session failures
+from the attempted session mode. On a fresh turn, distinguish effective-profile,
+authentication, and provider failures instead of reporting a generic missing
+session, and retain no native error text.
 
 Enable native auto-compaction for every turn. On an explicit context-exhaustion
 result, retry the durable request once in the same session with compaction

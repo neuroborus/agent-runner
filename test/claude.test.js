@@ -338,10 +338,11 @@ test("applies isolated profile and context selections to Claude", async () => {
   assert.strictEqual(await fixture.adapter.probe(execution), capabilities);
   const claudeCalls = fixture.calls.filter(({ file }) => file === "claude");
   assert.equal(claudeCalls.length, 3);
-  for (const call of claudeCalls) {
-    assert.equal(call.options.env.CLAUDE_CONFIG_DIR, "/profiles/work");
+  for (const call of claudeCalls.slice(0, 2)) {
+    assert.equal(call.options.env.CLAUDE_CONFIG_DIR, "/profiles/current");
   }
   const turn = turnCalls(fixture)[0];
+  assert.equal(turn.options.env.CLAUDE_CONFIG_DIR, "/profiles/work");
   assert.equal(option(turn.argumentsList, "--model"), "claude-test");
   assert.equal(option(turn.argumentsList, "--autocompact"), "200000");
 });
@@ -707,6 +708,51 @@ test("keeps a usage-rejected local commit unambiguous", async () => {
   );
 });
 
+test("classifies fresh-turn profile, authentication, and provider failures", async (t) => {
+  for (const { code, message, options = {} } of [
+    {
+      code: "ERR_CLAUDE_PROFILE_UNAVAILABLE",
+      message: "Session unavailable for the selected configuration.",
+      options: { profile: "/profiles/work" },
+    },
+    {
+      code: "ERR_CLAUDE_AUTHENTICATION_UNAVAILABLE",
+      message: "Authentication required: API key secret-value is invalid.",
+    },
+    {
+      code: "ERR_CLAUDE_PROVIDER_UNAVAILABLE",
+      message: "Provider service unavailable.",
+    },
+    {
+      code: "ERR_CLAUDE_PROVIDER_UNAVAILABLE",
+      message: "Session unavailable.",
+    },
+  ]) {
+    await t.test(code, async () => {
+      const fixture = createFixture({
+        handle({ call }) {
+          if (call.file === "claude" && call.argumentsList.includes("-p")) {
+            throw processFailure(result({ error: true, output: message }));
+          }
+          return undefined;
+        },
+      });
+
+      await assert.rejects(
+        fixture.adapter.run(request(options)),
+        (error) => {
+          assert.ok(hasCode(code)(error));
+          assert.equal(error.recoverable, true);
+          assert.doesNotMatch(error.message, /secret-value/u);
+          assert.equal(error.cause, undefined);
+          return true;
+        },
+      );
+      assert.equal(turnCalls(fixture).length, 1);
+    });
+  }
+});
+
 test("continues sessions and reconstructs when continuation is unavailable", async () => {
   let attempts = 0;
   const fixture = createFixture({
@@ -794,7 +840,13 @@ test("fails instead of replacing an unavailable fork source", async () => {
     fixture.adapter.run(
       request({ session: { id: SOURCE_SESSION, mode: "fork" } }),
     ),
-    hasCode("ERR_CLAUDE_SOURCE_SESSION_UNAVAILABLE"),
+    (error) => {
+      assert.ok(hasCode("ERR_CLAUDE_SOURCE_SESSION_UNAVAILABLE")(error));
+      assert.equal(error.recoverable, false);
+      assert.equal(error.cause, undefined);
+      assert.ok(!error.message.includes(SOURCE_SESSION));
+      return true;
+    },
   );
   assert.equal(turnCalls(fixture).length, 1);
 });

@@ -29,6 +29,38 @@ const MAX_MODEL_PAGES = 32;
 const CODEX_PROFILE_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,255}$/u;
 const DECIMAL_CONTEXT_SIZE_PATTERN = /^[1-9][0-9]*$/u;
 const MAX_CONTEXT_SIZE = 9_223_372_036_854_775_807n;
+const CAPABILITY_DIAGNOSTICS = Object.freeze({
+  autonomousWrite: "capability_autonomous_write",
+  localCommit: "capability_local_commit",
+  nativeSessionContinuation: "capability_session_continuation",
+  nativeSessionFork: "capability_session_fork",
+  readOnly: "capability_read_only",
+  remoteWriteBlocked: "capability_remote_write_blocked",
+  structuredOutput: "capability_structured_output",
+  workspaceWrite: "capability_workspace_write",
+});
+const CODEX_DIAGNOSTIC_CLASSES = new Set([
+  ...Object.values(CAPABILITY_DIAGNOSTICS),
+  "isolation_command_host",
+  "isolation_effective_configuration",
+  "isolation_feature",
+  "isolation_mcp",
+  "isolation_mcp_discovery",
+  "isolation_memory",
+  "isolation_network",
+  "isolation_notification",
+  "isolation_shell_environment",
+  "operation_dynamic_tool",
+  "operation_hosted_tool",
+  "operation_lifecycle_hook",
+  "operation_local_commit",
+  "operation_mcp_tool",
+  "operation_memory",
+  "operation_multi_agent",
+  "operation_plugin",
+  "operation_read_only_write",
+  "operation_remote_write",
+]);
 const DISABLED_FEATURES = Object.freeze([
   "apps",
   "artifact",
@@ -178,6 +210,7 @@ export class CodexAdapterError extends Error {
       ambiguous = false,
       cause,
       code = "ERR_CODEX_ADAPTER",
+      diagnosticClass,
       method,
       recoverable = false,
     } = {},
@@ -187,6 +220,9 @@ export class CodexAdapterError extends Error {
     this.code = code;
     this.ambiguous = ambiguous;
     this.recoverable = recoverable;
+    if (CODEX_DIAGNOSTIC_CLASSES.has(diagnosticClass)) {
+      this.diagnosticClass = diagnosticClass;
+    }
     if (method !== undefined) {
       this.method = method;
     }
@@ -305,15 +341,16 @@ function parseMcpServerNames(value) {
   let servers;
   try {
     servers = JSON.parse(value);
-  } catch (cause) {
+  } catch {
     throw new CodexAdapterError("Codex returned invalid MCP configuration.", {
-      cause,
       code: "ERR_CODEX_ISOLATION",
+      diagnosticClass: "isolation_mcp",
     });
   }
   if (!Array.isArray(servers) || servers.length > MAX_MCP_SERVERS) {
     throw new CodexAdapterError("Codex returned invalid MCP configuration.", {
       code: "ERR_CODEX_ISOLATION",
+      diagnosticClass: "isolation_mcp",
     });
   }
   const names = servers.map((server) => server?.name);
@@ -329,6 +366,7 @@ function parseMcpServerNames(value) {
   ) {
     throw new CodexAdapterError("Codex returned invalid MCP configuration.", {
       code: "ERR_CODEX_ISOLATION",
+      diagnosticClass: "isolation_mcp",
     });
   }
   return names;
@@ -340,16 +378,24 @@ function assertIsolatedConfiguration(value, expectedMcpServers) {
   const memories = config?.memories;
   const mcpServers = config?.mcp_servers;
   const shellEnvironment = config?.shell_environment_policy;
-  if (
-    !isRecord(config) ||
-    !isRecord(features) ||
-    DISABLED_FEATURES.some((feature) => features[feature] !== false) ||
-    features.code_mode_host !== true ||
+  let diagnosticClass;
+  if (!isRecord(config) || !isRecord(features)) {
+    diagnosticClass = "isolation_effective_configuration";
+  } else if (
+    DISABLED_FEATURES.some((feature) => features[feature] !== false)
+  ) {
+    diagnosticClass = "isolation_feature";
+  } else if (features.code_mode_host !== true) {
+    diagnosticClass = "isolation_command_host";
+  } else if (
     !isRecord(memories) ||
     memories.generate_memories !== false ||
-    memories.use_memories !== false ||
-    !Array.isArray(config.notify) ||
-    config.notify.length !== 0 ||
+    memories.use_memories !== false
+  ) {
+    diagnosticClass = "isolation_memory";
+  } else if (!Array.isArray(config.notify) || config.notify.length !== 0) {
+    diagnosticClass = "isolation_notification";
+  } else if (
     !isRecord(shellEnvironment) ||
     shellEnvironment.inherit !== "core" ||
     shellEnvironment.ignore_default_excludes !== false ||
@@ -358,16 +404,24 @@ function assertIsolatedConfiguration(value, expectedMcpServers) {
     Object.keys(shellEnvironment.set).length !== 0 ||
     shellEnvironment.exclude !== null ||
     shellEnvironment.include_only !== null ||
-    shellEnvironment.filters !== null ||
-    config.web_search !== "disabled" ||
+    shellEnvironment.filters !== null
+  ) {
+    diagnosticClass = "isolation_shell_environment";
+  } else if (config.web_search !== "disabled") {
+    diagnosticClass = "isolation_network";
+  } else if (
     !isRecord(mcpServers) ||
     expectedMcpServers.some((name) => !Object.hasOwn(mcpServers, name)) ||
     Object.values(mcpServers).some(
       (server) => !isRecord(server) || server.enabled !== false,
     )
   ) {
+    diagnosticClass = "isolation_mcp";
+  }
+  if (diagnosticClass !== undefined) {
     throw new CodexAdapterError("Codex external tools are not isolated.", {
       code: "ERR_CODEX_ISOLATION",
+      diagnosticClass,
     });
   }
 }
@@ -809,7 +863,10 @@ function auditItems(items, request) {
     if (item.type === "mcpToolCall") {
       throw new CodexAdapterError(
         "Codex used a disabled MCP server.",
-        { code: "ERR_CODEX_ISOLATION" },
+        {
+          code: "ERR_CODEX_ISOLATION",
+          diagnosticClass: "operation_mcp_tool",
+        },
       );
     }
     if (
@@ -818,24 +875,34 @@ function auditItems(items, request) {
     ) {
       throw new CodexAdapterError(
         "Codex used disabled multi-agent collaboration.",
-        { code: "ERR_CODEX_ISOLATION" },
+        {
+          code: "ERR_CODEX_ISOLATION",
+          diagnosticClass: "operation_multi_agent",
+        },
       );
     }
     if (item.type === "hookPrompt") {
       throw new CodexAdapterError("Codex used a disabled lifecycle hook.", {
         code: "ERR_CODEX_ISOLATION",
+        diagnosticClass: "operation_lifecycle_hook",
       });
     }
     if (item.type === "dynamicToolCall") {
       throw new CodexAdapterError(
         "Codex attempted an untrusted dynamic tool call.",
-        { code: "ERR_CODEX_REMOTE_WRITE_ATTEMPT" },
+        {
+          code: "ERR_CODEX_REMOTE_WRITE_ATTEMPT",
+          diagnosticClass: "operation_dynamic_tool",
+        },
       );
     }
     if (item.type === "webSearch" || item.type === "imageGeneration") {
       throw new CodexAdapterError(
         "Codex attempted a disabled hosted tool.",
-        { code: "ERR_CODEX_NETWORK_POLICY" },
+        {
+          code: "ERR_CODEX_NETWORK_POLICY",
+          diagnosticClass: "operation_hosted_tool",
+        },
       );
     }
     if (request.access !== "workspace-write" && item.type === "fileChange") {
@@ -846,6 +913,10 @@ function auditItems(items, request) {
             request.access === "local-commit"
               ? "ERR_CODEX_LOCAL_COMMIT_POLICY"
               : "ERR_CODEX_READ_ONLY_POLICY",
+          diagnosticClass:
+            request.access === "local-commit"
+              ? "operation_local_commit"
+              : "operation_read_only_write",
         },
       );
     }
@@ -856,6 +927,7 @@ function auditItems(items, request) {
     ) {
       throw new CodexAdapterError("Codex used disabled memories.", {
         code: "ERR_CODEX_ISOLATION",
+        diagnosticClass: "operation_memory",
       });
     }
     if (item.type === "commandExecution") {
@@ -868,6 +940,7 @@ function auditItems(items, request) {
       if (item.pluginId !== undefined && item.pluginId !== null) {
         throw new CodexAdapterError("Codex used a disabled plugin.", {
           code: "ERR_CODEX_ISOLATION",
+          diagnosticClass: "operation_plugin",
         });
       }
       const violation = commandPolicyViolation(
@@ -877,12 +950,16 @@ function auditItems(items, request) {
       if (violation === "remote") {
         throw new CodexAdapterError("Codex attempted a remote write.", {
           code: "ERR_CODEX_REMOTE_WRITE_ATTEMPT",
+          diagnosticClass: "operation_remote_write",
         });
       }
       if (violation === "local-commit") {
         throw new CodexAdapterError(
           "Codex attempted a forbidden local-commit operation.",
-          { code: "ERR_CODEX_LOCAL_COMMIT_POLICY" },
+          {
+            code: "ERR_CODEX_LOCAL_COMMIT_POLICY",
+            diagnosticClass: "operation_local_commit",
+          },
         );
       }
     }
@@ -929,7 +1006,10 @@ function normalizeResult(turn, request, sessionId) {
   ) {
     throw new CodexAdapterError(
       "Codex did not confirm the authorized local commit.",
-      { code: "ERR_CODEX_LOCAL_COMMIT_POLICY" },
+      {
+        code: "ERR_CODEX_LOCAL_COMMIT_POLICY",
+        diagnosticClass: "operation_local_commit",
+      },
     );
   }
   return Object.freeze({ output, structured, sessionId });
@@ -961,14 +1041,14 @@ export function createCodexAdapter(options = {}) {
   }
   const processEnvironment = isolateGitEnvironment(env);
   const commandEnvironment = isolateCommandEnvironment(processEnvironment);
-  const probePromises = new Map();
+  let probePromise;
 
-  async function inspectCapabilities(executionOptions) {
+  async function inspectCapabilities() {
     let versionResult;
     let helpResult;
     try {
       [versionResult, helpResult] = await Promise.all([
-        execute(codexBinary, nativeArguments(executionOptions, ["--version"]), {
+        execute(codexBinary, ["--version"], {
           encoding: "utf8",
           env: processEnvironment,
           maxBuffer: 1024 * 1024,
@@ -976,7 +1056,7 @@ export function createCodexAdapter(options = {}) {
         }),
         execute(
           codexBinary,
-          nativeArguments(executionOptions, ["app-server", "--help"]),
+          ["app-server", "--help"],
           {
             encoding: "utf8",
             env: processEnvironment,
@@ -1017,12 +1097,9 @@ export function createCodexAdapter(options = {}) {
   }
 
   function probe(value) {
-    const executionOptions = normalizeExecutionOptions(value);
-    const key = JSON.stringify(executionOptions);
-    if (!probePromises.has(key)) {
-      probePromises.set(key, inspectCapabilities(executionOptions));
-    }
-    return probePromises.get(key);
+    normalizeExecutionOptions(value);
+    probePromise ??= inspectCapabilities();
+    return probePromise;
   }
 
   async function appServerLaunch(request) {
@@ -1046,13 +1123,13 @@ export function createCodexAdapter(options = {}) {
           },
         );
         break;
-      } catch (cause) {
+      } catch {
         if (attempt === 1) {
           throw new CodexAdapterError(
             "Codex MCP configuration is temporarily unavailable.",
             {
-              cause,
               code: "ERR_CODEX_UNAVAILABLE",
+              diagnosticClass: "isolation_mcp_discovery",
               method: "mcp/list",
               recoverable: true,
             },
@@ -1091,10 +1168,16 @@ export function createCodexAdapter(options = {}) {
     if (request.session?.mode === "fork") {
       required.push("nativeSessionFork");
     }
-    if (required.some((capability) => capabilities[capability] !== true)) {
+    const missingCapability = required.find(
+      (capability) => capabilities[capability] !== true,
+    );
+    if (missingCapability !== undefined) {
       throw new CodexAdapterError(
         "Installed Codex CLI cannot enforce the requested capability.",
-        { code: "ERR_UNSUPPORTED_CODEX_CAPABILITY" },
+        {
+          code: "ERR_UNSUPPORTED_CODEX_CAPABILITY",
+          diagnosticClass: CAPABILITY_DIAGNOSTICS[missingCapability],
+        },
       );
     }
   }

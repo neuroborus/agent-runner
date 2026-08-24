@@ -23,6 +23,7 @@ const SOCAT_BINARY = "socat";
 const MINIMUM_CLAUDE_VERSION = Object.freeze([2, 1, 233]);
 const MAX_ARGUMENT_BYTES = 128 * 1024 - 1;
 const MAX_PROCESS_OUTPUT_BYTES = 64 * 1024 * 1024;
+const MAX_DIAGNOSTIC_INPUT_LENGTH = 4_096;
 const DECIMAL_CONTEXT_SIZE_PATTERN = /^[1-9][0-9]*$/u;
 const MINIMUM_CONTEXT_SIZE = 100_000n;
 const MAXIMUM_CONTEXT_SIZE = 1_000_000n;
@@ -84,8 +85,14 @@ const CONTEXT_ERROR_PATTERN =
   /(?:context(?:[_ -]window)?[^\n]{0,80}(?:exceed|full|limit)|prompt is too long)/iu;
 const USAGE_LIMIT_ERROR_PATTERN =
   /(?:rate[_ -]?limit|(?:usage|spend(?:ing)?|credit)[_ -]?limit[^\n]{0,80}(?:exceed|exhaust|reach)|quota[^\n]{0,80}(?:exceed|exhaust|reach)|(?:exceed|exhaust|reach)[^\n]{0,80}(?:quota|(?:usage|spend(?:ing)?|credit)[_ -]?limit)|credits?[^\n]{0,80}(?:deplet|exhaust)|insufficient credits?|credit balance[^\n]{0,80}(?:deplet|exhaust|low)|out of credits?|you(?:'ve| have) hit (?:your|the) limit)/iu;
+const AUTHENTICATION_ERROR_PATTERN =
+  /(?:authentication[_ -](?:error|failed|required)|not authenticated|unauthenticated|unauthorized|invalid (?:api[_ -]?)?key|(?:api[_ -]?)?key[^\n]{0,80}(?:invalid|expired|revoked)|(?:oauth|access|auth) token[^\n]{0,80}(?:invalid|expired|revoked)|(?:log|sign) ?in required|please (?:log|sign) ?in|\b401\b)/iu;
+const PROFILE_ERROR_PATTERN =
+  /(?:(?:profile|configuration|config(?:uration)? directory)[^\n]{0,80}(?:not found|does not exist|cannot (?:be )?load|missing|unavailable|invalid|inaccessible|permission denied)|CLAUDE_CONFIG_DIR[^\n]{0,80}(?:not found|does not exist|missing|invalid|inaccessible))/iu;
+const PROVIDER_ERROR_PATTERN =
+  /(?:(?:provider|service|api|connection|network)[^\n]{0,80}(?:unavailable|overload|error|failed|refused|timed? ?out|unreachable)|overloaded[_ -]?error|unable to connect to (?:Anthropic|Claude)[^\n]*services?|internal server error|bad gateway|service unavailable|gateway timeout|\b5\d\d\b)/iu;
 const SESSION_ERROR_PATTERN =
-  /(?:no conversation found|(?:conversation|session)[^\n]{0,80}(?:not found|unavailable|cannot|could not|invalid))/iu;
+  /(?:no conversation found|(?:conversation|session)[^\n]{0,80}(?:not found|does not exist|expired|unavailable|cannot|could not|invalid))/iu;
 const MODEL_ERROR_PATTERN =
   /(?:model)[^\n]{0,80}(?:not found|unavailable|invalid|unsupported|access)/iu;
 const AUTO_ERROR_PATTERN =
@@ -464,48 +471,109 @@ function commandArguments(
   return argumentsList;
 }
 
-function outputError(payload, fallback = "Claude turn failed.") {
+function classifiedAvailabilityError(message, session, profile, sessionId) {
+  if (AUTHENTICATION_ERROR_PATTERN.test(message)) {
+    return new ClaudeAdapterError("Claude authentication is unavailable.", {
+      code: "ERR_CLAUDE_AUTHENTICATION_UNAVAILABLE",
+      recoverable: true,
+      sessionId,
+    });
+  }
+  if (PROFILE_ERROR_PATTERN.test(message)) {
+    return new ClaudeAdapterError("Claude profile is unavailable.", {
+      code: "ERR_CLAUDE_PROFILE_UNAVAILABLE",
+      recoverable: true,
+      sessionId,
+    });
+  }
+  if (PROVIDER_ERROR_PATTERN.test(message)) {
+    return new ClaudeAdapterError("Claude provider is unavailable.", {
+      code: "ERR_CLAUDE_PROVIDER_UNAVAILABLE",
+      recoverable: true,
+      sessionId,
+    });
+  }
+  if (!SESSION_ERROR_PATTERN.test(message)) {
+    return undefined;
+  }
+  if (session?.mode === "fork") {
+    return new ClaudeAdapterError("Claude source session is unavailable.", {
+      code: "ERR_CLAUDE_SOURCE_SESSION_UNAVAILABLE",
+      sessionId,
+    });
+  }
+  if (session?.mode === "continue") {
+    return new ClaudeAdapterError(
+      "Claude continuation session is unavailable.",
+      {
+        code: "ERR_CLAUDE_CONTINUATION_SESSION_UNAVAILABLE",
+        recoverable: true,
+        sessionId,
+      },
+    );
+  }
+  if (profile !== undefined) {
+    return new ClaudeAdapterError("Claude profile is unavailable.", {
+      code: "ERR_CLAUDE_PROFILE_UNAVAILABLE",
+      recoverable: true,
+      sessionId,
+    });
+  }
+  return new ClaudeAdapterError("Claude provider is unavailable.", {
+    code: "ERR_CLAUDE_PROVIDER_UNAVAILABLE",
+    recoverable: true,
+    sessionId,
+  });
+}
+
+function outputError(
+  payload,
+  { fallback = "Claude turn failed.", profile, session } = {},
+) {
   const message =
     typeof payload?.result === "string" && payload.result.length > 0
       ? payload.result
       : fallback;
+  const diagnosticMessage = message.slice(0, MAX_DIAGNOSTIC_INPUT_LENGTH);
   const sessionId =
     typeof payload?.session_id === "string" &&
     SESSION_ID_PATTERN.test(payload.session_id)
       ? payload.session_id
       : undefined;
-  if (USAGE_LIMIT_ERROR_PATTERN.test(message)) {
+  if (USAGE_LIMIT_ERROR_PATTERN.test(diagnosticMessage)) {
     return new ClaudeAdapterError("Claude usage capacity is unavailable.", {
       code: "ERR_CLAUDE_USAGE_LIMIT",
       recoverable: true,
       sessionId,
     });
   }
-  if (CONTEXT_ERROR_PATTERN.test(message)) {
+  if (CONTEXT_ERROR_PATTERN.test(diagnosticMessage)) {
     return new ClaudeAdapterError("Claude context window is full.", {
       code: "ERR_CLAUDE_CONTEXT_EXHAUSTED",
       recoverable: true,
       sessionId,
     });
   }
-  if (MODEL_ERROR_PATTERN.test(message)) {
+  if (MODEL_ERROR_PATTERN.test(diagnosticMessage)) {
     return new ClaudeAdapterError("Claude model is unavailable.", {
       code: "ERR_CLAUDE_MODEL_UNAVAILABLE",
       sessionId,
     });
   }
-  if (AUTO_ERROR_PATTERN.test(message)) {
+  if (AUTO_ERROR_PATTERN.test(diagnosticMessage)) {
     return new ClaudeAdapterError("Claude auto mode is unavailable.", {
       code: "ERR_UNSUPPORTED_CLAUDE_CAPABILITY",
       sessionId,
     });
   }
-  if (SESSION_ERROR_PATTERN.test(message)) {
-    return new ClaudeAdapterError("Claude session is unavailable.", {
-      code: "ERR_CLAUDE_SESSION_UNAVAILABLE",
-      recoverable: true,
-      sessionId,
-    });
+  const availabilityError = classifiedAvailabilityError(
+    diagnosticMessage,
+    session,
+    profile,
+    sessionId,
+  );
+  if (availabilityError !== undefined) {
+    return availabilityError;
   }
   return new ClaudeAdapterError(fallback, {
     code: "ERR_CLAUDE_TURN_FAILED",
@@ -527,7 +595,7 @@ function validateRequestedModel(payload, model) {
   }
 }
 
-function normalizeResult(payload, request) {
+function normalizeResult(payload, request, session) {
   const schema = outputSchemaFor(request);
   const hasValidOutput =
     typeof payload?.result === "string"
@@ -546,7 +614,11 @@ function normalizeResult(payload, request) {
     !SESSION_ID_PATTERN.test(payload.session_id) ||
     !hasValidPermissionDenials
   ) {
-    throw outputError(payload, "Claude returned an invalid result.");
+    throw outputError(payload, {
+      fallback: "Claude returned an invalid result.",
+      profile: request.profile,
+      session,
+    });
   }
   if (payload.permission_denials?.length > 0) {
     throw new ClaudeAdapterError("Claude requested denied permission.", {
@@ -618,27 +690,23 @@ export function createClaudeAdapter(options = {}) {
       .filter((name) => /^[A-Za-z_][A-Za-z0-9_]*$/u.test(name))
       .sort(),
   );
-  const probePromises = new Map();
+  let probePromise;
 
-  async function inspectCapabilities(executionOptions) {
+  async function inspectCapabilities() {
     let versionResult;
     let helpResult;
     let socatAvailable = false;
-    const selectedEnvironment = executionEnvironment(
-      processEnvironment,
-      executionOptions,
-    );
     try {
       [versionResult, helpResult] = await Promise.all([
         execute(claudeBinary, ["--version"], {
           encoding: "utf8",
-          env: selectedEnvironment,
+          env: processEnvironment,
           maxBuffer: 1024 * 1024,
           timeout: 10_000,
         }),
         execute(claudeBinary, ["--help"], {
           encoding: "utf8",
-          env: selectedEnvironment,
+          env: processEnvironment,
           maxBuffer: 1024 * 1024,
           timeout: 10_000,
         }),
@@ -691,12 +759,9 @@ export function createClaudeAdapter(options = {}) {
   }
 
   function probe(value) {
-    const executionOptions = normalizeExecutionOptions(value);
-    const key = JSON.stringify(executionOptions);
-    if (!probePromises.has(key)) {
-      probePromises.set(key, inspectCapabilities(executionOptions));
-    }
-    return probePromises.get(key);
+    normalizeExecutionOptions(value);
+    probePromise ??= inspectCapabilities();
+    return probePromise;
   }
 
   async function assertCapabilities(request) {
@@ -825,7 +890,11 @@ export function createClaudeAdapter(options = {}) {
       if (payload === null) {
         const reportedError = outputError(
           { result: `${standardError}\n${standardOutput}`.trim() },
-          "Claude process failed.",
+          {
+            fallback: "Claude process failed.",
+            profile: request.profile,
+            session: selectedSession,
+          },
         );
         if (reportedError.code !== "ERR_CLAUDE_TURN_FAILED") {
           throw reportedError;
@@ -837,7 +906,11 @@ export function createClaudeAdapter(options = {}) {
           recoverable: true,
         });
       }
-      throw outputError(payload, standardError || "Claude process failed.");
+      throw outputError(payload, {
+        fallback: standardError || "Claude process failed.",
+        profile: request.profile,
+        session: selectedSession,
+      });
     }
     if (
       PERMISSION_MODE_FALLBACK_PATTERN.test(processOutput(processResult.stderr))
@@ -848,7 +921,7 @@ export function createClaudeAdapter(options = {}) {
       );
     }
     const payload = parseJsonOutput(processOutput(processResult.stdout));
-    const result = normalizeResult(payload, request);
+    const result = normalizeResult(payload, request, selectedSession);
     if (
       selectedSession?.mode === "fork" &&
       result.sessionId === selectedSession.id
@@ -925,16 +998,6 @@ export function createClaudeAdapter(options = {}) {
           },
         );
       }
-      if (
-        request.session?.mode === "fork" &&
-        cause.code === "ERR_CLAUDE_SESSION_UNAVAILABLE" &&
-        (cause.sessionId === undefined || cause.sessionId === request.session.id)
-      ) {
-        throw new ClaudeAdapterError("Claude source session is unavailable.", {
-          cause,
-          code: "ERR_CLAUDE_SOURCE_SESSION_UNAVAILABLE",
-        });
-      }
       if (cause.code === "ERR_CLAUDE_CONTEXT_EXHAUSTED") {
         const forkSourceId =
           request.session?.mode === "fork" ? request.session.id : undefined;
@@ -986,7 +1049,7 @@ export function createClaudeAdapter(options = {}) {
           session: null,
         });
       } else if (
-        cause.code === "ERR_CLAUDE_SESSION_UNAVAILABLE" &&
+        cause.code === "ERR_CLAUDE_CONTINUATION_SESSION_UNAVAILABLE" &&
         request.session?.mode === "continue"
       ) {
         result = await runAttempt(request, {
