@@ -95,8 +95,10 @@ Work only on this planned commit.
 Do not create a commit in this turn.
 Before returning, perform a concise self-review.
 For COMPLETED, put all results in summary; set reason, question, and whyBlocked to "", and options and evidence to [].
-For BLOCKED, set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
+For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or comparable external constraints. Set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
 For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-decision fields.
+
+Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
 
 Do not ask questions after clarification closes.
 A blocking product-decision outcome is allowed only when the task, plan, repository, conventions, and prior clarifications leave a choice between materially different product requirements or behaviors unresolved and progress is otherwise impossible.
@@ -123,8 +125,10 @@ Otherwise, return only the approval decision and actionable findings using the p
 If a finding is incorrect, dispute it with concise evidence instead of changing the code.
 
 Do not create a commit in this turn.
-For RESOLVED, return exactly one decision per blocker; every decision requires reason; DISPUTE requires evidence, while FIX evidence may be []. Set question and whyBlocked to "", and options and evidence to [].
-For PRODUCT_DECISION_REQUIRED, set decisions to []; use the product-decision fields.
+For RESOLVED, return exactly one decision per blocker; every decision requires reason; DISPUTE requires evidence, while FIX evidence may be []. Set top-level reason, question, and whyBlocked to "", and options and evidence to [].
+For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or comparable external constraints. Set decisions and options to []; provide reason and evidence; set question and whyBlocked to "".
+For PRODUCT_DECISION_REQUIRED, set decisions to [] and reason to ""; use the product-decision fields.
+Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
 Do not ask questions after clarification closes.
 A blocking product-decision outcome is allowed only when the task, plan, repository, conventions, and prior clarifications leave a choice between materially different product requirements or behaviors unresolved and progress is otherwise impossible.
 Do not use it for technical choices, implementation difficulty, naming, or ordinary review findings.
@@ -146,6 +150,8 @@ test("finalization and dispute prompts preserve their narrow roles", () => {
     FINALIZATION_INSTRUCTIONS,
     /Use PASS only after the complete validation procedure succeeds\./u,
   );
+  assert.match(FINALIZATION_INSTRUCTIONS, /sandbox, IPC, loopback/u);
+  assert.match(FINALIZATION_INSTRUCTIONS, /Do not weaken sandboxing/u);
   assert.match(
     FINALIZATION_INSTRUCTIONS,
     /For PASS, provide summary; set issues, options, and evidence to \[\]; set reason, question, and whyBlocked to ""\./u,
@@ -162,6 +168,7 @@ test("finalization and dispute prompts preserve their narrow roles", () => {
     FINALIZATION_INSTRUCTIONS,
     /For SKILL_INVALID, provide a repository-relative skillPath and reason/u,
   );
+  assert.match(FINALIZATION_INSTRUCTIONS, /For BLOCKED, use only/u);
   assert.match(
     FINALIZATION_INSTRUCTIONS,
     /For PRODUCT_DECISION_REQUIRED, set skillPath, summary, and reason to ""/u,

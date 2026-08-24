@@ -1657,14 +1657,21 @@ ${evidence}`,
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "BOOTSTRAP");
     }
-    if (["SKILL_MISSING", "SKILL_INVALID", "BLOCKED"].includes(result.status)) {
+    if (result.status === "BLOCKED") {
+      await pause("environment_blocked", {
+        explanation: result.reason,
+        evidence: result.evidence,
+        ...(result.skillPath === null ? {} : { skillPath: result.skillPath }),
+        resumeState: "FINALIZE",
+      });
+      return false;
+    }
+    if (["SKILL_MISSING", "SKILL_INVALID"].includes(result.status)) {
       const modifiedBeforeValidation =
-        result.status !== "BLOCKED" &&
         (await contentFingerprint()) !== beforeFingerprint;
       const reasons = {
         SKILL_MISSING: "finalization_skill_missing",
         SKILL_INVALID: "finalization_skill_invalid",
-        BLOCKED: "finalization_cannot_pass",
       };
       await pause(
         modifiedBeforeValidation
@@ -2259,6 +2266,17 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
     );
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "BOOTSTRAP");
+    }
+    if (result.status === "BLOCKED") {
+      await pause("environment_blocked", {
+        explanation: result.reason,
+        evidence: result.evidence,
+        resumeState:
+          state().workflowState === "FINALIZE"
+            ? "FINALIZE"
+            : "RESOLVE_FINDINGS",
+      });
+      return false;
     }
     const requiresFix = result.decisions.some(({ decision }) => decision === "FIX");
     const newDisputes = result.decisions

@@ -203,6 +203,18 @@ function implementationBlocked() {
   };
 }
 
+function environmentBlocked(reason, evidence) {
+  return {
+    status: "BLOCKED",
+    decisions: [],
+    reason,
+    question: "",
+    options: [],
+    whyBlocked: "",
+    evidence: [evidence],
+  };
+}
+
 function finalizationPassed(
   skillPath = ".agents/skills/finalization/SKILL.md",
 ) {
@@ -266,6 +278,20 @@ function finalizationUnavailable(status) {
   };
 }
 
+function finalizationBlocked(reason, evidence) {
+  return {
+    status: "BLOCKED",
+    skillPath: ".agents/skills/finalization/SKILL.md",
+    summary: "",
+    issues: [],
+    reason,
+    question: "",
+    options: [],
+    whyBlocked: "",
+    evidence: [evidence],
+  };
+}
+
 function reviewFindings(...ids) {
   return {
     status: "FINDINGS",
@@ -304,6 +330,7 @@ function resolution(...decisions) {
       evidence:
         decision === "FIX" ? [] : [`source.js demonstrates why ${id} is invalid.`],
     })),
+    reason: "",
     ...emptyDecision(),
   };
 }
@@ -2509,6 +2536,70 @@ test("retries implementation after an environment blocker clears", async (t) => 
   assert.equal(resumed.pipelineState.workflowState, "DONE");
 });
 
+test("retries unchanged loopback-blocked finding resolution", async (t) => {
+  const fixture = await createFixture(t, {
+    workWorker: [
+      implementationCompleted(),
+      finalizationFailed("F1"),
+      environmentBlocked(
+        "The required loopback endpoint is unavailable.",
+        "The validation client could not connect to its loopback service.",
+      ),
+      resolution({ id: "F1", decision: "FIX" }),
+      finalizationPassed(),
+    ],
+  });
+
+  const paused = await fixture.run();
+
+  assert.equal(paused.pause.reason, "environment_blocked");
+  assert.equal(paused.pause.resumeState, "RESOLVE_FINDINGS");
+  assert.equal(paused.pipelineState.finalizationResult.status, "FAIL");
+  assert.deepEqual(paused.pause.evidence, [
+    "The validation client could not connect to its loopback service.",
+  ]);
+
+  const resumed = await fixture.run();
+  assert.equal(resumed.pipelineState.workflowState, "DONE");
+});
+
+test("preserves a partial fix before sandbox-blocked validation", async (t) => {
+  const fixture = await createFixture(t, {
+    workWorker: [
+      implementationCompleted(),
+      finalizationFailed("F1"),
+      environmentBlocked(
+        "The validation sandbox rejected a required operation.",
+        "The sandbox denied the validation subprocess before it could run.",
+      ),
+      finalizationPassed(),
+    ],
+    async onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        request.prompt.includes("For each finding below")
+      ) {
+        await writeFile(join(request.cwd, "source.js"), "export const value = 2;\n");
+      }
+    },
+  });
+
+  const paused = await fixture.run();
+
+  assert.equal(paused.pause.reason, "environment_blocked");
+  assert.equal(paused.pause.resumeState, "FINALIZE");
+  assert.equal(paused.pipelineState.finalizationResult, null);
+  assert.equal(paused.pipelineState.finalizedFingerprint, null);
+  assert.equal(paused.pipelineState.reviewedFingerprint, null);
+  assert.equal(
+    await readFile(join(fixture.projectPath, "source.js"), "utf8"),
+    "export const value = 2;\n",
+  );
+
+  const resumed = await fixture.run();
+  assert.equal(resumed.pipelineState.workflowState, "DONE");
+});
+
 test("routes finalization failures through a fix and the complete gate", async (t) => {
   const fixture = await createFixture(t, {
     workWorker: [
@@ -3365,7 +3456,10 @@ test("retries finalization after its environment blocker clears", async (t) => {
   const fixture = await createFixture(t, {
     workWorker: [
       implementationCompleted(),
-      finalizationUnavailable("BLOCKED"),
+      finalizationBlocked(
+        "The validation IPC endpoint is unavailable.",
+        "The test runner could not open its required IPC channel.",
+      ),
       finalizationPassed(),
     ],
   });
@@ -3375,7 +3469,7 @@ test("retries finalization after its environment blocker clears", async (t) => {
   });
 
   assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
-  assert.equal(paused.pause.reason, "finalization_cannot_pass");
+  assert.equal(paused.pause.reason, "environment_blocked");
   assert.equal(paused.pause.resumeState, "FINALIZE");
 
   const resumed = await fixture.run({ finalization: "none" });
@@ -3449,7 +3543,10 @@ test("allows project changes before finalization becomes blocked", async (t) => 
     workReviewer: [],
     workWorker: [
       implementationCompleted(),
-      finalizationUnavailable("BLOCKED"),
+      finalizationBlocked(
+        "The validation process cannot be isolated on this host.",
+        "The required process-isolation facility is unavailable.",
+      ),
     ],
     async onRoleRun(role, request) {
       if (
@@ -3469,7 +3566,8 @@ test("allows project changes before finalization becomes blocked", async (t) => 
   const result = await fixture.run();
 
   assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
-  assert.equal(result.pause.reason, "finalization_cannot_pass");
+  assert.equal(result.pause.reason, "environment_blocked");
+  assert.equal(result.pause.resumeState, "FINALIZE");
   assert.equal(result.pause.code, undefined);
   assert.equal(result.pipelineState.finalizationResult, null);
   assert.equal(fixture.calls.reviewer.length, 1);
@@ -3480,7 +3578,13 @@ test("requires a resolved skill path when finalization is blocked", async (t) =>
     workReviewer: [],
     workWorker: [
       implementationCompleted(),
-      { ...finalizationUnavailable("BLOCKED"), skillPath: "" },
+      {
+        ...finalizationBlocked(
+          "The validation process is externally blocked.",
+          "The required validation service is unavailable.",
+        ),
+        skillPath: "",
+      },
     ],
   });
 

@@ -274,7 +274,7 @@ export const FINDING_RESOLUTION_SCHEMA = deepFreeze({
   properties: {
     status: {
       type: "string",
-      enum: ["RESOLVED", "PRODUCT_DECISION_REQUIRED"],
+      enum: ["RESOLVED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"],
     },
     decisions: {
       type: "array",
@@ -290,11 +290,13 @@ export const FINDING_RESOLUTION_SCHEMA = deepFreeze({
         additionalProperties: false,
       },
     },
+    reason: TEXT,
     ...DECISION_PROPERTIES,
   },
   required: [
     "status",
     "decisions",
+    "reason",
     "question",
     "options",
     "whyBlocked",

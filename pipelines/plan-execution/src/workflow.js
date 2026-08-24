@@ -1470,8 +1470,6 @@ ${JSON.stringify(state().bootstrapDisagreement, null, 2)}`,
       IMPLEMENTATION_SCHEMA,
       (evidence) => `${IMPLEMENTATION_INSTRUCTIONS}
 
-Use BLOCKED only for an external environment blocker.
-
 ${evidence}
 
 Current planned commit:
@@ -1624,14 +1622,21 @@ ${step.body}
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "IMPLEMENT");
     }
-    if (["SKILL_MISSING", "SKILL_INVALID", "BLOCKED"].includes(result.status)) {
+    if (result.status === "BLOCKED") {
+      await pause("environment_blocked", {
+        explanation: result.reason,
+        evidence: result.evidence,
+        ...(result.skillPath === null ? {} : { skillPath: result.skillPath }),
+        resumeState: "FINALIZE",
+      });
+      return false;
+    }
+    if (["SKILL_MISSING", "SKILL_INVALID"].includes(result.status)) {
       const modifiedBeforeValidation =
-        result.status !== "BLOCKED" &&
         (await contentFingerprint()) !== beforeFingerprint;
       const reasons = {
         SKILL_MISSING: "finalization_skill_missing",
         SKILL_INVALID: "finalization_skill_invalid",
-        BLOCKED: "finalization_cannot_pass",
       };
       await pause(
         modifiedBeforeValidation
@@ -2246,6 +2251,17 @@ ${JSON.stringify(
     );
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "IMPLEMENT");
+    }
+    if (result.status === "BLOCKED") {
+      await pause("environment_blocked", {
+        explanation: result.reason,
+        evidence: result.evidence,
+        resumeState:
+          state().workflowState === "FINALIZE"
+            ? "FINALIZE"
+            : "RESOLVE_FINDINGS",
+      });
+      return false;
     }
     if (
       budgetExhausted &&

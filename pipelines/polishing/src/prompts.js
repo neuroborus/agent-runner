@@ -32,15 +32,18 @@ export const POLISH_INSTRUCTIONS = `Polish the existing local repository changes
 
 You may modify workspace content and staging placement when correctness requires it. Preserve unrelated work. Do not create a commit, change HEAD or refs, alter remotes or Git identity, or perform a remote write. Before returning, perform a concise self-review.
 For COMPLETED, provide summary; set reason, question, and whyBlocked to "", and options and evidence to [].
-For BLOCKED, use only an external environment blocker; set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
-For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-decision fields.`;
+For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or comparable external constraints. Set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
+For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-decision fields.
+Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.`;
 
 export const FINALIZATION_INSTRUCTIONS = `Run the complete project finalization procedure in this dedicated turn, including project-required formatting or generated output. Do not perform unrelated fixes, stage changes as a discretionary handoff action, or create a commit.
 Use PASS only after the complete validation procedure succeeds.
+Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
 For PASS, provide summary; set issues, options, and evidence to []; set reason, question, and whyBlocked to "".
 For FAIL, provide summary and one or more issues with unique stable F-prefixed numeric IDs, each with command, problem, and evidence; set options and evidence to []; set reason, question, and whyBlocked to "".
 For SKILL_MISSING, provide the attempted repository-relative skillPath and reason; set summary, question, and whyBlocked to "", and issues and options to []; evidence may be [].
-For SKILL_INVALID, provide a repository-relative skillPath and reason; for BLOCKED, use the selected skillPath or "" when no skill is selected. Set summary, question, and whyBlocked to "", and issues and options to []; evidence may be [].
+For SKILL_INVALID, provide a repository-relative skillPath and reason; set summary, question, and whyBlocked to "", and issues and options to []; evidence may be [].
+For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or comparable external constraints. Use the selected skillPath or "" when no skill is selected; set summary, question, and whyBlocked to "", and issues and options to []; provide reason and evidence.
 For PRODUCT_DECISION_REQUIRED, set skillPath, summary, and reason to "", and issues to []; use the product-decision fields.`;
 
 export function finalizationBootstrapInstructions(policy) {
@@ -73,8 +76,10 @@ For PRODUCT_DECISION_REQUIRED, set findings to []; use the product-decision fiel
 export const FINDING_RESOLUTION_INSTRUCTIONS = `Resolve every current blocker in one batch. Fix each valid blocker idiomatically and minimally. Dispute an incorrect Reviewer finding only with concise evidence.
 
 Do not create a commit. Finalization failures must be fixed and cannot be disputed. A finding already upheld by the Arbiter must be fixed.
-For RESOLVED, return exactly one decision per blocker; every decision requires reason; DISPUTE requires evidence, while FIX evidence may be []. Set question and whyBlocked to "", and options and evidence to [].
-For PRODUCT_DECISION_REQUIRED, set decisions to []; use the product-decision fields.`;
+For RESOLVED, return exactly one decision per blocker; every decision requires reason; DISPUTE requires evidence, while FIX evidence may be []. Set top-level reason, question, and whyBlocked to "", and options and evidence to [].
+For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or comparable external constraints. Set decisions and options to []; provide reason and evidence; set question and whyBlocked to "".
+For PRODUCT_DECISION_REQUIRED, set decisions to [] and reason to ""; use the product-decision fields.
+Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.`;
 
 export const DISPUTE_RECONSIDERATION_INSTRUCTIONS = `Reconsider each disputed finding from the current repository evidence and the Worker's evidence.
 

@@ -192,6 +192,13 @@ through compaction, a fresh session, or provider fallback. Persist
 fingerprint-bound results before pausing so the durable request can resume after
 capacity returns.
 
+A writable Worker turn that cannot execute required validation because of
+sandbox, IPC, loopback, process-isolation, missing-service, permission, or a
+comparable external constraint returns structured `BLOCKED` with bounded reason
+and evidence. The pipeline persists `environment_blocked`, preserves safe
+workspace content, and never weakens sandbox, network, process, or host
+temporary-directory boundaries to make validation pass.
+
 The pipeline stores concise summaries as external run artifacts:
 
 ```text
@@ -237,6 +244,10 @@ reuse this checkpoint. The Worker may add or remove content when correctness
 requires it. It must not create a commit, change `HEAD` or refs, reconfigure
 remotes or Git identity, or perform a remote write.
 
+An external validation blocker pauses at `POLISH` without discarding safe
+Worker changes. Any stale fingerprint-bound finalization and review results are
+invalidated before the pause.
+
 ### Finalize
 
 Run the target repository's complete finalization procedure in a dedicated
@@ -256,6 +267,11 @@ fingerprint after the procedure and bind the result to it. A failure becomes
 blocking findings for Worker resolution. Unavailable explicit guidance or a
 blocked finalization procedure pauses.
 
+`BLOCKED` is reserved for required validation that cannot execute because of an
+external environment constraint. It carries bounded reason and evidence,
+pauses as `environment_blocked`, and resumes at `FINALIZE`; an executable check
+that reports a legitimate failure remains `FAIL`.
+
 ### Review And Findings
 
 After finalization passes, an independent read-only Reviewer checks the task,
@@ -270,6 +286,12 @@ disputes as `WITHDRAW` or `UPHOLD`. An unresolved dispute reaches a fresh
 read-only Arbiter after the configured budget. Every finding must be fixed,
 withdrawn, arbitrated, or explicitly overridden by the user for the exact
 reviewed fingerprint.
+
+If required validation is externally blocked during finding resolution, the
+Worker returns `BLOCKED` with no decisions and bounded reason and evidence. A
+content-changing partial fix is preserved, invalidates stale finalization and
+review evidence, and resumes at `FINALIZE`; an unchanged turn retains its
+blockers and resumes at `RESOLVE_FINDINGS`.
 
 Exact finding IDs drive no-progress detection; fuzzy semantic matching is out
 of scope. Exhausted fix, dispute, stable-finding, or stagnation budgets always
@@ -399,6 +421,9 @@ Pipeline tests use fake adapters and temporary repositories. Cover at least:
   plan-execution runs, detached MCP retry, and same-host stale recovery;
 - compatible legacy migration, incompatible reader and detached-child
   rejection, and disconnects that leave durable state unchanged;
+- sandbox, IPC, loopback, process-isolation, missing-service, and permission
+  validation blockers across polishing, finalization, and finding resolution,
+  including fingerprint-aware preservation and resume;
 - the invariant that `HEAD` never changes and completion never commits.
 
 Root tests cover workspace imports and metadata, static registration,

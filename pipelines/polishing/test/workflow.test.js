@@ -139,6 +139,18 @@ function polishingBlocked() {
   };
 }
 
+function environmentBlocked(reason, evidence) {
+  return {
+    status: "BLOCKED",
+    decisions: [],
+    reason,
+    question: "",
+    options: [],
+    whyBlocked: "",
+    evidence: [evidence],
+  };
+}
+
 function finalizationPassed(
   skillPath = ".agents/skills/finalization/SKILL.md",
 ) {
@@ -192,6 +204,20 @@ function finalizationUnavailable(status) {
   };
 }
 
+function finalizationBlocked(reason, evidence) {
+  return {
+    status: "BLOCKED",
+    skillPath: ".agents/skills/finalization/SKILL.md",
+    summary: "",
+    issues: [],
+    reason,
+    question: "",
+    options: [],
+    whyBlocked: "",
+    evidence: [evidence],
+  };
+}
+
 function reviewFindings(id = "R1") {
   return reviewFindingBatch([id]);
 }
@@ -229,6 +255,7 @@ function resolutionBatch(decisions) {
             ? ["The current test covers the reported behavior."]
             : [],
       })),
+    reason: "",
     ...emptyDecision(),
   };
 }
@@ -243,6 +270,7 @@ function verboseResolutionBatch(ids) {
       reason: detail,
       evidence: [detail, detail],
     })),
+    reason: "",
     ...emptyDecision(),
   };
 }
@@ -1789,6 +1817,102 @@ test("preserves Worker changes when a valid environment blocker pauses polishing
     await readFile(join(fixture.projectPath, "tracked.txt"), "utf8"),
     "safe blocked work\n",
   );
+});
+
+test("retries permission-blocked finalization", async (t) => {
+  const fixture = await createFixture(t, {
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationBlocked(
+        "The validation process lacks a required permission.",
+        "The required validation resource rejected access.",
+      ),
+      finalizationPassed(),
+    ],
+  });
+
+  const paused = await fixture.run();
+
+  assert.equal(paused.pause.reason, "environment_blocked");
+  assert.equal(paused.pause.resumeState, "FINALIZE");
+  assert.deepEqual(paused.pause.evidence, [
+    "The required validation resource rejected access.",
+  ]);
+
+  const resumed = await fixture.run();
+  assert.equal(resumed.pipelineState.workflowState, "DONE");
+});
+
+test("retries unchanged process-isolation-blocked finding resolution", async (t) => {
+  const fixture = await createFixture(t, {
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationFailed(),
+      environmentBlocked(
+        "The required process isolation is unavailable.",
+        "The validation subprocess could not enter its required isolation profile.",
+      ),
+      resolution("FIX"),
+      finalizationPassed(),
+    ],
+  });
+
+  const paused = await fixture.run();
+
+  assert.equal(paused.pause.reason, "environment_blocked");
+  assert.equal(paused.pause.resumeState, "RESOLVE_FINDINGS");
+  assert.equal(paused.pipelineState.finalizationResult.status, "FAIL");
+
+  const resumed = await fixture.run();
+  assert.equal(resumed.pipelineState.workflowState, "DONE");
+});
+
+test("preserves a partial fix before missing-service validation", async (t) => {
+  const fixture = await createFixture(t, {
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationFailed(),
+      environmentBlocked(
+        "A required local validation service is unavailable.",
+        "The service health check reported no available endpoint.",
+      ),
+      finalizationPassed(),
+    ],
+    async onRoleRun(role, request, _turn, { projectPath }) {
+      if (
+        role === "worker" &&
+        /Resolve every current blocker/u.test(request.prompt)
+      ) {
+        await writeFile(join(projectPath, "tracked.txt"), "safe partial fix\n");
+      }
+    },
+  });
+
+  const paused = await fixture.run();
+
+  assert.equal(paused.pause.reason, "environment_blocked");
+  assert.equal(paused.pause.resumeState, "FINALIZE");
+  assert.equal(paused.pipelineState.finalizationResult, null);
+  assert.equal(paused.pipelineState.finalizedFingerprint, null);
+  assert.equal(paused.pipelineState.reviewedFingerprint, null);
+  assert.equal(
+    await readFile(join(fixture.projectPath, "tracked.txt"), "utf8"),
+    "safe partial fix\n",
+  );
+
+  const recovered = await fixture.recover();
+  assert.equal(recovered.pause.reason, "environment_blocked");
+  const resumed = await fixture.run();
+  assert.equal(resumed.pipelineState.workflowState, "DONE");
 });
 
 test("binds finalization changes and review to one fingerprint without committing", async (t) => {

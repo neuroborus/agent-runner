@@ -509,6 +509,17 @@ compaction, a fresh session, or provider fallback. Persist
 one-shot commit authorization, preserve safe workspace changes, and enter
 `WAITING_FOR_USER` after the single rejected invocation.
 
+When a writable Worker turn cannot execute required validation because of
+sandbox, IPC, loopback, process-isolation, missing-service, permission, or a
+comparable external constraint, it returns structured `BLOCKED` with bounded
+reason and evidence. The pipeline persists `environment_blocked`; it does not
+turn the external constraint into a code finding or weaken the sandbox,
+network, process, or host temporary-directory boundary. Safe content remains in
+the workspace. A content-changing finding-resolution turn invalidates stale
+fingerprint-bound evidence and resumes at `FINALIZE`; an unchanged turn resumes
+at `RESOLVE_FINDINGS`. Initial implementation and finalization resume at their
+original `IMPLEMENT` and `FINALIZE` checkpoints respectively.
+
 `local-commit` is a one-turn capability used only after the runner's commit gate
 and requires the `commit` constraint. It allows the Worker to stage and create
 one ordinary local commit with the exact supplied message while the adapter
@@ -1117,6 +1128,11 @@ The Worker then:
 2. performs a concise self-review;
 3. returns control to the runner.
 
+If required validation cannot run because of an external environment
+constraint, the Worker returns `BLOCKED` with bounded reason and evidence. The
+runner preserves safe implementation content and pauses with
+`environment_blocked` at the `IMPLEMENT` checkpoint.
+
 The Worker must not create a Git commit during implementation, finalization, or
 finding resolution. Commit creation is allowed only in the dedicated,
 runner-authorized `COMMIT` turn after the gate passes.
@@ -1139,6 +1155,12 @@ the current procedure output. Skill-guided results identify the resolved
 repository-relative skill path; skill-less `PASS`, `FAIL`, and `BLOCKED`
 results carry no path. A blocked procedure or unavailable explicit skill pauses
 without advancing.
+
+`BLOCKED` is reserved for a required check that cannot execute because of an
+external environment constraint and carries bounded reason and evidence. It
+pauses with `environment_blocked` and resumes at `FINALIZE`; it is not
+`finalization_cannot_pass` and does not become a code failure. A legitimate
+check failure remains `FAIL`.
 
 The finalization procedure may legitimately modify files when the project itself requires this, for example formatting or generated output.
 
@@ -1231,6 +1253,13 @@ or:
 ```text
 DISPUTE
 ```
+
+If required validation is externally unavailable during the resolution turn,
+the Worker may instead return `BLOCKED` with no decisions and bounded reason and
+evidence. When the turn changed content, the runner preserves the partial fix,
+invalidates prior finalization and review evidence, and resumes at `FINALIZE`.
+When content is unchanged, it preserves the current blockers and resumes at
+`RESOLVE_FINDINGS`.
 
 #### FIX
 
@@ -1695,6 +1724,9 @@ At minimum cover:
 45. compatible legacy state migrates under the execution lease, incompatible
     readers and detached children fail with a specific version-skew error, and
     disconnects leave the durable run and retryable intent intact.
+46. sandbox, IPC, loopback, process-isolation, missing-service, and permission
+    validation blockers pause as `environment_blocked`, preserve safe content,
+    and resume from the correct fingerprint-aware checkpoint.
 
 Real Codex/Claude smoke tests should be opt-in integration tests.
 
@@ -1789,6 +1821,8 @@ Do not build:
 27. `CLARIFY` never closes while clarification input conflicts with the validated plan.
 28. A product decision invalidates dependent work, and a plan-changing answer requires a revised validated plan.
 29. The runner never creates a repository-local clarification artifact unless its resolved path is ignored.
+30. External validation constraints pause as `environment_blocked`; they never
+    become code failures or justify weakening the execution boundary.
 
 ---
 

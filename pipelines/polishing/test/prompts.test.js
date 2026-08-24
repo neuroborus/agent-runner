@@ -85,11 +85,15 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
   assert.match(PRODUCT_DECISION_INSTRUCTIONS, /materially different product/u);
   assert.match(POLISH_INSTRUCTIONS, /Do not create a commit/u);
   assert.match(POLISH_INSTRUCTIONS, /self-review/u);
+  assert.match(POLISH_INSTRUCTIONS, /sandbox, IPC, loopback/u);
   assert.match(FINALIZATION_INSTRUCTIONS, /finalization procedure/u);
   assert.match(FINALIZATION_INSTRUCTIONS, /Do not.*stage/u);
+  assert.match(FINALIZATION_INSTRUCTIONS, /external constraints/u);
+  assert.match(FINALIZATION_INSTRUCTIONS, /Do not weaken sandboxing/u);
   assert.match(REVIEW_INSTRUCTIONS, /Do not modify/u);
   assert.match(REVIEW_INSTRUCTIONS, /stable IDs/u);
   assert.match(FINDING_RESOLUTION_INSTRUCTIONS, /one batch/u);
+  assert.match(FINDING_RESOLUTION_INSTRUCTIONS, /For BLOCKED/u);
   assert.match(DISPUTE_RECONSIDERATION_INSTRUCTIONS, /Withdraw/u);
   assert.match(FINDING_ARBITRATION_INSTRUCTIONS, /WORKER_CORRECT/u);
   assert.match(STAGNATION_INSTRUCTIONS, /cannot approve/u);

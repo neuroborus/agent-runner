@@ -327,6 +327,17 @@ workflow state, reconciled one-shot authorization state, and any safe workspace
 changes before entering `WAITING_FOR_USER`. Resume reconstructs the same
 durable request after capacity returns.
 
+A Worker that cannot execute required validation because of sandbox, IPC,
+loopback, process-isolation, missing-service, permission, or comparable external
+constraints returns a bounded structured blocker. Plan execution and polishing
+persist `environment_blocked` rather than treating that condition as a code
+failure, preserve safe workspace content, and invalidate any stale
+fingerprint-bound finalization and review evidence. A content-changing finding
+resolution resumes at `FINALIZE`; an unchanged turn resumes at its original
+checkpoint. Finalization always resumes at `FINALIZE`. The workflow does not
+weaken isolation or grant network or host temporary-directory access to bypass
+the unavailable validation.
+
 An explicitly supplied source session is different: the first eligible turn of
 each new primary or review checkpoint creates a direct child and returns its ID
 without resuming or mutating the source. If the source cannot be forked, the

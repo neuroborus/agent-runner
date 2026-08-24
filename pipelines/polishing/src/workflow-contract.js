@@ -129,7 +129,11 @@ const PAUSE_RESUME_STATES = Object.freeze({
     "REVIEW",
     "RESOLVE_FINDINGS",
   ]),
-  environment_blocked: Object.freeze(["POLISH"]),
+  environment_blocked: Object.freeze([
+    "POLISH",
+    "FINALIZE",
+    "RESOLVE_FINDINGS",
+  ]),
   finalization_cannot_pass: Object.freeze(["FINALIZE"]),
   finalization_skill_invalid: Object.freeze(["FINALIZE"]),
   finalization_skill_missing: Object.freeze(["FINALIZE"]),
@@ -722,6 +726,10 @@ export function normalizeFinalizationResult(payload) {
     if (payload.status === "SKILL_INVALID" && payload.skillPath === "") {
       throw outputError("Finalization skill path is inapplicable.");
     }
+    const evidence =
+      payload.status === "BLOCKED"
+        ? normalizeTextList(payload.evidence, "finalization blocker evidence")
+        : normalizeOptionalEvidence(payload.evidence, "finalization evidence");
     return Object.freeze({
       status: payload.status,
       skillPath:
@@ -729,7 +737,7 @@ export function normalizeFinalizationResult(payload) {
           ? null
           : normalizeRelativePath(payload.skillPath, "finalization skill path"),
       reason: normalizeText(payload.reason, "finalization blocker", INVALID_OUTPUT_CODE),
-      evidence: normalizeOptionalEvidence(payload.evidence, "finalization evidence"),
+      evidence,
     });
   }
   if (payload.reason !== "" || !emptyDecision(payload)) {
@@ -801,21 +809,60 @@ export function normalizeResolutionResult(
 ) {
   assertExactFields(
     payload,
-    ["status", "decisions", "question", "options", "whyBlocked", "evidence"],
+    [
+      "status",
+      "decisions",
+      "reason",
+      "question",
+      "options",
+      "whyBlocked",
+      "evidence",
+    ],
     "Finding resolution",
     INVALID_OUTPUT_CODE,
   );
   assertStructuredResult(payload);
-  if (!isRecord(payload) || !["RESOLVED", "PRODUCT_DECISION_REQUIRED"].includes(payload.status)) {
+  if (
+    !isRecord(payload) ||
+    !["RESOLVED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"].includes(
+      payload.status,
+    )
+  ) {
     throw outputError("Worker returned an invalid finding resolution.");
   }
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
-    if (!emptyArray(payload.decisions)) {
+    if (!emptyArray(payload.decisions) || payload.reason !== "") {
       throw outputError("Product decision must not include finding decisions.");
     }
     return Object.freeze({ status: payload.status, decision: normalizeProductDecision(payload) });
   }
-  if (!emptyDecision(payload) || !Array.isArray(payload.decisions)) {
+  if (payload.status === "BLOCKED") {
+    if (
+      !emptyArray(payload.decisions) ||
+      payload.question !== "" ||
+      payload.whyBlocked !== "" ||
+      !emptyArray(payload.options)
+    ) {
+      throw outputError("Blocked finding resolution contains inapplicable fields.");
+    }
+    return Object.freeze({
+      status: payload.status,
+      reason: normalizeText(
+        payload.reason,
+        "finding-resolution blocker",
+        INVALID_OUTPUT_CODE,
+      ),
+      evidence: normalizeTextList(
+        payload.evidence,
+        "finding-resolution blocker evidence",
+      ),
+    });
+  }
+  if (
+    payload.reason !== "" ||
+    !emptyDecision(payload) ||
+    !Array.isArray(payload.decisions)
+  ) {
     throw outputError("Finding resolution contains inapplicable fields.");
   }
   const expectedIds = blockers.map(({ id }) => id).sort();

@@ -46,8 +46,10 @@ Work only on this planned commit.
 Do not create a commit in this turn.
 Before returning, perform a concise self-review.
 For COMPLETED, put all results in summary; set reason, question, and whyBlocked to "", and options and evidence to [].
-For BLOCKED, set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
+For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or comparable external constraints. Set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
 For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-decision fields.
+
+Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
 
 ${PRODUCT_DECISION_INSTRUCTIONS}`;
 
@@ -64,8 +66,10 @@ export const FINDING_RESOLUTION_INSTRUCTIONS = `For each finding below, fix it i
 If a finding is incorrect, dispute it with concise evidence instead of changing the code.
 
 Do not create a commit in this turn.
-For RESOLVED, return exactly one decision per blocker; every decision requires reason; DISPUTE requires evidence, while FIX evidence may be []. Set question and whyBlocked to "", and options and evidence to [].
-For PRODUCT_DECISION_REQUIRED, set decisions to []; use the product-decision fields.
+For RESOLVED, return exactly one decision per blocker; every decision requires reason; DISPUTE requires evidence, while FIX evidence may be []. Set top-level reason, question, and whyBlocked to "", and options and evidence to [].
+For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or comparable external constraints. Set decisions and options to []; provide reason and evidence; set question and whyBlocked to "".
+For PRODUCT_DECISION_REQUIRED, set decisions to [] and reason to ""; use the product-decision fields.
+Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
 ${PRODUCT_DECISION_INSTRUCTIONS}
 Otherwise, return each FIX or DISPUTE decision using the provided schema.`;
 
@@ -73,10 +77,12 @@ export const FINALIZATION_INSTRUCTIONS = `Run the complete project finalization 
 
 Do not perform unrelated fixes, stage changes, or create a commit.
 Use PASS only after the complete validation procedure succeeds.
+Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
 For PASS, provide summary; set issues, options, and evidence to []; set reason, question, and whyBlocked to "".
 For FAIL, provide summary and one or more issues with unique stable F-prefixed numeric IDs, each with command, problem, and evidence; set options and evidence to []; set reason, question, and whyBlocked to "".
 For SKILL_MISSING, provide the attempted repository-relative skillPath and reason; set summary, question, and whyBlocked to "", and issues and options to []; evidence may be [].
-For SKILL_INVALID, provide a repository-relative skillPath and reason; for BLOCKED, use the selected skillPath or "" when no skill is selected. Set summary, question, and whyBlocked to "", and issues and options to []; evidence may be [].
+For SKILL_INVALID, provide a repository-relative skillPath and reason; set summary, question, and whyBlocked to "", and issues and options to []; evidence may be [].
+For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or comparable external constraints. Use the selected skillPath or "" when no skill is selected; set summary, question, and whyBlocked to "", and issues and options to []; provide reason and evidence.
 For PRODUCT_DECISION_REQUIRED, set skillPath, summary, and reason to "", and issues to []; use the product-decision fields.
 ${PRODUCT_DECISION_INSTRUCTIONS}`;
 
