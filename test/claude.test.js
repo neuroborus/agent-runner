@@ -699,7 +699,8 @@ test("keeps a usage-rejected local commit unambiguous", async () => {
     (error) =>
       hasCode("ERR_CLAUDE_USAGE_LIMIT")(error) &&
       error.recoverable === true &&
-      error.ambiguous === false,
+      error.ambiguous === false &&
+      error.effectStarted === false,
   );
   assert.equal(turnCalls(fixture).length, 1);
   assert.equal(
@@ -749,6 +750,40 @@ test("classifies fresh-turn profile, authentication, and provider failures", asy
         },
       );
       assert.equal(turnCalls(fixture).length, 1);
+
+      const localCommitFixture = createFixture({
+        handle({ call }) {
+          if (call.file === "claude" && call.argumentsList.includes("-p")) {
+            throw processFailure(result({ error: true, output: message }));
+          }
+          return undefined;
+        },
+      });
+      await assert.rejects(
+        localCommitFixture.adapter.run(
+          request({
+            ...options,
+            access: "local-commit",
+            authorizationId: "authorization-1",
+            commit: {
+              expectedHead: EXPECTED_HEAD,
+              message: "test(scope): preserve classified failure",
+            },
+          }),
+        ),
+        (error) => {
+          assert.ok(hasCode(code)(error));
+          assert.equal(error.recoverable, true);
+          assert.equal(error.effectStarted, false);
+          assert.doesNotMatch(error.message, /secret-value/u);
+          return true;
+        },
+      );
+      assert.equal(turnCalls(localCommitFixture).length, 1);
+      assert.equal(
+        localCommitFixture.calls.filter(({ file }) => file === "bwrap").length,
+        1,
+      );
     });
   }
 });
@@ -1019,6 +1054,41 @@ test("creates one exact authorized commit in a networkless sandbox", async () =>
   assert.equal(commitCall.options.env.SSH_AUTH_SOCK, undefined);
 });
 
+test("proves a rejected local-commit policy did not start the effect", async () => {
+  const fixture = createFixture({
+    handle({ call }) {
+      if (call.file === "claude" && call.argumentsList.includes("-p")) {
+        return {
+          stdout: JSON.stringify(
+            result({
+              structured: { ready: false },
+            }),
+          ),
+          stderr: "",
+        };
+      }
+      return undefined;
+    },
+  });
+
+  await assert.rejects(
+    fixture.adapter.run(
+      request({
+        access: "local-commit",
+        authorizationId: "authorization-1",
+        commit: {
+          expectedHead: EXPECTED_HEAD,
+          message: "feat(test): create commit",
+        },
+      }),
+    ),
+    (error) =>
+      hasCode("ERR_CLAUDE_LOCAL_COMMIT_POLICY")(error) &&
+      error.effectStarted === false,
+  );
+  assert.equal(fixture.calls.filter(({ file }) => file === "bwrap").length, 1);
+});
+
 test("never replays an interrupted local-commit turn", async () => {
   const fixture = createFixture({
     handle({ call }) {
@@ -1041,11 +1111,48 @@ test("never replays an interrupted local-commit turn", async () => {
       }),
     ),
     (error) =>
-      hasCode("ERR_CLAUDE_LOCAL_COMMIT_INTERRUPTED")(error) &&
-      error.ambiguous === true,
+      hasCode("ERR_CLAUDE_PROCESS_INTERRUPTED")(error) &&
+      error.ambiguous === true &&
+      error.recoverable === true &&
+      error.effectStarted === false,
   );
   assert.equal(turnCalls(fixture).length, 1);
   assert.equal(fixture.calls.filter(({ file }) => file === "bwrap").length, 1);
+});
+
+test("keeps commit-executor failures ambiguous", async () => {
+  let bubblewrapCalls = 0;
+  const fixture = createFixture({
+    handle({ call }) {
+      if (call.file === "bwrap") {
+        bubblewrapCalls += 1;
+        if (bubblewrapCalls === 2) {
+          throw new Error("commit executor failed");
+        }
+      }
+      return undefined;
+    },
+  });
+
+  await assert.rejects(
+    fixture.adapter.run(
+      request({
+        access: "local-commit",
+        authorizationId: "authorization-1",
+        commit: {
+          expectedHead: EXPECTED_HEAD,
+          message: "feat(test): create commit",
+        },
+      }),
+    ),
+    (error) => {
+      assert.ok(hasCode("ERR_CLAUDE_LOCAL_COMMIT_INTERRUPTED")(error));
+      assert.equal(error.ambiguous, true);
+      assert.notEqual(error.effectStarted, false);
+      return true;
+    },
+  );
+  assert.equal(bubblewrapCalls, 2);
 });
 
 test(

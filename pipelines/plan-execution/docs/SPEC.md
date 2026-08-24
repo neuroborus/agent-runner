@@ -404,6 +404,12 @@ commit authorization remains in `COMMIT` for Git verification and is never
 cleared into a replayable effect. Immutable terminal history is upgraded without
 replaying an effect.
 
+Pipeline state version 3 adds a nullable pre-effect rejection record to a
+pending commit. The record contains only a bounded diagnostic code and whether
+the rejection is recoverable. Its version-2 migration sets the record to
+`null`, retaining every legacy consumed authorization on the verification-only
+path rather than inventing proof.
+
 ### `events.jsonl`
 
 Append-only machine-readable event history.
@@ -514,6 +520,17 @@ For non-commit turns, an adapter error may set `recoverable: true` only when
 reconstructing and retrying the durable request is safe. Safety, protocol, and
 isolation failures are not recoverable; an ambiguous `local-commit` outcome is
 never retried and must instead return to Git-state verification.
+
+A `local-commit` adapter error may additionally set `effectStarted: false`
+only when the adapter proves that its isolated commit executor was never
+invoked. This marker is independent of `recoverable`: policy rejection may be
+non-recoverable while provider unavailability is recoverable. The absent
+marker is the safe default for executor failures and every other outcome that
+could have started the effect. The runner never renews an authorization from
+the marker alone. It first persists the bounded code and recoverable
+classification on the consumed authorization, then Git must verify that no
+commit was created. An interrupted verification retains that durable proof for
+resume.
 
 An explicit Claude rate, quota, credit, or spend-limit rejection is recoverable
 backend unavailability, but the rejected turn itself is never retried through
@@ -639,7 +656,10 @@ Probe this isolated commit profile by verifying outside-workspace write denial,
 Git-metadata writes, and network denial. Report `localCommit: false` and fail
 preflight if any boundary cannot be enforced. Any interrupted or failed commit
 executor returns an ambiguous outcome for the runner's one-shot authorization
-and final Git-state verification; it is never replayed.
+and final Git-state verification; it is never replayed. Policy, capability,
+provider, or confirmation-turn rejection before executor invocation carries
+`effectStarted: false`, including `ERR_CODEX_LOCAL_COMMIT_POLICY`. The adapter
+preserves the original bounded error code and recoverable classification.
 
 ### Claude Code
 
@@ -714,7 +734,11 @@ subject-only commit with the exact supplied message. It preserves Git hooks and
 configured identity, strips ambient Git redirection and sensitive command
 environment values, and never adds Claude attribution. Report
 `localCommit: false` when this profile or Claude's required Linux sandbox
-dependencies cannot be probed.
+dependencies cannot be probed. Policy, capability, provider, or confirmation-
+turn rejection before executor invocation carries `effectStarted: false`,
+including `ERR_CLAUDE_LOCAL_COMMIT_POLICY`, while preserving the classified
+profile, authentication, provider, continuation, or process error and its
+recoverability; an executor failure does not carry the marker.
 
 ### Backend-neutral finalization guidance
 
@@ -1463,7 +1487,16 @@ The authorization permits one ordinary local commit only. It does not permit
 `commit --amend`, merge commits, rebases, resets, branch switches, tag creation,
 or any other history/ref mutation.
 
-If no commit is created, pause with `commit_failed`. If a commit is created but
+If no commit is created, pause with `commit_failed`. If the adapter also proved
+`effectStarted: false`, persist its bounded rejection metadata before Git
+verification and durably retire the consumed authorization only after that
+verification reports no commit. A non-recoverable policy rejection remains
+`commit_failed`; a recoverable provider rejection remains
+`backend_unavailable`. Either resumes at `COMMIT` by preparing a fresh
+authorization with a new ID. If verification is interrupted, retain both the
+consumed authorization and its proof, then resume verification without invoking
+the Worker again. Without the explicit marker, retain the consumed
+authorization on that verification-only path. If a commit is created but
 violates the authorization contract, pause with `commit_contract_violated`.
 Never amend, reset, or otherwise rewrite the unexpected commit automatically.
 
@@ -1772,6 +1805,12 @@ At minimum cover:
 46. sandbox, IPC, loopback, process-isolation, missing-service, and permission
     validation blockers pause as `environment_blocked`, preserve safe content,
     and resume from the correct fingerprint-aware checkpoint.
+47. pre-effect local-commit policy and provider rejections renew only after the
+    adapter proof and no-commit Git verification, while executor ambiguity and
+    interrupted verification never replay the consumed authorization.
+48. a pre-effect rejection followed by interrupted Git verification persists
+    its bounded proof, resumes verification without replay, and renews only
+    after the resumed verification confirms no commit.
 
 Real Codex/Claude smoke tests should be opt-in integration tests.
 

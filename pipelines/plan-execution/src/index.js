@@ -160,7 +160,9 @@ function validateResumeAction(run, action) {
   if (
     action === null &&
     ((run.pause?.reason === "commit_failed" &&
-      state.pendingCommit?.status === "consumed") ||
+      (state.pendingCommit?.status === "consumed" ||
+        (state.pendingCommit === null &&
+          run.pause.resumeState === "COMMIT"))) ||
       (RETRYABLE_PAUSE_REASONS.has(run.pause?.reason) &&
         (!state.preflightComplete ||
           ([
@@ -287,10 +289,27 @@ export function migratePlanExecutionStateV1(run) {
   });
 }
 
+export function migratePlanExecutionStateV2(run) {
+  const current = run.pipelineState;
+  return Object.freeze({
+    ...current,
+    pendingCommit:
+      current.pendingCommit === null
+        ? null
+        : Object.freeze({
+            ...current.pendingCommit,
+            preEffectRejection: null,
+          }),
+  });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
-  stateVersion: 2,
-  migrations: Object.freeze({ 1: migratePlanExecutionStateV1 }),
+  stateVersion: 3,
+  migrations: Object.freeze({
+    1: migratePlanExecutionStateV1,
+    2: migratePlanExecutionStateV2,
+  }),
   roles: ROLES,
   settings: SETTINGS,
   taskInputs: TASK_INPUTS,

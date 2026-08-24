@@ -252,7 +252,9 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
     return currentRun;
   }
 
-  async function pauseRejectedCommit(cause) {
+  async function pausePreEffectCommitRejection(rejection) {
+    const reason =
+      rejection.recoverable ? "backend_unavailable" : "commit_failed";
     await transition(
       {
         ...state(),
@@ -261,15 +263,15 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
       },
       {
         pause: {
-          reason: "backend_unavailable",
-          code: diagnosticCode(cause, "ERR_BACKEND_UNAVAILABLE"),
+          reason,
+          code: rejection.code,
           resumeState: "COMMIT",
         },
         publicActivity: activity(
           "runner",
-          "plan-execution",
-          "paused",
-          "Plan execution paused: backend_unavailable.",
+          "commit",
+          "authorization-retired",
+          `Commit authorization retired before effect: ${reason}.`,
         ),
       },
     );
@@ -2814,6 +2816,7 @@ ${JSON.stringify(
                 pendingCommit: {
                   status: "prepared",
                   authorization: preparedAuthorization,
+                  preEffectRejection: null,
                 },
               },
               {
@@ -2834,7 +2837,11 @@ ${JSON.stringify(
         }
         throw cause;
       }
-      pendingCommit = { status: "prepared", authorization };
+      pendingCommit = {
+        status: "prepared",
+        authorization,
+        preEffectRejection: null,
+      };
     }
 
     let agentError;
@@ -2854,6 +2861,7 @@ ${JSON.stringify(
                   pendingCommit: {
                     status: "consumed",
                     authorization: pendingCommit.authorization,
+                    preEffectRejection: null,
                   },
                 },
                 {
@@ -2915,10 +2923,34 @@ ${step.subject}`,
       } catch (cause) {
         agentError = cause;
       }
+      const preEffectRejection =
+        agentError?.effectStarted === false
+          ? Object.freeze({
+              code: diagnosticCode(
+                agentError,
+                "ERR_COMMIT_ADAPTER_REJECTED",
+              ),
+              recoverable: agentError?.recoverable === true,
+            })
+          : null;
       pendingCommit = {
         status: "consumed",
         authorization: pendingCommit.authorization,
+        preEffectRejection,
       };
+      if (preEffectRejection !== null) {
+        await transition(
+          { ...state(), pendingCommit },
+          {
+            publicActivity: activity(
+              "runner",
+              "commit",
+              "pre-effect-rejection-recorded",
+              `Commit ${current.currentStep} pre-effect rejection recorded.`,
+            ),
+          },
+        );
+      }
     }
 
     let verified;
@@ -2935,10 +2967,11 @@ ${step.subject}`,
       }
       if (
         cause.code === "ERR_COMMIT_NOT_CREATED" &&
-        agentError?.recoverable === true &&
-        agentError?.ambiguous === false
+        pendingCommit.preEffectRejection !== null
       ) {
-        await pauseRejectedCommit(agentError);
+        await pausePreEffectCommitRejection(
+          pendingCommit.preEffectRejection,
+        );
         return false;
       }
       const contractViolation =
@@ -3050,7 +3083,9 @@ ${step.subject}`,
         }
       } else if (
         currentRun.pause.reason === "commit_failed" &&
-        state().pendingCommit?.status === "consumed"
+        (state().pendingCommit?.status === "consumed" ||
+          (state().pendingCommit === null &&
+            currentRun.pause.resumeState === "COMMIT"))
       ) {
         await transition(
           { ...state(), workflowState: "COMMIT" },

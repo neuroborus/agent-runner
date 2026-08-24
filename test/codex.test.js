@@ -1344,6 +1344,7 @@ test("rejects forbidden Git and remote-write commands reported by Codex", async 
       ),
       (error) => {
         assert.ok(hasCode(code)(error));
+        assert.equal(error.effectStarted, false);
         assert.equal(
           error.diagnosticClass,
           code === "ERR_CODEX_REMOTE_WRITE_ATTEMPT"
@@ -1589,7 +1590,9 @@ test("does not invoke the commit executor when Codex is not ready", async () => 
         },
       }),
     ),
-    hasCode("ERR_CODEX_LOCAL_COMMIT_POLICY"),
+    (error) =>
+      hasCode("ERR_CODEX_LOCAL_COMMIT_POLICY")(error) &&
+      error.effectStarted === false,
   );
   assert.equal(
     fixture.executeCalls.filter(({ file }) => file === "git").length,
@@ -1634,7 +1637,10 @@ test("never replays an interrupted local-commit turn", async () => {
         },
       }),
     ),
-    hasCode("ERR_CODEX_LOCAL_COMMIT_INTERRUPTED"),
+    (error) =>
+      hasCode("ERR_CODEX_TURN_INTERRUPTED")(error) &&
+      error.recoverable === true &&
+      error.effectStarted === false,
   );
   assert.equal(turns, 1);
   assert.equal(fixture.processes.length, 1);
@@ -1756,7 +1762,11 @@ test("returns commit-executor failures for Git-state verification", async () => 
         },
       }),
     ),
-    hasCode("ERR_CODEX_LOCAL_COMMIT_INTERRUPTED"),
+    (error) => {
+      assert.ok(hasCode("ERR_CODEX_LOCAL_COMMIT_INTERRUPTED")(error));
+      assert.notEqual(error.effectStarted, false);
+      return true;
+    },
   );
   assert.equal(sandboxCalls, 2);
   assert.equal(fixture.processes.length, 1);

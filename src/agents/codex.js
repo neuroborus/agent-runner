@@ -211,6 +211,7 @@ export class CodexAdapterError extends Error {
       cause,
       code = "ERR_CODEX_ADAPTER",
       diagnosticClass,
+      effectStarted,
       method,
       recoverable = false,
     } = {},
@@ -220,6 +221,9 @@ export class CodexAdapterError extends Error {
     this.code = code;
     this.ambiguous = ambiguous;
     this.recoverable = recoverable;
+    if (typeof effectStarted === "boolean") {
+      this.effectStarted = effectStarted;
+    }
     if (CODEX_DIAGNOSTIC_CLASSES.has(diagnosticClass)) {
       this.diagnosticClass = diagnosticClass;
     }
@@ -1264,51 +1268,60 @@ export function createCodexAdapter(options = {}) {
         }
       }
     }
-    if (request.access === "local-commit") {
-      await createAuthorizedCommit(request);
-    }
     return result;
   }
 
   async function run(value) {
     const request = normalizeRequest(value);
-    await assertCapabilities(request);
     try {
-      return await runAttempt(request);
+      await assertCapabilities(request);
+    } catch (cause) {
+      if (
+        request.access === "local-commit" &&
+        cause instanceof CodexAdapterError
+      ) {
+        cause.effectStarted = false;
+      }
+      throw cause;
+    }
+    let result;
+    try {
+      result = await runAttempt(request);
     } catch (cause) {
       if (
         cause instanceof CodexAdapterError &&
         cause.recoverable &&
         cause.method === "mcp/list"
       ) {
+        if (request.access === "local-commit") {
+          cause.effectStarted = false;
+        }
         throw cause;
       }
       if (
         request.access === "local-commit" &&
-        cause instanceof CodexAdapterError &&
-        (cause.ambiguous || cause.recoverable)
+        cause instanceof CodexAdapterError
       ) {
-        if (cause.code === "ERR_CODEX_LOCAL_COMMIT_INTERRUPTED") {
-          throw cause;
-        }
-        throw new CodexAdapterError(
-          "Codex local-commit outcome requires Git-state verification.",
-          {
-            ambiguous: true,
-            cause,
-            code: "ERR_CODEX_LOCAL_COMMIT_INTERRUPTED",
-          },
-        );
+        cause.effectStarted = false;
+        throw cause;
       }
       if (
         cause instanceof CodexAdapterError &&
         cause.recoverable &&
         request.session?.mode !== "fork"
       ) {
-        return runAttempt(request, { fresh: true, recovery: "fresh" });
+        result = await runAttempt(request, {
+          fresh: true,
+          recovery: "fresh",
+        });
+      } else {
+        throw cause;
       }
-      throw cause;
     }
+    if (request.access === "local-commit") {
+      await createAuthorizedCommit(request);
+    }
+    return result;
   }
 
   return Object.freeze({ id: CODEX_BACKEND_ID, probe, run });

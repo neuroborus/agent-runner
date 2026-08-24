@@ -19,6 +19,7 @@ import test from "node:test";
 import {
   createPlanExecutionState,
   migratePlanExecutionStateV1,
+  migratePlanExecutionStateV2,
   planExecutionPipeline,
   runPlanExecution,
 } from "../src/index.js";
@@ -80,7 +81,18 @@ function versionOneState(state) {
   ]) {
     delete legacy[field];
   }
+  if (legacy.pendingCommit !== null) {
+    legacy.pendingCommit = {
+      status: legacy.pendingCommit.status,
+      authorization: legacy.pendingCommit.authorization,
+    };
+  }
   return legacy;
+}
+
+function migrateVersionOneState(state) {
+  const versionTwo = migratePlanExecutionStateV1({ pipelineState: state });
+  return migratePlanExecutionStateV2({ pipelineState: versionTwo });
 }
 
 test("rejects incomplete or substituted finalization PASS evidence", () => {
@@ -139,8 +151,9 @@ test("rejects incomplete or substituted finalization PASS evidence", () => {
 
 test("migrates version-1 execution state to the fail-closed shape", () => {
   const legacy = versionOneState(createPlanExecutionState());
-  const migrated = migratePlanExecutionStateV1({ pipelineState: legacy });
+  const migrated = migrateVersionOneState(legacy);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
+  assert.equal(migrated.pendingCommit, null);
   assert.equal(migrated.finalizationResult, null);
   assert.equal(migrated.reviewResult, null);
 });
@@ -168,7 +181,7 @@ test("invalidates version-1 validation evidence before active execution resumes"
   });
 
   await assert.rejects(fixture.run(), (cause) => cause === stop);
-  const migrated = migratePlanExecutionStateV1({ pipelineState: legacy });
+  const migrated = migrateVersionOneState(legacy);
 
   assert.doesNotThrow(() => normalizePipelineState(migrated));
   assert.equal(migrated.workflowState, "FINALIZE");
@@ -209,9 +222,9 @@ test("re-establishes validation before retrying a migrated finalization pause", 
     ],
   });
   const paused = await fixture.run();
-  const migrated = migratePlanExecutionStateV1({
-    pipelineState: versionOneState(paused.pipelineState),
-  });
+  const migrated = migrateVersionOneState(
+    versionOneState(paused.pipelineState),
+  );
   fixture.persistPipelineState(migrated, { pause: paused.pause });
 
   const completed = await fixture.run();
@@ -249,9 +262,9 @@ test("invalidates migrated findings before applying an override", async (t) => {
     maxSameFindingRounds: 10,
     stagnationWindowRounds: 10,
   });
-  const migrated = migratePlanExecutionStateV1({
-    pipelineState: versionOneState(paused.pipelineState),
-  });
+  const migrated = migrateVersionOneState(
+    versionOneState(paused.pipelineState),
+  );
   fixture.persistPipelineState(migrated, { pause: paused.pause });
 
   const completed = await fixture.run(
@@ -1015,7 +1028,7 @@ async function createFixture(
     revision: 1,
     runId,
     pipelineId: "plan-execution",
-    pipelineStateVersion: 2,
+    pipelineStateVersion: 3,
     projectPath,
     taskPath,
     roles: {
@@ -1294,7 +1307,7 @@ async function createFixture(
   ) {
     currentRun = {
       ...currentRun,
-      pipelineStateVersion: 2,
+      pipelineStateVersion: 3,
       pipelineState,
       pause,
       revision: currentRun.revision + 1,
@@ -2589,7 +2602,99 @@ test("accepts a verified commit after an interrupted adapter result", async (t) 
   );
 });
 
-test("re-authorizes after an unambiguous recoverable commit rejection", async (t) => {
+test("renews a policy-rejected commit authorization after Git proves no effect", async (t) => {
+  let rejectCommit = true;
+  const fixture = await createFixture(t, {
+    async onRoleRun(_role, request) {
+      if (request.access === "local-commit" && rejectCommit) {
+        rejectCommit = false;
+        const error = new Error("The adapter rejected the commit request.");
+        error.code = "ERR_FAKE_LOCAL_COMMIT_POLICY";
+        error.effectStarted = false;
+        throw error;
+      }
+    },
+  });
+
+  const paused = await fixture.run();
+
+  assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(paused.pause.reason, "commit_failed");
+  assert.equal(paused.pause.code, "ERR_FAKE_LOCAL_COMMIT_POLICY");
+  assert.equal(paused.pause.resumeState, "COMMIT");
+  assert.equal(paused.pipelineState.pendingCommit, null);
+  assert.equal(
+    fixture.transitions.findLast(
+      ({ options }) => options?.activity?.kind === "authorization-retired",
+    ).patch.pipelineState.pendingCommit,
+    null,
+  );
+
+  const resumed = await fixture.run();
+  const commitRequests = fixture.calls.worker.filter(
+    ({ access }) => access === "local-commit",
+  );
+
+  assert.equal(resumed.pipelineState.workflowState, "DONE");
+  assert.deepEqual(
+    commitRequests.map(({ authorizationId }) => authorizationId),
+    ["commit-1", "commit-2"],
+  );
+});
+
+test("preserves pre-effect proof across interrupted Git verification", async (t) => {
+  let rejectCommit = true;
+  let interruptVerification = true;
+  const fixture = await createFixture(t, {
+    onCommitVerify() {
+      if (interruptVerification) {
+        interruptVerification = false;
+        const error = new Error("Git verification was interrupted.");
+        error.code = "ERR_FAKE_COMMIT_VERIFICATION";
+        throw error;
+      }
+    },
+    onRoleRun(_role, request) {
+      if (request.access === "local-commit" && rejectCommit) {
+        rejectCommit = false;
+        const error = new Error("The adapter rejected the commit request.");
+        error.code = "ERR_FAKE_LOCAL_COMMIT_POLICY";
+        error.effectStarted = false;
+        throw error;
+      }
+    },
+  });
+
+  const verificationPaused = await fixture.run();
+
+  assert.equal(verificationPaused.pause.reason, "commit_failed");
+  assert.equal(verificationPaused.pause.code, "ERR_FAKE_COMMIT_VERIFICATION");
+  assert.deepEqual(
+    verificationPaused.pipelineState.pendingCommit.preEffectRejection,
+    {
+      code: "ERR_FAKE_LOCAL_COMMIT_POLICY",
+      recoverable: false,
+    },
+  );
+
+  const rejectionPaused = await fixture.run();
+
+  assert.equal(rejectionPaused.pause.reason, "commit_failed");
+  assert.equal(rejectionPaused.pause.code, "ERR_FAKE_LOCAL_COMMIT_POLICY");
+  assert.equal(rejectionPaused.pipelineState.pendingCommit, null);
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.deepEqual(
+    fixture.calls.worker
+      .filter(({ access }) => access === "local-commit")
+      .map(({ authorizationId }) => authorizationId),
+    ["commit-1", "commit-2"],
+  );
+});
+
+test("re-authorizes after a proven pre-effect provider rejection", async (t) => {
   let backendUnavailable = true;
   const fixture = await createFixture(t, {
     workReviewer: [
@@ -2611,6 +2716,7 @@ test("re-authorizes after an unambiguous recoverable commit rejection", async (t
         error.code = "ERR_FAKE_PROVIDER_LIMIT";
         error.recoverable = true;
         error.ambiguous = false;
+        error.effectStarted = false;
         throw error;
       }
     },
@@ -2628,9 +2734,9 @@ test("re-authorizes after an unambiguous recoverable commit rejection", async (t
   );
   assert.equal(rejectedRequest.authorizationId, "commit-1");
 
-  const migrated = migratePlanExecutionStateV1({
-    pipelineState: versionOneState(paused.pipelineState),
-  });
+  const migrated = migrateVersionOneState(
+    versionOneState(paused.pipelineState),
+  );
   assert.equal(migrated.validationMigrationPending, true);
   assert.equal(migrated.pendingCommit, null);
   fixture.persistPipelineState(migrated, { pause: paused.pause });
@@ -2644,6 +2750,33 @@ test("re-authorizes after an unambiguous recoverable commit rejection", async (t
   assert.deepEqual(
     commitRequests.map(({ authorizationId }) => authorizationId),
     ["commit-1", "commit-2"],
+  );
+});
+
+test("does not renew an unmarked provider rejection", async (t) => {
+  const fixture = await createFixture(t, {
+    onRoleRun(_role, request) {
+      if (request.access === "local-commit") {
+        const error = new Error("Provider capacity is unavailable.");
+        error.code = "ERR_FAKE_PROVIDER_LIMIT";
+        error.recoverable = true;
+        error.ambiguous = false;
+        throw error;
+      }
+    },
+  });
+
+  const paused = await fixture.run();
+  const resumed = await fixture.run();
+
+  assert.equal(paused.pause.reason, "commit_failed");
+  assert.equal(paused.pipelineState.pendingCommit.status, "consumed");
+  assert.equal(resumed.pause.reason, "commit_failed");
+  assert.equal(resumed.pipelineState.pendingCommit.status, "consumed");
+  assert.equal(
+    fixture.calls.worker.filter(({ access }) => access === "local-commit")
+      .length,
+    1,
   );
 });
 
@@ -2685,11 +2818,12 @@ test("never replays a consumed authorization when no commit was created", async 
   });
 
   const paused = await fixture.run();
-  const migrated = migratePlanExecutionStateV1({
-    pipelineState: versionOneState(paused.pipelineState),
-  });
+  const migrated = migrateVersionOneState(
+    versionOneState(paused.pipelineState),
+  );
   assert.equal(migrated.validationMigrationPending, true);
   assert.equal(migrated.pendingCommit.status, "consumed");
+  assert.equal(migrated.pendingCommit.preEffectRejection, null);
   fixture.persistPipelineState(migrated, { pause: paused.pause });
   const resumed = await fixture.run();
 

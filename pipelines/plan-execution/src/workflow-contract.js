@@ -93,6 +93,7 @@ const PENDING_EDIT_FIELDS = new Set([
   "preEditorHash",
 ]);
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
+const DIAGNOSTIC_CODE_PATTERN = /^[A-Z0-9_]{1,64}$/u;
 const OBJECT_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 const RUN_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/u;
 const REVIEW_FINDING_ID_PATTERN = /^R[1-9][0-9]{0,8}$/u;
@@ -132,6 +133,7 @@ const PAUSE_RESUME_STATES = Object.freeze({
     "RESOLVE_FINDINGS",
     "COMMIT",
   ]),
+  commit_failed: Object.freeze(["COMMIT"]),
   environment_blocked: Object.freeze([
     "IMPLEMENT",
     "FINALIZE",
@@ -1827,7 +1829,7 @@ function normalizePendingCommit(value) {
   }
   assertExactFields(
     value,
-    ["status", "authorization"],
+    ["status", "authorization", "preEffectRejection"],
     "Plan-execution pending commit",
   );
   if (!["prepared", "consumed"].includes(value.status)) {
@@ -1867,6 +1869,20 @@ function normalizePendingCommit(value) {
     [...authorization.subject].length > 72
   ) {
     throw workflowError("Plan-execution commit authorization is invalid.");
+  }
+  if (value.preEffectRejection !== null) {
+    assertExactFields(
+      value.preEffectRejection,
+      ["code", "recoverable"],
+      "Plan-execution pre-effect rejection",
+    );
+    if (
+      value.status !== "consumed" ||
+      !DIAGNOSTIC_CODE_PATTERN.test(value.preEffectRejection.code) ||
+      typeof value.preEffectRejection.recoverable !== "boolean"
+    ) {
+      throw workflowError("Plan-execution pre-effect rejection is invalid.");
+    }
   }
   return value;
 }
@@ -2639,7 +2655,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 2 ||
+    run.pipelineStateVersion !== 3 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -2789,6 +2805,8 @@ export function assertRun(run) {
       : undefined;
     const requiresResumeState =
       ["fix_limit_reached", "no_progress"].includes(run.pause.reason) ||
+      (run.pause.reason === "commit_failed" &&
+        state.pendingCommit === null) ||
       (state.preflightComplete &&
         [
           "backend_unavailable",
@@ -2812,13 +2830,22 @@ export function assertRun(run) {
         workflowState: run.pause.resumeState,
       });
     }
+    const consumedCommitPause =
+      state.pendingCommit?.status === "consumed" &&
+      ["commit_failed", "commit_contract_violated"].includes(
+        run.pause.reason,
+      );
+    const retiredCommitPause =
+      state.pendingCommit === null &&
+      run.pause.reason === "commit_failed" &&
+      run.pause.resumeState === "COMMIT";
     if (
-      (state.pendingCommit !== null) !==
+      (state.pendingCommit !== null ||
         ["commit_failed", "commit_contract_violated"].includes(
           run.pause.reason,
-        ) ||
-      (state.pendingCommit !== null &&
-        state.pendingCommit.status !== "consumed")
+        )) &&
+      !consumedCommitPause &&
+      !retiredCommitPause
     ) {
       throw workflowError("Plan-execution pending commit pause is invalid.");
     }

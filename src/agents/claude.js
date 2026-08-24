@@ -131,6 +131,7 @@ export class ClaudeAdapterError extends Error {
       ambiguous = false,
       cause,
       code = "ERR_CLAUDE_ADAPTER",
+      effectStarted,
       recoverable = false,
       sessionId,
     } = {},
@@ -140,6 +141,9 @@ export class ClaudeAdapterError extends Error {
     this.code = code;
     this.ambiguous = ambiguous;
     this.recoverable = recoverable;
+    if (typeof effectStarted === "boolean") {
+      this.effectStarted = effectStarted;
+    }
     if (sessionId !== undefined) {
       this.sessionId = sessionId;
     }
@@ -974,7 +978,17 @@ export function createClaudeAdapter(options = {}) {
         code: "ERR_INVALID_CLAUDE_OPTIONS",
       });
     }
-    await assertCapabilities(request);
+    try {
+      await assertCapabilities(request);
+    } catch (cause) {
+      if (
+        request.access === "local-commit" &&
+        cause instanceof ClaudeAdapterError
+      ) {
+        cause.effectStarted = false;
+      }
+      throw cause;
+    }
     let result;
     try {
       result = await runAttempt(request);
@@ -983,20 +997,14 @@ export function createClaudeAdapter(options = {}) {
         throw cause;
       }
       if (cause.code === "ERR_CLAUDE_USAGE_LIMIT") {
+        if (request.access === "local-commit") {
+          cause.effectStarted = false;
+        }
         throw cause;
       }
       if (request.access === "local-commit") {
-        if (!cause.ambiguous && !cause.recoverable) {
-          throw cause;
-        }
-        throw new ClaudeAdapterError(
-          "Claude local-commit outcome requires Git-state verification.",
-          {
-            ambiguous: true,
-            cause,
-            code: "ERR_CLAUDE_LOCAL_COMMIT_INTERRUPTED",
-          },
-        );
+        cause.effectStarted = false;
+        throw cause;
       }
       if (cause.code === "ERR_CLAUDE_CONTEXT_EXHAUSTED") {
         const forkSourceId =

@@ -290,6 +290,13 @@ earlier history. Missing, failing, or forward-version migrations fail closed.
 Plan execution persists each prepared or consumed one-shot commit authorization
 and every verified commit SHA. After an ambiguous commit turn, resume verifies
 the recorded authorization against Git state and never replays the effect.
+An adapter may attach `effectStarted: false` only when it proves that its
+isolated commit executor was never invoked. The pipeline durably records that
+bounded proof on the consumed authorization before Git verification. After Git
+independently confirms that no commit was created, the pipeline retires the
+authorization before a later resume can issue a fresh ID. An absent marker or
+executor failure keeps the consumed authorization on the verification-only
+path, while interrupted verification retains any recorded proof for resume.
 Polishing has no commit authorization and preserves the initial `HEAD`, refs,
 remotes, and Git identity through completion.
 
@@ -304,6 +311,10 @@ inventory and the runner fingerprints it again. A consumed plan-execution
 commit authorization remains on the verification path until Git resolves its
 effect; migration never converts it into a replayable authorization. Immutable
 terminal history is shape-upgraded without replaying an effect.
+
+Plan execution state version 3 adds the nullable bounded pre-effect rejection
+record to each pending commit. Its version-2 migration sets that record to
+`null`; it never infers proof for a legacy consumed authorization.
 
 ## Agent Context Recovery
 
@@ -378,7 +389,10 @@ No classification retains native output, credentials, or raw transcripts.
 
 Interrupted one-shot effects are also different. In particular, a
 `local-commit` turn is never replayed; control returns to the runner for pending
-authorization and Git-state verification.
+authorization and Git-state verification. Backend policy, profile, provider,
+or turn rejection before the isolated executor may prove `effectStarted:
+false`; that proof permits authorization renewal only after Git verifies that
+the effect did not occur. It never makes the consumed authorization replayable.
 
 Each state transition is a small write-ahead transaction:
 
