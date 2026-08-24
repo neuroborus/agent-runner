@@ -52,6 +52,7 @@ import {
   assertSettings,
   createPlanExecutionState,
   isRecord,
+  isOutputDiagnostic,
   normalizeAdapterCapabilities,
   normalizeBootstrapArbitration,
   normalizeBootstrapResult,
@@ -192,6 +193,126 @@ function diagnosticCode(cause, fallback) {
     : fallback;
 }
 
+function outputDiagnostic(cause, context) {
+  const field = cause?.diagnostic?.field;
+  const constraint = cause?.diagnostic?.constraint;
+  const candidate = Object.freeze({
+    ...context,
+    field,
+    constraint,
+  });
+  return isOutputDiagnostic(candidate)
+    ? candidate
+    : Object.freeze({
+        ...context,
+        field: "result",
+        constraint: "semantic-contract",
+      });
+}
+
+function bootstrapOutputContext(role, phase = "bootstrap") {
+  return Object.freeze({ role, phase, contract: "bootstrap" });
+}
+
+function reconciliationOutputContext(phase = "bootstrap") {
+  return Object.freeze({
+    role: "worker",
+    phase,
+    contract: "bootstrap-reconciliation",
+  });
+}
+
+function arbitrationOutputContext(phase = "bootstrap") {
+  return Object.freeze({
+    role: "arbiter",
+    phase,
+    contract: "bootstrap-arbitration",
+  });
+}
+
+function bootstrapOutputContextFor(role, schema, checkpoint) {
+  const phase =
+    checkpoint === "validation-migration" ? checkpoint : "bootstrap";
+  if (schema === BOOTSTRAP_SCHEMA) {
+    return bootstrapOutputContext(role, phase);
+  }
+  if (schema === BOOTSTRAP_RECONCILIATION_SCHEMA) {
+    return reconciliationOutputContext(phase);
+  }
+  if (schema === BOOTSTRAP_ARBITRATION_SCHEMA) {
+    return arbitrationOutputContext(phase);
+  }
+  return undefined;
+}
+
+function invalidRoleOutput(message, context, diagnostic) {
+  return new PlanExecutionWorkflowError(message, {
+    code: "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+    diagnostic: outputDiagnostic({ diagnostic }, context),
+  });
+}
+
+function persistedOutputDiagnostic(value) {
+  return isOutputDiagnostic(value)
+    ? Object.freeze({ ...value })
+    : undefined;
+}
+
+function normalizeRoleOutput(normalize, output, context) {
+  try {
+    if (
+      !isRecord(output) ||
+      Object.keys(output).length !== 1 ||
+      !isRecord(output.result)
+    ) {
+      throw invalidRoleOutput(
+        "Structured bootstrap role result must contain one result object.",
+        context,
+        { field: "result", constraint: "single-object-wrapper" },
+      );
+    }
+    return normalize(output.result);
+  } catch (cause) {
+    if (cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT") {
+      throw cause;
+    }
+    throw new PlanExecutionWorkflowError(
+      "Structured bootstrap role result violates its contract.",
+      {
+        code: cause.code,
+        diagnostic: outputDiagnostic(cause, context),
+      },
+    );
+  }
+}
+
+function normalizeBootstrapRoleOutput(output, role, phase = "bootstrap") {
+  return normalizeRoleOutput(
+    (value) => normalizeBootstrapResult(value, role),
+    output,
+    bootstrapOutputContext(role, phase),
+  );
+}
+
+function normalizeBootstrapReconciliationOutput(
+  output,
+  phase = "bootstrap",
+) {
+  return normalizeRoleOutput(
+    normalizeReconciliationResult,
+    output,
+    reconciliationOutputContext(phase),
+  );
+}
+
+function normalizeBootstrapArbitrationOutput(output, phase = "bootstrap") {
+  return normalizeRoleOutput(
+    normalizeBootstrapArbitration,
+    output,
+    arbitrationOutputContext(phase),
+  );
+}
+
 export async function runPlanExecution({ action, run, runtime, settings }) {
   assertRun(run);
   assertRuntime(runtime);
@@ -280,16 +401,28 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
 
   async function fail(cause) {
     const code = diagnosticCode(cause, "ERR_PLAN_EXECUTION_FAILED");
+    const diagnostic =
+      cause?.code === "ERR_INVALID_PLAN_EXECUTION_OUTPUT"
+        ? persistedOutputDiagnostic(cause.diagnostic)
+        : undefined;
+    const message =
+      diagnostic === undefined
+        ? `Plan execution failed: ${code}.`
+        : `Plan execution failed: ${code} (${diagnostic.role}/${diagnostic.phase} ${diagnostic.field}: ${diagnostic.constraint}).`;
     try {
       await transition(
         { ...state(), workflowState: "FAILED" },
         {
-          pause: { reason: "internal_failure", code },
+          pause: {
+            reason: "internal_failure",
+            code,
+            ...(diagnostic === undefined ? {} : { diagnostic }),
+          },
           publicActivity: activity(
             "runner",
             "plan-execution",
             "failed",
-            `Plan execution failed: ${code}.`,
+            message,
           ),
         },
       );
@@ -545,6 +678,7 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
       recoveryContext = "",
     } = {},
   ) {
+    const outputContext = bootstrapOutputContextFor(role, schema, checkpoint);
     await ensureRoleCapabilities(role);
     const evidence = await readCurrentInputs();
     if (evidence === null) {
@@ -674,10 +808,12 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
       throw agentError;
     }
     if (!isRecord(response)) {
-      throw workflowError(
-        `${role} returned no response.`,
-        "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
-      );
+      throw outputContext === undefined
+        ? workflowError(
+            `${role} returned no response.`,
+            "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+          )
+        : invalidRoleOutput(`${role} returned no response.`, outputContext);
     }
     await recordSession(
       role,
@@ -686,10 +822,15 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
       contextKey,
     );
     if (!isRecord(response.structured)) {
-      throw workflowError(
-        `${role} returned no structured result.`,
-        "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
-      );
+      throw outputContext === undefined
+        ? workflowError(
+            `${role} returned no structured result.`,
+            "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+          )
+        : invalidRoleOutput(
+            `${role} returned no structured result.`,
+            outputContext,
+          );
     }
     return response.structured;
   }
@@ -1065,17 +1206,23 @@ ${evidence}`,
     if (output === null) {
       return false;
     }
-    const result = normalizeBootstrapResult(output, role);
+    const result = normalizeBootstrapRoleOutput(
+      output,
+      role,
+      "validation-migration",
+    );
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
-      throw workflowError(
+      throw invalidRoleOutput(
         "Validation migration cannot require a product decision.",
-        "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+        bootstrapOutputContext(role, "validation-migration"),
+        { field: "status", constraint: "validation-migration-status" },
       );
     }
     if (result.status === "PLAN_REVISION_REQUIRED") {
-      throw workflowError(
+      throw invalidRoleOutput(
         "Validation migration cannot revise the validated plan.",
-        "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+        bootstrapOutputContext(role, "validation-migration"),
+        { field: "status", constraint: "validation-migration-status" },
       );
     }
     await transition(
@@ -1143,17 +1290,22 @@ ${JSON.stringify(
     if (output === null) {
       return false;
     }
-    const result = normalizeReconciliationResult(output);
+    const result = normalizeBootstrapReconciliationOutput(
+      output,
+      "validation-migration",
+    );
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
-      throw workflowError(
+      throw invalidRoleOutput(
         "Validation migration cannot require a product decision.",
-        "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+        reconciliationOutputContext("validation-migration"),
+        { field: "status", constraint: "validation-migration-status" },
       );
     }
     if (result.status === "PLAN_REVISION_REQUIRED") {
-      throw workflowError(
+      throw invalidRoleOutput(
         "Validation migration cannot revise the validated plan.",
-        "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+        reconciliationOutputContext("validation-migration"),
+        { field: "status", constraint: "validation-migration-status" },
       );
     }
     if (result.status === "RESOLVED") {
@@ -1187,17 +1339,22 @@ ${JSON.stringify(
     if (arbitrationOutput === null) {
       return false;
     }
-    const arbitration = normalizeBootstrapArbitration(arbitrationOutput);
+    const arbitration = normalizeBootstrapArbitrationOutput(
+      arbitrationOutput,
+      "validation-migration",
+    );
     if (arbitration.direction === "PRODUCT_DECISION_REQUIRED") {
-      throw workflowError(
+      throw invalidRoleOutput(
         "Validation migration cannot require a product decision.",
-        "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+        arbitrationOutputContext("validation-migration"),
+        { field: "direction", constraint: "validation-migration-direction" },
       );
     }
     if (arbitration.direction === "PLAN_REVISION_REQUIRED") {
-      throw workflowError(
+      throw invalidRoleOutput(
         "Validation migration cannot revise the validated plan.",
-        "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+        arbitrationOutputContext("validation-migration"),
+        { field: "direction", constraint: "validation-migration-direction" },
       );
     }
     return completeValidationMigration(arbitration, "arbiter");
@@ -1478,7 +1635,7 @@ ${evidence}`,
     if (output === null) {
       return false;
     }
-    const result = normalizeBootstrapResult(output, role);
+    const result = normalizeBootstrapRoleOutput(output, role);
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "BOOTSTRAP");
     }
@@ -1538,7 +1695,7 @@ ${JSON.stringify(
     if (output === null) {
       return false;
     }
-    const result = normalizeReconciliationResult(output);
+    const result = normalizeBootstrapReconciliationOutput(output);
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "BOOTSTRAP");
     }
@@ -1615,7 +1772,7 @@ ${JSON.stringify(
     if (output === null) {
       return false;
     }
-    const result = normalizeBootstrapArbitration(output);
+    const result = normalizeBootstrapArbitrationOutput(output);
     if (result.direction === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "BOOTSTRAP");
     }

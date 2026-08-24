@@ -21,6 +21,13 @@ import {
 } from "../src/index.js";
 
 test("bootstrap instructions preserve independent evidence and arbitration", () => {
+  for (const instructions of [
+    BOOTSTRAP_INSTRUCTIONS,
+    BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
+    BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
+  ]) {
+    assert.match(instructions, /schema's result object/u);
+  }
   assert.match(BOOTSTRAP_INSTRUCTIONS, /independently identify every required check/iu);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /validationInfrastructure/u);
   assert.match(

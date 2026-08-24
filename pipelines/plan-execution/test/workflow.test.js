@@ -24,9 +24,17 @@ import {
   runPlanExecution,
 } from "../src/index.js";
 import {
+  BOOTSTRAP_ARBITRATION_SCHEMA,
+  BOOTSTRAP_RECONCILIATION_SCHEMA,
+  BOOTSTRAP_SCHEMA,
+} from "../src/schemas.js";
+import {
   assertRun,
+  normalizeBootstrapArbitration,
+  normalizeBootstrapResult,
   normalizeFinalizationResult,
   normalizePipelineState,
+  normalizeReconciliationResult,
 } from "../src/workflow-contract.js";
 
 const executeFile = promisify(execFile);
@@ -57,6 +65,11 @@ const REQUIRED_CHECKS = Object.freeze([
 ]);
 const VALIDATION_INFRASTRUCTURE = Object.freeze([
   ".agents/skills/finalization/SKILL.md",
+]);
+const WRAPPED_BOOTSTRAP_SCHEMAS = new Set([
+  BOOTSTRAP_SCHEMA,
+  BOOTSTRAP_RECONCILIATION_SCHEMA,
+  BOOTSTRAP_ARBITRATION_SCHEMA,
 ]);
 
 function checkResults(status, evidence = "The fixture check completed.") {
@@ -93,6 +106,25 @@ function versionOneState(state) {
 function migrateVersionOneState(state) {
   const versionTwo = migratePlanExecutionStateV1({ pipelineState: state });
   return migratePlanExecutionStateV2({ pipelineState: versionTwo });
+}
+
+async function prepareValidationMigration(t, fixtureOptions) {
+  const stop = new Error("captured active legacy state");
+  let legacy;
+  const fixture = await createFixture(t, {
+    ...fixtureOptions,
+    onTransition(run) {
+      if (legacy === undefined && run.pipelineState.workflowState === "REVIEW") {
+        legacy = versionOneState(run.pipelineState);
+        throw stop;
+      }
+    },
+  });
+
+  await assert.rejects(fixture.run(), (cause) => cause === stop);
+  assert.notEqual(legacy, undefined);
+  fixture.persistPipelineState(migrateVersionOneState(legacy), { pause: null });
+  return fixture;
 }
 
 test("rejects incomplete or substituted finalization PASS evidence", () => {
@@ -147,6 +179,299 @@ test("rejects incomplete or substituted finalization PASS evidence", () => {
   assert.equal(exact.requiredChecks[0].command, exactCommand);
   assert.equal(exact.checks[0].command, exactCommand);
   assert.equal(exact.validationInfrastructure[0], exactPath);
+});
+
+test("enforces exact bootstrap field sets without retaining unexpected values", () => {
+  const sensitiveField = "DO_NOT_PERSIST_UNEXPECTED_FIELD";
+  const sensitiveValue = "DO_NOT_PERSIST_UNEXPECTED_VALUE";
+  const cases = [
+    {
+      normalize: (value) => normalizeBootstrapResult(value, "Worker"),
+      value: bootstrapReady("Worker"),
+    },
+    {
+      normalize: normalizeReconciliationResult,
+      value: reconciliationResolved(),
+    },
+    {
+      normalize: normalizeBootstrapArbitration,
+      value: arbitrationResolved(),
+    },
+  ];
+
+  for (const { normalize, value } of cases) {
+    assert.throws(
+      () => normalize({ ...value, [sensitiveField]: sensitiveValue }),
+      (cause) => {
+        assert.equal(cause.code, "ERR_INVALID_PLAN_EXECUTION_OUTPUT");
+        assert.deepEqual(cause.diagnostic, {
+          field: "result",
+          constraint: "exact-field-set",
+        });
+        assert.doesNotMatch(String(cause), /DO_NOT_PERSIST/u);
+        assert.doesNotMatch(JSON.stringify(cause), /DO_NOT_PERSIST/u);
+        return true;
+      },
+    );
+  }
+
+  assert.throws(
+    () =>
+      normalizeBootstrapResult(
+        {
+          ...bootstrapReady("Worker"),
+          requiredChecks: [
+            {
+              ...REQUIRED_CHECKS[0],
+              [sensitiveField]: sensitiveValue,
+            },
+          ],
+        },
+        "Worker",
+      ),
+    (cause) => {
+      assert.deepEqual(cause.diagnostic, {
+        field: "requiredChecks[0]",
+        constraint: "exact-field-set",
+      });
+      assert.doesNotMatch(String(cause), /DO_NOT_PERSIST/u);
+      assert.doesNotMatch(JSON.stringify(cause), /DO_NOT_PERSIST/u);
+      return true;
+    },
+  );
+});
+
+test("bootstrap schemas match conditional deterministic normalization", () => {
+  const bootstrapPlanRevision = {
+    ...bootstrapReady("Worker"),
+    status: "PLAN_REVISION_REQUIRED",
+    summary: "",
+    requiredChecks: [],
+    validationInfrastructure: [],
+    reason: "The validated plan does not cover the required behavior.",
+    evidence: ["The repository requires another planned commit."],
+  };
+  const reconciliationPlanRevision = {
+    ...reconciliationResolved(),
+    status: "PLAN_REVISION_REQUIRED",
+    summary: "",
+    requiredChecks: [],
+    validationInfrastructure: [],
+    reason: "The summaries expose a conflict with the validated plan.",
+    evidence: ["The required behavior changes a planned commit boundary."],
+  };
+  const arbitrationPlanRevision = {
+    ...arbitrationResolved(),
+    direction: "PLAN_REVISION_REQUIRED",
+    summary: "",
+    requiredChecks: [],
+    validationInfrastructure: [],
+    reason: "The disagreement cannot be resolved within the validated plan.",
+    evidence: ["Both reports require a different commit boundary."],
+  };
+  const arbitrationDirections = ["USE_WORKER", "USE_REVIEWER", "SYNTHESIZE"];
+  const contracts = [
+    {
+      name: "bootstrap",
+      schema: BOOTSTRAP_SCHEMA,
+      normalize: (value) => normalizeBootstrapResult(value, "Worker"),
+      valid: [
+        bootstrapReady("Worker"),
+        bootstrapPlanRevision,
+        bootstrapProductDecision(),
+      ],
+      invalid: [
+        { ...bootstrapReady("Worker"), summary: "" },
+        { ...bootstrapReady("Worker"), requiredChecks: [] },
+        { ...bootstrapPlanRevision, summary: "Unexpected summary." },
+        { ...bootstrapPlanRevision, requiredChecks: REQUIRED_CHECKS },
+        {
+          ...bootstrapPlanRevision,
+          validationInfrastructure: VALIDATION_INFRASTRUCTURE,
+        },
+        { ...bootstrapProductDecision(), question: "" },
+      ],
+    },
+    {
+      name: "reconciliation",
+      schema: BOOTSTRAP_RECONCILIATION_SCHEMA,
+      normalize: normalizeReconciliationResult,
+      valid: [
+        reconciliationResolved(),
+        reconciliationDisagreement(),
+        reconciliationPlanRevision,
+        reconciliationProductDecision(),
+      ],
+      invalid: [
+        { ...reconciliationResolved(), summary: "" },
+        { ...reconciliationResolved(), requiredChecks: [] },
+        { ...reconciliationDisagreement(), disagreement: "" },
+        { ...reconciliationDisagreement(), evidence: [] },
+        { ...reconciliationPlanRevision, summary: "Unexpected summary." },
+        { ...reconciliationProductDecision(), reason: "Unexpected reason." },
+      ],
+    },
+    {
+      name: "arbitration",
+      schema: BOOTSTRAP_ARBITRATION_SCHEMA,
+      normalize: normalizeBootstrapArbitration,
+      valid: [
+        ...arbitrationDirections.map((direction) => ({
+          ...arbitrationResolved(),
+          direction,
+        })),
+        arbitrationPlanRevision,
+        arbitrationProductDecision(),
+      ],
+      invalid: [
+        ...arbitrationDirections.map((direction) => ({
+          ...arbitrationResolved(),
+          direction,
+          rationale: "",
+        })),
+        { ...arbitrationResolved(), summary: "" },
+        { ...arbitrationResolved(), requiredChecks: [] },
+        { ...arbitrationPlanRevision, reason: "" },
+        { ...arbitrationPlanRevision, requiredChecks: REQUIRED_CHECKS },
+        { ...arbitrationProductDecision(), whyBlocked: "" },
+      ],
+    },
+  ];
+
+  for (const contract of contracts) {
+    assert.equal(contract.schema.type, "object");
+    assert.equal(contract.schema.anyOf, undefined);
+    assert.ok(contract.schema.properties.result.anyOf.length > 0);
+    assertArraySchemasDeclareItems(contract.schema);
+    for (const value of contract.valid) {
+      assert.equal(matchesSchemaSubset(contract.schema, value), false);
+      assert.equal(
+        matchesSchemaSubset(contract.schema, { result: value }),
+        true,
+        `${contract.name} schema rejected ${value.status ?? value.direction}`,
+      );
+      assert.doesNotThrow(() => contract.normalize(value));
+    }
+    for (const value of contract.invalid) {
+      assert.equal(
+        matchesSchemaSubset(contract.schema, { result: value }),
+        false,
+        `${contract.name} schema accepted invalid ${value.status ?? value.direction}`,
+      );
+      assert.throws(() => contract.normalize(value));
+    }
+  }
+});
+
+test("rejects validation-infrastructure directory paths", () => {
+  for (const path of ["config/", "./"]) {
+    assert.throws(
+      () =>
+        normalizeBootstrapResult(
+          {
+            ...bootstrapReady("Worker"),
+            validationInfrastructure: [path],
+          },
+          "Worker",
+        ),
+      (cause) => {
+        assert.deepEqual(cause.diagnostic, {
+          field: "validationInfrastructure[0]",
+          constraint:
+            "exact-repository-relative-path-up-to-4000-characters",
+        });
+        return true;
+      },
+    );
+  }
+  assert.doesNotThrow(() =>
+    normalizeBootstrapResult(
+      {
+        ...bootstrapReady("Worker"),
+        validationInfrastructure: ["config/checks.json"],
+      },
+      "Worker",
+    ),
+  );
+});
+
+test("classifies oversized and unserializable bootstrap contracts", () => {
+  const largePaths = Array.from(
+    { length: 32 },
+    (_, index) => `${"😀".repeat(3_990)}-${index}`,
+  );
+  const cases = [
+    {
+      normalize: (value) => normalizeBootstrapResult(value, "Worker"),
+      value: {
+        ...bootstrapReady("Worker"),
+        validationInfrastructure: largePaths,
+      },
+    },
+    {
+      normalize: normalizeReconciliationResult,
+      value: {
+        ...reconciliationResolved(),
+        validationInfrastructure: largePaths,
+      },
+    },
+    {
+      normalize: normalizeBootstrapArbitration,
+      value: {
+        ...arbitrationResolved(),
+        validationInfrastructure: largePaths,
+      },
+    },
+  ];
+
+  for (const { normalize, value } of cases) {
+    assert.throws(
+      () => normalize(value),
+      (cause) => {
+        assert.deepEqual(cause.diagnostic, {
+          field: "result",
+          constraint: "maximum-256-kibibytes",
+        });
+        return true;
+      },
+    );
+  }
+
+  const cyclic = bootstrapReady("Worker");
+  cyclic.evidence.push(cyclic);
+  assert.throws(
+    () => normalizeBootstrapResult(cyclic, "Worker"),
+    (cause) => {
+      assert.deepEqual(cause.diagnostic, {
+        field: "result",
+        constraint: "serializable-json",
+      });
+      return true;
+    },
+  );
+
+  const sensitiveCause = "DO_NOT_RETAIN_SERIALIZATION_CAUSE";
+  assert.throws(
+    () =>
+      normalizeBootstrapResult(
+        {
+          ...bootstrapReady("Worker"),
+          toJSON() {
+            throw new Error(sensitiveCause);
+          },
+        },
+        "Worker",
+      ),
+    (cause) => {
+      assert.deepEqual(cause.diagnostic, {
+        field: "result",
+        constraint: "serializable-json",
+      });
+      assert.equal(Object.hasOwn(cause, "cause"), false);
+      assert.doesNotMatch(String(cause), /DO_NOT_RETAIN/u);
+      return true;
+    },
+  );
 });
 
 test("migrates version-1 execution state to the fail-closed shape", () => {
@@ -205,6 +530,85 @@ test("invalidates version-1 validation evidence before active execution resumes"
       prompt.includes("versioned-state migration checkpoint"),
     ),
   );
+});
+
+test("redacts precise diagnostics across validation-migration contracts", async (t) => {
+  const sensitiveSummary = "DO_NOT_PERSIST_MIGRATION_SUMMARY".repeat(1_000);
+  const cases = [
+    {
+      name: "bootstrap",
+      fixture: {
+        workWorker: [
+          implementationCompleted(),
+          finalizationPassed(),
+          { ...bootstrapReady("Migrating Worker"), summary: sensitiveSummary },
+        ],
+      },
+      diagnostic: {
+        role: "worker",
+        phase: "validation-migration",
+        contract: "bootstrap",
+        field: "summary",
+        constraint: "concise-markdown-up-to-20000-characters",
+      },
+    },
+    {
+      name: "reconciliation",
+      fixture: {
+        workReviewer: [bootstrapReady("Migrating Reviewer")],
+        workWorker: [
+          implementationCompleted(),
+          finalizationPassed(),
+          bootstrapReady("Migrating Worker"),
+          { ...reconciliationResolved(), summary: sensitiveSummary },
+        ],
+      },
+      diagnostic: {
+        role: "worker",
+        phase: "validation-migration",
+        contract: "bootstrap-reconciliation",
+        field: "summary",
+        constraint: "concise-markdown-up-to-20000-characters",
+      },
+    },
+    {
+      name: "arbitration",
+      fixture: {
+        arbiter: [{ ...arbitrationResolved(), summary: sensitiveSummary }],
+        workReviewer: [bootstrapReady("Migrating Reviewer")],
+        workWorker: [
+          implementationCompleted(),
+          finalizationPassed(),
+          bootstrapReady("Migrating Worker"),
+          reconciliationDisagreement(),
+        ],
+      },
+      diagnostic: {
+        role: "arbiter",
+        phase: "validation-migration",
+        contract: "bootstrap-arbitration",
+        field: "summary",
+        constraint: "concise-markdown-up-to-20000-characters",
+      },
+    },
+  ];
+
+  for (const testCase of cases) {
+    await t.test(testCase.name, async (t) => {
+      const fixture = await prepareValidationMigration(t, testCase.fixture);
+
+      await assert.rejects(
+        fixture.run(),
+        (cause) => cause.code === "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+      );
+
+      assert.deepEqual(fixture.currentRun.pause.diagnostic, testCase.diagnostic);
+      assert.doesNotMatch(
+        JSON.stringify(fixture.transitions),
+        /DO_NOT_PERSIST/u,
+      );
+    });
+  }
 });
 
 test("re-establishes validation before retrying a migrated finalization pause", async (t) => {
@@ -642,11 +1046,75 @@ function stagnation(direction, findingIds = []) {
   };
 }
 
+function matchesSchemaSubset(schema, value) {
+  const objectValue =
+    value !== null && typeof value === "object" && !Array.isArray(value);
+  if (schema.type === "string" && typeof value !== "string") {
+    return false;
+  }
+  if (schema.type === "array" && !Array.isArray(value)) {
+    return false;
+  }
+  if (schema.type === "object" && !objectValue) {
+    return false;
+  }
+  if (schema.enum !== undefined && !schema.enum.includes(value)) {
+    return false;
+  }
+  if (typeof value === "string") {
+    const length = [...value].length;
+    if (
+      (schema.minLength !== undefined && length < schema.minLength) ||
+      (schema.maxLength !== undefined && length > schema.maxLength) ||
+      (schema.pattern !== undefined &&
+        !new RegExp(schema.pattern, "u").test(value))
+    ) {
+      return false;
+    }
+  }
+  if (Array.isArray(value)) {
+    if (
+      (schema.minItems !== undefined && value.length < schema.minItems) ||
+      (schema.maxItems !== undefined && value.length > schema.maxItems) ||
+      (schema.items !== undefined &&
+        value.some((item) => !matchesSchemaSubset(schema.items, item)))
+    ) {
+      return false;
+    }
+  }
+  if (objectValue) {
+    if (
+      schema.required?.some((field) => !Object.hasOwn(value, field)) ||
+      (schema.additionalProperties === false &&
+        Object.keys(value).some(
+          (field) => !Object.hasOwn(schema.properties, field),
+        )) ||
+      Object.entries(schema.properties ?? {}).some(
+        ([field, propertySchema]) =>
+          Object.hasOwn(value, field) &&
+          !matchesSchemaSubset(propertySchema, value[field]),
+      )
+    ) {
+      return false;
+    }
+  }
+  if (
+    schema.anyOf !== undefined &&
+    !schema.anyOf.some((branch) => matchesSchemaSubset(branch, value))
+  ) {
+    return false;
+  }
+  return true;
+}
+
 function assertStrictSchema(schema) {
   if (schema === null || typeof schema !== "object") {
     return;
   }
-  if (!Array.isArray(schema) && schema.type === "object") {
+  if (
+    !Array.isArray(schema) &&
+    (schema.type === "object" || schema.properties !== undefined)
+  ) {
     assert.equal(schema.additionalProperties, false);
     assert.deepEqual(
       new Set(schema.required),
@@ -655,6 +1123,18 @@ function assertStrictSchema(schema) {
   }
   for (const child of Object.values(schema)) {
     assertStrictSchema(child);
+  }
+}
+
+function assertArraySchemasDeclareItems(schema) {
+  if (schema === null || typeof schema !== "object") {
+    return;
+  }
+  if (!Array.isArray(schema) && schema.type === "array") {
+    assert.notEqual(schema.items, undefined);
+  }
+  for (const child of Object.values(schema)) {
+    assertArraySchemasDeclareItems(child);
   }
 }
 
@@ -962,7 +1442,9 @@ async function createFixture(
           }
           return {
             output: "structured",
-            structured,
+            structured: WRAPPED_BOOTSTRAP_SCHEMAS.has(request.schema)
+              ? { result: structured }
+              : structured,
             sessionId:
               request.session?.mode === "continue"
                 ? request.session.id
@@ -1444,6 +1926,30 @@ test("clarifies and bootstraps through independent source-session forks", async 
   for (const call of [...fixture.calls.worker, ...fixture.calls.reviewer]) {
     assertStrictSchema(call.schema);
   }
+  const bootstrapSchema = fixture.calls.worker[1].schema;
+  const readySchema = bootstrapSchema.properties.result.anyOf[0];
+  assert.equal(readySchema.properties.summary.maxLength, 20_000);
+  assert.equal(readySchema.properties.requiredChecks.maxItems, 32);
+  assert.equal(
+    readySchema.properties.requiredChecks.items.properties.command.maxLength,
+    4_000,
+  );
+  assert.equal(
+    new RegExp(
+      readySchema.properties.requiredChecks.items.properties.command.pattern,
+      "u",
+    ).test("npm test\nnode bypass.js"),
+    false,
+  );
+  assert.equal(readySchema.properties.validationInfrastructure.maxItems, 32);
+  const validationPathPattern = new RegExp(
+    readySchema.properties.validationInfrastructure.items.pattern,
+    "u",
+  );
+  assert.equal(validationPathPattern.test("config/checks.json"), true);
+  assert.equal(validationPathPattern.test("config/"), false);
+  assert.equal(validationPathPattern.test("./"), false);
+  assert.equal(validationPathPattern.test("../outside.js"), false);
   for (const call of fixture.calls.worker.slice(0, 3)) {
     assert.equal(call.access, "read-only");
   }
@@ -1459,6 +1965,204 @@ test("clarifies and bootstraps through independent source-session forks", async 
   assert.match(fixture.artifacts.get("context/worker.md"), /Worker understands/u);
   assert.match(fixture.artifacts.get("context/reviewer.md"), /Reviewer understands/u);
   assert.match(fixture.artifacts.get("context/resolved.md"), /roles agree/u);
+});
+
+test("accepts the advertised maximum bootstrap inventory", async (t) => {
+  const maximumSummary = "😀".repeat(20_000);
+  const requiredChecks = Array.from({ length: 32 }, (_, index) => ({
+    id: `C${index + 1}`,
+    command: `node --test test/check-${index + 1}.test.js`,
+  }));
+  const validationInfrastructure = Array.from(
+    { length: 32 },
+    (_, index) => `test/check-${index + 1}.test.js`,
+  );
+  const ready = (role) => ({
+    ...bootstrapReady(role),
+    ...(role === "Worker" ? { summary: maximumSummary } : {}),
+    requiredChecks,
+    validationInfrastructure,
+  });
+  const resolved = {
+    ...reconciliationResolved(),
+    requiredChecks,
+    validationInfrastructure,
+  };
+  const stop = new Error("implementation turn reached");
+  let implementationStarted = false;
+  const fixture = await createFixture(t, {
+    reviewer: [ready("Reviewer")],
+    worker: [clarificationReady(), ready("Worker"), resolved],
+    onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        request.prompt.includes("Implement the changes")
+      ) {
+        implementationStarted = true;
+        throw stop;
+      }
+    },
+  });
+
+  await assert.rejects(fixture.run(), (cause) => cause === stop);
+
+  assert.equal(implementationStarted, true);
+});
+
+test("reports bounded bootstrap output diagnostics without raw values", async (t) => {
+  const sensitiveField = "DO_NOT_PERSIST_THIS_FIELD";
+  const sensitiveValue = "DO_NOT_PERSIST_THIS_VALUE";
+  const fixture = await createFixture(t, {
+    worker: [
+      clarificationReady(),
+      {
+        ...bootstrapReady("Worker"),
+        requiredChecks: [
+          {
+            ...REQUIRED_CHECKS[0],
+            [sensitiveField]: sensitiveValue,
+          },
+        ],
+      },
+    ],
+  });
+
+  await assert.rejects(
+    fixture.run(),
+    (cause) => cause.code === "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+  );
+
+  assert.equal(fixture.currentRun.pipelineState.workflowState, "FAILED");
+  assert.deepEqual(fixture.currentRun.pause, {
+    reason: "internal_failure",
+    code: "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+    diagnostic: {
+      role: "worker",
+      phase: "bootstrap",
+      contract: "bootstrap",
+      field: "requiredChecks[0]",
+      constraint: "exact-field-set",
+    },
+  });
+  const failureActivity = fixture.transitions.find(
+    ({ options }) => options.activity?.kind === "failed",
+  )?.options.activity;
+  assert.match(
+    failureActivity.message,
+    /worker\/bootstrap requiredChecks\[0\]/u,
+  );
+  assert.doesNotMatch(JSON.stringify(fixture.currentRun), /DO_NOT_PERSIST/u);
+  assert.doesNotMatch(JSON.stringify(failureActivity), /DO_NOT_PERSIST/u);
+  assert.doesNotMatch(JSON.stringify(fixture.transitions), /DO_NOT_PERSIST/u);
+});
+
+test("diagnoses a non-object bootstrap result without retaining it", async (t) => {
+  const fixture = await createFixture(t, {
+    worker: [clarificationReady(), "DO_NOT_PERSIST_RAW_OUTPUT"],
+  });
+
+  await assert.rejects(
+    fixture.run(),
+    (cause) => cause.code === "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+  );
+
+  assert.deepEqual(fixture.currentRun.pause.diagnostic, {
+    role: "worker",
+    phase: "bootstrap",
+    contract: "bootstrap",
+    field: "result",
+    constraint: "single-object-wrapper",
+  });
+  assert.doesNotMatch(JSON.stringify(fixture.transitions), /DO_NOT_PERSIST/u);
+});
+
+test("does not retain bootstrap serialization errors in the workflow cause", async (t) => {
+  const sensitiveCause = "DO_NOT_RETAIN_WORKFLOW_SERIALIZATION_CAUSE";
+  const fixture = await createFixture(t, {
+    worker: [
+      clarificationReady(),
+      {
+        ...bootstrapReady("Worker"),
+        toJSON() {
+          throw new Error(sensitiveCause);
+        },
+      },
+    ],
+  });
+
+  await assert.rejects(fixture.run(), (cause) => {
+    assert.equal(cause.code, "ERR_INVALID_PLAN_EXECUTION_OUTPUT");
+    assert.equal(Object.hasOwn(cause, "cause"), false);
+    assert.doesNotMatch(String(cause), /DO_NOT_RETAIN/u);
+    return true;
+  });
+
+  assert.deepEqual(fixture.currentRun.pause.diagnostic, {
+    role: "worker",
+    phase: "bootstrap",
+    contract: "bootstrap",
+    field: "result",
+    constraint: "serializable-json",
+  });
+  assert.doesNotMatch(JSON.stringify(fixture.transitions), /DO_NOT_RETAIN/u);
+});
+
+test("redacts precise reconciliation and arbitration diagnostics", async (t) => {
+  const sensitiveSummary = "DO_NOT_PERSIST_SUMMARY".repeat(1_000);
+  const cases = [
+    {
+      name: "reconciliation",
+      fixture: {
+        worker: [
+          clarificationReady(),
+          bootstrapReady("Worker"),
+          { ...reconciliationResolved(), summary: sensitiveSummary },
+        ],
+      },
+      diagnostic: {
+        role: "worker",
+        phase: "bootstrap",
+        contract: "bootstrap-reconciliation",
+        field: "summary",
+        constraint: "concise-markdown-up-to-20000-characters",
+      },
+    },
+    {
+      name: "arbitration",
+      fixture: {
+        arbiter: [{ ...arbitrationResolved(), summary: sensitiveSummary }],
+        worker: [
+          clarificationReady(),
+          bootstrapReady("Worker"),
+          reconciliationDisagreement(),
+        ],
+      },
+      diagnostic: {
+        role: "arbiter",
+        phase: "bootstrap",
+        contract: "bootstrap-arbitration",
+        field: "summary",
+        constraint: "concise-markdown-up-to-20000-characters",
+      },
+    },
+  ];
+
+  for (const testCase of cases) {
+    await t.test(testCase.name, async (t) => {
+      const fixture = await createFixture(t, testCase.fixture);
+
+      await assert.rejects(
+        fixture.run(),
+        (cause) => cause.code === "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+      );
+
+      assert.deepEqual(fixture.currentRun.pause.diagnostic, testCase.diagnostic);
+      assert.doesNotMatch(
+        JSON.stringify(fixture.transitions),
+        /DO_NOT_PERSIST/u,
+      );
+    });
+  }
 });
 
 test("uses and persists a configured runner artifact root", async (t) => {
@@ -2327,6 +3031,47 @@ test("rejects inconsistent persisted workflow state", async (t) => {
     };
   });
 
+  await rejectsState("invalid output diagnostic", (run) => {
+    run.pipelineState.workflowState = "FAILED";
+    run.pause = {
+      reason: "internal_failure",
+      code: "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+      diagnostic: {
+        role: "worker",
+        phase: "bootstrap",
+        contract: "bootstrap",
+        field: "result",
+        constraint: "x".repeat(129),
+      },
+    };
+  });
+
+  for (const [name, diagnostic] of [
+    ["legacy output failure", {}],
+    [
+      "diagnosed output failure",
+      {
+        diagnostic: {
+          role: "worker",
+          phase: "bootstrap",
+          contract: "bootstrap",
+          field: "result",
+          constraint: "semantic-contract",
+        },
+      },
+    ],
+  ]) {
+    await rejectsState(`retained raw output in ${name}`, (run) => {
+      run.pipelineState.workflowState = "FAILED";
+      run.pause = {
+        reason: "internal_failure",
+        code: "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+        ...diagnostic,
+        rawOutput: "must not be persisted",
+      };
+    });
+  }
+
   await rejectsState("duplicate child session", (run) => {
     run.sessionLineage.children.push({ ...run.sessionLineage.children[0] });
   });
@@ -2459,7 +3204,7 @@ test("retries an unavailable bootstrap Arbiter without repeating bootstrap", asy
   assert.equal(fixture.probeCalls.arbiter, 2);
   assert.equal(
     fixture.calls.worker.filter(({ prompt }) =>
-      prompt.includes("Return a concise bootstrap summary"),
+      prompt.includes("Provide a concise bootstrap summary"),
     ).length,
     1,
   );

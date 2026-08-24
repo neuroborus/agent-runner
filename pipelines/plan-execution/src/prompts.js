@@ -19,13 +19,13 @@ For READY, set reason to "" and evidence to [].
 For PLAN_REVISION_REQUIRED, provide reason and evidence.`;
 
 export const BOOTSTRAP_INSTRUCTIONS = `Study the repository, task, validated plan, clarifications, project instructions, relevant finalization guidance, other relevant skills, project checks, tests, and Git history independently and without modifying the repository.
-Return a concise bootstrap summary covering the task, relevant architecture and files, invariants, planned commits, risks, and the complete project finalization procedure using the provided schema. Independently identify every required check as a stable C-prefixed ID and exact command, plus every repository-relative file that controls those checks, package scripts, test discovery, test runners, or validation configuration.
+Return the following fields inside the schema's result object. Provide a concise bootstrap summary covering the task, relevant architecture and files, invariants, planned commits, risks, and the complete project finalization procedure. Independently identify every required check as a stable C-prefixed ID and exact command, plus every repository-relative file that controls those checks, package scripts, test discovery, test runners, or validation configuration.
 For READY, provide summary, requiredChecks, and validationInfrastructure; set reason, question, and whyBlocked to "", and options and evidence to [].
 For PLAN_REVISION_REQUIRED, set summary, question, and whyBlocked to "", and requiredChecks, validationInfrastructure, and options to []; provide reason and evidence.
 For PRODUCT_DECISION_REQUIRED, set summary and reason to "", and requiredChecks and validationInfrastructure to []; use the product-decision fields.`;
 
 export const BOOTSTRAP_RECONCILIATION_INSTRUCTIONS = `Reconcile the independent Worker and Reviewer bootstrap summaries using the task, validated plan, repository, and evidence.
-Do not force agreement or modify the repository. Return a concise resolved summary, or the remaining material disagreement, using the provided schema.
+Do not force agreement or modify the repository. Return the following fields inside the schema's result object, with a concise resolved summary or the remaining material disagreement.
 Resolve the complete required-check inventory and validation-infrastructure file list from both independent reports; do not omit a check or path merely because only one role found it.
 For RESOLVED, provide summary, requiredChecks, and validationInfrastructure; set disagreement, reason, question, and whyBlocked to "", and options and evidence to [].
 For DISAGREEMENT, provide disagreement and evidence; set summary, reason, question, and whyBlocked to "", and requiredChecks, validationInfrastructure, and options to [].
@@ -33,6 +33,7 @@ For PLAN_REVISION_REQUIRED, provide reason and evidence; set summary, disagreeme
 For PRODUCT_DECISION_REQUIRED, set summary, disagreement, and reason to "", and requiredChecks and validationInfrastructure to []; use the product-decision fields.`;
 
 export const BOOTSTRAP_ARBITRATION_INSTRUCTIONS = `Resolve the bootstrap disagreement from the task, plan, repository, and evidence, choosing the minimal valid direction using the provided schema.
+Return the following fields inside the schema's result object.
 
 Do not modify the repository. Resolve only the recorded disagreement and do not rewrite requirements.
 Always provide rationale.

@@ -237,6 +237,7 @@ function createBackend(
       ) {
         structured = readyForExecution();
       } else if (
+        request.prompt.includes("Provide a concise bootstrap summary") ||
         request.prompt.includes("Return a concise bootstrap summary")
       ) {
         const reviewer = request.prompt.includes("As Reviewer");
@@ -357,7 +358,10 @@ function createBackend(
 
       return {
         output: "structured",
-        structured,
+        structured:
+          request.schema?.properties?.result?.anyOf === undefined
+            ? structured
+            : { result: structured },
         sessionId: sessionId(request, role),
       };
     },

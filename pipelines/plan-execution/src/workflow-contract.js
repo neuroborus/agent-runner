@@ -99,15 +99,64 @@ const RUN_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/u;
 const REVIEW_FINDING_ID_PATTERN = /^R[1-9][0-9]{0,8}$/u;
 const FINALIZATION_ISSUE_ID_PATTERN = /^F[1-9][0-9]{0,8}$/u;
 const REQUIRED_CHECK_ID_PATTERN = /^C[1-9][0-9]{0,8}$/u;
-const MAX_TEXT_LENGTH = 4_000;
-const MAX_SUMMARY_LENGTH = 20_000;
+export const MAX_TEXT_LENGTH = 4_000;
+export const MAX_SUMMARY_LENGTH = 20_000;
 export const MAX_PLAN_LENGTH = 100_000;
-const MAX_ITEMS = 32;
-const MAX_OPTIONS = 16;
+export const MAX_ITEMS = 32;
+export const MAX_OPTIONS = 16;
 export const MAX_DIAGNOSTIC_ITEMS = 32;
 const MAX_STRUCTURED_RESULT_BYTES = 256 * 1024;
 const INVALID_OUTPUT_CODE = "ERR_INVALID_PLAN_EXECUTION_OUTPUT";
 export const INVALID_EXECUTION_INPUT_CODE = "ERR_INVALID_EXECUTION_INPUT";
+const OUTPUT_DIAGNOSTIC_FIELDS = Object.freeze([
+  "role",
+  "phase",
+  "contract",
+  "field",
+  "constraint",
+]);
+const LEGACY_OUTPUT_FAILURE_FIELDS = Object.freeze(["reason", "code"]);
+const OUTPUT_FAILURE_FIELDS = Object.freeze([
+  ...LEGACY_OUTPUT_FAILURE_FIELDS,
+  "diagnostic",
+]);
+const OUTPUT_DIAGNOSTIC_VALUE_PATTERN = /^[a-zA-Z0-9_.[\]-]{1,128}$/u;
+const BOOTSTRAP_RESULT_FIELDS = Object.freeze([
+  "status",
+  "summary",
+  "requiredChecks",
+  "validationInfrastructure",
+  "reason",
+  "question",
+  "options",
+  "whyBlocked",
+  "evidence",
+]);
+const RECONCILIATION_RESULT_FIELDS = Object.freeze([
+  "status",
+  "summary",
+  "disagreement",
+  "requiredChecks",
+  "validationInfrastructure",
+  "reason",
+  "question",
+  "options",
+  "whyBlocked",
+  "evidence",
+]);
+const ARBITRATION_RESULT_FIELDS = Object.freeze([
+  "direction",
+  "summary",
+  "requiredChecks",
+  "validationInfrastructure",
+  "rationale",
+  "reason",
+  "question",
+  "options",
+  "whyBlocked",
+  "evidence",
+]);
+const REQUIRED_CHECK_FIELDS = Object.freeze(["id", "command"]);
 const SETTINGS_FIELDS = Object.freeze([
   "finalization",
   "maxFixRoundsPerStep",
@@ -163,10 +212,16 @@ const COMMIT_AUTHORIZATION_FIELDS = Object.freeze([
 ]);
 
 export class PlanExecutionWorkflowError extends Error {
-  constructor(message, { cause, code = "ERR_PLAN_EXECUTION_WORKFLOW" } = {}) {
-    super(message, { cause });
+  constructor(
+    message,
+    { cause, code = "ERR_PLAN_EXECUTION_WORKFLOW", diagnostic } = {},
+  ) {
+    super(message, cause === undefined ? undefined : { cause });
     this.name = "PlanExecutionWorkflowError";
     this.code = code;
+    if (diagnostic !== undefined) {
+      this.diagnostic = Object.freeze({ ...diagnostic });
+    }
   }
 }
 
@@ -181,34 +236,71 @@ export function isRecord(value) {
 export function workflowError(
   message,
   code = "ERR_INVALID_PLAN_EXECUTION_STATE",
+  diagnostic,
 ) {
-  return new PlanExecutionWorkflowError(message, { code });
+  return new PlanExecutionWorkflowError(message, { code, diagnostic });
 }
 
 export function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function outputError(message) {
-  return workflowError(message, INVALID_OUTPUT_CODE);
+function outputConstraint(field, constraint) {
+  return Object.freeze({ field, constraint });
 }
 
-function assertStructuredResultSize(payload) {
+function outputError(message, diagnostic) {
+  return workflowError(message, INVALID_OUTPUT_CODE, diagnostic);
+}
+
+export function isOutputDiagnostic(value) {
+  return (
+    isRecord(value) &&
+    Object.keys(value).length === OUTPUT_DIAGNOSTIC_FIELDS.length &&
+    OUTPUT_DIAGNOSTIC_FIELDS.every(
+      (field) =>
+        typeof value[field] === "string" &&
+        OUTPUT_DIAGNOSTIC_VALUE_PATTERN.test(value[field]),
+    )
+  );
+}
+
+function hasExactFields(value, fields) {
+  return (
+    Object.keys(value).length === fields.length &&
+    fields.every((field) => Object.hasOwn(value, field))
+  );
+}
+
+function assertExactOutputFields(value, fields, field = "result") {
+  if (!hasExactFields(value, fields)) {
+    throw outputError(
+      "Structured role result has an invalid field set.",
+      outputConstraint(field, "exact-field-set"),
+    );
+  }
+}
+
+function assertStructuredResultSize(payload, diagnostic) {
   let serialized;
   try {
     serialized = JSON.stringify(payload);
-  } catch (cause) {
-    throw new PlanExecutionWorkflowError(
+  } catch {
+    throw outputError(
       "Structured role result must be serializable.",
-      { cause, code: INVALID_OUTPUT_CODE },
+      outputConstraint("result", "serializable-json"),
     );
   }
   if (
     typeof serialized !== "string" ||
     Buffer.byteLength(serialized) > MAX_STRUCTURED_RESULT_BYTES
   ) {
-    throw outputError("Structured role result is too large.");
+    throw outputError("Structured role result is too large.", diagnostic);
   }
+}
+
+function characterLength(value) {
+  return [...value].length;
 }
 
 function normalizeText(
@@ -216,14 +308,15 @@ function normalizeText(
   name,
   maximumLength = MAX_TEXT_LENGTH,
   code = "ERR_INVALID_PLAN_EXECUTION_STATE",
+  diagnostic,
 ) {
   if (
     typeof value !== "string" ||
     value.trim().length === 0 ||
-    value.length > maximumLength ||
+    characterLength(value) > maximumLength ||
     /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(value)
   ) {
-    throw workflowError(`${name} must be concise plain text.`, code);
+    throw workflowError(`${name} must be concise plain text.`, code, diagnostic);
   }
   return value.trim().replace(/\s+/gu, " ");
 }
@@ -232,14 +325,15 @@ function normalizeSummary(
   value,
   name,
   code = "ERR_INVALID_PLAN_EXECUTION_STATE",
+  diagnostic,
 ) {
   if (
     typeof value !== "string" ||
     value.trim().length === 0 ||
-    value.length > MAX_SUMMARY_LENGTH ||
+    characterLength(value) > MAX_SUMMARY_LENGTH ||
     /\0|\p{Zl}|\p{Zp}/u.test(value)
   ) {
-    throw workflowError(`${name} must be concise Markdown.`, code);
+    throw workflowError(`${name} must be concise Markdown.`, code, diagnostic);
   }
   return value.trim();
 }
@@ -250,6 +344,7 @@ function normalizeTextList(
   {
     allowEmpty = false,
     code = "ERR_INVALID_PLAN_EXECUTION_STATE",
+    diagnosticField,
     maximum = MAX_ITEMS,
   } = {},
 ) {
@@ -258,11 +353,31 @@ function normalizeTextList(
     (!allowEmpty && value.length === 0) ||
     value.length > maximum
   ) {
-    throw workflowError(`${name} has an invalid number of items.`, code);
+    throw workflowError(
+      `${name} has an invalid number of items.`,
+      code,
+      diagnosticField === undefined
+        ? undefined
+        : outputConstraint(
+            diagnosticField,
+            `${allowEmpty ? "array" : "nonempty-array"}-up-to-${maximum}-items`,
+          ),
+    );
   }
   return Object.freeze(
     value.map((item, index) =>
-      normalizeText(item, `${name}[${index}]`, MAX_TEXT_LENGTH, code),
+      normalizeText(
+        item,
+        `${name}[${index}]`,
+        MAX_TEXT_LENGTH,
+        code,
+        diagnosticField === undefined
+          ? undefined
+          : outputConstraint(
+              `${diagnosticField}[${index}]`,
+              "nonempty-plain-text-up-to-4000-characters",
+            ),
+      ),
     ),
   );
 }
@@ -335,10 +450,15 @@ function normalizeProductDecision(payload) {
       "product decision question",
       MAX_TEXT_LENGTH,
       INVALID_OUTPUT_CODE,
+      outputConstraint(
+        "question",
+        "nonempty-plain-text-up-to-4000-characters",
+      ),
     ),
     options: normalizeTextList(payload.options, "product decision options", {
       allowEmpty: true,
       code: INVALID_OUTPUT_CODE,
+      diagnosticField: "options",
       maximum: MAX_OPTIONS,
     }),
     whyBlocked: normalizeText(
@@ -346,18 +466,25 @@ function normalizeProductDecision(payload) {
       "product decision rationale",
       MAX_TEXT_LENGTH,
       INVALID_OUTPUT_CODE,
+      outputConstraint(
+        "whyBlocked",
+        "nonempty-plain-text-up-to-4000-characters",
+      ),
     ),
     evidence: normalizeTextList(
       payload.evidence,
       "product decision evidence",
-      { code: INVALID_OUTPUT_CODE },
+      { code: INVALID_OUTPUT_CODE, diagnosticField: "evidence" },
     ),
   });
 }
 
-function normalizePlanRevision(payload) {
+function normalizePlanRevision(payload, discriminator = "status") {
   if (!emptyDecision(payload, { ignoreEvidence: true })) {
-    throw outputError("Plan-revision result contains inapplicable fields.");
+    throw outputError(
+      "Plan-revision result contains inapplicable fields.",
+      outputConstraint(discriminator, `${discriminator}-field-consistency`),
+    );
   }
   return Object.freeze({
     status: "PLAN_REVISION_REQUIRED",
@@ -366,9 +493,14 @@ function normalizePlanRevision(payload) {
       "plan-revision reason",
       MAX_TEXT_LENGTH,
       INVALID_OUTPUT_CODE,
+      outputConstraint(
+        "reason",
+        "nonempty-plain-text-up-to-4000-characters",
+      ),
     ),
     evidence: normalizeTextList(payload.evidence, "plan-revision evidence", {
       code: INVALID_OUTPUT_CODE,
+      diagnosticField: "evidence",
     }),
   });
 }
@@ -472,9 +604,16 @@ export function normalizeBootstrapResult(payload, role) {
     "PRODUCT_DECISION_REQUIRED",
   ];
   if (!isRecord(payload) || !statuses.includes(payload.status)) {
-    throw outputError(`${role} returned an invalid bootstrap result.`);
+    throw outputError(
+      `${role} returned an invalid bootstrap result.`,
+      outputConstraint("status", "supported-status"),
+    );
   }
-  assertStructuredResultSize(payload);
+  assertStructuredResultSize(
+    payload,
+    outputConstraint("result", "maximum-256-kibibytes"),
+  );
+  assertExactOutputFields(payload, BOOTSTRAP_RESULT_FIELDS);
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
     if (
       payload.summary !== "" ||
@@ -482,7 +621,10 @@ export function normalizeBootstrapResult(payload, role) {
       !emptyArray(payload.requiredChecks) ||
       !emptyArray(payload.validationInfrastructure)
     ) {
-      throw outputError("Product decision contains inapplicable fields.");
+      throw outputError(
+        "Product decision contains inapplicable fields.",
+        outputConstraint("status", "status-field-consistency"),
+      );
     }
     return Object.freeze({
       status: payload.status,
@@ -495,12 +637,18 @@ export function normalizeBootstrapResult(payload, role) {
       !emptyArray(payload.requiredChecks) ||
       !emptyArray(payload.validationInfrastructure)
     ) {
-      throw outputError("Plan revision must not contain a summary.");
+      throw outputError(
+        "Plan revision must not contain a summary.",
+        outputConstraint("status", "status-field-consistency"),
+      );
     }
     return normalizePlanRevision(payload);
   }
   if (payload.reason !== "" || !emptyDecision(payload)) {
-    throw outputError("Bootstrap result contains inapplicable fields.");
+    throw outputError(
+      "Bootstrap result contains inapplicable fields.",
+      outputConstraint("status", "status-field-consistency"),
+    );
   }
   return Object.freeze({
     status: payload.status,
@@ -508,6 +656,7 @@ export function normalizeBootstrapResult(payload, role) {
       payload.summary,
       `${role} bootstrap summary`,
       INVALID_OUTPUT_CODE,
+      outputConstraint("summary", "concise-markdown-up-to-20000-characters"),
     ),
     requiredChecks: normalizeRequiredChecks(
       payload.requiredChecks,
@@ -528,9 +677,16 @@ export function normalizeReconciliationResult(payload) {
     "PRODUCT_DECISION_REQUIRED",
   ];
   if (!isRecord(payload) || !statuses.includes(payload.status)) {
-    throw outputError("Worker returned an invalid reconciliation result.");
+    throw outputError(
+      "Worker returned an invalid reconciliation result.",
+      outputConstraint("status", "supported-status"),
+    );
   }
-  assertStructuredResultSize(payload);
+  assertStructuredResultSize(
+    payload,
+    outputConstraint("result", "maximum-256-kibibytes"),
+  );
+  assertExactOutputFields(payload, RECONCILIATION_RESULT_FIELDS);
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
     if (
       payload.summary !== "" ||
@@ -539,7 +695,10 @@ export function normalizeReconciliationResult(payload) {
       !emptyArray(payload.requiredChecks) ||
       !emptyArray(payload.validationInfrastructure)
     ) {
-      throw outputError("Product decision contains inapplicable fields.");
+      throw outputError(
+        "Product decision contains inapplicable fields.",
+        outputConstraint("status", "status-field-consistency"),
+      );
     }
     return Object.freeze({
       status: payload.status,
@@ -553,7 +712,10 @@ export function normalizeReconciliationResult(payload) {
       !emptyArray(payload.requiredChecks) ||
       !emptyArray(payload.validationInfrastructure)
     ) {
-      throw outputError("Plan revision contains inapplicable fields.");
+      throw outputError(
+        "Plan revision contains inapplicable fields.",
+        outputConstraint("status", "status-field-consistency"),
+      );
     }
     return normalizePlanRevision(payload);
   }
@@ -563,7 +725,10 @@ export function normalizeReconciliationResult(payload) {
       payload.reason !== "" ||
       !emptyDecision(payload)
     ) {
-      throw outputError("Resolved reconciliation must not contain a disagreement.");
+      throw outputError(
+        "Resolved reconciliation must not contain a disagreement.",
+        outputConstraint("status", "status-field-consistency"),
+      );
     }
     return Object.freeze({
       status: payload.status,
@@ -571,6 +736,7 @@ export function normalizeReconciliationResult(payload) {
         payload.summary,
         "resolved bootstrap summary",
         INVALID_OUTPUT_CODE,
+        outputConstraint("summary", "concise-markdown-up-to-20000-characters"),
       ),
       requiredChecks: normalizeRequiredChecks(
         payload.requiredChecks,
@@ -591,7 +757,10 @@ export function normalizeReconciliationResult(payload) {
     payload.whyBlocked !== "" ||
     !emptyArray(payload.options)
   ) {
-    throw outputError("Bootstrap disagreement must not contain a summary.");
+    throw outputError(
+      "Bootstrap disagreement must not contain a summary.",
+      outputConstraint("status", "status-field-consistency"),
+    );
   }
   return Object.freeze({
     status: payload.status,
@@ -601,11 +770,15 @@ export function normalizeReconciliationResult(payload) {
         "bootstrap disagreement",
         MAX_TEXT_LENGTH,
         INVALID_OUTPUT_CODE,
+        outputConstraint(
+          "disagreement",
+          "nonempty-plain-text-up-to-4000-characters",
+        ),
       ),
       evidence: normalizeTextList(
         payload.evidence,
         "bootstrap disagreement evidence",
-        { code: INVALID_OUTPUT_CODE },
+        { code: INVALID_OUTPUT_CODE, diagnosticField: "evidence" },
       ),
     }),
   });
@@ -620,14 +793,25 @@ export function normalizeBootstrapArbitration(payload) {
     "PRODUCT_DECISION_REQUIRED",
   ];
   if (!isRecord(payload) || !directions.includes(payload.direction)) {
-    throw outputError("Arbiter returned an invalid bootstrap direction.");
+    throw outputError(
+      "Arbiter returned an invalid bootstrap direction.",
+      outputConstraint("direction", "supported-direction"),
+    );
   }
-  assertStructuredResultSize(payload);
+  assertStructuredResultSize(
+    payload,
+    outputConstraint("result", "maximum-256-kibibytes"),
+  );
+  assertExactOutputFields(payload, ARBITRATION_RESULT_FIELDS);
   const rationale = normalizeText(
     payload.rationale,
     "bootstrap arbitration rationale",
     MAX_TEXT_LENGTH,
     INVALID_OUTPUT_CODE,
+    outputConstraint(
+      "rationale",
+      "nonempty-plain-text-up-to-4000-characters",
+    ),
   );
   if (payload.direction === "PRODUCT_DECISION_REQUIRED") {
     if (
@@ -636,7 +820,10 @@ export function normalizeBootstrapArbitration(payload) {
       !emptyArray(payload.requiredChecks) ||
       !emptyArray(payload.validationInfrastructure)
     ) {
-      throw outputError("Product decision contains inapplicable fields.");
+      throw outputError(
+        "Product decision contains inapplicable fields.",
+        outputConstraint("direction", "direction-field-consistency"),
+      );
     }
     return Object.freeze({
       direction: payload.direction,
@@ -650,9 +837,12 @@ export function normalizeBootstrapArbitration(payload) {
       !emptyArray(payload.requiredChecks) ||
       !emptyArray(payload.validationInfrastructure)
     ) {
-      throw outputError("Plan revision must not contain a summary.");
+      throw outputError(
+        "Plan revision must not contain a summary.",
+        outputConstraint("direction", "direction-field-consistency"),
+      );
     }
-    const revision = normalizePlanRevision(payload);
+    const revision = normalizePlanRevision(payload, "direction");
     return Object.freeze({
       direction: payload.direction,
       rationale,
@@ -661,7 +851,10 @@ export function normalizeBootstrapArbitration(payload) {
     });
   }
   if (payload.reason !== "" || !emptyDecision(payload)) {
-    throw outputError("Bootstrap arbitration contains inapplicable fields.");
+    throw outputError(
+      "Bootstrap arbitration contains inapplicable fields.",
+      outputConstraint("direction", "direction-field-consistency"),
+    );
   }
   return Object.freeze({
     direction: payload.direction,
@@ -670,6 +863,7 @@ export function normalizeBootstrapArbitration(payload) {
       payload.summary,
       "arbitrated bootstrap summary",
       INVALID_OUTPUT_CODE,
+      outputConstraint("summary", "concise-markdown-up-to-20000-characters"),
     ),
     requiredChecks: normalizeRequiredChecks(
       payload.requiredChecks,
@@ -701,26 +895,31 @@ function normalizeRelativePath(value, name, code = INVALID_OUTPUT_CODE) {
   return path;
 }
 
-function normalizeExactCommand(value, name, code) {
+function normalizeExactCommand(value, name, code, diagnostic) {
   if (
     typeof value !== "string" ||
     value.length === 0 ||
-    value.length > MAX_TEXT_LENGTH ||
+    characterLength(value) > MAX_TEXT_LENGTH ||
     value.trim() !== value ||
     /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(value)
   ) {
-    throw workflowError(`${name} must be an exact single-line command.`, code);
+    throw workflowError(
+      `${name} must be an exact single-line command.`,
+      code,
+      diagnostic,
+    );
   }
   return value;
 }
 
-function normalizeValidationInfrastructurePath(value, name, code) {
+function normalizeValidationInfrastructurePath(value, name, code, diagnostic) {
   if (
     typeof value !== "string" ||
     value.length === 0 ||
-    value.length > MAX_TEXT_LENGTH ||
+    characterLength(value) > MAX_TEXT_LENGTH ||
     value.trim() !== value ||
     value.includes("\\") ||
+    value.endsWith("/") ||
     /^[a-zA-Z]:\//u.test(value) ||
     /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(value) ||
     posix.isAbsolute(value) ||
@@ -730,7 +929,11 @@ function normalizeValidationInfrastructurePath(value, name, code) {
     value.startsWith(".git/") ||
     value.split("/").some((part) => part === "..")
   ) {
-    throw workflowError(`${name} must be an exact repository-relative path.`, code);
+    throw workflowError(
+      `${name} must be an exact repository-relative path.`,
+      code,
+      diagnostic,
+    );
   }
   return value;
 }
@@ -741,12 +944,32 @@ function normalizeRequiredChecks(value, code, { allowEmpty = false } = {}) {
     (!allowEmpty && value.length === 0) ||
     value.length > MAX_ITEMS
   ) {
-    throw workflowError("Required-check inventory is invalid.", code);
+    throw workflowError(
+      "Required-check inventory is invalid.",
+      code,
+      outputConstraint(
+        "requiredChecks",
+        allowEmpty
+          ? "array-up-to-32-items"
+          : "nonempty-array-up-to-32-items",
+      ),
+    );
   }
   const checks = Object.freeze(
-    value.map((check) => {
-      if (!isRecord(check) || !REQUIRED_CHECK_ID_PATTERN.test(check.id)) {
-        throw workflowError("Required check has an invalid ID.", code);
+    value.map((check, index) => {
+      if (!isRecord(check) || !hasExactFields(check, REQUIRED_CHECK_FIELDS)) {
+        throw workflowError(
+          "Required check has an invalid field set.",
+          code,
+          outputConstraint(`requiredChecks[${index}]`, "exact-field-set"),
+        );
+      }
+      if (!REQUIRED_CHECK_ID_PATTERN.test(check.id)) {
+        throw workflowError(
+          "Required check has an invalid ID.",
+          code,
+          outputConstraint(`requiredChecks[${index}].id`, "required-check-id"),
+        );
       }
       return Object.freeze({
         id: check.id,
@@ -754,6 +977,10 @@ function normalizeRequiredChecks(value, code, { allowEmpty = false } = {}) {
           check.command,
           `required check ${check.id} command`,
           code,
+          outputConstraint(
+            `requiredChecks[${index}].command`,
+            "exact-single-line-command-up-to-4000-characters",
+          ),
         ),
       });
     }),
@@ -762,14 +989,22 @@ function normalizeRequiredChecks(value, code, { allowEmpty = false } = {}) {
     new Set(checks.map(({ id }) => id)).size !== checks.length ||
     new Set(checks.map(({ command }) => command)).size !== checks.length
   ) {
-    throw workflowError("Required checks must have unique IDs and commands.", code);
+    throw workflowError(
+      "Required checks must have unique IDs and commands.",
+      code,
+      outputConstraint("requiredChecks", "unique-ids-and-commands"),
+    );
   }
   return checks;
 }
 
 function normalizeValidationInfrastructure(value, code) {
   if (!Array.isArray(value) || value.length > MAX_ITEMS) {
-    throw workflowError("Validation infrastructure is invalid.", code);
+    throw workflowError(
+      "Validation infrastructure is invalid.",
+      code,
+      outputConstraint("validationInfrastructure", "array-up-to-32-items"),
+    );
   }
   const paths = Object.freeze(
     value.map((path, index) =>
@@ -777,11 +1012,19 @@ function normalizeValidationInfrastructure(value, code) {
         path,
         `validation infrastructure[${index}]`,
         code,
+        outputConstraint(
+          `validationInfrastructure[${index}]`,
+          "exact-repository-relative-path-up-to-4000-characters",
+        ),
       ),
     ),
   );
   if (new Set(paths).size !== paths.length) {
-    throw workflowError("Validation infrastructure paths must be unique.", code);
+    throw workflowError(
+      "Validation infrastructure paths must be unique.",
+      code,
+      outputConstraint("validationInfrastructure", "unique-paths"),
+    );
   }
   return paths;
 }
@@ -2075,9 +2318,7 @@ export function normalizePipelineState(value) {
     value.validationMigrationPending &&
     (!value.preflightComplete ||
       resolvedSummary === null ||
-      ["CLARIFY", "BOOTSTRAP", "DONE", "FAILED"].includes(
-        value.workflowState,
-      ))
+      ["CLARIFY", "BOOTSTRAP", "DONE"].includes(value.workflowState))
   ) {
     throw workflowError("Plan-execution validation migration is inapplicable.");
   }
@@ -2781,6 +3022,26 @@ export function assertRun(run) {
         run.pause.reason.length === 0))
   ) {
     throw workflowError("Plan-execution pause state is invalid.");
+  }
+  const outputFailure =
+    state.workflowState === "FAILED" &&
+    run.pause?.reason === "internal_failure" &&
+    run.pause.code === INVALID_OUTPUT_CODE;
+  const hasOutputDiagnostic = Object.hasOwn(run.pause ?? {}, "diagnostic");
+  if (
+    (hasOutputDiagnostic &&
+      (!outputFailure ||
+        !hasExactFields(run.pause, OUTPUT_FAILURE_FIELDS) ||
+        !isOutputDiagnostic(run.pause.diagnostic))) ||
+    (outputFailure &&
+      !hasExactFields(
+        run.pause,
+        hasOutputDiagnostic
+          ? OUTPUT_FAILURE_FIELDS
+          : LEGACY_OUTPUT_FAILURE_FIELDS,
+      ))
+  ) {
+    throw workflowError("Plan-execution output diagnostic is invalid.");
   }
   assertInputPause(run, state);
   if (state.workflowState === "WAITING_FOR_USER") {

@@ -196,7 +196,10 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
           whyBlocked: "",
           evidence: [],
         };
-      } else if (request.prompt.includes("Return a concise bootstrap summary")) {
+      } else if (
+        request.prompt.includes("Provide a concise bootstrap summary") ||
+        request.prompt.includes("Return a concise bootstrap summary")
+      ) {
         const reviewer = request.prompt.includes("As Reviewer");
         structured = {
           status: "READY",
@@ -298,7 +301,14 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
         throw new Error("Unexpected fake execution turn.");
       }
       sessionId ??= freshSession();
-      return { output: "structured", structured, sessionId };
+      return {
+        output: "structured",
+        structured:
+          request.schema?.properties?.result?.anyOf === undefined
+            ? structured
+            : { result: structured },
+        sessionId,
+      };
     },
   };
 }
@@ -327,16 +337,18 @@ function createArbiterAdapter() {
       return {
         output: "structured",
         structured: {
-          direction: "SYNTHESIZE",
-          summary: "Use the existing minimal module boundary.",
-          requiredChecks: [{ id: "C1", command: "git diff --check" }],
-          validationInfrastructure: [],
-          rationale: "Repository ownership supports that boundary.",
-          reason: "",
-          question: "",
-          options: [],
-          whyBlocked: "",
-          evidence: [],
+          result: {
+            direction: "SYNTHESIZE",
+            summary: "Use the existing minimal module boundary.",
+            requiredChecks: [{ id: "C1", command: "git diff --check" }],
+            validationInfrastructure: [],
+            rationale: "Repository ownership supports that boundary.",
+            reason: "",
+            question: "",
+            options: [],
+            whyBlocked: "",
+            evidence: [],
+          },
         },
         sessionId: ARBITER_SESSION,
       };
