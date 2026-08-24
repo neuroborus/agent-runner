@@ -105,6 +105,7 @@ The V1 shape is:
   },
   "pipelines": {
     "plan-execution": {
+      "finalization": "auto",
       "maxFixRoundsPerStep": 5,
       "roles": {
         "worker": {
@@ -144,6 +145,15 @@ Pipeline descriptors validate their own settings and supply built-in defaults.
 The root loader owns only the versioned envelope, strict field validation, and
 resolution precedence; it does not duplicate pipeline-specific role or setting
 lists.
+
+Plan execution and polishing own a string `finalization` setting. `auto`, the
+default, discovers a conventional confined repository skill and otherwise
+falls back to repository instructions and project-defined checks. `none`
+selects that fallback directly. Any other accepted value is a normalized
+repository-relative `SKILL.md` path; a missing or unsafe explicit path blocks
+the run. Runner configuration supplies the base value and a safe project
+overlay may replace it. The resolved selection is persisted with the other
+pipeline settings and is not reloaded on resume.
 
 ## Run Lifecycle
 

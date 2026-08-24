@@ -15,6 +15,8 @@ import {
   COMMIT_INSTRUCTIONS,
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
+  finalizationBootstrapInstructions,
+  finalizationGuidanceInstructions,
   FINDING_ARBITRATION_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
   IMPLEMENTATION_INSTRUCTIONS,
@@ -38,6 +40,7 @@ import {
   STAGNATION_SCHEMA,
 } from "./schemas.js";
 import {
+  CONVENTIONAL_FINALIZATION_SKILL_PATHS,
   INVALID_EXECUTION_INPUT_CODE,
   MAX_CLARIFICATION_ROUNDS,
   MAX_DIAGNOSTIC_ITEMS,
@@ -89,6 +92,8 @@ const RETRYABLE_PAUSE_REASONS = new Set([
   "backend_unavailable",
   "environment_blocked",
   "finalization_cannot_pass",
+  "finalization_skill_invalid",
+  "finalization_skill_missing",
   "local_artifacts_not_ignored",
   "unsafe_git_state",
 ]);
@@ -936,6 +941,55 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
     });
   }
 
+  async function resolveFinalizationGuidance() {
+    const policy = state().settings.finalization;
+    if (policy === "none") {
+      return Object.freeze({ required: false, skillPath: null });
+    }
+    const candidates =
+      policy === "auto"
+        ? CONVENTIONAL_FINALIZATION_SKILL_PATHS
+        : [policy];
+    for (const skillPath of candidates) {
+      let inspection;
+      try {
+        inspection = await runtime.git.inspectPath({
+          path: skillPath,
+          projectPath: state().repositoryBaseline.projectPath,
+        });
+      } catch (cause) {
+        if (policy === "auto") {
+          continue;
+        }
+        await pause("finalization_skill_invalid", {
+          code: diagnosticCode(cause, "ERR_FINALIZATION_SKILL_INVALID"),
+          explanation:
+            "The explicitly configured finalization skill path is not safely confined to the repository.",
+          evidence: [skillPath],
+          resumeState: "FINALIZE",
+          skillPath,
+        });
+        return null;
+      }
+      if (inspection.exists) {
+        return Object.freeze({
+          required: policy !== "auto",
+          skillPath: inspection.relativePath,
+        });
+      }
+    }
+    if (policy !== "auto") {
+      await pause("finalization_skill_missing", {
+        explanation: "The explicitly configured finalization skill is missing.",
+        evidence: [policy],
+        resumeState: "FINALIZE",
+        skillPath: policy,
+      });
+      return null;
+    }
+    return Object.freeze({ required: false, skillPath: null });
+  }
+
   function correctionUpdate({ fingerprint, finalizationIssueIds, findingIds }) {
     const current = state();
     const currentCounters = counters();
@@ -1141,6 +1195,8 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
           ? "\nAs Reviewer, also state what you intend to verify."
           : ""
       }
+
+${finalizationBootstrapInstructions(state().settings.finalization)}
 
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
@@ -1490,12 +1546,17 @@ ${step.body}${
   async function runFinalizationTurn() {
     const step = planStep();
     const beforeFingerprint = await contentFingerprint();
-    const output = await runRole(
-      "worker",
-      FINALIZATION_SCHEMA,
-      (evidence) => `${FINALIZATION_INSTRUCTIONS}
+    const guidance = await resolveFinalizationGuidance();
+    if (guidance === null) {
+      return false;
+    }
+    async function requestFinalization(selectedGuidance) {
+      const output = await runRole(
+        "worker",
+        FINALIZATION_SCHEMA,
+        (evidence) => `${FINALIZATION_INSTRUCTIONS}
 
-Use FAIL for validation failures, SKILL_MISSING or SKILL_INVALID before invoking an unavailable skill, and BLOCKED only when the procedure cannot complete safely.
+${finalizationGuidanceInstructions(selectedGuidance)}
 
 ${evidence}
 
@@ -1504,16 +1565,62 @@ Current planned commit:
 
 ${step.body}
 `,
-      {
-        access: "workspace-write",
-        checkpoint: `commit:${state().currentStep}`,
-        recoveryContext: resolvedContext(),
-      },
-    );
-    if (output === null) {
+        {
+          access: "workspace-write",
+          checkpoint: `commit:${state().currentStep}`,
+          recoveryContext: resolvedContext(),
+        },
+      );
+      if (output === null) {
+        return null;
+      }
+      const result = normalizeFinalizationResult(output);
+      if (
+        selectedGuidance.skillPath === null &&
+        ["SKILL_MISSING", "SKILL_INVALID"].includes(result.status)
+      ) {
+        throw workflowError(
+          "Worker returned a skill availability status without selected finalization skill guidance.",
+          "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+        );
+      }
+      if (
+        result.status !== "PRODUCT_DECISION_REQUIRED" &&
+        result.skillPath !== selectedGuidance.skillPath
+      ) {
+        throw workflowError(
+          "Worker returned a finalization result for the wrong skill path.",
+          "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+        );
+      }
+      return result;
+    }
+    let result = await requestFinalization(guidance);
+    if (result === null) {
       return false;
     }
-    const result = normalizeFinalizationResult(output);
+    if (
+      guidance.skillPath !== null &&
+      !guidance.required &&
+      ["SKILL_MISSING", "SKILL_INVALID"].includes(result.status)
+    ) {
+      if ((await contentFingerprint()) !== beforeFingerprint) {
+        await pause("finalization_cannot_pass", {
+          code: "ERR_FINALIZATION_MODIFIED_BEFORE_VALIDATION",
+          explanation: result.reason,
+          evidence: result.evidence,
+          ...(result.skillPath === null ? {} : { skillPath: result.skillPath }),
+          resumeState: "FINALIZE",
+        });
+        return false;
+      }
+      result = await requestFinalization(
+        Object.freeze({ required: false, skillPath: null }),
+      );
+      if (result === null) {
+        return false;
+      }
+    }
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "IMPLEMENT");
     }
@@ -1537,7 +1644,7 @@ ${step.body}
             ? { code: "ERR_FINALIZATION_MODIFIED_BEFORE_VALIDATION" }
             : {}),
           ...(result.skillPath === null ? {} : { skillPath: result.skillPath }),
-          ...(result.status === "BLOCKED" ? { resumeState: "FINALIZE" } : {}),
+          resumeState: "FINALIZE",
         },
       );
       return false;
@@ -2539,6 +2646,8 @@ ${step.subject}`,
             "backend_unavailable",
             "environment_blocked",
             "finalization_cannot_pass",
+            "finalization_skill_invalid",
+            "finalization_skill_missing",
           ].includes(currentRun.pause.reason) &&
             [
               "CLARIFY",

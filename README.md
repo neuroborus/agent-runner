@@ -119,10 +119,12 @@ Pipeline settings use these defaults:
 | `plan-authoring` | `maxRevisionRounds` | 15 |
 | `plan-authoring` | `stagnationWindowRounds` | 3 |
 | `plan-execution` | `maxFixRoundsPerStep` | 5 |
+| `plan-execution` | `finalization` | `auto` |
 | `plan-execution` | `maxDisputesPerFinding` | 2 |
 | `plan-execution` | `maxSameFindingRounds` | 3 |
 | `plan-execution` | `stagnationWindowRounds` | 3 |
 | `polishing` | `maxFixRounds` | 5 |
+| `polishing` | `finalization` | `auto` |
 | `polishing` | `maxDisputesPerFinding` | 2 |
 | `polishing` | `maxSameFindingRounds` | 3 |
 | `polishing` | `stagnationWindowRounds` | 3 |
@@ -131,6 +133,14 @@ The stagnation window detects consecutive blocked correction rounds. Unless a
 harder limit preempts it, the first full window invokes one fresh Arbiter; a
 second full window pauses for the user instead of continuing an architectural
 correction loop indefinitely.
+
+For plan execution and polishing, `finalization: "auto"` uses a conventional
+confined repository `finalization` skill when present and otherwise derives the
+complete gate from repository instructions and project-defined checks. Use
+`"none"` to select that fallback deliberately, or a normalized
+repository-relative path ending in `SKILL.md` to require that exact skill. A
+missing, escaping, or invalid explicit skill blocks the run; absent optional
+guidance never skips the dedicated fingerprint-bound finalization turn.
 
 Backend sessions are disposable. When a native context is full, the adapter
 compacts it and retries once; if the context remains full, ordinary turns can
@@ -307,18 +317,19 @@ blocking material product decision may ask another question. If its answer
 invalidates the validated plan or completed execution scope, revise the plan
 and start a new execution run rather than rewriting history.
 
-For every execution step, the Worker implements the change, runs the
-repository's `finalization` skill, and passes an independent review of the same
-content fingerprint before receiving one-shot authorization to create the
-exact planned local commit. Commits are not pushed, no remote is changed, and
-remote writes remain permanently prohibited.
+For every execution step, the Worker implements the change, runs a dedicated
+finalization gate using the configured guidance policy, and passes an
+independent review of the same content fingerprint before receiving one-shot
+authorization to create the exact planned local commit. Commits are not pushed,
+no remote is changed, and remote writes remain permanently prohibited.
 
 Polishing follows the same fingerprint-bound finalization and independent
 review gate, but it has no commit turn or commit authorization. Successful
 polishing leaves the reviewed workspace content and staging state uncommitted.
-Its dedicated `FINALIZE` turn runs only the target project's finalization-skill
-validation procedure, including required formatting or generated output; it
-does not perform handoff staging or draft a commit.
+Its dedicated `FINALIZE` turn runs the target project's complete validation
+procedure, including required formatting or generated output, with configured
+skill guidance when available. It does not perform handoff staging or draft a
+commit.
 
 ## MCP
 

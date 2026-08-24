@@ -35,6 +35,7 @@ import {
 const executeFile = promisify(execFile);
 const SOURCE_SESSION = "source-session";
 const SETTINGS = Object.freeze({
+  finalization: "auto",
   maxFixRounds: 5,
   maxDisputesPerFinding: 2,
   maxSameFindingRounds: 3,
@@ -138,10 +139,12 @@ function polishingBlocked() {
   };
 }
 
-function finalizationPassed() {
+function finalizationPassed(
+  skillPath = ".agents/skills/finalization/SKILL.md",
+) {
   return {
     status: "PASS",
-    skillPath: ".agents/skills/finalization/SKILL.md",
+    skillPath,
     summary: "The complete project validation procedure passed.",
     issues: [],
     reason: "",
@@ -172,6 +175,20 @@ function finalizationFailed(id = "F1") {
     ],
     reason: "",
     ...emptyDecision(),
+  };
+}
+
+function finalizationUnavailable(status) {
+  return {
+    status,
+    skillPath: ".agents/skills/finalization/SKILL.md",
+    summary: "",
+    issues: [],
+    reason: "The finalization skill cannot be used safely.",
+    question: "",
+    options: [],
+    whyBlocked: "",
+    evidence: ["The repository instructions do not provide a valid procedure."],
   };
 }
 
@@ -326,6 +343,7 @@ async function createFixture(
   {
     artifactRoot = "LOCAL_ARTIFACTS",
     dirty = true,
+    finalizationSkill = true,
     ignoreArtifacts = true,
     interactive = false,
     onEdit,
@@ -360,6 +378,15 @@ async function createFixture(
   );
   await writeFile(join(projectPath, "tracked.txt"), "base\n");
   await writeFile(join(projectPath, "deleted.txt"), "delete me\n");
+  if (finalizationSkill) {
+    await mkdir(join(projectPath, ".agents", "skills", "finalization"), {
+      recursive: true,
+    });
+    await writeFile(
+      join(projectPath, ".agents", "skills", "finalization", "SKILL.md"),
+      "---\nname: finalization\ndescription: Test validation.\n---\n\nRun tests.\n",
+    );
+  }
 
   const taskPath =
     taskLocation === "external" || taskLocation === "symlinked-untracked"
@@ -391,6 +418,13 @@ async function createFixture(
       ".gitignore",
       "deleted.txt",
       "tracked.txt",
+    );
+  }
+  if (finalizationSkill) {
+    await runGit(
+      projectPath,
+      "add",
+      ".agents/skills/finalization/SKILL.md",
     );
   }
   await runGit(projectPath, "commit", "-qm", "initialize fixture");
@@ -1061,7 +1095,7 @@ test("prepares a dirty worktree through independent source-session bootstraps", 
   assert.doesNotMatch(fixture.calls.worker[1].prompt, /Reviewer independently/u);
   assert.match(fixture.calls.worker[2].prompt, /Reviewer bootstrap summary/u);
   const finalizationCall = fixture.calls.worker.find(({ prompt }) =>
-    prompt.includes("Locate and validate the target project's finalization skill"),
+    prompt.includes("Run the complete project finalization procedure"),
   );
   assert.ok(finalizationCall);
   assert.deepEqual(finalizationCall.session, {
@@ -1126,11 +1160,206 @@ test("uses and persists a configured runner artifact root", async (t) => {
   );
 });
 
+test("runs the dedicated finalization gate without skill guidance", async (t) => {
+  const fixture = await createFixture(t, {
+    settings: { ...SETTINGS, finalization: "none" },
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationPassed(""),
+    ],
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.pipelineState.finalizationResult.skillPath, null);
+  assert.equal(
+    result.pipelineState.finalizedFingerprint,
+    result.pipelineState.reviewedFingerprint,
+  );
+  assert.match(
+    fixture.calls.worker.find(({ prompt }) =>
+      prompt.includes("Run the complete project finalization procedure"),
+    ).prompt,
+    /No finalization skill guidance is available/u,
+  );
+});
+
+test("falls back when automatic finalization discovery finds no skill", async (t) => {
+  const fixture = await createFixture(t, {
+    finalizationSkill: false,
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationPassed(""),
+    ],
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.pipelineState.settings.finalization, "auto");
+  assert.equal(result.pipelineState.finalizationResult.skillPath, null);
+  assert.match(
+    fixture.calls.worker.find(({ prompt }) =>
+      prompt.includes("Run the complete project finalization procedure"),
+    ).prompt,
+    /repository instructions and project-defined checks/u,
+  );
+});
+
+test("uses an explicitly configured finalization skill", async (t) => {
+  const skillPath = ".agents/skills/finalization/SKILL.md";
+  const fixture = await createFixture(t, {
+    settings: { ...SETTINGS, finalization: skillPath },
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.pipelineState.settings.finalization, skillPath);
+  assert.match(
+    fixture.calls.worker.find(({ prompt }) =>
+      prompt.includes("Run the complete project finalization procedure"),
+    ).prompt,
+    /explicitly configured/u,
+  );
+});
+
+test("pauses before invoking a missing explicit finalization skill", async (t) => {
+  const skillPath = "checks/finalization/SKILL.md";
+  const fixture = await createFixture(t, {
+    settings: { ...SETTINGS, finalization: skillPath },
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(result.pause.reason, "finalization_skill_missing");
+  assert.equal(result.pause.resumeState, "FINALIZE");
+  assert.equal(result.pause.skillPath, skillPath);
+  assert.equal(
+    fixture.calls.worker.some(({ prompt }) =>
+      prompt.includes("Run the complete project finalization procedure"),
+    ),
+    false,
+  );
+});
+
+test("blocks an explicit finalization skill that escapes through a symlink", async (t) => {
+  const skillPath = "linked/SKILL.md";
+  const fixture = await createFixture(t, {
+    settings: { ...SETTINGS, finalization: skillPath },
+  });
+  await symlink(fixture.taskPath, join(fixture.projectPath, "linked"), "dir");
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(result.pause.reason, "finalization_skill_invalid");
+  assert.equal(result.pause.resumeState, "FINALIZE");
+  assert.equal(result.pause.skillPath, skillPath);
+  assert.equal(
+    fixture.calls.worker.some(({ prompt }) =>
+      prompt.includes("Run the complete project finalization procedure"),
+    ),
+    false,
+  );
+});
+
+test("resumes finalization after an explicit skill is corrected", async (t) => {
+  for (const kind of ["missing", "symlink-invalid"]) {
+    await t.test(kind, async (t) => {
+      const skillPath = `LOCAL_ARTIFACTS/skills/${kind}/SKILL.md`;
+      const fixture = await createFixture(t, {
+        settings: { ...SETTINGS, finalization: skillPath },
+        worker: [
+          clarificationReady(),
+          bootstrapReady("Worker"),
+          reconciliationResolved(),
+          polishingCompleted(),
+          finalizationPassed(skillPath),
+        ],
+      });
+      const skillDirectory = join(
+        fixture.projectPath,
+        "LOCAL_ARTIFACTS",
+        "skills",
+        kind,
+      );
+      if (kind === "symlink-invalid") {
+        await mkdir(join(fixture.projectPath, "LOCAL_ARTIFACTS", "skills"), {
+          recursive: true,
+        });
+        await symlink(fixture.taskPath, skillDirectory, "dir");
+      }
+
+      const paused = await fixture.run();
+
+      assert.equal(
+        paused.pause.reason,
+        kind === "missing"
+          ? "finalization_skill_missing"
+          : "finalization_skill_invalid",
+      );
+      assert.doesNotThrow(() =>
+        polishingPipeline.validateResumeAction(paused, null),
+      );
+      await rm(skillDirectory, { recursive: true, force: true });
+      await mkdir(skillDirectory, { recursive: true });
+      await writeFile(
+        join(skillDirectory, "SKILL.md"),
+        "---\nname: finalization\ndescription: Test validation.\n---\n\nRun tests.\n",
+      );
+
+      const resumed = await fixture.run();
+
+      assert.equal(resumed.pipelineState.workflowState, "DONE");
+      assert.equal(resumed.pause, null);
+      assert.equal(resumed.pipelineState.finalizationResult.skillPath, skillPath);
+    });
+  }
+});
+
+test("rejects a skill availability status without selected guidance", async (t) => {
+  const fixture = await createFixture(t, {
+    settings: { ...SETTINGS, finalization: "none" },
+    reviewer: [bootstrapReady("Reviewer")],
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      { ...finalizationUnavailable("SKILL_MISSING"), skillPath: "" },
+    ],
+  });
+
+  await assert.rejects(
+    fixture.run(),
+    (error) =>
+      error.code === "ERR_INVALID_POLISHING_OUTPUT" &&
+      /without selected finalization skill guidance/u.test(error.message),
+  );
+  assert.equal(fixture.currentRun.pipelineState.workflowState, "FAILED");
+});
+
 test("normalizes legacy polishing state to the default artifact root", () => {
-  const state = { ...createPolishingState({ settings: SETTINGS }) };
+  const legacySettings = { ...SETTINGS };
+  delete legacySettings.finalization;
+  const state = {
+    ...createPolishingState({ settings: SETTINGS }),
+    settings: legacySettings,
+  };
   delete state.artifactRoot;
 
-  assert.equal(normalizePipelineState(state).artifactRoot, "LOCAL_ARTIFACTS");
+  const normalized = normalizePipelineState(state);
+  assert.equal(normalized.artifactRoot, "LOCAL_ARTIFACTS");
+  assert.equal(normalized.settings.finalization, "auto");
 });
 
 test("accepts staged, unstaged, deleted, and untracked changes as one set", async (t) => {
@@ -1574,7 +1803,10 @@ test("binds finalization changes and review to one fingerprint without committin
         });
         await writeFile(join(projectPath, "tracked.txt"), "polished\n");
       }
-      if (role === "worker" && /Locate and validate/u.test(request.prompt)) {
+      if (
+        role === "worker" &&
+        /Run the complete project finalization procedure/u.test(request.prompt)
+      ) {
         beforeFinalizationFingerprint =
           await createGitService().contentFingerprint({
             allowedPaths: [],
@@ -1602,7 +1834,7 @@ test("binds finalization changes and review to one fingerprint without committin
     /Polish the existing local/u.test(prompt),
   );
   const finalizationCall = fixture.calls.worker.find(({ prompt }) =>
-    /Locate and validate/u.test(prompt),
+    /Run the complete project finalization procedure/u.test(prompt),
   );
   assert.match(polishCall.prompt, new RegExp(beforePolishFingerprint, "u"));
   assert.match(
@@ -1634,7 +1866,9 @@ test("fixes finalization failures in one batch and reruns the complete gate", as
   assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(result.counters.fixRounds, 1);
   assert.equal(
-    fixture.calls.worker.filter(({ prompt }) => /Locate and validate/u.test(prompt)).length,
+    fixture.calls.worker.filter(({ prompt }) =>
+      /Run the complete project finalization procedure/u.test(prompt),
+    ).length,
     2,
   );
 });

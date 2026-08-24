@@ -248,16 +248,11 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
           evidence: [],
         };
       } else if (
-        request.prompt.includes(
-          "Locate and validate the project's finalization skill",
-        ) ||
-        request.prompt.includes(
-          "Locate and validate the target project's finalization skill",
-        )
+        request.prompt.includes("Run the complete project finalization procedure")
       ) {
         structured = {
           status: "PASS",
-          skillPath: ".agents/skills/finalization/SKILL.md",
+          skillPath: "",
           summary: "The repository finalization procedure passed.",
           issues: [],
           reason: "",

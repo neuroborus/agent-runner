@@ -8,6 +8,8 @@ import {
   CLARIFICATION_INSTRUCTIONS,
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
+  finalizationBootstrapInstructions,
+  finalizationGuidanceInstructions,
   FINDING_ARBITRATION_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
   POLISH_INSTRUCTIONS,
@@ -34,6 +36,7 @@ import {
   assertRuntime,
   assertSettings,
   createPolishingState,
+  CONVENTIONAL_FINALIZATION_SKILL_PATHS,
   diagnosticCode,
   disputeHistoryCapacity,
   disputeHistoryFits,
@@ -847,6 +850,55 @@ export async function runPolishing({ action, run, runtime, settings }) {
     });
   }
 
+  async function resolveFinalizationGuidance() {
+    const policy = state().settings.finalization;
+    if (policy === "none") {
+      return Object.freeze({ required: false, skillPath: null });
+    }
+    const candidates =
+      policy === "auto"
+        ? CONVENTIONAL_FINALIZATION_SKILL_PATHS
+        : [policy];
+    for (const skillPath of candidates) {
+      let inspection;
+      try {
+        inspection = await runtime.git.inspectPath({
+          path: skillPath,
+          projectPath: state().repositoryBaseline.projectPath,
+        });
+      } catch (cause) {
+        if (policy === "auto") {
+          continue;
+        }
+        await pause("finalization_skill_invalid", {
+          code: diagnosticCode(cause, "ERR_FINALIZATION_SKILL_INVALID"),
+          explanation:
+            "The explicitly configured finalization skill path is not safely confined to the repository.",
+          evidence: [skillPath],
+          resumeState: "FINALIZE",
+          skillPath,
+        });
+        return null;
+      }
+      if (inspection.exists) {
+        return Object.freeze({
+          required: policy !== "auto",
+          skillPath: inspection.relativePath,
+        });
+      }
+    }
+    if (policy !== "auto") {
+      await pause("finalization_skill_missing", {
+        explanation: "The explicitly configured finalization skill is missing.",
+        evidence: [policy],
+        resumeState: "FINALIZE",
+        skillPath: policy,
+      });
+      return null;
+    }
+    return Object.freeze({ required: false, skillPath: null });
+  }
+
   function fixBudget() {
     return state().settings.maxFixRounds + state().additionalFixRounds;
   }
@@ -1319,6 +1371,8 @@ export async function runPolishing({ action, run, runtime, settings }) {
           : ""
       }
 
+${finalizationBootstrapInstructions(state().settings.finalization)}
+
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
 ${evidence}`,
@@ -1530,25 +1584,76 @@ ${evidence}${
 
   async function runFinalizationTurn() {
     const beforeFingerprint = await contentFingerprint();
-    const output = await runRole(
-      "worker",
-      FINALIZATION_SCHEMA,
-      (evidence) => `${FINALIZATION_INSTRUCTIONS}
-
-${PRODUCT_DECISION_INSTRUCTIONS}
-Use FAIL for validation failures, SKILL_MISSING or SKILL_INVALID before invoking an unavailable skill, and BLOCKED only when the procedure cannot complete safely.
-
-${evidence}`,
-      {
-        access: "workspace-write",
-        checkpoint: "work",
-        recoveryContext: workContext({ includePolishSummary: true }),
-      },
-    );
-    if (output === null) {
+    const guidance = await resolveFinalizationGuidance();
+    if (guidance === null) {
       return false;
     }
-    const result = normalizeFinalizationResult(output);
+    async function requestFinalization(selectedGuidance) {
+      const output = await runRole(
+        "worker",
+        FINALIZATION_SCHEMA,
+        (evidence) => `${FINALIZATION_INSTRUCTIONS}
+
+${PRODUCT_DECISION_INSTRUCTIONS}
+${finalizationGuidanceInstructions(selectedGuidance)}
+
+${evidence}`,
+        {
+          access: "workspace-write",
+          checkpoint: "work",
+          recoveryContext: workContext({ includePolishSummary: true }),
+        },
+      );
+      if (output === null) {
+        return null;
+      }
+      const result = normalizeFinalizationResult(output);
+      if (
+        selectedGuidance.skillPath === null &&
+        ["SKILL_MISSING", "SKILL_INVALID"].includes(result.status)
+      ) {
+        throw workflowError(
+          "Worker returned a skill availability status without selected finalization skill guidance.",
+          "ERR_INVALID_POLISHING_OUTPUT",
+        );
+      }
+      if (
+        result.status !== "PRODUCT_DECISION_REQUIRED" &&
+        result.skillPath !== selectedGuidance.skillPath
+      ) {
+        throw workflowError(
+          "Worker returned a finalization result for the wrong skill path.",
+          "ERR_INVALID_POLISHING_OUTPUT",
+        );
+      }
+      return result;
+    }
+    let result = await requestFinalization(guidance);
+    if (result === null) {
+      return false;
+    }
+    if (
+      guidance.skillPath !== null &&
+      !guidance.required &&
+      ["SKILL_MISSING", "SKILL_INVALID"].includes(result.status)
+    ) {
+      if ((await contentFingerprint()) !== beforeFingerprint) {
+        await pause("finalization_cannot_pass", {
+          code: "ERR_FINALIZATION_MODIFIED_BEFORE_VALIDATION",
+          explanation: result.reason,
+          evidence: result.evidence,
+          ...(result.skillPath === null ? {} : { skillPath: result.skillPath }),
+          resumeState: "FINALIZE",
+        });
+        return false;
+      }
+      result = await requestFinalization(
+        Object.freeze({ required: false, skillPath: null }),
+      );
+      if (result === null) {
+        return false;
+      }
+    }
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "BOOTSTRAP");
     }
@@ -1572,7 +1677,7 @@ ${evidence}`,
             ? { code: "ERR_FINALIZATION_MODIFIED_BEFORE_VALIDATION" }
             : {}),
           ...(result.skillPath === null ? {} : { skillPath: result.skillPath }),
-          ...(result.status === "BLOCKED" ? { resumeState: "FINALIZE" } : {}),
+          resumeState: "FINALIZE",
         },
       );
       return false;
@@ -2301,6 +2406,8 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
           "backend_unavailable",
           "environment_blocked",
           "finalization_cannot_pass",
+          "finalization_skill_invalid",
+          "finalization_skill_missing",
         ].includes(currentRun.pause.reason) &&
           [
             "CLARIFY",

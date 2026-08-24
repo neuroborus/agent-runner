@@ -8,6 +8,8 @@ import {
   CLARIFICATION_INSTRUCTIONS,
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
+  finalizationBootstrapInstructions,
+  finalizationGuidanceInstructions,
   FINDING_ARBITRATION_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
   POLISH_INSTRUCTIONS,
@@ -76,14 +78,14 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
   assert.match(CLARIFICATION_INSTRUCTIONS, /Do not modify the repository/u);
   assert.match(CLARIFICATION_INSTRUCTIONS, /existing changes/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /independently/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /finalization skill/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /finalization guidance/u);
   assert.match(BOOTSTRAP_RECONCILIATION_INSTRUCTIONS, /Do not force agreement/u);
   assert.match(BOOTSTRAP_ARBITRATION_INSTRUCTIONS, /Do not modify/u);
   assert.match(PRODUCT_DECISION_INSTRUCTIONS, /Do not ask questions/u);
   assert.match(PRODUCT_DECISION_INSTRUCTIONS, /materially different product/u);
   assert.match(POLISH_INSTRUCTIONS, /Do not create a commit/u);
   assert.match(POLISH_INSTRUCTIONS, /self-review/u);
-  assert.match(FINALIZATION_INSTRUCTIONS, /finalization skill/u);
+  assert.match(FINALIZATION_INSTRUCTIONS, /finalization procedure/u);
   assert.match(FINALIZATION_INSTRUCTIONS, /Do not.*stage/u);
   assert.match(REVIEW_INSTRUCTIONS, /Do not modify/u);
   assert.match(REVIEW_INSTRUCTIONS, /stable IDs/u);
@@ -91,6 +93,22 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
   assert.match(DISPUTE_RECONSIDERATION_INSTRUCTIONS, /Withdraw/u);
   assert.match(FINDING_ARBITRATION_INSTRUCTIONS, /WORKER_CORRECT/u);
   assert.match(STAGNATION_INSTRUCTIONS, /cannot approve/u);
+  assert.match(finalizationBootstrapInstructions("auto"), /conventional/u);
+  assert.match(finalizationBootstrapInstructions("none"), /do not skip/u);
+  assert.match(
+    finalizationGuidanceInstructions({
+      required: false,
+      skillPath: null,
+    }),
+    /repository instructions and project-defined checks/u,
+  );
+  assert.match(
+    finalizationGuidanceInstructions({
+      required: true,
+      skillPath: "checks/finalize/SKILL.md",
+    }),
+    /missing, escaping, or invalid skill is blocking/u,
+  );
 });
 
 test("polishing schemas are strict, bounded, and deeply frozen", () => {

@@ -18,8 +18,8 @@ Using the provided schema, return READY when compatible; otherwise return PLAN_R
 For READY, set reason to "" and evidence to [].
 For PLAN_REVISION_REQUIRED, provide reason and evidence.`;
 
-export const BOOTSTRAP_INSTRUCTIONS = `Study the repository, task, validated plan, clarifications, project instructions, the project's finalization skill, other relevant skills, tests, and Git history independently and without modifying the repository.
-Return a concise bootstrap summary covering the task, relevant architecture and files, invariants, planned commits, risks, and the project's finalization procedure using the provided schema.
+export const BOOTSTRAP_INSTRUCTIONS = `Study the repository, task, validated plan, clarifications, project instructions, relevant finalization guidance, other relevant skills, project checks, tests, and Git history independently and without modifying the repository.
+Return a concise bootstrap summary covering the task, relevant architecture and files, invariants, planned commits, risks, and the complete project finalization procedure using the provided schema.
 For READY, provide summary; set reason, question, and whyBlocked to "", and options and evidence to [].
 For PLAN_REVISION_REQUIRED, set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
 For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-decision fields.`;
@@ -69,17 +69,36 @@ For PRODUCT_DECISION_REQUIRED, set decisions to []; use the product-decision fie
 ${PRODUCT_DECISION_INSTRUCTIONS}
 Otherwise, return each FIX or DISPUTE decision using the provided schema.`;
 
-export const FINALIZATION_INSTRUCTIONS = `Locate and validate the project's finalization skill before following it in this dedicated turn.
-Run only the validation procedure defined by that skill, including project-required formatting or generated output, and report its result using the provided schema.
+export const FINALIZATION_INSTRUCTIONS = `Run the complete project finalization procedure in this dedicated turn, including project-required formatting or generated output, and report its result using the provided schema.
 
 Do not perform unrelated fixes, stage changes, or create a commit.
 Use PASS only after the complete validation procedure succeeds.
-For PASS, provide a repository-relative skillPath and summary; set issues, options, and evidence to []; set reason, question, and whyBlocked to "".
-For FAIL, provide a repository-relative skillPath, summary, and one or more issues with unique stable F-prefixed numeric IDs, each with command, problem, and evidence; set options and evidence to []; set reason, question, and whyBlocked to "".
-For SKILL_MISSING, provide reason; set skillPath, summary, question, and whyBlocked to "", and issues and options to []; evidence may be [].
-For SKILL_INVALID or BLOCKED, provide a repository-relative skillPath and reason; set summary, question, and whyBlocked to "", and issues and options to []; evidence may be [].
+For PASS, provide summary; set issues, options, and evidence to []; set reason, question, and whyBlocked to "".
+For FAIL, provide summary and one or more issues with unique stable F-prefixed numeric IDs, each with command, problem, and evidence; set options and evidence to []; set reason, question, and whyBlocked to "".
+For SKILL_MISSING, provide the attempted repository-relative skillPath and reason; set summary, question, and whyBlocked to "", and issues and options to []; evidence may be [].
+For SKILL_INVALID, provide a repository-relative skillPath and reason; for BLOCKED, use the selected skillPath or "" when no skill is selected. Set summary, question, and whyBlocked to "", and issues and options to []; evidence may be [].
 For PRODUCT_DECISION_REQUIRED, set skillPath, summary, and reason to "", and issues to []; use the product-decision fields.
 ${PRODUCT_DECISION_INSTRUCTIONS}`;
+
+export function finalizationBootstrapInstructions(policy) {
+  if (policy === "none") {
+    return "No finalization skill guidance is selected. Derive the complete finalization gate from repository instructions and project-defined checks; do not skip validation.";
+  }
+  if (policy === "auto") {
+    return "Use a conventional repository finalization skill when one is available. Otherwise derive the complete finalization gate from repository instructions and project-defined checks; missing optional guidance must not skip validation.";
+  }
+  return `Use only the explicitly configured finalization skill at ${policy}. Treat a missing, escaping, or invalid configured skill as blocking.`;
+}
+
+export function finalizationGuidanceInstructions({ required, skillPath }) {
+  if (skillPath === null) {
+    return `No finalization skill guidance is available for this turn. Derive and run the complete gate from repository instructions and project-defined checks; inspect relevant scripts and established validation commands instead of skipping validation.
+For PASS, FAIL, or BLOCKED, set skillPath to "". Do not use SKILL_MISSING or SKILL_INVALID when no skill is selected.`;
+  }
+  return `The resolved finalization skill is ${skillPath}. Validate that exact confined repository-relative skill before following it; do not substitute another path.
+${required ? "This skill is explicitly configured, so a missing, escaping, or invalid skill is blocking." : "This skill was discovered automatically; report SKILL_MISSING or SKILL_INVALID before invoking it so the runner can fall back to repository instructions and project checks."}
+For PASS, FAIL, SKILL_MISSING, SKILL_INVALID, or BLOCKED, set skillPath to ${JSON.stringify(skillPath)}.`;
+}
 
 export const COMMIT_INSTRUCTIONS = `Validate the authorized local commit using the exact supplied subject.
 Do not modify project content, amend history, bypass hooks, change Git identity or configuration, create other refs, or perform any remote write.`;

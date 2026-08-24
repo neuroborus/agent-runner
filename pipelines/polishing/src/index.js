@@ -7,6 +7,8 @@ import {
 } from "./workflow.js";
 import {
   assertRun as validateRun,
+  DEFAULT_FINALIZATION_POLICY,
+  isFinalizationPolicy,
   MAX_DISPUTES_PER_FINDING,
 } from "./workflow-contract.js";
 
@@ -17,6 +19,8 @@ export {
   CLARIFICATION_INSTRUCTIONS,
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
+  finalizationBootstrapInstructions,
+  finalizationGuidanceInstructions,
   FINDING_ARBITRATION_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
   POLISH_INSTRUCTIONS,
@@ -50,6 +54,12 @@ function positiveIntegerSetting(defaultValue, maximum = null) {
 
 const ROLES = Object.freeze(["worker", "reviewer", "arbiter"]);
 const SETTINGS = Object.freeze({
+  finalization: Object.freeze({
+    defaultValue: DEFAULT_FINALIZATION_POLICY,
+    errorMessage:
+      "must be auto, none, or a normalized repository-relative SKILL.md path",
+    validate: isFinalizationPolicy,
+  }),
   maxFixRounds: positiveIntegerSetting(5),
   maxDisputesPerFinding: positiveIntegerSetting(
     2,
@@ -70,6 +80,8 @@ const RETRYABLE_PAUSE_REASONS = new Set([
   "backend_unavailable",
   "environment_blocked",
   "finalization_cannot_pass",
+  "finalization_skill_invalid",
+  "finalization_skill_missing",
 ]);
 const RETRYABLE_PREFLIGHT_PAUSE_REASONS = new Set([
   "local_artifacts_not_ignored",

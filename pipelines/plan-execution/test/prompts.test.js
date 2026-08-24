@@ -9,6 +9,8 @@ import {
   COMMIT_INSTRUCTIONS,
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
+  finalizationBootstrapInstructions,
+  finalizationGuidanceInstructions,
   FINDING_ARBITRATION_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
   IMPLEMENTATION_INSTRUCTIONS,
@@ -21,8 +23,8 @@ import {
 test("bootstrap instructions preserve independent evidence and arbitration", () => {
   assert.equal(
     BOOTSTRAP_INSTRUCTIONS,
-    `Study the repository, task, validated plan, clarifications, project instructions, the project's finalization skill, other relevant skills, tests, and Git history independently and without modifying the repository.
-Return a concise bootstrap summary covering the task, relevant architecture and files, invariants, planned commits, risks, and the project's finalization procedure using the provided schema.
+    `Study the repository, task, validated plan, clarifications, project instructions, relevant finalization guidance, other relevant skills, project checks, tests, and Git history independently and without modifying the repository.
+Return a concise bootstrap summary covering the task, relevant architecture and files, invariants, planned commits, risks, and the complete project finalization procedure using the provided schema.
 For READY, provide summary; set reason, question, and whyBlocked to "", and options and evidence to [].
 For PLAN_REVISION_REQUIRED, set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
 For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-decision fields.`,
@@ -134,11 +136,7 @@ Otherwise, return each FIX or DISPUTE decision using the provided schema.`,
 test("finalization and dispute prompts preserve their narrow roles", () => {
   assert.match(
     FINALIZATION_INSTRUCTIONS,
-    /^Locate and validate the project's finalization skill before following it in this dedicated turn\./u,
-  );
-  assert.match(
-    FINALIZATION_INSTRUCTIONS,
-    /Run only the validation procedure defined by that skill/u,
+    /^Run the complete project finalization procedure in this dedicated turn/u,
   );
   assert.match(
     FINALIZATION_INSTRUCTIONS,
@@ -150,23 +148,43 @@ test("finalization and dispute prompts preserve their narrow roles", () => {
   );
   assert.match(
     FINALIZATION_INSTRUCTIONS,
-    /For PASS, provide a repository-relative skillPath and summary; set issues, options, and evidence to \[\]; set reason, question, and whyBlocked to ""\./u,
+    /For PASS, provide summary; set issues, options, and evidence to \[\]; set reason, question, and whyBlocked to ""\./u,
   );
   assert.match(
     FINALIZATION_INSTRUCTIONS,
-    /For FAIL, provide a repository-relative skillPath, summary, and one or more issues with unique stable F-prefixed numeric IDs, each with command, problem, and evidence;/u,
+    /For FAIL, provide summary and one or more issues with unique stable F-prefixed numeric IDs, each with command, problem, and evidence;/u,
   );
   assert.match(
     FINALIZATION_INSTRUCTIONS,
-    /For SKILL_MISSING, provide reason; set skillPath, summary, question, and whyBlocked to ""/u,
+    /For SKILL_MISSING, provide the attempted repository-relative skillPath and reason/u,
   );
   assert.match(
     FINALIZATION_INSTRUCTIONS,
-    /For SKILL_INVALID or BLOCKED, provide a repository-relative skillPath and reason/u,
+    /For SKILL_INVALID, provide a repository-relative skillPath and reason/u,
   );
   assert.match(
     FINALIZATION_INSTRUCTIONS,
     /For PRODUCT_DECISION_REQUIRED, set skillPath, summary, and reason to ""/u,
+  );
+  assert.match(finalizationBootstrapInstructions("auto"), /conventional/u);
+  assert.match(finalizationBootstrapInstructions("none"), /do not skip/u);
+  assert.match(
+    finalizationBootstrapInstructions("checks/finalize/SKILL.md"),
+    /explicitly configured/u,
+  );
+  assert.match(
+    finalizationGuidanceInstructions({
+      required: false,
+      skillPath: null,
+    }),
+    /repository instructions and project-defined checks/u,
+  );
+  assert.match(
+    finalizationGuidanceInstructions({
+      required: true,
+      skillPath: "checks/finalize/SKILL.md",
+    }),
+    /missing, escaping, or invalid skill is blocking/u,
   );
   assert.equal(
     DISPUTE_RECONSIDERATION_INSTRUCTIONS,

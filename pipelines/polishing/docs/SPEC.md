@@ -87,6 +87,12 @@ maxSameFindingRounds = 3
 stagnationWindowRounds = 3
 ```
 
+It also owns `finalization`, a string setting whose default `auto` discovers a
+conventional confined repository `finalization` skill and otherwise falls back
+to repository instructions and project-defined checks. `none` selects that
+fallback directly. Any other valid value is a normalized repository-relative
+path ending in `SKILL.md` and requires that exact skill.
+
 Settings are stored in pipeline state at run creation and are not reloaded on
 resume. The root may load safe project overrides from an ignored
 `LOCAL_ARTIFACTS/agent-runner.json` or an explicitly selected confined ignored
@@ -157,7 +163,8 @@ Preflight:
 
 Worker and Reviewer bootstrap independently and read-only. Both study the
 repository, task, complete current changes, clarifications, instructions,
-relevant skills including `finalization`, tests, and useful Git history. They
+relevant skills and finalization guidance, repository-defined project checks,
+tests, and useful Git history. They
 must not see each other's interpretation before both summaries exist. A source
 session supplied with `--fork-from` and optional separate `--fork-profile` is
 forked directly and independently for the first eligible turn of each Worker
@@ -222,17 +229,22 @@ remotes or Git identity, or perform a remote write.
 
 ### Finalize
 
-Run the target repository's `finalization` skill in a dedicated Worker turn.
-Locate and validate the skill first. Execute its validation procedure,
-including project-required formatting or generated output, but do not stage or
-commit as a discretionary handoff action. Report strict `PASS`, `FAIL`,
+Run the target repository's complete finalization procedure in a dedicated
+Worker turn in every policy mode. Locate and validate resolved skill guidance
+first. When no skill is selected or automatic discovery finds none, derive the
+same complete gate from repository instructions and project-defined checks;
+never skip validation. Execute required formatting or generated output, but do
+not stage or commit as a discretionary handoff action. Report strict `PASS`, `FAIL`,
 `SKILL_MISSING`, `SKILL_INVALID`, `BLOCKED`, or the narrowly allowed product
 decision outcome.
 
+An explicitly selected missing, escaping, or invalid skill pauses. An
+unavailable automatically discovered skill falls back to the skill-less gate.
+Skill-less `PASS`, `FAIL`, and `BLOCKED` results carry no skill path.
 Finalization-generated content changes are permitted. Compute the content
 fingerprint after the procedure and bind the result to it. A failure becomes
-blocking findings for Worker resolution. Missing, invalid, or blocked
-finalization pauses.
+blocking findings for Worker resolution. Unavailable explicit guidance or a
+blocked finalization procedure pauses.
 
 ### Review And Findings
 
@@ -343,6 +355,8 @@ Pipeline tests use fake adapters and temporary repositories. Cover at least:
 - successful polishing, finalization changes/failures, findings, fixes,
   disputes, arbitration, stagnation, budgets, overrides, and fingerprint
   invalidation;
+- automatic discovery, explicit skill selection, skill-less fallback, invalid
+  explicit paths, resume, and matching finalization/review fingerprints;
 - the invariant that `HEAD` never changes and completion never commits.
 
 Root tests cover workspace imports and metadata, static registration,

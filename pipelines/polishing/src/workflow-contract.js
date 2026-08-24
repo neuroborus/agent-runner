@@ -2,6 +2,11 @@ import { createHash } from "node:crypto";
 import { isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 
 export const MAX_CLARIFICATION_ROUNDS = 3;
+export const DEFAULT_FINALIZATION_POLICY = "auto";
+export const CONVENTIONAL_FINALIZATION_SKILL_PATHS = Object.freeze([
+  ".agents/skills/finalization/SKILL.md",
+  ".claude/skills/finalization/SKILL.md",
+]);
 export const WORKFLOW_STATES = Object.freeze([
   "CLARIFY",
   "BOOTSTRAP",
@@ -16,11 +21,15 @@ export const WORKFLOW_STATES = Object.freeze([
 
 const ROLES = Object.freeze(["worker", "reviewer", "arbiter"]);
 const SETTINGS_FIELDS = Object.freeze([
+  "finalization",
   "maxFixRounds",
   "maxDisputesPerFinding",
   "maxSameFindingRounds",
   "stagnationWindowRounds",
 ]);
+const NUMERIC_SETTINGS_FIELDS = SETTINGS_FIELDS.filter(
+  (field) => field !== "finalization",
+);
 const COUNTER_FIELDS = Object.freeze([
   "clarificationRounds",
   "productDecisions",
@@ -122,6 +131,8 @@ const PAUSE_RESUME_STATES = Object.freeze({
   ]),
   environment_blocked: Object.freeze(["POLISH"]),
   finalization_cannot_pass: Object.freeze(["FINALIZE"]),
+  finalization_skill_invalid: Object.freeze(["FINALIZE"]),
+  finalization_skill_missing: Object.freeze(["FINALIZE"]),
   fix_limit_reached: Object.freeze(["POLISH", "RESOLVE_FINDINGS"]),
   no_progress: Object.freeze(["RESOLVE_FINDINGS"]),
 });
@@ -708,10 +719,7 @@ export function normalizeFinalizationResult(payload) {
     ) {
       throw outputError("Unavailable finalization contains inapplicable fields.");
     }
-    if (
-      (payload.status === "SKILL_MISSING" && payload.skillPath !== "") ||
-      (payload.status !== "SKILL_MISSING" && payload.skillPath === "")
-    ) {
+    if (payload.status === "SKILL_INVALID" && payload.skillPath === "") {
       throw outputError("Finalization skill path is inapplicable.");
     }
     return Object.freeze({
@@ -736,7 +744,10 @@ export function normalizeFinalizationResult(payload) {
   }
   return Object.freeze({
     status: payload.status,
-    skillPath: normalizeRelativePath(payload.skillPath, "finalization skill path"),
+    skillPath:
+      payload.skillPath === ""
+        ? null
+        : normalizeRelativePath(payload.skillPath, "finalization skill path"),
     summary: normalizeSummary(payload.summary, "finalization summary", INVALID_OUTPUT_CODE),
     issues,
   });
@@ -1036,8 +1047,12 @@ export function normalizeResumeAction(value) {
 }
 
 export function assertSettings(settings) {
+  settings = normalizeSettings(settings);
   assertExactFields(settings, SETTINGS_FIELDS, "Polishing settings");
-  for (const field of SETTINGS_FIELDS) {
+  if (!isFinalizationPolicy(settings.finalization)) {
+    throw workflowError("Polishing setting finalization is invalid.");
+  }
+  for (const field of NUMERIC_SETTINGS_FIELDS) {
     if (!Number.isSafeInteger(settings[field]) || settings[field] < 1) {
       throw workflowError(`Polishing setting ${field} is invalid.`);
     }
@@ -1048,6 +1063,43 @@ export function assertSettings(settings) {
     );
   }
   disputeHistoryCapacity(settings);
+}
+
+export function isFinalizationPolicy(value) {
+  if (value === "auto" || value === "none") {
+    return true;
+  }
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 1_024 &&
+    !value.includes("\\") &&
+    !/^[a-zA-Z]:\//u.test(value) &&
+    !posix.isAbsolute(value) &&
+    posix.normalize(value) === value &&
+    value !== "." &&
+    value !== ".." &&
+    !value.startsWith("../") &&
+    value !== ".git" &&
+    !value.startsWith(".git/") &&
+    (value === "SKILL.md" || value.endsWith("/SKILL.md")) &&
+    !/[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(value)
+  );
+}
+
+function normalizeSettings(settings) {
+  if (
+    isRecord(settings) &&
+    !Object.hasOwn(settings, "finalization") &&
+    Object.keys(settings).length === NUMERIC_SETTINGS_FIELDS.length &&
+    NUMERIC_SETTINGS_FIELDS.every((field) => Object.hasOwn(settings, field))
+  ) {
+    return Object.freeze({
+      finalization: DEFAULT_FINALIZATION_POLICY,
+      ...settings,
+    });
+  }
+  return settings;
 }
 
 export function disputeHistoryCapacity(settings) {
@@ -1131,7 +1183,13 @@ function normalizePersistedFinalization(value) {
   if (!["PASS", "FAIL"].includes(value.status) || !HASH_PATTERN.test(value.fingerprint)) {
     throw workflowError("Polishing finalization result is invalid.");
   }
-  normalizeRelativePath(value.skillPath, "finalization skill path", "ERR_INVALID_POLISHING_STATE");
+  if (value.skillPath !== null) {
+    normalizeRelativePath(
+      value.skillPath,
+      "finalization skill path",
+      "ERR_INVALID_POLISHING_STATE",
+    );
+  }
   normalizeSummary(value.summary, "finalization summary");
   const issues = normalizeFinalizationIssues(value.issues, "ERR_INVALID_POLISHING_STATE");
   if (
@@ -1393,7 +1451,11 @@ export function normalizePipelineState(value) {
     }
   }
   if (value.settings !== null) {
-    assertSettings(value.settings);
+    const settings = normalizeSettings(value.settings);
+    assertSettings(settings);
+    if (settings !== value.settings) {
+      value = { ...value, settings };
+    }
   }
   if (
     value.preflightComplete !== (value.repositoryBaseline !== null) ||
@@ -2019,9 +2081,12 @@ export function assertRun(run) {
     const requiresResumeState =
       ["fix_limit_reached", "no_progress"].includes(run.pause.reason) ||
       (state.preflightComplete &&
-        ["backend_unavailable", "environment_blocked"].includes(
-          run.pause.reason,
-        )) ||
+        [
+          "backend_unavailable",
+          "environment_blocked",
+          "finalization_skill_invalid",
+          "finalization_skill_missing",
+        ].includes(run.pause.reason)) ||
       (run.pause.reason === "finalization_cannot_pass" &&
         run.pause.code !== "ERR_FINALIZATION_MODIFIED_BEFORE_VALIDATION");
     if (

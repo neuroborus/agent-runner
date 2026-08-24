@@ -34,6 +34,7 @@
       }
     },
     "plan-execution": {
+      "finalization": "auto",
       "maxFixRoundsPerStep": 5,
       "maxDisputesPerFinding": 2,
       "maxSameFindingRounds": 3,
@@ -50,6 +51,7 @@
       }
     },
     "polishing": {
+      "finalization": "auto",
       "maxFixRounds": 5,
       "maxDisputesPerFinding": 2,
       "maxSameFindingRounds": 3,

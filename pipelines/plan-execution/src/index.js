@@ -7,7 +7,11 @@ import {
   runPlanExecution,
   WORKFLOW_STATES,
 } from "./workflow.js";
-import { assertRun as validateRun } from "./workflow-contract.js";
+import {
+  assertRun as validateRun,
+  DEFAULT_FINALIZATION_POLICY,
+  isFinalizationPolicy,
+} from "./workflow-contract.js";
 
 export {
   BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
@@ -17,6 +21,8 @@ export {
   COMMIT_INSTRUCTIONS,
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
+  finalizationBootstrapInstructions,
+  finalizationGuidanceInstructions,
   FINDING_ARBITRATION_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
   IMPLEMENTATION_INSTRUCTIONS,
@@ -45,6 +51,12 @@ function positiveIntegerSetting(defaultValue) {
 
 const ROLES = Object.freeze(["worker", "reviewer", "arbiter"]);
 const SETTINGS = Object.freeze({
+  finalization: Object.freeze({
+    defaultValue: DEFAULT_FINALIZATION_POLICY,
+    errorMessage:
+      "must be auto, none, or a normalized repository-relative SKILL.md path",
+    validate: isFinalizationPolicy,
+  }),
   maxFixRoundsPerStep: positiveIntegerSetting(5),
   maxDisputesPerFinding: positiveIntegerSetting(2),
   maxSameFindingRounds: positiveIntegerSetting(3),
@@ -63,6 +75,8 @@ const RETRYABLE_PAUSE_REASONS = new Set([
   "backend_unavailable",
   "environment_blocked",
   "finalization_cannot_pass",
+  "finalization_skill_invalid",
+  "finalization_skill_missing",
   "local_artifacts_not_ignored",
   "unsafe_git_state",
 ]);
@@ -152,6 +166,8 @@ function validateResumeAction(run, action) {
             "backend_unavailable",
             "environment_blocked",
             "finalization_cannot_pass",
+            "finalization_skill_invalid",
+            "finalization_skill_missing",
           ].includes(run.pause?.reason) &&
             RESUMABLE_WORKFLOW_STATES.has(run.pause?.resumeState)))))
   ) {

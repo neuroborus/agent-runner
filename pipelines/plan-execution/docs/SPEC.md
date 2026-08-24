@@ -12,7 +12,7 @@ The runner must:
 - allow Worker, Reviewer, and Arbiter to use different backends;
 - complete a bounded clarification phase before implementation begins;
 - let the Worker operate unattended during normal execution;
-- validate each implementation through the target project's own `finalization` skill;
+- validate each implementation through a dedicated, optionally skill-guided finalization gate;
 - independently review each planned commit;
 - allow the Worker to fix or dispute review findings;
 - advance only when the exact current workspace has passed finalization and review with no unresolved findings;
@@ -266,6 +266,11 @@ workflow logic.
 
 The descriptor also owns the positive-integer settings and built-in defaults
 listed under [Retry Limits and No-Progress Detection](#14-retry-limits-and-no-progress-detection).
+It additionally owns the string `finalization` setting. Its default `auto`
+discovers a conventional confined repository `finalization` skill and otherwise
+falls back to repository instructions and project-defined checks. `none`
+selects that fallback directly; any other valid value is a normalized
+repository-relative path ending in `SKILL.md` and requires that exact skill.
 Runner overrides live directly under `pipelines.plan-execution`. The root
 loader strictly validates both versioned envelopes and delegates these values
 to the descriptor rather than duplicating pipeline policy. It discovers only
@@ -644,15 +649,24 @@ environment values, and never adds Claude attribution. Report
 `localCommit: false` when this profile or Claude's required Linux sandbox
 dependencies cannot be probed.
 
-### Backend-neutral `finalization` skill
+### Backend-neutral finalization guidance
 
-`finalization` is a repository-defined instruction/skill, not a Codex-only or Claude-only feature.
+Finalization is a dedicated pipeline gate, not a Codex-only or Claude-only
+feature. A repository-defined skill may guide it, but the gate does not depend
+on optional guidance being present.
 
-During bootstrap, the agent must locate the project's finalization instructions through the repository's agent instructions/skills.
+During bootstrap, the agent follows the persisted policy: use an explicitly
+selected confined skill, discover a conventional skill in `auto`, or derive the
+complete procedure from repository instructions and project-defined checks when
+no skill is selected or discovered.
 
-When the selected backend supports the skill natively, it may invoke it natively. Otherwise it must read and follow the skill instructions directly.
+When the selected backend supports a resolved skill natively, it may invoke it
+natively. Otherwise it reads and follows the instructions directly. An
+explicitly selected missing, escaping, or invalid skill blocks; an unavailable
+automatically discovered skill falls back without skipping finalization.
 
-The same repository finalization procedure must therefore work with either Worker backend.
+The same repository finalization procedure must therefore work with either
+Worker backend and without skill-specific guidance.
 
 ---
 
@@ -936,7 +950,8 @@ Both study:
 - optional `context.md`;
 - repository agent instructions;
 - relevant repository skills;
-- the `finalization` skill;
+- the persisted finalization policy, its resolved guidance when present, and
+  repository instructions and project checks for fallback validation;
 - relevant tests;
 - relevant Git history where useful;
 - project conventions related to the task.
@@ -1052,17 +1067,22 @@ runner-authorized `COMMIT` turn after the gate passes.
 
 ### 13.2 Finalization
 
-Run the project's `finalization` skill in a dedicated Worker turn.
+Run the complete project finalization procedure in a dedicated Worker turn for
+every policy mode.
 
 The finalization turn should execute the validation procedure and report its result. It should not perform unrelated discretionary fixes in the same turn.
 
 Before invocation, the Worker reports a missing or invalid resolved skill and
-does not execute it. A safe structured result is one of `PASS`, `FAIL`,
+does not execute it. An explicitly configured unavailable skill pauses. An
+unavailable automatically discovered skill switches to the same dedicated gate
+using repository instructions and project-defined checks. A safe structured
+result is one of `PASS`, `FAIL`,
 `SKILL_MISSING`, `SKILL_INVALID`, `BLOCKED`, or the narrowly permitted
 `PRODUCT_DECISION_REQUIRED`. `FAIL` supplies stable `F`-prefixed issue IDs for
-the current procedure output; `PASS`, `FAIL`, `SKILL_INVALID`, and `BLOCKED`
-identify the resolved repository-relative skill path. Missing, invalid, or
-blocked finalization pauses without advancing.
+the current procedure output. Skill-guided results identify the resolved
+repository-relative skill path; skill-less `PASS`, `FAIL`, and `BLOCKED`
+results carry no path. A blocked procedure or unavailable explicit skill pauses
+without advancing.
 
 The finalization procedure may legitimately modify files when the project itself requires this, for example formatting or generated output.
 
@@ -1609,6 +1629,8 @@ At minimum cover:
 39. preflight rejects a clarification path that the target repository does not ignore.
 40. MCP input uses the same one-shot authorization and preserves exact answers;
 41. MCP continuation cannot bypass the per-run lease or any local-commit gate.
+42. automatic, explicit, and skill-less finalization modes preserve the
+    dedicated gate, resume policy, and matching finalization/review fingerprints.
 
 Real Codex/Claude smoke tests should be opt-in integration tests.
 
@@ -1670,9 +1692,11 @@ Do not build:
 
 1. Worker and Reviewer independently study project/task/plan before implementation.
 2. Clarification, plan-compatibility, bootstrap, review, and arbitration turns are read-only.
-3. The repository's `finalization` skill defines project validation.
-4. Finalization is backend-neutral and must work through either Worker adapter.
-5. The runner never substitutes generic hard-coded test commands for finalization.
+3. A dedicated finalization turn always defines the project validation gate.
+4. Finalization is backend-neutral and must work through either Worker adapter,
+   with an explicit skill, automatic discovery, or no skill guidance.
+5. Skill-less finalization derives checks from repository evidence; the runner
+   never substitutes generic hard-coded test commands.
 6. The Worker is autonomous during normal implementation.
 7. Only the Worker creates planned commits, one at a time, in a dedicated turn
    authorized by the runner after the commit gate passes.

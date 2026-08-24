@@ -74,6 +74,8 @@ test("tracked example is valid and local configuration is ignored", async () => 
     model: "current",
     contextSize: "current",
   });
+  assert.equal(configuration.pipelines["plan-execution"].finalization, "auto");
+  assert.equal(configuration.pipelines.polishing.finalization, "auto");
   assert.match(gitignore, /^\/\.agent-runner\.json$/mu);
   assert.ok(Object.isFrozen(configuration));
   assert.ok(Object.isFrozen(configuration.pipelines));
@@ -97,6 +99,7 @@ test("minimal configuration uses pipeline-owned setting defaults", () => {
     roles: {},
   });
   assert.deepEqual(configuration.pipelines["plan-execution"], {
+    finalization: "auto",
     maxFixRoundsPerStep: 5,
     maxDisputesPerFinding: 2,
     maxSameFindingRounds: 3,
@@ -104,6 +107,7 @@ test("minimal configuration uses pipeline-owned setting defaults", () => {
     roles: {},
   });
   assert.deepEqual(configuration.pipelines.polishing, {
+    finalization: "auto",
     maxFixRounds: 5,
     maxDisputesPerFinding: 2,
     maxSameFindingRounds: 3,
@@ -171,6 +175,18 @@ test("configuration rejects unsupported shapes and values", () => {
     [
       '{"schemaVersion":1,"pipelines":{"plan-execution":{"maxFixRoundsPerStep":1.5}}}',
       /maxFixRoundsPerStep must be a positive integer/u,
+    ],
+    [
+      '{"schemaVersion":1,"pipelines":{"plan-execution":{"finalization":1}}}',
+      /finalization must be auto, none/u,
+    ],
+    [
+      '{"schemaVersion":1,"pipelines":{"plan-execution":{"finalization":"../SKILL.md"}}}',
+      /finalization must be auto, none/u,
+    ],
+    [
+      '{"schemaVersion":1,"pipelines":{"polishing":{"finalization":"checks/finalize.md"}}}',
+      /finalization must be auto, none/u,
     ],
     [
       '{"schemaVersion":1,"pipelines":{"plan-execution":{"maxDisputesPerFinding":0}}}',
@@ -319,6 +335,7 @@ test("role resolution applies CLI, role, runner, and native defaults", () => {
     },
   });
   assert.deepEqual(resolved.settings, {
+    finalization: "auto",
     maxFixRoundsPerStep: 8,
     maxDisputesPerFinding: 2,
     maxSameFindingRounds: 3,
@@ -394,6 +411,7 @@ test("project configuration is a strict partial overlay", () => {
       },
       pipelines: {
         polishing: {
+          finalization: ".agents/skills/release/SKILL.md",
           maxFixRounds: 8,
           roles: { reviewer: { model: "runner-reviewer" } },
         },
@@ -408,6 +426,7 @@ test("project configuration is a strict partial overlay", () => {
       defaultModel: "project-model",
       pipelines: {
         polishing: {
+          finalization: "none",
           maxFixRounds: 3,
           roles: {
             worker: { model: "project-worker" },
@@ -429,6 +448,7 @@ test("project configuration is a strict partial overlay", () => {
   );
 
   assert.equal(resolved.artifactRoot, "project-artifacts");
+  assert.equal(resolved.settings.finalization, "none");
   assert.equal(resolved.settings.maxFixRounds, 3);
   assert.deepEqual(resolved.roles.worker, {
     backend: "claude",
