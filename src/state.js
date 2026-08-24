@@ -23,11 +23,20 @@ import {
   normalizePublicActivity,
   normalizeRunState,
   normalizeTransitionPatch,
+  RUNTIME_COMPATIBILITY,
+  RUNTIME_COMPATIBILITY_TOKEN,
+  RUNTIME_VERSION_SKEW_EXIT_CODE,
   RUN_STATE_SCHEMA_VERSION,
   RunStoreError,
 } from "./state-validation.js";
 
-export { RUN_STATE_SCHEMA_VERSION, RunStoreError };
+export {
+  RUNTIME_COMPATIBILITY,
+  RUNTIME_COMPATIBILITY_TOKEN,
+  RUNTIME_VERSION_SKEW_EXIT_CODE,
+  RUN_STATE_SCHEMA_VERSION,
+  RunStoreError,
+};
 
 const DEFAULT_LEASE_STALE_MS = 5 * 60 * 1_000;
 
@@ -447,6 +456,7 @@ export function createRunStore({
           runId,
           pipelineId: input.pipelineId,
           pipelineStateVersion: input.pipelineStateVersion,
+          runtimeCompatibility: RUNTIME_COMPATIBILITY,
           projectPath,
           taskPath,
           roles: input.roles,
@@ -669,6 +679,61 @@ export function createRunStore({
     });
   }
 
+  async function migrateRun(
+    lease,
+    { pipelineState, pipelineStateVersion },
+    { activity } = {},
+  ) {
+    const normalizedActivity = normalizePublicActivity(activity);
+    if (
+      normalizedActivity?.actor !== "runner" ||
+      normalizedActivity.phase !== "runtime" ||
+      normalizedActivity.kind !== "migrated"
+    ) {
+      throw new RunStoreError("Run migration activity is invalid.", {
+        code: "ERR_INVALID_RUN_MIGRATION",
+      });
+    }
+
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
+      const snapshot = await loadSnapshot(runDirectory, record.runId);
+      if (
+        !Number.isSafeInteger(pipelineStateVersion) ||
+        pipelineStateVersion < snapshot.state.pipelineStateVersion ||
+        pipelineStateVersion < 1 ||
+        (snapshot.state.schemaVersion === RUN_STATE_SCHEMA_VERSION &&
+          snapshot.state.runtimeCompatibility?.runnerVersion ===
+            RUNTIME_COMPATIBILITY.runnerVersion &&
+          snapshot.state.runtimeCompatibility?.runStateVersion ===
+            RUNTIME_COMPATIBILITY.runStateVersion &&
+          pipelineStateVersion === snapshot.state.pipelineStateVersion)
+      ) {
+        throw new RunStoreError("Run migration target is invalid.", {
+          code: "ERR_INVALID_RUN_MIGRATION",
+        });
+      }
+      const nextState = normalizeRunState(
+        {
+          ...snapshot.state,
+          schemaVersion: RUN_STATE_SCHEMA_VERSION,
+          revision: snapshot.state.revision + 1,
+          pipelineStateVersion,
+          runtimeCompatibility: RUNTIME_COMPATIBILITY,
+          pipelineState,
+          updatedAt: timestamp(snapshot.state.updatedAt),
+        },
+        record.runId,
+      );
+      await journal.appendTransition(
+        runDirectory,
+        nextState,
+        snapshot,
+        normalizedActivity,
+      );
+      return deepFreeze(nextState);
+    });
+  }
+
   async function transitionRun(lease, patch, { activity } = {}) {
     const normalizedPatch = normalizeTransitionPatch(patch);
     const normalizedActivity = normalizePublicActivity(activity);
@@ -834,6 +899,7 @@ export function createRunStore({
     createRun,
     getRunDirectory,
     loadRun,
+    migrateRun,
     readPublicActivity,
     readAction: actions.read,
     recordChildSession,

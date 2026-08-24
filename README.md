@@ -298,7 +298,10 @@ agent-run run plan-execution \
 
 Runner state uses `$XDG_STATE_HOME/agent-runner/` with
 `~/.local/state/agent-runner/` as the fallback. Every run records its pipeline
-ID and state-schema version and is addressed by an opaque run ID. Complete
+ID, pipeline state-schema version, and an explicit runtime compatibility tuple
+that is independent from the package version. Compatible legacy state is
+migrated by the owning pipeline under the per-run lease; incompatible readers
+fail with a specific version-skew error without rewriting the run. Complete
 write-ahead events precede atomic state replacement; recovery repairs a lagging
 state file and derived progress. Mutating runs require one per-run execution
 lease. Plan execution and polishing also serialize ownership with an external
@@ -442,6 +445,9 @@ withholds its receipt after launch until the run advances or the child owns the
 worktree. Losing a concurrent ownership race keeps the durable idempotency
 intent available for an exact retry, including when the competing lease is
 released before the next MCP poll because child exit is acknowledged directly.
+The child also verifies the dispatching MCP process's runtime tuple before
+acquiring the run lease. Version skew leaves the durable run and incomplete
+intent unchanged and returns an actionable restart-and-retry error.
 The existing execution leases, Git safety checks, local-only policy, and
 one-shot commit authorization remain authoritative. V1 does not require MCP
 Tasks.
@@ -457,9 +463,10 @@ complete model transcripts.
 ## Pipeline Boundary
 
 The registry is static in V1. A pipeline descriptor exports an ID, a state
-version, roles, configuration settings and defaults, pipeline-specific accepted
-and required `run` options, task-input definitions, clarification and status
-projections, resume-action validation, persisted-run validation, and a
+version, roles, configuration settings and defaults, ordered migrations from
+supported prior versions, pipeline-specific accepted and required `run`
+options, task-input definitions, clarification and status projections,
+resume-action validation, persisted-run validation, and a
 description; the root CLI owns the common `--clarify` lifecycle option. Each
 workspace owns its explicit JavaScript workflow. The runner provides state,
 events, agents, and Git services; it does not provide a workflow DSL or

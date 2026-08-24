@@ -15,7 +15,13 @@ import {
 } from "./config.js";
 import { createGitService } from "./git.js";
 import { getPipeline } from "./pipeline-registry.js";
-import { createRunStore } from "./state.js";
+import { deepFreeze } from "./state-validation.js";
+import {
+  createRunStore,
+  RUNTIME_COMPATIBILITY,
+  RUNTIME_COMPATIBILITY_TOKEN,
+  RUN_STATE_SCHEMA_VERSION,
+} from "./state.js";
 
 const BACKENDS = new Set(BACKEND_IDS);
 const WORKTREE_LEASE_PIPELINES = new Set([
@@ -32,7 +38,11 @@ const RUN_FIELDS = new Set([
   "projectConfigurationPath",
   "sourceSession",
 ]);
-const RESUME_FIELDS = new Set(["runId", "action"]);
+const RESUME_FIELDS = new Set([
+  "runId",
+  "action",
+  "expectedRuntimeCompatibility",
+]);
 const CREATE_OPTIONS_FIELDS = new Set(["runId"]);
 const INPUT_FIELDS = new Set([
   "runId",
@@ -384,9 +394,26 @@ function normalizeRunInput(input) {
 
 function normalizeResumeInput(input) {
   rejectUnknownFields(input, RESUME_FIELDS, "resume");
+  if (
+    input.expectedRuntimeCompatibility !== undefined &&
+    input.expectedRuntimeCompatibility !== RUNTIME_COMPATIBILITY_TOKEN
+  ) {
+    throw new RunnerError(
+      "Detached continuation runtime is incompatible with the process that " +
+        "dispatched it; restart the Agent Runner MCP server and retry with " +
+        "the same idempotency key.",
+      { code: "ERR_RUNTIME_VERSION_SKEW" },
+    );
+  }
   return Object.freeze({
     runId: assertNonEmptyString(input.runId, "resume.runId"),
     action: input.action ?? null,
+    ...(input.expectedRuntimeCompatibility === undefined
+      ? {}
+      : {
+          expectedRuntimeCompatibility:
+            input.expectedRuntimeCompatibility,
+        }),
   });
 }
 
@@ -482,22 +509,84 @@ function orderedInputAnswers(run, input) {
   return Object.freeze(expectedIds.map((id) => byId.get(id)));
 }
 
-function pipelineForRun(run, knownPipeline) {
+export function preparePipelineMigration(run, pipeline) {
+  if (run.pipelineStateVersion > pipeline.stateVersion) {
+    throw new RunnerError(
+      `Run ${run.runId} uses newer ${pipeline.id} state version ` +
+        `${run.pipelineStateVersion}; this runtime supports version ` +
+        `${pipeline.stateVersion}. Use a compatible Agent Runner version.`,
+      { code: "ERR_PIPELINE_VERSION_SKEW" },
+    );
+  }
+
+  const originalVersion = run.pipelineStateVersion;
+  let migrated = run;
+  while (migrated.pipelineStateVersion < pipeline.stateVersion) {
+    const migration = pipeline.migrations?.[migrated.pipelineStateVersion];
+    if (typeof migration !== "function") {
+      throw new RunnerError(
+        `Run ${run.runId} requires an unavailable ${pipeline.id} migration ` +
+          `from state version ${migrated.pipelineStateVersion}. Use an ` +
+          "Agent Runner version with that migration.",
+        { code: "ERR_PIPELINE_VERSION_SKEW" },
+      );
+    }
+    let pipelineState;
+    try {
+      pipelineState = migration(migrated);
+    } catch (cause) {
+      throw new RunnerError(
+        `Run ${run.runId} could not migrate ${pipeline.id} state version ` +
+          `${migrated.pipelineStateVersion}.`,
+        { cause, code: "ERR_PIPELINE_MIGRATION_FAILED" },
+      );
+    }
+    if (!isRecord(pipelineState)) {
+      throw new RunnerError(
+        `${pipeline.id} migration from state version ` +
+          `${migrated.pipelineStateVersion} returned invalid state.`,
+        { code: "ERR_PIPELINE_MIGRATION_FAILED" },
+      );
+    }
+    migrated = deepFreeze({
+      ...migrated,
+      pipelineStateVersion: migrated.pipelineStateVersion + 1,
+      pipelineState,
+    });
+  }
+  try {
+    pipeline.workflow.validateRun(migrated);
+  } catch (cause) {
+    if (migrated.pipelineStateVersion === originalVersion) {
+      throw cause;
+    }
+    throw new RunnerError(
+      `Run ${run.runId} produced invalid ${pipeline.id} state after ` +
+        `migration from version ${originalVersion}.`,
+      { cause, code: "ERR_PIPELINE_MIGRATION_FAILED" },
+    );
+  }
+  return migrated;
+}
+
+function pipelineForRun(run, knownPipeline, { allowMigration = false } = {}) {
   const pipeline = knownPipeline ?? getPipeline(run.pipelineId);
   if (pipeline === undefined) {
     throw new RunnerError(`Unknown pipeline: ${run.pipelineId}.`, {
       code: "ERR_UNKNOWN_PIPELINE",
     });
   }
-  if (run.pipelineStateVersion !== pipeline.stateVersion) {
+  const compatibleRun = preparePipelineMigration(run, pipeline);
+  if (
+    !allowMigration &&
+    compatibleRun.pipelineStateVersion !== run.pipelineStateVersion
+  ) {
     throw new RunnerError(
-      `Run ${run.runId} uses unsupported ${pipeline.id} state version ` +
-        `${run.pipelineStateVersion}.`,
-      { code: "ERR_UNSUPPORTED_PIPELINE_STATE_VERSION" },
+      `Run ${run.runId} requires a persisted ${pipeline.id} state migration.`,
+      { code: "ERR_PIPELINE_MIGRATION_REQUIRED" },
     );
   }
-  pipeline.workflow.validateRun(run);
-  return pipeline;
+  return Object.freeze({ pipeline, run: compatibleRun });
 }
 
 export function pipelineRequiresWorktreeLease(pipelineId) {
@@ -566,6 +655,18 @@ export function createRunner(options = {}) {
   }
 
   async function execute(pipeline, run, lease, action = null) {
+    if (
+      run.schemaVersion !== RUN_STATE_SCHEMA_VERSION ||
+      run.runtimeCompatibility?.runnerVersion !==
+        RUNTIME_COMPATIBILITY.runnerVersion ||
+      run.runtimeCompatibility?.runStateVersion !==
+        RUNTIME_COMPATIBILITY.runStateVersion
+    ) {
+      throw new RunnerError(
+        `Run ${run.runId} requires a persisted runtime migration.`,
+        { code: "ERR_RUNTIME_MIGRATION_REQUIRED" },
+      );
+    }
     pipelineForRun(run, pipeline);
     const settings = run.pipelineState.settings;
     if (!isRecord(settings)) {
@@ -634,6 +735,51 @@ export function createRunner(options = {}) {
       directoryPath: await runStore.getRunDirectory(run.runId),
       run,
     });
+  }
+
+  async function recoverCompatibleRun(
+    lease,
+    runId,
+    { validatePreparedRun } = {},
+  ) {
+    const storedRun = await runStore.loadRun(runId);
+    const prepared = pipelineForRun(storedRun, undefined, {
+      allowMigration: true,
+    });
+    validatePreparedRun?.(prepared.run);
+    const runtimeMigrationRequired =
+      storedRun.schemaVersion !== RUN_STATE_SCHEMA_VERSION ||
+      storedRun.runtimeCompatibility?.runnerVersion !==
+        RUNTIME_COMPATIBILITY.runnerVersion ||
+      storedRun.runtimeCompatibility?.runStateVersion !==
+        RUNTIME_COMPATIBILITY.runStateVersion;
+    const pipelineMigrationRequired =
+      storedRun.pipelineStateVersion !== prepared.run.pipelineStateVersion;
+    let run;
+    if (runtimeMigrationRequired || pipelineMigrationRequired) {
+      const activity = {
+        actor: "runner",
+        phase: "runtime",
+        kind: "migrated",
+        message:
+          `Migrated run state for ${prepared.pipeline.id} to runtime ` +
+          `${RUNTIME_COMPATIBILITY_TOKEN} and pipeline state ` +
+          `${prepared.run.pipelineStateVersion}.`,
+      };
+      run = await runStore.migrateRun(
+        lease,
+        {
+          pipelineState: prepared.run.pipelineState,
+          pipelineStateVersion: prepared.run.pipelineStateVersion,
+        },
+        { activity },
+      );
+      await publish(activity, run);
+    } else {
+      run = await runStore.recoverRun(lease);
+    }
+    pipelineForRun(run, prepared.pipeline);
+    return Object.freeze({ pipeline: prepared.pipeline, run });
   }
 
   async function prepare(input, options = {}) {
@@ -761,14 +907,10 @@ export function createRunner(options = {}) {
     const normalized = normalizeResumeInput(input);
     const lease = await runStore.acquireRunLease(normalized.runId);
     try {
-      const recovered = await runStore.recoverRun(lease);
-      const pipeline = getPipeline(recovered.pipelineId);
-      if (pipeline === undefined) {
-        throw new RunnerError(`Unknown pipeline: ${recovered.pipelineId}.`, {
-          code: "ERR_UNKNOWN_PIPELINE",
-        });
-      }
-      pipelineForRun(recovered, pipeline);
+      const { pipeline, run: recovered } = await recoverCompatibleRun(
+        lease,
+        normalized.runId,
+      );
       if (
         recovered.pipelineState.workflowState === "WAITING_FOR_USER" ||
         normalized.action !== null
@@ -794,8 +936,10 @@ export function createRunner(options = {}) {
 
   async function status(runId) {
     assertNonEmptyString(runId, "runId");
-    const run = await runStore.loadRun(runId);
-    pipelineForRun(run);
+    const storedRun = await runStore.loadRun(runId);
+    const { run } = pipelineForRun(storedRun, undefined, {
+      allowMigration: true,
+    });
     return result(run);
   }
 
@@ -821,10 +965,17 @@ export function createRunner(options = {}) {
     });
     const lease = await runStore.acquireRunLease(normalized.runId);
     try {
-      const run = await runStore.recoverRun(lease);
-      pipelineForRun(run);
+      let answers;
+      const { run } = await recoverCompatibleRun(
+        lease,
+        normalized.runId,
+        {
+          validatePreparedRun(preparedRun) {
+            answers = orderedInputAnswers(preparedRun, normalized);
+          },
+        },
+      );
       return await withWorktreeLease(run, async () => {
-        const answers = orderedInputAnswers(run, normalized);
         const transcript = await clarifications.writeEditAnswers(
           run.pipelineState.pendingEdit,
           answers,

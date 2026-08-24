@@ -347,6 +347,7 @@ Persist at least:
 
 - run ID;
 - pipeline ID and pipeline state-schema version;
+- root run-envelope schema and runtime-compatibility tuple;
 - canonical project path;
 - canonical task path;
 - hashes of `task.md`, `plan.md`, and optional task `clarifications.md` and `context.md`;
@@ -381,6 +382,14 @@ continue with a new native session.
 
 Validate the complete next pipeline state before handing a transition to the
 root state service. Write state atomically using temporary-file + rename.
+The descriptor exposes an ordered migration for every supported prior pipeline
+state version. Status may evaluate those migrations in memory without rewriting
+history. Before execution resumes, the root evaluates the complete chain,
+validates the resulting current shape, and persists one complete migration
+event under the per-run execution lease. An unsupported forward version or a
+missing migration returns an actionable version-skew error; invalid migration
+output returns a specific migration failure instead of treating the run as
+generically invalid.
 
 ### `events.jsonl`
 
@@ -915,7 +924,10 @@ of launching a conflicting child. After a mutating child is spawned, MCP does
 not complete the intent until the run advances or that child owns the worktree;
 a child that loses a concurrent acquisition race leaves the intent retryable.
 The launcher's correlated exit acknowledgement preserves that result when the
-winning lease is released between MCP polls.
+winning lease is released between MCP polls. The dispatcher also passes its
+runtime tuple to the child. A mismatch is rejected before the child takes the
+run lease, and its distinct exit leaves the run and incomplete intent unchanged
+for an exact retry after the MCP process is restarted.
 The additive MCP start fields leave `sourceSession` unset by default and pass it
 only after the user deliberately selects a fork; native IDs remain opaque and
 an unknown source profile offers only `current` inheritance.
@@ -1667,6 +1679,9 @@ At minimum cover:
 44. independently identified plan-execution or polishing runs cannot own the
     same canonical Git worktree concurrently, including through detached MCP
     dispatch, and a demonstrably stale same-host owner is recoverable.
+45. compatible legacy state migrates under the execution lease, incompatible
+    readers and detached children fail with a specific version-skew error, and
+    disconnects leave the durable run and retryable intent intact.
 
 Real Codex/Claude smoke tests should be opt-in integration tests.
 

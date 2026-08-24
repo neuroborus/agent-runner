@@ -85,6 +85,7 @@ function validateResumeAction(run, action) {
 export const planAuthoringPipeline = Object.freeze({
   id: PLAN_AUTHORING_PIPELINE_ID,
   stateVersion: 1,
+  migrations: Object.freeze({}),
   roles: ROLES,
   settings: SETTINGS,
   taskInputs: TASK_INPUTS,

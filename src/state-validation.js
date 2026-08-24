@@ -1,6 +1,21 @@
 import { isAbsolute, resolve } from "node:path";
 
-export const RUN_STATE_SCHEMA_VERSION = 1;
+export const RUN_STATE_SCHEMA_VERSION = 2;
+export const RUNTIME_COMPATIBILITY_VERSION = 1;
+export const RUNTIME_COMPATIBILITY = Object.freeze({
+  runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
+  runStateVersion: RUN_STATE_SCHEMA_VERSION,
+});
+export const RUNTIME_COMPATIBILITY_TOKEN =
+  `${RUNTIME_COMPATIBILITY.runnerVersion}:` +
+  `${RUNTIME_COMPATIBILITY.runStateVersion}`;
+export const RUNTIME_VERSION_SKEW_EXIT_CODE = 78;
+
+const LEGACY_RUN_STATE_SCHEMA_VERSION = 1;
+const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
+  LEGACY_RUN_STATE_SCHEMA_VERSION,
+  RUN_STATE_SCHEMA_VERSION,
+]);
 
 const IDENTIFIER_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const ACTIVITY_KIND_PATTERN = /^[a-z][a-z0-9.-]{0,63}$/u;
@@ -13,6 +28,7 @@ const STATE_FIELDS = new Set([
   "runId",
   "pipelineId",
   "pipelineStateVersion",
+  "runtimeCompatibility",
   "projectPath",
   "taskPath",
   "roles",
@@ -50,6 +66,10 @@ const TRANSITION_FIELDS = new Set([
   "hashes",
   "pause",
   "pipelineState",
+]);
+const RUNTIME_COMPATIBILITY_FIELDS = new Set([
+  "runnerVersion",
+  "runStateVersion",
 ]);
 const MAX_STATE_BYTES = 1024 * 1024;
 const MAX_JSON_DEPTH = 20;
@@ -313,6 +333,48 @@ function normalizeTimestamp(value, path) {
   return value;
 }
 
+function normalizeRuntimeCompatibility(value, schemaVersion) {
+  if (schemaVersion === LEGACY_RUN_STATE_SCHEMA_VERSION) {
+    if (value !== undefined && value !== null) {
+      fail(
+        "Legacy run state must not declare runtime compatibility.",
+        "ERR_RUNTIME_VERSION_SKEW",
+      );
+    }
+    return null;
+  }
+
+  assertRecord(value, "run.runtimeCompatibility");
+  rejectUnknownFields(
+    value,
+    RUNTIME_COMPATIBILITY_FIELDS,
+    "run.runtimeCompatibility",
+  );
+  if (
+    Object.keys(value).length !== RUNTIME_COMPATIBILITY_FIELDS.size ||
+    !Number.isSafeInteger(value.runnerVersion) ||
+    value.runnerVersion < 1 ||
+    !Number.isSafeInteger(value.runStateVersion) ||
+    value.runStateVersion < 1
+  ) {
+    fail("run.runtimeCompatibility is invalid.");
+  }
+  if (
+    value.runnerVersion !== RUNTIME_COMPATIBILITY.runnerVersion ||
+    value.runStateVersion !== schemaVersion
+  ) {
+    fail(
+      "Run state requires an incompatible Agent Runner runtime " +
+        `(runner ${value.runnerVersion}, state ${value.runStateVersion}); ` +
+        "use the Agent Runner version that created the run or a version " +
+        "with an explicit migration.",
+      "ERR_RUNTIME_VERSION_SKEW",
+    );
+  }
+
+  return { ...value };
+}
+
 export function assertRunId(runId) {
   if (typeof runId !== "string" || !RUN_ID_PATTERN.test(runId)) {
     fail("Run ID is invalid.", "ERR_INVALID_RUN_ID");
@@ -402,8 +464,19 @@ export function normalizeRunState(value, expectedRunId) {
   assertRecord(value, "run");
   rejectUnknownFields(value, STATE_FIELDS, "run");
 
-  if (value.schemaVersion !== RUN_STATE_SCHEMA_VERSION) {
-    fail(`Unsupported run.schemaVersion: ${String(value.schemaVersion)}.`);
+  if (
+    !Number.isSafeInteger(value.schemaVersion) ||
+    value.schemaVersion < 1
+  ) {
+    fail("run.schemaVersion must be a positive safe integer.");
+  }
+  if (!SUPPORTED_RUN_STATE_SCHEMA_VERSIONS.has(value.schemaVersion)) {
+    fail(
+      `Unsupported run.schemaVersion: ${String(value.schemaVersion)}; ` +
+        "use the Agent Runner version that created the run or a version " +
+        "with an explicit migration.",
+      "ERR_RUNTIME_VERSION_SKEW",
+    );
   }
   if (!Number.isSafeInteger(value.revision) || value.revision < 1) {
     fail("run.revision must be a positive safe integer.");
@@ -441,11 +514,15 @@ export function normalizeRunState(value, expectedRunId) {
   }
 
   const normalized = {
-    schemaVersion: RUN_STATE_SCHEMA_VERSION,
+    schemaVersion: value.schemaVersion,
     revision: value.revision,
     runId,
     pipelineId,
     pipelineStateVersion: value.pipelineStateVersion,
+    runtimeCompatibility: normalizeRuntimeCompatibility(
+      value.runtimeCompatibility,
+      value.schemaVersion,
+    ),
     projectPath: value.projectPath,
     taskPath: value.taskPath,
     roles: normalizeRoles(value.roles),

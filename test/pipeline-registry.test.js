@@ -19,6 +19,15 @@ test("registry exposes explicit immutable pipeline descriptors", () => {
     assert.equal(getPipeline(pipeline.id), pipeline);
     assert.ok(Number.isSafeInteger(pipeline.stateVersion));
     assert.ok(pipeline.stateVersion > 0);
+    assert.ok(Object.isFrozen(pipeline.migrations));
+    assert.ok(
+      Object.entries(pipeline.migrations).every(
+        ([version, migration]) =>
+          /^[1-9][0-9]*$/u.test(version) &&
+          Number(version) < pipeline.stateVersion &&
+          typeof migration === "function",
+      ),
+    );
     assert.ok(Object.isFrozen(pipeline));
     assert.ok(Object.isFrozen(pipeline.roles));
     assert.ok(Object.isFrozen(pipeline.settings));

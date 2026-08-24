@@ -16,6 +16,7 @@ import test from "node:test";
 import {
   createRunStore,
   resolveStateRoot,
+  RUNTIME_COMPATIBILITY,
   RUN_STATE_SCHEMA_VERSION,
   RunStoreError,
 } from "../src/index.js";
@@ -105,6 +106,10 @@ test("resolves the external state root and creates a complete run", async (t) =>
     /^[0-9a-f]{8}-[0-9a-f-]{27}$/u,
   );
   assert.equal(created.state.schemaVersion, RUN_STATE_SCHEMA_VERSION);
+  assert.deepEqual(
+    created.state.runtimeCompatibility,
+    RUNTIME_COMPATIBILITY,
+  );
   assert.equal(created.state.revision, 1);
   assert.equal(created.state.projectPath, projectPath);
   assert.equal(created.state.taskPath, taskPath);
@@ -202,6 +207,105 @@ test("normalizes legacy role records for every pipeline without rewriting histor
     assert.equal(await readFile(statePath, "utf8"), legacyStateSource);
     assert.equal(await readFile(eventsPath, "utf8"), legacyEventSource);
   }
+});
+
+test("migrates a legacy run envelope as one leased journal transition", async (t) => {
+  const { created, stateRoot, store } = await createFixture(t);
+  await created.lease.release();
+  const statePath = join(created.directoryPath, "state.json");
+  const eventsPath = join(created.directoryPath, "events.jsonl");
+  const legacyState = JSON.parse(await readFile(statePath, "utf8"));
+  legacyState.schemaVersion = 1;
+  delete legacyState.runtimeCompatibility;
+  const legacyEvent = JSON.parse((await readFile(eventsPath, "utf8")).trim());
+  legacyEvent.schemaVersion = 1;
+  legacyEvent.state = legacyState;
+  const legacyStateSource = `${JSON.stringify(legacyState, null, 2)}\n`;
+  const legacyEventSource = `${JSON.stringify(legacyEvent)}\n`;
+  await Promise.all([
+    writeFile(statePath, legacyStateSource),
+    writeFile(eventsPath, legacyEventSource),
+  ]);
+
+  const legacyRun = await store.loadRun(created.state.runId);
+  assert.equal(legacyRun.schemaVersion, 1);
+  assert.equal(legacyRun.runtimeCompatibility, null);
+  assert.equal(await readFile(statePath, "utf8"), legacyStateSource);
+  assert.equal(await readFile(eventsPath, "utf8"), legacyEventSource);
+
+  const resumedStore = createRunStore({ stateRoot });
+  const lease = await resumedStore.acquireRunLease(created.state.runId);
+  const migrated = await resumedStore.migrateRun(
+    lease,
+    {
+      pipelineState: legacyRun.pipelineState,
+      pipelineStateVersion: legacyRun.pipelineStateVersion,
+    },
+    {
+      activity: {
+        actor: "runner",
+        phase: "runtime",
+        kind: "migrated",
+        message: "Migrated legacy run state.",
+      },
+    },
+  );
+  await lease.release();
+
+  assert.equal(migrated.schemaVersion, RUN_STATE_SCHEMA_VERSION);
+  assert.equal(migrated.revision, 2);
+  assert.deepEqual(migrated.runtimeCompatibility, RUNTIME_COMPATIBILITY);
+  assert.deepEqual(await resumedStore.loadRun(created.state.runId), migrated);
+  const events = (await readFile(eventsPath, "utf8"))
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(events[0].schemaVersion, 1);
+  assert.equal(events[1].schemaVersion, RUN_STATE_SCHEMA_VERSION);
+  assert.equal(events[1].activity.kind, "migrated");
+});
+
+test("preserves actionable runtime skew errors from state and journal reads", async (t) => {
+  const { created, store } = await createFixture(t);
+  await created.lease.release();
+  const statePath = join(created.directoryPath, "state.json");
+  const eventsPath = join(created.directoryPath, "events.jsonl");
+  const originalState = await readFile(statePath, "utf8");
+  const originalEvent = await readFile(eventsPath, "utf8");
+  const incompatibleState = JSON.parse(originalState);
+  incompatibleState.runtimeCompatibility.runnerVersion += 1;
+  await writeFile(
+    statePath,
+    `${JSON.stringify(incompatibleState, null, 2)}\n`,
+  );
+
+  await assert.rejects(
+    store.loadRun(created.state.runId),
+    (error) =>
+      error instanceof RunStoreError &&
+      error.code === "ERR_RUNTIME_VERSION_SKEW" &&
+      /use the Agent Runner version/u.test(error.message),
+  );
+
+  const incompatibleEvent = JSON.parse(originalEvent.trim());
+  incompatibleEvent.state.runtimeCompatibility.runnerVersion += 1;
+  await Promise.all([
+    writeFile(statePath, originalState),
+    writeFile(eventsPath, `${JSON.stringify(incompatibleEvent)}\n`),
+  ]);
+  await assert.rejects(
+    store.loadRun(created.state.runId),
+    (error) =>
+      error instanceof RunStoreError &&
+      error.code === "ERR_RUNTIME_VERSION_SKEW" &&
+      !/Run state is invalid/u.test(error.message) &&
+      !/Invalid event/u.test(error.message),
+  );
+  assert.equal(await readFile(statePath, "utf8"), originalState);
+  assert.equal(
+    await readFile(eventsPath, "utf8"),
+    `${JSON.stringify(incompatibleEvent)}\n`,
+  );
 });
 
 test("rejects a state root inside the project before creating it", async (t) => {

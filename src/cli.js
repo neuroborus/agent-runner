@@ -1,9 +1,13 @@
 import { parseArgs } from "node:util";
 
 import packageMetadata from "../package.json" with { type: "json" };
-import { serveMcp } from "./mcp.js";
+import {
+  DETACHED_RUNTIME_COMPATIBILITY_ENV,
+  serveMcp,
+} from "./mcp.js";
 import { getPipeline, listPipelines } from "./pipeline-registry.js";
 import { createRunner, parseSourceSession } from "./runner.js";
+import { RUNTIME_VERSION_SKEW_EXIT_CODE } from "./state.js";
 
 const COMMAND_OPTIONS = Object.freeze({
   resume: Object.freeze(["run", "extra-fix-rounds", "override-finding"]),
@@ -234,6 +238,7 @@ export async function main(
     stderr = process.stderr,
     runner,
     startMcp = serveMcp,
+    environment = process.env,
   } = {},
 ) {
   let parsed;
@@ -399,6 +404,12 @@ export async function main(
       const result = await commandRunner.resume({
         runId: values.run,
         action: resumeAction(values),
+        ...(environment[DETACHED_RUNTIME_COMPATIBILITY_ENV] === undefined
+          ? {}
+          : {
+              expectedRuntimeCompatibility:
+                environment[DETACHED_RUNTIME_COMPATIBILITY_ENV],
+            }),
       });
       stdout.write(runSummary(result));
       return workflowExitCode(result.run);
@@ -408,6 +419,8 @@ export async function main(
     return 0;
   } catch (error) {
     stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-    return 1;
+    return error?.code === "ERR_RUNTIME_VERSION_SKEW"
+      ? RUNTIME_VERSION_SKEW_EXIT_CODE
+      : 1;
   }
 }

@@ -21,6 +21,7 @@ export {
   createDetachedLauncher,
   createMcpControlPlane,
   createMcpServer,
+  DETACHED_RUNTIME_COMPATIBILITY_ENV,
   launchDetachedRun,
   MCP_INSTRUCTIONS,
   serveMcp,
@@ -34,6 +35,9 @@ export {
 export {
   createRunStore,
   resolveStateRoot,
+  RUNTIME_COMPATIBILITY,
+  RUNTIME_COMPATIBILITY_TOKEN,
+  RUNTIME_VERSION_SKEW_EXIT_CODE,
   RUN_STATE_SCHEMA_VERSION,
   RunStoreError,
 } from "./state.js";

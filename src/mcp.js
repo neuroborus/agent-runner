@@ -13,7 +13,12 @@ import {
   createRunner,
   pipelineRequiresWorktreeLease,
 } from "./runner.js";
-import { createRunStore, RunStoreError } from "./state.js";
+import {
+  createRunStore,
+  RUNTIME_COMPATIBILITY_TOKEN,
+  RUNTIME_VERSION_SKEW_EXIT_CODE,
+  RunStoreError,
+} from "./state.js";
 
 const MAX_WAIT_MS = 24 * 60 * 60 * 1_000;
 const DEFAULT_WAIT_MS = 30_000;
@@ -21,6 +26,8 @@ const RETRY_DELAY_MS = 25;
 const EXECUTABLE_PATH = fileURLToPath(
   new URL("../bin/agent-run.js", import.meta.url),
 );
+export const DETACHED_RUNTIME_COMPATIBILITY_ENV =
+  "AGENT_RUNNER_PARENT_RUNTIME_COMPATIBILITY";
 
 export const MCP_INSTRUCTIONS = `Use run_start to start a durable pipeline, then use one run_wait call for the desired waiting interval. Use run_activity only for explicit or historical reads; do not poll status, activity, or wait at a fixed cadence. Leave sourceSession unset unless the user deliberately chooses to fork a compatible current native session after being offered a fresh start. Offer its known trusted profile with the fork choice; when the profile is unknown, offer only current profile inheritance and never guess an alias. Primary and review roles fork the complete source context independently, which can spend provider context and quota twice. Recommend a fresh start for a long, multi-topic, or uncertain source session. Keep native session IDs opaque; never inspect provider-private storage or infer or fabricate an ID. Answer pending input from explicit user context when sufficient; otherwise ask the user. Never invent a material product decision.`;
 
@@ -260,14 +267,35 @@ export function createDetachedLauncher({
   executablePath = EXECUTABLE_PATH,
   environment = process.env,
 } = {}) {
-  return (runIdValue, action = null, { onExit } = {}) =>
+  return (
+    runIdValue,
+    action = null,
+    {
+      expectedRuntimeCompatibility = RUNTIME_COMPATIBILITY_TOKEN,
+      onExit,
+    } = {},
+  ) =>
     new Promise((resolvePromise, rejectPromise) => {
+      if (expectedRuntimeCompatibility !== RUNTIME_COMPATIBILITY_TOKEN) {
+        rejectPromise(
+          new RunStoreError(
+            "Detached continuation runtime does not match this launcher; " +
+              "restart the Agent Runner MCP server and retry.",
+            { code: "ERR_RUNTIME_VERSION_SKEW" },
+          ),
+        );
+        return;
+      }
       const child = spawnProcess(
         process.execPath,
         detachedArguments(executablePath, runIdValue, action),
         {
           detached: true,
-          env: environment,
+          env: {
+            ...environment,
+            [DETACHED_RUNTIME_COMPATIBILITY_ENV]:
+              expectedRuntimeCompatibility,
+          },
           stdio: "ignore",
         },
       );
@@ -316,6 +344,7 @@ export function createMcpControlPlane(options = {}) {
       waitForLease = false,
     } = {},
   ) {
+    let dispatchedChildExitCode = null;
     let dispatchedChildExited = false;
     let dispatchStarted = false;
     while (true) {
@@ -327,6 +356,22 @@ export function createMcpControlPlane(options = {}) {
         run.revision > baselineRevision
       ) {
         return;
+      }
+      if (dispatchedChildExitCode === RUNTIME_VERSION_SKEW_EXIT_CODE) {
+        throw new RunStoreError(
+          `Detached continuation for run ${run.runId} rejected an ` +
+            "incompatible runtime; restart the Agent Runner MCP server " +
+            "and retry this request with the same idempotency key.",
+          { code: "ERR_RUNTIME_VERSION_SKEW" },
+        );
+      }
+      if (dispatchedChildExited) {
+        throw new RunStoreError(
+          `Detached continuation for run ${run.runId} exited before the ` +
+            "run advanced or acquired its execution lease; retry this MCP " +
+            "request with the same idempotency key.",
+          { code: "ERR_DETACHED_START_FAILED" },
+        );
       }
       const runIsLeased = await runStore.runIsLeased(runIdValue);
       if (pipelineRequiresWorktreeLease(run.pipelineId)) {
@@ -345,14 +390,6 @@ export function createMcpControlPlane(options = {}) {
             { code: "ERR_WORKTREE_LEASED" },
           );
         }
-        if (dispatchedChildExited) {
-          throw new RunStoreError(
-            `Detached continuation for run ${run.runId} exited before the ` +
-              "run advanced or acquired its Git worktree; retry this MCP " +
-              "request with the same idempotency key.",
-            { code: "ERR_DETACHED_START_FAILED" },
-          );
-        }
         if (
           worktreeLeaseOwner === run.runId &&
           (!waitForLease || dispatchStarted)
@@ -361,8 +398,10 @@ export function createMcpControlPlane(options = {}) {
         }
         if (!runIsLeased && !dispatchStarted) {
           await launchRun(runIdValue, action, {
-            onExit() {
+            expectedRuntimeCompatibility: RUNTIME_COMPATIBILITY_TOKEN,
+            onExit(code) {
               dispatchedChildExited = true;
+              dispatchedChildExitCode = code;
             },
           });
           dispatchStarted = true;
@@ -370,12 +409,18 @@ export function createMcpControlPlane(options = {}) {
         await delay(RETRY_DELAY_MS, signal);
         continue;
       }
-      if (!runIsLeased) {
-        await launchRun(runIdValue, action);
+      if (runIsLeased && (!waitForLease || dispatchStarted)) {
         return;
       }
-      if (!waitForLease) {
-        return;
+      if (!runIsLeased && !dispatchStarted) {
+        await launchRun(runIdValue, action, {
+          expectedRuntimeCompatibility: RUNTIME_COMPATIBILITY_TOKEN,
+          onExit(code) {
+            dispatchedChildExited = true;
+            dispatchedChildExitCode = code;
+          },
+        });
+        dispatchStarted = true;
       }
       await delay(RETRY_DELAY_MS, signal);
     }
@@ -518,13 +563,7 @@ export function createMcpControlPlane(options = {}) {
         signal: context.signal,
       });
       if (changed.revision === run.revision && Date.now() >= deadline) {
-        return {
-          ...statusProjection({
-            directoryPath: await runStore.getRunDirectory(input.runId),
-            run: changed,
-          }),
-          timedOut: true,
-        };
+        return { ...statusProjection(current), timedOut: true };
       }
     }
   }

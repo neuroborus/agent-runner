@@ -179,6 +179,7 @@ function validateResumeAction(run, action) {
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
   stateVersion: 1,
+  migrations: Object.freeze({}),
   roles: ROLES,
   settings: SETTINGS,
   taskInputs: TASK_INPUTS,

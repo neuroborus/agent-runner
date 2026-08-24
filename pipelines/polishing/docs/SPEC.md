@@ -325,7 +325,8 @@ State lives outside both the target repository and task directory under the
 common external run store. Pipeline state includes resolved settings, baseline,
 input hashes, clarification status, backend versions, bootstrap summaries,
 findings, disputes, arbitration, budgets, fingerprints, overrides, and pause
-details.
+details. The common versioned envelope also records an explicit runtime
+compatibility tuple maintained independently from the package version.
 
 Persist concise structured decisions and public summaries, never raw model
 transcripts, chain-of-thought, credentials, or unhashed remote and identity
@@ -343,6 +344,15 @@ Recovery accepts only an incomplete final journal fragment, advances lagging
 state from complete events, and never depends on a native Codex or Claude
 session surviving interruption.
 
+The descriptor owns one explicit ordered migration for every supported prior
+pipeline state version. Lock-free status may project a compatible migration in
+memory, but only a mutating continuation may persist it. Before workflow
+execution the root evaluates the complete chain, validates the current
+pipeline shape, and appends one atomic migration event under the per-run lease.
+Unsupported forward versions, missing migrations, and incompatible runtime
+tuples return a specific actionable version-skew error; invalid migration
+output returns a specific migration failure. Neither changes the durable run.
+
 MCP uses the common STDIO tools, persists idempotency intents before mutation
 and receipts before returning, and launches detached continuation under the
 same lease rules. A worktree conflict leaves the durable run and incomplete
@@ -351,7 +361,10 @@ After spawn, the receipt remains incomplete until the run advances or that
 child owns the worktree, so losing a concurrent acquisition race remains
 retryable. A correlated child exit acknowledgement makes this deterministic
 when the winning lease is released between MCP polls. A disconnected client
-cannot create a second workflow owner.
+cannot create a second workflow owner. The dispatcher passes its runtime tuple
+to the detached child, which rejects a mismatch before taking the run lease.
+Its distinct skew exit becomes an actionable restart-and-retry error while the
+incomplete idempotency intent and run remain durable.
 Its additive start fields leave `sourceSession` unset until the user
 deliberately selects a fork; native IDs remain opaque and an unknown source
 profile permits only `current` inheritance.
@@ -384,6 +397,8 @@ Pipeline tests use fake adapters and temporary repositories. Cover at least:
   explicit paths, resume, and matching finalization/review fingerprints;
 - canonical-worktree conflicts across independently identified polishing or
   plan-execution runs, detached MCP retry, and same-host stale recovery;
+- compatible legacy migration, incompatible reader and detached-child
+  rejection, and disconnects that leave durable state unchanged;
 - the invariant that `HEAD` never changes and completion never commits.
 
 Root tests cover workspace imports and metadata, static registration,

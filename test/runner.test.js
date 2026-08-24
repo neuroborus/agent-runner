@@ -19,8 +19,11 @@ import {
   createRunner,
   createRunStore,
   parseRunnerConfiguration,
+  RUNTIME_COMPATIBILITY_TOKEN,
+  RUN_STATE_SCHEMA_VERSION,
   RunnerError,
 } from "../src/index.js";
+import { preparePipelineMigration } from "../src/runner.js";
 
 const executeFile = promisify(execFile);
 const SOURCE_SESSION = "11111111-1111-4111-8111-111111111111";
@@ -362,6 +365,30 @@ function runnerFor(
   });
 }
 
+async function rewriteRunAsLegacy(directoryPath) {
+  const statePath = join(directoryPath, "state.json");
+  const eventsPath = join(directoryPath, "events.jsonl");
+  const state = JSON.parse(await readFile(statePath, "utf8"));
+  state.schemaVersion = 1;
+  delete state.runtimeCompatibility;
+  const events = (await readFile(eventsPath, "utf8"))
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  for (const event of events) {
+    event.schemaVersion = 1;
+    event.state.schemaVersion = 1;
+    delete event.state.runtimeCompatibility;
+  }
+  await Promise.all([
+    writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`),
+    writeFile(
+      eventsPath,
+      `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+    ),
+  ]);
+}
+
 test("validates the canonical Git root before creating external state", async (t) => {
   const fixture = await createFixture(t);
   const nestedProjectPath = join(fixture.projectPath, "nested");
@@ -509,6 +536,150 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
   assert.ok(activities.every(({ runId }) => runId === paused.run.runId));
 });
 
+test("migrates a legacy runtime envelope under the run lease before resume", async (t) => {
+  const fixture = await createFixture(t);
+  const adapter = createAdapter();
+  const activities = [];
+  const runner = runnerFor(fixture, { codex: adapter }, { activities });
+  const prepared = await runner.create({
+    pipelineId: "plan-authoring",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    sourceSession: null,
+  });
+  await rewriteRunAsLegacy(prepared.directoryPath);
+
+  const legacyStatus = await runner.status(prepared.run.runId);
+  assert.equal(legacyStatus.run.schemaVersion, 1);
+  assert.equal(legacyStatus.run.runtimeCompatibility, null);
+  assert.equal(legacyStatus.run.revision, 1);
+
+  const completed = await runner.resume({
+    runId: prepared.run.runId,
+    action: null,
+  });
+  assert.equal(completed.run.pipelineState.workflowState, "DONE");
+  assert.equal(completed.run.schemaVersion, RUN_STATE_SCHEMA_VERSION);
+  assert.equal(
+    completed.run.runtimeCompatibility.runStateVersion,
+    RUN_STATE_SCHEMA_VERSION,
+  );
+  assert.ok(
+    activities.some(
+      ({ actor, kind, phase }) =>
+        actor === "runner" && kind === "migrated" && phase === "runtime",
+    ),
+  );
+  const events = (await readFile(
+    join(prepared.directoryPath, "events.jsonl"),
+    "utf8",
+  ))
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(events[0].schemaVersion, 1);
+  assert.equal(events[1].activity.kind, "migrated");
+});
+
+test("rejects a detached runtime mismatch before touching a durable run", async (t) => {
+  const fixture = await createFixture(t);
+  const runner = runnerFor(fixture, { codex: createAdapter() });
+  const prepared = await runner.create({
+    pipelineId: "plan-authoring",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    sourceSession: null,
+  });
+  const statePath = join(prepared.directoryPath, "state.json");
+  const eventsPath = join(prepared.directoryPath, "events.jsonl");
+  const before = await Promise.all([
+    readFile(statePath, "utf8"),
+    readFile(eventsPath, "utf8"),
+  ]);
+
+  await assert.rejects(
+    runner.resume({
+      runId: prepared.run.runId,
+      action: null,
+      expectedRuntimeCompatibility: `${RUNTIME_COMPATIBILITY_TOKEN}-other`,
+    }),
+    (error) =>
+      error instanceof RunnerError &&
+      error.code === "ERR_RUNTIME_VERSION_SKEW" &&
+      /restart the Agent Runner MCP server/u.test(error.message),
+  );
+  assert.deepEqual(
+    await Promise.all([
+      readFile(statePath, "utf8"),
+      readFile(eventsPath, "utf8"),
+    ]),
+    before,
+  );
+});
+
+test("applies explicit pipeline migrations in order without mutating input", () => {
+  const run = Object.freeze({
+    runId: PREPARED_RUN,
+    pipelineId: "test-pipeline",
+    pipelineStateVersion: 1,
+    pipelineState: Object.freeze({ value: 1 }),
+  });
+  const versions = [];
+  const pipeline = {
+    id: "test-pipeline",
+    stateVersion: 3,
+    migrations: {
+      1(current) {
+        versions.push(current.pipelineStateVersion);
+        return { ...current.pipelineState, value: 2 };
+      },
+      2(current) {
+        versions.push(current.pipelineStateVersion);
+        return { ...current.pipelineState, value: 3 };
+      },
+    },
+    workflow: {
+      validateRun(current) {
+        assert.equal(current.pipelineStateVersion, 3);
+        assert.equal(current.pipelineState.value, 3);
+      },
+    },
+  };
+
+  const migrated = preparePipelineMigration(run, pipeline);
+  assert.deepEqual(versions, [1, 2]);
+  assert.equal(migrated.pipelineStateVersion, 3);
+  assert.deepEqual(run.pipelineState, { value: 1 });
+  assert.throws(
+    () =>
+      preparePipelineMigration(run, {
+        ...pipeline,
+        migrations: {},
+      }),
+    (error) =>
+      error instanceof RunnerError &&
+      error.code === "ERR_PIPELINE_VERSION_SKEW",
+  );
+  assert.throws(
+    () =>
+      preparePipelineMigration(run, {
+        ...pipeline,
+        workflow: {
+          validateRun() {
+            throw new Error("Invalid migrated shape.");
+          },
+        },
+      }),
+    (error) =>
+      error instanceof RunnerError &&
+      error.code === "ERR_PIPELINE_MIGRATION_FAILED",
+  );
+});
+
 test("prepares a durable run and submits identified input before continuation", async (t) => {
   const fixture = await createFixture(t);
   const adapter = createAdapter({ questionFirst: true });
@@ -563,6 +734,62 @@ test("prepares a durable run and submits identified input before continuation", 
     await readFile(join(fixture.taskPath, "clarifications.md"), "utf8"),
     /### A1\n\nUse behavior A exactly\./u,
   );
+});
+
+test("submits input previewed from a compatible legacy run", async (t) => {
+  const fixture = await createFixture(t);
+  const runner = runnerFor(fixture, {
+    codex: createAdapter({ questionFirst: true }),
+  });
+  const paused = await runner.run({
+    pipelineId: "plan-authoring",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    sourceSession: null,
+  });
+  await rewriteRunAsLegacy(paused.directoryPath);
+
+  const response = {
+    runId: paused.run.runId,
+    requestId: paused.run.pause.inputRequest.id,
+    expectedRevision: paused.run.revision,
+    answers: [{ questionId: "q1", answer: "Use behavior A exactly." }],
+  };
+  const preview = await runner.previewInput(response);
+  await assert.rejects(
+    runner.submitInput({
+      ...response,
+      expectedRevision: response.expectedRevision + 1,
+      responseHash: preview.responseHash,
+    }),
+    (error) => error.code === "ERR_STALE_INPUT_REQUEST",
+  );
+  const unchanged = await runner.status(paused.run.runId);
+  assert.equal(unchanged.run.schemaVersion, 1);
+  assert.equal(unchanged.run.revision, paused.run.revision);
+
+  const submitted = await runner.submitInput({
+    ...response,
+    responseHash: preview.responseHash,
+  });
+
+  assert.equal(submitted.run.schemaVersion, RUN_STATE_SCHEMA_VERSION);
+  assert.equal(submitted.run.revision, paused.run.revision + 2);
+  assert.equal(
+    submitted.run.pause.inputResponse.transcriptHash,
+    preview.responseHash,
+  );
+  const events = (await readFile(
+    join(paused.directoryPath, "events.jsonl"),
+    "utf8",
+  ))
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(events.at(-2).activity.kind, "migrated");
+  assert.equal(events.at(-1).activity.kind, "submitted");
 });
 
 test("rejects incompatible or unsupported source sessions before creating a run", async (t) => {

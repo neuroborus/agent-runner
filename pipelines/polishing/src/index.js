@@ -172,6 +172,7 @@ function validateResumeAction(run, action) {
 export const polishingPipeline = Object.freeze({
   id: POLISHING_PIPELINE_ID,
   stateVersion: 1,
+  migrations: Object.freeze({}),
   roles: ROLES,
   settings: SETTINGS,
   taskInputs: TASK_INPUTS,

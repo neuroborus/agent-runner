@@ -10,6 +10,7 @@ import {
 import {
   normalizePublicActivity,
   normalizeRunState,
+  RUNTIME_COMPATIBILITY,
   RUN_STATE_SCHEMA_VERSION,
   RunStoreError,
 } from "./state-validation.js";
@@ -26,14 +27,17 @@ const EVENT_FIELDS = new Set([
   "activity",
 ]);
 const IMMUTABLE_STATE_FIELDS = [
-  "schemaVersion",
   "runId",
   "pipelineId",
-  "pipelineStateVersion",
   "projectPath",
   "taskPath",
   "roles",
   "createdAt",
+];
+const VERSION_STATE_FIELDS = [
+  "schemaVersion",
+  "pipelineStateVersion",
+  "runtimeCompatibility",
 ];
 const TRANSITION_STATE_FIELDS = [
   "counters",
@@ -69,8 +73,17 @@ function normalizeEvent(value, runId, lineNumber) {
     if (unknownField !== undefined) {
       throw new RunStoreError(`event.${unknownField} is not supported.`);
     }
-    if (value.schemaVersion !== RUN_STATE_SCHEMA_VERSION) {
-      throw new RunStoreError("Event schema version is unsupported.");
+    if (
+      Number.isSafeInteger(value.schemaVersion) &&
+      value.schemaVersion > 0 &&
+      ![1, RUN_STATE_SCHEMA_VERSION].includes(value.schemaVersion)
+    ) {
+      throw new RunStoreError(
+        `Unsupported event.schemaVersion: ${String(value.schemaVersion)}; ` +
+          "use the Agent Runner version that created the run or a version " +
+          "with an explicit migration.",
+        { code: "ERR_RUNTIME_VERSION_SKEW" },
+      );
     }
     if (
       !Number.isSafeInteger(value.revision) ||
@@ -82,6 +95,12 @@ function normalizeEvent(value, runId, lineNumber) {
     }
 
     const state = normalizeRunState(value.state, runId);
+    if (value.schemaVersion !== state.schemaVersion) {
+      throw new RunStoreError(
+        "Event and run state schema versions are inconsistent.",
+        { code: "ERR_RUNTIME_VERSION_SKEW" },
+      );
+    }
     const recordedAt = new Date(value.recordedAt);
     if (
       Number.isNaN(recordedAt.valueOf()) ||
@@ -93,7 +112,7 @@ function normalizeEvent(value, runId, lineNumber) {
     }
 
     return {
-      schemaVersion: RUN_STATE_SCHEMA_VERSION,
+      schemaVersion: value.schemaVersion,
       revision: value.revision,
       runId,
       recordedAt: value.recordedAt,
@@ -101,6 +120,9 @@ function normalizeEvent(value, runId, lineNumber) {
       activity: normalizePublicActivity(value.activity),
     };
   } catch (cause) {
+    if (cause?.code === "ERR_RUNTIME_VERSION_SKEW") {
+      throw cause;
+    }
     throw new RunStoreError(`Invalid event at line ${lineNumber}.`, {
       cause,
       code: "ERR_INVALID_EVENT_LOG",
@@ -123,6 +145,21 @@ function assertEventContinuity(events) {
     const immutableFieldChanged = IMMUTABLE_STATE_FIELDS.some(
       (field) => !isDeepStrictEqual(state[field], previousState[field]),
     );
+    const versionChanged = VERSION_STATE_FIELDS.some(
+      (field) => !isDeepStrictEqual(state[field], previousState[field]),
+    );
+    const migrationIsValid =
+      versionChanged &&
+      events[index].activity?.actor === "runner" &&
+      events[index].activity.phase === "runtime" &&
+      events[index].activity.kind === "migrated" &&
+      state.schemaVersion === RUN_STATE_SCHEMA_VERSION &&
+      state.schemaVersion >= previousState.schemaVersion &&
+      state.pipelineStateVersion >= previousState.pipelineStateVersion &&
+      isDeepStrictEqual(
+        state.runtimeCompatibility,
+        RUNTIME_COMPATIBILITY,
+      );
     const lineageChanged =
       state.sessionLineage.source !== previousState.sessionLineage.source ||
       state.sessionLineage.sourceProfile !==
@@ -135,12 +172,14 @@ function assertEventContinuity(events) {
       );
     const hasContentChange =
       children.length > previousChildren.length ||
+      versionChanged ||
       TRANSITION_STATE_FIELDS.some(
         (field) => !isDeepStrictEqual(state[field], previousState[field]),
       );
 
     if (
       immutableFieldChanged ||
+      (versionChanged && !migrationIsValid) ||
       lineageChanged ||
       state.updatedAt < previousState.updatedAt ||
       (!hasContentChange && events[index].activity === null)
@@ -221,6 +260,9 @@ async function readStoredState(runDirectory, runId) {
       runId,
     );
   } catch (cause) {
+    if (cause?.code === "ERR_RUNTIME_VERSION_SKEW") {
+      throw cause;
+    }
     throw new RunStoreError("Run state is invalid.", {
       cause,
       code: "ERR_INVALID_RUN_STATE",
@@ -311,7 +353,7 @@ export function createStateJournal({ onTransitionBoundary }) {
     await removePartialEventTail(runDirectory, snapshot);
 
     const event = {
-      schemaVersion: RUN_STATE_SCHEMA_VERSION,
+      schemaVersion: state.schemaVersion,
       revision: state.revision,
       runId: state.runId,
       recordedAt: state.updatedAt,

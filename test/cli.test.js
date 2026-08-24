@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import packageMetadata from "../package.json" with { type: "json" };
-import { main, parseSourceSession, RunnerError } from "../src/index.js";
+import {
+  DETACHED_RUNTIME_COMPATIBILITY_ENV,
+  main,
+  parseSourceSession,
+  RUNTIME_COMPATIBILITY_TOKEN,
+  RUNTIME_VERSION_SKEW_EXIT_CODE,
+  RunnerError,
+} from "../src/index.js";
 
 const RUN_ID = "11111111-1111-4111-8111-111111111111";
 
@@ -449,6 +456,34 @@ test("resume dispatches one finding override", async () => {
     type: "override-finding",
     findingId: "R7",
   });
+});
+
+test("detached resume rejects runtime skew with a distinct exit code", async () => {
+  let request;
+  const stderr = createSink();
+  const exitCode = await main(["resume", "--run", RUN_ID], {
+    environment: {
+      [DETACHED_RUNTIME_COMPATIBILITY_ENV]:
+        `${RUNTIME_COMPATIBILITY_TOKEN}-old`,
+    },
+    stdout: createSink().stream,
+    stderr: stderr.stream,
+    runner: fakeRunner({
+      async resume(input) {
+        request = input;
+        const error = new Error("Runtime mismatch.");
+        error.code = "ERR_RUNTIME_VERSION_SKEW";
+        throw error;
+      },
+    }),
+  });
+
+  assert.equal(exitCode, RUNTIME_VERSION_SKEW_EXIT_CODE);
+  assert.equal(
+    request.expectedRuntimeCompatibility,
+    `${RUNTIME_COMPATIBILITY_TOKEN}-old`,
+  );
+  assert.match(stderr.read(), /Runtime mismatch/u);
 });
 
 test("resume rejects conflicting or invalid fix actions", async () => {

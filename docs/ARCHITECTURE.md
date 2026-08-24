@@ -264,16 +264,28 @@ directories may remain after release; ownership exists only while `.lease` is
 present.
 
 `state.json` contains the common versioned envelope: monotonic revision,
-pipeline ID and state version, canonical paths, resolved roles, counters,
-hashes, pause state, session lineage, timestamps, and opaque pipeline-owned
-state, including its resolved settings from the initial revision. The root
-validates JSON shape and size without interpreting workflow roles or outcomes.
+pipeline ID and state version, an explicit runtime-compatibility tuple,
+canonical paths, resolved roles, counters, hashes, pause state, session
+lineage, timestamps, and opaque pipeline-owned state, including its resolved
+settings from the initial revision. The compatibility generation is maintained
+independently from the package version, which is not a persistence contract.
+The root validates JSON shape and size without interpreting workflow roles or
+outcomes.
 Session lineage records an optional source-session reference, its resolved
 trusted profile when known, and every direct child role/session ID with its
 accepted-input and pipeline-checkpoint context key. Legacy role records missing
 `profile` or `contextSize`, and missing or nullable `model`, normalize to
 `current` in memory without rewriting state or event history. Native session
 resume remains an optimization rather than a correctness dependency.
+
+Lock-free readers reject unsupported envelope, runtime, or pipeline versions
+with an actionable version-skew error and never rewrite durable state. A
+supported legacy envelope may be projected through the pipeline's explicit,
+ordered migrations for status. Before workflow execution, the runner evaluates
+the complete migration chain, validates the current pipeline shape, and appends
+one complete migration event while holding the per-run execution lease. The
+event upgrades the envelope and pipeline state atomically without rewriting
+earlier history. Missing, failing, or forward-version migrations fail closed.
 
 Plan execution persists each prepared or consumed one-shot commit authorization
 and every verified commit SHA. After an ambiguous commit turn, resume verifies
@@ -350,6 +362,14 @@ opaque owner token before removing a lease. Pipeline-declared run artifacts are
 atomically replaced beneath the run directory, with absolute paths, traversal,
 reserved state files, and symlink escapes rejected. Managed state and lease
 paths must be isolated regular files rather than symbolic or hard links.
+
+Detached MCP launch also carries the dispatching process's runtime tuple in a
+bounded internal environment field. The child compares it with its loaded code
+before acquiring a run lease or recovering the run. A mismatch uses a distinct
+exit status that the parent converts to an actionable version-skew error; the
+run and incomplete idempotency intent remain durable for retry after the MCP
+process is restarted. Client disconnect and wait cancellation still affect
+only the client-side operation.
 
 ## Clarification Lifecycle
 
