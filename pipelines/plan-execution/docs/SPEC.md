@@ -723,7 +723,14 @@ directories. Use native sandbox credential-deny entries so Bash commands cannot
 inherit provider credentials without enabling subprocess hardening that
 downgrades `auto` to Manual mode, and reject any reported permission-mode
 fallback. Fail preflight when the host cannot enforce those settings. Plan-mode
-turns do not expose editing tools and also deny command writes to the workspace.
+turns derive their advertised read-only capability and invocation arguments
+from the same access envelope. They do not expose editing tools, deny command
+writes to the workspace and Git metadata, and set
+`sandbox.autoAllowBashIfSandboxed: true` so repository inspection proceeds
+without a prompt only inside the required native sandbox. Unsandboxed fallback
+and command network access remain disabled. The opt-in real Claude smoke test
+must exercise a representative repository-inspection command through this
+exact envelope.
 
 Worker default:
 

@@ -420,6 +420,12 @@ Adapter capability probes inspect the installed CLI and enforceable local
 isolation only. They do not apply a selected native profile and do not claim
 that its authentication or provider is usable; that is established by the
 first real turn under the effective profile.
+Claude derives its advertised read-only capability and turn arguments from one
+plan-mode access envelope. It exposes only repository-inspection tools, allows
+Bash without prompting only when the required native sandbox is active, denies
+workspace and Git-metadata writes, closes command network access, and forbids
+unsandboxed fallback. Workspace-write turns retain Claude's separate `auto`
+permission policy and background classifier.
 Every retryable request carries a turn prompt and a complete recovery prompt
 reconstructed from validated run state, durable artifacts, and the observed
 workspace. A role session is continued only when its persisted key matches the

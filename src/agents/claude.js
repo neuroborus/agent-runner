@@ -69,6 +69,16 @@ const BASE_OPTIONS = Object.freeze([
 ]);
 const READ_ONLY_TOOLS = "Bash,Read,Glob,Grep";
 const WORKSPACE_TOOLS = "Bash,Read,Edit,Write,Glob,Grep";
+const READ_ONLY_ACCESS = Object.freeze({
+  autoAllowBashIfSandboxed: true,
+  permissionMode: "plan",
+  tools: READ_ONLY_TOOLS,
+});
+const WORKSPACE_ACCESS = Object.freeze({
+  autoAllowBashIfSandboxed: false,
+  permissionMode: "auto",
+  tools: WORKSPACE_TOOLS,
+});
 const SYSTEM_INSTRUCTIONS =
   "Operate only inside the requested repository. Read and follow its agent " +
   "instructions and relevant SKILL.md files directly. Do not stage, restore, " +
@@ -339,6 +349,12 @@ function outputSchemaFor(request) {
     : request.schema;
 }
 
+function accessConfigurationFor(request) {
+  return request.access === "workspace-write"
+    ? WORKSPACE_ACCESS
+    : READ_ONLY_ACCESS;
+}
+
 function turnPrompt(request, recovery) {
   const prefix =
     recovery === "compact"
@@ -361,7 +377,12 @@ function turnPrompt(request, recovery) {
   return prompt;
 }
 
-function cliSettings(request, gitDirectories, credentialEnvironmentNames) {
+function cliSettings(
+  request,
+  accessConfiguration,
+  gitDirectories,
+  credentialEnvironmentNames,
+) {
   const deniedWritePaths =
     request.access === "workspace-write"
       ? gitDirectories
@@ -410,7 +431,8 @@ function cliSettings(request, gitDirectories, credentialEnvironmentNames) {
     sandbox: {
       enabled: true,
       failIfUnavailable: true,
-      autoAllowBashIfSandboxed: false,
+      autoAllowBashIfSandboxed:
+        accessConfiguration.autoAllowBashIfSandboxed,
       excludedCommands: [],
       allowUnsandboxedCommands: false,
       enableWeakerNestedSandbox: false,
@@ -440,17 +462,23 @@ function commandArguments(
   credentialEnvironmentNames,
   session,
 ) {
+  const accessConfiguration = accessConfigurationFor(request);
   const argumentsList = [
     "-p",
     ...BASE_OPTIONS,
     "--settings",
-    cliSettings(request, gitDirectories, credentialEnvironmentNames),
+    cliSettings(
+      request,
+      accessConfiguration,
+      gitDirectories,
+      credentialEnvironmentNames,
+    ),
     "--append-system-prompt",
     SYSTEM_INSTRUCTIONS,
     "--permission-mode",
-    request.access === "workspace-write" ? "auto" : "plan",
+    accessConfiguration.permissionMode,
     "--tools",
-    request.access === "workspace-write" ? WORKSPACE_TOOLS : READ_ONLY_TOOLS,
+    accessConfiguration.tools,
   ];
   if (request.model !== undefined) {
     argumentsList.push("--model", request.model);
@@ -760,7 +788,10 @@ export function createClaudeAdapter(options = {}) {
     return Object.freeze({
       version: version.text,
       structuredOutput: cliSupported,
-      readOnly: cliSupported,
+      readOnly:
+        cliSupported &&
+        READ_ONLY_ACCESS.permissionMode === "plan" &&
+        READ_ONLY_ACCESS.autoAllowBashIfSandboxed,
       autonomousWrite: isolated,
       workspaceWrite: isolated,
       localCommit: isolated,

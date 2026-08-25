@@ -302,6 +302,7 @@ test("runs strict read-only turns with isolated tools and an explicit model", as
   });
   assert.equal(settings.sandbox.enabled, true);
   assert.equal(settings.sandbox.failIfUnavailable, true);
+  assert.equal(settings.sandbox.autoAllowBashIfSandboxed, true);
   assert.equal(settings.sandbox.allowUnsandboxedCommands, false);
   assert.equal(settings.sandbox.enableWeakerNestedSandbox, false);
   assert.equal(settings.sandbox.filesystem.disabled, false);
@@ -427,6 +428,7 @@ test("uses auto mode only for autonomous workspace turns", async () => {
     "Bash,Read,Edit,Write,Glob,Grep",
   );
   const settings = JSON.parse(option(turn.argumentsList, "--settings"));
+  assert.equal(settings.sandbox.autoAllowBashIfSandboxed, false);
   assert.ok(!settings.sandbox.filesystem.denyWrite.includes(PROJECT_PATH));
 });
 
@@ -1171,17 +1173,19 @@ test("keeps commit-executor failures ambiguous", async () => {
 });
 
 test(
-  "runs an opt-in real Claude smoke turn",
+  "runs an opt-in real Claude read-only inspection smoke turn",
   { skip: process.env.AGENT_RUNNER_LIVE_CLAUDE !== "1" },
   async () => {
     const adapter = createClaudeAdapter();
     const response = await adapter.run(
       request({
-        prompt: "Return whether one plus one equals two.",
+        prompt:
+          "Use Bash to run `git status --short` in the current repository. " +
+          "Return ok=true only when the command completes successfully.",
         schema: STRICT_SCHEMA,
       }),
     );
     assert.equal(typeof response.sessionId, "string");
-    assert.equal(typeof response.structured.ok, "boolean");
+    assert.equal(response.structured.ok, true);
   },
 );
