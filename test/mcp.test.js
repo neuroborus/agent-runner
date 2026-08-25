@@ -4,11 +4,12 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
@@ -18,6 +19,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import {
   createClarificationService,
   createDetachedLauncher,
+  createGitService,
   createMcpControlPlane,
   createRunner,
   createRunStore,
@@ -396,6 +398,109 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
   assert.equal(invalid.isError, true);
 
   await client.close();
+  assert.equal(diagnostics, "");
+});
+
+test("reports unexpected issues from a detached worktree over fresh STDIO", async (t) => {
+  if (!(await childNodeStdoutIsAvailable())) {
+    t.skip("Nested Node stdout is unavailable in this environment.");
+    return;
+  }
+  const paths = await workspace(t, "agent-runner-mcp-detached-report-");
+  const repositoryPath = paths.projectPath;
+  const worktreePath = join(paths.root, "worktree");
+  await executeFile("git", ["init", "-q", "-b", "main", repositoryPath]);
+  await Promise.all([
+    writeFile(join(repositoryPath, ".gitignore"), "/LOCAL_ARTIFACTS/\n"),
+    writeFile(join(repositoryPath, "tracked.txt"), "tracked\n"),
+  ]);
+  await executeFile("git", ["-C", repositoryPath, "add", "."]);
+  await executeFile("git", [
+    "-C",
+    repositoryPath,
+    "-c",
+    "user.name=Fixture User",
+    "-c",
+    "user.email=fixture@example.com",
+    "commit",
+    "-qm",
+    "initial",
+  ]);
+  await executeFile("git", [
+    "-C",
+    repositoryPath,
+    "worktree",
+    "add",
+    "--detach",
+    "-q",
+    worktreePath,
+    "HEAD",
+  ]);
+
+  const projectPath = await realpath(worktreePath);
+  const issuesPath = join(
+    projectPath,
+    "LOCAL_ARTIFACTS",
+    "agent-runner",
+    "issues",
+  );
+  const preflight = await createGitService().preflight({
+    projectPath,
+    requiredIgnoredPaths: [issuesPath],
+  });
+  assert.equal(preflight.snapshot.projectPath, projectPath);
+  assert.equal(preflight.snapshot.detached, true);
+  assert.deepEqual(preflight.ignoredPaths, [
+    {
+      changed: false,
+      exists: false,
+      ignored: true,
+      kind: null,
+      path: issuesPath,
+      relativePath: "LOCAL_ARTIFACTS/agent-runner/issues",
+      tracked: false,
+    },
+  ]);
+
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: ["bin/agent-run.js", "mcp"],
+    cwd: new URL("..", import.meta.url).pathname,
+    env: { ...process.env, XDG_STATE_HOME: paths.stateRoot },
+    stderr: "pipe",
+  });
+  let diagnostics = "";
+  transport.stderr?.on("data", (chunk) => {
+    diagnostics += chunk;
+  });
+  const client = new Client({ name: "detached-report-test", version: "1.0.0" });
+  t.after(() => client.close().catch(() => {}));
+  await client.connect(transport);
+
+  const input = {
+    idempotencyKey: "detached-worktree-report",
+    projectPath,
+    summary: "The detached worktree report path was rejected unexpectedly.",
+    expectedBehavior: "The canonical ignored destination accepts the report.",
+    actualBehavior: "This regression verifies successful publication.",
+    occurrence: "It occurred through a fresh STDIO MCP process.",
+    unexpectedReason: "Run preflight accepted the exact same destination.",
+  };
+  const first = await client.callTool({
+    name: "unexpected_issue_report",
+    arguments: input,
+  });
+  assert.equal(first.isError, undefined);
+  assert.equal(dirname(first.structuredContent.reportPath), issuesPath);
+  assert.match(
+    await readFile(first.structuredContent.reportPath, "utf8"),
+    /The detached worktree report path was rejected unexpectedly\./u,
+  );
+  const retry = await client.callTool({
+    name: "unexpected_issue_report",
+    arguments: input,
+  });
+  assert.deepEqual(retry.structuredContent, first.structuredContent);
   assert.equal(diagnostics, "");
 });
 
