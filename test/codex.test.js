@@ -8,6 +8,7 @@ import packageMetadata from "../package.json" with { type: "json" };
 import {
   CODEX_BACKEND_ID,
   CodexAdapterError,
+  STRUCTURED_OUTPUT_FAILURE_CLASS,
   createCodexAdapter,
 } from "../src/agents/index.js";
 
@@ -30,6 +31,11 @@ function hasCode(code) {
 function hasDiagnostic(code, diagnosticClass) {
   return (error) =>
     hasCode(code)(error) && error.diagnosticClass === diagnosticClass;
+}
+
+function hasFailureClass(code, failureClass) {
+  return (error) =>
+    hasCode(code)(error) && error.failureClass === failureClass;
 }
 
 function completedTurn(threadId, turnId, output = "done", items = []) {
@@ -319,6 +325,12 @@ test("constructs with the native environment and probes capabilities", async () 
     new CodexAdapterError("invalid diagnostic", {
       diagnosticClass: "command_with_secret_value",
     }).diagnosticClass,
+    undefined,
+  );
+  assert.equal(
+    new CodexAdapterError("invalid failure class", {
+      failureClass: "native-provider-text",
+    }).failureClass,
     undefined,
   );
   assert.throws(
@@ -1074,7 +1086,10 @@ test("validates strict schemas and structured output", async () => {
   assert.equal(fixture.processes.length, 0);
   await assert.rejects(
     fixture.adapter.run(request({ schema: schemaWithObjectData })),
-    hasCode("ERR_CODEX_STRUCTURED_OUTPUT"),
+    hasFailureClass(
+      "ERR_CODEX_STRUCTURED_OUTPUT",
+      STRUCTURED_OUTPUT_FAILURE_CLASS,
+    ),
   );
 });
 

@@ -9,6 +9,7 @@ import {
   isEnvironment,
   isRecord,
   isolateGitEnvironment,
+  STRUCTURED_OUTPUT_FAILURE_CLASS,
 } from "./adapter-contract.js";
 import {
   executeClaudeLocalCommit,
@@ -132,6 +133,7 @@ export class ClaudeAdapterError extends Error {
       cause,
       code = "ERR_CLAUDE_ADAPTER",
       effectStarted,
+      failureClass,
       recoverable = false,
       sessionId,
     } = {},
@@ -143,6 +145,9 @@ export class ClaudeAdapterError extends Error {
     this.recoverable = recoverable;
     if (typeof effectStarted === "boolean") {
       this.effectStarted = effectStarted;
+    }
+    if (failureClass === STRUCTURED_OUTPUT_FAILURE_CLASS) {
+      this.failureClass = failureClass;
     }
     if (sessionId !== undefined) {
       this.sessionId = sessionId;
@@ -636,7 +641,10 @@ function normalizeResult(payload, request, session) {
     if (!isRecord(payload.structured_output)) {
       throw new ClaudeAdapterError(
         "Claude returned invalid structured output.",
-        { code: "ERR_CLAUDE_STRUCTURED_OUTPUT" },
+        {
+          code: "ERR_CLAUDE_STRUCTURED_OUTPUT",
+          failureClass: STRUCTURED_OUTPUT_FAILURE_CLASS,
+        },
       );
     }
     structured = deepFreeze(payload.structured_output);

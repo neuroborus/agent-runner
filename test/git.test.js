@@ -258,6 +258,7 @@ test("validates ignored repository-local artifact paths without creating them", 
     requiredIgnoredPaths: [clarificationPath],
   });
   assert.equal(accepted.ignoredPaths[0].exists, false);
+  assert.equal(accepted.ignoredPaths[0].kind, null);
   assert.equal(accepted.ignoredPaths[0].changed, false);
   assert.equal(accepted.ignoredPaths[0].ignored, true);
   assert.equal(accepted.ignoredPaths[0].tracked, false);
@@ -315,6 +316,7 @@ test("identifies paths that belong to a dirty worktree change set", async (t) =>
   );
 
   assert.equal(tracked.tracked, true);
+  assert.equal(tracked.kind, "file");
   assert.equal(tracked.changed, true);
   assert.equal(untracked.tracked, false);
   assert.equal(untracked.ignored, false);

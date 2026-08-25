@@ -17,6 +17,7 @@ export {
   createClaudeAdapter,
   createCodexAdapter,
 };
+export { STRUCTURED_OUTPUT_FAILURE_CLASS } from "./adapter-contract.js";
 
 export const BACKEND_IDS = Object.freeze([
   CODEX_BACKEND_ID,

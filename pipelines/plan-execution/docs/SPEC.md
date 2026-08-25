@@ -369,6 +369,8 @@ Persist at least:
 - latest finalized content fingerprint;
 - complete required-check inventory, validation-infrastructure file list, and
   runner-computed infrastructure fingerprint;
+- bounded bootstrap-correction attempts containing only role, phase, contract,
+  field, constraint, and attempt number;
 - exact per-check finalization evidence and the fingerprint-bound Reviewer
   validation-change decision;
 - latest reviewed content fingerprint;
@@ -412,6 +414,16 @@ pending commit. The record contains only a bounded diagnostic code and whether
 the rejection is recoverable. Its version-2 migration sets the record to
 `null`, retaining every legacy consumed authorization on the verification-only
 path rather than inventing proof.
+
+Pipeline state version 4 adds the bounded bootstrap-correction ledger. Its
+version-3 migration initializes an empty ledger without changing accepted
+bootstrap context, validation evidence, workflow position, safe workspace
+content, or commit authority. A ledger entry records only attempt `1` plus the
+producing role, phase, contract, field, and violated constraint. It never
+contains the rejected value, raw structured output, or provider text. A
+matching bounded pending record is cleared when the replacement is accepted;
+the retained history still enforces the one-attempt limit if bootstrap later
+restarts after authorized product input.
 
 Common run-envelope version 3 independently adds nullable bounded active
 provider role and phase. Version-1 and version-2 envelopes project it as `null`
@@ -545,6 +557,11 @@ For non-commit turns, an adapter error may set `recoverable: true` only when
 reconstructing and retrying the durable request is safe. Safety, protocol, and
 isolation failures are not recoverable; an ambiguous `local-commit` outcome is
 never retried and must instead return to Git-state verification.
+
+When a requested structured result cannot be produced, each adapter retains
+its backend-specific bounded error code and additionally exposes only the
+shared `failureClass: "structured-output"` classification. Pipeline workflow
+logic consumes that class rather than backend IDs or native error codes.
 
 A `local-commit` adapter error may additionally set `effectStarted: false`
 only when the adapter proves that its isolated commit executor was never
@@ -1119,6 +1136,12 @@ an agent-supplied digest is never trusted.
 Exact commands and paths retain interior whitespace; validation rejects unsafe,
 non-normalized, multiline, or boundary-whitespace values rather than rewriting
 them.
+Every producing bootstrap prompt, including validation-migration discovery,
+reconciliation, and arbitration, requires unique check IDs, unique exact
+single-line commands already normalized without boundary whitespace, and
+unique existing canonical repository-relative validation files. A symlink or
+path through a symlink is an invalid alias even when its target is confined to
+the repository.
 Provider-facing structured-output schemas are portable approximations limited
 to the common backend Structured Outputs subset and do not use regex
 lookaround. They retain strict objects, bounds, safe lexical patterns, and
@@ -1129,6 +1152,26 @@ and places its discriminated variants in a nested `result` union. A rejected
 bootstrap result persists and publishes only its role, phase, contract field,
 and violated constraint; it never retains the rejected value or raw role
 output.
+
+The producing Worker, Reviewer, reconciliation Worker, or Arbiter receives one
+read-only correction turn for an invalid bootstrap contract. The runner first
+persists attempt `1` and the bounded diagnostic, then reconstructs the complete
+request from durable state and asks for a complete replacement result. A
+provider interruption does not consume another correction or require the
+native session. Each adapter maps its native structured-output failure to the
+shared bounded `structured-output` failure class. The pipeline maps only that
+class to the bounded `result` semantic diagnostic after the read-only mutation
+guard completes; provider text is discarded. A valid replacement retires the
+pending correction before any product-decision pause, while its history remains
+consumed. A repeated invalid result fails closed.
+
+Before any inventory is accepted or fingerprinted, the runner asks the root
+Git boundary to inspect each validation-infrastructure path. The path must
+exist as a regular file and the returned canonical repository-relative path
+must exactly equal the proposed value. Missing files, directories, symlinks,
+and symlink traversal return to the producing role as a field-specific
+`existing-canonical-repository-file` correction; they do not surface later as
+a generic unsafe-path failure and are never followed or silently rewritten.
 
 The Reviewer summary additionally states what it intends to verify.
 
@@ -1675,7 +1718,7 @@ a fresh execution run. `read_only_agent_mutated_repository` explains that the
 run is contaminated and offers only a fresh run from an uncontaminated
 worktree; it never accepts hybrid changes. `environment_blocked` preserves why
 validation is blocked, its bounded evidence, and the exact retry checkpoint.
-This read-only projection leaves pipeline state version 3 unchanged.
+This read-only projection adds no fields to pipeline state version 4.
 
 Example:
 
@@ -1876,6 +1919,12 @@ At minimum cover:
 49. blocked provider turns publish bounded role/phase before invocation;
     owner loss, timed-out MCP wait, ordinary resume, and interrupted one-shot
     verification preserve the lease-aware activity contract.
+50. invalid Worker, Reviewer, reconciliation, arbitration, and validation-
+    migration bootstrap results receive one durable read-only correction and a
+    repeated invalid result fails closed without persisted rejected values.
+51. missing, directory, symlink, and symlink-traversing validation-
+    infrastructure paths are rejected before inventory acceptance with the
+    producing field identified, while canonical existing files are accepted.
 
 Real Codex/Claude smoke tests should be opt-in integration tests.
 
@@ -1972,6 +2021,10 @@ Do not build:
 29. The runner never creates a repository-local clarification artifact unless its resolved path is ignored.
 30. External validation constraints pause as `environment_blocked`; they never
     become code failures or justify weakening the execution boundary.
+31. Bootstrap inventories use unique check IDs, unique normalized exact
+    commands, and unique existing canonical repository-relative validation
+    files; invalid output receives at most one read-only correction per
+    producing role, phase, and contract.
 
 ---
 

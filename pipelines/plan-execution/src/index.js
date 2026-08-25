@@ -16,6 +16,7 @@ import {
 
 export {
   BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
+  BOOTSTRAP_CORRECTION_INSTRUCTIONS,
   BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
@@ -479,12 +480,21 @@ export function migratePlanExecutionStateV2(run) {
   });
 }
 
+export function migratePlanExecutionStateV3(run) {
+  return Object.freeze({
+    ...run.pipelineState,
+    bootstrapCorrections: Object.freeze([]),
+    pendingBootstrapCorrection: null,
+  });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
-  stateVersion: 3,
+  stateVersion: 4,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
+    3: migratePlanExecutionStateV3,
   }),
   roles: ROLES,
   settings: SETTINGS,

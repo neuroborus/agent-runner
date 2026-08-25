@@ -394,6 +394,20 @@ Plan execution state version 3 adds the nullable bounded pre-effect rejection
 record to each pending commit. Its version-2 migration sets that record to
 `null`; it never infers proof for a legacy consumed authorization.
 
+Plan execution state version 4 adds a bounded bootstrap-correction ledger. Its
+version-3 migration initializes an empty ledger without changing accepted
+bootstrap context, validation evidence, workspace content, commit authority, or
+workflow position. Each producing role, phase, and contract may consume at most
+one read-only correction attempt. The durable entry contains only attempt `1`
+and the existing bounded role, phase, contract, field, and constraint
+diagnostic; rejected values and provider output are never persisted. A bounded
+pending copy distinguishes a correction that still must run from consumed
+history and is cleared as soon as a valid replacement is accepted. Each adapter
+maps its native structured-output failure to the shared bounded
+`structured-output` failure class. Pipelines consume only that backend-neutral
+class, and plan execution turns it into the bounded semantic diagnostic only
+after read-only mutation checks complete.
+
 Common run-envelope version 3 adds `activeTurn`, either `null` or the current
 bounded `{ role, phase }`. Version-1 and version-2 runs project it as `null`
 without rewriting state or history; the next mutating continuation persists the
@@ -457,6 +471,15 @@ depend on a prior session. Reviewer rejection remains a finding. Commands and
 repository-relative infrastructure paths are validated and compared without
 rewriting interior whitespace. Host-reported results and user attestations are
 outside this trust boundary.
+
+Before plan execution accepts a bootstrap, reconciliation, arbitration, or
+legacy validation-migration inventory, the root Git boundary verifies every
+validation-infrastructure entry is an existing regular file whose canonical
+repository-relative path exactly matches the proposed path. Missing files,
+directories, symlinks, and paths traversing a symlink are field-specific
+bootstrap violations; the runner does not follow or silently canonicalize
+them. The producing role receives the bounded diagnostic on its one correction
+turn, and a second invalid result fails closed.
 
 An explicitly supplied source session is different: the first eligible turn of
 each new primary or review checkpoint creates a direct child and returns its ID

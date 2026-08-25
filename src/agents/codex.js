@@ -11,6 +11,7 @@ import {
   isEnvironment,
   isRecord,
   isolateGitEnvironment,
+  STRUCTURED_OUTPUT_FAILURE_CLASS,
 } from "./adapter-contract.js";
 import { createCodexAppServerClient } from "./codex-app-server.js";
 import {
@@ -231,6 +232,7 @@ export class CodexAdapterError extends Error {
       code = "ERR_CODEX_ADAPTER",
       diagnosticClass,
       effectStarted,
+      failureClass,
       method,
       recoverable = false,
     } = {},
@@ -242,6 +244,9 @@ export class CodexAdapterError extends Error {
     this.recoverable = recoverable;
     if (typeof effectStarted === "boolean") {
       this.effectStarted = effectStarted;
+    }
+    if (failureClass === STRUCTURED_OUTPUT_FAILURE_CLASS) {
+      this.failureClass = failureClass;
     }
     if (CODEX_DIAGNOSTIC_CLASSES.has(diagnosticClass)) {
       this.diagnosticClass = diagnosticClass;
@@ -1027,12 +1032,16 @@ function normalizeResult(turn, request, sessionId) {
       throw new CodexAdapterError("Codex returned invalid structured output.", {
         cause,
         code: "ERR_CODEX_STRUCTURED_OUTPUT",
+        failureClass: STRUCTURED_OUTPUT_FAILURE_CLASS,
       });
     }
     if (!isRecord(structured)) {
       throw new CodexAdapterError(
         "Codex structured output must be an object.",
-        { code: "ERR_CODEX_STRUCTURED_OUTPUT" },
+        {
+          code: "ERR_CODEX_STRUCTURED_OUTPUT",
+          failureClass: STRUCTURED_OUTPUT_FAILURE_CLASS,
+        },
       );
     }
     deepFreeze(structured);

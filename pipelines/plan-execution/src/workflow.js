@@ -9,6 +9,7 @@ import {
 
 import {
   BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
+  BOOTSTRAP_CORRECTION_INSTRUCTIONS,
   BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
@@ -107,6 +108,11 @@ const GIT_PREFLIGHT_CODES = new Set([
   "ERR_UNSAFE_REPOSITORY_PATH",
   "ERR_UNSUPPORTED_GIT_CONFIGURATION",
 ]);
+const INVALID_BOOTSTRAP_PATH_CODES = new Set([
+  "ERR_UNSAFE_REPOSITORY_PATH",
+  "ERR_UNSUPPORTED_GIT_PATH",
+]);
+const STRUCTURED_OUTPUT_FAILURE_CLASS = "structured-output";
 
 function activity(actor, phase, kind, message) {
   return Object.freeze({ actor, phase, kind, message });
@@ -321,6 +327,59 @@ function normalizeBootstrapArbitrationOutput(output, phase = "bootstrap") {
   );
 }
 
+function normalizeValidationMigrationRoleOutput(output, role) {
+  const result = normalizeBootstrapRoleOutput(
+    output,
+    role,
+    "validation-migration",
+  );
+  if (result.status !== "READY") {
+    throw invalidRoleOutput(
+      "Validation migration requires a ready inventory.",
+      bootstrapOutputContext(role, "validation-migration"),
+      { field: "status", constraint: "validation-migration-status" },
+    );
+  }
+  return result;
+}
+
+function normalizeValidationMigrationReconciliationOutput(output) {
+  const result = normalizeBootstrapReconciliationOutput(
+    output,
+    "validation-migration",
+  );
+  if (!["RESOLVED", "DISAGREEMENT"].includes(result.status)) {
+    throw invalidRoleOutput(
+      "Validation migration requires an inventory resolution.",
+      reconciliationOutputContext("validation-migration"),
+      { field: "status", constraint: "validation-migration-status" },
+    );
+  }
+  return result;
+}
+
+function normalizeValidationMigrationArbitrationOutput(output) {
+  const result = normalizeBootstrapArbitrationOutput(
+    output,
+    "validation-migration",
+  );
+  if (
+    !["USE_WORKER", "USE_REVIEWER", "SYNTHESIZE"].includes(
+      result.direction,
+    )
+  ) {
+    throw invalidRoleOutput(
+      "Validation migration requires an inventory direction.",
+      arbitrationOutputContext("validation-migration"),
+      {
+        field: "direction",
+        constraint: "validation-migration-direction",
+      },
+    );
+  }
+  return result;
+}
+
 export async function runPlanExecution({ action, run, runtime, settings }) {
   assertRun(run);
   assertRuntime(runtime);
@@ -468,6 +527,7 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
         resolvedSummary: null,
         bootstrapDisagreement: null,
         bootstrapArbitrationUsed: false,
+        pendingBootstrapCorrection: null,
         compatibilityCheckRequired: false,
         currentStep: null,
         reviewerStep: null,
@@ -829,6 +889,15 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
       assertRun(currentRun);
     }
     if (agentError !== undefined) {
+      if (
+        outputContext !== undefined &&
+        agentError?.failureClass === STRUCTURED_OUTPUT_FAILURE_CLASS
+      ) {
+        throw invalidRoleOutput(
+          `${role} returned invalid structured output.`,
+          outputContext,
+        );
+      }
       throw agentError;
     }
     if (!isRecord(response)) {
@@ -1138,6 +1207,141 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
     });
   }
 
+  function correctionMatchesContext(correction, context) {
+    return (
+      correction.role === context.role &&
+      correction.phase === context.phase &&
+      correction.contract === context.contract
+    );
+  }
+
+  function bootstrapCorrectionAttempt(context) {
+    return state().bootstrapCorrections.find((correction) =>
+      correctionMatchesContext(correction, context),
+    );
+  }
+
+  function pendingBootstrapCorrection(context) {
+    const correction = state().pendingBootstrapCorrection;
+    return correction !== null && correctionMatchesContext(correction, context)
+      ? correction
+      : undefined;
+  }
+
+  async function validateBootstrapInventory(result, context) {
+    if (!Array.isArray(result.validationInfrastructure)) {
+      return result;
+    }
+    for (const [index, path] of result.validationInfrastructure.entries()) {
+      let inspection;
+      try {
+        inspection = await runtime.git.inspectPath({
+          path,
+          projectPath: state().repositoryBaseline.projectPath,
+        });
+      } catch (cause) {
+        if (!INVALID_BOOTSTRAP_PATH_CODES.has(cause?.code)) {
+          throw cause;
+        }
+        throw invalidRoleOutput(
+          "Bootstrap validation infrastructure path is unsafe.",
+          context,
+          {
+            field: `validationInfrastructure[${index}]`,
+            constraint: "existing-canonical-repository-file",
+          },
+        );
+      }
+      if (
+        !isRecord(inspection) ||
+        inspection.exists !== true ||
+        inspection.kind !== "file" ||
+        inspection.relativePath !== path
+      ) {
+        throw invalidRoleOutput(
+          "Bootstrap validation infrastructure path is not a canonical repository file.",
+          context,
+          {
+            field: `validationInfrastructure[${index}]`,
+            constraint: "existing-canonical-repository-file",
+          },
+        );
+      }
+    }
+    return result;
+  }
+
+  async function runBootstrapContract({
+    role,
+    schema,
+    checkpoint,
+    recoveryContext = "",
+    buildPrompt,
+    normalize,
+  }) {
+    const context = bootstrapOutputContextFor(role, schema, checkpoint);
+    while (true) {
+      const correction = pendingBootstrapCorrection(context);
+      try {
+        const output = await runRole(
+          role,
+          schema,
+          (evidence) => {
+            const prompt = buildPrompt(evidence);
+            return correction === undefined
+              ? prompt
+              : `${prompt}\n\n${BOOTSTRAP_CORRECTION_INSTRUCTIONS}\n\nCorrection diagnostic:\n${JSON.stringify(correction, null, 2)}`;
+          },
+          { checkpoint, recoveryContext },
+        );
+        if (output === null) {
+          return null;
+        }
+        const result = await validateBootstrapInventory(
+          normalize(output),
+          context,
+        );
+        if (correction !== undefined) {
+          await transition({
+            ...state(),
+            pendingBootstrapCorrection: null,
+          });
+        }
+        return result;
+      } catch (cause) {
+        if (
+          cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT" ||
+          !isOutputDiagnostic(cause.diagnostic)
+        ) {
+          throw cause;
+        }
+        if (bootstrapCorrectionAttempt(context) !== undefined) {
+          throw cause;
+        }
+        const diagnostic = outputDiagnostic(cause, context);
+        const correction = { attempt: 1, ...diagnostic };
+        await transition(
+          {
+            ...state(),
+            bootstrapCorrections: [
+              ...state().bootstrapCorrections,
+              correction,
+            ],
+            pendingBootstrapCorrection: correction,
+          },
+          {
+            publicActivity: activity(
+              context.role,
+              context.phase,
+              "bootstrap-correction",
+              `${context.role} must correct ${context.contract} field ${diagnostic.field}.`,
+            ),
+          },
+        );
+      }
+    }
+  }
+
   async function establishedValidation(result) {
     return {
       requiredChecks: result.requiredChecks,
@@ -1213,10 +1417,12 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
   }
 
   async function rediscoverValidationRole(role) {
-    const output = await runRole(
+    const result = await runBootstrapContract({
       role,
-      BOOTSTRAP_SCHEMA,
-      (evidence) => `${BOOTSTRAP_INSTRUCTIONS}
+      schema: BOOTSTRAP_SCHEMA,
+      checkpoint: "validation-migration",
+      recoveryContext: resolvedContext(),
+      buildPrompt: (evidence) => `${BOOTSTRAP_INSTRUCTIONS}
 
 This is a versioned-state migration checkpoint. Treat every persisted legacy check, path, fingerprint, and aggregate validation result as provisional. Independently rediscover the complete current validation inventory from repository evidence before work can advance.
 
@@ -1225,29 +1431,11 @@ ${finalizationBootstrapInstructions(state().settings.finalization)}
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
 ${evidence}`,
-      { checkpoint: "validation-migration", recoveryContext: resolvedContext() },
-    );
-    if (output === null) {
+      normalize: (output) =>
+        normalizeValidationMigrationRoleOutput(output, role),
+    });
+    if (result === null) {
       return false;
-    }
-    const result = normalizeBootstrapRoleOutput(
-      output,
-      role,
-      "validation-migration",
-    );
-    if (result.status === "PRODUCT_DECISION_REQUIRED") {
-      throw invalidRoleOutput(
-        "Validation migration cannot require a product decision.",
-        bootstrapOutputContext(role, "validation-migration"),
-        { field: "status", constraint: "validation-migration-status" },
-      );
-    }
-    if (result.status === "PLAN_REVISION_REQUIRED") {
-      throw invalidRoleOutput(
-        "Validation migration cannot revise the validated plan.",
-        bootstrapOutputContext(role, "validation-migration"),
-        { field: "status", constraint: "validation-migration-status" },
-      );
     }
     await transition(
       {
@@ -1289,10 +1477,12 @@ ${evidence}`,
   }
 
   async function reconcileValidationMigration() {
-    const output = await runRole(
-      "worker",
-      BOOTSTRAP_RECONCILIATION_SCHEMA,
-      (evidence) => `${BOOTSTRAP_RECONCILIATION_INSTRUCTIONS}
+    const result = await runBootstrapContract({
+      role: "worker",
+      schema: BOOTSTRAP_RECONCILIATION_SCHEMA,
+      checkpoint: "validation-migration",
+      recoveryContext: resolvedContext(),
+      buildPrompt: (evidence) => `${BOOTSTRAP_RECONCILIATION_INSTRUCTIONS}
 
 Reconcile only the independently rediscovered validation requirements. Legacy validation evidence is provisional and must not be selected.
 
@@ -1309,36 +1499,20 @@ ${JSON.stringify(
   null,
   2,
 )}`,
-      { checkpoint: "validation-migration", recoveryContext: resolvedContext() },
-    );
-    if (output === null) {
+      normalize: normalizeValidationMigrationReconciliationOutput,
+    });
+    if (result === null) {
       return false;
-    }
-    const result = normalizeBootstrapReconciliationOutput(
-      output,
-      "validation-migration",
-    );
-    if (result.status === "PRODUCT_DECISION_REQUIRED") {
-      throw invalidRoleOutput(
-        "Validation migration cannot require a product decision.",
-        reconciliationOutputContext("validation-migration"),
-        { field: "status", constraint: "validation-migration-status" },
-      );
-    }
-    if (result.status === "PLAN_REVISION_REQUIRED") {
-      throw invalidRoleOutput(
-        "Validation migration cannot revise the validated plan.",
-        reconciliationOutputContext("validation-migration"),
-        { field: "status", constraint: "validation-migration-status" },
-      );
     }
     if (result.status === "RESOLVED") {
       return completeValidationMigration(result, "worker");
     }
-    const arbitrationOutput = await runRole(
-      "arbiter",
-      BOOTSTRAP_ARBITRATION_SCHEMA,
-      (evidence) => `${BOOTSTRAP_ARBITRATION_INSTRUCTIONS}
+    const arbitration = await runBootstrapContract({
+      role: "arbiter",
+      schema: BOOTSTRAP_ARBITRATION_SCHEMA,
+      checkpoint: "validation-migration",
+      recoveryContext: resolvedContext(),
+      buildPrompt: (evidence) => `${BOOTSTRAP_ARBITRATION_INSTRUCTIONS}
 
 Resolve only this validation-inventory migration disagreement. Legacy validation evidence is provisional and must not be selected.
 
@@ -1358,28 +1532,10 @@ ${JSON.stringify(
   null,
   2,
 )}`,
-      { checkpoint: "validation-migration", recoveryContext: resolvedContext() },
-    );
-    if (arbitrationOutput === null) {
+      normalize: normalizeValidationMigrationArbitrationOutput,
+    });
+    if (arbitration === null) {
       return false;
-    }
-    const arbitration = normalizeBootstrapArbitrationOutput(
-      arbitrationOutput,
-      "validation-migration",
-    );
-    if (arbitration.direction === "PRODUCT_DECISION_REQUIRED") {
-      throw invalidRoleOutput(
-        "Validation migration cannot require a product decision.",
-        arbitrationOutputContext("validation-migration"),
-        { field: "direction", constraint: "validation-migration-direction" },
-      );
-    }
-    if (arbitration.direction === "PLAN_REVISION_REQUIRED") {
-      throw invalidRoleOutput(
-        "Validation migration cannot revise the validated plan.",
-        arbitrationOutputContext("validation-migration"),
-        { field: "direction", constraint: "validation-migration-direction" },
-      );
     }
     return completeValidationMigration(arbitration, "arbiter");
   }
@@ -1640,10 +1796,11 @@ ${JSON.stringify(
   }
 
   async function bootstrapRole(role) {
-    const output = await runRole(
+    const result = await runBootstrapContract({
       role,
-      BOOTSTRAP_SCHEMA,
-      (evidence) => `${BOOTSTRAP_INSTRUCTIONS}${
+      schema: BOOTSTRAP_SCHEMA,
+      checkpoint: "bootstrap",
+      buildPrompt: (evidence) => `${BOOTSTRAP_INSTRUCTIONS}${
         role === "reviewer"
           ? "\nAs Reviewer, also state what you intend to verify."
           : ""
@@ -1654,12 +1811,11 @@ ${finalizationBootstrapInstructions(state().settings.finalization)}
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
 ${evidence}`,
-      { checkpoint: "bootstrap" },
-    );
-    if (output === null) {
+      normalize: (output) => normalizeBootstrapRoleOutput(output, role),
+    });
+    if (result === null) {
       return false;
     }
-    const result = normalizeBootstrapRoleOutput(output, role);
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "BOOTSTRAP");
     }
@@ -1690,10 +1846,11 @@ ${evidence}`,
   }
 
   async function reconcileBootstrap() {
-    const output = await runRole(
-      "worker",
-      BOOTSTRAP_RECONCILIATION_SCHEMA,
-      (evidence) => `${BOOTSTRAP_RECONCILIATION_INSTRUCTIONS}
+    const result = await runBootstrapContract({
+      role: "worker",
+      schema: BOOTSTRAP_RECONCILIATION_SCHEMA,
+      checkpoint: "bootstrap",
+      buildPrompt: (evidence) => `${BOOTSTRAP_RECONCILIATION_INSTRUCTIONS}
 
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
@@ -1714,12 +1871,11 @@ ${JSON.stringify(
   null,
   2,
 )}`,
-      { checkpoint: "bootstrap" },
-    );
-    if (output === null) {
+      normalize: normalizeBootstrapReconciliationOutput,
+    });
+    if (result === null) {
       return false;
     }
-    const result = normalizeBootstrapReconciliationOutput(output);
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "BOOTSTRAP");
     }
@@ -1764,10 +1920,11 @@ ${JSON.stringify(
   }
 
   async function arbitrateBootstrap() {
-    const output = await runRole(
-      "arbiter",
-      BOOTSTRAP_ARBITRATION_SCHEMA,
-      (evidence) => `${BOOTSTRAP_ARBITRATION_INSTRUCTIONS}
+    const result = await runBootstrapContract({
+      role: "arbiter",
+      schema: BOOTSTRAP_ARBITRATION_SCHEMA,
+      checkpoint: "arbitration",
+      buildPrompt: (evidence) => `${BOOTSTRAP_ARBITRATION_INSTRUCTIONS}
 
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
@@ -1791,12 +1948,11 @@ ${JSON.stringify(
   null,
   2,
 )}`,
-      { checkpoint: "arbitration" },
-    );
-    if (output === null) {
+      normalize: normalizeBootstrapArbitrationOutput,
+    });
+    if (result === null) {
       return false;
     }
-    const result = normalizeBootstrapArbitrationOutput(output);
     if (result.direction === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "BOOTSTRAP");
     }

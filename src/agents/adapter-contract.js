@@ -52,6 +52,8 @@ const SCHEMA_MAP_KEYWORDS = Object.freeze([
   "properties",
 ]);
 
+export const STRUCTURED_OUTPUT_FAILURE_CLASS = "structured-output";
+
 export function isRecord(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return false;

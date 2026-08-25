@@ -352,6 +352,8 @@ export async function inspectPathAtRoot(
     { baseHead: head },
   );
   const prefix = `${location.relativePath}/`;
+  const exists = await pathExists(location.path);
+  const metadata = exists ? await lstat(location.path) : null;
   return Object.freeze({
     ...location,
     changed:
@@ -359,7 +361,15 @@ export async function inspectPathAtRoot(
       changedPaths.some(
         (path) => path === location.relativePath || path.startsWith(prefix),
       ),
-    exists: await pathExists(location.path),
+    exists,
+    kind:
+      metadata === null
+        ? null
+        : metadata.isFile()
+          ? "file"
+          : metadata.isDirectory()
+            ? "directory"
+            : "other",
     ignored: ignoredResult.exitCode === 0,
     tracked,
   });

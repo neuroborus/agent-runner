@@ -47,6 +47,8 @@ const PIPELINE_STATE_FIELDS = new Set([
   "resolvedSummary",
   "bootstrapDisagreement",
   "bootstrapArbitrationUsed",
+  "bootstrapCorrections",
+  "pendingBootstrapCorrection",
   "compatibilityCheckRequired",
   "currentStep",
   "reviewerStep",
@@ -143,6 +145,10 @@ const TERMINAL_TURN_DIAGNOSTIC_CLASSES = new Set([
   "turn_usage_limit_exceeded",
 ]);
 const OUTPUT_DIAGNOSTIC_VALUE_PATTERN = /^[a-zA-Z0-9_.[\]-]{1,128}$/u;
+const BOOTSTRAP_CORRECTION_FIELDS = Object.freeze([
+  "attempt",
+  ...OUTPUT_DIAGNOSTIC_FIELDS,
+]);
 const BOOTSTRAP_RESULT_FIELDS = Object.freeze([
   "status",
   "summary",
@@ -1786,6 +1792,50 @@ function normalizeDisagreement(value) {
   });
 }
 
+function normalizeBootstrapCorrection(correction) {
+  if (
+    !isRecord(correction) ||
+    !hasExactFields(correction, BOOTSTRAP_CORRECTION_FIELDS) ||
+    correction.attempt !== 1
+  ) {
+    throw workflowError("Plan-execution bootstrap correction is invalid.");
+  }
+  const diagnostic = Object.fromEntries(
+    OUTPUT_DIAGNOSTIC_FIELDS.map((field) => [field, correction[field]]),
+  );
+  const validContext =
+    (correction.contract === "bootstrap" &&
+      ["worker", "reviewer"].includes(correction.role)) ||
+    (correction.contract === "bootstrap-reconciliation" &&
+      correction.role === "worker") ||
+    (correction.contract === "bootstrap-arbitration" &&
+      correction.role === "arbiter");
+  if (
+    !isOutputDiagnostic(diagnostic) ||
+    !["bootstrap", "validation-migration"].includes(correction.phase) ||
+    !validContext
+  ) {
+    throw workflowError("Plan-execution bootstrap correction is invalid.");
+  }
+  return correction;
+}
+
+function normalizeBootstrapCorrections(value) {
+  if (!Array.isArray(value) || value.length > MAX_ITEMS) {
+    throw workflowError("Plan-execution bootstrap corrections are invalid.");
+  }
+  const contexts = new Set();
+  for (const correction of value) {
+    normalizeBootstrapCorrection(correction);
+    const context = `${correction.role}\0${correction.phase}\0${correction.contract}`;
+    if (contexts.has(context)) {
+      throw workflowError("Plan-execution bootstrap corrections must be unique.");
+    }
+    contexts.add(context);
+  }
+  return value;
+}
+
 function normalizedSummary(value, name) {
   return value === null ? null : normalizeSummary(value, name);
 }
@@ -2317,6 +2367,23 @@ export function normalizePipelineState(value) {
     "resolved summary",
   );
   const disagreement = normalizeDisagreement(value.bootstrapDisagreement);
+  const bootstrapCorrections = normalizeBootstrapCorrections(
+    value.bootstrapCorrections,
+  );
+  const pendingBootstrapCorrection =
+    value.pendingBootstrapCorrection === null
+      ? null
+      : normalizeBootstrapCorrection(value.pendingBootstrapCorrection);
+  if (
+    pendingBootstrapCorrection !== null &&
+    !bootstrapCorrections.some((correction) =>
+      isDeepStrictEqual(correction, pendingBootstrapCorrection),
+    )
+  ) {
+    throw workflowError(
+      "Plan-execution pending bootstrap correction is inconsistent.",
+    );
+  }
   if (
     (reviewerSummary !== null && workerSummary === null) ||
     (!value.validationMigrationPending &&
@@ -2664,6 +2731,8 @@ export function normalizePipelineState(value) {
       resolvedSummary !== null ||
       disagreement !== null ||
       value.bootstrapArbitrationUsed ||
+      bootstrapCorrections.length !== 0 ||
+      pendingBootstrapCorrection !== null ||
       value.compatibilityCheckRequired ||
       value.currentStep !== null ||
       value.reviewerStep !== null ||
@@ -2845,6 +2914,8 @@ export function createPlanExecutionState({
     resolvedSummary: null,
     bootstrapDisagreement: null,
     bootstrapArbitrationUsed: false,
+    bootstrapCorrections: Object.freeze([]),
+    pendingBootstrapCorrection: null,
     compatibilityCheckRequired: false,
     currentStep: null,
     reviewerStep: null,
@@ -2922,7 +2993,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 3 ||
+    run.pipelineStateVersion !== 4 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||

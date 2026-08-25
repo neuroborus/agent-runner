@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
+  BOOTSTRAP_CORRECTION_INSTRUCTIONS,
   BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
@@ -27,6 +28,10 @@ test("bootstrap instructions preserve independent evidence and arbitration", () 
     BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
   ]) {
     assert.match(instructions, /schema's result object/u);
+    assert.match(instructions, /Required-check IDs must be unique/u);
+    assert.match(instructions, /Exact commands must be unique/u);
+    assert.match(instructions, /canonical repository-relative file paths/u);
+    assert.match(instructions, /symlink alias/u);
   }
   assert.match(BOOTSTRAP_INSTRUCTIONS, /independently identify every required check/iu);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /validationInfrastructure/u);
@@ -38,6 +43,11 @@ test("bootstrap instructions preserve independent evidence and arbitration", () 
     BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
     /complete requiredChecks inventory/u,
   );
+  assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /one read-only correction/u);
+  assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /complete replacement/u);
+  assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /ordinary clarification question/u);
+  assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /PRODUCT_DECISION_REQUIRED/u);
+  assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /repeated invalid result fails closed/u);
 });
 
 test("clarification instructions keep questions before implementation", () => {

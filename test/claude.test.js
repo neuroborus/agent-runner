@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   CLAUDE_BACKEND_ID,
   ClaudeAdapterError,
+  STRUCTURED_OUTPUT_FAILURE_CLASS,
   createClaudeAdapter,
 } from "../src/agents/index.js";
 
@@ -40,6 +41,11 @@ const STRICT_SCHEMA = Object.freeze({
 
 function hasCode(code) {
   return (error) => error instanceof ClaudeAdapterError && error.code === code;
+}
+
+function hasFailureClass(code, failureClass) {
+  return (error) =>
+    hasCode(code)(error) && error.failureClass === failureClass;
 }
 
 function result({
@@ -161,6 +167,12 @@ function turnCalls(fixture) {
 
 test("constructs and probes enforceable Claude capabilities", async () => {
   assert.doesNotThrow(() => createClaudeAdapter());
+  assert.equal(
+    new ClaudeAdapterError("invalid failure class", {
+      failureClass: "native-provider-text",
+    }).failureClass,
+    undefined,
+  );
   assert.throws(
     () => createClaudeAdapter({ env: new Map() }),
     hasCode("ERR_INVALID_CLAUDE_OPTIONS"),
@@ -488,7 +500,10 @@ test("validates requests, strict schemas, and structured results", async () => {
   });
   await assert.rejects(
     invalidOutput.adapter.run(request({ schema: STRICT_SCHEMA })),
-    hasCode("ERR_CLAUDE_STRUCTURED_OUTPUT"),
+    hasFailureClass(
+      "ERR_CLAUDE_STRUCTURED_OUTPUT",
+      STRUCTURED_OUTPUT_FAILURE_CLASS,
+    ),
   );
 
   for (const payload of [
