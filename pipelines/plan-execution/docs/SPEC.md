@@ -284,6 +284,16 @@ explicitly selects another confined ignored path. It never creates the file or
 changes ignore rules. Resolved roles, settings, and `artifactRoot` are persisted
 and never reloaded on resume.
 
+The descriptor also owns `trustedChecks`, an ordered list of unique lowercase
+aliases that defaults to `[]`. Only runner-root `trustedCommands`
+configuration may define an alias, its exact inventory command, and its
+executable/argument vector. A safe project overlay may select runner-defined
+aliases through `trustedChecks`, but cannot define or alter binaries,
+arguments, environment values, aliases, or host commands. Before agent work,
+the root persists every resolved vector and alias, deterministic command
+identities, an ordered command fingerprint, and a trusted-configuration
+fingerprint. Resume uses that durable snapshot without reloading configuration.
+
 Codex and Claude do **not** both need to be installed for every run. Preflight validates the Worker and Reviewer selected for the run. The Arbiter backend may be validated lazily when arbitration is first needed.
 
 ---
@@ -373,6 +383,8 @@ Persist at least:
   field, constraint, and attempt number;
 - exact per-check finalization evidence and the fingerprint-bound Reviewer
   validation-change decision;
+- the resolved runner-trusted command snapshot, command/configuration
+  fingerprints, and bounded executor provenance for accepted check evidence;
 - latest reviewed content fingerprint;
 - escalation reason when paused;
 - an optional allowlisted terminal diagnostic class for a failed Codex turn,
@@ -424,6 +436,14 @@ contains the rejected value, raw structured output, or provider text. A
 matching bounded pending record is cleared when the replacement is accepted;
 the retained history still enforces the one-attempt limit if bootstrap later
 restarts after authorized product input.
+
+Pipeline state version 5 adds the resolved trusted-validation snapshot and
+runner/agent executor provenance to accepted per-check evidence. The version-4
+migration defaults legacy runs to empty trust and invalidates active
+finalization and review evidence through the existing independent validation-
+migration checkpoint. Immutable terminal evidence is shape-upgraded. A
+consumed one-shot commit authorization remains on the verification-only path,
+and migration never creates a replayable authorization.
 
 Common run-envelope version 3 independently adds nullable bounded active
 provider role and phase. Version-1 and version-2 envelopes project it as `null`
@@ -1317,9 +1337,46 @@ The finalization turn should execute the validation procedure and report its res
 
 Every non-availability result carries the complete inventory actually used and
 exactly one ordered result for each required check. `PASS` requires every result
-to be `PASS`; omission, `NOT_RUN`, skip, exclusion, substitution, replacement,
-or weakening is invalid structured output. Evidence is bounded and direct;
+to be `PASS` after the runner replaces the exact selected trusted-command
+placeholders described below; every other omission, `NOT_RUN`, skip, exclusion,
+substitution, replacement, or weakening is invalid structured output. Evidence is bounded and direct;
 external host results and user attestations do not satisfy the gate.
+
+Every selected runner-trusted command must appear exactly once in the inventory
+using its persisted exact command text. The Worker does not execute it and
+returns `NOT_RUN` only for that selected entry. After the Worker turn completes
+and repository changes are reconciled, the root runs the exact persisted
+executable/argument vector directly without a shell and replaces the
+placeholder with bounded runner evidence. It retains no process stdout or
+stderr and accepts no configuration-supplied environment values. The Linux
+executor requires bubblewrap. Before agent work, the root resolves it only from
+fixed system locations to a canonical absolute executable whose file and
+ancestor directories are not writable by the runner identity. Project-relative
+or project-writable `PATH` entries never participate, and resume and execution
+reverify that pinned path. Its private network namespace contains minimal
+read-only system and repository mounts, private runtime and temporary storage,
+a hidden ambient home, and a finite non-credential environment.
+Command-owned loopback listeners remain possible inside that namespace, but raw
+host Unix daemon and control sockets are masked. A Docker daemon must be
+rootless, and every service must run as part of the exact command inside the
+same mount, network, and PID namespaces; it cannot acquire host mounts or
+networking and is retired with the complete process tree. Remote network and
+filesystem writes, hosting credentials, Git credential helpers, and ambient
+authentication variables remain unavailable. The runner supervises the
+complete process tree with a private PID namespace and bounded outer
+process-group TERM/KILL retirement. A one-byte signal from inside the completed
+isolation profile distinguishes setup denial from a nonzero validation-command
+exit without retaining stderr or other native output. A repository snapshot
+before and after every trusted command
+rejects workspace, index, history/ref, remote-configuration, or Git-identity
+mutation, and the complete validation-infrastructure fingerprint is recomputed
+after trusted execution. Missing isolation, an unterminated process tree,
+blocked, skipped, changed, substituted, non-allowlisted, unmatched, or
+fingerprint-drifting commands fail closed. Agent and runner results form one
+ordered evidence tuple bound to the same content, validation-infrastructure,
+ordered-command, and trusted-configuration fingerprints. The executor runs
+outside agent turns and does not grant an agent loopback, Docker, database,
+network, host temporary-directory, or another host-service capability.
 
 The Worker must not change package scripts, test discovery, test runners,
 validation configuration, or the inventory merely to evade an environment
@@ -1969,6 +2026,14 @@ At minimum cover:
     classified writable usage/provider failures preserve reconciled changes,
     and forbidden, authentication, ambiguous writable, and one-shot outcomes
     remain fail closed.
+53. runner-only trusted command definitions, project alias selection, durable
+    snapshot resume, exact-vector execution, bounded redaction, fingerprint
+    drift, exact lexical round trips, and non-allowlisted substitutions fail
+    closed.
+54. service-backed runner checks combine with agent checks only for one exact
+    fingerprint tuple, while blocked checks pause and workspace, Git, ref,
+    remote, identity, ignored validation-infrastructure, leaked process-tree,
+    remote-write, or ambient-credential effects are rejected.
 
 Real Codex/Claude smoke tests should be opt-in integration tests.
 
@@ -2072,6 +2137,11 @@ Do not build:
 32. Claude recovery persists no denied input or native provider text, retries
     only finite allowlisted failures, and reconstructs the request from durable
     runner state without making a native session authoritative.
+33. Only runner-root configuration defines trusted host commands; selected
+    commands execute outside agent turns as exact persisted vectors, and their
+    bounded evidence cannot pass unless every fingerprint and repository guard
+    remains unchanged. The isolated executor denies remote writes and ambient
+    credentials and retires the complete process tree before reconciliation.
 
 ---
 

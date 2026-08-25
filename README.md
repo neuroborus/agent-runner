@@ -34,7 +34,8 @@ Each pipeline owns its specification under its workspace.
 - Git
 - Codex CLI 0.147.0 or newer stable and/or Claude Code 2.1.233 or newer stable,
   depending on the selected role backends
-- `bubblewrap` and `socat` for the V1 Claude backend on Linux
+- `bubblewrap` for trusted validation and the V1 Claude backend on Linux, plus
+  `socat` for the Claude backend
 
 The project uses native ES modules. Its only external runtime dependencies are
 the official Node MCP server SDK and its schema library.
@@ -130,6 +131,7 @@ Pipeline settings use these defaults:
 | `plan-execution` | `maxDisputesPerFinding` | 2 |
 | `plan-execution` | `maxSameFindingRounds` | 3 |
 | `plan-execution` | `stagnationWindowRounds` | 3 |
+| `plan-execution` | `trustedChecks` | `[]` |
 | `polishing` | `maxFixRounds` | 5 |
 | `polishing` | `finalization` | `auto` |
 | `polishing` | `maxDisputesPerFinding` | 2 |
@@ -148,6 +150,52 @@ complete gate from repository instructions and project-defined checks. Use
 repository-relative path ending in `SKILL.md` to require that exact skill. A
 missing, escaping, or invalid explicit skill blocks the run; absent optional
 guidance never skips the dedicated fingerprint-bound finalization turn.
+
+Required checks that need loopback listeners, Docker, a local database, or a
+comparable host service may be delegated to the runner's trusted validation
+executor. Only the runner-root configuration may define an alias, its exact
+inventory command, and its executable/argument vector:
+
+```json
+{
+  "schemaVersion": 1,
+  "trustedCommands": {
+    "service-tests": {
+      "command": "npm run test:service",
+      "executable": "npm",
+      "arguments": ["run", "test:service"]
+    }
+  },
+  "pipelines": {
+    "plan-execution": {
+      "trustedChecks": ["service-tests"]
+    }
+  }
+}
+```
+
+An ignored project configuration may select `service-tests` through the same
+pipeline setting, but cannot define or alter its command, vector, environment,
+or executable. The default is no selected trusted commands. Selection resolves
+to a durable fingerprinted snapshot before agent work; resume uses that
+snapshot without reloading configuration. The runner executes the vector
+directly without a shell. Before agent work, it resolves bubblewrap only from
+fixed system locations to a canonical absolute executable whose file and parent
+directories are not writable by the runner identity. The target repository's
+`PATH` is never used to select or launch it, and the pinned path is reverified
+on resume and execution. Its network namespace has a minimal read-only system
+and repository view, private runtime and temporary storage, a hidden user home,
+and a finite non-credential environment. Raw host daemon and control sockets
+are unavailable. A Docker daemon needed by a check must be rootless, and every
+service must be command-owned inside the same mount, network, and PID
+namespaces. A private PID namespace and an outer process group retire that
+complete service tree before reconciliation. A readiness signal distinguishes
+isolation setup failure from an executed check failure without retaining
+process output. The runner rejects any workspace, Git, ref, remote, identity,
+or validation-infrastructure mutation. Missing isolation or a process tree that
+cannot be retired blocks or fails closed. Agent and runner results are accepted
+only as one complete ordered gate for the same content,
+validation-infrastructure, command, and trusted-configuration fingerprints.
 
 Backend sessions are disposable. When a native context is full, the adapter
 compacts it and retries once; if the context remains full, ordinary turns can
@@ -538,7 +586,9 @@ duplicate pipeline-owned policy.
 │   ├── state-journal.js
 │   ├── state-lease.js
 │   ├── state-validation.js
-│   └── state.js
+│   ├── state.js
+│   ├── trusted-validation-execution.js
+│   └── trusted-validation.js
 ├── packages/
 │   └── commit-plan/
 ├── pipelines/

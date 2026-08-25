@@ -28,6 +28,8 @@ dependency before an actual import needs it.
 - Codex and Claude adapter execution and access-mode enforcement.
 - Git snapshots, content fingerprints, read-only guards, remote/identity guards,
   and constrained local-commit verification.
+- Runner-trusted exact-vector validation outside agent turns, with bounded
+  results and repository mutation guards.
 - Static pipeline registration.
 
 The root is one application, so these modules are not separate workspace
@@ -104,9 +106,17 @@ The V1 shape is:
       "configDirectory": "/profiles/claude-primary"
     }
   },
+  "trustedCommands": {
+    "service-tests": {
+      "command": "npm run test:service",
+      "executable": "npm",
+      "arguments": ["run", "test:service"]
+    }
+  },
   "pipelines": {
     "plan-execution": {
       "finalization": "auto",
+      "trustedChecks": ["service-tests"],
       "maxFixRoundsPerStep": 5,
       "roles": {
         "worker": {
@@ -161,6 +171,17 @@ repository-relative `SKILL.md` path; a missing or unsafe explicit path blocks
 the run. Runner configuration supplies the base value and a safe project
 overlay may replace it. The resolved selection is persisted with the other
 pipeline settings and is not reloaded on resume.
+
+`trustedCommands` is runner-only configuration. Each lowercase alias binds one
+exact inventory command to one executable and argument vector; definitions
+cannot carry environment values. Plan execution's `trustedChecks` setting may
+select aliases, and an ignored project configuration may replace that
+selection, but project configuration cannot define an alias, binary, argument,
+environment value, or new host command. The default selection is empty. Before
+agent work, the root resolves it into an immutable snapshot containing every
+selected vector, deterministic command identities, an ordered command
+fingerprint, and a trusted-configuration fingerprint. Resume uses that durable
+snapshot without reloading either configuration source.
 
 ## Run Lifecycle
 
@@ -408,6 +429,14 @@ maps its native structured-output failure to the shared bounded
 class, and plan execution turns it into the bounded semantic diagnostic only
 after read-only mutation checks complete.
 
+Plan execution state version 5 adds the resolved trusted-validation snapshot
+and executor provenance to every accepted per-check result. Its version-4
+migration selects empty legacy trust and invalidates active finalization and
+review gates through the existing independent validation-migration checkpoint.
+Immutable terminal evidence is shape-upgraded, and a consumed one-shot commit
+authorization remains on its verification-only path; migration never makes it
+replayable.
+
 Common run-envelope version 3 adds `activeTurn`, either `null` or the current
 bounded `{ role, phase }`. Version-1 and version-2 runs project it as `null`
 without rewriting state or history; the next mutating continuation persists the
@@ -498,6 +527,41 @@ depend on a prior session. Reviewer rejection remains a finding. Commands and
 repository-relative infrastructure paths are validated and compared without
 rewriting interior whitespace. Host-reported results and user attestations are
 outside this trust boundary.
+
+A selected runner-trusted command is the only exception to agent-side check
+execution. Bootstrap inventories must contain its exact configured command.
+The finalization agent returns `NOT_RUN` only for those selected entries; after
+the agent turn reconciles, the root executor replaces each placeholder by
+running the exact persisted executable/argument vector directly without a
+shell. On Linux it requires bubblewrap and runs with a private network
+namespace. Before agent work, the root resolves bubblewrap only from fixed
+system locations to a canonical absolute executable whose file and ancestor
+directories are not writable by the runner identity. Project-relative or
+project-writable `PATH` entries never participate, and resume and execution
+reverify the pinned path. The namespace contains minimal read-only system and
+repository mounts, private temporary storage, a hidden ambient home, private
+runtime storage, and a finite non-credential environment. Isolated loopback
+listeners remain available inside the command namespace, but raw host Unix
+daemon and control sockets are masked.
+A Docker daemon must be rootless, and every service must be command-owned inside
+the same mount, network, and PID namespaces, so it cannot gain host mounts or
+networking and is retired with the complete process tree. Remote network and
+filesystem writes, hosting credentials, Git credential helpers, and ambient
+authentication variables are unavailable. A private PID namespace and an outer
+process group provide bounded TERM/KILL retirement before reconciliation. A
+one-byte readiness signal emitted inside the completed isolation profile
+distinguishes setup denial from an executed check failure without exposing
+native output. The runner retains no stdout or stderr and records only bounded
+status, exit/signal/timeout data, command identity, and fixed evidence. A full
+Git snapshot before and after each command rejects workspace, index,
+history/ref, remote-configuration, or identity mutation, and the complete
+validation-infrastructure fingerprint is recomputed after trusted execution.
+Missing isolation, an unterminated process tree, skipped, changed,
+non-allowlisted, substituted, unmatched, or fingerprint-drifting checks fail
+closed. The final evidence tuple binds agent and runner results to the same
+content, validation-infrastructure, ordered-command, and trusted-configuration
+fingerprints. This service does not broaden any agent turn's sandbox and
+introduces no daemon or shell DSL.
 
 Before plan execution accepts a bootstrap, reconciliation, arbitration, or
 legacy validation-migration inventory, the root Git boundary verifies every

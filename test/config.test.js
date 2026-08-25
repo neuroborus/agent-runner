@@ -20,6 +20,7 @@ import {
   ConfigurationError,
   createGitService,
   DEFAULT_ARTIFACT_ROOT,
+  getPipeline,
   loadProjectConfiguration,
   loadRunnerConfiguration,
   parseProjectConfiguration,
@@ -60,6 +61,7 @@ test("tracked example is valid and local configuration is ignored", async () => 
   assert.equal(configuration.defaultProfile, "current");
   assert.equal(configuration.defaultModel, "current");
   assert.equal(configuration.defaultContextSize, "current");
+  assert.deepEqual(configuration.trustedCommands, {});
   assert.deepEqual(configuration.pipelines["plan-authoring"].roles.reviewer, {
     backend: "claude",
     profile: "claude-primary",
@@ -95,6 +97,7 @@ test("minimal configuration uses pipeline-owned setting defaults", () => {
   assert.equal(configuration.artifactRoot, DEFAULT_ARTIFACT_ROOT);
   assert.equal(configuration.issueReporting, true);
   assert.deepEqual(configuration.profiles, {});
+  assert.deepEqual(configuration.trustedCommands, {});
   assert.deepEqual(configuration.pipelines["plan-authoring"], {
     maxRevisionRounds: 15,
     stagnationWindowRounds: 3,
@@ -106,6 +109,7 @@ test("minimal configuration uses pipeline-owned setting defaults", () => {
     maxDisputesPerFinding: 2,
     maxSameFindingRounds: 3,
     stagnationWindowRounds: 3,
+    trustedChecks: [],
     roles: {},
   });
   assert.deepEqual(configuration.pipelines.polishing, {
@@ -137,6 +141,19 @@ test("configuration rejects unsupported shapes and values", () => {
       /defaultProfile selects unknown profile/u,
     ],
     ['{"schemaVersion":1,"profiles":[]}', /profiles must be an object/u],
+    ['{"schemaVersion":1,"trustedCommands":[]}', /trustedCommands must be an object/u],
+    [
+      '{"schemaVersion":1,"trustedCommands":{"service":{"command":"npm test","executable":"npm","arguments":["test"],"environment":{}}}}',
+      /Trusted command service is invalid/u,
+    ],
+    [
+      '{"schemaVersion":1,"trustedCommands":{"service":{"command":"npm\\ttest","executable":"npm","arguments":["test"]}}}',
+      /Trusted command service command is invalid/u,
+    ],
+    [
+      '{"schemaVersion":1,"trustedCommands":{"service":{"command":"npm test","executable":"npm","arguments":["--flag\\tvalue"]}}}',
+      /Trusted command service argument 1 is invalid/u,
+    ],
     [
       '{"schemaVersion":1,"profiles":{"current":{"backend":"codex","profile":"work"}}}',
       /profile names/u,
@@ -356,7 +373,9 @@ test("role resolution applies CLI, role, runner, and native defaults", () => {
     maxDisputesPerFinding: 2,
     maxSameFindingRounds: 3,
     stagnationWindowRounds: 3,
+    trustedChecks: [],
   });
+  assert.deepEqual(resolved.trustedValidation.commands, []);
   assert.ok(Object.isFrozen(resolved));
   assert.ok(Object.isFrozen(resolved.roles));
   assert.ok(Object.isFrozen(resolved.settings));
@@ -490,6 +509,19 @@ test("project configuration rejects untrusted and unsafe fields", () => {
     [{ credentials: {} }, /credentials/u],
     [{ binary: "/usr/bin/codex" }, /binary/u],
     [{ environment: {} }, /environment/u],
+    [{ trustedCommands: {} }, /trustedCommands/u],
+    [
+      {
+        pipelines: {
+          "plan-execution": {
+            trustedChecks: [
+              { alias: "service", executable: "npm", arguments: ["test"] },
+            ],
+          },
+        },
+      },
+      /trustedChecks must be an array of unique trusted command aliases/u,
+    ],
     [{ pipelines: null }, /pipelines must be an object/u],
     [{ artifactRoot: "/outside" }, /artifactRoot/u],
     [{ artifactRoot: "C:/outside" }, /artifactRoot/u],
@@ -511,6 +543,90 @@ test("project configuration rejects untrusted and unsafe fields", () => {
       message,
     );
   }
+});
+
+test("only runner configuration defines exact trusted command vectors", () => {
+  const runnerConfiguration = parseRunnerConfiguration(
+    JSON.stringify({
+      schemaVersion: 1,
+      defaultBackend: "codex",
+      trustedCommands: {
+        "service-check": {
+          command: "npm run test:service",
+          executable: "/opt/validation  tools/npm",
+          arguments: ["run", "  test:service  "],
+        },
+      },
+    }),
+  );
+  const projectConfiguration = parseProjectConfiguration(
+    JSON.stringify({
+      schemaVersion: 1,
+      pipelines: {
+        "plan-execution": {
+          trustedChecks: ["service-check"],
+        },
+      },
+    }),
+    runnerConfiguration,
+  );
+
+  const resolved = resolvePipelineConfiguration(
+    "plan-execution",
+    runnerConfiguration,
+    {},
+    {},
+    null,
+    projectConfiguration,
+  );
+
+  assert.deepEqual(resolved.settings.trustedChecks, ["service-check"]);
+  assert.deepEqual(resolved.trustedValidation.commands[0], {
+    alias: "service-check",
+    command: "npm run test:service",
+    executable: "/opt/validation  tools/npm",
+    arguments: ["run", "  test:service  "],
+    identity: resolved.trustedValidation.commands[0].identity,
+  });
+  assert.match(
+    resolved.trustedValidation.commands[0].identity,
+    /^[a-f0-9]{64}$/u,
+  );
+  assert.match(
+    resolved.trustedValidation.commandFingerprint,
+    /^[a-f0-9]{64}$/u,
+  );
+  assert.match(
+    resolved.trustedValidation.configurationFingerprint,
+    /^[a-f0-9]{64}$/u,
+  );
+  assert.ok(Object.isFrozen(resolved.trustedValidation.commands));
+  const state = getPipeline("plan-execution").workflow.createState({
+    settings: resolved.settings,
+    trustedValidation: resolved.trustedValidation,
+  });
+  assert.equal(
+    state.trustedValidation.commands[0].executable,
+    "/opt/validation  tools/npm",
+  );
+  assert.equal(
+    state.trustedValidation.commands[0].arguments[1],
+    "  test:service  ",
+  );
+
+  assert.throws(
+    () =>
+      parseProjectConfiguration(
+        JSON.stringify({
+          schemaVersion: 1,
+          pipelines: {
+            "plan-execution": { trustedChecks: ["missing"] },
+          },
+        }),
+        runnerConfiguration,
+      ),
+    (error) => error.code === "ERR_UNKNOWN_TRUSTED_COMMAND",
+  );
 });
 
 test("loads only ignored confined project configuration files", async (t) => {

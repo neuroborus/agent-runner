@@ -58,6 +58,7 @@ const PIPELINE_STATE_FIELDS = new Set([
   "requiredChecks",
   "validationInfrastructure",
   "validationInfrastructureFingerprint",
+  "trustedValidation",
   "validationMigrationPending",
   "reviewResult",
   "reviewedFingerprint",
@@ -185,15 +186,41 @@ const ARBITRATION_RESULT_FIELDS = Object.freeze([
   "evidence",
 ]);
 const REQUIRED_CHECK_FIELDS = Object.freeze(["id", "command"]);
+const PERSISTED_CHECK_RESULT_FIELDS = Object.freeze([
+  "checkId",
+  "command",
+  "status",
+  "evidence",
+  "executor",
+  "commandIdentity",
+  "exitCode",
+  "signal",
+  "timedOut",
+]);
+const TRUSTED_COMMAND_FIELDS = Object.freeze([
+  "alias",
+  "command",
+  "executable",
+  "arguments",
+  "identity",
+]);
+const TRUSTED_VALIDATION_FIELDS = Object.freeze([
+  "schemaVersion",
+  "commands",
+  "commandFingerprint",
+  "configurationFingerprint",
+]);
+const TRUSTED_ALIAS_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const SETTINGS_FIELDS = Object.freeze([
   "finalization",
   "maxFixRoundsPerStep",
   "maxDisputesPerFinding",
   "maxSameFindingRounds",
   "stagnationWindowRounds",
+  "trustedChecks",
 ]);
 const NUMERIC_SETTINGS_FIELDS = SETTINGS_FIELDS.filter(
-  (field) => field !== "finalization",
+  (field) => !["finalization", "trustedChecks"].includes(field),
 );
 const EDIT_PAUSE_REASONS = Object.freeze({
   "clarification-answers": "clarification_answers_required",
@@ -272,6 +299,139 @@ export function workflowError(
 export function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
+
+function trustedCommandIdentity(command) {
+  return sha256(
+    JSON.stringify({
+      alias: command.alias,
+      command: command.command,
+      executable: command.executable,
+      arguments: command.arguments,
+    }),
+  );
+}
+
+function trustedValidationFingerprints(commands) {
+  return Object.freeze({
+    commandFingerprint: sha256(
+      JSON.stringify(commands.map(({ identity }) => identity)),
+    ),
+    configurationFingerprint: sha256(
+      JSON.stringify({
+        schemaVersion: 1,
+        commands: commands.map(
+          ({ alias, command, executable, arguments: argumentsList }) => ({
+            alias,
+            command,
+            executable,
+            arguments: argumentsList,
+          }),
+        ),
+      }),
+    ),
+  });
+}
+
+function normalizeExactVectorText(
+  value,
+  name,
+  { allowEmpty = false, requireTrimmed = false } = {},
+) {
+  if (
+    typeof value !== "string" ||
+    (!allowEmpty && value.length === 0) ||
+    characterLength(value) > MAX_TEXT_LENGTH ||
+    /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(value) ||
+    (requireTrimmed && value.trim() !== value)
+  ) {
+    throw workflowError(`${name} is invalid.`);
+  }
+  return value;
+}
+
+function normalizeTrustedValidation(value) {
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, TRUSTED_VALIDATION_FIELDS) ||
+    value.schemaVersion !== 1 ||
+    !Array.isArray(value.commands) ||
+    value.commands.length > MAX_ITEMS ||
+    !HASH_PATTERN.test(value.commandFingerprint) ||
+    !HASH_PATTERN.test(value.configurationFingerprint)
+  ) {
+    throw workflowError("Plan-execution trusted validation is invalid.");
+  }
+  const commands = Object.freeze(
+    value.commands.map((command, index) => {
+      if (
+        !isRecord(command) ||
+        !hasExactFields(command, TRUSTED_COMMAND_FIELDS) ||
+        !TRUSTED_ALIAS_PATTERN.test(command.alias) ||
+        !Array.isArray(command.arguments) ||
+        command.arguments.length > 64 ||
+        !HASH_PATTERN.test(command.identity)
+      ) {
+        throw workflowError(
+          `Plan-execution trusted command ${index + 1} is invalid.`,
+        );
+      }
+      const normalized = Object.freeze({
+        alias: command.alias,
+        command: normalizeExactVectorText(
+          command.command,
+          `trusted command ${command.alias} command`,
+          { requireTrimmed: true },
+        ),
+        executable: normalizeExactVectorText(
+          command.executable,
+          `trusted command ${command.alias} executable`,
+          { requireTrimmed: true },
+        ),
+        arguments: Object.freeze(
+          command.arguments.map((argument) =>
+            normalizeExactVectorText(
+              argument,
+              `trusted command ${command.alias} argument`,
+              { allowEmpty: true },
+            ),
+          ),
+        ),
+        identity: command.identity,
+      });
+      if (trustedCommandIdentity(normalized) !== command.identity) {
+        throw workflowError(
+          `Plan-execution trusted command ${command.alias} identity is invalid.`,
+        );
+      }
+      return normalized;
+    }),
+  );
+  if (
+    new Set(commands.map(({ alias }) => alias)).size !== commands.length ||
+    new Set(commands.map(({ command }) => command)).size !== commands.length ||
+    new Set(commands.map(({ identity }) => identity)).size !== commands.length
+  ) {
+    throw workflowError("Plan-execution trusted commands must be unique.");
+  }
+  const fingerprints = trustedValidationFingerprints(commands);
+  if (
+    value.commandFingerprint !== fingerprints.commandFingerprint ||
+    value.configurationFingerprint !== fingerprints.configurationFingerprint
+  ) {
+    throw workflowError(
+      "Plan-execution trusted validation fingerprint is invalid.",
+    );
+  }
+  return Object.freeze({ schemaVersion: 1, commands, ...fingerprints });
+}
+
+export const EMPTY_TRUSTED_VALIDATION = Object.freeze(
+  normalizeTrustedValidation({
+    schemaVersion: 1,
+    commands: Object.freeze([]),
+    ...trustedValidationFingerprints([]),
+  }),
+);
 
 function outputConstraint(field, constraint) {
   return Object.freeze({ field, constraint });
@@ -1061,7 +1221,12 @@ function normalizeValidationInfrastructure(value, code) {
   return paths;
 }
 
-function normalizeCheckResults(value, requiredChecks, code) {
+function normalizeCheckResults(
+  value,
+  requiredChecks,
+  code,
+  { trustedCommands = new Set() } = {},
+) {
   if (!Array.isArray(value) || value.length !== requiredChecks.length) {
     throw workflowError("Finalization check evidence is incomplete.", code);
   }
@@ -1071,7 +1236,10 @@ function normalizeCheckResults(value, requiredChecks, code) {
       if (
         !isRecord(result) ||
         result.checkId !== required.id ||
-        !["PASS", "FAIL", "BLOCKED", "NOT_RUN"].includes(result.status)
+        !["PASS", "FAIL", "BLOCKED", "NOT_RUN"].includes(result.status) ||
+        (trustedCommands.has(required.command)
+          ? result.status !== "NOT_RUN"
+          : result.status === "NOT_RUN")
       ) {
         throw workflowError("Finalization check evidence was substituted.", code);
       }
@@ -1232,7 +1400,10 @@ export function normalizeImplementationResult(payload) {
   });
 }
 
-export function normalizeFinalizationResult(payload) {
+export function normalizeFinalizationResult(
+  payload,
+  { trustedCommands = [] } = {},
+) {
   const statuses = [
     "PASS",
     "FAIL",
@@ -1245,6 +1416,13 @@ export function normalizeFinalizationResult(payload) {
     throw outputError("Worker returned an invalid finalization result.");
   }
   assertStructuredResultSize(payload);
+  const trustedCommandSet = new Set(trustedCommands);
+  if (
+    trustedCommandSet.size !== trustedCommands.length ||
+    trustedCommands.some((command) => typeof command !== "string")
+  ) {
+    throw workflowError("Trusted finalization commands are invalid.");
+  }
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
     if (
       payload.skillPath !== "" ||
@@ -1290,6 +1468,7 @@ export function normalizeFinalizationResult(payload) {
             payload.checks,
             requiredChecks,
             INVALID_OUTPUT_CODE,
+            { trustedCommands: trustedCommandSet },
           )
         : emptyArray(payload.checks)
           ? Object.freeze([])
@@ -1356,12 +1535,17 @@ export function normalizeFinalizationResult(payload) {
     payload.checks,
     requiredChecks,
     INVALID_OUTPUT_CODE,
+    { trustedCommands: trustedCommandSet },
   );
   if (
     (payload.status === "PASS" && issues.length !== 0) ||
     (payload.status === "FAIL" && issues.length === 0) ||
     (payload.status === "PASS" &&
-      checks.some(({ status }) => status !== "PASS")) ||
+      checks.some(
+        ({ command, status }) =>
+          status !== "PASS" &&
+          !(trustedCommandSet.has(command) && status === "NOT_RUN"),
+      )) ||
     (payload.status === "FAIL" &&
       !checks.some(({ status }) => status === "FAIL"))
   ) {
@@ -1876,6 +2060,8 @@ function normalizePersistedFinalization(value) {
       "validationInfrastructure",
       "validationInfrastructureFingerprint",
       "checks",
+      "trustedCommandFingerprint",
+      "trustedConfigurationFingerprint",
       "validationChanged",
       "fingerprint",
     ],
@@ -1903,7 +2089,9 @@ function normalizePersistedFinalization(value) {
     (value.status === "PASS" && issues.length !== 0) ||
     (value.status === "FAIL" && issues.length === 0) ||
     typeof value.validationChanged !== "boolean" ||
-    !HASH_PATTERN.test(value.validationInfrastructureFingerprint)
+    !HASH_PATTERN.test(value.validationInfrastructureFingerprint) ||
+    !HASH_PATTERN.test(value.trustedCommandFingerprint) ||
+    !HASH_PATTERN.test(value.trustedConfigurationFingerprint)
   ) {
     throw workflowError("Plan-execution finalization result is inconsistent.");
   }
@@ -1915,11 +2103,54 @@ function normalizePersistedFinalization(value) {
     value.validationInfrastructure,
     "ERR_INVALID_PLAN_EXECUTION_STATE",
   );
-  const checks = normalizeCheckResults(
-    value.checks,
-    requiredChecks,
-    "ERR_INVALID_PLAN_EXECUTION_STATE",
-  );
+  if (!Array.isArray(value.checks) || value.checks.length !== requiredChecks.length) {
+    throw workflowError("Plan-execution check evidence is incomplete.");
+  }
+  const checks = value.checks.map((check, index) => {
+    if (!isRecord(check) || !hasExactFields(check, PERSISTED_CHECK_RESULT_FIELDS)) {
+      throw workflowError("Plan-execution check evidence is invalid.");
+    }
+    const [normalized] = normalizeCheckResults(
+      [
+        {
+          checkId: check.checkId,
+          command: check.command,
+          status: check.status,
+          evidence: check.evidence,
+        },
+      ],
+      [requiredChecks[index]],
+      "ERR_INVALID_PLAN_EXECUTION_STATE",
+    );
+    const runnerResult = check.executor === "runner";
+    const validRunnerResult =
+      runnerResult &&
+      !check.timedOut &&
+      ((check.status === "PASS" &&
+        check.exitCode === 0 &&
+        check.signal === null) ||
+        (check.status === "FAIL" &&
+          (check.exitCode === null || check.exitCode !== 0) &&
+          (check.exitCode !== null || check.signal !== null)));
+    if (
+      !["agent", "runner"].includes(check.executor) ||
+      !["PASS", "FAIL"].includes(check.status) ||
+      typeof check.timedOut !== "boolean" ||
+      (runnerResult
+        ? !HASH_PATTERN.test(check.commandIdentity) ||
+          (check.exitCode !== null && !Number.isSafeInteger(check.exitCode)) ||
+          (check.signal !== null &&
+            (typeof check.signal !== "string" || check.signal.length > 32)) ||
+          !validRunnerResult
+        : check.commandIdentity !== null ||
+          check.exitCode !== null ||
+          check.signal !== null ||
+          check.timedOut)
+    ) {
+      throw workflowError("Plan-execution check executor evidence is invalid.");
+    }
+    return Object.freeze({ ...normalized, ...check });
+  });
   if (
     (value.status === "PASS" &&
       checks.some(({ status }) => status !== "PASS")) ||
@@ -2268,6 +2499,21 @@ export function normalizePipelineState(value) {
       value = { ...value, settings };
     }
   }
+  const trustedValidation = normalizeTrustedValidation(value.trustedValidation);
+  if (trustedValidation !== value.trustedValidation) {
+    value = { ...value, trustedValidation };
+  }
+  if (
+    value.settings !== null &&
+    !isDeepStrictEqual(
+      value.settings.trustedChecks,
+      trustedValidation.commands.map(({ alias }) => alias),
+    )
+  ) {
+    throw workflowError(
+      "Plan-execution trusted validation selection is inconsistent.",
+    );
+  }
   if (
     value.preflightComplete !== (value.repositoryBaseline !== null) ||
     value.preflightComplete !== (value.backendVersions !== null) ||
@@ -2478,7 +2724,21 @@ export function normalizePipelineState(value) {
   ) {
     throw workflowError("Plan-execution validation inventory is inconsistent.");
   }
+  if (
+    requiredChecks !== null &&
+    trustedValidation.commands.some(
+      ({ command }) =>
+        !requiredChecks.some((required) => required.command === command),
+    )
+  ) {
+    throw workflowError(
+      "Plan-execution validation inventory omits a trusted command.",
+    );
+  }
   if (finalizationResult !== null) {
+    const trustedCommands = new Map(
+      trustedValidation.commands.map((command) => [command.command, command]),
+    );
     const matchesEstablishedValidation =
       isDeepStrictEqual(finalizationResult.requiredChecks, requiredChecks) &&
       isDeepStrictEqual(
@@ -2487,6 +2747,23 @@ export function normalizePipelineState(value) {
       ) &&
       finalizationResult.validationInfrastructureFingerprint ===
         value.validationInfrastructureFingerprint;
+    if (
+      finalizationResult.trustedCommandFingerprint !==
+        trustedValidation.commandFingerprint ||
+      finalizationResult.trustedConfigurationFingerprint !==
+        trustedValidation.configurationFingerprint ||
+      finalizationResult.checks.some((check) => {
+        const trusted = trustedCommands.get(check.command);
+        return trusted === undefined
+          ? check.executor !== "agent" || check.commandIdentity !== null
+          : check.executor !== "runner" ||
+              check.commandIdentity !== trusted.identity;
+      })
+    ) {
+      throw workflowError(
+        "Plan-execution trusted finalization evidence is inconsistent.",
+      );
+    }
     const reviewedChange = reviewResult?.validationChange;
     if (
       (!finalizationResult.validationChanged &&
@@ -2887,6 +3164,7 @@ export function createPlanExecutionState({
   artifactRoot = "LOCAL_ARTIFACTS",
   proactiveClarification = false,
   settings = null,
+  trustedValidation = EMPTY_TRUSTED_VALIDATION,
 } = {}) {
   if (typeof proactiveClarification !== "boolean") {
     throw workflowError("proactiveClarification must be a boolean.");
@@ -2894,11 +3172,19 @@ export function createPlanExecutionState({
   if (settings !== null) {
     assertSettings(settings);
   }
+  const normalizedTrustedValidation =
+    normalizeTrustedValidation(trustedValidation);
   return Object.freeze(normalizePipelineState({
     workflowState: "CLARIFY",
     artifactRoot,
     preflightComplete: false,
-    settings: settings === null ? null : Object.freeze({ ...settings }),
+    settings:
+      settings === null
+        ? null
+        : Object.freeze({
+            ...settings,
+            trustedChecks: Object.freeze([...settings.trustedChecks]),
+          }),
     repositoryBaseline: null,
     backendVersions: null,
     proactiveClarification,
@@ -2925,6 +3211,7 @@ export function createPlanExecutionState({
     requiredChecks: null,
     validationInfrastructure: null,
     validationInfrastructureFingerprint: null,
+    trustedValidation: normalizedTrustedValidation,
     validationMigrationPending: false,
     reviewResult: null,
     reviewedFingerprint: null,
@@ -2993,7 +3280,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 4 ||
+    run.pipelineStateVersion !== 5 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -3316,11 +3603,25 @@ export function assertSettings(settings) {
   if (!isFinalizationPolicy(settings.finalization)) {
     throw workflowError("Plan-execution setting finalization is invalid.");
   }
+  if (!isTrustedCheckSelection(settings.trustedChecks)) {
+    throw workflowError("Plan-execution setting trustedChecks is invalid.");
+  }
   for (const field of NUMERIC_SETTINGS_FIELDS) {
     if (!Number.isSafeInteger(settings[field]) || settings[field] < 1) {
       throw workflowError(`Plan-execution setting ${field} is invalid.`);
     }
   }
+}
+
+export function isTrustedCheckSelection(value) {
+  return (
+    Array.isArray(value) &&
+    value.length <= MAX_ITEMS &&
+    new Set(value).size === value.length &&
+    value.every(
+      (alias) => typeof alias === "string" && TRUSTED_ALIAS_PATTERN.test(alias),
+    )
+  );
 }
 
 export function isFinalizationPolicy(value) {
@@ -3346,18 +3647,38 @@ export function isFinalizationPolicy(value) {
 }
 
 function normalizeSettings(settings) {
+  let normalized = settings;
   if (
-    isRecord(settings) &&
-    !Object.hasOwn(settings, "finalization") &&
-    Object.keys(settings).length === NUMERIC_SETTINGS_FIELDS.length &&
-    NUMERIC_SETTINGS_FIELDS.every((field) => Object.hasOwn(settings, field))
+    isRecord(normalized) &&
+    !Object.hasOwn(normalized, "finalization") &&
+    ((Object.keys(normalized).length === NUMERIC_SETTINGS_FIELDS.length &&
+      NUMERIC_SETTINGS_FIELDS.every((field) =>
+        Object.hasOwn(normalized, field),
+      )) ||
+      (Object.keys(normalized).length === SETTINGS_FIELDS.length - 1 &&
+        SETTINGS_FIELDS.filter((field) => field !== "finalization").every(
+          (field) => Object.hasOwn(normalized, field),
+        )))
   ) {
-    return Object.freeze({
+    normalized = Object.freeze({
       finalization: DEFAULT_FINALIZATION_POLICY,
-      ...settings,
+      ...normalized,
     });
   }
-  return settings;
+  if (
+    isRecord(normalized) &&
+    !Object.hasOwn(normalized, "trustedChecks") &&
+    Object.keys(normalized).length === SETTINGS_FIELDS.length - 1 &&
+    SETTINGS_FIELDS.filter((field) => field !== "trustedChecks").every(
+      (field) => Object.hasOwn(normalized, field),
+    )
+  ) {
+    normalized = Object.freeze({
+      ...normalized,
+      trustedChecks: Object.freeze([]),
+    });
+  }
+  return normalized;
 }
 
 export function assertRuntime(runtime) {
@@ -3365,7 +3686,9 @@ export function assertRuntime(runtime) {
     !isRecord(runtime) ||
     !isRecord(runtime.adapters) ||
     !isRecord(runtime.clarifications) ||
-    !isRecord(runtime.git)
+    !isRecord(runtime.git) ||
+    !isRecord(runtime.trustedValidation) ||
+    typeof runtime.trustedValidation.execute !== "function"
   ) {
     throw workflowError("Plan-execution runtime is invalid.");
   }

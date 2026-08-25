@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { BACKEND_IDS } from "./agents/index.js";
 import { getPipeline, listPipelines } from "./pipeline-registry.js";
+import { createTrustedValidationSnapshot } from "./trusted-validation.js";
 
 export const CONFIG_FILENAME = ".agent-runner.json";
 export const DEFAULT_ARTIFACT_ROOT = "LOCAL_ARTIFACTS";
@@ -30,10 +31,11 @@ const TOP_LEVEL_FIELDS = new Set([
   "issueReporting",
   "pipelines",
   "profiles",
+  "trustedCommands",
 ]);
 const PROJECT_TOP_LEVEL_FIELDS = new Set(
   [...TOP_LEVEL_FIELDS].filter(
-    (field) => !["issueReporting", "profiles"].includes(field),
+    (field) => !["issueReporting", "profiles", "trustedCommands"].includes(field),
   ),
 );
 const ROLE_FIELDS = new Set(["backend", "contextSize", "model", "profile"]);
@@ -164,6 +166,46 @@ function normalizeProfile(name, value) {
   });
 }
 
+function normalizeTrustedCommands(value) {
+  assertRecord(value, "configuration.trustedCommands");
+  try {
+    const snapshot = createTrustedValidationSnapshot(
+      value,
+      Object.keys(value),
+    );
+    return Object.freeze(
+      Object.fromEntries(
+        snapshot.commands.map(
+          ({ alias, command, executable, arguments: argumentsList }) => [
+            alias,
+            Object.freeze({
+              command,
+              executable,
+              arguments: argumentsList,
+            }),
+          ],
+        ),
+      ),
+    );
+  } catch (cause) {
+    throw new ConfigurationError(cause.message, { cause });
+  }
+}
+
+function assertKnownTrustedSelection(settings, trustedCommands, path) {
+  if (!Object.hasOwn(settings, "trustedChecks")) {
+    return;
+  }
+  try {
+    createTrustedValidationSnapshot(trustedCommands, settings.trustedChecks);
+  } catch (cause) {
+    throw new ConfigurationError(`${path}.trustedChecks is invalid: ${cause.message}`, {
+      cause,
+      code: cause.code,
+    });
+  }
+}
+
 function normalizePipeline(
   pipeline,
   input,
@@ -190,7 +232,9 @@ function normalizePipeline(
         `${path}.${settingName} ${definition.errorMessage}.`,
       );
     }
-    normalized[settingName] = resolvedValue;
+    normalized[settingName] = Array.isArray(resolvedValue)
+      ? Object.freeze([...resolvedValue])
+      : resolvedValue;
   }
 
   const inputRoles = input.roles === undefined ? {} : input.roles;
@@ -263,6 +307,9 @@ function normalizeConfiguration(input) {
       ]),
     ),
   );
+  const trustedCommands = normalizeTrustedCommands(
+    input.trustedCommands === undefined ? {} : input.trustedCommands,
+  );
 
   const inputPipelines = input.pipelines === undefined ? {} : input.pipelines;
   assertRecord(inputPipelines, "configuration.pipelines");
@@ -285,6 +332,7 @@ function normalizeConfiguration(input) {
     defaultModel: input.defaultModel ?? CURRENT,
     defaultContextSize: input.defaultContextSize ?? CURRENT,
     profiles,
+    trustedCommands,
     pipelines: Object.freeze(
       Object.fromEntries(
         pipelines.map((pipeline) => [
@@ -324,6 +372,13 @@ function normalizeConfiguration(input) {
         { code: "ERR_UNKNOWN_PROFILE" },
       );
     }
+  }
+  for (const pipeline of pipelines) {
+    assertKnownTrustedSelection(
+      normalized.pipelines[pipeline.id],
+      trustedCommands,
+      `configuration.pipelines.${pipeline.id}`,
+    );
   }
 
   return Object.freeze(normalized);
@@ -425,6 +480,16 @@ function normalizeProjectConfiguration(input, runnerConfiguration) {
       throw new ConfigurationError(
         `${path} selects unknown trusted profile: ${selection}.`,
         { code: "ERR_UNKNOWN_PROFILE" },
+      );
+    }
+  }
+  for (const pipeline of pipelines) {
+    const settings = normalized.pipelines[pipeline.id];
+    if (settings !== undefined) {
+      assertKnownTrustedSelection(
+        settings,
+        runnerConfiguration.trustedCommands,
+        `${rootPath}.pipelines.${pipeline.id}`,
       );
     }
   }
@@ -840,14 +905,30 @@ export function resolvePipelineConfiguration(
   const { roles: _roles, ...runnerSettings } = pipelineConfiguration;
   const { roles: _projectRoles, ...projectSettings } =
     projectPipelineConfiguration;
+  const settings = Object.freeze({ ...runnerSettings, ...projectSettings });
+  let trustedValidation;
+  if (Object.hasOwn(settings, "trustedChecks")) {
+    try {
+      trustedValidation = createTrustedValidationSnapshot(
+        normalizedConfiguration.trustedCommands,
+        settings.trustedChecks,
+      );
+    } catch (cause) {
+      throw new ConfigurationError(cause.message, {
+        cause,
+        code: cause.code,
+      });
+    }
+  }
   return Object.freeze({
     artifactRoot:
       normalizedProjectConfiguration?.artifactRoot ??
       normalizedConfiguration.artifactRoot,
     pipelineId,
     roles: Object.freeze(resolvedRoles),
-    settings: Object.freeze({ ...runnerSettings, ...projectSettings }),
+    settings,
     sourceProfile:
       sourceProfile === null ? null : normalizedSourceSession.profile,
+    ...(trustedValidation === undefined ? {} : { trustedValidation }),
   });
 }

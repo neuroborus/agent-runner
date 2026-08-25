@@ -137,7 +137,11 @@ test("finalization and dispute prompts preserve their narrow roles", () => {
   );
   assert.match(
     FINALIZATION_INSTRUCTIONS,
-    /Use PASS only after every established required check succeeds/u,
+    /Use PASS only after every agent-executed required check succeeds/u,
+  );
+  assert.match(
+    FINALIZATION_INSTRUCTIONS,
+    /Return NOT_RUN only for a command explicitly listed as runner-trusted/u,
   );
   assert.match(FINALIZATION_INSTRUCTIONS, /sandbox, IPC, loopback/u);
   assert.match(FINALIZATION_INSTRUCTIONS, /Do not weaken sandboxing/u);

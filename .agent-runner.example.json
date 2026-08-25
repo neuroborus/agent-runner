@@ -6,6 +6,7 @@
   "defaultProfile": "current",
   "defaultModel": "current",
   "defaultContextSize": "current",
+  "trustedCommands": {},
   "profiles": {
     "codex-work": {
       "backend": "codex",
@@ -40,6 +41,7 @@
       "maxDisputesPerFinding": 2,
       "maxSameFindingRounds": 3,
       "stagnationWindowRounds": 3,
+      "trustedChecks": [],
       "roles": {
         "worker": {},
         "reviewer": {

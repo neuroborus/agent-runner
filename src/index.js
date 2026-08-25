@@ -41,3 +41,9 @@ export {
   RUN_STATE_SCHEMA_VERSION,
   RunStoreError,
 } from "./state.js";
+export {
+  createTrustedValidationService,
+  createTrustedValidationSnapshot,
+  TrustedValidationError,
+  validateTrustedValidationSnapshot,
+} from "./trusted-validation.js";

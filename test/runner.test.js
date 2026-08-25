@@ -905,6 +905,130 @@ test("prepares a durable run and submits identified input before continuation", 
   );
 });
 
+test("resumes plan execution from its durable trusted-command snapshot", async (t) => {
+  const fixture = await createFixture(t);
+  await writeFile(join(fixture.projectPath, ".gitignore"), "/LOCAL_ARTIFACTS/\n");
+  await writeFile(join(fixture.projectPath, "source.js"), "export const value = 1;\n");
+  await writeFile(join(fixture.taskPath, "plan.md"), PLAN);
+  await executeFile("git", ["-C", fixture.projectPath, "config", "user.name", "Test"]);
+  await executeFile("git", [
+    "-C",
+    fixture.projectPath,
+    "config",
+    "user.email",
+    "test@example.com",
+  ]);
+  await executeFile("git", ["-C", fixture.projectPath, "add", "."]);
+  await executeFile("git", [
+    "-C",
+    fixture.projectPath,
+    "commit",
+    "-qm",
+    "test: fixture",
+  ]);
+  const configuration = {
+    schemaVersion: 1,
+    defaultBackend: "codex",
+    trustedCommands: {
+      "service-check": {
+        command: "npm run test:service",
+        executable: "npm",
+        arguments: ["run", "test:service"],
+      },
+    },
+    pipelines: {
+      "plan-execution": { trustedChecks: ["service-check"] },
+    },
+  };
+  let configurationLoads = 0;
+  const trustedPreflights = [];
+  const trustedValidation = {
+    async execute() {
+      throw new Error("Trusted validation unexpectedly executed.");
+    },
+    async preflight(options) {
+      trustedPreflights.push(options);
+    },
+  };
+  const runStore = createRunStore({ stateRoot: fixture.stateRoot });
+  const adapter = {
+    async probe() {
+      return {
+        version: "fake-1.0.0",
+        structuredOutput: true,
+        readOnly: true,
+        autonomousWrite: true,
+        workspaceWrite: true,
+        localCommit: true,
+        remoteWriteBlocked: true,
+        nativeSessionContinuation: true,
+        nativeSessionFork: true,
+      };
+    },
+    async run() {
+      return {
+        output: "structured",
+        structured: {
+          status: "PLAN_REVISION_REQUIRED",
+          questions: [],
+          reason: "The durable test intentionally stops before bootstrap.",
+          question: "",
+          options: [],
+          whyBlocked: "",
+          evidence: ["No provider continuation is required."],
+        },
+        sessionId: PLANNER_SESSION,
+      };
+    },
+  };
+  const firstRunner = createRunner({
+    adapters: { codex: adapter },
+    clarifications: createClarificationService({ interactive: false }),
+    git: createGitService(),
+    async loadConfiguration() {
+      configurationLoads += 1;
+      return parseRunnerConfiguration(JSON.stringify(configuration));
+    },
+    runStore,
+    trustedValidation,
+  });
+  const prepared = await firstRunner.create(
+    {
+      pipelineId: "plan-execution",
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+      proactiveClarification: false,
+      roleOverrides: {},
+      sourceSession: null,
+    },
+    { runId: PREPARED_RUN },
+  );
+  const durableSnapshot = prepared.run.pipelineState.trustedValidation;
+  assert.equal(configurationLoads, 1);
+
+  const resumed = await createRunner({
+    adapters: { codex: adapter },
+    clarifications: createClarificationService({ interactive: false }),
+    git: createGitService(),
+    async loadConfiguration() {
+      throw new Error("Resume reloaded runner configuration.");
+    },
+    runStore,
+    trustedValidation,
+  }).resume({ runId: PREPARED_RUN, action: null });
+
+  assert.equal(resumed.run.pause.reason, "plan_revision_required");
+  assert.deepEqual(
+    resumed.run.pipelineState.trustedValidation,
+    durableSnapshot,
+  );
+  assert.equal(configurationLoads, 1);
+  assert.deepEqual(trustedPreflights, [
+    { projectPath: fixture.projectPath },
+    { projectPath: fixture.projectPath },
+  ]);
+});
+
 test("submits input previewed from a compatible legacy run", async (t) => {
   const fixture = await createFixture(t);
   const runner = runnerFor(fixture, {

@@ -86,7 +86,7 @@ Otherwise, return each FIX or DISPUTE decision using the provided schema.`;
 export const FINALIZATION_INSTRUCTIONS = `Run the complete project finalization procedure in this dedicated turn, including project-required formatting or generated output, and report its result using the provided schema.
 
 Do not perform unrelated fixes, stage changes, or create a commit.
-Use PASS only after every established required check succeeds without being skipped, excluded, substituted, replaced, or weakened. Return the complete requiredChecks and validationInfrastructure actually used, and exactly one ordered checks entry for every required check with bounded direct evidence. Do not use host-reported or user-attested results.
+Use PASS only after every agent-executed required check succeeds without being skipped, excluded, substituted, replaced, or weakened. Return the complete requiredChecks and validationInfrastructure actually used, and exactly one ordered checks entry for every required check with bounded direct evidence. Return NOT_RUN only for a command explicitly listed as runner-trusted in the turn context; the runner executes that persisted vector before it accepts the gate. Do not use any other host-reported or user-attested results.
 Changes to package scripts, test discovery, test runners, validation configuration, the check inventory, or its infrastructure paths are allowed only when this planned commit requires them; never make them merely to evade an environmental blocker.
 Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
 For PASS, provide summary; set issues, options, and evidence to []; set reason, question, and whyBlocked to "".

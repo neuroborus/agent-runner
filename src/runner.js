@@ -22,6 +22,7 @@ import {
   RUNTIME_COMPATIBILITY_TOKEN,
   RUN_STATE_SCHEMA_VERSION,
 } from "./state.js";
+import { createTrustedValidationService } from "./trusted-validation.js";
 
 const BACKENDS = new Set(BACKEND_IDS);
 const WORKTREE_LEASE_PIPELINES = new Set([
@@ -60,6 +61,7 @@ const RUNNER_OPTION_FIELDS = new Set([
   "loadConfiguration",
   "onActivity",
   "runStore",
+  "trustedValidation",
 ]);
 
 export class RunnerError extends Error {
@@ -603,13 +605,18 @@ export function createRunner(options = {}) {
     options.loadConfiguration ?? loadRunnerConfiguration;
   const onActivity = options.onActivity ?? (async () => {});
   const runStore = options.runStore ?? createRunStore();
+  const trustedValidation =
+    options.trustedValidation ?? createTrustedValidationService({ git });
   if (
     !isRecord(adapters) ||
     !isRecord(clarifications) ||
     !isRecord(git) ||
     typeof loadConfiguration !== "function" ||
     typeof onActivity !== "function" ||
-    !isRecord(runStore)
+    !isRecord(runStore) ||
+    !isRecord(trustedValidation) ||
+    typeof trustedValidation.preflight !== "function" ||
+    typeof trustedValidation.execute !== "function"
   ) {
     throw new RunnerError("Runner services are invalid.", {
       code: "ERR_INVALID_RUNNER_OPTIONS",
@@ -635,6 +642,7 @@ export function createRunner(options = {}) {
       adapters: selectedAdapters,
       clarifications,
       git,
+      trustedValidation,
       readInputs: ({ taskPath }) => readInputs(pipeline, taskPath),
       async startAgentTurn(activeTurn) {
         const current = await runStore.loadRun(run.runId);
@@ -859,6 +867,9 @@ export function createRunner(options = {}) {
       });
     }
     validateSourceRoles(pipeline, resolved.roles, normalized.sourceSession);
+    if ((resolved.trustedValidation?.commands.length ?? 0) > 0) {
+      await trustedValidation.preflight({ projectPath });
+    }
     await probeRequiredRoles(
       pipeline,
       resolved.roles,
@@ -869,6 +880,9 @@ export function createRunner(options = {}) {
       artifactRoot: resolved.artifactRoot,
       proactiveClarification: normalized.proactiveClarification,
       settings: resolved.settings,
+      ...(resolved.trustedValidation === undefined
+        ? {}
+        : { trustedValidation: resolved.trustedValidation }),
     });
     const created = await runStore.createRun({
       ...(createOptions.runId === undefined
@@ -936,6 +950,9 @@ export function createRunner(options = {}) {
         lease,
         normalized.runId,
       );
+      if ((recovered.pipelineState.trustedValidation?.commands.length ?? 0) > 0) {
+        await trustedValidation.preflight({ projectPath: recovered.projectPath });
+      }
       if (
         recovered.pipelineState.workflowState === "WAITING_FOR_USER" ||
         normalized.action !== null
