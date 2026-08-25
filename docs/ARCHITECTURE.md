@@ -299,6 +299,18 @@ run ID, an opaque token, process ID, hostname, and acquisition time. Empty key
 directories may remain after release; ownership exists only while `.lease` is
 present.
 
+Run, canonical-worktree, reclaiming, and MCP action leases share one durable
+no-replace publication primitive. It writes and syncs the complete JSON record
+to an isolated in-directory temporary file, atomically links that inode at the
+lease path only when the path is absent, removes the temporary link, and syncs
+the directory before acquisition returns. A lock-free reader therefore treats
+an unpublished lease as absent and parses only a complete record. If it meets
+the bounded internal link between publication and cleanup, including after an
+interrupted publisher, it removes only the matching same-directory temporary
+link to restore the isolated final file; unrecognized or persistent hard links
+remain unsafe. Exclusive contention, stale-owner recovery, and release all use
+the published record and continue to verify its opaque owner token.
+
 `state.json` contains the common versioned envelope: monotonic revision,
 pipeline ID and state version, an explicit runtime-compatibility tuple,
 canonical paths, resolved roles, counters, hashes, pause state, session

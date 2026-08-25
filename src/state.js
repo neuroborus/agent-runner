@@ -199,6 +199,7 @@ export function createRunStore({
   processId = process.pid,
   processIsAlive = defaultProcessIsAlive,
   leaseStaleMs = DEFAULT_LEASE_STALE_MS,
+  onLeasePublicationBoundary = async () => {},
   onTransitionBoundary = async () => {},
 } = {}) {
   if (typeof stateRoot !== "string" || !isAbsolute(stateRoot)) {
@@ -211,6 +212,7 @@ export function createRunStore({
     typeof runIdFactory !== "function" ||
     typeof leaseTokenFactory !== "function" ||
     typeof processIsAlive !== "function" ||
+    typeof onLeasePublicationBoundary !== "function" ||
     typeof onTransitionBoundary !== "function" ||
     typeof hostName !== "string" ||
     hostName.length === 0 ||
@@ -260,6 +262,7 @@ export function createRunStore({
     hostName,
     processId,
     processIsAlive,
+    onPublicationBoundary: onLeasePublicationBoundary,
     staleMs: leaseStaleMs,
     timestamp,
     tokenFactory: leaseTokenFactory,
@@ -274,6 +277,7 @@ export function createRunStore({
     leaseSubject: (runId) => `Run ${runId}'s Git worktree`,
     processId,
     processIsAlive,
+    onPublicationBoundary: onLeasePublicationBoundary,
     reclaimingLeaseDescription: "Reclaiming worktree lease",
     requireMatchingRunId: false,
     staleMs: leaseStaleMs,
@@ -285,6 +289,7 @@ export function createRunStore({
     hostName,
     processId,
     processIsAlive,
+    onPublicationBoundary: onLeasePublicationBoundary,
     stateRoot: requestedStateRoot,
     tokenFactory: leaseTokenFactory,
   });

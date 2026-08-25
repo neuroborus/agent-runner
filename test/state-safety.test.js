@@ -3,6 +3,7 @@ import {
   access,
   appendFile,
   link,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -17,6 +18,37 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { createRunStore, RunStoreError } from "../src/index.js";
+
+function createPublicationBarrier() {
+  let pending;
+  return {
+    async onBoundary(boundary) {
+      if (pending === undefined || !pending.matches(boundary)) {
+        return;
+      }
+      const current = pending;
+      pending = undefined;
+      current.reached(boundary);
+      await current.continuation;
+    },
+    pause(matches) {
+      let continuePublication;
+      let publicationReached;
+      const reached = new Promise((resolve) => {
+        publicationReached = resolve;
+      });
+      const continuation = new Promise((resolve) => {
+        continuePublication = resolve;
+      });
+      pending = {
+        continuation,
+        matches,
+        reached: publicationReached,
+      };
+      return { reached, release: continuePublication };
+    },
+  };
+}
 
 function runInput(projectPath, taskPath, overrides = {}) {
   return {
@@ -47,12 +79,17 @@ async function createFixture(t, storeOptions = {}) {
 }
 
 test("rejects invalid run-store options", async (t) => {
-  assert.throws(
-    () => createRunStore({ hostName: "invalid\nhost" }),
-    (error) =>
-      error instanceof RunStoreError &&
-      error.code === "ERR_INVALID_RUN_STORE_OPTIONS",
-  );
+  for (const options of [
+    { hostName: "invalid\nhost" },
+    { onLeasePublicationBoundary: null },
+  ]) {
+    assert.throws(
+      () => createRunStore(options),
+      (error) =>
+        error instanceof RunStoreError &&
+        error.code === "ERR_INVALID_RUN_STORE_OPTIONS",
+    );
+  }
   await assert.rejects(
     createFixture(t, { clock: () => Symbol("invalid") }),
     (error) =>
@@ -164,6 +201,61 @@ test("keeps status lock-free and rejects concurrent mutating ownership", async (
   );
 });
 
+test("publishes a complete run lease before contention can observe it", async (t) => {
+  const barrier = createPublicationBarrier();
+  const { created, stateRoot, store } = await createFixture(t, {
+    onLeasePublicationBoundary: (boundary) => barrier.onBoundary(boundary),
+  });
+  await created.lease.release();
+  const leasePath = join(created.directoryPath, ".lease");
+  const paused = barrier.pause(
+    (boundary) =>
+      boundary.filePath === leasePath && boundary.phase === "prepared",
+  );
+  const acquisition = store.acquireRunLease(created.state.runId);
+  await paused.reached;
+
+  await assert.rejects(access(leasePath), (error) => error.code === "ENOENT");
+  const [temporaryName] = (await readdir(created.directoryPath)).filter(
+    (name) => name.includes(".lease.publish."),
+  );
+  assert.ok(temporaryName);
+  assert.equal(
+    (await lstat(join(created.directoryPath, temporaryName))).nlink,
+    1,
+  );
+  assert.equal(
+    JSON.parse(
+      await readFile(join(created.directoryPath, temporaryName), "utf8"),
+    ).runId,
+    created.state.runId,
+  );
+
+  const competingStore = createRunStore({ stateRoot });
+  assert.equal(await competingStore.runIsLeased(created.state.runId), false);
+  const winner = await competingStore.acquireRunLease(created.state.runId);
+  assert.equal(await competingStore.runIsLeased(created.state.runId), true);
+  assert.equal(
+    JSON.parse(await readFile(leasePath, "utf8")).runId,
+    created.state.runId,
+  );
+  assert.equal((await lstat(leasePath)).nlink, 1);
+
+  paused.release();
+  await assert.rejects(
+    acquisition,
+    (error) =>
+      error instanceof RunStoreError && error.code === "ERR_RUN_LEASED",
+  );
+  await winner.release();
+  assert.equal(
+    (await readdir(created.directoryPath)).some((name) =>
+      name.includes(".lease.publish."),
+    ),
+    false,
+  );
+});
+
 test("serializes ownership by canonical worktree without locking status", async (t) => {
   const { created, projectPath, stateRoot, store, workspace } =
     await createFixture(t);
@@ -202,6 +294,50 @@ test("serializes ownership by canonical worktree without locking status", async 
     competingRunId,
   );
   await resumedLease.release();
+});
+
+test("reads a complete worktree lease during no-replace publication", async (t) => {
+  const barrier = createPublicationBarrier();
+  const { created, projectPath, stateRoot, store } = await createFixture(t, {
+    onLeasePublicationBoundary: (boundary) => barrier.onBoundary(boundary),
+  });
+  const paused = barrier.pause(
+    (boundary) => boundary.phase === "published",
+  );
+  const acquisition = store.acquireWorktreeLease(
+    projectPath,
+    created.state.runId,
+  );
+  const { filePath: leasePath } = await paused.reached;
+
+  assert.equal((await lstat(leasePath)).nlink, 2);
+  const competingStore = createRunStore({ stateRoot });
+  assert.equal(
+    await competingStore.worktreeLeaseOwner(projectPath, created.state.runId),
+    created.state.runId,
+  );
+  assert.equal(
+    JSON.parse(await readFile(leasePath, "utf8")).runId,
+    created.state.runId,
+  );
+  assert.equal((await lstat(leasePath)).nlink, 1);
+
+  paused.release();
+  const lease = await acquisition;
+  await assert.rejects(
+    competingStore.acquireWorktreeLease(projectPath, created.state.runId),
+    (error) =>
+      error instanceof RunStoreError && error.code === "ERR_WORKTREE_LEASED",
+  );
+  const hardLinkPath = join(stateRoot, "unexpected-lease-link");
+  await link(leasePath, hardLinkPath);
+  await assert.rejects(
+    competingStore.worktreeLeaseOwner(projectPath, created.state.runId),
+    (error) =>
+      error instanceof RunStoreError && error.code === "ERR_UNSAFE_STATE_FILE",
+  );
+  await rm(hardLinkPath);
+  await lease.release();
 });
 
 test("recovers only stale same-host worktree ownership and checks release ownership", async (t) => {
@@ -428,6 +564,97 @@ test("serializes stale recovery with an owned marker", async (t) => {
     JSON.parse(await readFile(leasePath, "utf8")),
     existingLease,
   );
+});
+
+test("publishes reclaiming ownership before stale-lease contention", async (t) => {
+  const { created, stateRoot } = await createFixture(t);
+  await created.lease.release();
+  const leasePath = join(created.directoryPath, ".lease");
+  const markerPath = join(created.directoryPath, ".lease-reclaiming");
+  const staleLease = {
+    runId: created.state.runId,
+    token: "11111111-1111-4111-8111-111111111111",
+    pid: 111,
+    hostname: "test-host",
+    acquiredAt: "2020-01-01T00:00:00.000Z",
+  };
+  await writeFile(leasePath, `${JSON.stringify(staleLease)}\n`);
+
+  const barrier = createPublicationBarrier();
+  const storeOptions = {
+    stateRoot,
+    clock: () => new Date("2026-08-16T00:00:00.000Z"),
+    hostName: "test-host",
+    processId: 222,
+    processIsAlive: (pid) => pid !== 111,
+    leaseStaleMs: 0,
+  };
+  const recoveringStore = createRunStore({
+    ...storeOptions,
+    onLeasePublicationBoundary: (boundary) => barrier.onBoundary(boundary),
+  });
+  const paused = barrier.pause(
+    (boundary) =>
+      boundary.filePath === markerPath && boundary.phase === "prepared",
+  );
+  const acquisition = recoveringStore.acquireRunLease(created.state.runId);
+  await paused.reached;
+
+  await assert.rejects(access(markerPath), (error) => error.code === "ENOENT");
+  assert.deepEqual(JSON.parse(await readFile(leasePath, "utf8")), staleLease);
+  assert.equal(await recoveringStore.runIsLeased(created.state.runId), false);
+
+  const competingStore = createRunStore({ ...storeOptions, processId: 333 });
+  const winner = await competingStore.acquireRunLease(created.state.runId);
+  assert.equal(JSON.parse(await readFile(leasePath, "utf8")).pid, 333);
+  assert.equal((await lstat(leasePath)).nlink, 1);
+
+  paused.release();
+  await assert.rejects(
+    acquisition,
+    (error) =>
+      error instanceof RunStoreError && error.code === "ERR_RUN_LEASED",
+  );
+  await assert.rejects(access(markerPath), (error) => error.code === "ENOENT");
+  await winner.release();
+});
+
+test("publishes complete MCP action leases under contention", async (t) => {
+  const barrier = createPublicationBarrier();
+  const { stateRoot, store } = await createFixture(t, {
+    onLeasePublicationBoundary: (boundary) => barrier.onBoundary(boundary),
+  });
+  const input = {
+    key: "action-lease-race",
+    tool: "run_start",
+    arguments: { pipelineId: "plan-authoring" },
+    context: { runId: "11111111-1111-4111-8111-111111111111" },
+  };
+  const paused = barrier.pause(
+    (boundary) => boundary.phase === "prepared",
+  );
+  const acquisition = store.beginAction(input);
+  const { filePath: leasePath } = await paused.reached;
+
+  await assert.rejects(access(leasePath), (error) => error.code === "ENOENT");
+  assert.equal(await store.readAction(input), null);
+  const competingStore = createRunStore({ stateRoot });
+  const winner = await competingStore.beginAction(input);
+  assert.equal((await competingStore.readAction(input)).status, "intent");
+  assert.match(
+    JSON.parse(await readFile(leasePath, "utf8")).token,
+    /^[0-9a-f-]{36}$/u,
+  );
+  assert.equal((await lstat(leasePath)).nlink, 1);
+
+  paused.release();
+  await assert.rejects(
+    acquisition,
+    (error) =>
+      error instanceof RunStoreError &&
+      error.code === "ERR_MCP_ACTION_IN_PROGRESS",
+  );
+  await winner.release();
 });
 
 test("grants one owner during concurrent stale recovery", async (t) => {

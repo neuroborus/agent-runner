@@ -1,8 +1,8 @@
 import { join } from "node:path";
 
 import {
-  createExclusiveFile,
-  readOptionalText,
+  publishExclusiveFile,
+  readOptionalPublishedText,
   removeFile,
 } from "./state-files.js";
 import { assertRunId, RunStoreError } from "./state-validation.js";
@@ -84,7 +84,7 @@ async function readLease(
   description,
   invalidLeaseCode,
 ) {
-  const source = await readOptionalText(filePath);
+  const source = await readOptionalPublishedText(filePath);
   return source === null
     ? null
     : parseLease(
@@ -105,6 +105,7 @@ export function createLeaseManager({
   leaseSubject = (runId) => `Run ${runId}`,
   processId,
   processIsAlive,
+  onPublicationBoundary,
   reclaimingLeaseDescription = "Reclaiming lease",
   requireMatchingRunId = true,
   staleMs,
@@ -172,7 +173,9 @@ export function createLeaseManager({
   }
 
   async function writeLeaseFile(filePath, record) {
-    await createExclusiveFile(filePath, `${JSON.stringify(record)}\n`);
+    await publishExclusiveFile(filePath, `${JSON.stringify(record)}\n`, {
+      onPublicationBoundary,
+    });
   }
 
   async function createLeaseFile(runDirectory, runId) {
