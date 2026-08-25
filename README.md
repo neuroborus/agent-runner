@@ -137,6 +137,7 @@ Pipeline settings use these defaults:
 | `polishing` | `maxDisputesPerFinding` | 2 |
 | `polishing` | `maxSameFindingRounds` | 3 |
 | `polishing` | `stagnationWindowRounds` | 3 |
+| `polishing` | `trustedChecks` | `[]` |
 
 The stagnation window detects consecutive blocked correction rounds. Unless a
 harder limit preempts it, the first full window invokes one fresh Arbiter; a
@@ -167,7 +168,7 @@ inventory command, and its executable/argument vector:
     }
   },
   "pipelines": {
-    "plan-execution": {
+    "polishing": {
       "trustedChecks": ["service-tests"]
     }
   }

@@ -8,6 +8,7 @@ import {
 import {
   assertRun as validateRun,
   DEFAULT_FINALIZATION_POLICY,
+  EMPTY_TRUSTED_VALIDATION,
   isFinalizationPolicy,
   MAX_DISPUTES_PER_FINDING,
   sha256,
@@ -53,6 +54,18 @@ function positiveIntegerSetting(defaultValue, maximum = null) {
   });
 }
 
+function trustedCheckSelection(value) {
+  return (
+    Array.isArray(value) &&
+    value.length <= 32 &&
+    new Set(value).size === value.length &&
+    value.every(
+      (alias) =>
+        typeof alias === "string" && /^[a-z][a-z0-9-]{0,63}$/u.test(alias),
+    )
+  );
+}
+
 const ROLES = Object.freeze(["worker", "reviewer", "arbiter"]);
 const SETTINGS = Object.freeze({
   finalization: Object.freeze({
@@ -68,6 +81,11 @@ const SETTINGS = Object.freeze({
   ),
   maxSameFindingRounds: positiveIntegerSetting(3),
   stagnationWindowRounds: positiveIntegerSetting(3),
+  trustedChecks: Object.freeze({
+    defaultValue: Object.freeze([]),
+    errorMessage: "must be an array of unique trusted command aliases",
+    validate: trustedCheckSelection,
+  }),
 });
 const TASK_INPUTS = Object.freeze({
   task: Object.freeze({ filename: "task.md", optional: false }),
@@ -436,10 +454,95 @@ export function migratePolishingStateV1(run) {
   });
 }
 
+function upgradedTrustedFinalization(result) {
+  if (result === null) {
+    return null;
+  }
+  return Object.freeze({
+    ...result,
+    checks: Object.freeze(
+      result.checks.map((check) =>
+        Object.freeze({
+          ...check,
+          status: ["BLOCKED", "NOT_RUN"].includes(check.status)
+            ? "FAIL"
+            : check.status,
+          executor: "agent",
+          commandIdentity: null,
+          exitCode: null,
+          signal: null,
+          timedOut: false,
+        }),
+      ),
+    ),
+    trustedCommandFingerprint:
+      EMPTY_TRUSTED_VALIDATION.commandFingerprint,
+    trustedConfigurationFingerprint:
+      EMPTY_TRUSTED_VALIDATION.configurationFingerprint,
+  });
+}
+
+export function migratePolishingStateV2(run) {
+  const current = run.pipelineState;
+  const prepared = current.resolvedSummary !== null;
+  const immutableTerminal = ["DONE", "FAILED"].includes(
+    current.workflowState,
+  );
+  const validationMigrationPending = prepared && !immutableTerminal;
+  const paused = current.workflowState === "WAITING_FOR_USER";
+  const rerunFinalization =
+    validationMigrationPending &&
+    !paused &&
+    ["FINALIZE", "REVIEW", "RESOLVE_FINDINGS"].includes(
+      current.workflowState,
+    );
+  const keepLegacyGate = immutableTerminal || paused;
+  const reviewedFingerprint = keepLegacyGate
+    ? current.reviewedFingerprint
+    : null;
+  return Object.freeze({
+    ...current,
+    settings:
+      current.settings === null
+        ? null
+        : Object.freeze({
+            ...current.settings,
+            trustedChecks: Object.freeze([]),
+          }),
+    trustedValidation: EMPTY_TRUSTED_VALIDATION,
+    workflowState: rerunFinalization ? "FINALIZE" : current.workflowState,
+    workerValidation: validationMigrationPending
+      ? null
+      : current.workerValidation,
+    reviewerValidation: validationMigrationPending
+      ? null
+      : current.reviewerValidation,
+    validationMigrationPending,
+    finalizationResult: keepLegacyGate
+      ? upgradedTrustedFinalization(current.finalizationResult)
+      : null,
+    finalizedFingerprint: keepLegacyGate
+      ? current.finalizedFingerprint
+      : null,
+    reviewResult: keepLegacyGate ? current.reviewResult : null,
+    reviewedFingerprint,
+    findings: keepLegacyGate ? current.findings : Object.freeze([]),
+    pendingDisputes: keepLegacyGate
+      ? current.pendingDisputes
+      : Object.freeze([]),
+    reviewReconsideration: keepLegacyGate
+      ? current.reviewReconsideration
+      : Object.freeze([]),
+  });
+}
+
 export const polishingPipeline = Object.freeze({
   id: POLISHING_PIPELINE_ID,
-  stateVersion: 2,
-  migrations: Object.freeze({ 1: migratePolishingStateV1 }),
+  stateVersion: 3,
+  migrations: Object.freeze({
+    1: migratePolishingStateV1,
+    2: migratePolishingStateV2,
+  }),
   roles: ROLES,
   settings: SETTINGS,
   taskInputs: TASK_INPUTS,

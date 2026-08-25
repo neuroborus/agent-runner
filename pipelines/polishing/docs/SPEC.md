@@ -93,6 +93,14 @@ to repository instructions and project-defined checks. `none` selects that
 fallback directly. Any other valid value is a normalized repository-relative
 path ending in `SKILL.md` and requires that exact skill.
 
+`trustedChecks` is an array of unique runner-trusted command aliases and
+defaults to empty. Runner-root configuration alone defines each alias's exact
+inventory command and executable/argument vector. An ignored project
+configuration may replace the alias selection but cannot define or alter an
+alias, binary, argument, environment value, or host command. The root resolves
+the complete selection and fingerprints it before agent work; resume uses the
+persisted snapshot without reloading configuration.
+
 Settings are stored in pipeline state at run creation and are not reloaded on
 resume. The root may load safe project overrides from an ignored
 `LOCAL_ARTIFACTS/agent-runner.json` or an explicitly selected confined ignored
@@ -158,8 +166,10 @@ Preflight:
 4. verifies the ignored run clarification path;
 5. records the dirty repository snapshot and requires at least one change;
 6. probes Worker and Reviewer capabilities independently;
-7. creates or preserves the run clarification transcript;
-8. stores the artifact root, settings, hashes, backend versions, and the repository baseline.
+7. resolves and persists the selected trusted-command vectors, identities,
+   ordered-command fingerprint, and trusted-configuration fingerprint;
+8. creates or preserves the run clarification transcript;
+9. stores the artifact root, settings, hashes, backend versions, and the repository baseline.
 
 Worker and Reviewer bootstrap independently and read-only. Both study the
 repository, task, complete current changes, clarifications, instructions,
@@ -234,6 +244,10 @@ arbitration establishes the inventory from both reports, and the runner—not an
 agent—fingerprints those files.
 Commands and paths retain interior whitespace exactly; unsafe, non-normalized,
 multiline, or boundary-whitespace values are rejected instead of rewritten.
+Every selected runner-trusted inventory command must appear exactly once in
+each accepted inventory. Agents receive only its alias, exact inventory
+command, and deterministic identity; they never receive authority to execute
+the persisted vector outside their ordinary turn sandbox.
 
 ## Workflow
 
@@ -291,11 +305,26 @@ blocked finalization procedure pauses.
 
 Every non-availability result repeats the complete inventory actually used and
 contains exactly one ordered result with bounded direct evidence for every
-required check. `PASS` requires all of them to pass; omissions, `NOT_RUN`,
-skips, exclusions, substitutions, replacements, or weakening are invalid
-output. Host-reported results and user attestations are not trusted. The Worker
-must not weaken package scripts, test discovery, test runners, validation
-configuration, the inventory, or its file set to evade an environment blocker.
+required check. Agent-executed checks must pass; omissions, skips, exclusions,
+substitutions, replacements, or weakening are invalid output. `NOT_RUN` is
+valid only for an exact selected runner-trusted command. After the Worker turn
+is reconciled, the root executor replaces each such placeholder by running the
+persisted executable/argument vector directly without a shell or expanding the
+agent turn's capabilities. Other host-reported results and user attestations
+are not trusted. The Worker must not weaken package scripts, test discovery,
+test runners, validation configuration, the inventory, or its file set to
+evade an environment blocker.
+
+Each runner result retains only bounded status, exit/signal/timeout data,
+command identity, and fixed evidence; raw process output is discarded. Before
+and after execution, the shared root service rejects workspace, index, history,
+ref, remote, or identity mutation and recomputes validation-infrastructure
+fingerprints. Missing isolation, an unterminated process tree, a changed
+binding, a non-allowlisted command, infrastructure drift, or mutation fails
+closed. A bounded environment failure pauses at `FINALIZE`; resume reuses the
+durable command snapshot. The accepted ordered evidence tuple binds both agent
+and runner results to the same content, validation-infrastructure,
+ordered-command, and trusted-configuration fingerprints.
 
 `BLOCKED` is reserved for required validation that cannot execute because of an
 external environment constraint. It carries bounded reason and evidence,
@@ -407,7 +436,7 @@ continue to use the existing resume validation. A read-only repository mutation
 instead instructs the user to abandon the contaminated run and start fresh from
 an uncontaminated worktree. `environment_blocked` retains why validation is
 blocked and the precise `POLISH`, `FINALIZE`, or `RESOLVE_FINDINGS` retry
-checkpoint. This read-only projection leaves pipeline state version 2 unchanged.
+checkpoint. This read-only projection leaves pipeline state version 3 unchanged.
 
 Each transition is a complete write-ahead event appended and synchronized
 before atomic state replacement. `progress.md` is derived public activity.
@@ -432,7 +461,7 @@ Recovery accepts only an incomplete final journal fragment, advances lagging
 state from complete events, and never depends on a native Codex or Claude
 session surviving interruption.
 
-Claude read-only recovery uses the same pipeline state version 2 and common run
+Claude read-only recovery uses the same pipeline state version 3 and common run
 envelope. A valid but otherwise unclassified read-only result or process failure
 may pause only after the read-only mutation guard succeeds. Resume rebuilds the
 complete role request from the persisted inputs and checkpoint. No denied tool
@@ -457,6 +486,16 @@ evidence provisional. Before retry, override, finalization, or review advances,
 fresh independent Worker and Reviewer checkpoints re-establish the inventory
 and the runner fingerprints it again. Completed active work returns through
 `FINALIZE`; immutable failed history is upgraded without replaying an effect.
+
+Pipeline state version 3 adds the resolved trusted-validation snapshot and
+executor provenance to every accepted per-check result. Its version-2 migration
+selects empty legacy trust, preserves safe workspace content, and invalidates
+active finalization and review evidence through the existing independent
+validation-migration checkpoint before advancement. Paused legacy evidence
+remains provisional until that checkpoint runs. Retained `BLOCKED` and
+`NOT_RUN` entries in paused or immutable failed evidence become `FAIL` without
+losing their bounded diagnostics. Immutable `DONE` and `FAILED` evidence is
+shape-upgraded without replaying workspace work.
 
 MCP uses the common STDIO tools, persists idempotency intents before mutation
 and receipts before returning, and launches detached continuation under the
@@ -509,6 +548,8 @@ Pipeline tests use fake adapters and temporary repositories. Cover at least:
 - sandbox, IPC, loopback, process-isolation, missing-service, and permission
   validation blockers across polishing, finalization, and finding resolution,
   including fingerprint-aware preservation and resume;
+- successful, blocked, failed, non-allowlisted, fingerprint-drifting, mutating,
+  and resumed runner-trusted checks with the durable selected snapshot;
 - finite redacted Claude failure classification, durable read-only request
   reconstruction, writable usage/provider reconciliation, and terminal
   authentication, forbidden-operation, and ambiguous writable boundaries;

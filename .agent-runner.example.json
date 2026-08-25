@@ -59,6 +59,7 @@
       "maxDisputesPerFinding": 2,
       "maxSameFindingRounds": 3,
       "stagnationWindowRounds": 3,
+      "trustedChecks": [],
       "roles": {
         "worker": {},
         "reviewer": {

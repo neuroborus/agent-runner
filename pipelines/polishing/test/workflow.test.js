@@ -21,6 +21,7 @@ import { createRunStore } from "../../../src/state.js";
 import {
   createPolishingState,
   migratePolishingStateV1,
+  migratePolishingStateV2,
   polishingPipeline,
   runPolishing,
 } from "../src/index.js";
@@ -42,6 +43,7 @@ const SETTINGS = Object.freeze({
   maxDisputesPerFinding: 2,
   maxSameFindingRounds: 3,
   stagnationWindowRounds: 3,
+  trustedChecks: Object.freeze([]),
 });
 const REQUIRED_CHECKS = Object.freeze([
   Object.freeze({ id: "C1", command: "npm test" }),
@@ -69,10 +71,111 @@ function versionOneState(state) {
     "validationInfrastructureFingerprint",
     "validationMigrationPending",
     "reviewResult",
+    "trustedValidation",
   ]) {
     delete legacy[field];
   }
+  if (legacy.settings !== null) {
+    const { trustedChecks: _trustedChecks, ...settings } = legacy.settings;
+    legacy.settings = settings;
+  }
   return legacy;
+}
+
+function versionTwoState(state) {
+  const legacy = { ...state };
+  delete legacy.trustedValidation;
+  if (legacy.settings !== null) {
+    const { trustedChecks: _trustedChecks, ...settings } = legacy.settings;
+    legacy.settings = settings;
+  }
+  if (legacy.finalizationResult !== null) {
+    const {
+      trustedCommandFingerprint: _trustedCommandFingerprint,
+      trustedConfigurationFingerprint: _trustedConfigurationFingerprint,
+      ...finalizationResult
+    } = legacy.finalizationResult;
+    legacy.finalizationResult = {
+      ...finalizationResult,
+      checks: finalizationResult.checks.map(
+        ({
+          executor: _executor,
+          commandIdentity: _commandIdentity,
+          exitCode: _exitCode,
+          signal: _signal,
+          timedOut: _timedOut,
+          ...check
+        }) => check,
+      ),
+    };
+  }
+  return legacy;
+}
+
+function versionTwoFailedFinalizationState(
+  state,
+  { incompleteStatus, workflowState },
+) {
+  const requiredChecks = Object.freeze([
+    ...REQUIRED_CHECKS,
+    Object.freeze({ id: "C2", command: "npm run service:test" }),
+  ]);
+  const finalizationResult = {
+    ...state.finalizationResult,
+    status: "FAIL",
+    summary: "Legacy finalization retained incomplete validation evidence.",
+    issues: [
+      {
+        id: "F1",
+        command: "npm test",
+        problem: "A required validation check did not pass.",
+        evidence: ["The legacy validation gate remained incomplete."],
+      },
+    ],
+    requiredChecks,
+    checks: [
+      {
+        ...state.finalizationResult.checks[0],
+        status: "FAIL",
+        evidence: ["The legacy check failed."],
+      },
+      {
+        checkId: "C2",
+        command: "npm run service:test",
+        status: incompleteStatus,
+        evidence: ["The legacy check did not complete."],
+        executor: "agent",
+        commandIdentity: null,
+        exitCode: null,
+        signal: null,
+        timedOut: false,
+      },
+    ],
+    validationChanged: false,
+  };
+  return versionTwoState({
+    ...state,
+    workflowState,
+    workerValidation: {
+      ...state.workerValidation,
+      requiredChecks,
+    },
+    reviewerValidation: {
+      ...state.reviewerValidation,
+      requiredChecks,
+    },
+    requiredChecks,
+    finalizationResult,
+    finalizedFingerprint: null,
+    reviewResult: null,
+    reviewedFingerprint: null,
+    findings: [],
+  });
+}
+
+function migrateVersionOneState(state) {
+  const versionTwo = migratePolishingStateV1({ pipelineState: state });
+  return migratePolishingStateV2({ pipelineState: versionTwo });
 }
 
 test("rejects incomplete or substituted finalization PASS evidence", () => {
@@ -95,7 +198,7 @@ test("rejects incomplete or substituted finalization PASS evidence", () => {
         ...valid,
         checks: [{ ...valid.checks[0], status: "NOT_RUN" }],
       }),
-    /status does not match/u,
+    /substituted|status does not match/u,
   );
   const blocked = finalizationBlocked(
     "The sandbox blocked the required check.",
@@ -129,12 +232,115 @@ test("rejects incomplete or substituted finalization PASS evidence", () => {
   assert.equal(exact.validationInfrastructure[0], exactPath);
 });
 
+test("rejects mixed failed and blocked finalization before persistence", async (t) => {
+  const requiredChecks = Object.freeze([
+    ...REQUIRED_CHECKS,
+    Object.freeze({ id: "C2", command: "npm run lint" }),
+  ]);
+  const failed = finalizationFailed();
+  const mixedFinalization = {
+    ...failed,
+    requiredChecks,
+    checks: [
+      ...failed.checks,
+      {
+        checkId: "C2",
+        command: "npm run lint",
+        status: "BLOCKED",
+        evidence: ["The lint check could not start."],
+      },
+    ],
+  };
+  const fixture = await createFixture(t, {
+    reviewer: [
+      { ...bootstrapReady("Reviewer"), requiredChecks },
+    ],
+    worker: [
+      clarificationReady(),
+      { ...bootstrapReady("Worker"), requiredChecks },
+      { ...reconciliationResolved(), requiredChecks },
+      polishingCompleted(),
+      mixedFinalization,
+    ],
+  });
+
+  await assert.rejects(fixture.run(), (error) => {
+    assert.equal(error.code, "ERR_INVALID_POLISHING_OUTPUT");
+    assert.match(error.message, /status does not match/u);
+    return true;
+  });
+  assert.equal(fixture.currentRun.pipelineState.workflowState, "FAILED");
+  assert.equal(fixture.currentRun.pipelineState.finalizationResult, null);
+});
+
 test("migrates version-1 polishing state to the fail-closed shape", () => {
   const legacy = versionOneState(createPolishingState());
-  const migrated = migratePolishingStateV1({ pipelineState: legacy });
+  const migrated = migrateVersionOneState(legacy);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
   assert.equal(migrated.finalizationResult, null);
   assert.equal(migrated.reviewResult, null);
+});
+
+test("migrates version-2 state with empty trust and invalidates its active gate", async (t) => {
+  const fixture = await createFixture(t);
+  const completed = await fixture.run();
+  const legacy = versionTwoState({
+    ...completed.pipelineState,
+    workflowState: "REVIEW",
+  });
+  const migrated = migratePolishingStateV2({ pipelineState: legacy });
+
+  assert.equal(migrated.workflowState, "FINALIZE");
+  assert.equal(migrated.polishSummary, completed.pipelineState.polishSummary);
+  assert.equal(migrated.finalizationResult, null);
+  assert.equal(migrated.reviewResult, null);
+  assert.equal(migrated.validationMigrationPending, true);
+  assert.deepEqual(migrated.settings.trustedChecks, []);
+  assert.deepEqual(migrated.trustedValidation.commands, []);
+  assert.doesNotThrow(() => normalizePipelineState(migrated));
+  assert.equal(polishingPipeline.stateVersion, 3);
+});
+
+test("migrates incomplete paused and terminal version-2 checks fail closed", async (t) => {
+  const fixture = await createFixture(t);
+  const completed = await fixture.run();
+  const cases = [
+    {
+      name: "paused BLOCKED check",
+      workflowState: "WAITING_FOR_USER",
+      incompleteStatus: "BLOCKED",
+      migrationPending: true,
+    },
+    {
+      name: "immutable terminal NOT_RUN check",
+      workflowState: "FAILED",
+      incompleteStatus: "NOT_RUN",
+      migrationPending: false,
+    },
+  ];
+
+  for (const migrationCase of cases) {
+    await t.test(migrationCase.name, () => {
+      const legacy = versionTwoFailedFinalizationState(
+        completed.pipelineState,
+        migrationCase,
+      );
+      const migrated = migratePolishingStateV2({ pipelineState: legacy });
+
+      assert.deepEqual(
+        migrated.finalizationResult.checks.map(({ status }) => status),
+        ["FAIL", "FAIL"],
+      );
+      assert.deepEqual(migrated.finalizationResult.checks[1].evidence, [
+        "The legacy check did not complete.",
+      ]);
+      assert.equal(
+        migrated.validationMigrationPending,
+        migrationCase.migrationPending,
+      );
+      assert.doesNotThrow(() => normalizePipelineState(migrated));
+    });
+  }
 });
 
 test("invalidates version-1 validation evidence before completed polishing resumes", async (t) => {
@@ -157,9 +363,9 @@ test("invalidates version-1 validation evidence before completed polishing resum
     ],
   });
   const completed = await fixture.run();
-  const migrated = migratePolishingStateV1({
-    pipelineState: versionOneState(completed.pipelineState),
-  });
+  const migrated = migrateVersionOneState(
+    versionOneState(completed.pipelineState),
+  );
 
   assert.doesNotThrow(() => normalizePipelineState(migrated));
   assert.equal(migrated.workflowState, "FINALIZE");
@@ -207,9 +413,9 @@ test("re-establishes validation before retrying a migrated finalization pause", 
     ],
   });
   const paused = await fixture.run();
-  const migrated = migratePolishingStateV1({
-    pipelineState: versionOneState(paused.pipelineState),
-  });
+  const migrated = migrateVersionOneState(
+    versionOneState(paused.pipelineState),
+  );
   await fixture.persistPipelineState(migrated);
 
   const completed = await fixture.run();
@@ -252,9 +458,9 @@ test("invalidates migrated findings before applying an override", async (t) => {
     },
   });
   const paused = await fixture.run();
-  const migrated = migratePolishingStateV1({
-    pipelineState: versionOneState(paused.pipelineState),
-  });
+  const migrated = migrateVersionOneState(
+    versionOneState(paused.pipelineState),
+  );
   await fixture.persistPipelineState(migrated);
 
   const completed = await fixture.run({
@@ -269,6 +475,28 @@ test("invalidates migrated findings before applying an override", async (t) => {
 
 function hash(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function trustedValidationSnapshot(
+  alias = "service-check",
+  command = "npm run test:service",
+) {
+  const vector = {
+    alias,
+    command,
+    executable: "npm",
+    arguments: ["run", "test:service"],
+  };
+  const identity = hash(JSON.stringify(vector));
+  const commands = [{ ...vector, identity }];
+  return Object.freeze({
+    schemaVersion: 1,
+    commands: Object.freeze(commands.map(Object.freeze)),
+    commandFingerprint: hash(JSON.stringify([identity])),
+    configurationFingerprint: hash(
+      JSON.stringify({ schemaVersion: 1, commands: [vector] }),
+    ),
+  });
 }
 
 function emptyDecision() {
@@ -628,12 +856,15 @@ async function createFixture(
     interactive = false,
     onEdit,
     onRoleRun,
+    onTrustedValidation,
+    prepareProject,
     proactiveClarification = false,
     reviewer = [bootstrapReady("Reviewer"), reviewApproved()],
     sessionIdForRole,
     settings = SETTINGS,
     sourceSession = null,
     taskLocation = "external",
+    trustedValidation,
     worker = [
       clarificationReady(),
       bootstrapReady("Worker"),
@@ -667,6 +898,7 @@ async function createFixture(
       "---\nname: finalization\ndescription: Test validation.\n---\n\nRun tests.\n",
     );
   }
+  await prepareProject?.(projectPath);
 
   const taskPath =
     taskLocation === "external" || taskLocation === "symlinked-untracked"
@@ -755,7 +987,7 @@ async function createFixture(
   const store = createRunStore({ stateRoot });
   let created = await store.createRun({
     pipelineId: "polishing",
-    pipelineStateVersion: 2,
+    pipelineStateVersion: 3,
     projectPath,
     taskPath,
     roles: {
@@ -768,6 +1000,7 @@ async function createFixture(
       artifactRoot,
       proactiveClarification,
       settings,
+      ...(trustedValidation === undefined ? {} : { trustedValidation }),
     }),
     activity: {
       actor: "runner",
@@ -791,6 +1024,12 @@ async function createFixture(
     adapters,
     clarifications,
     git,
+    trustedValidation: {
+      async execute(options) {
+        assert.notEqual(onTrustedValidation, undefined);
+        return onTrustedValidation(options);
+      },
+    },
     async readInputs({ taskPath: requestedTaskPath }) {
       const task = await optionalInput(join(requestedTaskPath, "task.md"));
       if (task === null) {
@@ -2157,6 +2396,336 @@ test("retries permission-blocked finalization", async (t) => {
 
   const resumed = await fixture.run();
   assert.equal(resumed.pipelineState.workflowState, "DONE");
+});
+
+test("resumes and completes runner-trusted polishing validation", async (t) => {
+  const trustedValidation = trustedValidationSnapshot();
+  const requiredChecks = [
+    ...REQUIRED_CHECKS,
+    { id: "C2", command: trustedValidation.commands[0].command },
+  ];
+  const bootstrap = (result) => ({ ...result, requiredChecks });
+  const finalization = {
+    ...finalizationPassed(),
+    requiredChecks,
+    checks: [
+      ...checkResults("PASS"),
+      {
+        checkId: "C2",
+        command: trustedValidation.commands[0].command,
+        status: "NOT_RUN",
+        evidence: ["Reserved for the runner-trusted executor."],
+      },
+    ],
+  };
+  const trustedCalls = [];
+  const fixture = await createFixture(t, {
+    settings: { ...SETTINGS, trustedChecks: ["service-check"] },
+    trustedValidation,
+    reviewer: [bootstrap(bootstrapReady("Reviewer")), reviewApproved()],
+    worker: [
+      clarificationReady(),
+      bootstrap(bootstrapReady("Worker")),
+      bootstrap(reconciliationResolved()),
+      polishingCompleted(),
+      finalization,
+      finalization,
+    ],
+    onTrustedValidation(options) {
+      trustedCalls.push(options);
+      return {
+        status: trustedCalls.length === 1 ? "BLOCKED" : "PASS",
+        commandIdentity: options.commandIdentity,
+        exitCode: trustedCalls.length === 1 ? null : 0,
+        signal: null,
+        timedOut: trustedCalls.length === 1,
+        evidence: [
+          trustedCalls.length === 1
+            ? "The isolated temporary service is unavailable."
+            : "The isolated temporary service check passed.",
+        ],
+        ...options.bindings,
+      };
+    },
+  });
+
+  const paused = await fixture.run();
+
+  assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(paused.pause.reason, "environment_blocked");
+  assert.equal(paused.pause.code, "ERR_TRUSTED_VALIDATION_BLOCKED");
+  assert.equal(paused.pause.resumeState, "FINALIZE");
+  assert.equal(paused.pipelineState.finalizationResult, null);
+
+  const recovered = await fixture.recover();
+  assert.deepEqual(
+    recovered.pipelineState.trustedValidation,
+    trustedValidation,
+  );
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(trustedCalls.length, 2);
+  assert.deepEqual(
+    result.pipelineState.finalizationResult.checks.map(
+      ({ checkId, executor, commandIdentity }) => ({
+        checkId,
+        executor,
+        commandIdentity,
+      }),
+    ),
+    [
+      { checkId: "C1", executor: "agent", commandIdentity: null },
+      {
+        checkId: "C2",
+        executor: "runner",
+        commandIdentity: trustedValidation.commands[0].identity,
+      },
+    ],
+  );
+  assert.equal(
+    result.pipelineState.finalizationResult.trustedCommandFingerprint,
+    trustedValidation.commandFingerprint,
+  );
+  assert.match(fixture.calls.worker[1].prompt, /service-check/u);
+  assert.match(
+    fixture.calls.worker.find(({ prompt }) =>
+      prompt.includes("Run the complete project finalization procedure"),
+    ).prompt,
+    /return NOT_RUN/u,
+  );
+});
+
+test("rejects non-allowlisted polishing finalization placeholders", () => {
+  const trustedValidation = trustedValidationSnapshot();
+  const requiredChecks = [
+    ...REQUIRED_CHECKS,
+    { id: "C2", command: trustedValidation.commands[0].command },
+  ];
+  const result = {
+    ...finalizationPassed(),
+    requiredChecks,
+    checks: [
+      { ...checkResults("PASS")[0], status: "NOT_RUN" },
+      {
+        checkId: "C2",
+        command: trustedValidation.commands[0].command,
+        status: "PASS",
+        evidence: ["The agent substituted a host result."],
+      },
+    ],
+  };
+
+  assert.throws(
+    () =>
+      normalizeFinalizationResult(result, {
+        trustedCommands: [trustedValidation.commands[0].command],
+      }),
+    /substituted/u,
+  );
+});
+
+test("turns a runner-trusted polishing failure into a bounded issue", async (t) => {
+  const trustedValidation = trustedValidationSnapshot();
+  const requiredChecks = [
+    ...REQUIRED_CHECKS,
+    { id: "C2", command: trustedValidation.commands[0].command },
+  ];
+  const finalization = {
+    ...finalizationPassed(),
+    requiredChecks,
+    checks: [
+      ...checkResults("PASS"),
+      {
+        checkId: "C2",
+        command: trustedValidation.commands[0].command,
+        status: "NOT_RUN",
+        evidence: ["Reserved for the runner-trusted executor."],
+      },
+    ],
+  };
+  let trustedCalls = 0;
+  const fixture = await createFixture(t, {
+    settings: { ...SETTINGS, trustedChecks: ["service-check"] },
+    trustedValidation,
+    reviewer: [
+      { ...bootstrapReady("Reviewer"), requiredChecks },
+      reviewApproved(),
+    ],
+    worker: [
+      clarificationReady(),
+      { ...bootstrapReady("Worker"), requiredChecks },
+      { ...reconciliationResolved(), requiredChecks },
+      polishingCompleted(),
+      finalization,
+      resolution("FIX", "F1"),
+      finalization,
+    ],
+    async onRoleRun(role, request, _turn, { projectPath }) {
+      if (role === "worker" && /Resolve every current blocker/u.test(request.prompt)) {
+        await writeFile(join(projectPath, "tracked.txt"), "fixed service input\n");
+      }
+    },
+    onTrustedValidation(options) {
+      trustedCalls += 1;
+      return {
+        status: trustedCalls === 1 ? "FAIL" : "PASS",
+        commandIdentity: options.commandIdentity,
+        exitCode: trustedCalls === 1 ? 7 : 0,
+        signal: null,
+        timedOut: false,
+        evidence: [
+          trustedCalls === 1
+            ? "Runner-trusted command service-check exited with code 7."
+            : "Runner-trusted command service-check exited with code 0.",
+        ],
+        ...options.bindings,
+      };
+    },
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(trustedCalls, 2);
+  assert.equal(result.counters.fixRounds, 1);
+  assert.ok(
+    fixture.calls.worker.some(({ prompt }) =>
+      prompt.includes("A runner-trusted validation command failed."),
+    ),
+  );
+});
+
+for (const [name, code] of [
+  ["binding drift", "ERR_TRUSTED_VALIDATION_BINDING_CHANGED"],
+  ["repository mutation", "ERR_TRUSTED_VALIDATION_MUTATED_REPOSITORY"],
+]) {
+  test(`rejects trusted polishing validation ${name}`, async (t) => {
+    const trustedValidation = trustedValidationSnapshot();
+    const requiredChecks = [
+      ...REQUIRED_CHECKS,
+      { id: "C2", command: trustedValidation.commands[0].command },
+    ];
+    const finalization = {
+      ...finalizationPassed(),
+      requiredChecks,
+      checks: [
+        ...checkResults("PASS"),
+        {
+          checkId: "C2",
+          command: trustedValidation.commands[0].command,
+          status: "NOT_RUN",
+          evidence: ["Reserved for the runner-trusted executor."],
+        },
+      ],
+    };
+    const fixture = await createFixture(t, {
+      settings: { ...SETTINGS, trustedChecks: ["service-check"] },
+      trustedValidation,
+      reviewer: [
+        { ...bootstrapReady("Reviewer"), requiredChecks },
+      ],
+      worker: [
+        clarificationReady(),
+        { ...bootstrapReady("Worker"), requiredChecks },
+        { ...reconciliationResolved(), requiredChecks },
+        polishingCompleted(),
+        finalization,
+      ],
+      onTrustedValidation() {
+        const error = new Error(`Trusted executor ${name}.`);
+        error.code = code;
+        throw error;
+      },
+    });
+
+    const result = await fixture.run();
+
+    assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
+    assert.equal(result.pause.reason, "unsafe_git_state");
+    assert.equal(result.pause.code, code);
+  });
+}
+
+test("rejects validation-infrastructure drift after trusted polishing execution", async (t) => {
+  const trustedValidation = trustedValidationSnapshot();
+  const infrastructurePath = "LOCAL_ARTIFACTS/validation.json";
+  const validationInfrastructure = [infrastructurePath];
+  const requiredChecks = [
+    ...REQUIRED_CHECKS,
+    { id: "C2", command: trustedValidation.commands[0].command },
+  ];
+  const fixture = await createFixture(t, {
+    async prepareProject(projectPath) {
+      await mkdir(join(projectPath, "LOCAL_ARTIFACTS"), { recursive: true });
+      await writeFile(
+        join(projectPath, infrastructurePath),
+        '{"version":1}\n',
+      );
+    },
+    settings: { ...SETTINGS, trustedChecks: ["service-check"] },
+    trustedValidation,
+    reviewer: [
+      {
+        ...bootstrapReady("Reviewer"),
+        requiredChecks,
+        validationInfrastructure,
+      },
+    ],
+    worker: [
+      clarificationReady(),
+      {
+        ...bootstrapReady("Worker"),
+        requiredChecks,
+        validationInfrastructure,
+      },
+      {
+        ...reconciliationResolved(),
+        requiredChecks,
+        validationInfrastructure,
+      },
+      polishingCompleted(),
+      {
+        ...finalizationPassed(),
+        requiredChecks,
+        validationInfrastructure,
+        checks: [
+          ...checkResults("PASS"),
+          {
+            checkId: "C2",
+            command: trustedValidation.commands[0].command,
+            status: "NOT_RUN",
+            evidence: ["Reserved for the runner-trusted executor."],
+          },
+        ],
+      },
+    ],
+    async onTrustedValidation(options) {
+      await writeFile(
+        join(fixture.projectPath, infrastructurePath),
+        '{"version":2}\n',
+      );
+      return {
+        status: "PASS",
+        commandIdentity: options.commandIdentity,
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        evidence: ["The runner-trusted check passed."],
+        ...options.bindings,
+      };
+    },
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(result.pause.reason, "unsafe_git_state");
+  assert.equal(
+    result.pause.code,
+    "ERR_TRUSTED_VALIDATION_INFRASTRUCTURE_CHANGED",
+  );
+  assert.equal(result.pipelineState.finalizationResult, null);
 });
 
 test("retries unchanged process-isolation-blocked finding resolution", async (t) => {

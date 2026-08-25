@@ -174,14 +174,15 @@ pipeline settings and is not reloaded on resume.
 
 `trustedCommands` is runner-only configuration. Each lowercase alias binds one
 exact inventory command to one executable and argument vector; definitions
-cannot carry environment values. Plan execution's `trustedChecks` setting may
-select aliases, and an ignored project configuration may replace that
-selection, but project configuration cannot define an alias, binary, argument,
-environment value, or new host command. The default selection is empty. Before
-agent work, the root resolves it into an immutable snapshot containing every
-selected vector, deterministic command identities, an ordered command
-fingerprint, and a trusted-configuration fingerprint. Resume uses that durable
-snapshot without reloading either configuration source.
+cannot carry environment values. Plan execution and polishing each own a
+`trustedChecks` setting that may select aliases, and an ignored project
+configuration may replace that pipeline's selection, but project configuration
+cannot define an alias, binary, argument, environment value, or new host
+command. The default selection is empty. Before agent work, the root resolves
+it into an immutable snapshot containing every selected vector, deterministic
+command identities, an ordered command fingerprint, and a
+trusted-configuration fingerprint. Resume uses that durable snapshot without
+reloading either configuration source.
 
 ## Run Lifecycle
 
@@ -436,6 +437,15 @@ review gates through the existing independent validation-migration checkpoint.
 Immutable terminal evidence is shape-upgraded, and a consumed one-shot commit
 authorization remains on its verification-only path; migration never makes it
 replayable.
+
+Polishing state version 3 adopts the same resolved trusted-validation snapshot,
+per-check executor provenance, and fingerprint-bound evidence tuple. Its
+version-2 migration selects empty legacy trust, preserves safe workspace
+content, and invalidates active finalization and review evidence through the
+existing independent validation-migration checkpoint before advancement.
+Retained `BLOCKED` and `NOT_RUN` entries in paused or immutable failed evidence
+become `FAIL` without losing their bounded diagnostics. Immutable terminal
+evidence is shape-upgraded without replaying work.
 
 Common run-envelope version 3 adds `activeTurn`, either `null` or the current
 bounded `{ role, phase }`. Version-1 and version-2 runs project it as `null`

@@ -168,6 +168,35 @@ export async function runPolishing({ action, run, runtime, settings }) {
       .join("\n\n");
   }
 
+  function trustedValidationInstructions() {
+    const commands = state().trustedValidation.commands.map(
+      ({ alias, command, identity }) => ({ alias, command, identity }),
+    );
+    if (commands.length === 0) {
+      return "No runner-trusted validation commands are selected for this run.";
+    }
+    return `Runner-trusted validation commands selected before agent work:
+${JSON.stringify(commands, null, 2)}
+Include every listed command exactly once in requiredChecks. Do not execute these commands in an agent turn. During finalization, return NOT_RUN for only these checks with evidence that each is reserved for the runner; the runner will execute their persisted exact vectors outside the agent turn.`;
+  }
+
+  function assertTrustedValidationInventory(result) {
+    if (
+      state().trustedValidation.commands.some(
+        ({ command }) =>
+          !result.requiredChecks.some(
+            (required) => required.command === command,
+          ),
+      )
+    ) {
+      throw workflowError(
+        "Bootstrap validation inventory omits a runner-trusted command.",
+        "ERR_INVALID_POLISHING_OUTPUT",
+      );
+    }
+    return result;
+  }
+
   function clearedWorkState(current, { clearBootstrap = false } = {}) {
     return {
       ...current,
@@ -955,6 +984,8 @@ This is a versioned-state migration checkpoint. Treat every persisted legacy che
 
 ${finalizationBootstrapInstructions(state().settings.finalization)}
 
+${trustedValidationInstructions()}
+
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
 ${evidence}`,
@@ -973,6 +1004,7 @@ ${evidence}`,
         "ERR_INVALID_POLISHING_OUTPUT",
       );
     }
+    assertTrustedValidationInventory(result);
     await transition(
       {
         ...state(),
@@ -1020,6 +1052,8 @@ ${evidence}`,
 
 Reconcile only the independently rediscovered validation requirements. Legacy validation evidence is provisional and must not be selected.
 
+${trustedValidationInstructions()}
+
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
 ${evidence}
@@ -1049,6 +1083,7 @@ ${JSON.stringify(
       );
     }
     if (result.status === "RESOLVED") {
+      assertTrustedValidationInventory(result);
       return completeValidationMigration(result, "worker");
     }
     const arbitrationOutput = await runRole(
@@ -1057,6 +1092,8 @@ ${JSON.stringify(
       (evidence) => `${BOOTSTRAP_ARBITRATION_INSTRUCTIONS}
 
 Resolve only this validation-inventory migration disagreement. Legacy validation evidence is provisional and must not be selected.
+
+${trustedValidationInstructions()}
 
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
@@ -1089,6 +1126,7 @@ ${JSON.stringify(
         "ERR_INVALID_POLISHING_OUTPUT",
       );
     }
+    assertTrustedValidationInventory(arbitration);
     return completeValidationMigration(arbitration, "arbiter");
   }
 
@@ -1631,6 +1669,8 @@ ${JSON.stringify(
 
 ${finalizationBootstrapInstructions(state().settings.finalization)}
 
+${trustedValidationInstructions()}
+
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
 ${evidence}`,
@@ -1643,6 +1683,7 @@ ${evidence}`,
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "BOOTSTRAP");
     }
+    assertTrustedValidationInventory(result);
     await writeContext(`context/${role}.md`, result.summary);
     await transition(
       {
@@ -1670,6 +1711,8 @@ ${evidence}`,
       "worker",
       BOOTSTRAP_RECONCILIATION_SCHEMA,
       (evidence) => `${BOOTSTRAP_RECONCILIATION_INSTRUCTIONS}
+
+${trustedValidationInstructions()}
 
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
@@ -1713,6 +1756,7 @@ ${JSON.stringify(
       );
       return true;
     }
+    assertTrustedValidationInventory(result);
     await writeContext("context/resolved.md", result.summary);
     const validation = await establishedValidation(result);
     await transition(
@@ -1739,6 +1783,8 @@ ${JSON.stringify(
       "arbiter",
       BOOTSTRAP_ARBITRATION_SCHEMA,
       (evidence) => `${BOOTSTRAP_ARBITRATION_INSTRUCTIONS}
+
+${trustedValidationInstructions()}
 
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
@@ -1774,6 +1820,7 @@ ${JSON.stringify(
     if (result.direction === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "BOOTSTRAP");
     }
+    assertTrustedValidationInventory(result);
     await writeContext("context/resolved.md", result.summary);
     const validation = await establishedValidation(result);
     await transition(
@@ -1887,6 +1934,8 @@ ${evidence}${
 ${PRODUCT_DECISION_INSTRUCTIONS}
 ${finalizationGuidanceInstructions(selectedGuidance)}
 
+${trustedValidationInstructions()}
+
 ${evidence}
 
 Established required-check inventory:
@@ -1910,7 +1959,11 @@ ${JSON.stringify(
       if (output === null) {
         return null;
       }
-      const result = normalizeFinalizationResult(output);
+      const result = normalizeFinalizationResult(output, {
+        trustedCommands: state().trustedValidation.commands.map(
+          ({ command }) => command,
+        ),
+      });
       if (
         selectedGuidance.skillPath === null &&
         ["SKILL_MISSING", "SKILL_INVALID"].includes(result.status)
@@ -1960,6 +2013,20 @@ ${JSON.stringify(
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "BOOTSTRAP");
     }
+    if (
+      !["SKILL_MISSING", "SKILL_INVALID"].includes(result.status) &&
+      state().trustedValidation.commands.some(
+        ({ command }) =>
+          !result.requiredChecks.some(
+            (required) => required.command === command,
+          ),
+      )
+    ) {
+      throw workflowError(
+        "Worker omitted a runner-trusted finalization command.",
+        "ERR_INVALID_POLISHING_OUTPUT",
+      );
+    }
     if (result.status === "BLOCKED") {
       await pause("environment_blocked", {
         explanation: result.reason,
@@ -1997,6 +2064,105 @@ ${JSON.stringify(
       await validationInfrastructureFingerprint(
         result.validationInfrastructure,
       );
+    const trustedByCommand = new Map(
+      state().trustedValidation.commands.map((command) => [
+        command.command,
+        command,
+      ]),
+    );
+    const bindings = Object.freeze({
+      contentFingerprint: fingerprint,
+      validationInfrastructureFingerprint: candidateValidationFingerprint,
+      commandFingerprint: state().trustedValidation.commandFingerprint,
+      configurationFingerprint:
+        state().trustedValidation.configurationFingerprint,
+    });
+    const checks = [];
+    const issues = [...result.issues];
+    const issueIds = new Set(issues.map(({ id }) => id));
+    let nextIssue = 1;
+    for (const [index, required] of result.requiredChecks.entries()) {
+      const reported = result.checks[index];
+      const trusted = trustedByCommand.get(required.command);
+      if (trusted === undefined) {
+        checks.push({
+          ...reported,
+          executor: "agent",
+          commandIdentity: null,
+          exitCode: null,
+          signal: null,
+          timedOut: false,
+        });
+        continue;
+      }
+      let executed;
+      try {
+        executed = await runtime.trustedValidation.execute({
+          bindings,
+          commandIdentity: trusted.identity,
+          projectPath: state().repositoryBaseline.projectPath,
+          snapshot: state().trustedValidation,
+        });
+      } catch (cause) {
+        if (
+          ![
+            "ERR_TRUSTED_VALIDATION_BINDING_CHANGED",
+            "ERR_TRUSTED_VALIDATION_MUTATED_REPOSITORY",
+            "ERR_TRUSTED_VALIDATION_PROCESS_TREE_ACTIVE",
+          ].includes(cause?.code)
+        ) {
+          throw cause;
+        }
+        await pause("unsafe_git_state", { code: cause.code });
+        return false;
+      }
+      const completedValidationFingerprint =
+        await validationInfrastructureFingerprint(
+          result.validationInfrastructure,
+        );
+      if (completedValidationFingerprint !== candidateValidationFingerprint) {
+        await pause("unsafe_git_state", {
+          code: "ERR_TRUSTED_VALIDATION_INFRASTRUCTURE_CHANGED",
+        });
+        return false;
+      }
+      if (executed.status === "BLOCKED") {
+        await pause("environment_blocked", {
+          code: "ERR_TRUSTED_VALIDATION_BLOCKED",
+          explanation:
+            "A selected runner-trusted validation command could not complete in the host environment.",
+          evidence: executed.evidence,
+          resumeState: "FINALIZE",
+        });
+        return false;
+      }
+      checks.push({
+        checkId: required.id,
+        command: required.command,
+        status: executed.status,
+        evidence: executed.evidence,
+        executor: "runner",
+        commandIdentity: executed.commandIdentity,
+        exitCode: executed.exitCode,
+        signal: executed.signal,
+        timedOut: executed.timedOut,
+      });
+      if (executed.status === "FAIL") {
+        while (issueIds.has(`F${nextIssue}`)) {
+          nextIssue += 1;
+        }
+        const id = `F${nextIssue}`;
+        issueIds.add(id);
+        nextIssue += 1;
+        issues.push({
+          id,
+          command: required.command,
+          problem: "A runner-trusted validation command failed.",
+          evidence: executed.evidence,
+        });
+      }
+    }
+    const finalStatus = issues.length === 0 ? "PASS" : "FAIL";
     const validationChanged =
       !isDeepStrictEqual(result.requiredChecks, state().requiredChecks) ||
       !isDeepStrictEqual(
@@ -2007,14 +2173,25 @@ ${JSON.stringify(
         state().validationInfrastructureFingerprint;
     const finalizationResult = {
       ...result,
+      status: finalStatus,
+      summary:
+        finalStatus === result.status
+          ? result.summary
+          : "The project finalization procedure found blocking failures.",
+      issues,
+      checks,
       validationInfrastructureFingerprint: candidateValidationFingerprint,
+      trustedCommandFingerprint:
+        state().trustedValidation.commandFingerprint,
+      trustedConfigurationFingerprint:
+        state().trustedValidation.configurationFingerprint,
       validationChanged,
       fingerprint,
     };
-    if (result.status === "FAIL") {
+    if (finalStatus === "FAIL") {
       const correction = correctionUpdate({
         fingerprint,
-        finalizationIssueIds: result.issues.map(({ id }) => id),
+        finalizationIssueIds: issues.map(({ id }) => id),
         findingIds: [],
       });
       await transition(
@@ -2038,7 +2215,7 @@ ${JSON.stringify(
             "worker",
             "finalization",
             "failed",
-            `Finalization reported ${result.issues.length} blocking issues.`,
+            `Finalization reported ${issues.length} blocking issues.`,
           ),
         },
       );
@@ -2099,6 +2276,10 @@ ${JSON.stringify(
     validationInfrastructure: current.validationInfrastructure,
     validationInfrastructureFingerprint:
       current.validationInfrastructureFingerprint,
+    trustedCommandFingerprint:
+      current.trustedValidation.commandFingerprint,
+    trustedConfigurationFingerprint:
+      current.trustedValidation.configurationFingerprint,
   },
   null,
   2,

@@ -79,6 +79,7 @@ test("tracked example is valid and local configuration is ignored", async () => 
   });
   assert.equal(configuration.pipelines["plan-execution"].finalization, "auto");
   assert.equal(configuration.pipelines.polishing.finalization, "auto");
+  assert.deepEqual(configuration.pipelines.polishing.trustedChecks, []);
   assert.match(gitignore, /^\/\.agent-runner\.json$/mu);
   assert.ok(Object.isFrozen(configuration));
   assert.ok(Object.isFrozen(configuration.pipelines));
@@ -118,6 +119,7 @@ test("minimal configuration uses pipeline-owned setting defaults", () => {
     maxDisputesPerFinding: 2,
     maxSameFindingRounds: 3,
     stagnationWindowRounds: 3,
+    trustedChecks: [],
     roles: {},
   });
 });
@@ -566,6 +568,9 @@ test("only runner configuration defines exact trusted command vectors", () => {
         "plan-execution": {
           trustedChecks: ["service-check"],
         },
+        polishing: {
+          trustedChecks: ["service-check"],
+        },
       },
     }),
     runnerConfiguration,
@@ -612,6 +617,23 @@ test("only runner configuration defines exact trusted command vectors", () => {
   assert.equal(
     state.trustedValidation.commands[0].arguments[1],
     "  test:service  ",
+  );
+  const polishingResolved = resolvePipelineConfiguration(
+    "polishing",
+    runnerConfiguration,
+    {},
+    {},
+    null,
+    projectConfiguration,
+  );
+  assert.deepEqual(polishingResolved.settings.trustedChecks, ["service-check"]);
+  const polishingState = getPipeline("polishing").workflow.createState({
+    settings: polishingResolved.settings,
+    trustedValidation: polishingResolved.trustedValidation,
+  });
+  assert.deepEqual(
+    polishingState.trustedValidation,
+    resolved.trustedValidation,
   );
 
   assert.throws(
