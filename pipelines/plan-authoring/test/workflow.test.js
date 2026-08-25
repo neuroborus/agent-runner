@@ -1331,6 +1331,66 @@ test("invalidates dependent work after a read-only repository mutation", async (
   assert.equal(fixture.calls.reviewer.length, 1);
 });
 
+test("reconstructs an allowlisted failed Claude read-only turn", async (t) => {
+  let unavailable = true;
+  const fixture = await createFixture(t, {
+    onRoleRun(role) {
+      if (role === "reviewer" && unavailable) {
+        unavailable = false;
+        const error = new Error("provider-native secret text");
+        error.code = "ERR_CLAUDE_READ_ONLY_TURN_FAILED";
+        error.recoverable = true;
+        throw error;
+      }
+    },
+  });
+
+  const paused = await fixture.run();
+
+  assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(paused.pause.reason, "backend_unavailable");
+  assert.equal(paused.pause.code, "ERR_CLAUDE_READ_ONLY_TURN_FAILED");
+  assert.equal(paused.pause.resumeState, "REVIEW");
+  assert.notEqual(paused.pipelineState.draft, null);
+  assert.doesNotMatch(JSON.stringify(fixture.transitions), /provider-native/u);
+
+  const completed = await fixture.run();
+  const resumedRequest = fixture.calls.reviewer.at(-1);
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(resumedRequest.session, undefined);
+  assert.equal(resumedRequest.prompt, resumedRequest.recoveryPrompt);
+});
+
+test("keeps Claude authentication terminal for a read-only turn", async (t) => {
+  const fixture = await createFixture(t, {
+    onRoleRun(role) {
+      if (role === "planner") {
+        const error = new Error("provider-native authentication secret");
+        error.code = "ERR_CLAUDE_AUTHENTICATION_UNAVAILABLE";
+        throw error;
+      }
+    },
+    reviewer: [],
+  });
+
+  await assert.rejects(
+    fixture.run(),
+    (error) => error.code === "ERR_CLAUDE_AUTHENTICATION_UNAVAILABLE",
+  );
+
+  assert.equal(fixture.currentRun.pipelineState.workflowState, "FAILED");
+  assert.equal(fixture.currentRun.pause.reason, "internal_failure");
+  assert.equal(
+    fixture.currentRun.pause.code,
+    "ERR_CLAUDE_AUTHENTICATION_UNAVAILABLE",
+  );
+  assert.doesNotMatch(
+    JSON.stringify(fixture.transitions),
+    /authentication secret/u,
+  );
+});
+
 test("pauses when an agent changes ignored clarifications", async (t) => {
   let mutated = false;
   const fixture = await createFixture(t, {

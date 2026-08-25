@@ -2941,7 +2941,7 @@ test("rejects malformed persisted structured input", async (t) => {
   await assert.rejects(fixture.run(), /input request is invalid/u);
 });
 
-test("retries a temporarily unavailable clarification Worker", async (t) => {
+test("reconstructs an allowlisted failed Claude read-only turn", async (t) => {
   let interruptClarification = true;
   const fixture = await createFixture(t, {
     async onRoleRun(role, request) {
@@ -2951,8 +2951,8 @@ test("retries a temporarily unavailable clarification Worker", async (t) => {
         interruptClarification
       ) {
         interruptClarification = false;
-        const error = new Error("Codex turn was interrupted.");
-        error.code = "ERR_CODEX_TURN_INTERRUPTED";
+        const error = new Error("provider-native secret text");
+        error.code = "ERR_CLAUDE_READ_ONLY_TURN_FAILED";
         error.recoverable = true;
         throw error;
       }
@@ -2963,12 +2963,16 @@ test("retries a temporarily unavailable clarification Worker", async (t) => {
 
   assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
   assert.equal(paused.pause.reason, "backend_unavailable");
-  assert.equal(paused.pause.code, "ERR_CODEX_TURN_INTERRUPTED");
+  assert.equal(paused.pause.code, "ERR_CLAUDE_READ_ONLY_TURN_FAILED");
   assert.equal(paused.pause.resumeState, "CLARIFY");
+  assert.doesNotMatch(JSON.stringify(fixture.transitions), /provider-native/u);
 
   const resumed = await fixture.run();
+  const resumedRequest = fixture.calls.worker[1];
 
   assert.equal(resumed.pipelineState.workflowState, "DONE");
+  assert.equal(resumedRequest.session, undefined);
+  assert.equal(resumedRequest.prompt, resumedRequest.recoveryPrompt);
 });
 
 test("pauses before bootstrap when clarification requires a revised plan", async (t) => {
@@ -4259,7 +4263,36 @@ test("preserves workspace changes after a Claude usage rejection", async (t) => 
   );
 });
 
-test("re-finalizes a partial correction after a backend interruption", async (t) => {
+test("does not let Claude provider recovery mask a control mutation", async (t) => {
+  const fixture = await createFixture(t, {
+    async onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        request.prompt.includes("Implement the changes")
+      ) {
+        await executeFile("git", [
+          "-C",
+          request.cwd,
+          "remote",
+          "add",
+          "unexpected",
+          "https://example.invalid/repository.git",
+        ]);
+        const error = new Error("Claude provider is unavailable.");
+        error.code = "ERR_CLAUDE_PROVIDER_UNAVAILABLE";
+        error.recoverable = true;
+        throw error;
+      }
+    },
+  });
+
+  const paused = await fixture.run();
+
+  assert.equal(paused.pause.reason, "unexpected_remote_configuration_change");
+  assert.notEqual(paused.pause.reason, "backend_unavailable");
+});
+
+test("re-finalizes a partial correction after provider unavailability", async (t) => {
   let interruptResolution = true;
   const fixture = await createFixture(t, {
     workReviewer: [reviewFindings("R1"), reviewApproved()],
@@ -4279,8 +4312,8 @@ test("re-finalizes a partial correction after a backend interruption", async (t)
           join(request.cwd, "source.js"),
           "export const value = 2;\n",
         );
-        const error = new Error("Claude process was interrupted.");
-        error.code = "ERR_CLAUDE_PROCESS_INTERRUPTED";
+        const error = new Error("Claude provider is unavailable.");
+        error.code = "ERR_CLAUDE_PROVIDER_UNAVAILABLE";
         error.recoverable = true;
         throw error;
       }
@@ -4291,7 +4324,7 @@ test("re-finalizes a partial correction after a backend interruption", async (t)
 
   assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
   assert.equal(paused.pause.reason, "backend_unavailable");
-  assert.equal(paused.pause.code, "ERR_CLAUDE_PROCESS_INTERRUPTED");
+  assert.equal(paused.pause.code, "ERR_CLAUDE_PROVIDER_UNAVAILABLE");
   assert.equal(paused.pause.resumeState, "FINALIZE");
   assert.equal(paused.pipelineState.finalizationResult, null);
   assert.equal(paused.pipelineState.finalizedFingerprint, null);
@@ -4313,6 +4346,43 @@ test("re-finalizes a partial correction after a backend interruption", async (t)
     fixture.calls.reviewer.at(-1).prompt,
     /Previous findings for this step:[\s\S]*"id": "R1"/u,
   );
+});
+
+test("fails closed after an ambiguous writable Claude process failure", async (t) => {
+  let interrupted = false;
+  const fixture = await createFixture(t, {
+    async onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        request.prompt.includes("Implement the changes") &&
+        !interrupted
+      ) {
+        interrupted = true;
+        await writeFile(
+          join(request.cwd, "source.js"),
+          "export const value = 2;\n",
+        );
+        const error = new Error("provider-native secret text");
+        error.code = "ERR_CLAUDE_PROCESS_INTERRUPTED";
+        error.ambiguous = true;
+        throw error;
+      }
+    },
+  });
+
+  await assert.rejects(
+    fixture.run(),
+    (error) => error.code === "ERR_CLAUDE_PROCESS_INTERRUPTED",
+  );
+
+  assert.equal(fixture.currentRun.pipelineState.workflowState, "FAILED");
+  assert.equal(fixture.currentRun.pause.reason, "internal_failure");
+  assert.equal(fixture.currentRun.pause.code, "ERR_CLAUDE_PROCESS_INTERRUPTED");
+  assert.equal(
+    await readFile(join(fixture.projectPath, "source.js"), "utf8"),
+    "export const value = 2;\n",
+  );
+  assert.doesNotMatch(JSON.stringify(fixture.transitions), /provider-native/u);
 });
 
 test("retries implementation after an environment blocker clears", async (t) => {

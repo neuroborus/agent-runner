@@ -186,11 +186,24 @@ First, forked, fresh, and context-invalidated turns receive the complete durable
 request. Compatible continuations receive only the current instruction and
 state delta while retaining the complete request for adapter recovery after
 unavailable continuation or failed compaction.
-An explicit Claude rate, quota, credit, or spend-limit rejection is not retried
-through compaction, a fresh session, or provider fallback. Persist
+Claude classifies structured permission denials, HTTP status, result subtype,
+and terminal reason before consulting a bounded native-text slice. Only finite
+allowlisted backend, capability, configuration, usage, provider, expected-tool
+permission, and harmless read-only execution failures are resumable. Bash
+permission recovery requires a positively recognized safe repository
+inspection; every other Bash denial fails closed. Provider recovery requires an
+explicit transient HTTP status, while non-transient client statuses and an
+unqualified structured `api_error` are terminal. Authentication,
+forbidden-operation denials, isolation or protocol failures, and unclassified
+writable process outcomes remain terminal. Denied input,
+native result text, raw standard error, and native process causes are discarded.
+An explicit rate, quota, credit, or spend-limit rejection is not retried through
+compaction, a fresh session, or provider fallback. Persist
 `backend_unavailable`, safe Worker workspace changes, and invalidation of stale
-fingerprint-bound results before pausing so the durable request can resume after
-capacity returns.
+fingerprint-bound results before pausing so the complete durable request can be
+reconstructed after capacity returns. Classified usage and provider failures
+from writable turns use this path only after workspace and repository-control
+reconciliation; no native session is required.
 
 A writable Worker turn that cannot execute required validation because of
 sandbox, IPC, loopback, process-isolation, missing-service, permission, or a
@@ -419,6 +432,15 @@ Recovery accepts only an incomplete final journal fragment, advances lagging
 state from complete events, and never depends on a native Codex or Claude
 session surviving interruption.
 
+Claude read-only recovery uses the same pipeline state version 2 and common run
+envelope. A valid but otherwise unclassified read-only result or process failure
+may pause only after the read-only mutation guard succeeds. Resume rebuilds the
+complete role request from the persisted inputs and checkpoint. No denied tool
+input, native provider text, raw standard error, or new recovery field is
+persisted. Writable usage/provider recovery first preserves safe content and
+invalidates stale fingerprint-bound evidence; ambiguous writable failures fail
+closed.
+
 The descriptor owns one explicit ordered migration for every supported prior
 pipeline state version. Lock-free status may project a compatible migration in
 memory, but only a mutating continuation may persist it. Before workflow
@@ -487,6 +509,9 @@ Pipeline tests use fake adapters and temporary repositories. Cover at least:
 - sandbox, IPC, loopback, process-isolation, missing-service, and permission
   validation blockers across polishing, finalization, and finding resolution,
   including fingerprint-aware preservation and resume;
+- finite redacted Claude failure classification, durable read-only request
+  reconstruction, writable usage/provider reconciliation, and terminal
+  authentication, forbidden-operation, and ambiguous writable boundaries;
 - the invariant that `HEAD` never changes and completion never commits.
 
 Root tests cover workspace imports and metadata, static registration,

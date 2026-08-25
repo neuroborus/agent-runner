@@ -446,12 +446,33 @@ recovery prompt once. If continuation still fails, writable and read-only work
 can resume in a fresh session with the same complete prompt and a concise
 recovery preface.
 
-An explicit Claude rate, quota, credit, or spend-limit rejection bypasses that
-context-recovery path and all provider fallback. The rejected turn is invoked
+Claude turn failures use a finite adapter-owned diagnostic allowlist. Structured
+`permission_denials`, `api_error_status`, result subtype, and `terminal_reason`
+take precedence over bounded message matching. The adapter discards denied tool
+input, native result text, raw standard error, and process causes; only its
+fixed code, fixed message, allowlisted class, and safety fields cross the
+boundary. Authentication remains terminal. A denial that identifies an
+unexposed tool or a Bash command outside the narrow positive repository-
+inspection allowlist is also terminal. Only an expected non-Bash tool or a
+positively recognized safe Bash inspection may be a recoverable capability or
+configuration failure. Structured provider recovery accepts only explicit
+transient HTTP statuses; non-transient client statuses and an `api_error`
+without a transient status fail closed with a fixed request-rejected error.
+
+An explicit Claude rate, quota, credit, or spend-limit rejection bypasses
+context recovery and provider fallback. Other allowlisted backend, capability,
+configuration, usage, and provider failures use the same durable pause path.
+An otherwise unclassified valid read-only result or process failure is
+recoverable only because the enforced read-only envelope and the pipeline's
+post-turn repository guard prove that it could not mutate the repository.
+Unknown writable process outcomes remain terminal after reconciliation;
+classified usage and provider failures may pause only after safe workspace
+changes and control state have been reconciled. The rejected turn is invoked
 once, then the owning pipeline persists `backend_unavailable`, its resumable
 workflow state, reconciled one-shot authorization state, and any safe workspace
 changes before entering `WAITING_FOR_USER`. Resume reconstructs the same
-durable request after capacity returns.
+durable request after availability returns. No new persisted field or state
+version is required.
 
 A Worker that cannot execute required validation because of sandbox, IPC,
 loopback, process-isolation, missing-service, permission, or comparable external
@@ -495,9 +516,11 @@ turn fails before agent work rather than silently losing lineage.
 Adapter failures retain only bounded diagnostics. Codex capability, isolation,
 and prohibited-operation errors carry one allowlisted diagnostic class rather
 than a command or native response. Claude classifies unavailable source and
-continuation sessions from the attempted session mode, and distinguishes those
-from effective-profile, authentication, and provider failures on fresh turns.
-No classification retains native output, credentials, or raw transcripts.
+continuation sessions from the attempted session mode, distinguishes those
+from effective-profile, authentication, backend, capability, configuration,
+usage, provider, permission, and process failures, and derives recoverability
+only from its finite class allowlist. No classification retains native output,
+denied input, credentials, or raw transcripts.
 For a failed Codex turn, recognized App Server `codexErrorInfo` variants map to
 a finite terminal diagnostic-class allowlist. Plan execution may persist only
 that validated class with `ERR_CODEX_TURN_FAILED`; native messages, additional

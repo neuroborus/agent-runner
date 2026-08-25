@@ -574,12 +574,30 @@ classification on the consumed authorization, then Git must verify that no
 commit was created. An interrupted verification retains that durable proof for
 resume.
 
+Claude recoverability is derived from a finite adapter-owned diagnostic-class
+allowlist. Structured permission denials, HTTP status, result subtype, and
+terminal reason take precedence over bounded message matching. Backend,
+capability, configuration, usage, provider, and expected-tool permission
+failures may be recoverable, but Bash permission recovery requires a positively
+recognized safe repository inspection. Authentication, every other Bash
+denial, and permission denials proving a forbidden operation remain terminal.
+Provider recovery requires an explicit transient HTTP status; non-transient
+client statuses and an unqualified structured `api_error` fail closed. An
+otherwise unclassified valid result or process failure is recoverable only for
+a read-only turn. Denied tool input,
+native result text, raw standard error, and process causes are discarded.
+
 An explicit Claude rate, quota, credit, or spend-limit rejection is recoverable
 backend unavailability, but the rejected turn itself is never retried through
 compaction, a fresh session, or provider fallback. Persist
 `backend_unavailable` with the resumable pipeline state, reconcile any prepared
 one-shot commit authorization, preserve safe workspace changes, and enter
-`WAITING_FOR_USER` after the single rejected invocation.
+`WAITING_FOR_USER` after the single rejected invocation. Classified usage and
+provider failures from non-commit writable turns use the same path only after
+workspace and repository-control reconciliation. Unknown writable process
+outcomes remain terminal. Resume reconstructs the complete request from durable
+state rather than requiring the failed native session. These rules add no new
+pipeline-state field or migration.
 
 When a writable Worker turn cannot execute required validation because of
 sandbox, IPC, loopback, process-isolation, missing-service, permission, or a
@@ -760,6 +778,20 @@ Reject permission denials from a non-interactive turn instead of treating a
 partial response as success. Pass an explicit model without a fallback chain
 and reject a full model ID when the result's model usage reports a different
 model.
+
+Classify `permission_denials`, `api_error_status`, result subtype, and
+`terminal_reason` before consulting at most one bounded native-text slice.
+Expose only fixed error codes and messages plus a finite non-sensitive
+diagnostic class. Never attach denied `tool_input`, provider result text, raw
+standard error, or the native process error. A denial of an unexposed tool or a
+Bash command outside the positive repository-inspection allowlist is a terminal
+safety failure. An exposed non-Bash tool or a positively recognized safe Bash
+inspection may be a recoverable capability/configuration failure. Treat only
+explicit transient HTTP statuses as provider unavailability; fail closed on
+non-transient client statuses and `api_error` without such a status. Unknown
+valid read-only result failures and unclassified read-only process exits are
+recoverable; the same unknown outcomes during workspace-write or one-shot
+commit work are not.
 
 Map a trusted Claude alias only to its configured absolute isolated
 configuration directory through `CLAUDE_CONFIG_DIR`. Map an explicit decimal
@@ -1932,6 +1964,11 @@ At minimum cover:
 51. missing, directory, symlink, and symlink-traversing validation-
     infrastructure paths are rejected before inventory acceptance with the
     producing field identified, while canonical existing files are accepted.
+52. Claude structured status and permission classification is finite and
+    redacted; allowlisted read-only failures reconstruct from durable state,
+    classified writable usage/provider failures preserve reconciled changes,
+    and forbidden, authentication, ambiguous writable, and one-shot outcomes
+    remain fail closed.
 
 Real Codex/Claude smoke tests should be opt-in integration tests.
 
@@ -2032,6 +2069,9 @@ Do not build:
     commands, and unique existing canonical repository-relative validation
     files; invalid output receives at most one read-only correction per
     producing role, phase, and contract.
+32. Claude recovery persists no denied input or native provider text, retries
+    only finite allowlisted failures, and reconstructs the request from durable
+    runner state without making a native session authoritative.
 
 ---
 

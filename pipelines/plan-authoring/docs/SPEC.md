@@ -254,10 +254,24 @@ First, forked, fresh, and context-invalidated turns receive that complete
 durable context. A compatible role continuation receives only its current
 instruction and state delta; the complete prompt remains attached for adapter
 recovery after unavailable continuation or failed compaction.
-An explicit Claude rate, quota, credit, or spend-limit rejection is not retried
-through compaction, a fresh session, or provider fallback. Persist
-`backend_unavailable` with the current authoring state and resume the durable
-request after capacity returns.
+Claude classifies structured permission, HTTP status, result subtype, and
+terminal-reason fields before bounded native-text matching. Only finite
+allowlisted backend, capability, configuration, usage, provider, expected-tool
+permission, and harmless read-only execution failures are resumable. A Bash
+denial is an expected-tool capability failure only for a positively recognized
+safe repository inspection; all other Bash denials fail closed. Provider
+recovery requires an explicit transient HTTP status, while non-transient client
+statuses and an unqualified structured `api_error` are terminal. An
+unclassified valid read-only result or process failure may use this path only
+after the repository guard proves the turn remained read-only. Authentication,
+forbidden-operation permission denials, protocol failures, and isolation
+failures remain terminal. Denied input and native provider text are discarded.
+An explicit rate, quota, credit, or spend-limit rejection is not retried through
+compaction, a fresh session, or provider fallback. Persist
+`backend_unavailable` with the current authoring state and resume by
+reconstructing the complete durable request after availability returns; do not
+require the failed native session. This uses the existing version-1 pipeline
+state and common run envelope without a migration.
 The planning checkpoint is seeded from the validated inputs and its current
 draft, blockers, and bounded correction history. A product-decision edit
 invalidates it before planning resumes.
@@ -331,3 +345,6 @@ path is ignored and untracked.
   runtime; this pipeline continues to own the same states and transitions.
 - Cover blocked provider activity, interrupted-owner projection, and resumed
   request reconstruction with fake adapters and external temporary state.
+- Cover finite redacted Claude classification, durable reconstruction of a
+  failed read-only request, and terminal authentication and forbidden-operation
+  boundaries without retaining native provider text.

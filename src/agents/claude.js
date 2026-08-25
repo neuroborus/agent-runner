@@ -25,6 +25,35 @@ const MINIMUM_CLAUDE_VERSION = Object.freeze([2, 1, 233]);
 const MAX_ARGUMENT_BYTES = 128 * 1024 - 1;
 const MAX_PROCESS_OUTPUT_BYTES = 64 * 1024 * 1024;
 const MAX_DIAGNOSTIC_INPUT_LENGTH = 4_096;
+const CLAUDE_DIAGNOSTIC_CLASSES = new Set([
+  "authentication_unavailable",
+  "backend_unavailable",
+  "capability_unavailable",
+  "configuration_unavailable",
+  "continuation_session_unavailable",
+  "context_exhausted",
+  "permission_capability",
+  "permission_forbidden_operation",
+  "permission_unclassified",
+  "provider_unavailable",
+  "read_only_execution_failed",
+  "read_only_process_failed",
+  "source_session_unavailable",
+  "usage_limit",
+  "writable_process_ambiguous",
+]);
+const RECOVERABLE_CLAUDE_DIAGNOSTIC_CLASSES = new Set([
+  "backend_unavailable",
+  "capability_unavailable",
+  "configuration_unavailable",
+  "continuation_session_unavailable",
+  "context_exhausted",
+  "permission_capability",
+  "provider_unavailable",
+  "read_only_execution_failed",
+  "read_only_process_failed",
+  "usage_limit",
+]);
 const DECIMAL_CONTEXT_SIZE_PATTERN = /^[1-9][0-9]*$/u;
 const MINIMUM_CONTEXT_SIZE = 100_000n;
 const MAXIMUM_CONTEXT_SIZE = 1_000_000n;
@@ -101,7 +130,7 @@ const AUTHENTICATION_ERROR_PATTERN =
 const PROFILE_ERROR_PATTERN =
   /(?:(?:profile|configuration|config(?:uration)? directory)[^\n]{0,80}(?:not found|does not exist|cannot (?:be )?load|missing|unavailable|invalid|inaccessible|permission denied)|CLAUDE_CONFIG_DIR[^\n]{0,80}(?:not found|does not exist|missing|invalid|inaccessible))/iu;
 const PROVIDER_ERROR_PATTERN =
-  /(?:(?:provider|service|api|connection|network)[^\n]{0,80}(?:unavailable|overload|error|failed|refused|timed? ?out|unreachable)|overloaded[_ -]?error|unable to connect to (?:Anthropic|Claude)[^\n]*services?|internal server error|bad gateway|service unavailable|gateway timeout|\b5\d\d\b)/iu;
+  /(?:(?:provider|service|api|connection)[^\n]{0,80}(?:unavailable|overload|error|failed|refused|timed? ?out|unreachable)|(?:Anthropic|Claude)[^\n]{0,80}(?:network|connection)[^\n]{0,80}(?:unavailable|failed|refused|timed? ?out|unreachable)|overloaded[_ -]?error|unable to connect to (?:Anthropic|Claude)[^\n]*services?|internal server error|bad gateway|service unavailable|gateway timeout|\b5\d\d\b)/iu;
 const SESSION_ERROR_PATTERN =
   /(?:no conversation found|(?:conversation|session)[^\n]{0,80}(?:not found|does not exist|expired|unavailable|cannot|could not|invalid))/iu;
 const MODEL_ERROR_PATTERN =
@@ -110,6 +139,27 @@ const AUTO_ERROR_PATTERN =
   /(?:auto mode|permission mode[^\n]*auto)[^\n]{0,80}(?:unavailable|disabled|unsupported|invalid)/iu;
 const PERMISSION_MODE_FALLBACK_PATTERN =
   /permission mode forced to (?:default|manual)/iu;
+const BACKEND_ERROR_PATTERN =
+  /(?:backend|runtime|turn setup)[^\n]{0,80}(?:unavailable|failed|error|timed? ?out)|failed to (?:initialize|start) (?:the )?(?:backend|runtime|turn)/iu;
+const CAPABILITY_ERROR_PATTERN =
+  /(?:(?:permission|safe|plan|auto) mode|sandbox|capabilit(?:y|ies))[^\n]{0,80}(?:unavailable|disabled|unsupported|invalid|failed)/iu;
+const CONFIGURATION_ERROR_PATTERN =
+  /(?:configuration|config(?:uration)? directory|profile|model)[^\n]{0,80}(?:not found|does not exist|cannot (?:be )?load|missing|unavailable|invalid|inaccessible|permission denied|unsupported)/iu;
+const SAFE_BASH_INSPECTION_PATTERNS = Object.freeze([
+  /^git status(?:\s+(?:-s|-b|-sb|-bs|--short|--branch|--porcelain(?:=v[12])?|--untracked-files=(?:no|normal|all)|--ignored(?:=(?:traditional|matching|no))?|--no-ahead-behind))*$/u,
+  /^git rev-parse\s+(?:--git-dir|--show-toplevel|--is-inside-work-tree|--verify\s+HEAD|HEAD)$/u,
+  /^git diff\s+(?:--check|--cached\s+--check|--staged\s+--check)$/u,
+  /^git remote(?:\s+-v)?$/u,
+]);
+const ERROR_RESULT_SUBTYPES = new Set([
+  "error_during_execution",
+  "error_max_budget_usd",
+  "error_max_structured_output_retries",
+  "error_max_turns",
+]);
+const STRUCTURED_OUTPUT_TERMINAL_REASONS = new Set([
+  "structured_output_retry_exhausted",
+]);
 const IGNORED_CONTROL_ENVIRONMENT = new Set([
   "CLAUDE_AUTO_BACKGROUND_TASKS",
   "CLAUDE_CODE_AUTO_CONNECT_IDE",
@@ -142,6 +192,7 @@ export class ClaudeAdapterError extends Error {
       ambiguous = false,
       cause,
       code = "ERR_CLAUDE_ADAPTER",
+      diagnosticClass,
       effectStarted,
       failureClass,
       recoverable = false,
@@ -152,12 +203,17 @@ export class ClaudeAdapterError extends Error {
     this.name = "ClaudeAdapterError";
     this.code = code;
     this.ambiguous = ambiguous;
-    this.recoverable = recoverable;
+    this.recoverable =
+      recoverable &&
+      RECOVERABLE_CLAUDE_DIAGNOSTIC_CLASSES.has(diagnosticClass);
     if (typeof effectStarted === "boolean") {
       this.effectStarted = effectStarted;
     }
     if (failureClass === STRUCTURED_OUTPUT_FAILURE_CLASS) {
       this.failureClass = failureClass;
+    }
+    if (CLAUDE_DIAGNOSTIC_CLASSES.has(diagnosticClass)) {
+      this.diagnosticClass = diagnosticClass;
     }
     if (sessionId !== undefined) {
       this.sessionId = sessionId;
@@ -508,24 +564,98 @@ function commandArguments(
   return argumentsList;
 }
 
-function classifiedAvailabilityError(message, session, profile, sessionId) {
+function diagnosticText(payload) {
+  const values = [
+    ...(typeof payload?.result === "string" ? [payload.result] : []),
+    ...(Array.isArray(payload?.errors)
+      ? payload.errors.filter((value) => typeof value === "string")
+      : []),
+  ];
+  return values.join("\n").slice(0, MAX_DIAGNOSTIC_INPUT_LENGTH);
+}
+
+function payloadSessionId(payload) {
+  return typeof payload?.session_id === "string" &&
+    SESSION_ID_PATTERN.test(payload.session_id)
+    ? payload.session_id
+    : undefined;
+}
+
+function diagnosticError(message, options) {
+  return new ClaudeAdapterError(message, options);
+}
+
+function usageLimitError(sessionId) {
+  return diagnosticError("Claude usage capacity is unavailable.", {
+    code: "ERR_CLAUDE_USAGE_LIMIT",
+    diagnosticClass: "usage_limit",
+    recoverable: true,
+    sessionId,
+  });
+}
+
+function providerUnavailableError(sessionId) {
+  return diagnosticError("Claude provider is unavailable.", {
+    code: "ERR_CLAUDE_PROVIDER_UNAVAILABLE",
+    diagnosticClass: "provider_unavailable",
+    recoverable: true,
+    sessionId,
+  });
+}
+
+function requestRejectedError(sessionId) {
+  return diagnosticError("Claude rejected the request.", {
+    code: "ERR_CLAUDE_REQUEST_REJECTED",
+    sessionId,
+  });
+}
+
+function authenticationUnavailableError(sessionId) {
+  return diagnosticError("Claude authentication is unavailable.", {
+    code: "ERR_CLAUDE_AUTHENTICATION_UNAVAILABLE",
+    diagnosticClass: "authentication_unavailable",
+    sessionId,
+  });
+}
+
+function classifiedAvailabilityError(
+  message,
+  { profile, session, sessionId },
+) {
   if (AUTHENTICATION_ERROR_PATTERN.test(message)) {
-    return new ClaudeAdapterError("Claude authentication is unavailable.", {
-      code: "ERR_CLAUDE_AUTHENTICATION_UNAVAILABLE",
-      recoverable: true,
-      sessionId,
-    });
+    return authenticationUnavailableError(sessionId);
   }
   if (PROFILE_ERROR_PATTERN.test(message)) {
-    return new ClaudeAdapterError("Claude profile is unavailable.", {
+    return diagnosticError("Claude profile is unavailable.", {
       code: "ERR_CLAUDE_PROFILE_UNAVAILABLE",
+      diagnosticClass: "configuration_unavailable",
       recoverable: true,
       sessionId,
     });
   }
   if (PROVIDER_ERROR_PATTERN.test(message)) {
-    return new ClaudeAdapterError("Claude provider is unavailable.", {
-      code: "ERR_CLAUDE_PROVIDER_UNAVAILABLE",
+    return providerUnavailableError(sessionId);
+  }
+  if (BACKEND_ERROR_PATTERN.test(message)) {
+    return diagnosticError("Claude backend is unavailable.", {
+      code: "ERR_CLAUDE_BACKEND_UNAVAILABLE",
+      diagnosticClass: "backend_unavailable",
+      recoverable: true,
+      sessionId,
+    });
+  }
+  if (CAPABILITY_ERROR_PATTERN.test(message)) {
+    return diagnosticError("Claude capability is unavailable.", {
+      code: "ERR_UNSUPPORTED_CLAUDE_CAPABILITY",
+      diagnosticClass: "capability_unavailable",
+      recoverable: true,
+      sessionId,
+    });
+  }
+  if (CONFIGURATION_ERROR_PATTERN.test(message)) {
+    return diagnosticError("Claude configuration is unavailable.", {
+      code: "ERR_CLAUDE_CONFIGURATION_UNAVAILABLE",
+      diagnosticClass: "configuration_unavailable",
       recoverable: true,
       sessionId,
     });
@@ -534,88 +664,219 @@ function classifiedAvailabilityError(message, session, profile, sessionId) {
     return undefined;
   }
   if (session?.mode === "fork") {
-    return new ClaudeAdapterError("Claude source session is unavailable.", {
+    return diagnosticError("Claude source session is unavailable.", {
       code: "ERR_CLAUDE_SOURCE_SESSION_UNAVAILABLE",
+      diagnosticClass: "source_session_unavailable",
       sessionId,
     });
   }
   if (session?.mode === "continue") {
-    return new ClaudeAdapterError(
+    return diagnosticError(
       "Claude continuation session is unavailable.",
       {
         code: "ERR_CLAUDE_CONTINUATION_SESSION_UNAVAILABLE",
+        diagnosticClass: "continuation_session_unavailable",
         recoverable: true,
         sessionId,
       },
     );
   }
   if (profile !== undefined) {
-    return new ClaudeAdapterError("Claude profile is unavailable.", {
+    return diagnosticError("Claude profile is unavailable.", {
       code: "ERR_CLAUDE_PROFILE_UNAVAILABLE",
+      diagnosticClass: "configuration_unavailable",
       recoverable: true,
       sessionId,
     });
   }
-  return new ClaudeAdapterError("Claude provider is unavailable.", {
-    code: "ERR_CLAUDE_PROVIDER_UNAVAILABLE",
-    recoverable: true,
-    sessionId,
-  });
+  return providerUnavailableError(sessionId);
 }
 
-function outputError(
-  payload,
-  { fallback = "Claude turn failed.", profile, session } = {},
-) {
-  const message =
-    typeof payload?.result === "string" && payload.result.length > 0
-      ? payload.result
-      : fallback;
-  const diagnosticMessage = message.slice(0, MAX_DIAGNOSTIC_INPUT_LENGTH);
-  const sessionId =
-    typeof payload?.session_id === "string" &&
-    SESSION_ID_PATTERN.test(payload.session_id)
-      ? payload.session_id
-      : undefined;
-  if (USAGE_LIMIT_ERROR_PATTERN.test(diagnosticMessage)) {
-    return new ClaudeAdapterError("Claude usage capacity is unavailable.", {
-      code: "ERR_CLAUDE_USAGE_LIMIT",
+function structuredProviderError(payload, sessionId) {
+  const status = payload?.api_error_status;
+  if (payload?.subtype === "error_max_budget_usd") {
+    return usageLimitError(sessionId);
+  }
+  if (
+    payload?.subtype === "error_max_structured_output_retries" ||
+    STRUCTURED_OUTPUT_TERMINAL_REASONS.has(payload?.terminal_reason)
+  ) {
+    return diagnosticError("Claude returned invalid structured output.", {
+      code: "ERR_CLAUDE_STRUCTURED_OUTPUT",
+      failureClass: STRUCTURED_OUTPUT_FAILURE_CLASS,
+      sessionId,
+    });
+  }
+  if (status === 429) {
+    return usageLimitError(sessionId);
+  }
+  if (status === 401 || status === 403) {
+    return authenticationUnavailableError(sessionId);
+  }
+  if (
+    status === 408 ||
+    status === 425 ||
+    status === 529 ||
+    (Number.isInteger(status) && status >= 500 && status <= 599)
+  ) {
+    return providerUnavailableError(sessionId);
+  }
+  if (status !== undefined) {
+    return requestRejectedError(sessionId);
+  }
+  if (payload?.terminal_reason === "budget_exhausted") {
+    return usageLimitError(sessionId);
+  }
+  if (payload?.terminal_reason === "api_error") {
+    return requestRejectedError(sessionId);
+  }
+  if (payload?.terminal_reason === "turn_setup_failed") {
+    return diagnosticError("Claude backend is unavailable.", {
+      code: "ERR_CLAUDE_BACKEND_UNAVAILABLE",
+      diagnosticClass: "backend_unavailable",
       recoverable: true,
       sessionId,
     });
   }
+  if (payload?.terminal_reason === "tool_deferred_unavailable") {
+    return diagnosticError("Claude capability is unavailable.", {
+      code: "ERR_UNSUPPORTED_CLAUDE_CAPABILITY",
+      diagnosticClass: "capability_unavailable",
+      recoverable: true,
+      sessionId,
+    });
+  }
+  return undefined;
+}
+
+function outputError(payload, request, session) {
+  const sessionId = payloadSessionId(payload);
+  const structuredError = structuredProviderError(payload, sessionId);
+  if (structuredError !== undefined) {
+    return structuredError;
+  }
+  const diagnosticMessage = diagnosticText(payload);
+  if (USAGE_LIMIT_ERROR_PATTERN.test(diagnosticMessage)) {
+    return usageLimitError(sessionId);
+  }
   if (CONTEXT_ERROR_PATTERN.test(diagnosticMessage)) {
-    return new ClaudeAdapterError("Claude context window is full.", {
+    return diagnosticError("Claude context window is full.", {
       code: "ERR_CLAUDE_CONTEXT_EXHAUSTED",
+      diagnosticClass: "context_exhausted",
       recoverable: true,
       sessionId,
     });
   }
   if (MODEL_ERROR_PATTERN.test(diagnosticMessage)) {
-    return new ClaudeAdapterError("Claude model is unavailable.", {
+    return diagnosticError("Claude model is unavailable.", {
       code: "ERR_CLAUDE_MODEL_UNAVAILABLE",
+      diagnosticClass: "configuration_unavailable",
+      recoverable: true,
       sessionId,
     });
   }
   if (AUTO_ERROR_PATTERN.test(diagnosticMessage)) {
-    return new ClaudeAdapterError("Claude auto mode is unavailable.", {
+    return diagnosticError("Claude auto mode is unavailable.", {
       code: "ERR_UNSUPPORTED_CLAUDE_CAPABILITY",
+      diagnosticClass: "capability_unavailable",
+      recoverable: true,
       sessionId,
     });
   }
   const availabilityError = classifiedAvailabilityError(
     diagnosticMessage,
-    session,
-    profile,
-    sessionId,
+    { profile: request.profile, session, sessionId },
   );
   if (availabilityError !== undefined) {
     return availabilityError;
   }
-  return new ClaudeAdapterError(fallback, {
+  if (request.access === "read-only") {
+    return diagnosticError("Claude read-only execution failed.", {
+      code: "ERR_CLAUDE_READ_ONLY_TURN_FAILED",
+      diagnosticClass: "read_only_execution_failed",
+      recoverable: true,
+      sessionId,
+    });
+  }
+  return diagnosticError("Claude turn failed.", {
+    ambiguous: request.access === "workspace-write",
     code: "ERR_CLAUDE_TURN_FAILED",
     sessionId,
   });
+}
+
+function isClaudeErrorResult(payload) {
+  return (
+    isRecord(payload) &&
+    payload.type === "result" &&
+    payload.is_error === true &&
+    typeof payload.session_id === "string" &&
+    (payload.permission_denials == null ||
+      Array.isArray(payload.permission_denials)) &&
+    ((payload.subtype === "success" && typeof payload.result === "string") ||
+      (ERROR_RESULT_SUBTYPES.has(payload.subtype) &&
+        (typeof payload.result === "string" ||
+          (Array.isArray(payload.errors) &&
+            payload.errors.every((value) => typeof value === "string")))))
+  );
+}
+
+function permissionDiagnostic(denials, request) {
+  const permittedTools = new Set(
+    accessConfigurationFor(request).tools.split(","),
+  );
+  let unclassified = false;
+  for (const denial of denials) {
+    if (!isRecord(denial) || typeof denial.tool_name !== "string") {
+      unclassified = true;
+      continue;
+    }
+    if (!permittedTools.has(denial.tool_name)) {
+      return "permission_forbidden_operation";
+    }
+    if (denial.tool_name !== "Bash") {
+      continue;
+    }
+    const command = denial.tool_input?.command;
+    if (typeof command !== "string" || command.length === 0) {
+      unclassified = true;
+      continue;
+    }
+    if (
+      !SAFE_BASH_INSPECTION_PATTERNS.some((pattern) => pattern.test(command))
+    ) {
+      return "permission_forbidden_operation";
+    }
+  }
+  return unclassified ? "permission_unclassified" : "permission_capability";
+}
+
+function permissionError(denials, request, sessionId) {
+  const diagnosticClass = permissionDiagnostic(denials, request);
+  return diagnosticError("Claude requested denied permission.", {
+    code: "ERR_CLAUDE_PERMISSION_DENIED",
+    diagnosticClass,
+    recoverable: diagnosticClass === "permission_capability",
+    sessionId,
+  });
+}
+
+function processFailureError(request) {
+  if (request.access === "read-only") {
+    return diagnosticError("Claude read-only process failed.", {
+      code: "ERR_CLAUDE_PROCESS_INTERRUPTED",
+      diagnosticClass: "read_only_process_failed",
+      recoverable: true,
+    });
+  }
+  return diagnosticError(
+    "Claude process outcome requires repository reconciliation.",
+    {
+      ambiguous: true,
+      code: "ERR_CLAUDE_PROCESS_INTERRUPTED",
+      diagnosticClass: "writable_process_ambiguous",
+    },
+  );
 }
 
 function validateRequestedModel(payload, model) {
@@ -641,6 +902,21 @@ function normalizeResult(payload, request, session) {
   const hasValidPermissionDenials =
     payload?.permission_denials == null ||
     Array.isArray(payload.permission_denials);
+  const sessionId = payloadSessionId(payload);
+  if (
+    hasValidPermissionDenials &&
+    payload.permission_denials?.length > 0
+  ) {
+    if (sessionId === undefined) {
+      throw new ClaudeAdapterError("Claude returned an invalid result.", {
+        code: "ERR_CLAUDE_PROTOCOL",
+      });
+    }
+    throw permissionError(payload.permission_denials, request, sessionId);
+  }
+  if (isClaudeErrorResult(payload)) {
+    throw outputError(payload, request, session);
+  }
   if (
     !isRecord(payload) ||
     payload.type !== "result" ||
@@ -651,16 +927,8 @@ function normalizeResult(payload, request, session) {
     !SESSION_ID_PATTERN.test(payload.session_id) ||
     !hasValidPermissionDenials
   ) {
-    throw outputError(payload, {
-      fallback: "Claude returned an invalid result.",
-      profile: request.profile,
-      session,
-    });
-  }
-  if (payload.permission_denials?.length > 0) {
-    throw new ClaudeAdapterError("Claude requested denied permission.", {
-      code: "ERR_CLAUDE_PERMISSION_DENIED",
-      sessionId: payload.session_id,
+    throw new ClaudeAdapterError("Claude returned an invalid result.", {
+      code: "ERR_CLAUDE_TURN_FAILED",
     });
   }
   validateRequestedModel(payload, request.model);
@@ -923,8 +1191,9 @@ export function createClaudeAdapter(options = {}) {
         throw new ClaudeAdapterError(
           "Claude permission mode fell back to Manual mode.",
           {
-            cause,
             code: "ERR_UNSUPPORTED_CLAUDE_CAPABILITY",
+            diagnosticClass: "capability_unavailable",
+            recoverable: true,
           },
         );
       }
@@ -933,34 +1202,48 @@ export function createClaudeAdapter(options = {}) {
       if (payload === null) {
         const reportedError = outputError(
           { result: `${standardError}\n${standardOutput}`.trim() },
-          {
-            fallback: "Claude process failed.",
-            profile: request.profile,
-            session: selectedSession,
-          },
+          request,
+          selectedSession,
         );
-        if (reportedError.code !== "ERR_CLAUDE_TURN_FAILED") {
+        if (
+          ![
+            "ERR_CLAUDE_READ_ONLY_TURN_FAILED",
+            "ERR_CLAUDE_TURN_FAILED",
+          ].includes(reportedError.code)
+        ) {
           throw reportedError;
         }
-        throw new ClaudeAdapterError("Claude process was interrupted.", {
-          ambiguous: true,
-          cause,
-          code: "ERR_CLAUDE_PROCESS_INTERRUPTED",
-          recoverable: true,
+        throw processFailureError(request);
+      }
+      const sessionId = payloadSessionId(payload);
+      if (
+        Array.isArray(payload.permission_denials) &&
+        payload.permission_denials.length > 0
+      ) {
+        if (sessionId === undefined) {
+          throw new ClaudeAdapterError("Claude returned an invalid result.", {
+            code: "ERR_CLAUDE_PROTOCOL",
+          });
+        }
+        throw permissionError(payload.permission_denials, request, sessionId);
+      }
+      if (!isClaudeErrorResult(payload)) {
+        throw new ClaudeAdapterError("Claude returned an invalid result.", {
+          code: "ERR_CLAUDE_PROTOCOL",
         });
       }
-      throw outputError(payload, {
-        fallback: standardError || "Claude process failed.",
-        profile: request.profile,
-        session: selectedSession,
-      });
+      throw outputError(payload, request, selectedSession);
     }
     if (
       PERMISSION_MODE_FALLBACK_PATTERN.test(processOutput(processResult.stderr))
     ) {
       throw new ClaudeAdapterError(
         "Claude permission mode fell back to Manual mode.",
-        { code: "ERR_UNSUPPORTED_CLAUDE_CAPABILITY" },
+        {
+          code: "ERR_UNSUPPORTED_CLAUDE_CAPABILITY",
+          diagnosticClass: "capability_unavailable",
+          recoverable: true,
+        },
       );
     }
     const payload = parseJsonOutput(processOutput(processResult.stdout));
@@ -1084,6 +1367,7 @@ export function createClaudeAdapter(options = {}) {
                 {
                   cause: recoveryCause,
                   code: "ERR_CLAUDE_CONTEXT_EXHAUSTED",
+                  diagnosticClass: "context_exhausted",
                   recoverable: true,
                   sessionId,
                 },

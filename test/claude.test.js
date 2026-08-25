@@ -48,6 +48,11 @@ function hasFailureClass(code, failureClass) {
     hasCode(code)(error) && error.failureClass === failureClass;
 }
 
+function hasDiagnostic(code, diagnosticClass) {
+  return (error) =>
+    hasCode(code)(error) && error.diagnosticClass === diagnosticClass;
+}
+
 function result({
   error = false,
   output = "done",
@@ -173,6 +178,15 @@ test("constructs and probes enforceable Claude capabilities", async () => {
     }).failureClass,
     undefined,
   );
+  const invalidDiagnostic = new ClaudeAdapterError(
+    "invalid diagnostic class",
+    {
+      diagnosticClass: "native-provider-text",
+      recoverable: true,
+    },
+  );
+  assert.equal(invalidDiagnostic.diagnosticClass, undefined);
+  assert.equal(invalidDiagnostic.recoverable, false);
   assert.throws(
     () => createClaudeAdapter({ env: new Map() }),
     hasCode("ERR_INVALID_CLAUDE_OPTIONS"),
@@ -551,13 +565,20 @@ test("validates requests, strict schemas, and structured results", async () => {
   );
 });
 
-test("rejects permission fallback and explicit model rerouting", async () => {
+test("rejects permission fallback and explicit model rerouting", async (t) => {
   const denied = createFixture({
     handle({ call }) {
       if (call.file === "claude" && call.argumentsList.includes("-p")) {
         return {
           stdout: JSON.stringify(
-            result({ permission_denials: [{ tool_name: "Edit" }] }),
+            result({
+              permission_denials: [
+                {
+                  tool_input: { file_path: "source.js" },
+                  tool_name: "Edit",
+                },
+              ],
+            }),
           ),
           stderr: "",
         };
@@ -567,8 +588,89 @@ test("rejects permission fallback and explicit model rerouting", async () => {
   });
   await assert.rejects(
     denied.adapter.run(request({ access: "workspace-write" })),
-    hasCode("ERR_CLAUDE_PERMISSION_DENIED"),
+    (error) =>
+      hasDiagnostic(
+        "ERR_CLAUDE_PERMISSION_DENIED",
+        "permission_capability",
+      )(error) && error.recoverable === true,
   );
+
+  const safeInspection = createFixture({
+    handle({ call }) {
+      if (call.file === "claude" && call.argumentsList.includes("-p")) {
+        return {
+          stdout: JSON.stringify(
+            result({
+              permission_denials: [
+                {
+                  tool_input: { command: "git status --short" },
+                  tool_name: "Bash",
+                },
+              ],
+            }),
+          ),
+          stderr: "",
+        };
+      }
+      return undefined;
+    },
+  });
+  await assert.rejects(
+    safeInspection.adapter.run(request()),
+    (error) =>
+      hasDiagnostic(
+        "ERR_CLAUDE_PERMISSION_DENIED",
+        "permission_capability",
+      )(error) && error.recoverable === true,
+  );
+
+  for (const forbiddenCommand of [
+    "git branch release",
+    "git clean -fd",
+    "git tag release",
+    "git add source.js",
+    "git restore source.js",
+    "command git commit -m provider-secret-value",
+    "env git push origin HEAD",
+    "sh -c 'git remote set-url origin forbidden'",
+    "/usr/bin/git -C . tag release",
+    "curl https://provider-secret-value.invalid",
+  ]) {
+    await t.test(`fails closed for ${forbiddenCommand}`, async () => {
+      const forbidden = createFixture({
+        handle({ call }) {
+          if (call.file === "claude" && call.argumentsList.includes("-p")) {
+            return {
+              stdout: JSON.stringify(
+                result({
+                  permission_denials: [
+                    {
+                      tool_input: { command: forbiddenCommand },
+                      tool_name: "Bash",
+                    },
+                  ],
+                }),
+              ),
+              stderr: "",
+            };
+          }
+          return undefined;
+        },
+      });
+      await assert.rejects(forbidden.adapter.run(request()), (error) => {
+        assert.ok(
+          hasDiagnostic(
+            "ERR_CLAUDE_PERMISSION_DENIED",
+            "permission_forbidden_operation",
+          )(error),
+        );
+        assert.equal(error.recoverable, false);
+        assert.doesNotMatch(error.message, /provider-secret-value/u);
+        assert.equal(error.cause, undefined);
+        return true;
+      });
+    });
+  }
 
   const rerouted = createFixture({
     handle({ call }) {
@@ -623,7 +725,11 @@ test("rejects permission fallback and explicit model rerouting", async () => {
   });
   await assert.rejects(
     unavailableAuto.adapter.run(request({ access: "workspace-write" })),
-    hasCode("ERR_UNSUPPORTED_CLAUDE_CAPABILITY"),
+    (error) =>
+      hasDiagnostic(
+        "ERR_UNSUPPORTED_CLAUDE_CAPABILITY",
+        "capability_unavailable",
+      )(error) && error.recoverable === true,
   );
   assert.equal(turnCalls(unavailableAuto).length, 1);
 
@@ -640,7 +746,11 @@ test("rejects permission fallback and explicit model rerouting", async () => {
   });
   await assert.rejects(
     manualFallback.adapter.run(request({ access: "workspace-write" })),
-    hasCode("ERR_UNSUPPORTED_CLAUDE_CAPABILITY"),
+    (error) =>
+      hasDiagnostic(
+        "ERR_UNSUPPORTED_CLAUDE_CAPABILITY",
+        "capability_unavailable",
+      )(error) && error.recoverable === true,
   );
 });
 
@@ -690,6 +800,227 @@ test("classifies explicit usage limits without retrying the rejected turn", asyn
   }
 });
 
+test("prefers structured Claude failure fields over native text", async (t) => {
+  for (const {
+    code,
+    diagnosticClass,
+    payload,
+    recoverable,
+  } of [
+    {
+      code: "ERR_CLAUDE_USAGE_LIMIT",
+      diagnosticClass: "usage_limit",
+      payload: result({
+        api_error_status: 429,
+        error: true,
+        output: "Authentication required: provider-secret-value.",
+      }),
+      recoverable: true,
+    },
+    {
+      code: "ERR_CLAUDE_PROVIDER_UNAVAILABLE",
+      diagnosticClass: "provider_unavailable",
+      payload: result({
+        api_error_status: 503,
+        error: true,
+        output: "provider-secret-value",
+        terminal_reason: "api_error",
+      }),
+      recoverable: true,
+    },
+    {
+      code: "ERR_CLAUDE_AUTHENTICATION_UNAVAILABLE",
+      diagnosticClass: "authentication_unavailable",
+      payload: result({
+        api_error_status: 401,
+        error: true,
+        output: "provider-secret-value",
+        terminal_reason: "api_error",
+      }),
+      recoverable: false,
+    },
+    {
+      code: "ERR_CLAUDE_BACKEND_UNAVAILABLE",
+      diagnosticClass: "backend_unavailable",
+      payload: result({
+        error: true,
+        output: "provider-secret-value",
+        terminal_reason: "turn_setup_failed",
+      }),
+      recoverable: true,
+    },
+  ]) {
+    await t.test(code, async () => {
+      const fixture = createFixture({
+        handle({ call }) {
+          if (call.file === "claude" && call.argumentsList.includes("-p")) {
+            return { stdout: JSON.stringify(payload), stderr: "" };
+          }
+          return undefined;
+        },
+      });
+
+      await assert.rejects(fixture.adapter.run(request()), (error) => {
+        assert.ok(hasDiagnostic(code, diagnosticClass)(error));
+        assert.equal(error.recoverable, recoverable);
+        assert.doesNotMatch(error.message, /provider-secret-value/u);
+        assert.equal(error.cause, undefined);
+        return true;
+      });
+    });
+  }
+});
+
+test("fails closed for non-transient structured Claude API errors", async (t) => {
+  for (const status of [400, 404, 422, undefined]) {
+    await t.test(
+      status === undefined ? "missing status" : String(status),
+      async () => {
+        const payload = result({
+          error: true,
+          output: "Provider unavailable: provider-secret-value.",
+          terminal_reason: "api_error",
+          ...(status === undefined ? {} : { api_error_status: status }),
+        });
+        const fixture = createFixture({
+          handle({ call }) {
+            if (call.file === "claude" && call.argumentsList.includes("-p")) {
+              return { stdout: JSON.stringify(payload), stderr: "" };
+            }
+            return undefined;
+          },
+        });
+
+        await assert.rejects(fixture.adapter.run(request()), (error) => {
+          assert.ok(hasCode("ERR_CLAUDE_REQUEST_REJECTED")(error));
+          assert.equal(error.diagnosticClass, undefined);
+          assert.equal(error.recoverable, false);
+          assert.doesNotMatch(error.message, /provider-secret-value/u);
+          assert.equal(error.cause, undefined);
+          return true;
+        });
+      },
+    );
+  }
+});
+
+test("classifies bounded native error arrays without retaining them", async () => {
+  const payload = result({ error: true });
+  delete payload.result;
+  payload.errors = ["API rate_limit_error provider-secret-value"];
+  const fixture = createFixture({
+    handle({ call }) {
+      if (call.file === "claude" && call.argumentsList.includes("-p")) {
+        throw processFailure(payload, "raw standard error secret");
+      }
+      return undefined;
+    },
+  });
+
+  await assert.rejects(fixture.adapter.run(request()), (error) => {
+    assert.ok(hasDiagnostic("ERR_CLAUDE_USAGE_LIMIT", "usage_limit")(error));
+    assert.equal(error.recoverable, true);
+    assert.doesNotMatch(error.message, /secret/u);
+    assert.equal(error.cause, undefined);
+    return true;
+  });
+});
+
+test("maps native structured-output exhaustion to the shared failure class", async () => {
+  const fixture = createFixture({
+    handle({ call }) {
+      if (call.file === "claude" && call.argumentsList.includes("-p")) {
+        return {
+          stdout: JSON.stringify(
+            result({
+              error: true,
+              output: "provider-native structured output text",
+              subtype: "error_max_structured_output_retries",
+              terminal_reason: "structured_output_retry_exhausted",
+            }),
+          ),
+          stderr: "",
+        };
+      }
+      return undefined;
+    },
+  });
+
+  await assert.rejects(
+    fixture.adapter.run(request({ schema: STRICT_SCHEMA })),
+    hasFailureClass(
+      "ERR_CLAUDE_STRUCTURED_OUTPUT",
+      STRUCTURED_OUTPUT_FAILURE_CLASS,
+    ),
+  );
+});
+
+test("retries only harmless unclassified read-only process failures", async () => {
+  for (const [access, recoverable, diagnosticClass] of [
+    ["read-only", true, "read_only_process_failed"],
+    ["workspace-write", false, "writable_process_ambiguous"],
+  ]) {
+    const fixture = createFixture({
+      handle({ call }) {
+        if (call.file === "claude" && call.argumentsList.includes("-p")) {
+          throw processFailure(undefined, "provider-native secret text");
+        }
+        return undefined;
+      },
+    });
+
+    await assert.rejects(
+      fixture.adapter.run(request({ access })),
+      (error) => {
+        assert.ok(hasCode("ERR_CLAUDE_PROCESS_INTERRUPTED")(error));
+        assert.equal(error.diagnosticClass, diagnosticClass);
+        assert.equal(error.recoverable, recoverable);
+        assert.equal(error.ambiguous, access === "workspace-write");
+        assert.doesNotMatch(error.message, /provider-native/u);
+        assert.equal(error.cause, undefined);
+        return true;
+      },
+    );
+  }
+});
+
+test("makes only unclassified read-only result failures resumable", async () => {
+  for (const [access, code, recoverable, diagnosticClass] of [
+    [
+      "read-only",
+      "ERR_CLAUDE_READ_ONLY_TURN_FAILED",
+      true,
+      "read_only_execution_failed",
+    ],
+    ["workspace-write", "ERR_CLAUDE_TURN_FAILED", false, undefined],
+  ]) {
+    const fixture = createFixture({
+      handle({ call }) {
+        if (call.file === "claude" && call.argumentsList.includes("-p")) {
+          return {
+            stdout: JSON.stringify(
+              result({
+                error: true,
+                output: "unclassified provider-native secret text",
+              }),
+            ),
+            stderr: "",
+          };
+        }
+        return undefined;
+      },
+    });
+
+    await assert.rejects(fixture.adapter.run(request({ access })), (error) => {
+      assert.ok(hasCode(code)(error));
+      assert.equal(error.recoverable, recoverable);
+      assert.equal(error.diagnosticClass, diagnosticClass);
+      assert.doesNotMatch(error.message, /provider-native/u);
+      return true;
+    });
+  }
+});
+
 test("keeps a usage-rejected local commit unambiguous", async () => {
   const fixture = createFixture({
     handle({ call }) {
@@ -727,22 +1058,33 @@ test("keeps a usage-rejected local commit unambiguous", async () => {
 });
 
 test("classifies fresh-turn profile, authentication, and provider failures", async (t) => {
-  for (const { code, message, options = {} } of [
+  for (const {
+    code,
+    diagnosticClass,
+    message,
+    options = {},
+    recoverable = true,
+  } of [
     {
       code: "ERR_CLAUDE_PROFILE_UNAVAILABLE",
+      diagnosticClass: "configuration_unavailable",
       message: "Session unavailable for the selected configuration.",
       options: { profile: "/profiles/work" },
     },
     {
       code: "ERR_CLAUDE_AUTHENTICATION_UNAVAILABLE",
+      diagnosticClass: "authentication_unavailable",
       message: "Authentication required: API key secret-value is invalid.",
+      recoverable: false,
     },
     {
       code: "ERR_CLAUDE_PROVIDER_UNAVAILABLE",
+      diagnosticClass: "provider_unavailable",
       message: "Provider service unavailable.",
     },
     {
       code: "ERR_CLAUDE_PROVIDER_UNAVAILABLE",
+      diagnosticClass: "provider_unavailable",
       message: "Session unavailable.",
     },
   ]) {
@@ -760,7 +1102,8 @@ test("classifies fresh-turn profile, authentication, and provider failures", asy
         fixture.adapter.run(request(options)),
         (error) => {
           assert.ok(hasCode(code)(error));
-          assert.equal(error.recoverable, true);
+          assert.equal(error.diagnosticClass, diagnosticClass);
+          assert.equal(error.recoverable, recoverable);
           assert.doesNotMatch(error.message, /secret-value/u);
           assert.equal(error.cause, undefined);
           return true;
@@ -790,7 +1133,8 @@ test("classifies fresh-turn profile, authentication, and provider failures", asy
         ),
         (error) => {
           assert.ok(hasCode(code)(error));
-          assert.equal(error.recoverable, true);
+          assert.equal(error.diagnosticClass, diagnosticClass);
+          assert.equal(error.recoverable, recoverable);
           assert.equal(error.effectStarted, false);
           assert.doesNotMatch(error.message, /secret-value/u);
           return true;
@@ -1130,7 +1474,8 @@ test("never replays an interrupted local-commit turn", async () => {
     (error) =>
       hasCode("ERR_CLAUDE_PROCESS_INTERRUPTED")(error) &&
       error.ambiguous === true &&
-      error.recoverable === true &&
+      error.recoverable === false &&
+      error.diagnosticClass === "writable_process_ambiguous" &&
       error.effectStarted === false,
   );
   assert.equal(turnCalls(fixture).length, 1);
