@@ -925,7 +925,8 @@ test("records complete pending answers before detached continuation", async (t) 
     answers: [{ questionId: "q1", answer: "A" }],
   };
 
-  assert.deepEqual((await control.runStatus({ runId: RUN_ID })).pendingInput, {
+  const pendingStatus = await control.runStatus({ runId: RUN_ID });
+  assert.deepEqual(pendingStatus.pendingInput, {
     id: "request-1",
     kind: "clarification",
     questions: [{ id: "q1", question: "Choose?", options: ["A", "B"] }],
@@ -933,6 +934,9 @@ test("records complete pending answers before detached continuation", async (t) 
     artifactPath: pendingEdit.transcriptPath,
     revision: 1,
   });
+  assert.deepEqual(pendingStatus.pause.nextActions, [
+    { type: "respond", requestId: "request-1" },
+  ]);
 
   assert.deepEqual(await control.runRespond(input), {
     runId: RUN_ID,
@@ -1153,7 +1157,9 @@ test("resumes only an action valid for the persisted pause", async (t) => {
     pause: { reason: "fix_limit_reached", resumeState: "POLISH" },
     state: {
       additionalFixRounds: 0,
-      findings: [],
+      finalizationResult: { status: "PASS" },
+      findings: [{ id: "R1", problem: "Review is incomplete." }],
+      reviewedFingerprint: "a".repeat(64),
       settings: { maxFixRounds: 5 },
     },
     workflowState: "WAITING_FOR_USER",
@@ -1167,15 +1173,31 @@ test("resumes only an action valid for the persisted pause", async (t) => {
       activityCursor: 1,
       status: "WAITING_FOR_USER",
       currentStep: null,
-      pause: "fix_limit_reached",
+      pause: {
+        reason: "fix_limit_reached",
+        code: null,
+        explanation: "Polishing reached its configured fix limit.",
+        evidence: [],
+        resumeState: "POLISH",
+        nextActions: [
+          {
+            type: "resume",
+            action: { type: "extra-fix-rounds", amount: 1 },
+          },
+          {
+            type: "resume",
+            action: { type: "override-finding", findingId: "R1" },
+          },
+        ],
+      },
       clarificationPath: null,
       planPath: null,
       pendingInput: null,
-      findings: [],
+      findings: [{ id: "R1", summary: "Review is incomplete." }],
       completedCommits: [],
       stagnationDirection: null,
       finalizedFingerprint: null,
-      reviewedFingerprint: null,
+      reviewedFingerprint: "a".repeat(12),
       stateDirectory: await store.getRunDirectory(FIFTH_RUN_ID),
     },
   );
@@ -1257,6 +1279,86 @@ test("resumes only an action valid for the persisted pause", async (t) => {
     }),
     /not valid for this paused run/u,
   );
+});
+
+test("projects the same bounded pause through MCP status and wait", async (t) => {
+  const paths = await workspace(t, "agent-runner-mcp-pause-");
+  const store = createRunStore({ stateRoot: paths.stateRoot });
+  await createStoredRun(store, paths, {
+    pipelineId: "plan-execution",
+    pause: {
+      reason: "environment_blocked",
+      code: "ERR_LOOPBACK_UNAVAILABLE",
+      explanation: "Check C2 cannot bind a loopback listener.",
+      evidence: ["C2: listener creation was denied."],
+      resumeState: "IMPLEMENT",
+      prompt: "private prompt",
+      transcript: "private transcript",
+      credentials: "private credentials",
+      nativeResponse: "private native response",
+      rawStderr: "private stderr",
+    },
+    state: { findings: [], preflightComplete: true },
+    workflowState: "WAITING_FOR_USER",
+  });
+  const control = createMcpControlPlane({
+    runner: storedRunner(store, paths),
+    runStore: store,
+  });
+  const expectedPause = {
+    reason: "environment_blocked",
+    code: "ERR_LOOPBACK_UNAVAILABLE",
+    explanation: "Check C2 cannot bind a loopback listener.",
+    evidence: ["C2: listener creation was denied."],
+    resumeState: "IMPLEMENT",
+    nextActions: [{ type: "resume", action: null }],
+  };
+
+  const status = await control.runStatus({ runId: RUN_ID });
+  const waited = await control.runWait({
+    runId: RUN_ID,
+    cursor: 0,
+    timeoutMs: 0,
+    progress: false,
+  });
+
+  assert.deepEqual(status.pause, expectedPause);
+  assert.deepEqual(waited.pause, expectedPause);
+  assert.equal(waited.timedOut, false);
+  const serialized = JSON.stringify({ status, waited });
+  assert.doesNotMatch(
+    serialized,
+    /private prompt|private transcript|private credentials|private native response|private stderr/u,
+  );
+
+  await createStoredRun(store, paths, {
+    id: SECOND_RUN_ID,
+    pipelineId: "plan-execution",
+    pause: {
+      reason: "plan_revision_required",
+      explanation: "The accepted clarification conflicts with Commit 2.",
+      evidence: ["The plan requires the opposite behavior."],
+    },
+    workflowState: "WAITING_FOR_USER",
+  });
+  await createStoredRun(store, paths, {
+    id: THIRD_RUN_ID,
+    pipelineId: "polishing",
+    pause: {
+      reason: "read_only_agent_mutated_repository",
+      code: "ERR_READ_ONLY_REPOSITORY_CHANGED",
+    },
+    workflowState: "WAITING_FOR_USER",
+  });
+  assert.deepEqual(
+    (await control.runStatus({ runId: SECOND_RUN_ID })).pause.nextActions,
+    [{ type: "start-new-run", requirement: "revised-plan" }],
+  );
+  const contaminated = await control.runStatus({ runId: THIRD_RUN_ID });
+  assert.match(contaminated.pause.explanation, /abandon this run/u);
+  assert.deepEqual(contaminated.pause.nextActions, [
+    { type: "start-new-run", requirement: "uncontaminated-worktree" },
+  ]);
 });
 
 test("waits for a pausing owner to release its lease before resuming", async (t) => {

@@ -1003,7 +1003,14 @@ test("runs registered workflows through recoverable MCP controls", async (t) => 
     progress: false,
   });
   assert.equal(executionPause.status, "WAITING_FOR_USER");
-  assert.equal(executionPause.pause, "backend_unavailable");
+  assert.deepEqual(executionPause.pause, {
+    reason: "backend_unavailable",
+    code: "ERR_BACKEND_UNAVAILABLE",
+    explanation: "The selected backend is temporarily unavailable.",
+    evidence: [],
+    resumeState: "CLARIFY",
+    nextActions: [{ type: "resume", action: null }],
+  });
 
   const reconnected = createMcpControlPlane({
     launchRun: pipelineProcess.launchRun,

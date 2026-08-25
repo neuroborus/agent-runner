@@ -200,6 +200,26 @@ projection. A user-action pause has a distinct exit status from an internal
 failure; neither status output nor activity rendering exposes raw prompts or
 model transcripts.
 
+Each descriptor also owns a bounded public pause projection. CLI status, MCP
+status, and MCP wait render that same projection as `null` or an object with
+the finite public `reason`, an optional validated bounded diagnostic `code`, a
+concise `explanation`, bounded `evidence`, the validated `resumeState` when one
+exists, and `nextActions`. No other persisted pause field crosses this boundary:
+in particular prompts, transcripts, credentials, native responses, raw
+standard error, rejected values, internal diagnostics, and counters remain private.
+Unknown pause reasons fail closed to `unknown_pause` without their persisted
+text.
+
+Public next actions are concrete descriptor-owned operations. `respond`
+identifies the exact pending request; `resume` carries either the validated
+null retry or one valid extra-round or finding-override payload; and
+`start-new-run` identifies either a revised-plan or uncontaminated-worktree
+requirement. A submitted input awaiting detached continuation exposes no second
+action. Plan revision never projects resume of the stale run, and a read-only
+repository mutation never projects acceptance of contaminated or hybrid
+changes. This is a read-only projection of existing durable state and does not
+change the root or pipeline state versions.
+
 ## MCP Control Plane
 
 `agent-run mcp` exposes the same static registry and runner through the official

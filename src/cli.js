@@ -111,11 +111,30 @@ function shortFingerprint(value) {
   return typeof value === "string" ? value.slice(0, 12) : null;
 }
 
+function pauseActionLine(runId, action) {
+  if (action.type === "respond") {
+    return `  Respond to pending input ${action.requestId} through MCP, or edit the clarification artifact and resume.`;
+  }
+  if (action.type === "start-new-run") {
+    return action.requirement === "revised-plan"
+      ? "  Revise the plan and start a fresh plan-execution run."
+      : "  Abandon this run and start a fresh run from an uncontaminated worktree.";
+  }
+  if (action.action === null) {
+    return `  Retry with: agent-run resume --run ${runId}`;
+  }
+  if (action.action.type === "extra-fix-rounds") {
+    return `  Grant another fix round with: agent-run resume --run ${runId} --extra-fix-rounds ${action.action.amount}`;
+  }
+  return `  Override finding ${action.action.findingId} with: agent-run resume --run ${runId} --override-finding ${action.action.findingId}`;
+}
+
 function runSummary({ directoryPath, run }) {
   const state = run.pipelineState;
   const pipeline = getPipeline(run.pipelineId);
   const status = pipeline.projections.status(run);
   const clarification = pipeline.projections.clarification(run);
+  const pause = pipeline.projections.pause(run);
   const lines = [
     `Run: ${run.runId}`,
     `Pipeline: ${run.pipelineId}`,
@@ -124,8 +143,27 @@ function runSummary({ directoryPath, run }) {
   if (status.currentStep !== null) {
     lines.push(`Step: ${status.currentStep}`);
   }
-  if (run.pause?.reason !== undefined) {
-    lines.push(`Pause: ${run.pause.reason}`);
+  if (pause !== null) {
+    lines.push(`Pause: ${pause.reason}`);
+    if (pause.code !== null) {
+      lines.push(`Pause code: ${pause.code}`);
+    }
+    lines.push(`Explanation: ${pause.explanation}`);
+    if (pause.evidence.length > 0) {
+      lines.push("Evidence:");
+      for (const entry of pause.evidence) {
+        lines.push(`  ${entry}`);
+      }
+    }
+    if (pause.resumeState !== null) {
+      lines.push(`Resume state: ${pause.resumeState}`);
+    }
+    if (pause.nextActions.length > 0) {
+      lines.push("Next actions:");
+      for (const action of pause.nextActions) {
+        lines.push(pauseActionLine(run.runId, action));
+      }
+    }
   }
   if (clarification.path !== null) {
     lines.push(`Clarifications: ${clarification.path}`);

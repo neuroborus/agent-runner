@@ -1632,8 +1632,27 @@ When paused:
 
 1. persist state;
 2. append an event;
-3. print a concise explanation;
+3. project and print the same bounded public pause used by MCP status and wait;
 4. do not advance.
+
+The descriptor-owned public pause contains only its finite reason, an optional
+validated bounded diagnostic code, concise explanation, bounded evidence,
+validated resume checkpoint, and applicable next actions. It omits prompts,
+transcripts, credentials, native responses, raw standard error, rejected
+structured values, internal diagnostics, and private counters. The root
+separately projects a pending input request without copying it into the pause.
+An input awaiting detached continuation has no second action.
+
+Next actions preserve the existing validation contract: an identified input
+uses `respond`; a safe retry carries a null resume action; an exhausted fix
+budget carries one concrete valid additional round; and each currently
+overridable finding receives its exact ID. `plan_revision_required` preserves
+the validated rationale and evidence but offers only revision of `plan.md` and
+a fresh execution run. `read_only_agent_mutated_repository` explains that the
+run is contaminated and offers only a fresh run from an uncontaminated
+worktree; it never accepts hybrid changes. `environment_blocked` preserves why
+validation is blocked, its bounded evidence, and the exact retry checkpoint.
+This read-only projection leaves pipeline state version 3 unchanged.
 
 Example:
 
@@ -1756,7 +1775,8 @@ A debug mode may expose backend stdout/stderr.
 - expected/current HEAD;
 - last finalized/reviewed fingerprint;
 - state directory;
-- pause reason when applicable.
+- bounded pause reason, explanation, evidence, retry checkpoint, and applicable
+  next actions when present.
 
 ---
 

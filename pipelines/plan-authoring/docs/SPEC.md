@@ -95,6 +95,16 @@ validated structured role results and deterministic runner outcomes. Never
 persist raw model transcripts, chain-of-thought, credentials, or unhashed
 remote or identity data.
 
+The descriptor projects each pause as bounded public data for both CLI and MCP:
+its finite reason, optional validated bounded error code, a deterministic
+explanation, empty evidence for this pipeline, a validated backend retry state
+when present, and only the applicable input-response or null-resume action. It
+never projects the stored input request itself, authorization metadata,
+question snapshots, revision counters, prompts, transcripts, native output, or
+raw standard error; the root's separate pending-input projection owns the
+identified questions. This projection does not change the version-1 persisted
+state contract.
+
 ## Clarification
 
 Before the first Planner turn in `CLARIFY`, the runner ensures the clarification

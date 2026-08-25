@@ -379,6 +379,20 @@ Persist concise structured decisions and public summaries, never raw model
 transcripts, chain-of-thought, credentials, or unhashed remote and identity
 values.
 
+The descriptor projects each pause through one bounded public contract shared
+by CLI status, MCP status, and MCP wait. It contains the finite reason, optional
+validated bounded diagnostic code, concise explanation, bounded evidence,
+validated resume checkpoint, and only applicable next actions. Prompts,
+transcripts, credentials, native responses, raw standard error, rejected
+values, internal diagnostics, pause-only paths, and counters remain private;
+identified questions stay in the root pending-input projection. Input response,
+safe null retry, one concrete valid extra-fix round, and exact finding overrides
+continue to use the existing resume validation. A read-only repository mutation
+instead instructs the user to abandon the contaminated run and start fresh from
+an uncontaminated worktree. `environment_blocked` retains why validation is
+blocked and the precise `POLISH`, `FINALIZE`, or `RESOLVE_FINDINGS` retry
+checkpoint. This read-only projection leaves pipeline state version 2 unchanged.
+
 Each transition is a complete write-ahead event appended and synchronized
 before atomic state replacement. `progress.md` is derived public activity.
 Mutating run/resume operations acquire the per-run execution lease first and an

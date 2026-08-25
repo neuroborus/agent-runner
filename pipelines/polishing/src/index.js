@@ -96,6 +96,171 @@ const RESUMABLE_WORKFLOW_STATES = new Set([
   "REVIEW",
   "RESOLVE_FINDINGS",
 ]);
+const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
+  backend_unavailable: "The selected backend is temporarily unavailable.",
+  clarification_answers_required:
+    "Material clarification answers are required before polishing can continue.",
+  clarification_limit_reached:
+    "Clarification reached its configured question-round limit.",
+  clarifications_changed:
+    "The execution clarification artifact changed outside an authorized editor window.",
+  environment_blocked:
+    "Required validation is blocked by the execution environment.",
+  finalization_cannot_pass:
+    "The current finalization procedure cannot establish a passing gate.",
+  finalization_skill_invalid:
+    "The explicitly configured finalization skill is invalid.",
+  finalization_skill_missing:
+    "The explicitly configured finalization skill is missing.",
+  fix_limit_reached: "Polishing reached its configured fix limit.",
+  internal_failure: "Polishing failed.",
+  local_artifacts_not_ignored:
+    "The configured repository-local artifact path is not ignored.",
+  no_changes: "The repository has no changes to polish.",
+  no_progress: "The correction loop reached a bounded no-progress condition.",
+  proactive_clarification:
+    "Optional proactive polishing clarification input is pending.",
+  product_decision_required:
+    "A material product decision is required before polishing can continue.",
+  read_only_agent_mutated_repository:
+    "A read-only turn contaminated the repository; abandon this run and restart from an uncontaminated worktree.",
+  task_input_changed: "A task input changed after the run began.",
+  task_input_overlaps_changes:
+    "A task input overlaps the writable change set.",
+  unexpected_git_identity_change:
+    "The effective Git identity changed during polishing.",
+  unexpected_git_ref_change:
+    "Git history or refs changed during polishing.",
+  unexpected_remote_configuration_change:
+    "Git remote configuration changed during polishing.",
+  unsafe_git_state:
+    "The repository is not at a state that can be reconciled safely.",
+});
+const PUBLIC_DETAIL_REASONS = new Set([
+  "environment_blocked",
+  "finalization_cannot_pass",
+  "finalization_skill_invalid",
+  "finalization_skill_missing",
+]);
+
+function publicCode(value) {
+  return typeof value === "string" && /^[A-Z0-9_]{1,64}$/u.test(value)
+    ? value
+    : null;
+}
+
+function publicResumeState(run) {
+  return run.pipelineState.workflowState === "WAITING_FOR_USER" &&
+    WORKFLOW_STATES.includes(run.pause.resumeState)
+    ? run.pause.resumeState
+    : null;
+}
+
+function publicExplanation(pause, fallback) {
+  return PUBLIC_DETAIL_REASONS.has(pause.reason) &&
+    typeof pause.explanation === "string" &&
+    pause.explanation.length > 0 &&
+    pause.explanation.length <= 4_000
+    ? pause.explanation
+    : fallback;
+}
+
+function publicEvidence(pause) {
+  return Object.freeze(
+    PUBLIC_DETAIL_REASONS.has(pause.reason) && Array.isArray(pause.evidence)
+      ? pause.evidence
+          .filter(
+            (entry) =>
+              typeof entry === "string" &&
+              entry.length > 0 &&
+              entry.length <= 4_000,
+          )
+          .slice(0, 32)
+      : [],
+  );
+}
+
+function resumeActionApplies(run, action) {
+  try {
+    validateResumeAction(run, action);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function projectPause(run) {
+  if (run.pause === null) {
+    return null;
+  }
+  const knownReason = Object.hasOwn(
+    PUBLIC_PAUSE_EXPLANATIONS,
+    run.pause.reason,
+  );
+  const reason = knownReason ? run.pause.reason : "unknown_pause";
+  const explanation = knownReason
+    ? PUBLIC_PAUSE_EXPLANATIONS[reason]
+    : "No public diagnostic is available for this pause.";
+  const nextActions = [];
+  if (
+    run.pipelineState.workflowState === "WAITING_FOR_USER" &&
+    run.pause.inputRequest !== undefined &&
+    run.pause.inputResponse === undefined
+  ) {
+    nextActions.push(
+      Object.freeze({
+        type: "respond",
+        requestId: run.pause.inputRequest.id,
+      }),
+    );
+  } else if (
+    run.pipelineState.workflowState === "WAITING_FOR_USER" &&
+    run.pause.inputResponse === undefined
+  ) {
+    if (run.pause.reason === "read_only_agent_mutated_repository") {
+      nextActions.push(
+        Object.freeze({
+          type: "start-new-run",
+          requirement: "uncontaminated-worktree",
+        }),
+      );
+    } else {
+      if (resumeActionApplies(run, null)) {
+        nextActions.push(Object.freeze({ type: "resume", action: null }));
+      }
+      const extraFixRounds = Object.freeze({
+        type: "extra-fix-rounds",
+        amount: 1,
+      });
+      if (resumeActionApplies(run, extraFixRounds)) {
+        nextActions.push(
+          Object.freeze({ type: "resume", action: extraFixRounds }),
+        );
+      }
+      for (const finding of Array.isArray(run.pipelineState.findings)
+        ? run.pipelineState.findings
+        : []) {
+        const override = Object.freeze({
+          type: "override-finding",
+          findingId: finding.id,
+        });
+        if (resumeActionApplies(run, override)) {
+          nextActions.push(
+            Object.freeze({ type: "resume", action: override }),
+          );
+        }
+      }
+    }
+  }
+  return Object.freeze({
+    reason,
+    code: knownReason ? publicCode(run.pause.code) : null,
+    explanation: publicExplanation(run.pause, explanation),
+    evidence: publicEvidence(run.pause),
+    resumeState: publicResumeState(run),
+    nextActions: Object.freeze(nextActions),
+  });
+}
 
 function projectClarification(run) {
   return Object.freeze({
@@ -283,6 +448,7 @@ export const polishingPipeline = Object.freeze({
   description: "Polish and review an existing dirty worktree without committing it.",
   projections: Object.freeze({
     clarification: projectClarification,
+    pause: projectPause,
     status: projectStatus,
   }),
   validateResumeAction,

@@ -36,6 +36,7 @@ test("registry exposes explicit immutable pipeline descriptors", () => {
     assert.ok(Object.isFrozen(pipeline.runOptions));
     assert.ok(Object.isFrozen(pipeline.requiredRunOptions));
     assert.equal(typeof pipeline.projections.clarification, "function");
+    assert.equal(typeof pipeline.projections.pause, "function");
     assert.equal(typeof pipeline.projections.status, "function");
     assert.equal(typeof pipeline.validateResumeAction, "function");
     for (const definition of Object.values(pipeline.taskInputs)) {
@@ -55,6 +56,204 @@ test("registry exposes explicit immutable pipeline descriptors", () => {
       assert.ok(pipeline.runOptions.includes(option));
     }
   }
+});
+
+function pausedRun(pause, pipelineState = {}) {
+  return {
+    pause,
+    pipelineState: {
+      workflowState: "WAITING_FOR_USER",
+      pendingEdit: null,
+      preflightComplete: true,
+      ...pipelineState,
+    },
+  };
+}
+
+test("pipeline pause projections preserve bounded details and redact private fields", () => {
+  const pipeline = getPipeline("plan-execution");
+  const projected = pipeline.projections.pause(
+    pausedRun({
+      reason: "environment_blocked",
+      code: "ERR_LOOPBACK_UNAVAILABLE",
+      explanation: "Check C2 cannot bind a loopback listener.",
+      evidence: ["C2: listener creation was denied."],
+      resumeState: "IMPLEMENT",
+      prompt: "private prompt",
+      transcript: "private transcript",
+      credentials: "private credentials",
+      nativeResponse: "private native response",
+      rawStderr: "private stderr",
+    }),
+  );
+
+  assert.deepEqual(projected, {
+    reason: "environment_blocked",
+    code: "ERR_LOOPBACK_UNAVAILABLE",
+    explanation: "Check C2 cannot bind a loopback listener.",
+    evidence: ["C2: listener creation was denied."],
+    resumeState: "IMPLEMENT",
+    nextActions: [{ type: "resume", action: null }],
+  });
+  const serialized = JSON.stringify(projected);
+  for (const privateValue of [
+    "private prompt",
+    "private transcript",
+    "private credentials",
+    "private native response",
+    "private stderr",
+  ]) {
+    assert.doesNotMatch(serialized, new RegExp(privateValue, "u"));
+  }
+  assert.ok(Object.isFrozen(projected));
+  assert.ok(Object.isFrozen(projected.evidence));
+  assert.ok(Object.isFrozen(projected.nextActions));
+
+  for (const pipelineId of [
+    "plan-authoring",
+    "plan-execution",
+    "polishing",
+  ]) {
+    assert.deepEqual(
+      getPipeline(pipelineId).projections.pause(
+        pausedRun({
+          reason: "__proto__",
+          code: "ERR_PRIVATE_PROVIDER_DETAIL",
+          explanation: "private unknown explanation",
+          evidence: ["private unknown evidence"],
+          resumeState: "private unknown state",
+        }),
+      ),
+      {
+        reason: "unknown_pause",
+        code: null,
+        explanation: "No public diagnostic is available for this pause.",
+        evidence: [],
+        resumeState: null,
+        nextActions: [],
+      },
+    );
+  }
+});
+
+test("plan-execution pause projection distinguishes fresh-run requirements", () => {
+  const projectPause = getPipeline("plan-execution").projections.pause;
+
+  assert.deepEqual(
+    projectPause(
+      pausedRun({
+        reason: "plan_revision_required",
+        explanation: "Commit 2 conflicts with the accepted clarification.",
+        evidence: ["The plan requires the opposite behavior."],
+      }),
+    ),
+    {
+      reason: "plan_revision_required",
+      code: null,
+      explanation: "Commit 2 conflicts with the accepted clarification.",
+      evidence: ["The plan requires the opposite behavior."],
+      resumeState: null,
+      nextActions: [
+        { type: "start-new-run", requirement: "revised-plan" },
+      ],
+    },
+  );
+
+  assert.deepEqual(
+    projectPause(
+      pausedRun({
+        reason: "read_only_agent_mutated_repository",
+        code: "ERR_READ_ONLY_REPOSITORY_CHANGED",
+      }),
+    ),
+    {
+      reason: "read_only_agent_mutated_repository",
+      code: "ERR_READ_ONLY_REPOSITORY_CHANGED",
+      explanation:
+        "A read-only turn contaminated the repository; abandon this run and restart from an uncontaminated worktree.",
+      evidence: [],
+      resumeState: null,
+      nextActions: [
+        {
+          type: "start-new-run",
+          requirement: "uncontaminated-worktree",
+        },
+      ],
+    },
+  );
+});
+
+test("pipeline pause projections expose only applicable response and resume actions", () => {
+  const executionPause = getPipeline("plan-execution").projections.pause;
+  const polishingPause = getPipeline("polishing").projections.pause;
+  const authoringPause = getPipeline("plan-authoring").projections.pause;
+
+  assert.deepEqual(
+    authoringPause(
+      pausedRun(
+        {
+          reason: "clarification_answers_required",
+          inputRequest: { id: "edit-1" },
+        },
+        { pendingEdit: { id: "edit-1" } },
+      ),
+    ).nextActions,
+    [{ type: "respond", requestId: "edit-1" }],
+  );
+
+  const findingState = {
+    additionalFixRounds: 0,
+    settings: { maxFixRoundsPerStep: 5 },
+    finalizationResult: { status: "PASS" },
+    reviewedFingerprint: "a".repeat(64),
+    findings: [{ id: "R1" }, { id: "R2" }],
+  };
+  assert.deepEqual(
+    executionPause(
+      pausedRun(
+        { reason: "fix_limit_reached", resumeState: "IMPLEMENT" },
+        findingState,
+      ),
+    ).nextActions,
+    [
+      {
+        type: "resume",
+        action: { type: "extra-fix-rounds", amount: 1 },
+      },
+      {
+        type: "resume",
+        action: { type: "override-finding", findingId: "R1" },
+      },
+      {
+        type: "resume",
+        action: { type: "override-finding", findingId: "R2" },
+      },
+    ],
+  );
+
+  assert.deepEqual(
+    polishingPause(
+      pausedRun(
+        { reason: "backend_unavailable", resumeState: "POLISH" },
+        { findings: [] },
+      ),
+    ).nextActions,
+    [{ type: "resume", action: null }],
+  );
+
+  assert.deepEqual(
+    executionPause(
+      pausedRun(
+        {
+          reason: "clarification_answers_required",
+          inputRequest: { id: "edit-2" },
+          inputResponse: { requestId: "edit-2" },
+        },
+        { pendingEdit: { id: "edit-2" } },
+      ),
+    ).nextActions,
+    [],
+  );
 });
 
 test("pipelines own their pipeline-specific run options", () => {

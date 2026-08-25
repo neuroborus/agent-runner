@@ -229,6 +229,7 @@ function statusProjection({ directoryPath, run }) {
   const pipeline = getPipeline(run.pipelineId);
   const status = pipeline.projections.status(run);
   const clarification = pipeline.projections.clarification(run);
+  const pause = pipeline.projections.pause(run);
   return {
     runId: run.runId,
     pipelineId: run.pipelineId,
@@ -236,7 +237,7 @@ function statusProjection({ directoryPath, run }) {
     activityCursor: run.revision,
     status: run.pipelineState.workflowState,
     currentStep: status.currentStep,
-    pause: run.pause?.reason ?? null,
+    pause,
     clarificationPath: clarification.path,
     planPath: status.planPath,
     pendingInput: pendingInput(run),
