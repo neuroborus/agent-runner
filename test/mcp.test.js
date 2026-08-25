@@ -98,14 +98,31 @@ async function rewriteRunAsLegacy(directoryPath) {
   const state = JSON.parse(await readFile(statePath, "utf8"));
   state.schemaVersion = 1;
   delete state.runtimeCompatibility;
+  delete state.activeTurn;
   const events = (await readFile(eventsPath, "utf8"))
     .trimEnd()
     .split("\n")
     .map((line) => JSON.parse(line));
+  let previousActiveTurn = null;
   for (const event of events) {
+    const activeTurn = event.state.activeTurn;
+    if (
+      event.activity === null &&
+      activeTurn === null &&
+      previousActiveTurn !== null
+    ) {
+      event.activity = {
+        actor: previousActiveTurn.role,
+        phase: previousActiveTurn.phase,
+        kind: "turn-finished",
+        message: `${previousActiveTurn.role} turn finished.`,
+      };
+    }
+    previousActiveTurn = activeTurn;
     event.schemaVersion = 1;
     event.state.schemaVersion = 1;
     delete event.state.runtimeCompatibility;
+    delete event.state.activeTurn;
   }
   await Promise.all([
     writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`),
@@ -1172,6 +1189,7 @@ test("resumes only an action valid for the persisted pause", async (t) => {
       revision: 1,
       activityCursor: 1,
       status: "WAITING_FOR_USER",
+      execution: { state: "idle", role: null, phase: null },
       currentStep: null,
       pause: {
         reason: "fix_limit_reached",
@@ -1547,6 +1565,82 @@ test("waits by revision, emits public progress, and leaves timeouts read-only", 
     (error) => error.name === "AbortError",
   );
   assert.equal((await store.loadRun(SECOND_RUN_ID)).revision, 1);
+});
+
+test("projects live and crashed provider activity through status and wait", async (t) => {
+  const paths = await workspace(t, "agent-runner-mcp-provider-activity-");
+  const ownerProcessId = 424_242;
+  let ownerIsAlive = true;
+  const store = createRunStore({
+    stateRoot: paths.stateRoot,
+    processId: ownerProcessId,
+    processIsAlive: (pid) => pid === ownerProcessId && ownerIsAlive,
+  });
+  await createStoredRun(store, paths);
+  const lease = await store.acquireRunLease(RUN_ID);
+  const turn = { role: "planner", phase: "clarify" };
+  const started = await store.startAgentTurn(lease, turn, {
+    activity: {
+      actor: turn.role,
+      phase: turn.phase,
+      kind: "turn-started",
+      message: "planner clarify turn started.",
+    },
+  });
+  const control = createMcpControlPlane({
+    runner: storedRunner(store, paths),
+    runStore: store,
+  });
+
+  assert.deepEqual((await control.runStatus({ runId: RUN_ID })).execution, {
+    state: "running",
+    role: "planner",
+    phase: "clarify",
+  });
+  const waiting = await control.runWait({
+    runId: RUN_ID,
+    cursor: started.revision,
+    timeoutMs: 10,
+    progress: false,
+  });
+  assert.equal(waiting.timedOut, true);
+  assert.deepEqual(waiting.execution, {
+    state: "running",
+    role: "planner",
+    phase: "clarify",
+  });
+
+  ownerIsAlive = false;
+  assert.equal(await store.runIsLeased(RUN_ID), true);
+  assert.equal(await store.runLeaseOwnerIsLive(RUN_ID), false);
+  const leaseRecord = JSON.parse(
+    await readFile(join(await store.getRunDirectory(RUN_ID), ".lease"), "utf8"),
+  );
+  assert.equal(leaseRecord.pid, ownerProcessId);
+  const interruptedWait = await control.runWait({
+    runId: RUN_ID,
+    cursor: started.revision,
+    timeoutMs: 10,
+    progress: false,
+  });
+  assert.equal(interruptedWait.timedOut, true);
+  assert.deepEqual(interruptedWait.execution, {
+    state: "interrupted",
+    role: "planner",
+    phase: "clarify",
+  });
+
+  await lease.release();
+  ownerIsAlive = true;
+  const resumedLease = await store.acquireRunLease(RUN_ID);
+  await store.recoverRun(resumedLease);
+  await store.finishAgentTurn(resumedLease, turn);
+  await resumedLease.release();
+  assert.deepEqual((await control.runStatus({ runId: RUN_ID })).execution, {
+    state: "idle",
+    role: null,
+    phase: null,
+  });
 });
 
 test("launches continuation independently from the MCP process streams", async () => {

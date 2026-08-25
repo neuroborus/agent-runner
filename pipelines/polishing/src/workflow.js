@@ -32,6 +32,7 @@ import {
   STAGNATION_SCHEMA,
 } from "./schemas.js";
 import {
+  activeTurn,
   activity,
   assertRun,
   assertRuntime,
@@ -548,83 +549,96 @@ export async function runPolishing({ action, run, runtime, settings }) {
     };
     let response;
     let agentError;
+    const turn = activeTurn(role, state().workflowState);
+    currentRun = await runtime.startAgentTurn(turn);
+    assertRun(currentRun);
+    let nextRepositoryBaseline;
     try {
-      response = await runtime.adapters[role].run(request);
-    } catch (cause) {
-      agentError = cause;
-    }
-    let nextRepositoryBaseline = baseline;
-    if (access === "read-only") {
-      await runtime.git.assertUnchanged(turnSnapshot);
-      await runtime.git.assertUnchanged(baseline);
-    } else {
-      nextRepositoryBaseline = await runtime.git.snapshot({
-        allowedPaths: baseline.allowedPaths,
-        projectPath: baseline.projectPath,
-      });
-      const reason = workspaceControlChange(turnSnapshot, nextRepositoryBaseline);
-      if (reason !== null) {
-        await pause(reason);
+      try {
+        response = await runtime.adapters[role].run(request);
+      } catch (cause) {
+        agentError = cause;
+      }
+      nextRepositoryBaseline = baseline;
+      if (access === "read-only") {
+        await runtime.git.assertUnchanged(turnSnapshot);
+        await runtime.git.assertUnchanged(baseline);
+      } else {
+        nextRepositoryBaseline = await runtime.git.snapshot({
+          allowedPaths: baseline.allowedPaths,
+          projectPath: baseline.projectPath,
+        });
+        const reason = workspaceControlChange(
+          turnSnapshot,
+          nextRepositoryBaseline,
+        );
+        if (reason !== null) {
+          await pause(reason);
+          return null;
+        }
+        const contentChanged =
+          baseline.contentFingerprint !==
+          nextRepositoryBaseline.contentFingerprint;
+        const workspaceChanged = [
+          "clean",
+          "trackedContentFingerprint",
+          "untrackedContentFingerprint",
+          "contentFingerprint",
+          "indexFingerprint",
+        ].some((field) => baseline[field] !== nextRepositoryBaseline[field]);
+        if (workspaceChanged) {
+          const current = state();
+          const contentChangingCorrection =
+            contentChanged && current.workflowState === "RESOLVE_FINDINGS";
+          await transition(
+            contentChangingCorrection
+              ? {
+                  ...current,
+                  workflowState: "FINALIZE",
+                  repositoryBaseline: nextRepositoryBaseline,
+                  finalizationResult: null,
+                  finalizedFingerprint: null,
+                  reviewResult: null,
+                  reviewedFingerprint: null,
+                  previousFindings:
+                    current.findings.length === 0
+                      ? current.previousFindings
+                      : current.findings,
+                  findings: [],
+                  pendingCorrection: true,
+                  reviewReconsideration: [],
+                }
+              : {
+                  ...current,
+                  repositoryBaseline: nextRepositoryBaseline,
+                  ...(contentChanged
+                    ? {
+                        finalizationResult: null,
+                        finalizedFingerprint: null,
+                        reviewResult: null,
+                        reviewedFingerprint: null,
+                        findings: [],
+                        reviewReconsideration: [],
+                      }
+                    : {}),
+                },
+            contentChangingCorrection
+              ? {
+                  nextCounters: {
+                    ...counters(),
+                    fixRounds: counters().fixRounds + 1,
+                  },
+                }
+              : undefined,
+          );
+        }
+      }
+      if ((await readCurrentInputs()) === null) {
         return null;
       }
-      const contentChanged =
-        baseline.contentFingerprint !== nextRepositoryBaseline.contentFingerprint;
-      const workspaceChanged = [
-        "clean",
-        "trackedContentFingerprint",
-        "untrackedContentFingerprint",
-        "contentFingerprint",
-        "indexFingerprint",
-      ].some((field) => baseline[field] !== nextRepositoryBaseline[field]);
-      if (workspaceChanged) {
-        const current = state();
-        const contentChangingCorrection =
-          contentChanged && current.workflowState === "RESOLVE_FINDINGS";
-        await transition(
-          contentChangingCorrection
-            ? {
-                ...current,
-                workflowState: "FINALIZE",
-                repositoryBaseline: nextRepositoryBaseline,
-                finalizationResult: null,
-                finalizedFingerprint: null,
-                reviewResult: null,
-                reviewedFingerprint: null,
-                previousFindings:
-                  current.findings.length === 0
-                    ? current.previousFindings
-                    : current.findings,
-                findings: [],
-                pendingCorrection: true,
-                reviewReconsideration: [],
-              }
-            : {
-                ...current,
-                repositoryBaseline: nextRepositoryBaseline,
-                ...(contentChanged
-                  ? {
-                      finalizationResult: null,
-                      finalizedFingerprint: null,
-                      reviewResult: null,
-                      reviewedFingerprint: null,
-                      findings: [],
-                      reviewReconsideration: [],
-                    }
-                  : {}),
-              },
-          contentChangingCorrection
-            ? {
-                nextCounters: {
-                  ...counters(),
-                  fixRounds: counters().fixRounds + 1,
-                },
-              }
-            : undefined,
-        );
-      }
-    }
-    if ((await readCurrentInputs()) === null) {
-      return null;
+    } finally {
+      currentRun = await runtime.finishAgentTurn(turn);
+      assertRun(currentRun);
     }
     if (agentError !== undefined) {
       throw agentError;

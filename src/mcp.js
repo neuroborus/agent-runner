@@ -225,7 +225,20 @@ function shortFingerprint(value) {
   return typeof value === "string" ? value.slice(0, 12) : null;
 }
 
-function statusProjection({ directoryPath, run }) {
+function executionProjection(run, leaseOwnerIsLive) {
+  const state = leaseOwnerIsLive
+    ? "running"
+    : run.activeTurn === null
+      ? "idle"
+      : "interrupted";
+  return {
+    state,
+    role: run.activeTurn?.role ?? null,
+    phase: run.activeTurn?.phase ?? null,
+  };
+}
+
+function statusProjection({ directoryPath, run }, leaseOwnerIsLive) {
   const pipeline = getPipeline(run.pipelineId);
   const status = pipeline.projections.status(run);
   const clarification = pipeline.projections.clarification(run);
@@ -236,6 +249,7 @@ function statusProjection({ directoryPath, run }) {
     revision: run.revision,
     activityCursor: run.revision,
     status: run.pipelineState.workflowState,
+    execution: executionProjection(run, leaseOwnerIsLive),
     currentStep: status.currentStep,
     pause,
     clarificationPath: clarification.path,
@@ -369,6 +383,13 @@ export function createMcpControlPlane(options = {}) {
         options.loadConfiguration ??
         loadRunnerConfiguration,
     });
+
+  async function projectStatus(current) {
+    const leaseOwnerIsLive = await runStore.runLeaseOwnerIsLive(
+      current.run.runId,
+    );
+    return statusProjection(current, leaseOwnerIsLive);
+  }
 
   async function beginAction(input, signal) {
     while (true) {
@@ -551,7 +572,7 @@ export function createMcpControlPlane(options = {}) {
   }
 
   async function runStatus(input) {
-    return statusProjection(await runner.status(input.runId));
+    return projectStatus(await runner.status(input.runId));
   }
 
   async function runActivity(input) {
@@ -600,11 +621,11 @@ export function createMcpControlPlane(options = {}) {
         continue;
       }
       if (waitIsTerminal(run)) {
-        return { ...statusProjection(current), timedOut: false };
+        return { ...(await projectStatus(current)), timedOut: false };
       }
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
-        return { ...statusProjection(current), timedOut: true };
+        return { ...(await projectStatus(current)), timedOut: true };
       }
       const changed = await runStore.waitForRunChange(input.runId, {
         afterRevision: run.revision,
@@ -612,7 +633,7 @@ export function createMcpControlPlane(options = {}) {
         signal: context.signal,
       });
       if (changed.revision === run.revision && Date.now() >= deadline) {
-        return { ...statusProjection(current), timedOut: true };
+        return { ...(await projectStatus(current)), timedOut: true };
       }
     }
   }

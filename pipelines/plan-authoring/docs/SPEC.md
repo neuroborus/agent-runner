@@ -95,6 +95,19 @@ validated structured role results and deterministic runner outcomes. Never
 persist raw model transcripts, chain-of-thought, credentials, or unhashed
 remote or identity data.
 
+Common run-envelope version 3 adds nullable bounded active provider role and
+phase. The runner persists a `turn-started` write-ahead transition immediately
+before each Planner, Reviewer, or Arbiter invocation and clears it only after
+the read-only repository guard reconciles the turn. Version-1 and version-2
+envelopes project null activity until the next mutating continuation persists
+the explicit runtime migration. If execution stops first, lock-free MCP status
+and timed-out wait combine the retained activity with the absence of a live
+execution owner to report interruption, even before stale lease recovery;
+resume reconstructs the same checkpoint request
+from durable inputs without depending on the native session. Same-host status
+reads check owner process liveness immediately without changing the lease
+staleness threshold used for exclusive acquisition and recovery.
+
 The descriptor projects each pause as bounded public data for both CLI and MCP:
 its finite reason, optional validated bounded error code, a deterministic
 explanation, empty evidence for this pipeline, a validated backend retry state
@@ -316,3 +329,5 @@ path is ignored and untracked.
 - Do not automatically start plan execution after authoring completes.
 - Keep MCP start, wait, response, and detached-process behavior in the root
   runtime; this pipeline continues to own the same states and transitions.
+- Cover blocked provider activity, interrupted-owner projection, and resumed
+  request reconstruction with fake adapters and external temporary state.

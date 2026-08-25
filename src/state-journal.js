@@ -43,6 +43,7 @@ const TRANSITION_STATE_FIELDS = [
   "counters",
   "hashes",
   "pause",
+  "activeTurn",
   "pipelineState",
 ];
 const MAX_EVENT_LOG_BYTES = 64 * 1024 * 1024;
@@ -76,7 +77,7 @@ function normalizeEvent(value, runId, lineNumber) {
     if (
       Number.isSafeInteger(value.schemaVersion) &&
       value.schemaVersion > 0 &&
-      ![1, RUN_STATE_SCHEMA_VERSION].includes(value.schemaVersion)
+      ![1, 2, RUN_STATE_SCHEMA_VERSION].includes(value.schemaVersion)
     ) {
       throw new RunStoreError(
         `Unsupported event.schemaVersion: ${String(value.schemaVersion)}; ` +

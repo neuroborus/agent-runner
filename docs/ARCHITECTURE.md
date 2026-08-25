@@ -289,6 +289,15 @@ session to avoid unnecessary provider context and quota use.
 `WAITING_FOR_USER`, `DONE`, `FAILED`, or its caller-selected timeout. Optional
 MCP progress notifications carry only bounded public activity with role labels;
 they do not wake a model or alter the run. Cancellation cancels only that wait.
+MCP status and wait also project one bounded `execution` object. Its finite
+`state` is `running` while the per-run execution lease has a live owner,
+`interrupted` when persisted provider activity has lost its owner, and `idle`
+otherwise; nullable `role` and `phase` come only from the common run envelope.
+A read checks same-host process liveness immediately without changing the
+stale threshold used for exclusive acquisition; an owner on another host
+remains live because its process liveness cannot be established locally.
+A timeout therefore distinguishes a live detached continuation from an
+interrupted process without polling or a heartbeat.
 `run_activity` remains an explicit cursor-based history read rather than a
 polling primitive. V1 does not require the MCP Tasks extension, a network
 transport, authentication, or a daemon.
@@ -334,9 +343,10 @@ the published record and continue to verify its opaque owner token.
 `state.json` contains the common versioned envelope: monotonic revision,
 pipeline ID and state version, an explicit runtime-compatibility tuple,
 canonical paths, resolved roles, counters, hashes, pause state, session
-lineage, timestamps, and opaque pipeline-owned state, including its resolved
-settings from the initial revision. The compatibility generation is maintained
-independently from the package version, which is not a persistence contract.
+lineage, nullable bounded active provider role/phase, timestamps, and opaque
+pipeline-owned state, including its resolved settings from the initial
+revision. The compatibility generation is maintained independently from the
+package version, which is not a persistence contract.
 The root validates JSON shape and size without interpreting workflow roles or
 outcomes.
 Session lineage records an optional source-session reference, its resolved
@@ -383,6 +393,11 @@ terminal history is shape-upgraded without replaying an effect.
 Plan execution state version 3 adds the nullable bounded pre-effect rejection
 record to each pending commit. Its version-2 migration sets that record to
 `null`; it never infers proof for a legacy consumed authorization.
+
+Common run-envelope version 3 adds `activeTurn`, either `null` or the current
+bounded `{ role, phase }`. Version-1 and version-2 runs project it as `null`
+without rewriting state or history; the next mutating continuation persists the
+explicit ordered runtime migration under the execution lease.
 
 ## Agent Context Recovery
 
@@ -485,6 +500,19 @@ only their generic form. Cursor-based readers expose this projection without
 returning private pipeline state, model output, credentials, or unhashed remote
 and identity values. Persist concise structured decisions and summaries, never
 raw model transcripts or chain-of-thought.
+
+Immediately before every provider invocation, the runner appends and syncs a
+complete `turn-started` transition whose next state contains the bounded active
+role and pipeline phase. The active turn remains durable while the provider is
+blocked and through repository or one-shot-effect reconciliation, then a
+second write-ahead transition clears it. If the process stops first, the stale
+activity remains without a live execution owner, even while its lease record
+awaits stale recovery. A resumed owner
+reconstructs the request from durable pipeline state, replaces ordinary stale
+activity when it starts the reconstructed turn, and clears a one-shot commit
+activity only after Git verification deterministically resolves the consumed
+authorization. Native sessions, polling, model-token heartbeats, and daemons
+are not part of this correctness path.
 
 Every mutating run or resume holds one atomic per-run execution lease. Plan
 execution and polishing also hold one atomic lease for the canonical Git

@@ -476,6 +476,7 @@ export function createRunStore({
             children:
               input.childSessions === undefined ? [] : input.childSessions,
           },
+          activeTurn: null,
           pipelineState:
             input.pipelineState === undefined ? {} : input.pipelineState,
           createdAt,
@@ -566,6 +567,11 @@ export function createRunStore({
   async function runIsLeased(runId) {
     const runDirectory = await getRunDirectory(runId);
     return runLeases.isLeased(runDirectory, runId);
+  }
+
+  async function runLeaseOwnerIsLive(runId) {
+    const runDirectory = await getRunDirectory(runId);
+    return runLeases.ownerIsLive(runDirectory, runId);
   }
 
   async function acquireWorktreeLease(projectPath, runId) {
@@ -784,6 +790,57 @@ export function createRunStore({
     });
   }
 
+  async function startAgentTurn(lease, activeTurn, { activity } = {}) {
+    const normalizedPatch = normalizeTransitionPatch({ activeTurn });
+    const normalizedActivity = normalizePublicActivity(activity);
+    if (
+      normalizedPatch.activeTurn === null ||
+      normalizedActivity?.actor !== normalizedPatch.activeTurn.role ||
+      normalizedActivity.phase !== normalizedPatch.activeTurn.phase ||
+      normalizedActivity.kind !== "turn-started"
+    ) {
+      throw new RunStoreError("Agent turn activity is invalid.", {
+        code: "ERR_INVALID_AGENT_TURN",
+      });
+    }
+    return transitionRun(lease, normalizedPatch, {
+      activity: normalizedActivity,
+    });
+  }
+
+  async function finishAgentTurn(lease, activeTurn) {
+    const normalized = normalizeTransitionPatch({ activeTurn }).activeTurn;
+    if (normalized === null) {
+      throw new RunStoreError("Active agent turn is invalid.", {
+        code: "ERR_INVALID_AGENT_TURN",
+      });
+    }
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
+      const snapshot = await loadSnapshot(runDirectory, record.runId);
+      if (!isDeepStrictEqual(snapshot.state.activeTurn, normalized)) {
+        throw new RunStoreError("Active agent turn does not match.", {
+          code: "ERR_INVALID_AGENT_TURN",
+        });
+      }
+      const nextState = normalizeRunState(
+        {
+          ...snapshot.state,
+          activeTurn: null,
+          revision: snapshot.state.revision + 1,
+          updatedAt: timestamp(snapshot.state.updatedAt),
+        },
+        record.runId,
+      );
+      await journal.appendTransition(
+        runDirectory,
+        nextState,
+        snapshot,
+        null,
+      );
+      return deepFreeze(nextState);
+    });
+  }
+
   async function recordChildSession(
     lease,
     childSession,
@@ -903,6 +960,7 @@ export function createRunStore({
     acquireWorktreeLease,
     createRun,
     getRunDirectory,
+    finishAgentTurn,
     loadRun,
     migrateRun,
     readPublicActivity,
@@ -910,6 +968,8 @@ export function createRunStore({
     recordChildSession,
     recoverRun,
     runIsLeased,
+    runLeaseOwnerIsLive,
+    startAgentTurn,
     transitionRun,
     validateStateBoundary,
     waitForRunChange,

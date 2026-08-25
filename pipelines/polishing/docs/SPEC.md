@@ -373,7 +373,10 @@ common external run store. Pipeline state includes resolved settings, baseline,
 input hashes, clarification status, backend versions, bootstrap summaries,
 findings, disputes, arbitration, budgets, fingerprints, overrides, and pause
 details. The common versioned envelope also records an explicit runtime
-compatibility tuple maintained independently from the package version.
+compatibility tuple maintained independently from the package version and, in
+version 3, nullable bounded active provider role and phase. Version-1 and
+version-2 envelopes project null activity without rewriting until the next
+mutating continuation persists the explicit runtime migration.
 
 Persist concise structured decisions and public summaries, never raw model
 transcripts, chain-of-thought, credentials, or unhashed remote and identity
@@ -395,6 +398,17 @@ checkpoint. This read-only projection leaves pipeline state version 2 unchanged.
 
 Each transition is a complete write-ahead event appended and synchronized
 before atomic state replacement. `progress.md` is derived public activity.
+Immediately before every Worker, Reviewer, or Arbiter provider call, the root
+persists a complete `turn-started` transition. It clears the active turn only
+after the pipeline reconciles read-only guards or safely snapshots and persists
+writable workspace effects. If the process stops first, MCP status and timed-out
+wait combine the retained role/phase with the absence of a live execution owner
+to report `interrupted`, even before stale lease recovery; a live detached owner
+reports `running`, and no owner or retained
+turn reports `idle`. Same-host reads check owner process liveness immediately
+without changing acquisition or stale-recovery thresholds. Resume reconstructs
+the request from durable state and does not require polling, a heartbeat,
+daemon, or surviving native session.
 Mutating run/resume operations acquire the per-run execution lease first and an
 external lease keyed by the canonical Git worktree second, then release them in
 reverse order. Separate run IDs therefore cannot mutate one worktree
@@ -459,6 +473,8 @@ Pipeline tests use fake adapters and temporary repositories. Cover at least:
 - reconciliation, arbitration, and product-decision pauses;
 - read-only mutation plus ref, remote, and identity guards;
 - durable transitions, interrupted turns, and journal recovery;
+- blocked provider activity plus lease-aware running, interrupted, and idle MCP
+  projection;
 - successful polishing, finalization changes/failures, findings, fixes,
   disputes, arbitration, stagnation, budgets, overrides, and fingerprint
   invalidation;

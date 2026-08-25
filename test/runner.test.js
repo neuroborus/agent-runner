@@ -403,14 +403,31 @@ async function rewriteRunAsLegacy(directoryPath) {
   const state = JSON.parse(await readFile(statePath, "utf8"));
   state.schemaVersion = 1;
   delete state.runtimeCompatibility;
+  delete state.activeTurn;
   const events = (await readFile(eventsPath, "utf8"))
     .trimEnd()
     .split("\n")
     .map((line) => JSON.parse(line));
+  let previousActiveTurn = null;
   for (const event of events) {
+    const activeTurn = event.state.activeTurn;
+    if (
+      event.activity === null &&
+      activeTurn === null &&
+      previousActiveTurn !== null
+    ) {
+      event.activity = {
+        actor: previousActiveTurn.role,
+        phase: previousActiveTurn.phase,
+        kind: "turn-finished",
+        message: `${previousActiveTurn.role} turn finished.`,
+      };
+    }
+    previousActiveTurn = activeTurn;
     event.schemaVersion = 1;
     event.state.schemaVersion = 1;
     delete event.state.runtimeCompatibility;
+    delete event.state.activeTurn;
   }
   await Promise.all([
     writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`),
@@ -478,6 +495,126 @@ test("serializes execution and polishing runs for one temporary worktree", async
   }
 
   await ownerLease.release();
+});
+
+test("publishes blocking provider activity before every pipeline turn", async (t) => {
+  for (const [pipelineId, expectedRole] of [
+    ["plan-authoring", "planner"],
+    ["plan-execution", "worker"],
+    ["polishing", "worker"],
+  ]) {
+    await t.test(pipelineId, async (pipelineTest) => {
+      const fixture = await createFixture(pipelineTest);
+      if (pipelineId !== "plan-authoring") {
+        await Promise.all([
+          writeFile(
+            join(fixture.projectPath, ".gitignore"),
+            "/LOCAL_ARTIFACTS/\n",
+          ),
+          writeFile(
+            join(fixture.projectPath, "source.js"),
+            "export const value = 0;\n",
+          ),
+        ]);
+        await executeFile("git", [
+          "-C",
+          fixture.projectPath,
+          "config",
+          "user.name",
+          "Test User",
+        ]);
+        await executeFile("git", [
+          "-C",
+          fixture.projectPath,
+          "config",
+          "user.email",
+          "test@example.com",
+        ]);
+        await executeFile("git", [
+          "-C",
+          fixture.projectPath,
+          "add",
+          ".gitignore",
+          "source.js",
+        ]);
+        await executeFile("git", [
+          "-C",
+          fixture.projectPath,
+          "commit",
+          "-qm",
+          "chore(test): initialize",
+        ]);
+        if (pipelineId === "plan-execution") {
+          await writeFile(join(fixture.taskPath, "plan.md"), PLAN);
+        } else {
+          await writeFile(
+            join(fixture.projectPath, "source.js"),
+            "export const value = 1;\n",
+          );
+        }
+      }
+
+      const delegate =
+        pipelineId === "plan-authoring"
+          ? createAdapter()
+          : createExecutionAdapter();
+      const started = Promise.withResolvers();
+      const unblock = Promise.withResolvers();
+      let blockFirstTurn = true;
+      const runStore = createRunStore({ stateRoot: fixture.stateRoot });
+      const adapter = {
+        ...delegate,
+        async run(request) {
+          if (blockFirstTurn) {
+            blockFirstTurn = false;
+            const [runId] = await readdir(join(fixture.stateRoot, "runs"));
+            const active = await runStore.loadRun(runId);
+            assert.deepEqual(active.activeTurn, {
+              role: expectedRole,
+              phase: "clarify",
+            });
+            started.resolve(runId);
+            await unblock.promise;
+          }
+          return delegate.run(request);
+        },
+      };
+      const activities = [];
+      const runner = runnerFor(
+        fixture,
+        { codex: adapter },
+        { activities, runStore },
+      );
+      const executing = runner.run({
+        pipelineId,
+        projectPath: fixture.projectPath,
+        taskPath: fixture.taskPath,
+        proactiveClarification: false,
+        roleOverrides: {},
+        sourceSession: null,
+      });
+      const runId = await Promise.race([
+        started.promise,
+        executing.then(
+          () => assert.fail("Pipeline completed before its first provider turn."),
+          (cause) => Promise.reject(cause),
+        ),
+      ]);
+      assert.equal(await runStore.runIsLeased(runId), true);
+      assert.deepEqual((await runner.status(runId)).run.activeTurn, {
+        role: expectedRole,
+        phase: "clarify",
+      });
+
+      unblock.resolve();
+      const completed = await executing;
+      assert.equal(completed.run.activeTurn, null);
+      assert.equal(
+        activities.filter(({ kind }) => kind === "turn-started").length,
+        delegate.calls.length,
+      );
+    });
+  }
 });
 
 test("runs and resumes a registered pipeline from persisted configuration", async (t) => {

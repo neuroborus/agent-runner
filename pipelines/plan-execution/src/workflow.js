@@ -112,6 +112,13 @@ function activity(actor, phase, kind, message) {
   return Object.freeze({ actor, phase, kind, message });
 }
 
+function activeTurn(role, workflowState) {
+  return Object.freeze({
+    role,
+    phase: workflowState.toLowerCase().replaceAll("_", "-"),
+  });
+}
+
 function isWithin(parentPath, childPath) {
   const pathFromParent = relative(parentPath, childPath);
   return (
@@ -744,74 +751,82 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
     };
     let response;
     let agentError;
+    const turn = activeTurn(role, state().workflowState);
+    currentRun = await runtime.startAgentTurn(turn);
+    assertRun(currentRun);
     try {
-      response = await runtime.adapters[role].run(request);
-    } catch (cause) {
-      agentError = cause;
-    }
-    let nextRepositoryBaseline = baseline;
-    if (access === "read-only") {
-      await runtime.git.assertUnchanged(turnSnapshot);
-      await runtime.git.assertUnchanged(baseline);
-    } else {
-      nextRepositoryBaseline = await runtime.git.snapshot({
-        allowedPaths: baseline.allowedPaths,
-        projectPath: baseline.projectPath,
-      });
-      const reason = workspaceControlChange(
-        turnSnapshot,
-        nextRepositoryBaseline,
-      );
-      if (reason !== null) {
-        await pause(reason);
+      try {
+        response = await runtime.adapters[role].run(request);
+      } catch (cause) {
+        agentError = cause;
+      }
+      let nextRepositoryBaseline = baseline;
+      if (access === "read-only") {
+        await runtime.git.assertUnchanged(turnSnapshot);
+        await runtime.git.assertUnchanged(baseline);
+      } else {
+        nextRepositoryBaseline = await runtime.git.snapshot({
+          allowedPaths: baseline.allowedPaths,
+          projectPath: baseline.projectPath,
+        });
+        const reason = workspaceControlChange(
+          turnSnapshot,
+          nextRepositoryBaseline,
+        );
+        if (reason !== null) {
+          await pause(reason);
+          return null;
+        }
+      }
+      if ((await readCurrentInputs()) === null) {
         return null;
       }
-    }
-    if ((await readCurrentInputs()) === null) {
-      return null;
-    }
-    if (access !== "read-only") {
-      const current = state();
-      const changedCorrection =
-        current.workflowState === "RESOLVE_FINDINGS" &&
-        turnSnapshot.contentFingerprint !==
-          nextRepositoryBaseline.contentFingerprint;
-      if (
-        changedCorrection ||
-        !isDeepStrictEqual(nextRepositoryBaseline, baseline)
-      ) {
-        await transition(
-          changedCorrection
-            ? {
-                ...current,
-                workflowState: "FINALIZE",
-                repositoryBaseline: nextRepositoryBaseline,
-                finalizationResult: null,
-                finalizedFingerprint: null,
-                reviewResult: null,
-                reviewedFingerprint: null,
-                previousFindings:
-                  current.findings.length === 0
-                    ? current.previousFindings
-                    : current.findings,
-                findings: [],
-                pendingCorrection: true,
-                reviewReconsideration: [],
-              }
-            : {
-                ...current,
-                repositoryBaseline: nextRepositoryBaseline,
-              },
-          changedCorrection
-            ? {
-                nextCounters: {
-                  ...counters(),
-                  fixRounds: counters().fixRounds + 1,
+      if (access !== "read-only") {
+        const current = state();
+        const changedCorrection =
+          current.workflowState === "RESOLVE_FINDINGS" &&
+          turnSnapshot.contentFingerprint !==
+            nextRepositoryBaseline.contentFingerprint;
+        if (
+          changedCorrection ||
+          !isDeepStrictEqual(nextRepositoryBaseline, baseline)
+        ) {
+          await transition(
+            changedCorrection
+              ? {
+                  ...current,
+                  workflowState: "FINALIZE",
+                  repositoryBaseline: nextRepositoryBaseline,
+                  finalizationResult: null,
+                  finalizedFingerprint: null,
+                  reviewResult: null,
+                  reviewedFingerprint: null,
+                  previousFindings:
+                    current.findings.length === 0
+                      ? current.previousFindings
+                      : current.findings,
+                  findings: [],
+                  pendingCorrection: true,
+                  reviewReconsideration: [],
+                }
+              : {
+                  ...current,
+                  repositoryBaseline: nextRepositoryBaseline,
                 },
-              }
-            : {},
-        );
+            changedCorrection
+              ? {
+                  nextCounters: {
+                    ...counters(),
+                    fixRounds: counters().fixRounds + 1,
+                  },
+                }
+              : {},
+          );
+        }
       }
+    } finally {
+      currentRun = await runtime.finishAgentTurn(turn);
+      assertRun(currentRun);
     }
     if (agentError !== undefined) {
       throw agentError;
@@ -3011,6 +3026,27 @@ ${JSON.stringify(
     }
 
     let agentError;
+    const commitTurn = activeTurn("worker", "COMMIT");
+    let commitTurnNeedsReconciliation =
+      currentRun.activeTurn !== undefined &&
+      currentRun.activeTurn !== null;
+    if (
+      commitTurnNeedsReconciliation &&
+      !isDeepStrictEqual(currentRun.activeTurn, commitTurn)
+    ) {
+      throw workflowError(
+        "Persisted agent turn does not match commit verification.",
+        "ERR_INVALID_PLAN_EXECUTION_STATE",
+      );
+    }
+    async function finishCommitTurn() {
+      if (!commitTurnNeedsReconciliation) {
+        return;
+      }
+      currentRun = await runtime.finishAgentTurn(commitTurn);
+      assertRun(currentRun);
+      commitTurnNeedsReconciliation = false;
+    }
     if (pendingCommit.status === "prepared") {
       const previousSession = [...currentRun.sessionLineage.children]
         .reverse()
@@ -3084,6 +3120,9 @@ ${step.subject}`,
           ? {}
           : { session: { id: previousSession, mode: "continue" } }),
       };
+      currentRun = await runtime.startAgentTurn(commitTurn);
+      assertRun(currentRun);
+      commitTurnNeedsReconciliation = true;
       try {
         await runtime.adapters.worker.run(request);
       } catch (cause) {
@@ -3122,6 +3161,7 @@ ${step.subject}`,
     let verified;
     try {
       verified = await runtime.git.verifyCommit(pendingCommit.authorization);
+      await finishCommitTurn();
     } catch (cause) {
       if (
         ![
@@ -3131,6 +3171,7 @@ ${step.subject}`,
       ) {
         throw cause;
       }
+      await finishCommitTurn();
       if (
         cause.code === "ERR_COMMIT_NOT_CREATED" &&
         pendingCommit.preEffectRejection !== null

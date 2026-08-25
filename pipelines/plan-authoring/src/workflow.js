@@ -61,6 +61,13 @@ function activity(actor, phase, kind, message) {
   return Object.freeze({ actor, phase, kind, message });
 }
 
+function activeTurn(role, workflowState) {
+  return Object.freeze({
+    role,
+    phase: workflowState.toLowerCase().replaceAll("_", "-"),
+  });
+}
+
 function isWithin(parentPath, childPath) {
   const pathFromParent = relative(parentPath, childPath);
   return (
@@ -377,13 +384,21 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
     };
     let response;
     let agentError;
+    const turn = activeTurn(role, pipelineState().workflowState);
+    currentRun = await runtime.startAgentTurn(turn);
+    assertRun(currentRun);
     try {
-      response = await runtime.adapters[role].run(request);
-    } catch (cause) {
-      agentError = cause;
+      try {
+        response = await runtime.adapters[role].run(request);
+      } catch (cause) {
+        agentError = cause;
+      }
+      await runtime.git.assertUnchanged(snapshot);
+      await runtime.git.assertUnchanged(pipelineState().repositoryBaseline);
+    } finally {
+      currentRun = await runtime.finishAgentTurn(turn);
+      assertRun(currentRun);
     }
-    await runtime.git.assertUnchanged(snapshot);
-    await runtime.git.assertUnchanged(pipelineState().repositoryBaseline);
     if (agentError !== undefined) {
       throw agentError;
     }

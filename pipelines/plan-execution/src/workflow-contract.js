@@ -3307,8 +3307,10 @@ export function assertRuntime(runtime) {
     }
   }
   for (const name of [
+    "finishAgentTurn",
     "readInputs",
     "recordChildSession",
+    "startAgentTurn",
     "transition",
     "writeRunArtifact",
   ]) {

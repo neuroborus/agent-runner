@@ -811,6 +811,21 @@ async function createFixture(
       currentRun = await store.transitionRun(lease, patch, options);
       return currentRun;
     },
+    async startAgentTurn(activeTurn) {
+      currentRun = await store.startAgentTurn(lease, activeTurn, {
+        activity: {
+          actor: activeTurn.role,
+          phase: activeTurn.phase,
+          kind: "turn-started",
+          message: `${activeTurn.role} ${activeTurn.phase} turn started.`,
+        },
+      });
+      return currentRun;
+    },
+    async finishAgentTurn(activeTurn) {
+      currentRun = await store.finishAgentTurn(lease, activeTurn);
+      return currentRun;
+    },
     async recordChildSession(child, options) {
       currentRun = await store.recordChildSession(lease, child, options);
       return currentRun;
@@ -837,6 +852,21 @@ async function createFixture(
     currentRun = await reopened.recoverRun(lease);
     runtime.transition = async (patch, options) => {
       currentRun = await reopened.transitionRun(lease, patch, options);
+      return currentRun;
+    };
+    runtime.startAgentTurn = async (activeTurn) => {
+      currentRun = await reopened.startAgentTurn(lease, activeTurn, {
+        activity: {
+          actor: activeTurn.role,
+          phase: activeTurn.phase,
+          kind: "turn-started",
+          message: `${activeTurn.role} ${activeTurn.phase} turn started.`,
+        },
+      });
+      return currentRun;
+    };
+    runtime.finishAgentTurn = async (activeTurn) => {
+      currentRun = await reopened.finishAgentTurn(lease, activeTurn);
       return currentRun;
     };
     runtime.recordChildSession = async (child, options) => {
@@ -1315,6 +1345,13 @@ test("preflights digit-boundary transition growth before persistence", async (t)
       run: nearCapacityRun,
       runtime: {
         ...fixture.runtime,
+        async startAgentTurn(activeTurn) {
+          return {
+            ...nearCapacityRun,
+            activeTurn,
+            revision: nearCapacityRun.revision + 1,
+          };
+        },
         async transition(patch) {
           attemptedTransitions.push(patch);
           return {

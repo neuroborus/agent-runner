@@ -209,6 +209,105 @@ test("normalizes legacy role records for every pipeline without rewriting histor
   }
 });
 
+test("projects version-2 activity state for every pipeline without rewriting", async (t) => {
+  for (const pipelineId of [
+    "plan-authoring",
+    "plan-execution",
+    "polishing",
+  ]) {
+    const workspace = await mkdtemp(
+      join(tmpdir(), `agent-runner-v2-${pipelineId}-`),
+    );
+    t.after(() => rm(workspace, { recursive: true, force: true }));
+    const projectPath = join(workspace, "project");
+    const taskPath = join(workspace, "task");
+    await Promise.all([mkdir(projectPath), mkdir(taskPath)]);
+    const store = createRunStore({ stateRoot: join(workspace, "state") });
+    const created = await store.createRun({
+      pipelineId,
+      pipelineStateVersion: 1,
+      projectPath,
+      taskPath,
+      roles: {},
+      pipelineState: { workflowState: "CLARIFY" },
+    });
+    await created.lease.release();
+
+    const statePath = join(created.directoryPath, "state.json");
+    const eventsPath = join(created.directoryPath, "events.jsonl");
+    const versionTwoState = JSON.parse(await readFile(statePath, "utf8"));
+    versionTwoState.schemaVersion = 2;
+    versionTwoState.runtimeCompatibility.runStateVersion = 2;
+    delete versionTwoState.activeTurn;
+    const versionTwoEvent = JSON.parse(
+      (await readFile(eventsPath, "utf8")).trim(),
+    );
+    versionTwoEvent.schemaVersion = 2;
+    versionTwoEvent.state = versionTwoState;
+    const stateSource = `${JSON.stringify(versionTwoState, null, 2)}\n`;
+    const eventSource = `${JSON.stringify(versionTwoEvent)}\n`;
+    await Promise.all([
+      writeFile(statePath, stateSource),
+      writeFile(eventsPath, eventSource),
+    ]);
+
+    const loaded = await store.loadRun(created.state.runId);
+    assert.equal(loaded.schemaVersion, 2);
+    assert.equal(loaded.activeTurn, null);
+    assert.equal(await readFile(statePath, "utf8"), stateSource);
+    assert.equal(await readFile(eventsPath, "utf8"), eventSource);
+  }
+});
+
+test("persists bounded agent turns until owner-checked reconciliation", async (t) => {
+  const { created, stateRoot, store } = await createFixture(t);
+  const turn = { role: "worker", phase: "implement" };
+  const started = await store.startAgentTurn(created.lease, turn, {
+    activity: {
+      actor: "worker",
+      phase: "implement",
+      kind: "turn-started",
+      message: "worker implement turn started.",
+    },
+  });
+  assert.deepEqual(started.activeTurn, turn);
+  assert.deepEqual((await store.loadRun(started.runId)).activeTurn, turn);
+  await assert.rejects(
+    store.finishAgentTurn(created.lease, {
+      role: "reviewer",
+      phase: "review",
+    }),
+    (error) => error.code === "ERR_INVALID_AGENT_TURN",
+  );
+
+  await created.lease.release();
+  const resumedStore = createRunStore({ stateRoot });
+  assert.deepEqual((await resumedStore.loadRun(started.runId)).activeTurn, turn);
+  const lease = await resumedStore.acquireRunLease(started.runId);
+  const recovered = await resumedStore.recoverRun(lease);
+  assert.deepEqual(recovered.activeTurn, turn);
+  const resumedTurn = { role: "worker", phase: "finalize" };
+  const restarted = await resumedStore.startAgentTurn(lease, resumedTurn, {
+    activity: {
+      actor: "worker",
+      phase: "finalize",
+      kind: "turn-started",
+      message: "worker finalize turn started.",
+    },
+  });
+  assert.deepEqual(restarted.activeTurn, resumedTurn);
+  const finished = await resumedStore.finishAgentTurn(lease, resumedTurn);
+  assert.equal(finished.activeTurn, null);
+  await lease.release();
+
+  const activities = await resumedStore.readPublicActivity(started.runId);
+  assert.equal(
+    activities.activities.filter(({ kind }) => kind === "turn-started").length,
+    2,
+  );
+  assert.equal(activities.cursor, finished.revision);
+});
+
 test("migrates a legacy run envelope as one leased journal transition", async (t) => {
   const { created, stateRoot, store } = await createFixture(t);
   await created.lease.release();
@@ -217,6 +316,7 @@ test("migrates a legacy run envelope as one leased journal transition", async (t
   const legacyState = JSON.parse(await readFile(statePath, "utf8"));
   legacyState.schemaVersion = 1;
   delete legacyState.runtimeCompatibility;
+  delete legacyState.activeTurn;
   const legacyEvent = JSON.parse((await readFile(eventsPath, "utf8")).trim());
   legacyEvent.schemaVersion = 1;
   legacyEvent.state = legacyState;

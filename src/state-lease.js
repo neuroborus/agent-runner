@@ -130,11 +130,7 @@ export function createLeaseManager({
     );
   }
 
-  async function leaseIsStale(lease) {
-    const age = currentDate().valueOf() - Date.parse(lease.acquiredAt);
-    if (age < staleMs || lease.hostname !== hostName) {
-      return false;
-    }
+  async function ownerProcessIsAlive(lease) {
     const processAlive = await processIsAlive(lease.pid);
     if (typeof processAlive !== "boolean") {
       throw new RunStoreError(
@@ -142,7 +138,15 @@ export function createLeaseManager({
         { code: "ERR_INVALID_RUN_STORE_OPTIONS" },
       );
     }
-    return !processAlive;
+    return processAlive;
+  }
+
+  async function leaseIsStale(lease) {
+    const age = currentDate().valueOf() - Date.parse(lease.acquiredAt);
+    if (age < staleMs || lease.hostname !== hostName) {
+      return false;
+    }
+    return !(await ownerProcessIsAlive(lease));
   }
 
   function createLeaseHandle(runDirectory, record) {
@@ -303,6 +307,17 @@ export function createLeaseManager({
     return (await owner(runDirectory, runId)) !== null;
   }
 
+  async function ownerIsLive(runDirectory, runId) {
+    const lease = await readManagedLease(
+      join(runDirectory, LEASE_FILENAME),
+      runId,
+    );
+    return (
+      lease !== null &&
+      (lease.hostname !== hostName || (await ownerProcessIsAlive(lease)))
+    );
+  }
+
   async function assertLeaseFile(metadata) {
     const persistedLease = await readManagedLease(
       join(metadata.runDirectory, LEASE_FILENAME),
@@ -354,5 +369,5 @@ export function createLeaseManager({
     metadata.released = true;
   }
 
-  return Object.freeze({ acquire, isLeased, owner, runExclusive });
+  return Object.freeze({ acquire, isLeased, owner, ownerIsLive, runExclusive });
 }

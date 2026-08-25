@@ -1,6 +1,6 @@
 import { isAbsolute, resolve } from "node:path";
 
-export const RUN_STATE_SCHEMA_VERSION = 2;
+export const RUN_STATE_SCHEMA_VERSION = 3;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
   runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
@@ -12,8 +12,10 @@ export const RUNTIME_COMPATIBILITY_TOKEN =
 export const RUNTIME_VERSION_SKEW_EXIT_CODE = 78;
 
 const LEGACY_RUN_STATE_SCHEMA_VERSION = 1;
+const ACTIVITY_RUN_STATE_SCHEMA_VERSION = 3;
 const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   LEGACY_RUN_STATE_SCHEMA_VERSION,
+  2,
   RUN_STATE_SCHEMA_VERSION,
 ]);
 
@@ -36,6 +38,7 @@ const STATE_FIELDS = new Set([
   "hashes",
   "pause",
   "sessionLineage",
+  "activeTurn",
   "pipelineState",
   "createdAt",
   "updatedAt",
@@ -47,6 +50,7 @@ const SESSION_LINEAGE_FIELDS = new Set([
 ]);
 const CHILD_SESSION_FIELDS = new Set(["role", "sessionId", "contextKey"]);
 const ACTIVITY_FIELDS = new Set(["actor", "phase", "kind", "message"]);
+const ACTIVE_TURN_FIELDS = new Set(["role", "phase"]);
 const INPUT_REQUEST_FIELDS = new Set([
   "id",
   "kind",
@@ -65,6 +69,7 @@ const TRANSITION_FIELDS = new Set([
   "counters",
   "hashes",
   "pause",
+  "activeTurn",
   "pipelineState",
 ]);
 const RUNTIME_COMPATIBILITY_FIELDS = new Set([
@@ -460,6 +465,31 @@ function normalizeRoles(value) {
   return roles;
 }
 
+function normalizeActiveTurn(
+  value,
+  schemaVersion = RUN_STATE_SCHEMA_VERSION,
+) {
+  if (schemaVersion < ACTIVITY_RUN_STATE_SCHEMA_VERSION) {
+    if (value !== undefined) {
+      fail("Legacy run state must not declare an active turn.");
+    }
+    return null;
+  }
+  if (value === null) {
+    return null;
+  }
+
+  assertRecord(value, "run.activeTurn");
+  rejectUnknownFields(value, ACTIVE_TURN_FIELDS, "run.activeTurn");
+  if (Object.keys(value).length !== ACTIVE_TURN_FIELDS.size) {
+    fail("run.activeTurn is invalid.");
+  }
+  return {
+    role: assertIdentifier(value.role, "run.activeTurn.role"),
+    phase: assertIdentifier(value.phase, "run.activeTurn.phase"),
+  };
+}
+
 export function normalizeRunState(value, expectedRunId) {
   assertRecord(value, "run");
   rejectUnknownFields(value, STATE_FIELDS, "run");
@@ -530,6 +560,7 @@ export function normalizeRunState(value, expectedRunId) {
     hashes: cloneRecord(value.hashes, "run.hashes"),
     pause,
     sessionLineage: normalizeSessionLineage(value.sessionLineage),
+    activeTurn: normalizeActiveTurn(value.activeTurn, value.schemaVersion),
     pipelineState: cloneRecord(value.pipelineState, "run.pipelineState"),
     createdAt,
     updatedAt,
@@ -554,6 +585,9 @@ export function normalizeTransitionPatch(value) {
       patch.pause === null
         ? null
         : normalizePause(patch.pause);
+  }
+  if (Object.hasOwn(patch, "activeTurn")) {
+    normalized.activeTurn = normalizeActiveTurn(patch.activeTurn);
   }
 
   return normalized;

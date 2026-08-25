@@ -380,7 +380,8 @@ The common envelope also persists an optional opaque source-session reference,
 its resolved trusted profile when known, and every direct Worker, Reviewer, or
 Arbiter child session ID with its
 accepted-input and pipeline-checkpoint context key, monotonic revision and
-timestamps, and an opaque pipeline-owned state object. Store
+timestamps, a nullable bounded active provider role/phase, and an opaque
+pipeline-owned state object. Store
 correction-round snapshots and arbitration episodes there without asking the
 root runtime to interpret them. Native backend session resume is optional; the
 persisted task, plan, decisions, summaries, and lineage must be sufficient to
@@ -412,6 +413,17 @@ the rejection is recoverable. Its version-2 migration sets the record to
 `null`, retaining every legacy consumed authorization on the verification-only
 path rather than inventing proof.
 
+Common run-envelope version 3 independently adds nullable bounded active
+provider role and phase. Version-1 and version-2 envelopes project it as `null`
+without rewriting; the next mutating continuation persists the explicit runtime
+migration under the per-run lease.
+MCP status and timed-out wait combine that field with the live execution lease:
+`running` identifies a current execution owner, including a detached
+continuation; `interrupted` identifies retained provider activity with no owner,
+and `idle` identifies neither. This projection uses no polling, daemon, or
+heartbeat. Same-host reads check owner process liveness immediately while
+exclusive acquisition and stale recovery retain their existing age threshold.
+
 ### `events.jsonl`
 
 Append-only machine-readable event history.
@@ -433,6 +445,17 @@ summaries, findings, and decisions only from validated structured results. The
 state service validates generic shape and size limits without interpreting
 roles or outcomes, and cursor readers expose only this safe projection rather
 than private pipeline state.
+
+Immediately before every Worker, Reviewer, or Arbiter provider call, append and
+sync a `turn-started` transition containing the bounded active role and current
+pipeline phase. Clear it only after read-only or writable repository
+reconciliation. For the one-shot commit turn, retain it until independent Git
+verification resolves the consumed authorization; an interrupted verification
+never clears it or replays the Worker. A stopped ordinary turn retains its
+activity without a live execution owner, even while its lease record awaits
+stale recovery, and resume reconstructs the request from
+the persisted checkpoint before replacing and eventually clearing that
+activity.
 
 ### `progress.md`
 
@@ -1850,6 +1873,9 @@ At minimum cover:
 48. a pre-effect rejection followed by interrupted Git verification persists
     its bounded proof, resumes verification without replay, and renews only
     after the resumed verification confirms no commit.
+49. blocked provider turns publish bounded role/phase before invocation;
+    owner loss, timed-out MCP wait, ordinary resume, and interrupted one-shot
+    verification preserve the lease-aware activity contract.
 
 Real Codex/Claude smoke tests should be opt-in integration tests.
 

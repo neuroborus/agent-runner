@@ -404,6 +404,7 @@ async function createFixture(
     counters: {},
     hashes: {},
     pause: null,
+    activeTurn: null,
     sessionLineage: { source: sourceSession, children: [] },
     pipelineState: createPlanAuthoringState({ proactiveClarification }),
   };
@@ -462,6 +463,25 @@ async function createFixture(
     async transition(patch, options) {
       currentRun = { ...currentRun, ...patch, revision: currentRun.revision + 1 };
       transitions.push({ patch, options });
+      return currentRun;
+    },
+    async startAgentTurn(activeTurn) {
+      currentRun = {
+        ...currentRun,
+        activeTurn,
+        revision: currentRun.revision + 1,
+      };
+      transitions.push({ activeTurn, kind: "turn-started", options: {} });
+      return currentRun;
+    },
+    async finishAgentTurn(activeTurn) {
+      assert.deepEqual(currentRun.activeTurn, activeTurn);
+      currentRun = {
+        ...currentRun,
+        activeTurn: null,
+        revision: currentRun.revision + 1,
+      };
+      transitions.push({ activeTurn, kind: "turn-finished", options: {} });
       return currentRun;
     },
     async recordChildSession(child, options) {

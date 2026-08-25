@@ -636,6 +636,31 @@ export function createRunner(options = {}) {
       clarifications,
       git,
       readInputs: ({ taskPath }) => readInputs(pipeline, taskPath),
+      async startAgentTurn(activeTurn) {
+        const current = await runStore.loadRun(run.runId);
+        pipeline.workflow.validateRun(
+          deepFreeze({
+            ...current,
+            activeTurn,
+            revision: current.revision + 1,
+          }),
+        );
+        const activity = {
+          actor: activeTurn?.role,
+          phase: activeTurn?.phase,
+          kind: "turn-started",
+          message: `${activeTurn?.role} ${activeTurn?.phase} turn started.`,
+        };
+        const next = await runStore.startAgentTurn(
+          lease,
+          activeTurn,
+          { activity },
+        );
+        await publish(activity, next);
+        return next;
+      },
+      finishAgentTurn: (activeTurn) =>
+        runStore.finishAgentTurn(lease, activeTurn),
       async recordChildSession(child, { activity } = {}) {
         const next = await runStore.recordChildSession(lease, child, {
           activity,

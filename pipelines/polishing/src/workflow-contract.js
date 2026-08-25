@@ -2734,8 +2734,10 @@ export function assertRuntime(runtime) {
     }
   }
   for (const name of [
+    "finishAgentTurn",
     "readInputs",
     "recordChildSession",
+    "startAgentTurn",
     "transition",
     "writeRunArtifact",
   ]) {
@@ -2848,6 +2850,13 @@ export function normalizeInputSnapshot(value, taskPath) {
 
 export function activity(actor, phase, kind, message) {
   return Object.freeze({ actor, phase, kind, message });
+}
+
+export function activeTurn(role, workflowState) {
+  return Object.freeze({
+    role,
+    phase: workflowState.toLowerCase().replaceAll("_", "-"),
+  });
 }
 
 export function diagnosticCode(cause, fallback) {
