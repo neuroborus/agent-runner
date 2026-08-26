@@ -106,6 +106,7 @@ export const MAX_TEXT_LENGTH = 4_000;
 export const MAX_SUMMARY_LENGTH = 20_000;
 export const MAX_PLAN_LENGTH = 100_000;
 export const MAX_ITEMS = 32;
+export const MAX_VALIDATION_ITEMS = MAX_ITEMS * 2;
 export const MAX_OPTIONS = 16;
 export const MAX_DIAGNOSTIC_ITEMS = 32;
 const MAX_STRUCTURED_RESULT_BYTES = 256 * 1024;
@@ -165,8 +166,6 @@ const RECONCILIATION_RESULT_FIELDS = Object.freeze([
   "status",
   "summary",
   "disagreement",
-  "requiredChecks",
-  "validationInfrastructure",
   "reason",
   "question",
   "options",
@@ -176,8 +175,6 @@ const RECONCILIATION_RESULT_FIELDS = Object.freeze([
 const ARBITRATION_RESULT_FIELDS = Object.freeze([
   "direction",
   "summary",
-  "requiredChecks",
-  "validationInfrastructure",
   "rationale",
   "reason",
   "question",
@@ -853,10 +850,12 @@ export function normalizeBootstrapResult(payload, role) {
     requiredChecks: normalizeRequiredChecks(
       payload.requiredChecks,
       INVALID_OUTPUT_CODE,
+      { maxItems: MAX_ITEMS },
     ),
     validationInfrastructure: normalizeValidationInfrastructure(
       payload.validationInfrastructure,
       INVALID_OUTPUT_CODE,
+      { maxItems: MAX_ITEMS },
     ),
   });
 }
@@ -883,9 +882,7 @@ export function normalizeReconciliationResult(payload) {
     if (
       payload.summary !== "" ||
       payload.disagreement !== "" ||
-      payload.reason !== "" ||
-      !emptyArray(payload.requiredChecks) ||
-      !emptyArray(payload.validationInfrastructure)
+      payload.reason !== ""
     ) {
       throw outputError(
         "Product decision contains inapplicable fields.",
@@ -900,9 +897,7 @@ export function normalizeReconciliationResult(payload) {
   if (payload.status === "PLAN_REVISION_REQUIRED") {
     if (
       payload.summary !== "" ||
-      payload.disagreement !== "" ||
-      !emptyArray(payload.requiredChecks) ||
-      !emptyArray(payload.validationInfrastructure)
+      payload.disagreement !== ""
     ) {
       throw outputError(
         "Plan revision contains inapplicable fields.",
@@ -930,21 +925,11 @@ export function normalizeReconciliationResult(payload) {
         INVALID_OUTPUT_CODE,
         outputConstraint("summary", "concise-markdown-up-to-20000-characters"),
       ),
-      requiredChecks: normalizeRequiredChecks(
-        payload.requiredChecks,
-        INVALID_OUTPUT_CODE,
-      ),
-      validationInfrastructure: normalizeValidationInfrastructure(
-        payload.validationInfrastructure,
-        INVALID_OUTPUT_CODE,
-      ),
     });
   }
   if (
     payload.summary !== "" ||
     payload.reason !== "" ||
-    !emptyArray(payload.requiredChecks) ||
-    !emptyArray(payload.validationInfrastructure) ||
     payload.question !== "" ||
     payload.whyBlocked !== "" ||
     !emptyArray(payload.options)
@@ -1008,9 +993,7 @@ export function normalizeBootstrapArbitration(payload) {
   if (payload.direction === "PRODUCT_DECISION_REQUIRED") {
     if (
       payload.summary !== "" ||
-      payload.reason !== "" ||
-      !emptyArray(payload.requiredChecks) ||
-      !emptyArray(payload.validationInfrastructure)
+      payload.reason !== ""
     ) {
       throw outputError(
         "Product decision contains inapplicable fields.",
@@ -1024,11 +1007,7 @@ export function normalizeBootstrapArbitration(payload) {
     });
   }
   if (payload.direction === "PLAN_REVISION_REQUIRED") {
-    if (
-      payload.summary !== "" ||
-      !emptyArray(payload.requiredChecks) ||
-      !emptyArray(payload.validationInfrastructure)
-    ) {
+    if (payload.summary !== "") {
       throw outputError(
         "Plan revision must not contain a summary.",
         outputConstraint("direction", "direction-field-consistency"),
@@ -1056,14 +1035,6 @@ export function normalizeBootstrapArbitration(payload) {
       "arbitrated bootstrap summary",
       INVALID_OUTPUT_CODE,
       outputConstraint("summary", "concise-markdown-up-to-20000-characters"),
-    ),
-    requiredChecks: normalizeRequiredChecks(
-      payload.requiredChecks,
-      INVALID_OUTPUT_CODE,
-    ),
-    validationInfrastructure: normalizeValidationInfrastructure(
-      payload.validationInfrastructure,
-      INVALID_OUTPUT_CODE,
     ),
   });
 }
@@ -1130,11 +1101,15 @@ function normalizeValidationInfrastructurePath(value, name, code, diagnostic) {
   return value;
 }
 
-function normalizeRequiredChecks(value, code, { allowEmpty = false } = {}) {
+function normalizeRequiredChecks(
+  value,
+  code,
+  { allowEmpty = false, maxItems = MAX_VALIDATION_ITEMS } = {},
+) {
   if (
     !Array.isArray(value) ||
     (!allowEmpty && value.length === 0) ||
-    value.length > MAX_ITEMS
+    value.length > maxItems
   ) {
     throw workflowError(
       "Required-check inventory is invalid.",
@@ -1142,8 +1117,8 @@ function normalizeRequiredChecks(value, code, { allowEmpty = false } = {}) {
       outputConstraint(
         "requiredChecks",
         allowEmpty
-          ? "array-up-to-32-items"
-          : "nonempty-array-up-to-32-items",
+          ? `array-up-to-${maxItems}-items`
+          : `nonempty-array-up-to-${maxItems}-items`,
       ),
     );
   }
@@ -1190,12 +1165,19 @@ function normalizeRequiredChecks(value, code, { allowEmpty = false } = {}) {
   return checks;
 }
 
-function normalizeValidationInfrastructure(value, code) {
-  if (!Array.isArray(value) || value.length > MAX_ITEMS) {
+function normalizeValidationInfrastructure(
+  value,
+  code,
+  { maxItems = MAX_VALIDATION_ITEMS } = {},
+) {
+  if (!Array.isArray(value) || value.length > maxItems) {
     throw workflowError(
       "Validation infrastructure is invalid.",
       code,
-      outputConstraint("validationInfrastructure", "array-up-to-32-items"),
+      outputConstraint(
+        "validationInfrastructure",
+        `array-up-to-${maxItems}-items`,
+      ),
     );
   }
   const paths = Object.freeze(
@@ -2174,10 +2156,12 @@ function normalizePersistedValidation(value, name) {
   normalizeRequiredChecks(
     value.requiredChecks,
     "ERR_INVALID_PLAN_EXECUTION_STATE",
+    { maxItems: MAX_ITEMS },
   );
   normalizeValidationInfrastructure(
     value.validationInfrastructure,
     "ERR_INVALID_PLAN_EXECUTION_STATE",
+    { maxItems: MAX_ITEMS },
   );
   return value;
 }

@@ -403,6 +403,11 @@ remotes, and Git identity through completion.
 Plan execution and polishing state version 2 persist the independently
 bootstrapped required-check inventory, the repository-relative files that own
 validation infrastructure, and a runner-computed fingerprint of those files.
+The runner establishes that inventory from accepted Worker evidence followed by
+accepted Reviewer evidence. It deduplicates exact commands and paths in stable
+first-seen order and assigns contiguous `C1`-through-`Cn` IDs; reconciliation
+and arbitration resolve only summaries and material disagreements and cannot
+add commands or paths. Validation-migration discovery uses the same derivation.
 The version-1 migration preserves safe workspace content while invalidating
 active aggregate finalization and review evidence. Paused legacy evidence is
 explicitly provisional: before a retry, override, finalization, or review can
@@ -539,7 +544,8 @@ rewriting interior whitespace. Host-reported results and user attestations are
 outside this trust boundary.
 
 A selected runner-trusted command is the only exception to agent-side check
-execution. Bootstrap inventories must contain its exact configured command.
+execution. The runner-derived bootstrap inventory must contain its exact
+configured command.
 The finalization agent returns `NOT_RUN` only for those selected entries; after
 the agent turn reconciles, the root executor replaces each placeholder by
 running the exact persisted executable/argument vector directly without a
@@ -573,14 +579,15 @@ content, validation-infrastructure, ordered-command, and trusted-configuration
 fingerprints. This service does not broaden any agent turn's sandbox and
 introduces no daemon or shell DSL.
 
-Before plan execution accepts a bootstrap, reconciliation, arbitration, or
-legacy validation-migration inventory, the root Git boundary verifies every
+Before plan execution accepts a producing role's bootstrap or legacy
+validation-migration inventory, the root Git boundary verifies every
 validation-infrastructure entry is an existing regular file whose canonical
 repository-relative path exactly matches the proposed path. Missing files,
 directories, symlinks, and paths traversing a symlink are field-specific
 bootstrap violations; the runner does not follow or silently canonicalize
 them. The producing role receives the bounded diagnostic on its one correction
-turn, and a second invalid result fails closed.
+turn, and a second invalid result fails closed. The deterministic aggregate is
+therefore derived only from independently accepted canonical role evidence.
 
 An explicitly supplied source session is different: the first eligible turn of
 each new primary or review checkpoint creates a direct child and returns its ID

@@ -3,6 +3,7 @@ import {
   MAX_OPTIONS,
   MAX_SUMMARY_LENGTH,
   MAX_TEXT_LENGTH,
+  MAX_VALIDATION_ITEMS,
 } from "./workflow-contract.js";
 
 function deepFreeze(value) {
@@ -30,13 +31,18 @@ const REQUIRED_CHECK = {
 };
 const REQUIRED_CHECKS = {
   type: "array",
-  maxItems: MAX_ITEMS,
+  maxItems: MAX_VALIDATION_ITEMS,
   items: REQUIRED_CHECK,
 };
+const BOOTSTRAP_REQUIRED_CHECKS = { ...REQUIRED_CHECKS, maxItems: MAX_ITEMS };
 const VALIDATION_INFRASTRUCTURE = {
   type: "array",
-  maxItems: MAX_ITEMS,
+  maxItems: MAX_VALIDATION_ITEMS,
   items: TEXT,
+};
+const BOOTSTRAP_VALIDATION_INFRASTRUCTURE = {
+  ...VALIDATION_INFRASTRUCTURE,
+  maxItems: MAX_ITEMS,
 };
 const CHECK_RESULT = {
   type: "object",
@@ -120,8 +126,8 @@ export const BOOTSTRAP_SCHEMA = deepFreeze({
       enum: ["READY", "PRODUCT_DECISION_REQUIRED"],
     },
     summary: SUMMARY,
-    requiredChecks: REQUIRED_CHECKS,
-    validationInfrastructure: VALIDATION_INFRASTRUCTURE,
+    requiredChecks: BOOTSTRAP_REQUIRED_CHECKS,
+    validationInfrastructure: BOOTSTRAP_VALIDATION_INFRASTRUCTURE,
     reason: TEXT,
     ...DECISION_PROPERTIES,
   },
@@ -148,8 +154,6 @@ export const BOOTSTRAP_RECONCILIATION_SCHEMA = deepFreeze({
     },
     summary: SUMMARY,
     disagreement: TEXT,
-    requiredChecks: REQUIRED_CHECKS,
-    validationInfrastructure: VALIDATION_INFRASTRUCTURE,
     reason: TEXT,
     ...DECISION_PROPERTIES,
   },
@@ -157,8 +161,6 @@ export const BOOTSTRAP_RECONCILIATION_SCHEMA = deepFreeze({
     "status",
     "summary",
     "disagreement",
-    "requiredChecks",
-    "validationInfrastructure",
     "reason",
     "question",
     "options",
@@ -181,8 +183,6 @@ export const BOOTSTRAP_ARBITRATION_SCHEMA = deepFreeze({
       ],
     },
     summary: SUMMARY,
-    requiredChecks: REQUIRED_CHECKS,
-    validationInfrastructure: VALIDATION_INFRASTRUCTURE,
     rationale: TEXT,
     reason: TEXT,
     ...DECISION_PROPERTIES,
@@ -190,8 +190,6 @@ export const BOOTSTRAP_ARBITRATION_SCHEMA = deepFreeze({
   required: [
     "direction",
     "summary",
-    "requiredChecks",
-    "validationInfrastructure",
     "rationale",
     "reason",
     "question",
@@ -244,7 +242,11 @@ export const FINALIZATION_SCHEMA = deepFreeze({
     issues: { type: "array", maxItems: MAX_ITEMS, items: FINALIZATION_ISSUE },
     requiredChecks: REQUIRED_CHECKS,
     validationInfrastructure: VALIDATION_INFRASTRUCTURE,
-    checks: { type: "array", maxItems: MAX_ITEMS, items: CHECK_RESULT },
+    checks: {
+      type: "array",
+      maxItems: MAX_VALIDATION_ITEMS,
+      items: CHECK_RESULT,
+    },
     reason: TEXT,
     ...DECISION_PROPERTIES,
   },

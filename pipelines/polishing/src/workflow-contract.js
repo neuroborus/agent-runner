@@ -143,6 +143,7 @@ const TRUSTED_ALIAS_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 export const MAX_TEXT_LENGTH = 4_000;
 export const MAX_SUMMARY_LENGTH = 20_000;
 export const MAX_ITEMS = 32;
+export const MAX_VALIDATION_ITEMS = MAX_ITEMS * 2;
 export const MAX_OPTIONS = 16;
 const MAX_STRUCTURED_RESULT_BYTES = 256 * 1024;
 export const MAX_DURABLE_RUN_BYTES = 960 * 1024;
@@ -586,10 +587,12 @@ export function normalizeBootstrapResult(payload, role) {
     requiredChecks: normalizeRequiredChecks(
       payload.requiredChecks,
       INVALID_OUTPUT_CODE,
+      { maxItems: MAX_ITEMS },
     ),
     validationInfrastructure: normalizeValidationInfrastructure(
       payload.validationInfrastructure,
       INVALID_OUTPUT_CODE,
+      { maxItems: MAX_ITEMS },
     ),
   });
 }
@@ -599,8 +602,6 @@ export function normalizeReconciliationResult(payload) {
     "status",
     "summary",
     "disagreement",
-    "requiredChecks",
-    "validationInfrastructure",
     "reason",
     "question",
     "options",
@@ -620,9 +621,7 @@ export function normalizeReconciliationResult(payload) {
     if (
       payload.summary !== "" ||
       payload.disagreement !== "" ||
-      payload.reason !== "" ||
-      !emptyArray(payload.requiredChecks) ||
-      !emptyArray(payload.validationInfrastructure)
+      payload.reason !== ""
     ) {
       throw outputError("Product decision contains inapplicable fields.");
     }
@@ -646,21 +645,11 @@ export function normalizeReconciliationResult(payload) {
         "resolved bootstrap summary",
         INVALID_OUTPUT_CODE,
       ),
-      requiredChecks: normalizeRequiredChecks(
-        payload.requiredChecks,
-        INVALID_OUTPUT_CODE,
-      ),
-      validationInfrastructure: normalizeValidationInfrastructure(
-        payload.validationInfrastructure,
-        INVALID_OUTPUT_CODE,
-      ),
     });
   }
   if (
     payload.summary !== "" ||
     payload.reason !== "" ||
-    !emptyArray(payload.requiredChecks) ||
-    !emptyArray(payload.validationInfrastructure) ||
     payload.question !== "" ||
     payload.whyBlocked !== "" ||
     !emptyArray(payload.options)
@@ -687,8 +676,6 @@ export function normalizeBootstrapArbitration(payload) {
   const fields = [
     "direction",
     "summary",
-    "requiredChecks",
-    "validationInfrastructure",
     "rationale",
     "reason",
     "question",
@@ -716,9 +703,7 @@ export function normalizeBootstrapArbitration(payload) {
   if (payload.direction === "PRODUCT_DECISION_REQUIRED") {
     if (
       payload.summary !== "" ||
-      payload.reason !== "" ||
-      !emptyArray(payload.requiredChecks) ||
-      !emptyArray(payload.validationInfrastructure)
+      payload.reason !== ""
     ) {
       throw outputError("Product decision contains inapplicable fields.");
     }
@@ -737,14 +722,6 @@ export function normalizeBootstrapArbitration(payload) {
     summary: normalizeSummary(
       payload.summary,
       "arbitrated bootstrap summary",
-      INVALID_OUTPUT_CODE,
-    ),
-    requiredChecks: normalizeRequiredChecks(
-      payload.requiredChecks,
-      INVALID_OUTPUT_CODE,
-    ),
-    validationInfrastructure: normalizeValidationInfrastructure(
-      payload.validationInfrastructure,
       INVALID_OUTPUT_CODE,
     ),
   });
@@ -800,11 +777,15 @@ function normalizeValidationInfrastructurePath(value, name, code) {
   return value;
 }
 
-function normalizeRequiredChecks(value, code, { allowEmpty = false } = {}) {
+function normalizeRequiredChecks(
+  value,
+  code,
+  { allowEmpty = false, maxItems = MAX_VALIDATION_ITEMS } = {},
+) {
   if (
     !Array.isArray(value) ||
     (!allowEmpty && value.length === 0) ||
-    value.length > MAX_ITEMS
+    value.length > maxItems
   ) {
     throw workflowError("Required-check inventory is invalid.", code);
   }
@@ -832,8 +813,12 @@ function normalizeRequiredChecks(value, code, { allowEmpty = false } = {}) {
   return checks;
 }
 
-function normalizeValidationInfrastructure(value, code) {
-  if (!Array.isArray(value) || value.length > MAX_ITEMS) {
+function normalizeValidationInfrastructure(
+  value,
+  code,
+  { maxItems = MAX_VALIDATION_ITEMS } = {},
+) {
+  if (!Array.isArray(value) || value.length > maxItems) {
     throw workflowError("Validation infrastructure is invalid.", code);
   }
   const paths = Object.freeze(
@@ -1826,10 +1811,13 @@ function normalizePersistedValidation(value, name) {
     ["requiredChecks", "validationInfrastructure"],
     name,
   );
-  normalizeRequiredChecks(value.requiredChecks, "ERR_INVALID_POLISHING_STATE");
+  normalizeRequiredChecks(value.requiredChecks, "ERR_INVALID_POLISHING_STATE", {
+    maxItems: MAX_ITEMS,
+  });
   normalizeValidationInfrastructure(
     value.validationInfrastructure,
     "ERR_INVALID_POLISHING_STATE",
+    { maxItems: MAX_ITEMS },
   );
   return value;
 }

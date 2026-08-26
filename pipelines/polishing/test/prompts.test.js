@@ -35,6 +35,7 @@ import {
   MAX_OPTIONS,
   MAX_SUMMARY_LENGTH,
   MAX_TEXT_LENGTH,
+  MAX_VALIDATION_ITEMS,
 } from "../src/workflow-contract.js";
 
 function assertStrictSchema(schema) {
@@ -53,10 +54,11 @@ function assertSchemaBounds(schema, propertyName = null) {
     return;
   }
   if (schema.type === "array") {
-    assert.equal(
-      schema.maxItems,
-      propertyName === "options" ? MAX_OPTIONS : MAX_ITEMS,
-      `${propertyName} must have the deterministic collection bound`,
+    assert.ok(
+      propertyName === "options"
+        ? schema.maxItems === MAX_OPTIONS
+        : [MAX_ITEMS, MAX_VALIDATION_ITEMS].includes(schema.maxItems),
+      `${propertyName} must have a deterministic collection bound`,
     );
     assertSchemaBounds(schema.items, propertyName);
     return;
@@ -81,6 +83,24 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
   assert.match(BOOTSTRAP_INSTRUCTIONS, /finalization guidance/u);
   assert.match(BOOTSTRAP_RECONCILIATION_INSTRUCTIONS, /Do not force agreement/u);
   assert.match(BOOTSTRAP_ARBITRATION_INSTRUCTIONS, /Do not modify/u);
+  for (const instructions of [
+    BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
+    BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
+  ]) {
+    assert.match(instructions, /runner derives the final required-check/u);
+    assert.match(instructions, /Do not propose, select, or repeat commands/u);
+    assert.doesNotMatch(instructions, /provide .*requiredChecks/iu);
+  }
+  for (const schema of [
+    BOOTSTRAP_RECONCILIATION_SCHEMA,
+    BOOTSTRAP_ARBITRATION_SCHEMA,
+  ]) {
+    assert.equal(Object.hasOwn(schema.properties, "requiredChecks"), false);
+    assert.equal(
+      Object.hasOwn(schema.properties, "validationInfrastructure"),
+      false,
+    );
+  }
   assert.match(PRODUCT_DECISION_INSTRUCTIONS, /Do not ask questions/u);
   assert.match(PRODUCT_DECISION_INSTRUCTIONS, /materially different product/u);
   assert.match(POLISH_INSTRUCTIONS, /Do not create a commit/u);

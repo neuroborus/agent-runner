@@ -22,27 +22,28 @@ import {
 } from "../src/index.js";
 
 test("bootstrap instructions preserve independent evidence and arbitration", () => {
-  for (const instructions of [
-    BOOTSTRAP_INSTRUCTIONS,
-    BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
-    BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
-  ]) {
-    assert.match(instructions, /schema's result object/u);
-    assert.match(instructions, /Required-check IDs must be unique/u);
-    assert.match(instructions, /Exact commands must be unique/u);
-    assert.match(instructions, /canonical repository-relative file paths/u);
-    assert.match(instructions, /symlink alias/u);
-  }
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /schema's result object/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /Required-check IDs must be unique/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /Exact commands must be unique/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /canonical repository-relative file paths/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /symlink alias/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /independently identify every required check/iu);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /validationInfrastructure/u);
   assert.match(
     BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
-    /from both independent reports/u,
+    /runner derives the final required-check/u,
   );
   assert.match(
     BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
-    /complete requiredChecks inventory/u,
+    /runner derives the final required-check/u,
   );
+  for (const instructions of [
+    BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
+    BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
+  ]) {
+    assert.match(instructions, /Do not propose, select, or repeat commands/u);
+    assert.doesNotMatch(instructions, /provide .*requiredChecks/iu);
+  }
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /one read-only correction/u);
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /complete replacement/u);
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /ordinary clarification question/u);

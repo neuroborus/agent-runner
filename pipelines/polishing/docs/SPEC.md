@@ -239,9 +239,14 @@ resolved context permits the workflow to enter `POLISH`.
 Each bootstrap role independently returns the complete ordered inventory of
 stable `C`-prefixed required-check IDs and exact commands, plus every
 repository-relative file that controls package scripts, test discovery, test
-runners, skill guidance, or validation configuration. Reconciliation or
-arbitration establishes the inventory from both reports, and the runner—not an
-agent—fingerprints those files.
+runners, skill guidance, or validation configuration. The runner establishes
+the inventory from accepted Worker evidence followed by accepted Reviewer
+evidence, deduplicates exact commands and paths in stable first-seen order,
+ignores conflicting role IDs, and assigns final contiguous `C1`-through-`Cn`
+IDs. Every command or path found by either role is preserved. Reconciliation
+and arbitration resolve only summaries and material disagreements; their output
+contains no inventory fields and cannot invent, select, or omit commands or
+paths. The runner—not an agent—fingerprints the derived files.
 Commands and paths retain interior whitespace exactly; unsafe, non-normalized,
 multiline, or boundary-whitespace values are rejected instead of rewritten.
 Every selected runner-trusted inventory command must appear exactly once in
@@ -532,6 +537,9 @@ Pipeline tests use fake adapters and temporary repositories. Cover at least:
 - independent Worker/Reviewer bootstrap and deliberate MCP source-session
   forks;
 - reconciliation, arbitration, and product-decision pauses;
+- stable runner derivation across conflicting role IDs, cross-role repeated
+  commands and paths, role-only entries, trusted commands, and attempted
+  reconciliation inventory invention;
 - read-only mutation plus ref, remote, and identity guards;
 - durable transitions, interrupted turns, and journal recovery;
 - blocked provider activity plus lease-aware running, interrupted, and idle MCP

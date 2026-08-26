@@ -1189,18 +1189,22 @@ Each summary should cover:
 Each role also returns an independently discovered ordered inventory of stable
 `C`-prefixed check IDs and exact commands, plus every repository-relative file
 that controls package scripts, test discovery, test runners, skill guidance, or
-validation configuration. Reconciliation or arbitration establishes the
-complete inventory from both reports. The runner fingerprints the listed files;
-an agent-supplied digest is never trusted.
+validation configuration. The runner establishes the complete inventory from
+accepted Worker evidence followed by accepted Reviewer evidence. It deduplicates
+exact commands and paths in stable first-seen order, ignores conflicting role
+IDs, and assigns the final contiguous `C1`-through-`Cn` IDs. Every command and
+path found by either role is preserved. Reconciliation and arbitration return no
+inventory fields and cannot invent, select, or omit commands or repository
+paths. The runner fingerprints the derived file list; an agent-supplied digest
+is never trusted.
 Exact commands and paths retain interior whitespace; validation rejects unsafe,
 non-normalized, multiline, or boundary-whitespace values rather than rewriting
 them.
-Every producing bootstrap prompt, including validation-migration discovery,
-reconciliation, and arbitration, requires unique check IDs, unique exact
-single-line commands already normalized without boundary whitespace, and
-unique existing canonical repository-relative validation files. A symlink or
-path through a symlink is an invalid alias even when its target is confined to
-the repository.
+Every inventory-producing bootstrap prompt, including validation-migration
+discovery, requires unique check IDs, unique exact single-line commands already
+normalized without boundary whitespace, and unique existing canonical
+repository-relative validation files. A symlink or path through a symlink is an
+invalid alias even when its target is confined to the repository.
 Provider-facing structured-output schemas are portable approximations limited
 to the common backend Structured Outputs subset and do not use regex
 lookaround. They retain strict objects, bounds, safe lexical patterns, and
@@ -1212,8 +1216,9 @@ bootstrap result persists and publishes only its role, phase, contract field,
 and violated constraint; it never retains the rejected value or raw role
 output.
 
-The producing Worker, Reviewer, reconciliation Worker, or Arbiter receives one
-read-only correction turn for an invalid bootstrap contract. The runner first
+The producing Worker or Reviewer and each summary-producing reconciliation
+Worker or Arbiter receives one read-only correction turn for an invalid
+bootstrap contract. The runner first
 persists attempt `1` and the bounded diagnostic, then reconstructs the complete
 request from durable state and asks for a complete replacement result. A
 provider interruption does not consume another correction or require the
@@ -1239,6 +1244,11 @@ The Reviewer summary additionally states what it intends to verify.
 After both summaries exist, compare material differences.
 
 Resolve differences from task/plan/repository evidence.
+
+Reconciliation and any arbitration resolve only the summary and a remaining
+material disagreement. The runner independently derives the established
+validation inventory from the two already accepted role inventories regardless
+of which summary direction is selected.
 
 Persist the agreed context:
 
@@ -2034,6 +2044,9 @@ At minimum cover:
     fingerprint tuple, while blocked checks pause and workspace, Git, ref,
     remote, identity, ignored validation-infrastructure, leaked process-tree,
     remote-write, or ambient-credential effects are rejected.
+55. conflicting role IDs, cross-role repeated commands and paths, role-only
+    entries, runner-trusted commands, and attempted reconciliation inventory
+    invention produce one stable complete runner-derived inventory.
 
 Real Codex/Claude smoke tests should be opt-in integration tests.
 
@@ -2130,10 +2143,11 @@ Do not build:
 29. The runner never creates a repository-local clarification artifact unless its resolved path is ignored.
 30. External validation constraints pause as `environment_blocked`; they never
     become code failures or justify weakening the execution boundary.
-31. Bootstrap inventories use unique check IDs, unique normalized exact
+31. Bootstrap role inventories use unique check IDs, unique normalized exact
     commands, and unique existing canonical repository-relative validation
-    files; invalid output receives at most one read-only correction per
-    producing role, phase, and contract.
+    files; the runner derives the final stable union and assigns contiguous IDs,
+    while invalid output receives at most one read-only correction per producing
+    role, phase, and contract.
 32. Claude recovery persists no denied input or native provider text, retries
     only finite allowlisted failures, and reconstructs the request from durable
     runner state without making a native session authoritative.

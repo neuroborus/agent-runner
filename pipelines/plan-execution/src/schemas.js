@@ -3,6 +3,7 @@ import {
   MAX_OPTIONS,
   MAX_SUMMARY_LENGTH,
   MAX_TEXT_LENGTH,
+  MAX_VALIDATION_ITEMS,
 } from "./workflow-contract.js";
 
 function deepFreeze(value) {
@@ -69,17 +70,25 @@ const REQUIRED_CHECK = {
 const REQUIRED_CHECKS = {
   type: "array",
   items: REQUIRED_CHECK,
-  maxItems: MAX_ITEMS,
+  maxItems: MAX_VALIDATION_ITEMS,
 };
-const EMPTY_REQUIRED_CHECKS = { ...REQUIRED_CHECKS, maxItems: 0 };
-const NONEMPTY_REQUIRED_CHECKS = { ...REQUIRED_CHECKS, minItems: 1 };
+const BOOTSTRAP_REQUIRED_CHECKS = { ...REQUIRED_CHECKS, maxItems: MAX_ITEMS };
+const EMPTY_REQUIRED_CHECKS = { ...BOOTSTRAP_REQUIRED_CHECKS, maxItems: 0 };
+const NONEMPTY_REQUIRED_CHECKS = {
+  ...BOOTSTRAP_REQUIRED_CHECKS,
+  minItems: 1,
+};
 const VALIDATION_INFRASTRUCTURE = {
   type: "array",
   items: VALIDATION_PATH,
+  maxItems: MAX_VALIDATION_ITEMS,
+};
+const BOOTSTRAP_VALIDATION_INFRASTRUCTURE = {
+  ...VALIDATION_INFRASTRUCTURE,
   maxItems: MAX_ITEMS,
 };
 const EMPTY_VALIDATION_INFRASTRUCTURE = {
-  ...VALIDATION_INFRASTRUCTURE,
+  ...BOOTSTRAP_VALIDATION_INFRASTRUCTURE,
   maxItems: 0,
 };
 const CHECK_RESULT = {
@@ -126,8 +135,8 @@ const BOOTSTRAP_PROPERTIES = {
     enum: ["READY", "PLAN_REVISION_REQUIRED", "PRODUCT_DECISION_REQUIRED"],
   },
   summary: SUMMARY,
-  requiredChecks: REQUIRED_CHECKS,
-  validationInfrastructure: VALIDATION_INFRASTRUCTURE,
+  requiredChecks: BOOTSTRAP_REQUIRED_CHECKS,
+  validationInfrastructure: BOOTSTRAP_VALIDATION_INFRASTRUCTURE,
   reason: TEXT,
   ...DECISION_PROPERTIES,
 };
@@ -143,8 +152,6 @@ const RECONCILIATION_PROPERTIES = {
   },
   summary: SUMMARY,
   disagreement: TEXT,
-  requiredChecks: REQUIRED_CHECKS,
-  validationInfrastructure: VALIDATION_INFRASTRUCTURE,
   reason: TEXT,
   ...DECISION_PROPERTIES,
 };
@@ -160,8 +167,6 @@ const ARBITRATION_PROPERTIES = {
     ],
   },
   summary: SUMMARY,
-  requiredChecks: REQUIRED_CHECKS,
-  validationInfrastructure: VALIDATION_INFRASTRUCTURE,
   rationale: NONEMPTY_TEXT,
   reason: TEXT,
   ...DECISION_PROPERTIES,
@@ -298,15 +303,12 @@ export const BOOTSTRAP_RECONCILIATION_SCHEMA = deepFreeze(
     variant("status", ["RESOLVED"], RECONCILIATION_PROPERTIES, {
       summary: NONEMPTY_SUMMARY,
       disagreement: EMPTY_TEXT,
-      requiredChecks: NONEMPTY_REQUIRED_CHECKS,
       reason: EMPTY_TEXT,
       ...EMPTY_DECISION_PROPERTIES,
     }),
     variant("status", ["DISAGREEMENT"], RECONCILIATION_PROPERTIES, {
       summary: EMPTY_TEXT,
       disagreement: NONEMPTY_TEXT,
-      requiredChecks: EMPTY_REQUIRED_CHECKS,
-      validationInfrastructure: EMPTY_VALIDATION_INFRASTRUCTURE,
       reason: EMPTY_TEXT,
       question: EMPTY_TEXT,
       options: EMPTY_OPTIONS,
@@ -320,8 +322,6 @@ export const BOOTSTRAP_RECONCILIATION_SCHEMA = deepFreeze(
       {
         summary: EMPTY_TEXT,
         disagreement: EMPTY_TEXT,
-        requiredChecks: EMPTY_REQUIRED_CHECKS,
-        validationInfrastructure: EMPTY_VALIDATION_INFRASTRUCTURE,
         reason: NONEMPTY_TEXT,
         question: EMPTY_TEXT,
         options: EMPTY_OPTIONS,
@@ -336,8 +336,6 @@ export const BOOTSTRAP_RECONCILIATION_SCHEMA = deepFreeze(
       {
         summary: EMPTY_TEXT,
         disagreement: EMPTY_TEXT,
-        requiredChecks: EMPTY_REQUIRED_CHECKS,
-        validationInfrastructure: EMPTY_VALIDATION_INFRASTRUCTURE,
         reason: EMPTY_TEXT,
         ...PRODUCT_DECISION_PROPERTIES,
       },
@@ -353,7 +351,6 @@ export const BOOTSTRAP_ARBITRATION_SCHEMA = deepFreeze(
       ARBITRATION_PROPERTIES,
       {
         summary: NONEMPTY_SUMMARY,
-        requiredChecks: NONEMPTY_REQUIRED_CHECKS,
         reason: EMPTY_TEXT,
         ...EMPTY_DECISION_PROPERTIES,
       },
@@ -364,8 +361,6 @@ export const BOOTSTRAP_ARBITRATION_SCHEMA = deepFreeze(
       ARBITRATION_PROPERTIES,
       {
         summary: EMPTY_TEXT,
-        requiredChecks: EMPTY_REQUIRED_CHECKS,
-        validationInfrastructure: EMPTY_VALIDATION_INFRASTRUCTURE,
         reason: NONEMPTY_TEXT,
         question: EMPTY_TEXT,
         options: EMPTY_OPTIONS,
@@ -379,8 +374,6 @@ export const BOOTSTRAP_ARBITRATION_SCHEMA = deepFreeze(
       ARBITRATION_PROPERTIES,
       {
         summary: EMPTY_TEXT,
-        requiredChecks: EMPTY_REQUIRED_CHECKS,
-        validationInfrastructure: EMPTY_VALIDATION_INFRASTRUCTURE,
         reason: EMPTY_TEXT,
         ...PRODUCT_DECISION_PROPERTIES,
       },
@@ -430,7 +423,11 @@ export const FINALIZATION_SCHEMA = deepFreeze({
     issues: { type: "array", items: FINALIZATION_ISSUE },
     requiredChecks: REQUIRED_CHECKS,
     validationInfrastructure: VALIDATION_INFRASTRUCTURE,
-    checks: { type: "array", items: CHECK_RESULT },
+    checks: {
+      type: "array",
+      items: CHECK_RESULT,
+      maxItems: MAX_VALIDATION_ITEMS,
+    },
     reason: TEXT,
     ...DECISION_PROPERTIES,
   },

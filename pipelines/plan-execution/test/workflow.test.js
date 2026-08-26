@@ -291,6 +291,33 @@ test("enforces exact bootstrap field sets without retaining unexpected values", 
   );
 });
 
+test("rejects reconciliation and arbitration inventory invention", () => {
+  const inventedValue = "Review the implementation and then decide the path.";
+  for (const [normalize, value] of [
+    [
+      normalizeReconciliationResult,
+      {
+        ...reconciliationResolved(),
+        validationInfrastructure: [inventedValue],
+      },
+    ],
+    [
+      normalizeBootstrapArbitration,
+      { ...arbitrationResolved(), requiredChecks: REQUIRED_CHECKS },
+    ],
+  ]) {
+    assert.throws(() => normalize(value), (cause) => {
+      assert.equal(cause.code, "ERR_INVALID_PLAN_EXECUTION_OUTPUT");
+      assert.deepEqual(cause.diagnostic, {
+        field: "result",
+        constraint: "exact-field-set",
+      });
+      assert.doesNotMatch(JSON.stringify(cause), /Review the implementation/u);
+      return true;
+    });
+  }
+});
+
 test("bootstrap schemas match conditional deterministic normalization", () => {
   const bootstrapPlanRevision = {
     ...bootstrapReady("Worker"),
@@ -305,8 +332,6 @@ test("bootstrap schemas match conditional deterministic normalization", () => {
     ...reconciliationResolved(),
     status: "PLAN_REVISION_REQUIRED",
     summary: "",
-    requiredChecks: [],
-    validationInfrastructure: [],
     reason: "The summaries expose a conflict with the validated plan.",
     evidence: ["The required behavior changes a planned commit boundary."],
   };
@@ -314,8 +339,6 @@ test("bootstrap schemas match conditional deterministic normalization", () => {
     ...arbitrationResolved(),
     direction: "PLAN_REVISION_REQUIRED",
     summary: "",
-    requiredChecks: [],
-    validationInfrastructure: [],
     reason: "The disagreement cannot be resolved within the validated plan.",
     evidence: ["Both reports require a different commit boundary."],
   };
@@ -354,7 +377,10 @@ test("bootstrap schemas match conditional deterministic normalization", () => {
       ],
       invalid: [
         { ...reconciliationResolved(), summary: "" },
-        { ...reconciliationResolved(), requiredChecks: [] },
+        {
+          ...reconciliationResolved(),
+          validationInfrastructure: ["not a repository path from a model"],
+        },
         { ...reconciliationDisagreement(), disagreement: "" },
         { ...reconciliationDisagreement(), evidence: [] },
         { ...reconciliationPlanRevision, summary: "Unexpected summary." },
@@ -380,9 +406,8 @@ test("bootstrap schemas match conditional deterministic normalization", () => {
           rationale: "",
         })),
         { ...arbitrationResolved(), summary: "" },
-        { ...arbitrationResolved(), requiredChecks: [] },
+        { ...arbitrationResolved(), requiredChecks: REQUIRED_CHECKS },
         { ...arbitrationPlanRevision, reason: "" },
-        { ...arbitrationPlanRevision, requiredChecks: REQUIRED_CHECKS },
         { ...arbitrationProductDecision(), whyBlocked: "" },
       ],
     },
@@ -454,15 +479,19 @@ test("bootstrap schemas use portable patterns with authoritative normalization",
     const invalid = [
       { ...contract.valid, summary: "   " },
       contract.whitespaceText,
-      {
-        ...contract.valid,
-        requiredChecks: [{ ...REQUIRED_CHECKS[0], command: " npm test" }],
-      },
-      {
-        ...contract.valid,
-        validationInfrastructure: ["../outside.js"],
-      },
     ];
+    if (contract.name === "bootstrap") {
+      invalid.push(
+        {
+          ...contract.valid,
+          requiredChecks: [{ ...REQUIRED_CHECKS[0], command: " npm test" }],
+        },
+        {
+          ...contract.valid,
+          validationInfrastructure: ["../outside.js"],
+        },
+      );
+    }
     for (const value of invalid) {
       assert.equal(
         matchesSchemaSubset(contract.schema, { result: value }),
@@ -562,20 +591,6 @@ test("classifies oversized and unserializable bootstrap contracts", () => {
       normalize: (value) => normalizeBootstrapResult(value, "Worker"),
       value: {
         ...bootstrapReady("Worker"),
-        validationInfrastructure: largePaths,
-      },
-    },
-    {
-      normalize: normalizeReconciliationResult,
-      value: {
-        ...reconciliationResolved(),
-        validationInfrastructure: largePaths,
-      },
-    },
-    {
-      normalize: normalizeBootstrapArbitration,
-      value: {
-        ...arbitrationResolved(),
         validationInfrastructure: largePaths,
       },
     },
@@ -1031,8 +1046,6 @@ function reconciliationResolved() {
     status: "RESOLVED",
     summary: "The roles agree on the minimal implementation and finalization procedure.",
     disagreement: "",
-    requiredChecks: REQUIRED_CHECKS,
-    validationInfrastructure: VALIDATION_INFRASTRUCTURE,
     reason: "",
     ...emptyDecision(),
   };
@@ -1043,8 +1056,6 @@ function reconciliationDisagreement() {
     status: "DISAGREEMENT",
     summary: "",
     disagreement: "The roles disagree about the required repository boundary.",
-    requiredChecks: [],
-    validationInfrastructure: [],
     reason: "",
     question: "",
     options: [],
@@ -1058,8 +1069,6 @@ function reconciliationProductDecision() {
     status: "PRODUCT_DECISION_REQUIRED",
     summary: "",
     disagreement: "",
-    requiredChecks: [],
-    validationInfrastructure: [],
     reason: "",
     question: "Which public behavior should be implemented?",
     options: ["Behavior A", "Behavior B"],
@@ -1072,8 +1081,6 @@ function arbitrationResolved() {
   return {
     direction: "SYNTHESIZE",
     summary: "Use the existing repository boundary and keep the change local.",
-    requiredChecks: REQUIRED_CHECKS,
-    validationInfrastructure: VALIDATION_INFRASTRUCTURE,
     rationale: "Repository ownership evidence supports the existing boundary.",
     reason: "",
     ...emptyDecision(),
@@ -1084,8 +1091,6 @@ function arbitrationProductDecision() {
   return {
     direction: "PRODUCT_DECISION_REQUIRED",
     summary: "",
-    requiredChecks: [],
-    validationInfrastructure: [],
     rationale: "The repository evidence cannot select a product behavior.",
     reason: "",
     question: "Which public behavior should be implemented?",
@@ -2272,6 +2277,12 @@ test("clarifies and bootstraps through independent source-session forks", async 
   assert.equal(validationPathPattern.test("config/"), false);
   assert.equal(validationPathPattern.test("./"), false);
   assert.equal(validationPathPattern.test("../outside.js"), true);
+  assert.equal(FINALIZATION_SCHEMA.properties.requiredChecks.maxItems, 64);
+  assert.equal(
+    FINALIZATION_SCHEMA.properties.validationInfrastructure.maxItems,
+    64,
+  );
+  assert.equal(FINALIZATION_SCHEMA.properties.checks.maxItems, 64);
   for (const call of fixture.calls.worker.slice(0, 3)) {
     assert.equal(call.access, "read-only");
   }
@@ -2305,11 +2316,6 @@ test("accepts the advertised maximum bootstrap inventory", async (t) => {
     requiredChecks,
     validationInfrastructure,
   });
-  const resolved = {
-    ...reconciliationResolved(),
-    requiredChecks,
-    validationInfrastructure,
-  };
   const stop = new Error("implementation turn reached");
   let implementationStarted = false;
   const fixture = await createFixture(t, {
@@ -2322,7 +2328,7 @@ test("accepts the advertised maximum bootstrap inventory", async (t) => {
       );
     },
     reviewer: [ready("Reviewer")],
-    worker: [clarificationReady(), ready("Worker"), resolved],
+    worker: [clarificationReady(), ready("Worker"), reconciliationResolved()],
     onRoleRun(role, request) {
       if (
         role === "worker" &&
@@ -2337,6 +2343,56 @@ test("accepts the advertised maximum bootstrap inventory", async (t) => {
   await assert.rejects(fixture.run(), (cause) => cause === stop);
 
   assert.equal(implementationStarted, true);
+});
+
+test("derives one stable complete inventory from independent role evidence", async (t) => {
+  const workerPath = "validation/worker.js";
+  const reviewerPath = "validation/reviewer.js";
+  const worker = {
+    ...bootstrapReady("Worker"),
+    requiredChecks: [
+      { id: "C7", command: "npm test" },
+      { id: "C2", command: "npm run lint" },
+    ],
+    validationInfrastructure: ["package.json", workerPath],
+  };
+  const reviewer = {
+    ...bootstrapReady("Reviewer"),
+    requiredChecks: [
+      { id: "C1", command: "npm test" },
+      { id: "C7", command: "npm run docs" },
+    ],
+    validationInfrastructure: ["package.json", reviewerPath],
+  };
+  const stop = new Error("implementation turn reached");
+  const fixture = await createFixture(t, {
+    async prepareProject(projectPath) {
+      await mkdir(join(projectPath, "validation"));
+      await Promise.all([
+        writeFile(join(projectPath, workerPath), "// worker validation\n"),
+        writeFile(join(projectPath, reviewerPath), "// reviewer validation\n"),
+      ]);
+    },
+    reviewer: [reviewer],
+    worker: [clarificationReady(), worker, reconciliationResolved()],
+    onRoleRun(role, request) {
+      if (role === "worker" && request.prompt.includes("Implement the changes")) {
+        throw stop;
+      }
+    },
+  });
+
+  await assert.rejects(fixture.run(), (cause) => cause === stop);
+  assert.deepEqual(fixture.currentRun.pipelineState.requiredChecks, [
+    { id: "C1", command: "npm test" },
+    { id: "C2", command: "npm run lint" },
+    { id: "C3", command: "npm run docs" },
+  ]);
+  assert.deepEqual(fixture.currentRun.pipelineState.validationInfrastructure, [
+    "package.json",
+    workerPath,
+    reviewerPath,
+  ]);
 });
 
 test("persists only the bounded class for a terminal Codex bootstrap failure", async (
@@ -2543,9 +2599,10 @@ test("gives the independent Reviewer one bounded bootstrap correction", async (t
   assert.doesNotMatch(JSON.stringify(fixture.transitions), /DO_NOT_PERSIST/u);
 });
 
-test("returns a symlink-alias inventory path for bounded correction", async (t) => {
+test("corrects a symlink alias and preserves the canonical role-only path", async (t) => {
   const aliasPath = ".claude/skills/finalization/SKILL.md";
   const canonicalPath = ".agents/skills/finalization/SKILL.md";
+  const validationInfrastructure = [canonicalPath, ...VALIDATION_INFRASTRUCTURE];
   const fixture = await createFixture(t, {
     async prepareProject(projectPath) {
       await symlink(".agents", join(projectPath, ".claude"));
@@ -2561,6 +2618,11 @@ test("returns a symlink-alias inventory path for bounded correction", async (t) 
         validationInfrastructure: [canonicalPath],
       },
       reconciliationResolved(),
+    ],
+    reviewer: [bootstrapReady("Reviewer")],
+    workWorker: [
+      implementationCompleted(),
+      { ...finalizationPassed(), validationInfrastructure },
     ],
   });
 
@@ -2578,6 +2640,10 @@ test("returns a symlink-alias inventory path for bounded correction", async (t) 
     },
   ]);
   assert.match(fixture.calls.worker[2].prompt, /validationInfrastructure\[0\]/u);
+  assert.deepEqual(
+    completed.pipelineState.validationInfrastructure,
+    validationInfrastructure,
+  );
   assert.doesNotMatch(
     JSON.stringify(fixture.currentRun),
     /ERR_UNSAFE_REPOSITORY_PATH/u,
@@ -2891,7 +2957,7 @@ test("corrects, blocks, and completes runner-trusted validation", async (t) => {
       clarificationReady(),
       bootstrapReady("Worker"),
       bootstrap("Worker"),
-      { ...reconciliationResolved(), requiredChecks },
+      reconciliationResolved(),
     ],
     reviewer: [bootstrap("Reviewer")],
     workWorker: [implementationCompleted(), finalization, finalization],
@@ -2978,7 +3044,7 @@ test("turns a runner-trusted check failure into a bounded finalization issue", a
     worker: [
       clarificationReady(),
       { ...bootstrapReady("Worker"), requiredChecks },
-      { ...reconciliationResolved(), requiredChecks },
+      reconciliationResolved(),
     ],
     reviewer: [{ ...bootstrapReady("Reviewer"), requiredChecks }],
     workWorker: [
@@ -3053,7 +3119,7 @@ test("rejects trusted validation binding drift and repository mutation", async (
         worker: [
           clarificationReady(),
           { ...bootstrapReady("Worker"), requiredChecks },
-          { ...reconciliationResolved(), requiredChecks },
+          reconciliationResolved(),
         ],
         reviewer: [{ ...bootstrapReady("Reviewer"), requiredChecks }],
         workWorker: [
@@ -3114,11 +3180,7 @@ test("rejects ignored validation-infrastructure drift after trusted execution", 
         requiredChecks,
         validationInfrastructure,
       },
-      {
-        ...reconciliationResolved(),
-        requiredChecks,
-        validationInfrastructure,
-      },
+      reconciliationResolved(),
     ],
     reviewer: [
       {

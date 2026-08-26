@@ -118,6 +118,35 @@ function activity(actor, phase, kind, message) {
   return Object.freeze({ actor, phase, kind, message });
 }
 
+function deriveValidationInventory(workerValidation, reviewerValidation) {
+  const commands = [];
+  const commandSet = new Set();
+  const paths = [];
+  const pathSet = new Set();
+  for (const validation of [workerValidation, reviewerValidation]) {
+    for (const { command } of validation.requiredChecks) {
+      if (!commandSet.has(command)) {
+        commandSet.add(command);
+        commands.push(command);
+      }
+    }
+    for (const path of validation.validationInfrastructure) {
+      if (!pathSet.has(path)) {
+        pathSet.add(path);
+        paths.push(path);
+      }
+    }
+  }
+  return Object.freeze({
+    requiredChecks: Object.freeze(
+      commands.map((command, index) =>
+        Object.freeze({ id: `C${index + 1}`, command }),
+      ),
+    ),
+    validationInfrastructure: Object.freeze(paths),
+  });
+}
+
 function activeTurn(role, workflowState) {
   return Object.freeze({
     role,
@@ -1377,7 +1406,11 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     }
   }
 
-  async function establishedValidation(result) {
+  async function establishedValidation() {
+    const result = deriveValidationInventory(
+      state().workerValidation,
+      state().reviewerValidation,
+    );
     return {
       requiredChecks: result.requiredChecks,
       validationInfrastructure: result.validationInfrastructure,
@@ -1494,8 +1527,8 @@ ${evidence}`,
     return true;
   }
 
-  async function completeValidationMigration(result, actor) {
-    const validation = await establishedValidation(result);
+  async function completeValidationMigration(actor) {
+    const validation = await establishedValidation();
     await transition(
       {
         ...state(),
@@ -1544,7 +1577,7 @@ ${JSON.stringify(
       return false;
     }
     if (result.status === "RESOLVED") {
-      return completeValidationMigration(result, "worker");
+      return completeValidationMigration("worker");
     }
     const arbitration = await runBootstrapContract({
       role: "arbiter",
@@ -1578,7 +1611,7 @@ ${JSON.stringify(
     if (arbitration === null) {
       return false;
     }
-    return completeValidationMigration(arbitration, "arbiter");
+    return completeValidationMigration("arbiter");
   }
 
   async function runValidationMigration() {
@@ -1897,8 +1930,6 @@ ${evidence}`,
 
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
-${trustedValidationInstructions()}
-
 ${evidence}
 
 Worker bootstrap summary:
@@ -1907,15 +1938,7 @@ ${state().workerSummary}
 Reviewer bootstrap summary:
 ${state().reviewerSummary}
 
-Independent validation evidence:
-${JSON.stringify(
-  {
-    worker: state().workerValidation,
-    reviewer: state().reviewerValidation,
-  },
-  null,
-  2,
-)}`,
+The runner will derive validation inventories from the independently accepted role evidence.`,
       normalize: normalizeBootstrapReconciliationOutput,
     });
     if (result === null) {
@@ -1943,7 +1966,7 @@ ${JSON.stringify(
       return true;
     }
     await writeContext("context/resolved.md", result.summary);
-    const validation = await establishedValidation(result);
+    const validation = await establishedValidation();
     await transition(
       {
         ...state(),
@@ -1973,8 +1996,6 @@ ${JSON.stringify(
 
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
-${trustedValidationInstructions()}
-
 ${evidence}
 
 Worker bootstrap summary:
@@ -1986,15 +2007,7 @@ ${state().reviewerSummary}
 Recorded disagreement:
 ${JSON.stringify(state().bootstrapDisagreement, null, 2)}
 
-Independent validation evidence:
-${JSON.stringify(
-  {
-    worker: state().workerValidation,
-    reviewer: state().reviewerValidation,
-  },
-  null,
-  2,
-)}`,
+The runner will derive validation inventories from the independently accepted role evidence.`,
       normalize: normalizeBootstrapArbitrationOutput,
     });
     if (result === null) {
@@ -2008,7 +2021,7 @@ ${JSON.stringify(
       return false;
     }
     await writeContext("context/resolved.md", result.summary);
-    const validation = await establishedValidation(result);
+    const validation = await establishedValidation();
     await transition(
       {
         ...state(),

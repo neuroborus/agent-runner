@@ -91,6 +91,35 @@ const SAFE_PREFLIGHT_PAUSE_CODES = new Set([
   "ERR_GIT_SNAPSHOT_RACE",
 ]);
 
+function deriveValidationInventory(workerValidation, reviewerValidation) {
+  const commands = [];
+  const commandSet = new Set();
+  const paths = [];
+  const pathSet = new Set();
+  for (const validation of [workerValidation, reviewerValidation]) {
+    for (const { command } of validation.requiredChecks) {
+      if (!commandSet.has(command)) {
+        commandSet.add(command);
+        commands.push(command);
+      }
+    }
+    for (const path of validation.validationInfrastructure) {
+      if (!pathSet.has(path)) {
+        pathSet.add(path);
+        paths.push(path);
+      }
+    }
+  }
+  return Object.freeze({
+    requiredChecks: Object.freeze(
+      commands.map((command, index) =>
+        Object.freeze({ id: `C${index + 1}`, command }),
+      ),
+    ),
+    validationInfrastructure: Object.freeze(paths),
+  });
+}
+
 function isWithin(parentPath, childPath) {
   const pathFromParent = relative(parentPath, childPath);
   return (
@@ -910,7 +939,12 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     });
   }
 
-  async function establishedValidation(result) {
+  async function establishedValidation() {
+    const result = deriveValidationInventory(
+      state().workerValidation,
+      state().reviewerValidation,
+    );
+    assertTrustedValidationInventory(result);
     return {
       requiredChecks: result.requiredChecks,
       validationInfrastructure: result.validationInfrastructure,
@@ -1025,8 +1059,8 @@ ${evidence}`,
     return true;
   }
 
-  async function completeValidationMigration(result, actor) {
-    const validation = await establishedValidation(result);
+  async function completeValidationMigration(actor) {
+    const validation = await establishedValidation();
     await transition(
       {
         ...state(),
@@ -1083,8 +1117,7 @@ ${JSON.stringify(
       );
     }
     if (result.status === "RESOLVED") {
-      assertTrustedValidationInventory(result);
-      return completeValidationMigration(result, "worker");
+      return completeValidationMigration("worker");
     }
     const arbitrationOutput = await runRole(
       "arbiter",
@@ -1126,8 +1159,7 @@ ${JSON.stringify(
         "ERR_INVALID_POLISHING_OUTPUT",
       );
     }
-    assertTrustedValidationInventory(arbitration);
-    return completeValidationMigration(arbitration, "arbiter");
+    return completeValidationMigration("arbiter");
   }
 
   async function runValidationMigration() {
@@ -1712,8 +1744,6 @@ ${evidence}`,
       BOOTSTRAP_RECONCILIATION_SCHEMA,
       (evidence) => `${BOOTSTRAP_RECONCILIATION_INSTRUCTIONS}
 
-${trustedValidationInstructions()}
-
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
 ${evidence}
@@ -1724,15 +1754,7 @@ ${state().workerSummary}
 Reviewer bootstrap summary:
 ${state().reviewerSummary}
 
-Independent validation evidence:
-${JSON.stringify(
-  {
-    worker: state().workerValidation,
-    reviewer: state().reviewerValidation,
-  },
-  null,
-  2,
-)}`,
+The runner will derive validation inventories from the independently accepted role evidence.`,
       { checkpoint: "bootstrap", recoveryContext: workContext() },
     );
     if (output === null) {
@@ -1756,9 +1778,8 @@ ${JSON.stringify(
       );
       return true;
     }
-    assertTrustedValidationInventory(result);
     await writeContext("context/resolved.md", result.summary);
-    const validation = await establishedValidation(result);
+    const validation = await establishedValidation();
     await transition(
       {
         ...state(),
@@ -1784,8 +1805,6 @@ ${JSON.stringify(
       BOOTSTRAP_ARBITRATION_SCHEMA,
       (evidence) => `${BOOTSTRAP_ARBITRATION_INSTRUCTIONS}
 
-${trustedValidationInstructions()}
-
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
 ${evidence}
@@ -1799,15 +1818,7 @@ ${state().reviewerSummary}
 Recorded disagreement:
 ${JSON.stringify(state().bootstrapDisagreement, null, 2)}
 
-Independent validation evidence:
-${JSON.stringify(
-  {
-    worker: state().workerValidation,
-    reviewer: state().reviewerValidation,
-  },
-  null,
-  2,
-)}`,
+The runner will derive validation inventories from the independently accepted role evidence.`,
       {
         checkpoint: "arbitration",
         recoveryContext: workContext(),
@@ -1820,9 +1831,8 @@ ${JSON.stringify(
     if (result.direction === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "BOOTSTRAP");
     }
-    assertTrustedValidationInventory(result);
     await writeContext("context/resolved.md", result.summary);
-    const validation = await establishedValidation(result);
+    const validation = await establishedValidation();
     await transition(
       {
         ...state(),

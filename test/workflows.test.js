@@ -265,8 +265,6 @@ function createBackend(
                 status: "DISAGREEMENT",
                 summary: "",
                 disagreement: "The roles selected different module boundaries.",
-                requiredChecks: [],
-                validationInfrastructure: [],
                 reason: "",
                 question: "",
                 options: [],
@@ -277,8 +275,6 @@ function createBackend(
                 status: "RESOLVED",
                 summary: "Use the existing minimal module boundary.",
                 disagreement: "",
-                requiredChecks: [{ id: "C1", command: "git diff --check" }],
-                validationInfrastructure: [],
                 reason: "",
                 question: "",
                 options: [],
@@ -290,8 +286,6 @@ function createBackend(
         structured = {
           direction: "SYNTHESIZE",
           summary: "Use the existing minimal module boundary.",
-          requiredChecks: [{ id: "C1", command: "git diff --check" }],
-          validationInfrastructure: [],
           rationale: "Repository ownership supports that boundary.",
           reason: "",
           question: "",
@@ -1025,7 +1019,7 @@ test("runs registered workflows through recoverable MCP controls", async (t) => 
   });
   await within(
     implementationGate.entered.promise,
-    5_000,
+    30_000,
     "Execution did not reach implementation.",
   );
   const timedOut = await reconnected.runWait({

@@ -258,7 +258,7 @@ test("rejects mixed failed and blocked finalization before persistence", async (
     worker: [
       clarificationReady(),
       { ...bootstrapReady("Worker"), requiredChecks },
-      { ...reconciliationResolved(), requiredChecks },
+      reconciliationResolved(),
       polishingCompleted(),
       mixedFinalization,
     ],
@@ -271,6 +271,62 @@ test("rejects mixed failed and blocked finalization before persistence", async (
   });
   assert.equal(fixture.currentRun.pipelineState.workflowState, "FAILED");
   assert.equal(fixture.currentRun.pipelineState.finalizationResult, null);
+});
+
+test("derives one stable complete inventory from independent role evidence", async (t) => {
+  const workerPath = "validation/worker.js";
+  const reviewerPath = "validation/reviewer.js";
+  const worker = {
+    ...bootstrapReady("Worker"),
+    requiredChecks: [
+      { id: "C7", command: "npm test" },
+      { id: "C2", command: "npm run lint" },
+    ],
+    validationInfrastructure: [
+      ".agents/skills/finalization/SKILL.md",
+      workerPath,
+    ],
+  };
+  const reviewer = {
+    ...bootstrapReady("Reviewer"),
+    requiredChecks: [
+      { id: "C1", command: "npm test" },
+      { id: "C7", command: "npm run docs" },
+    ],
+    validationInfrastructure: [
+      ".agents/skills/finalization/SKILL.md",
+      reviewerPath,
+    ],
+  };
+  const stop = new Error("polishing turn reached");
+  const fixture = await createFixture(t, {
+    async prepareProject(projectPath) {
+      await mkdir(join(projectPath, "validation"));
+      await Promise.all([
+        writeFile(join(projectPath, workerPath), "// worker validation\n"),
+        writeFile(join(projectPath, reviewerPath), "// reviewer validation\n"),
+      ]);
+    },
+    reviewer: [reviewer],
+    worker: [clarificationReady(), worker, reconciliationResolved()],
+    onRoleRun(role, request) {
+      if (role === "worker" && /Polish the existing local/u.test(request.prompt)) {
+        throw stop;
+      }
+    },
+  });
+
+  await assert.rejects(fixture.run(), (cause) => cause === stop);
+  assert.deepEqual(fixture.currentRun.pipelineState.requiredChecks, [
+    { id: "C1", command: "npm test" },
+    { id: "C2", command: "npm run lint" },
+    { id: "C3", command: "npm run docs" },
+  ]);
+  assert.deepEqual(fixture.currentRun.pipelineState.validationInfrastructure, [
+    ".agents/skills/finalization/SKILL.md",
+    workerPath,
+    reviewerPath,
+  ]);
 });
 
 test("migrates version-1 polishing state to the fail-closed shape", () => {
@@ -543,8 +599,6 @@ function reconciliationResolved() {
     summary:
       "Polish the existing change set within the established repository boundaries.",
     disagreement: "",
-    requiredChecks: REQUIRED_CHECKS,
-    validationInfrastructure: VALIDATION_INFRASTRUCTURE,
     reason: "",
     ...emptyDecision(),
   };
@@ -555,8 +609,6 @@ function reconciliationDisagreement() {
     status: "DISAGREEMENT",
     summary: "",
     disagreement: "The roles selected different owning modules.",
-    requiredChecks: [],
-    validationInfrastructure: [],
     reason: "",
     question: "",
     options: [],
@@ -569,8 +621,6 @@ function arbitrationResolved() {
   return {
     direction: "SYNTHESIZE",
     summary: "Use the existing narrow module boundary and preserve the public behavior.",
-    requiredChecks: REQUIRED_CHECKS,
-    validationInfrastructure: VALIDATION_INFRASTRUCTURE,
     rationale: "Repository ownership and tests support the combined interpretation.",
     reason: "",
     ...emptyDecision(),
@@ -2426,7 +2476,7 @@ test("resumes and completes runner-trusted polishing validation", async (t) => {
     worker: [
       clarificationReady(),
       bootstrap(bootstrapReady("Worker")),
-      bootstrap(reconciliationResolved()),
+      reconciliationResolved(),
       polishingCompleted(),
       finalization,
       finalization,
@@ -2555,7 +2605,7 @@ test("turns a runner-trusted polishing failure into a bounded issue", async (t) 
     worker: [
       clarificationReady(),
       { ...bootstrapReady("Worker"), requiredChecks },
-      { ...reconciliationResolved(), requiredChecks },
+      reconciliationResolved(),
       polishingCompleted(),
       finalization,
       resolution("FIX", "F1"),
@@ -2628,7 +2678,7 @@ for (const [name, code] of [
       worker: [
         clarificationReady(),
         { ...bootstrapReady("Worker"), requiredChecks },
-        { ...reconciliationResolved(), requiredChecks },
+        reconciliationResolved(),
         polishingCompleted(),
         finalization,
       ],
@@ -2679,11 +2729,7 @@ test("rejects validation-infrastructure drift after trusted polishing execution"
         requiredChecks,
         validationInfrastructure,
       },
-      {
-        ...reconciliationResolved(),
-        requiredChecks,
-        validationInfrastructure,
-      },
+      reconciliationResolved(),
       polishingCompleted(),
       {
         ...finalizationPassed(),
