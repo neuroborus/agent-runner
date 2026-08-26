@@ -199,9 +199,15 @@ Backend sessions are disposable. When a native context is full, the adapter
 compacts it and retries once; persistent pressure moves ordinary turns to a
 fresh session reconstructed from durable run state, artifacts, and the current
 workspace. Explicit source sessions retain strict identity and lineage.
-Interrupted local-commit turns are reconciled from Git state. An explicit Claude
-rate, quota, credit, or spend-limit rejection pauses as `backend_unavailable`,
-with durable workflow state and safe workspace changes preserved for resume.
+Interrupted ordinary turns revalidate canonical paths, durable task inputs, and
+Git controls before restarting from the complete request in a fresh native
+session. Read-only turns still require an unchanged repository; authorized
+plan-execution and polishing Worker turns may preserve partial content and
+staging changes while rejecting history/ref, remote, or identity drift.
+Interrupted local-commit turns are reconciled from Git state and never replayed.
+An explicit Claude rate, quota, credit, or spend-limit rejection pauses as
+`backend_unavailable`, with durable workflow state and safe workspace changes
+preserved for resume.
 
 ## Task Inputs
 
@@ -360,6 +366,14 @@ print concise labeled activity as it is persisted; `status` prints the current
 state, pause, artifact paths, findings, fingerprints, commit SHAs, and a bounded
 public activity summary.
 
+An action-free resume also recovers a nonterminal, nonpaused persisted active
+turn after its execution owner is lost. Recovery retains the active marker
+through input and repository reconciliation, replaces it when the complete
+request restarts, and clears it only after normal post-turn reconciliation. If
+correction reconciliation advanced the checkpoint before the marker could be
+cleared, resume clears that completed marker after the same safety checks and
+continues from the advanced checkpoint without replaying the correction.
+
 Plan execution and polishing accept one applicable resume action at a time:
 
 ```bash
@@ -501,7 +515,10 @@ are appended verbatim to the durable clarification transcript before detached
 execution continues. Editing the artifact and using `run_resume` remains
 supported;
 `run_resume` requires `expectedRevision` from the latest status or wait result,
-a unique idempotency key, and only an action valid for the persisted pause.
+a unique idempotency key, and only an action valid for the persisted pause. The
+only non-pause exception is a null action at the exact revision of a nonterminal
+persisted active turn with no live execution owner; stale revisions, non-null
+actions, and concurrent owners are rejected.
 
 Mutating tools persist an action intent before mutation and a receipt before
 returning. Exact retries return the original result, while reusing a key with

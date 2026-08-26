@@ -1404,6 +1404,123 @@ test("resumes only an action valid for the persisted pause", async (t) => {
   );
 });
 
+test("resumes only action-free ownerless interrupted runs at the exact revision", async (t) => {
+  const paths = await workspace(t, "agent-runner-mcp-interrupted-resume-");
+  const store = createRunStore({ stateRoot: paths.stateRoot });
+  await createStoredRun(store, paths);
+  const turn = { role: "planner", phase: "clarify" };
+  const lease = await store.acquireRunLease(RUN_ID);
+  const started = await store.startAgentTurn(lease, turn, {
+    activity: {
+      actor: turn.role,
+      phase: turn.phase,
+      kind: "turn-started",
+      message: "planner clarify turn started.",
+    },
+  });
+  await lease.release();
+
+  const launches = [];
+  const control = createMcpControlPlane({
+    async launchRun(id, action) {
+      launches.push({ action, id });
+      await advanceMutatingStoredRun(store, id);
+    },
+    runner: storedRunner(store, paths),
+    runStore: store,
+  });
+  await assert.rejects(
+    control.runResume({
+      idempotencyKey: "interrupted-action",
+      runId: RUN_ID,
+      expectedRevision: started.revision,
+      action: { type: "extra-fix-rounds", amount: 1 },
+    }),
+    /only an action-free resume/u,
+  );
+  await assert.rejects(
+    control.runResume({
+      idempotencyKey: "interrupted-stale-revision",
+      runId: RUN_ID,
+      expectedRevision: started.revision - 1,
+      action: null,
+    }),
+    /revision is stale/u,
+  );
+  const input = {
+    idempotencyKey: "interrupted-resume",
+    runId: RUN_ID,
+    expectedRevision: started.revision,
+    action: null,
+  };
+  assert.deepEqual(await control.runResume(input), { runId: RUN_ID });
+  assert.deepEqual(await control.runResume(input), { runId: RUN_ID });
+  assert.deepEqual(launches, [{ action: null, id: RUN_ID }]);
+
+  await createStoredRun(store, paths, { id: SECOND_RUN_ID });
+  const ownedLease = await store.acquireRunLease(SECOND_RUN_ID);
+  t.after(() => ownedLease.release().catch(() => {}));
+  const owned = await store.startAgentTurn(ownedLease, turn, {
+    activity: {
+      actor: turn.role,
+      phase: turn.phase,
+      kind: "turn-started",
+      message: "planner clarify turn started.",
+    },
+  });
+  await assert.rejects(
+    control.runResume({
+      idempotencyKey: "interrupted-concurrent-owner",
+      runId: SECOND_RUN_ID,
+      expectedRevision: owned.revision,
+      action: null,
+    }),
+    (error) => error.code === "ERR_RUN_LEASED",
+  );
+  assert.equal(launches.length, 1);
+});
+
+test("does not let a paused active turn bypass resume validation", async (t) => {
+  const paths = await workspace(t, "agent-runner-mcp-paused-active-turn-");
+  const store = createRunStore({ stateRoot: paths.stateRoot });
+  await createStoredRun(store, paths, {
+    pipelineId: "plan-execution",
+    pause: { reason: "commit_failed" },
+    workflowState: "WAITING_FOR_USER",
+  });
+  const turn = { role: "worker", phase: "implement" };
+  const lease = await store.acquireRunLease(RUN_ID);
+  const started = await store.startAgentTurn(lease, turn, {
+    activity: {
+      actor: turn.role,
+      phase: turn.phase,
+      kind: "turn-started",
+      message: "worker implement turn started.",
+    },
+  });
+  await lease.release();
+
+  let launches = 0;
+  const control = createMcpControlPlane({
+    async launchRun() {
+      launches += 1;
+    },
+    runner: storedRunner(store, paths),
+    runStore: store,
+  });
+
+  await assert.rejects(
+    control.runResume({
+      idempotencyKey: "paused-active-turn",
+      runId: RUN_ID,
+      expectedRevision: started.revision,
+      action: null,
+    }),
+    /not valid for this paused run/u,
+  );
+  assert.equal(launches, 0);
+});
+
 test("projects the same bounded pause through MCP status and wait", async (t) => {
   const paths = await workspace(t, "agent-runner-mcp-pause-");
   const store = createRunStore({ stateRoot: paths.stateRoot });

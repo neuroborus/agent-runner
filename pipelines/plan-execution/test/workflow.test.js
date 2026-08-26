@@ -2108,6 +2108,35 @@ async function createFixture(
           throw error;
         }
       },
+      async reconcileInterrupted(snapshot, { allowWorkspaceChanges }) {
+        const current = await gitSnapshot({
+          allowedPaths: snapshot.allowedPaths,
+        });
+        if (!allowWorkspaceChanges) {
+          await this.assertUnchanged(snapshot);
+          return current;
+        }
+        const changes = [];
+        for (const [field, name] of [
+          ["head", "head"],
+          ["branch", "branch"],
+          ["detached", "detached-head"],
+          ["refsFingerprint", "refs"],
+          ["remoteConfigurationFingerprint", "remote-configuration"],
+          ["identityFingerprint", "identity"],
+        ]) {
+          if (snapshot[field] !== current[field]) {
+            changes.push(name);
+          }
+        }
+        if (changes.length > 0) {
+          const error = new Error("Interrupted repository controls changed.");
+          error.code = "ERR_INTERRUPTED_REPOSITORY_CONTROL_CHANGED";
+          error.changes = changes;
+          throw error;
+        }
+        return current;
+      },
     },
     async readInputs() {
       const task = await optionalInput(join(taskPath, "task.md"));
@@ -2208,6 +2237,7 @@ async function createFixture(
     projectPath,
     persistPipelineState,
     run,
+    runtime,
     taskPath,
     transitions,
   };
@@ -4189,6 +4219,240 @@ test("verifies frozen inputs at the implementation boundary", async (t) => {
   assert.equal(result.pause.reason, "task_input_changed");
   assert.equal(result.pipelineState.currentStep, null);
   assert.equal(result.pipelineState.resolvedSummary, null);
+});
+
+test("reconstructs an interrupted writable turn with partial content and staging", async (t) => {
+  let interrupt = true;
+  let recovering = false;
+  const fixture = await createFixture(t, {
+    async onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        request.prompt.includes("Implement the changes")
+      ) {
+        if (interrupt) {
+          interrupt = false;
+          const error = new Error("Provider interrupted.");
+          error.recoverable = true;
+          throw error;
+        }
+        if (recovering) {
+          assert.equal(request.session, undefined);
+          assert.equal(request.prompt, request.recoveryPrompt);
+          assert.equal(
+            await readFile(join(fixture.projectPath, "partial.txt"), "utf8"),
+            "partial implementation\n",
+          );
+          const { stdout } = await executeFile("git", [
+            "-C",
+            fixture.projectPath,
+            "diff",
+            "--cached",
+            "--name-only",
+          ]);
+          assert.match(stdout, /^partial\.txt$/mu);
+          recovering = false;
+        }
+      }
+    },
+  });
+
+  const paused = await fixture.run();
+  assert.equal(paused.pause.resumeState, "IMPLEMENT");
+  await writeFile(
+    join(fixture.projectPath, "partial.txt"),
+    "partial implementation\n",
+  );
+  await executeFile("git", ["-C", fixture.projectPath, "add", "partial.txt"]);
+  Object.assign(fixture.currentRun, {
+    activeTurn: { role: "worker", phase: "implement" },
+    pause: null,
+    pipelineState: { ...paused.pipelineState, workflowState: "IMPLEMENT" },
+  });
+  recovering = true;
+
+  const completed = await fixture.run();
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.activeTurn, null);
+});
+
+test("rejects task and Git-control drift before interrupted writable recovery", async (t) => {
+  for (const drift of ["plan", "identity"]) {
+    await t.test(drift, async (t) => {
+      let interrupt = true;
+      const fixture = await createFixture(t, {
+        onRoleRun(role, request) {
+          if (
+            role === "worker" &&
+            request.prompt.includes("Implement the changes") &&
+            interrupt
+          ) {
+            interrupt = false;
+            const error = new Error("Provider interrupted.");
+            error.recoverable = true;
+            throw error;
+          }
+        },
+      });
+      const paused = await fixture.run();
+      Object.assign(fixture.currentRun, {
+        activeTurn: { role: "worker", phase: "implement" },
+        pause: null,
+        pipelineState: {
+          ...paused.pipelineState,
+          workflowState: "IMPLEMENT",
+        },
+      });
+      if (drift === "plan") {
+        await writeFile(join(fixture.taskPath, "plan.md"), `${PLAN}\nDrift.\n`);
+      } else {
+        await executeFile("git", [
+          "-C",
+          fixture.projectPath,
+          "config",
+          "user.name",
+          "Changed Identity",
+        ]);
+      }
+
+      const rejected = await fixture.run();
+      assert.equal(
+        rejected.pause.reason,
+        drift === "plan" ? "task_input_changed" : "unexpected_git_identity_change",
+      );
+      assert.deepEqual(rejected.activeTurn, {
+        role: "worker",
+        phase: "implement",
+      });
+    });
+  }
+});
+
+test("counts a recovered correction that removes partial content", async (t) => {
+  let interrupt = true;
+  const fixture = await createFixture(t, {
+    async onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        request.prompt.includes("For each finding below") &&
+        interrupt
+      ) {
+        interrupt = false;
+        const error = new Error("Provider interrupted.");
+        error.recoverable = true;
+        throw error;
+      }
+      if (
+        role === "worker" &&
+        request.prompt.includes("For each finding below")
+      ) {
+        await rm(join(request.cwd, "partial-fix.txt"));
+      }
+    },
+    workReviewer: [reviewFindings("R1"), reviewApproved()],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      resolution({ id: "R1", decision: "FIX" }),
+      finalizationPassed(),
+    ],
+  });
+
+  const paused = await fixture.run();
+  assert.equal(paused.pause.resumeState, "RESOLVE_FINDINGS");
+  await writeFile(join(fixture.projectPath, "partial-fix.txt"), "partial fix\n");
+  Object.assign(fixture.currentRun, {
+    activeTurn: { role: "worker", phase: "resolve-findings" },
+    pause: null,
+    pipelineState: {
+      ...paused.pipelineState,
+      workflowState: "RESOLVE_FINDINGS",
+    },
+  });
+
+  const completed = await fixture.run();
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.counters.fixRounds, 1);
+  await assert.rejects(
+    readFile(join(fixture.projectPath, "partial-fix.txt")),
+    { code: "ENOENT" },
+  );
+});
+
+test("clears a reconciled correction marker without replaying the turn", async (t) => {
+  const processLoss = new Error(
+    "Process stopped after correction reconciliation.",
+  );
+  const fixture = await createFixture(t, {
+    async onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        request.prompt.includes("For each finding below")
+      ) {
+        await writeFile(
+          join(fixture.projectPath, "reconciled-fix.txt"),
+          "reconciled fix\n",
+        );
+      }
+    },
+    workReviewer: [reviewFindings("R1"), reviewApproved()],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      resolution({ id: "R1", decision: "FIX" }),
+      finalizationPassed(),
+    ],
+  });
+  const transition = fixture.runtime.transition;
+  const finishAgentTurn = fixture.runtime.finishAgentTurn;
+  let processStopped = false;
+  fixture.runtime.transition = async (patch, options) => {
+    if (processStopped) {
+      throw processLoss;
+    }
+    const next = await transition(patch, options);
+    if (
+      next.activeTurn?.phase === "resolve-findings" &&
+      next.pipelineState.workflowState === "FINALIZE" &&
+      next.pipelineState.pendingCorrection
+    ) {
+      processStopped = true;
+    }
+    return next;
+  };
+  fixture.runtime.finishAgentTurn = async (turn) => {
+    if (processStopped) {
+      throw processLoss;
+    }
+    return finishAgentTurn(turn);
+  };
+
+  await assert.rejects(fixture.run(), (error) => error === processLoss);
+  assert.deepEqual(fixture.currentRun.activeTurn, {
+    role: "worker",
+    phase: "resolve-findings",
+  });
+  assert.equal(fixture.currentRun.pipelineState.workflowState, "FINALIZE");
+  assert.equal(fixture.currentRun.pipelineState.pendingCorrection, true);
+  assert.equal(fixture.currentRun.counters.fixRounds, 1);
+  const resolutionTurns = fixture.calls.worker.filter(({ prompt }) =>
+    prompt.includes("For each finding below"),
+  ).length;
+
+  processStopped = false;
+  fixture.runtime.transition = transition;
+  fixture.runtime.finishAgentTurn = finishAgentTurn;
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.activeTurn, null);
+  assert.equal(completed.counters.fixRounds, 1);
+  assert.equal(
+    fixture.calls.worker.filter(({ prompt }) =>
+      prompt.includes("For each finding below"),
+    ).length,
+    resolutionTurns,
+  );
 });
 
 test("treats emptied required inputs as drift on resume", async (t) => {

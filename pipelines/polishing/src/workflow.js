@@ -358,6 +358,8 @@ export async function runPolishing({ action, run, runtime, settings }) {
   }
 
   let currentRun = run;
+  let interruptedTurn = run.activeTurn;
+  let interruptedRepositoryReconciled = false;
 
   function state() {
     return normalizePipelineState(currentRun.pipelineState);
@@ -754,6 +756,70 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     return null;
   }
 
+  function interruptedControlChange(cause) {
+    if (cause?.changes?.includes("remote-configuration")) {
+      return "unexpected_remote_configuration_change";
+    }
+    if (cause?.changes?.includes("identity")) {
+      return "unexpected_git_identity_change";
+    }
+    return "unexpected_git_ref_change";
+  }
+
+  function interruptedTurnIsWritable(turn) {
+    if (turn.role !== "worker") {
+      return false;
+    }
+    if (["polish", "finalize"].includes(turn.phase)) {
+      return true;
+    }
+    return (
+      turn.phase === "resolve-findings" &&
+      counters().fixRounds < fixBudget()
+    );
+  }
+
+  function interruptedCorrectionWasReconciled(turn) {
+    const current = state();
+    return (
+      turn.role === "worker" &&
+      turn.phase === "resolve-findings" &&
+      current.workflowState === "FINALIZE" &&
+      current.pendingCorrection
+    );
+  }
+
+  async function recoverInterruptedTurn() {
+    if (interruptedTurn === null) {
+      return true;
+    }
+    if ((await readCurrentInputs()) === null) {
+      return false;
+    }
+    const correctionWasReconciled =
+      interruptedCorrectionWasReconciled(interruptedTurn);
+    const allowWorkspaceChanges = interruptedTurnIsWritable(interruptedTurn);
+    try {
+      await runtime.git.reconcileInterrupted(state().repositoryBaseline, {
+        allowWorkspaceChanges,
+      });
+    } catch (cause) {
+      if (cause?.code !== "ERR_INTERRUPTED_REPOSITORY_CONTROL_CHANGED") {
+        throw cause;
+      }
+      await pause(interruptedControlChange(cause), { code: cause.code });
+      return false;
+    }
+    interruptedRepositoryReconciled = true;
+    if (correctionWasReconciled) {
+      currentRun = await runtime.finishAgentTurn(interruptedTurn);
+      assertRun(currentRun);
+      interruptedTurn = null;
+      interruptedRepositoryReconciled = false;
+    }
+    return true;
+  }
+
   async function runRole(
     role,
     schema,
@@ -765,10 +831,22 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       reportWorkspaceChange = false,
     } = {},
   ) {
+    const turn = activeTurn(role, state().workflowState);
+    const recovering = interruptedTurn !== null;
+    if (recovering && !isDeepStrictEqual(interruptedTurn, turn)) {
+      throw workflowError(
+        "Persisted agent turn does not match polishing recovery.",
+        "ERR_INVALID_POLISHING_STATE",
+      );
+    }
     const outputContext = bootstrapOutputContextFor(role, schema, checkpoint);
     await ensureRoleCapabilities(role);
     const evidence = await readCurrentInputs();
-    if (evidence === null || !(await verifyPersistedRepository())) {
+    if (
+      evidence === null ||
+      ((!recovering || !interruptedRepositoryReconciled) &&
+        !(await verifyPersistedRepository()))
+    ) {
       return null;
     }
     const baseline = state().repositoryBaseline;
@@ -793,14 +871,16 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       .reverse()
       .find((child) => child.role === role);
     const previousSession =
-      role !== "arbiter" && latestSession?.contextKey === contextKey
+      !recovering &&
+      role !== "arbiter" &&
+      latestSession?.contextKey === contextKey
         ? latestSession.sessionId
         : undefined;
     const sourceSession = currentRun.sessionLineage.source;
     const session =
       previousSession !== undefined
         ? { id: previousSession, mode: "continue" }
-        : sourceSession !== null && role !== "arbiter"
+        : !recovering && sourceSession !== null && role !== "arbiter"
           ? { id: sourceSession, mode: "fork" }
           : undefined;
     const configuration = currentRun.roles[role];
@@ -827,9 +907,10 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     };
     let response;
     let agentError;
-    const turn = activeTurn(role, state().workflowState);
     currentRun = await runtime.startAgentTurn(turn);
     assertRun(currentRun);
+    interruptedTurn = null;
+    interruptedRepositoryReconciled = false;
     let nextRepositoryBaseline;
     try {
       try {
@@ -904,7 +985,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
               ? {
                   nextCounters: {
                     ...counters(),
-                    fixRounds: counters().fixRounds + 1,
+                    fixRounds:
+                      counters().fixRounds +
+                      (current.pendingCorrection ? 0 : 1),
                   },
                 }
               : undefined,
@@ -3370,6 +3453,9 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
 
   assertResumeActionApplicable();
   try {
+    if (!(await recoverInterruptedTurn())) {
+      return currentRun;
+    }
     const resumeActionSuperseded = await prepareValidationMigrationResume();
     if (["DONE", "FAILED"].includes(state().workflowState)) {
       if (resumeAction !== null) {
@@ -3423,6 +3509,7 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
     }
     if (
       state().preflightComplete &&
+      !interruptedRepositoryReconciled &&
       ((await readCurrentInputs()) === null ||
         !(await verifyPersistedRepository()))
     ) {

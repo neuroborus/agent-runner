@@ -507,6 +507,24 @@ Recovery accepts only an incomplete final journal fragment, advances lagging
 state from complete events, and never depends on a native Codex or Claude
 session surviving interruption.
 
+An exact-revision MCP continuation may resume a nonterminal, nonpaused
+persisted active turn with a null action only when no live execution owner
+remains; ordinary paused-run action validation is unchanged. Before replay,
+resume revalidates the canonical project and task paths and every task, context,
+task-clarification, and execution-clarification hash. The root Git boundary
+requires an unchanged workspace and index for read-only phases. For an interrupted
+Worker phase that had workspace-write authority, it may instead preserve
+content and staging drift after proving that `HEAD`, branch/detached state,
+refs, remotes, Git identity, canonical root, and allowed runner paths did not
+change. The pipeline then advances its baseline, invalidates stale
+fingerprint-bound finalization and review evidence, and counts interrupted
+correction content once. The reconstructed turn uses its complete request in a
+fresh native session; the new `turn-started` event replaces the stale marker,
+which clears only after normal workspace reconciliation. If correction
+reconciliation already advanced the state to `FINALIZE`, resume instead clears
+the retained `worker`/`resolve-findings` marker after the same safety checks and
+continues from `FINALIZE` without replaying or recounting the correction.
+
 Claude read-only recovery uses the same pipeline state version 4 and common run
 envelope. A valid but otherwise unclassified read-only result or process failure
 may pause only after the read-only mutation guard succeeds. Resume rebuilds the
@@ -601,6 +619,10 @@ Pipeline tests use fake adapters and temporary repositories. Cover at least:
   repeated invalid bootstrap output;
 - read-only mutation plus ref, remote, and identity guards;
 - durable transitions, interrupted turns, and journal recovery;
+- action-free owner-loss continuation, input and Git-control drift rejection,
+  read-only replay guards, preserved partial Worker content and staging,
+  evidence invalidation, exact-once correction accounting, and activity-marker
+  continuity;
 - blocked provider activity plus lease-aware running, interrupted, and idle MCP
   projection;
 - successful polishing, finalization changes/failures, findings, fixes,

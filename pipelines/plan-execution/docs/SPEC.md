@@ -488,6 +488,23 @@ activity without a live execution owner, even while its lease record awaits
 stale recovery, and resume reconstructs the request from
 the persisted checkpoint before replacing and eventually clearing that
 activity.
+For an ordinary interrupted turn, resume first revalidates canonical project
+and task paths plus every persisted task, plan, context, task-clarification, and
+execution-clarification hash. The root Git boundary then reconciles the stored
+snapshot. Read-only phases require a completely unchanged workspace and index;
+an interrupted Worker phase retains content and staging drift only when that
+phase had workspace-write authority and only while `HEAD`, branch/detached
+state, refs, remotes, Git identity, canonical root, and runner-allowed paths
+remain unchanged. Safe partial changes advance the repository baseline,
+invalidate dependent fingerprint-bound evidence, and count correction work
+exactly once. Recovery uses the complete request in a fresh native session, and
+the new `turn-started` transition replaces the stale marker before ordinary
+post-turn reconciliation clears it. If correction reconciliation already
+advanced the state to `FINALIZE`, resume clears the retained
+`worker`/`resolve-findings` marker after those safety checks and continues from
+`FINALIZE` without replaying or recounting the correction. A consumed `COMMIT`
+turn is excluded: its marker remains through verification and the Worker effect
+is never replayed.
 
 ### `progress.md`
 
@@ -1905,6 +1922,12 @@ A user override must be explicitly recorded in `events.jsonl` and `progress.md`.
 `agent-run resume --run <run-id>` must reconstruct the workflow from persisted
 state.
 
+An ownerless persisted active turn is a continuation target even though the
+run is not paused. CLI resume and exact-revision MCP `run_resume` reconstruct it
+with a null action; MCP rejects a non-null action, stale revision, or live
+execution owner. Paused runs continue to use their descriptor-owned action
+validator unchanged.
+
 Before continuing:
 
 1. resolve the run ID, load its state, and verify the canonical task path;
@@ -2078,6 +2101,10 @@ At minimum cover:
 57. 64-item role inventories, disjoint 128-item derived inventories,
     persistence, finalization round trips, infrastructure fingerprinting, and
     strict capacity exhaustion remain bounded and consistent.
+58. ownerless interrupted read-only and writable turns revalidate all durable
+    inputs and Git controls, preserve only authorized partial content and index
+    changes, invalidate dependent evidence, replace and clear activity in
+    order, and never replay a consumed commit authorization.
 
 Real Codex/Claude smoke tests should be opt-in integration tests.
 

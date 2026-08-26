@@ -35,6 +35,16 @@ const SNAPSHOT_FINGERPRINT_FIELDS = Object.freeze([
   "contentFingerprint",
   ...SNAPSHOT_COMPARISONS.slice(2).map(([field]) => field),
 ]);
+const INTERRUPTED_CONTROL_COMPARISONS = Object.freeze([
+  ["projectPath", "project-path"],
+  ["allowedPaths", "allowed-paths"],
+  ["head", "head"],
+  ["branch", "branch"],
+  ["detached", "detached-head"],
+  ["refsFingerprint", "refs"],
+  ["remoteConfigurationFingerprint", "remote-configuration"],
+  ["identityFingerprint", "identity"],
+]);
 const OBJECT_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 
@@ -470,6 +480,43 @@ export function createGitService(options = {}) {
     return currentSnapshot;
   }
 
+  async function reconcileInterrupted(
+    previousSnapshot,
+    { allowWorkspaceChanges = false } = {},
+  ) {
+    assertSnapshot(previousSnapshot);
+    assertBoolean(allowWorkspaceChanges, "allowWorkspaceChanges");
+    if (!allowWorkspaceChanges) {
+      return assertUnchanged(previousSnapshot);
+    }
+    const currentSnapshot = await snapshot({
+      allowedPaths: previousSnapshot.allowedPaths,
+      projectPath: previousSnapshot.projectPath,
+    });
+    const changes = INTERRUPTED_CONTROL_COMPARISONS.filter(
+      ([field]) =>
+        !Object.is(previousSnapshot[field], currentSnapshot[field]) &&
+        !(
+          field === "allowedPaths" &&
+          previousSnapshot.allowedPaths.length ===
+            currentSnapshot.allowedPaths.length &&
+          previousSnapshot.allowedPaths.every(
+            (path, index) => path === currentSnapshot.allowedPaths[index],
+          )
+        ),
+    ).map(([, change]) => change);
+    if (changes.length > 0) {
+      throw new GitSafetyError(
+        "Repository controls changed during an interrupted writable turn.",
+        {
+          changes,
+          code: "ERR_INTERRUPTED_REPOSITORY_CONTROL_CHANGED",
+        },
+      );
+    }
+    return currentSnapshot;
+  }
+
   const commitService = createGitCommitService({
     assertSnapshot,
     authorizationIdFactory,
@@ -486,6 +533,7 @@ export function createGitService(options = {}) {
     contentFingerprint,
     inspectPath,
     preflight,
+    reconcileInterrupted,
     resolveProject,
     snapshot,
     validationInfrastructureFingerprint,

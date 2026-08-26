@@ -1763,12 +1763,13 @@ async function createFixture(
   async function persistPipelineState(
     pipelineState,
     counters = currentRun.counters,
+    pause = currentRun.pause,
   ) {
     currentRun = await runtime.transition(
       {
         counters,
         hashes: currentRun.hashes,
-        pause: currentRun.pause,
+        pause,
         pipelineState,
       },
       {
@@ -4310,6 +4311,103 @@ test("persists a forbidden-delegation diagnostic without provider data", async (
   );
 });
 
+test("recovers an ownerless writable turn with partial content and staging", async (t) => {
+  let interrupt = true;
+  let recovering = false;
+  const fixture = await createFixture(t, {
+    async onRoleRun(role, request, _turn, { projectPath }) {
+      if (
+        role === "worker" &&
+        /Polish the existing local/u.test(request.prompt)
+      ) {
+        if (interrupt) {
+          interrupt = false;
+          const error = new Error("Provider interrupted.");
+          error.recoverable = true;
+          throw error;
+        }
+        if (recovering) {
+          assert.equal(request.session, undefined);
+          assert.equal(request.prompt, request.recoveryPrompt);
+          assert.equal(
+            await readFile(join(projectPath, "partial.txt"), "utf8"),
+            "partial polish\n",
+          );
+          const staged = await runGit(projectPath, "diff", "--cached", "--name-only");
+          assert.match(staged.stdout, /^partial\.txt$/mu);
+          recovering = false;
+        }
+      }
+    },
+  });
+
+  const paused = await fixture.run();
+  assert.equal(paused.pause.resumeState, "POLISH");
+  await fixture.persistPipelineState(
+    { ...paused.pipelineState, workflowState: "POLISH" },
+    paused.counters,
+    null,
+  );
+  await fixture.runtime.startAgentTurn({ role: "worker", phase: "polish" });
+  await writeFile(join(fixture.projectPath, "partial.txt"), "partial polish\n");
+  await runGit(fixture.projectPath, "add", "partial.txt");
+  await fixture.recover();
+  recovering = true;
+
+  const completed = await fixture.run();
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.activeTurn, null);
+  const staged = await runGit(
+    fixture.projectPath,
+    "diff",
+    "--cached",
+    "--name-only",
+  );
+  assert.match(staged.stdout, /^partial\.txt$/mu);
+});
+
+test("rejects Git-control drift before recovering an interrupted writable turn", async (t) => {
+  let interrupt = true;
+  const fixture = await createFixture(t, {
+    onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        /Polish the existing local/u.test(request.prompt) &&
+        interrupt
+      ) {
+        interrupt = false;
+        const error = new Error("Provider interrupted.");
+        error.recoverable = true;
+        throw error;
+      }
+    },
+  });
+  const paused = await fixture.run();
+  await fixture.persistPipelineState(
+    { ...paused.pipelineState, workflowState: "POLISH" },
+    paused.counters,
+    null,
+  );
+  await fixture.runtime.startAgentTurn({ role: "worker", phase: "polish" });
+  await runGit(
+    fixture.projectPath,
+    "remote",
+    "add",
+    "unexpected",
+    "https://example.invalid/repository.git",
+  );
+  await fixture.recover();
+  const calls = fixture.calls.worker.length;
+
+  const rejected = await fixture.run();
+  assert.equal(rejected.pause.reason, "unexpected_remote_configuration_change");
+  assert.deepEqual(rejected.activeTurn, {
+    role: "worker",
+    phase: "polish",
+  });
+  assert.equal(fixture.calls.worker.length, calls);
+});
+
 test("accounts for a content-changing interrupted correction before recovery", async (t) => {
   let interrupted = false;
   const fixture = await createFixture(t, {
@@ -4354,6 +4452,84 @@ test("accounts for a content-changing interrupted correction before recovery", a
   assert.equal(resumed.pause.reason, "no_progress");
   assert.equal(resumed.counters.fixRounds, 1);
   assert.equal(resumed.counters.correctionRounds, 1);
+});
+
+test("clears a reconciled correction marker without replaying the turn", async (t) => {
+  const processLoss = new Error(
+    "Process stopped after correction reconciliation.",
+  );
+  const fixture = await createFixture(t, {
+    reviewer: [
+      bootstrapReady("Reviewer"),
+      reviewFindings("R1"),
+      reviewApproved(),
+    ],
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationPassed(),
+      resolution("FIX", "R1"),
+      finalizationPassed(),
+    ],
+    async onRoleRun(role, request, _turn, { projectPath }) {
+      if (
+        role === "worker" &&
+        /Resolve every current blocker/u.test(request.prompt)
+      ) {
+        await writeFile(join(projectPath, "tracked.txt"), "reconciled fix\n");
+      }
+    },
+  });
+  const transition = fixture.runtime.transition;
+  const finishAgentTurn = fixture.runtime.finishAgentTurn;
+  let processStopped = false;
+  fixture.runtime.transition = async (patch, options) => {
+    if (processStopped) {
+      throw processLoss;
+    }
+    const next = await transition(patch, options);
+    if (
+      next.activeTurn?.phase === "resolve-findings" &&
+      next.pipelineState.workflowState === "FINALIZE" &&
+      next.pipelineState.pendingCorrection
+    ) {
+      processStopped = true;
+    }
+    return next;
+  };
+  fixture.runtime.finishAgentTurn = async (turn) => {
+    if (processStopped) {
+      throw processLoss;
+    }
+    return finishAgentTurn(turn);
+  };
+
+  await assert.rejects(fixture.run(), (error) => error === processLoss);
+  assert.deepEqual(fixture.currentRun.activeTurn, {
+    role: "worker",
+    phase: "resolve-findings",
+  });
+  assert.equal(fixture.currentRun.pipelineState.workflowState, "FINALIZE");
+  assert.equal(fixture.currentRun.pipelineState.pendingCorrection, true);
+  assert.equal(fixture.currentRun.counters.fixRounds, 1);
+  const resolutionTurns = fixture.calls.worker.filter(({ prompt }) =>
+    /Resolve every current blocker/u.test(prompt),
+  ).length;
+
+  await fixture.recover();
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.activeTurn, null);
+  assert.equal(completed.counters.fixRounds, 1);
+  assert.equal(
+    fixture.calls.worker.filter(({ prompt }) =>
+      /Resolve every current blocker/u.test(prompt),
+    ).length,
+    resolutionTurns,
+  );
 });
 
 test("does not charge an interrupted staging-only correction as a fix", async (t) => {

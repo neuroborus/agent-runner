@@ -285,7 +285,12 @@ hash, and execution lease before work is launched again.
 child with no inherited standard streams. `run_respond` atomically writes the
 identified answers, records their transcript hash in run state, then launches
 the same detached continuation. `run_resume` accepts only an action applicable
-to the persisted pause. The child owns the existing per-run execution lease
+to the persisted pause, except that an exact-revision, nonterminal, nonpaused
+run with a persisted active turn and no live execution owner accepts one null
+action to recover that interruption. A non-null action, stale revision, live
+owner, or persisted pause is rejected without weakening ordinary pause-action
+validation. The child owns
+the existing per-run execution lease
 and, for plan execution or polishing, the canonical-worktree lease. Before
 detached dispatch, MCP rejects an already-owned worktree without completing the
 idempotency intent, leaving the reserved durable run available for an exact
@@ -676,6 +681,25 @@ activity when it starts the reconstructed turn, and clears a one-shot commit
 activity only after Git verification deterministically resolves the consumed
 authorization. Native sessions, polling, model-token heartbeats, and daemons
 are not part of this correctness path.
+
+Before an ordinary interrupted turn is reconstructed, the runner revalidates
+the canonical project and task directories and the owning pipeline revalidates
+every durable task, context, plan, and accepted clarification input. The root
+Git boundary then compares the persisted snapshot with the current repository.
+Read-only turns still require an unchanged workspace and index. An interrupted
+plan-execution or polishing Worker may retain content and staging drift only
+for a phase that originally had workspace-write authority; `HEAD`, branch and
+detached state, local refs, remotes, Git identity, canonical root, and allowed
+runner paths must remain unchanged. The pipeline advances its baseline only
+after those checks, invalidates fingerprint-bound finalization and review
+evidence when content changed, and charges interrupted correction work once.
+The reconstructed request uses the complete recovery prompt in a fresh native
+session, and its `turn-started` event replaces the stale marker before normal
+post-turn reconciliation clears it. If a correction transition was already
+persisted before process loss, recovery clears its retained marker after the
+same input and Git checks and continues from the advanced checkpoint without
+replaying or recounting the correction. Consumed one-shot commit turns remain
+on their verification-only path and are never reconstructed or replayed.
 
 Every mutating run or resume holds one atomic per-run execution lease. Plan
 execution and polishing also hold one atomic lease for the canonical Git

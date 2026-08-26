@@ -429,6 +429,8 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
   }
 
   let currentRun = run;
+  let interruptedTurn = run.activeTurn;
+  let interruptedRepositoryReconciled = false;
 
   function state() {
     return normalizePipelineState(currentRun.pipelineState);
@@ -807,6 +809,74 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     return null;
   }
 
+  function interruptedControlChange(cause) {
+    if (cause?.changes?.includes("remote-configuration")) {
+      return "unexpected_remote_configuration_change";
+    }
+    if (cause?.changes?.includes("identity")) {
+      return "unexpected_git_identity_change";
+    }
+    return "unexpected_git_ref_change";
+  }
+
+  function interruptedTurnIsWritable(turn) {
+    if (turn.role !== "worker") {
+      return false;
+    }
+    if (["implement", "finalize"].includes(turn.phase)) {
+      return true;
+    }
+    return (
+      turn.phase === "resolve-findings" &&
+      counters().fixRounds < fixBudget()
+    );
+  }
+
+  function interruptedCorrectionWasReconciled(turn) {
+    const current = state();
+    return (
+      turn.role === "worker" &&
+      turn.phase === "resolve-findings" &&
+      current.workflowState === "FINALIZE" &&
+      current.pendingCorrection
+    );
+  }
+
+  async function recoverInterruptedTurn() {
+    if (
+      interruptedTurn === null ||
+      (interruptedTurn.phase === "commit" &&
+        state().pendingCommit?.status === "consumed")
+    ) {
+      return true;
+    }
+    if ((await readCurrentInputs()) === null) {
+      return false;
+    }
+    const correctionWasReconciled =
+      interruptedCorrectionWasReconciled(interruptedTurn);
+    const allowWorkspaceChanges = interruptedTurnIsWritable(interruptedTurn);
+    try {
+      await runtime.git.reconcileInterrupted(state().repositoryBaseline, {
+        allowWorkspaceChanges,
+      });
+    } catch (cause) {
+      if (cause?.code !== "ERR_INTERRUPTED_REPOSITORY_CONTROL_CHANGED") {
+        throw cause;
+      }
+      await pause(interruptedControlChange(cause), { code: cause.code });
+      return false;
+    }
+    interruptedRepositoryReconciled = true;
+    if (correctionWasReconciled) {
+      currentRun = await runtime.finishAgentTurn(interruptedTurn);
+      assertRun(currentRun);
+      interruptedTurn = null;
+      interruptedRepositoryReconciled = false;
+    }
+    return true;
+  }
+
   async function runRole(
     role,
     schema,
@@ -817,6 +887,14 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       recoveryContext = "",
     } = {},
   ) {
+    const turn = activeTurn(role, state().workflowState);
+    const recovering = interruptedTurn !== null;
+    if (recovering && !isDeepStrictEqual(interruptedTurn, turn)) {
+      throw workflowError(
+        "Persisted agent turn does not match plan-execution recovery.",
+        "ERR_INVALID_PLAN_EXECUTION_STATE",
+      );
+    }
     const outputContext = bootstrapOutputContextFor(role, schema, checkpoint);
     await ensureRoleCapabilities(role);
     const evidence = await readCurrentInputs();
@@ -824,7 +902,10 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       return null;
     }
     const baseline = state().repositoryBaseline;
-    if (!(await verifyPersistedRepository())) {
+    if (
+      (!recovering || !interruptedRepositoryReconciled) &&
+      !(await verifyPersistedRepository())
+    ) {
       return null;
     }
     const turnSnapshot = await runtime.git.snapshot({
@@ -842,14 +923,16 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       .reverse()
       .find((child) => child.role === role);
     const previousSession =
-      role !== "arbiter" && latestSession?.contextKey === contextKey
+      !recovering &&
+      role !== "arbiter" &&
+      latestSession?.contextKey === contextKey
         ? latestSession.sessionId
         : undefined;
     const sourceSession = currentRun.sessionLineage.source;
     const session =
       previousSession !== undefined
         ? { id: previousSession, mode: "continue" }
-        : sourceSession !== null && role !== "arbiter"
+        : !recovering && sourceSession !== null && role !== "arbiter"
           ? { id: sourceSession, mode: "fork" }
           : undefined;
     const roleConfiguration = currentRun.roles[role];
@@ -876,9 +959,10 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     };
     let response;
     let agentError;
-    const turn = activeTurn(role, state().workflowState);
     currentRun = await runtime.startAgentTurn(turn);
     assertRun(currentRun);
+    interruptedTurn = null;
+    interruptedRepositoryReconciled = false;
     try {
       try {
         response = await runtime.adapters[role].run(request);
@@ -908,10 +992,12 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       }
       if (access !== "read-only") {
         const current = state();
+        const contentChanged =
+          baseline.contentFingerprint !==
+          nextRepositoryBaseline.contentFingerprint;
         const changedCorrection =
           current.workflowState === "RESOLVE_FINDINGS" &&
-          turnSnapshot.contentFingerprint !==
-            nextRepositoryBaseline.contentFingerprint;
+          contentChanged;
         if (
           changedCorrection ||
           !isDeepStrictEqual(nextRepositoryBaseline, baseline)
@@ -937,12 +1023,28 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
               : {
                   ...current,
                   repositoryBaseline: nextRepositoryBaseline,
+                  ...(contentChanged
+                    ? {
+                        finalizationResult: null,
+                        finalizedFingerprint: null,
+                        reviewResult: null,
+                        reviewedFingerprint: null,
+                        previousFindings:
+                          current.findings.length === 0
+                            ? current.previousFindings
+                            : current.findings,
+                        findings: [],
+                        reviewReconsideration: [],
+                      }
+                    : {}),
                 },
             changedCorrection
               ? {
                   nextCounters: {
                     ...counters(),
-                    fixRounds: counters().fixRounds + 1,
+                    fixRounds:
+                      counters().fixRounds +
+                      (current.pendingCorrection ? 0 : 1),
                   },
                 }
               : {},
@@ -3194,6 +3296,7 @@ ${JSON.stringify(
     if (output === null) {
       return false;
     }
+    const fixRoundAlreadyCounted = state().pendingCorrection;
     const result = normalizeResolutionResult(
       output,
       blockers,
@@ -3306,7 +3409,9 @@ ${JSON.stringify(
         {
           nextCounters: {
             ...counters(),
-            fixRounds: counters().fixRounds + (changed ? 0 : 1),
+            fixRounds:
+              counters().fixRounds +
+              (fixRoundAlreadyCounted ? 0 : 1),
           },
           publicActivity: activity(
             "worker",
@@ -3661,6 +3766,9 @@ ${step.subject}`),
     if (state().settings === null) {
       await transition({ ...state(), settings }, { pause: null });
     }
+    if (!(await recoverInterruptedTurn())) {
+      return currentRun;
+    }
     const resumeActionSuperseded = await prepareValidationMigrationResume();
     if (!resumeActionSuperseded && !(await applyResumeAction())) {
       return currentRun;
@@ -3721,6 +3829,7 @@ ${step.subject}`),
       state().pendingCommit?.status === "consumed";
     if (
       state().preflightComplete &&
+      !interruptedRepositoryReconciled &&
       !["WAITING_FOR_USER", "FAILED", "DONE"].includes(state().workflowState) &&
       (!commitVerificationPending &&
         ((await readCurrentInputs()) === null ||
