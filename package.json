@@ -2,7 +2,7 @@
   "name": "agent-runner",
   "version": "0.0.0",
   "private": true,
-  "description": "Local CLI for running explicit agent pipelines",
+  "description": "Local CLI and STDIO MCP server for durable agent pipelines",
   "type": "module",
   "exports": "./src/index.js",
   "workspaces": [
