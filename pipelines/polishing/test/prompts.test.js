@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
+  BOOTSTRAP_CORRECTION_INSTRUCTIONS,
   BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
@@ -81,6 +82,13 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
   assert.match(CLARIFICATION_INSTRUCTIONS, /existing changes/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /independently/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /finalization guidance/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /IDs must be unique/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /unique, single-line/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /canonical repository-relative/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /symlink alias/u);
+  assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /one read-only correction/u);
+  assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /rejected result/u);
+  assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /fails closed/u);
   assert.match(BOOTSTRAP_RECONCILIATION_INSTRUCTIONS, /Do not force agreement/u);
   assert.match(BOOTSTRAP_ARBITRATION_INSTRUCTIONS, /Do not modify/u);
   for (const instructions of [

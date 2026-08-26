@@ -58,6 +58,8 @@ const PIPELINE_STATE_FIELDS = new Set([
   "resolvedSummary",
   "bootstrapDisagreement",
   "bootstrapArbitrationUsed",
+  "bootstrapCorrections",
+  "pendingBootstrapCorrection",
   "polishSummary",
   "finalizationResult",
   "finalizedFingerprint",
@@ -66,6 +68,7 @@ const PIPELINE_STATE_FIELDS = new Set([
   "validationInfrastructureFingerprint",
   "trustedValidation",
   "validationMigrationPending",
+  "validationMigrationDisagreement",
   "reviewResult",
   "reviewedFingerprint",
   "findings",
@@ -126,6 +129,7 @@ const PERSISTED_CHECK_RESULT_FIELDS = Object.freeze([
   "signal",
   "timedOut",
 ]);
+const REQUIRED_CHECK_FIELDS = Object.freeze(["id", "command"]);
 const TRUSTED_COMMAND_FIELDS = Object.freeze([
   "alias",
   "command",
@@ -152,6 +156,23 @@ export const MAX_DISPUTE_HISTORY_BYTES = 64 * 1024;
 export const MAX_DISPUTES_PER_FINDING = 2;
 const INVALID_OUTPUT_CODE = "ERR_INVALID_POLISHING_OUTPUT";
 export const INVALID_POLISHING_INPUT_CODE = "ERR_INVALID_POLISHING_INPUT";
+const OUTPUT_DIAGNOSTIC_FIELDS = Object.freeze([
+  "role",
+  "phase",
+  "contract",
+  "field",
+  "constraint",
+]);
+const LEGACY_OUTPUT_FAILURE_FIELDS = Object.freeze(["reason", "code"]);
+const OUTPUT_FAILURE_FIELDS = Object.freeze([
+  ...LEGACY_OUTPUT_FAILURE_FIELDS,
+  "diagnostic",
+]);
+const OUTPUT_DIAGNOSTIC_VALUE_PATTERN = /^[a-zA-Z0-9_.[\]-]{1,128}$/u;
+const BOOTSTRAP_CORRECTION_FIELDS = Object.freeze([
+  "attempt",
+  ...OUTPUT_DIAGNOSTIC_FIELDS,
+]);
 const EDIT_PAUSE_REASONS = Object.freeze({
   "clarification-answers": "clarification_answers_required",
   "product-decision": "product_decision_required",
@@ -179,10 +200,16 @@ const PAUSE_RESUME_STATES = Object.freeze({
 });
 
 export class PolishingWorkflowError extends Error {
-  constructor(message, { cause, code = "ERR_POLISHING_WORKFLOW" } = {}) {
-    super(message, { cause });
+  constructor(
+    message,
+    { cause, code = "ERR_POLISHING_WORKFLOW", diagnostic } = {},
+  ) {
+    super(message, cause === undefined ? undefined : { cause });
     this.name = "PolishingWorkflowError";
     this.code = code;
+    if (diagnostic !== undefined) {
+      this.diagnostic = Object.freeze({ ...diagnostic });
+    }
   }
 }
 
@@ -197,8 +224,9 @@ export function isRecord(value) {
 export function workflowError(
   message,
   code = "ERR_INVALID_POLISHING_STATE",
+  diagnostic,
 ) {
-  return new PolishingWorkflowError(message, { code });
+  return new PolishingWorkflowError(message, { code, diagnostic });
 }
 
 export function sha256(value) {
@@ -367,8 +395,32 @@ export function assertDisputeHistoryFits(
   }
 }
 
-function outputError(message) {
-  return workflowError(message, INVALID_OUTPUT_CODE);
+function outputConstraint(field, constraint) {
+  return Object.freeze({ field, constraint });
+}
+
+function outputError(message, diagnostic) {
+  return workflowError(message, INVALID_OUTPUT_CODE, diagnostic);
+}
+
+export function isOutputDiagnostic(value) {
+  return (
+    isRecord(value) &&
+    Object.keys(value).length === OUTPUT_DIAGNOSTIC_FIELDS.length &&
+    OUTPUT_DIAGNOSTIC_FIELDS.every(
+      (field) =>
+        typeof value[field] === "string" &&
+        OUTPUT_DIAGNOSTIC_VALUE_PATTERN.test(value[field]),
+    )
+  );
+}
+
+function hasExactFields(value, fields) {
+  return (
+    isRecord(value) &&
+    Object.keys(value).length === fields.length &&
+    fields.every((field) => Object.hasOwn(value, field))
+  );
 }
 
 function assertExactFields(value, fields, name, code) {
@@ -381,44 +433,63 @@ function assertExactFields(value, fields, name, code) {
   }
 }
 
-function assertStructuredResult(payload) {
+function assertExactOutputFields(value, fields, field = "result") {
+  if (!hasExactFields(value, fields)) {
+    throw outputError(
+      "Structured role result has an invalid field set.",
+      outputConstraint(field, "exact-field-set"),
+    );
+  }
+}
+
+function assertStructuredResult(payload, diagnostic) {
   let serialized;
   try {
     serialized = JSON.stringify(payload);
-  } catch (cause) {
-    throw new PolishingWorkflowError(
+  } catch {
+    throw outputError(
       "Structured role result must be serializable.",
-      { cause, code: INVALID_OUTPUT_CODE },
+      outputConstraint("result", "serializable-json"),
     );
   }
   if (
     typeof serialized !== "string" ||
     Buffer.byteLength(serialized) > MAX_STRUCTURED_RESULT_BYTES
   ) {
-    throw outputError("Structured role result is too large.");
+    throw outputError("Structured role result is too large.", diagnostic);
   }
 }
 
-function normalizeText(value, name, code = "ERR_INVALID_POLISHING_STATE") {
+function normalizeText(
+  value,
+  name,
+  code = "ERR_INVALID_POLISHING_STATE",
+  diagnostic,
+) {
   if (
     typeof value !== "string" ||
     value.trim().length === 0 ||
     value.length > MAX_TEXT_LENGTH ||
     /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(value)
   ) {
-    throw workflowError(`${name} must be concise plain text.`, code);
+    throw workflowError(`${name} must be concise plain text.`, code, diagnostic);
   }
   return value.trim().replace(/\s+/gu, " ");
 }
 
-function normalizeSummary(value, name, code = "ERR_INVALID_POLISHING_STATE") {
+function normalizeSummary(
+  value,
+  name,
+  code = "ERR_INVALID_POLISHING_STATE",
+  diagnostic,
+) {
   if (
     typeof value !== "string" ||
     value.trim().length === 0 ||
     value.length > MAX_SUMMARY_LENGTH ||
     /\0|\p{Zl}|\p{Zp}/u.test(value)
   ) {
-    throw workflowError(`${name} must be concise Markdown.`, code);
+    throw workflowError(`${name} must be concise Markdown.`, code, diagnostic);
   }
   return value.trim();
 }
@@ -426,18 +497,42 @@ function normalizeSummary(value, name, code = "ERR_INVALID_POLISHING_STATE") {
 function normalizeTextList(
   value,
   name,
-  { allowEmpty = false, maximum = MAX_ITEMS, code = INVALID_OUTPUT_CODE } = {},
+  {
+    allowEmpty = false,
+    maximum = MAX_ITEMS,
+    code = INVALID_OUTPUT_CODE,
+    diagnosticField,
+  } = {},
 ) {
   if (
     !Array.isArray(value) ||
     (!allowEmpty && value.length === 0) ||
     value.length > maximum
   ) {
-    throw workflowError(`${name} has an invalid number of items.`, code);
+    throw workflowError(
+      `${name} has an invalid number of items.`,
+      code,
+      diagnosticField === undefined
+        ? undefined
+        : outputConstraint(
+            diagnosticField,
+            `${allowEmpty ? "array" : "nonempty-array"}-up-to-${maximum}-items`,
+          ),
+    );
   }
   return Object.freeze(
     value.map((item, index) =>
-      normalizeText(item, `${name}[${index}]`, code),
+      normalizeText(
+        item,
+        `${name}[${index}]`,
+        code,
+        diagnosticField === undefined
+          ? undefined
+          : outputConstraint(
+              `${diagnosticField}[${index}]`,
+              "nonempty-plain-text-up-to-4000-characters",
+            ),
+      ),
     ),
   );
 }
@@ -555,11 +650,20 @@ export function normalizeBootstrapResult(payload, role) {
     "whyBlocked",
     "evidence",
   ];
-  assertExactFields(payload, fields, `${role} bootstrap result`, INVALID_OUTPUT_CODE);
-  assertStructuredResult(payload);
-  if (!["READY", "PRODUCT_DECISION_REQUIRED"].includes(payload.status)) {
-    throw outputError(`${role} returned an invalid bootstrap status.`);
+  if (
+    !isRecord(payload) ||
+    !["READY", "PRODUCT_DECISION_REQUIRED"].includes(payload.status)
+  ) {
+    throw outputError(
+      `${role} returned an invalid bootstrap status.`,
+      outputConstraint("status", "supported-status"),
+    );
   }
+  assertStructuredResult(
+    payload,
+    outputConstraint("result", "maximum-256-kibibytes"),
+  );
+  assertExactOutputFields(payload, fields);
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
     if (
       payload.summary !== "" ||
@@ -567,7 +671,10 @@ export function normalizeBootstrapResult(payload, role) {
       !emptyArray(payload.requiredChecks) ||
       !emptyArray(payload.validationInfrastructure)
     ) {
-      throw outputError("Product decision contains inapplicable fields.");
+      throw outputError(
+        "Product decision contains inapplicable fields.",
+        outputConstraint("status", "status-field-consistency"),
+      );
     }
     return Object.freeze({
       status: payload.status,
@@ -575,7 +682,10 @@ export function normalizeBootstrapResult(payload, role) {
     });
   }
   if (payload.reason !== "" || !emptyDecision(payload)) {
-    throw outputError("Bootstrap result contains inapplicable fields.");
+    throw outputError(
+      "Bootstrap result contains inapplicable fields.",
+      outputConstraint("status", "status-field-consistency"),
+    );
   }
   return Object.freeze({
     status: payload.status,
@@ -583,6 +693,7 @@ export function normalizeBootstrapResult(payload, role) {
       payload.summary,
       `${role} bootstrap summary`,
       INVALID_OUTPUT_CODE,
+      outputConstraint("summary", "concise-markdown-up-to-20000-characters"),
     ),
     requiredChecks: normalizeRequiredChecks(
       payload.requiredChecks,
@@ -608,22 +719,32 @@ export function normalizeReconciliationResult(payload) {
     "whyBlocked",
     "evidence",
   ];
-  assertExactFields(payload, fields, "Bootstrap reconciliation", INVALID_OUTPUT_CODE);
-  assertStructuredResult(payload);
   if (
+    !isRecord(payload) ||
     !["RESOLVED", "DISAGREEMENT", "PRODUCT_DECISION_REQUIRED"].includes(
       payload.status,
     )
   ) {
-    throw outputError("Worker returned an invalid reconciliation status.");
+    throw outputError(
+      "Worker returned an invalid reconciliation status.",
+      outputConstraint("status", "supported-status"),
+    );
   }
+  assertStructuredResult(
+    payload,
+    outputConstraint("result", "maximum-256-kibibytes"),
+  );
+  assertExactOutputFields(payload, fields);
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
     if (
       payload.summary !== "" ||
       payload.disagreement !== "" ||
       payload.reason !== ""
     ) {
-      throw outputError("Product decision contains inapplicable fields.");
+      throw outputError(
+        "Product decision contains inapplicable fields.",
+        outputConstraint("status", "status-field-consistency"),
+      );
     }
     return Object.freeze({
       status: payload.status,
@@ -636,7 +757,10 @@ export function normalizeReconciliationResult(payload) {
       payload.reason !== "" ||
       !emptyDecision(payload)
     ) {
-      throw outputError("Resolved reconciliation contains inapplicable fields.");
+      throw outputError(
+        "Resolved reconciliation contains inapplicable fields.",
+        outputConstraint("status", "status-field-consistency"),
+      );
     }
     return Object.freeze({
       status: payload.status,
@@ -644,6 +768,7 @@ export function normalizeReconciliationResult(payload) {
         payload.summary,
         "resolved bootstrap summary",
         INVALID_OUTPUT_CODE,
+        outputConstraint("summary", "concise-markdown-up-to-20000-characters"),
       ),
     });
   }
@@ -654,7 +779,10 @@ export function normalizeReconciliationResult(payload) {
     payload.whyBlocked !== "" ||
     !emptyArray(payload.options)
   ) {
-    throw outputError("Bootstrap disagreement contains inapplicable fields.");
+    throw outputError(
+      "Bootstrap disagreement contains inapplicable fields.",
+      outputConstraint("status", "status-field-consistency"),
+    );
   }
   return Object.freeze({
     status: payload.status,
@@ -663,10 +791,15 @@ export function normalizeReconciliationResult(payload) {
         payload.disagreement,
         "bootstrap disagreement",
         INVALID_OUTPUT_CODE,
+        outputConstraint(
+          "disagreement",
+          "nonempty-plain-text-up-to-4000-characters",
+        ),
       ),
       evidence: normalizeTextList(
         payload.evidence,
         "bootstrap disagreement evidence",
+        { code: INVALID_OUTPUT_CODE, diagnosticField: "evidence" },
       ),
     }),
   });
@@ -683,9 +816,8 @@ export function normalizeBootstrapArbitration(payload) {
     "whyBlocked",
     "evidence",
   ];
-  assertExactFields(payload, fields, "Bootstrap arbitration", INVALID_OUTPUT_CODE);
-  assertStructuredResult(payload);
   if (
+    !isRecord(payload) ||
     ![
       "USE_WORKER",
       "USE_REVIEWER",
@@ -693,19 +825,34 @@ export function normalizeBootstrapArbitration(payload) {
       "PRODUCT_DECISION_REQUIRED",
     ].includes(payload.direction)
   ) {
-    throw outputError("Arbiter returned an invalid bootstrap direction.");
+    throw outputError(
+      "Arbiter returned an invalid bootstrap direction.",
+      outputConstraint("direction", "supported-direction"),
+    );
   }
+  assertStructuredResult(
+    payload,
+    outputConstraint("result", "maximum-256-kibibytes"),
+  );
+  assertExactOutputFields(payload, fields);
   const rationale = normalizeText(
     payload.rationale,
     "bootstrap arbitration rationale",
     INVALID_OUTPUT_CODE,
+    outputConstraint(
+      "rationale",
+      "nonempty-plain-text-up-to-4000-characters",
+    ),
   );
   if (payload.direction === "PRODUCT_DECISION_REQUIRED") {
     if (
       payload.summary !== "" ||
       payload.reason !== ""
     ) {
-      throw outputError("Product decision contains inapplicable fields.");
+      throw outputError(
+        "Product decision contains inapplicable fields.",
+        outputConstraint("direction", "direction-field-consistency"),
+      );
     }
     return Object.freeze({
       direction: payload.direction,
@@ -714,7 +861,10 @@ export function normalizeBootstrapArbitration(payload) {
     });
   }
   if (payload.reason !== "" || !emptyDecision(payload)) {
-    throw outputError("Bootstrap arbitration contains inapplicable fields.");
+    throw outputError(
+      "Bootstrap arbitration contains inapplicable fields.",
+      outputConstraint("direction", "direction-field-consistency"),
+    );
   }
   return Object.freeze({
     direction: payload.direction,
@@ -723,6 +873,7 @@ export function normalizeBootstrapArbitration(payload) {
       payload.summary,
       "arbitrated bootstrap summary",
       INVALID_OUTPUT_CODE,
+      outputConstraint("summary", "concise-markdown-up-to-20000-characters"),
     ),
   });
 }
@@ -743,7 +894,7 @@ function normalizeRelativePath(value, name, code = INVALID_OUTPUT_CODE) {
   return path;
 }
 
-function normalizeExactCommand(value, name, code) {
+function normalizeExactCommand(value, name, code, diagnostic) {
   if (
     typeof value !== "string" ||
     value.length === 0 ||
@@ -751,18 +902,23 @@ function normalizeExactCommand(value, name, code) {
     value.trim() !== value ||
     /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(value)
   ) {
-    throw workflowError(`${name} must be an exact single-line command.`, code);
+    throw workflowError(
+      `${name} must be an exact single-line command.`,
+      code,
+      diagnostic,
+    );
   }
   return value;
 }
 
-function normalizeValidationInfrastructurePath(value, name, code) {
+function normalizeValidationInfrastructurePath(value, name, code, diagnostic) {
   if (
     typeof value !== "string" ||
     value.length === 0 ||
     value.length > MAX_TEXT_LENGTH ||
     value.trim() !== value ||
     value.includes("\\") ||
+    value.endsWith("/") ||
     /^[a-zA-Z]:\//u.test(value) ||
     /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(value) ||
     posix.isAbsolute(value) ||
@@ -772,7 +928,11 @@ function normalizeValidationInfrastructurePath(value, name, code) {
     value.startsWith(".git/") ||
     value.split("/").some((part) => part === "..")
   ) {
-    throw workflowError(`${name} must be an exact repository-relative path.`, code);
+    throw workflowError(
+      `${name} must be an exact repository-relative path.`,
+      code,
+      diagnostic,
+    );
   }
   return value;
 }
@@ -787,12 +947,32 @@ function normalizeRequiredChecks(
     (!allowEmpty && value.length === 0) ||
     value.length > maxItems
   ) {
-    throw workflowError("Required-check inventory is invalid.", code);
+    throw workflowError(
+      "Required-check inventory is invalid.",
+      code,
+      outputConstraint(
+        "requiredChecks",
+        allowEmpty
+          ? `array-up-to-${maxItems}-items`
+          : `nonempty-array-up-to-${maxItems}-items`,
+      ),
+    );
   }
   const checks = Object.freeze(
-    value.map((check) => {
-      if (!isRecord(check) || !REQUIRED_CHECK_ID_PATTERN.test(check.id)) {
-        throw workflowError("Required check has an invalid ID.", code);
+    value.map((check, index) => {
+      if (!hasExactFields(check, REQUIRED_CHECK_FIELDS)) {
+        throw workflowError(
+          "Required check has an invalid field set.",
+          code,
+          outputConstraint(`requiredChecks[${index}]`, "exact-field-set"),
+        );
+      }
+      if (!REQUIRED_CHECK_ID_PATTERN.test(check.id)) {
+        throw workflowError(
+          "Required check has an invalid ID.",
+          code,
+          outputConstraint(`requiredChecks[${index}].id`, "required-check-id"),
+        );
       }
       return Object.freeze({
         id: check.id,
@@ -800,6 +980,10 @@ function normalizeRequiredChecks(
           check.command,
           `required check ${check.id} command`,
           code,
+          outputConstraint(
+            `requiredChecks[${index}].command`,
+            "exact-single-line-command-up-to-4000-characters",
+          ),
         ),
       });
     }),
@@ -808,7 +992,11 @@ function normalizeRequiredChecks(
     new Set(checks.map(({ id }) => id)).size !== checks.length ||
     new Set(checks.map(({ command }) => command)).size !== checks.length
   ) {
-    throw workflowError("Required checks must have unique IDs and commands.", code);
+    throw workflowError(
+      "Required checks must have unique IDs and commands.",
+      code,
+      outputConstraint("requiredChecks", "unique-ids-and-commands"),
+    );
   }
   return checks;
 }
@@ -819,7 +1007,14 @@ function normalizeValidationInfrastructure(
   { maxItems = MAX_VALIDATION_ITEMS } = {},
 ) {
   if (!Array.isArray(value) || value.length > maxItems) {
-    throw workflowError("Validation infrastructure is invalid.", code);
+    throw workflowError(
+      "Validation infrastructure is invalid.",
+      code,
+      outputConstraint(
+        "validationInfrastructure",
+        `array-up-to-${maxItems}-items`,
+      ),
+    );
   }
   const paths = Object.freeze(
     value.map((path, index) =>
@@ -827,11 +1022,19 @@ function normalizeValidationInfrastructure(
         path,
         `validation infrastructure[${index}]`,
         code,
+        outputConstraint(
+          `validationInfrastructure[${index}]`,
+          "exact-repository-relative-path-up-to-4000-characters",
+        ),
       ),
     ),
   );
   if (new Set(paths).size !== paths.length) {
-    throw workflowError("Validation infrastructure paths must be unique.", code);
+    throw workflowError(
+      "Validation infrastructure paths must be unique.",
+      code,
+      outputConstraint("validationInfrastructure", "unique-paths"),
+    );
   }
   return paths;
 }
@@ -1675,6 +1878,49 @@ function normalizeDisagreement(value) {
   });
 }
 
+function normalizeBootstrapCorrection(correction) {
+  if (
+    !hasExactFields(correction, BOOTSTRAP_CORRECTION_FIELDS) ||
+    correction.attempt !== 1
+  ) {
+    throw workflowError("Polishing bootstrap correction is invalid.");
+  }
+  const diagnostic = Object.fromEntries(
+    OUTPUT_DIAGNOSTIC_FIELDS.map((field) => [field, correction[field]]),
+  );
+  const validContext =
+    (correction.contract === "bootstrap" &&
+      ["worker", "reviewer"].includes(correction.role)) ||
+    (correction.contract === "bootstrap-reconciliation" &&
+      correction.role === "worker") ||
+    (correction.contract === "bootstrap-arbitration" &&
+      correction.role === "arbiter");
+  if (
+    !isOutputDiagnostic(diagnostic) ||
+    !["bootstrap", "validation-migration"].includes(correction.phase) ||
+    !validContext
+  ) {
+    throw workflowError("Polishing bootstrap correction is invalid.");
+  }
+  return correction;
+}
+
+function normalizeBootstrapCorrections(value) {
+  if (!Array.isArray(value) || value.length > MAX_ITEMS) {
+    throw workflowError("Polishing bootstrap corrections are invalid.");
+  }
+  const contexts = new Set();
+  for (const correction of value) {
+    normalizeBootstrapCorrection(correction);
+    const context = `${correction.role}\0${correction.phase}\0${correction.contract}`;
+    if (contexts.has(context)) {
+      throw workflowError("Polishing bootstrap corrections must be unique.");
+    }
+    contexts.add(context);
+  }
+  return value;
+}
+
 function normalizePersistedFindings(value, name = "Polishing findings") {
   try {
     return normalizeReviewFindings(value, "ERR_INVALID_POLISHING_STATE");
@@ -2196,6 +2442,26 @@ export function normalizePipelineState(value) {
     "resolved summary",
   );
   const disagreement = normalizeDisagreement(value.bootstrapDisagreement);
+  const validationMigrationDisagreement = normalizeDisagreement(
+    value.validationMigrationDisagreement,
+  );
+  const bootstrapCorrections = normalizeBootstrapCorrections(
+    value.bootstrapCorrections,
+  );
+  const pendingBootstrapCorrection =
+    value.pendingBootstrapCorrection === null
+      ? null
+      : normalizeBootstrapCorrection(value.pendingBootstrapCorrection);
+  if (
+    pendingBootstrapCorrection !== null &&
+    !bootstrapCorrections.some((correction) =>
+      isDeepStrictEqual(correction, pendingBootstrapCorrection),
+    )
+  ) {
+    throw workflowError(
+      "Polishing pending bootstrap correction is inconsistent.",
+    );
+  }
   const polishSummary = normalizeOptionalSummary(
     value.polishSummary,
     "polishing summary",
@@ -2364,9 +2630,20 @@ export function normalizePipelineState(value) {
     value.validationMigrationPending &&
     (!value.preflightComplete ||
       resolvedSummary === null ||
-      ["CLARIFY", "BOOTSTRAP", "FAILED"].includes(value.workflowState))
+      ["CLARIFY", "BOOTSTRAP", "DONE"].includes(value.workflowState))
   ) {
     throw workflowError("Polishing validation migration is inapplicable.");
+  }
+  if (
+    (validationMigrationDisagreement !== null &&
+      (!value.validationMigrationPending ||
+        workerValidation === null ||
+        reviewerValidation === null)) ||
+    (pendingBootstrapCorrection?.phase === "validation-migration" &&
+      pendingBootstrapCorrection.contract === "bootstrap-arbitration" &&
+      validationMigrationDisagreement === null)
+  ) {
+    throw workflowError("Polishing validation migration checkpoint is invalid.");
   }
   const currentFindingIds = new Set(findings.map(({ id }) => id));
   const previousFindingIds = new Set(previousFindings.map(({ id }) => id));
@@ -2511,6 +2788,9 @@ export function normalizePipelineState(value) {
       resolvedSummary !== null ||
       disagreement !== null ||
       value.bootstrapArbitrationUsed ||
+      bootstrapCorrections.length !== 0 ||
+      pendingBootstrapCorrection !== null ||
+      validationMigrationDisagreement !== null ||
       hasWorkProgress)
   ) {
     throw workflowError("Polishing preflight state is inconsistent.");
@@ -2651,6 +2931,8 @@ export function createPolishingState({
     resolvedSummary: null,
     bootstrapDisagreement: null,
     bootstrapArbitrationUsed: false,
+    bootstrapCorrections: Object.freeze([]),
+    pendingBootstrapCorrection: null,
     polishSummary: null,
     finalizationResult: null,
     finalizedFingerprint: null,
@@ -2659,6 +2941,7 @@ export function createPolishingState({
     validationInfrastructureFingerprint: null,
     trustedValidation: normalizedTrustedValidation,
     validationMigrationPending: false,
+    validationMigrationDisagreement: null,
     reviewResult: null,
     reviewedFingerprint: null,
     findings: [],
@@ -2739,7 +3022,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "polishing" ||
-    run.pipelineStateVersion !== 3 ||
+    run.pipelineStateVersion !== 4 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -2860,6 +3143,26 @@ export function assertRun(run) {
         run.pause.reason.length === 0))
   ) {
     throw workflowError("Polishing pause state is invalid.");
+  }
+  const outputFailure =
+    state.workflowState === "FAILED" &&
+    run.pause?.reason === "internal_failure" &&
+    run.pause.code === INVALID_OUTPUT_CODE;
+  const hasOutputDiagnostic = Object.hasOwn(run.pause ?? {}, "diagnostic");
+  if (
+    (hasOutputDiagnostic &&
+      (!outputFailure ||
+        !hasExactFields(run.pause, OUTPUT_FAILURE_FIELDS) ||
+        !isOutputDiagnostic(run.pause.diagnostic))) ||
+    (outputFailure &&
+      !hasExactFields(
+        run.pause,
+        hasOutputDiagnostic
+          ? OUTPUT_FAILURE_FIELDS
+          : LEGACY_OUTPUT_FAILURE_FIELDS,
+      ))
+  ) {
+    throw workflowError("Polishing output diagnostic is invalid.");
   }
   if (state.workflowState === "WAITING_FOR_USER") {
     const expectedReason = EDIT_PAUSE_REASONS[state.pendingEdit?.action];

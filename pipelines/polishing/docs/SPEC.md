@@ -254,6 +254,19 @@ each accepted inventory. Agents receive only its alias, exact inventory
 command, and deterministic identity; they never receive authority to execute
 the persisted vector outside their ordinary turn sandbox.
 
+Before accepting either role's bootstrap or validation-migration inventory,
+the root Git boundary requires each proposed infrastructure path to identify an
+existing regular file by its exact canonical repository-relative path. Missing
+files, directories, symlinks, and paths traversing a symlink are field-specific
+contract violations. Every producing role, bootstrap or validation-migration
+phase, and bootstrap contract receives at most one read-only correction. The
+runner persists only attempt `1` and the bounded role, phase, contract, field,
+and constraint diagnostic before that turn. A valid replacement clears the
+pending copy; resume reconstructs an interrupted correction from durable state;
+a repeated invalid result fails closed. Rejected structured values, provider
+text, prompts, commands, transcripts, credentials, and chain-of-thought are
+never retained.
+
 ## Workflow
 
 The explicit persisted states are:
@@ -441,7 +454,7 @@ continue to use the existing resume validation. A read-only repository mutation
 instead instructs the user to abandon the contaminated run and start fresh from
 an uncontaminated worktree. `environment_blocked` retains why validation is
 blocked and the precise `POLISH`, `FINALIZE`, or `RESOLVE_FINDINGS` retry
-checkpoint. This read-only projection leaves pipeline state version 3 unchanged.
+checkpoint. This read-only projection leaves pipeline state version 4 unchanged.
 
 Each transition is a complete write-ahead event appended and synchronized
 before atomic state replacement. `progress.md` is derived public activity.
@@ -466,7 +479,7 @@ Recovery accepts only an incomplete final journal fragment, advances lagging
 state from complete events, and never depends on a native Codex or Claude
 session surviving interruption.
 
-Claude read-only recovery uses the same pipeline state version 3 and common run
+Claude read-only recovery uses the same pipeline state version 4 and common run
 envelope. A valid but otherwise unclassified read-only result or process failure
 may pause only after the read-only mutation guard succeeds. Resume rebuilds the
 complete role request from the persisted inputs and checkpoint. No denied tool
@@ -501,6 +514,17 @@ remains provisional until that checkpoint runs. Retained `BLOCKED` and
 `NOT_RUN` entries in paused or immutable failed evidence become `FAIL` without
 losing their bounded diagnostics. Immutable `DONE` and `FAILED` evidence is
 shape-upgraded without replaying workspace work.
+
+Pipeline state version 4 adds the bounded bootstrap-correction ledger and
+pending diagnostic. Its version-3 migration initializes them empty without
+changing accepted context, validation evidence, workspace content, or workflow
+position. A correction is unique by producing role, bootstrap or
+validation-migration phase, and contract; only its attempt and finite
+field/constraint diagnostic are durable. Resume reconstructs a pending
+read-only correction, acceptance clears it, and a repeated invalid result is
+terminal. When validation migration requires arbitration, its accepted bounded
+disagreement is persisted before the Arbiter turn, resumed directly after an
+interruption, and cleared atomically with successful migration completion.
 
 MCP uses the common STDIO tools, persists idempotency intents before mutation
 and receipts before returning, and launches detached continuation under the
@@ -540,6 +564,10 @@ Pipeline tests use fake adapters and temporary repositories. Cover at least:
 - stable runner derivation across conflicting role IDs, cross-role repeated
   commands and paths, role-only entries, trusted commands, and attempted
   reconciliation inventory invention;
+- duplicate IDs or commands, multiline commands, missing files, directories,
+  symlink aliases, successful bounded correction, interrupted reconstruction,
+  validation-migration correction including interrupted Arbiter recovery, and
+  repeated invalid bootstrap output;
 - read-only mutation plus ref, remote, and identity guards;
 - durable transitions, interrupted turns, and journal recovery;
 - blocked provider activity plus lease-aware running, interrupted, and idle MCP

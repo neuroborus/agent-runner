@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import {
   BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
+  BOOTSTRAP_CORRECTION_INSTRUCTIONS,
   BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
@@ -43,6 +44,7 @@ import {
   disputeHistoryCapacity,
   disputeHistoryFits,
   INVALID_POLISHING_INPUT_CODE,
+  isOutputDiagnostic,
   isRecord,
   MAX_DIAGNOSTIC_ITEMS,
   MAX_CLARIFICATION_ROUNDS,
@@ -90,6 +92,11 @@ const SAFE_PREFLIGHT_PAUSE_CODES = new Set([
   "ERR_UNSUPPORTED_GIT_PATH",
   "ERR_GIT_SNAPSHOT_RACE",
 ]);
+const INVALID_BOOTSTRAP_PATH_CODES = new Set([
+  "ERR_UNSAFE_REPOSITORY_PATH",
+  "ERR_UNSUPPORTED_GIT_PATH",
+]);
+const STRUCTURED_OUTPUT_FAILURE_CLASS = "structured-output";
 
 function deriveValidationInventory(workerValidation, reviewerValidation) {
   const commands = [];
@@ -165,6 +172,171 @@ function contextKeyFor(role, checkpoint, context) {
   return sha256(`${role}\0${checkpoint}\0${context}`);
 }
 
+function outputDiagnostic(cause, context) {
+  const field = cause?.diagnostic?.field;
+  const constraint = cause?.diagnostic?.constraint;
+  const candidate = Object.freeze({ ...context, field, constraint });
+  return isOutputDiagnostic(candidate)
+    ? candidate
+    : Object.freeze({
+        ...context,
+        field: "result",
+        constraint: "semantic-contract",
+      });
+}
+
+function bootstrapOutputContext(role, phase = "bootstrap") {
+  return Object.freeze({ role, phase, contract: "bootstrap" });
+}
+
+function reconciliationOutputContext(phase = "bootstrap") {
+  return Object.freeze({
+    role: "worker",
+    phase,
+    contract: "bootstrap-reconciliation",
+  });
+}
+
+function arbitrationOutputContext(phase = "bootstrap") {
+  return Object.freeze({
+    role: "arbiter",
+    phase,
+    contract: "bootstrap-arbitration",
+  });
+}
+
+function bootstrapOutputContextFor(role, schema, checkpoint) {
+  const phase =
+    checkpoint === "validation-migration" ? checkpoint : "bootstrap";
+  if (schema === BOOTSTRAP_SCHEMA) {
+    return bootstrapOutputContext(role, phase);
+  }
+  if (schema === BOOTSTRAP_RECONCILIATION_SCHEMA) {
+    return reconciliationOutputContext(phase);
+  }
+  if (schema === BOOTSTRAP_ARBITRATION_SCHEMA) {
+    return arbitrationOutputContext(phase);
+  }
+  return undefined;
+}
+
+function invalidRoleOutput(message, context, diagnostic) {
+  return new PolishingWorkflowError(message, {
+    code: "ERR_INVALID_POLISHING_OUTPUT",
+    diagnostic: outputDiagnostic({ diagnostic }, context),
+  });
+}
+
+function persistedOutputDiagnostic(value) {
+  return isOutputDiagnostic(value)
+    ? Object.freeze({ ...value })
+    : undefined;
+}
+
+function normalizeRoleOutput(normalize, output, context) {
+  try {
+    if (!isRecord(output)) {
+      throw invalidRoleOutput(
+        "Structured bootstrap role result must be an object.",
+        context,
+        { field: "result", constraint: "single-object" },
+      );
+    }
+    return normalize(output);
+  } catch (cause) {
+    if (cause?.code !== "ERR_INVALID_POLISHING_OUTPUT") {
+      throw cause;
+    }
+    throw new PolishingWorkflowError(
+      "Structured bootstrap role result violates its contract.",
+      {
+        code: cause.code,
+        diagnostic: outputDiagnostic(cause, context),
+      },
+    );
+  }
+}
+
+function normalizeBootstrapRoleOutput(output, role, phase = "bootstrap") {
+  return normalizeRoleOutput(
+    (value) => normalizeBootstrapResult(value, role),
+    output,
+    bootstrapOutputContext(role, phase),
+  );
+}
+
+function normalizeBootstrapReconciliationOutput(
+  output,
+  phase = "bootstrap",
+) {
+  return normalizeRoleOutput(
+    normalizeReconciliationResult,
+    output,
+    reconciliationOutputContext(phase),
+  );
+}
+
+function normalizeBootstrapArbitrationOutput(output, phase = "bootstrap") {
+  return normalizeRoleOutput(
+    normalizeBootstrapArbitration,
+    output,
+    arbitrationOutputContext(phase),
+  );
+}
+
+function normalizeValidationMigrationRoleOutput(output, role) {
+  const result = normalizeBootstrapRoleOutput(
+    output,
+    role,
+    "validation-migration",
+  );
+  if (result.status !== "READY") {
+    throw invalidRoleOutput(
+      "Validation migration requires a ready inventory.",
+      bootstrapOutputContext(role, "validation-migration"),
+      { field: "status", constraint: "validation-migration-status" },
+    );
+  }
+  return result;
+}
+
+function normalizeValidationMigrationReconciliationOutput(output) {
+  const result = normalizeBootstrapReconciliationOutput(
+    output,
+    "validation-migration",
+  );
+  if (!["RESOLVED", "DISAGREEMENT"].includes(result.status)) {
+    throw invalidRoleOutput(
+      "Validation migration requires an inventory resolution.",
+      reconciliationOutputContext("validation-migration"),
+      { field: "status", constraint: "validation-migration-status" },
+    );
+  }
+  return result;
+}
+
+function normalizeValidationMigrationArbitrationOutput(output) {
+  const result = normalizeBootstrapArbitrationOutput(
+    output,
+    "validation-migration",
+  );
+  if (
+    !["USE_WORKER", "USE_REVIEWER", "SYNTHESIZE"].includes(
+      result.direction,
+    )
+  ) {
+    throw invalidRoleOutput(
+      "Validation migration requires an inventory direction.",
+      arbitrationOutputContext("validation-migration"),
+      {
+        field: "direction",
+        constraint: "validation-migration-direction",
+      },
+    );
+  }
+  return result;
+}
+
 export async function runPolishing({ action, run, runtime, settings }) {
   assertRun(run);
   assertRuntime(runtime);
@@ -238,10 +410,12 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
             resolvedSummary: null,
             bootstrapDisagreement: null,
             bootstrapArbitrationUsed: false,
+            pendingBootstrapCorrection: null,
             requiredChecks: null,
             validationInfrastructure: null,
             validationInfrastructureFingerprint: null,
             validationMigrationPending: false,
+            validationMigrationDisagreement: null,
           }
         : {}),
       polishSummary: null,
@@ -310,16 +484,28 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
 
   async function fail(cause) {
     const code = diagnosticCode(cause, "ERR_POLISHING_FAILED");
+    const diagnostic =
+      cause?.code === "ERR_INVALID_POLISHING_OUTPUT"
+        ? persistedOutputDiagnostic(cause.diagnostic)
+        : undefined;
+    const message =
+      diagnostic === undefined
+        ? `Polishing failed: ${code}.`
+        : `Polishing failed: ${code} (${diagnostic.role}/${diagnostic.phase} ${diagnostic.field}: ${diagnostic.constraint}).`;
     try {
       await transition(
         { ...state(), workflowState: "FAILED" },
         {
-          pause: { reason: "internal_failure", code },
+          pause: {
+            reason: "internal_failure",
+            code,
+            ...(diagnostic === undefined ? {} : { diagnostic }),
+          },
           publicActivity: activity(
             "runner",
             "polishing",
             "failed",
-            `Polishing failed: ${code}.`,
+            message,
           ),
         },
       );
@@ -548,6 +734,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       reportWorkspaceChange = false,
     } = {},
   ) {
+    const outputContext = bootstrapOutputContextFor(role, schema, checkpoint);
     await ensureRoleCapabilities(role);
     const evidence = await readCurrentInputs();
     if (evidence === null || !(await verifyPersistedRepository())) {
@@ -699,13 +886,27 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       assertRun(currentRun);
     }
     if (agentError !== undefined) {
+      if (
+        outputContext !== undefined &&
+        agentError?.failureClass === STRUCTURED_OUTPUT_FAILURE_CLASS
+      ) {
+        throw invalidRoleOutput(
+          `${role} returned invalid structured output.`,
+          outputContext,
+        );
+      }
       throw agentError;
     }
     if (!isRecord(response) || !isRecord(response.structured)) {
-      throw workflowError(
-        `${role} returned no structured result.`,
-        "ERR_INVALID_POLISHING_OUTPUT",
-      );
+      throw outputContext === undefined
+        ? workflowError(
+            `${role} returned no structured result.`,
+            "ERR_INVALID_POLISHING_OUTPUT",
+          )
+        : invalidRoleOutput(
+            `${role} returned no structured result.`,
+            outputContext,
+          );
     }
     await recordSession(
       role,
@@ -939,6 +1140,159 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     });
   }
 
+  function correctionMatchesContext(correction, context) {
+    return (
+      correction.role === context.role &&
+      correction.phase === context.phase &&
+      correction.contract === context.contract
+    );
+  }
+
+  function bootstrapCorrectionAttempt(context) {
+    return state().bootstrapCorrections.find((correction) =>
+      correctionMatchesContext(correction, context),
+    );
+  }
+
+  function pendingBootstrapCorrection(context) {
+    const correction = state().pendingBootstrapCorrection;
+    return correction !== null && correctionMatchesContext(correction, context)
+      ? correction
+      : undefined;
+  }
+
+  async function validateBootstrapInventory(result, context) {
+    if (!Array.isArray(result.validationInfrastructure)) {
+      return result;
+    }
+    for (const [index, path] of result.validationInfrastructure.entries()) {
+      let inspection;
+      try {
+        inspection = await runtime.git.inspectPath({
+          path,
+          projectPath: state().repositoryBaseline.projectPath,
+        });
+      } catch (cause) {
+        if (!INVALID_BOOTSTRAP_PATH_CODES.has(cause?.code)) {
+          throw cause;
+        }
+        throw invalidRoleOutput(
+          "Bootstrap validation infrastructure path is unsafe.",
+          context,
+          {
+            field: `validationInfrastructure[${index}]`,
+            constraint: "existing-canonical-repository-file",
+          },
+        );
+      }
+      if (
+        !isRecord(inspection) ||
+        inspection.exists !== true ||
+        inspection.kind !== "file" ||
+        inspection.relativePath !== path
+      ) {
+        throw invalidRoleOutput(
+          "Bootstrap validation infrastructure path is not a canonical repository file.",
+          context,
+          {
+            field: `validationInfrastructure[${index}]`,
+            constraint: "existing-canonical-repository-file",
+          },
+        );
+      }
+    }
+    if (
+      state().trustedValidation.commands.some(
+        ({ command }) =>
+          !result.requiredChecks.some(
+            (required) => required.command === command,
+          ),
+      )
+    ) {
+      throw invalidRoleOutput(
+        "Bootstrap validation inventory omits a runner-trusted command.",
+        context,
+        {
+          field: "requiredChecks",
+          constraint: "includes-runner-trusted-commands",
+        },
+      );
+    }
+    return result;
+  }
+
+  async function runBootstrapContract({
+    role,
+    schema,
+    checkpoint,
+    recoveryContext = "",
+    buildPrompt,
+    normalize,
+    deferCorrectionClear = false,
+  }) {
+    const context = bootstrapOutputContextFor(role, schema, checkpoint);
+    while (true) {
+      const correction = pendingBootstrapCorrection(context);
+      try {
+        const output = await runRole(
+          role,
+          schema,
+          (evidence) => {
+            const prompt = buildPrompt(evidence);
+            return correction === undefined
+              ? prompt
+              : `${prompt}\n\n${BOOTSTRAP_CORRECTION_INSTRUCTIONS}\n\nCorrection diagnostic:\n${JSON.stringify(correction, null, 2)}`;
+          },
+          { checkpoint, recoveryContext },
+        );
+        if (output === null) {
+          return null;
+        }
+        const result = await validateBootstrapInventory(
+          normalize(output),
+          context,
+        );
+        if (correction !== undefined && !deferCorrectionClear) {
+          await transition({
+            ...state(),
+            pendingBootstrapCorrection: null,
+          });
+        }
+        return result;
+      } catch (cause) {
+        if (
+          cause?.code !== "ERR_INVALID_POLISHING_OUTPUT" ||
+          !isOutputDiagnostic(cause.diagnostic)
+        ) {
+          throw cause;
+        }
+        if (bootstrapCorrectionAttempt(context) !== undefined) {
+          throw cause;
+        }
+        const diagnostic = outputDiagnostic(cause, context);
+        const correction = { attempt: 1, ...diagnostic };
+        await transition(
+          {
+            ...state(),
+            bootstrapCorrections: [
+              ...state().bootstrapCorrections,
+              correction,
+            ],
+            pendingBootstrapCorrection: correction,
+          },
+          {
+            publicActivity: activity(
+              context.role,
+              context.phase,
+              "bootstrap-correction",
+              `${context.role} must correct ${context.contract} field ${diagnostic.field}.`,
+            ),
+          },
+        );
+      }
+    }
+  }
+
   async function establishedValidation() {
     const result = deriveValidationInventory(
       state().workerValidation,
@@ -1009,10 +1363,12 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
   }
 
   async function rediscoverValidationRole(role) {
-    const output = await runRole(
+    const result = await runBootstrapContract({
       role,
-      BOOTSTRAP_SCHEMA,
-      (evidence) => `${BOOTSTRAP_INSTRUCTIONS}
+      schema: BOOTSTRAP_SCHEMA,
+      checkpoint: "validation-migration",
+      recoveryContext: workContext({ includePolishSummary: true }),
+      buildPrompt: (evidence) => `${BOOTSTRAP_INSTRUCTIONS}
 
 This is a versioned-state migration checkpoint. Treat every persisted legacy check, path, fingerprint, and aggregate validation result as provisional. Independently rediscover the complete current validation inventory from repository evidence before work can advance.
 
@@ -1023,22 +1379,12 @@ ${trustedValidationInstructions()}
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
 ${evidence}`,
-      {
-        checkpoint: "validation-migration",
-        recoveryContext: workContext({ includePolishSummary: true }),
-      },
-    );
-    if (output === null) {
+      normalize: (output) =>
+        normalizeValidationMigrationRoleOutput(output, role),
+    });
+    if (result === null) {
       return false;
     }
-    const result = normalizeBootstrapResult(output, role);
-    if (result.status === "PRODUCT_DECISION_REQUIRED") {
-      throw workflowError(
-        "Validation migration cannot require a product decision.",
-        "ERR_INVALID_POLISHING_OUTPUT",
-      );
-    }
-    assertTrustedValidationInventory(result);
     await transition(
       {
         ...state(),
@@ -1065,6 +1411,8 @@ ${evidence}`,
       {
         ...state(),
         ...validation,
+        pendingBootstrapCorrection: null,
+        validationMigrationDisagreement: null,
       },
       {
         publicActivity: activity(
@@ -1079,10 +1427,12 @@ ${evidence}`,
   }
 
   async function reconcileValidationMigration() {
-    const output = await runRole(
-      "worker",
-      BOOTSTRAP_RECONCILIATION_SCHEMA,
-      (evidence) => `${BOOTSTRAP_RECONCILIATION_INSTRUCTIONS}
+    const result = await runBootstrapContract({
+      role: "worker",
+      schema: BOOTSTRAP_RECONCILIATION_SCHEMA,
+      checkpoint: "validation-migration",
+      recoveryContext: workContext({ includePolishSummary: true }),
+      buildPrompt: (evidence) => `${BOOTSTRAP_RECONCILIATION_INSTRUCTIONS}
 
 Reconcile only the independently rediscovered validation requirements. Legacy validation evidence is provisional and must not be selected.
 
@@ -1101,28 +1451,39 @@ ${JSON.stringify(
   null,
   2,
 )}`,
-      {
-        checkpoint: "validation-migration",
-        recoveryContext: workContext({ includePolishSummary: true }),
-      },
-    );
-    if (output === null) {
+      normalize: normalizeValidationMigrationReconciliationOutput,
+    });
+    if (result === null) {
       return false;
-    }
-    const result = normalizeReconciliationResult(output);
-    if (result.status === "PRODUCT_DECISION_REQUIRED") {
-      throw workflowError(
-        "Validation migration cannot require a product decision.",
-        "ERR_INVALID_POLISHING_OUTPUT",
-      );
     }
     if (result.status === "RESOLVED") {
       return completeValidationMigration("worker");
     }
-    const arbitrationOutput = await runRole(
-      "arbiter",
-      BOOTSTRAP_ARBITRATION_SCHEMA,
-      (evidence) => `${BOOTSTRAP_ARBITRATION_INSTRUCTIONS}
+    await transition(
+      {
+        ...state(),
+        validationMigrationDisagreement: result.disagreement,
+      },
+      {
+        publicActivity: activity(
+          "worker",
+          "migration",
+          "validation-disagreement",
+          "Validation migration disagreement requires arbitration.",
+        ),
+      },
+    );
+    return true;
+  }
+
+  async function arbitrateValidationMigration() {
+    const arbitration = await runBootstrapContract({
+      role: "arbiter",
+      schema: BOOTSTRAP_ARBITRATION_SCHEMA,
+      checkpoint: "validation-migration",
+      recoveryContext: workContext({ includePolishSummary: true }),
+      deferCorrectionClear: true,
+      buildPrompt: (evidence) => `${BOOTSTRAP_ARBITRATION_INSTRUCTIONS}
 
 Resolve only this validation-inventory migration disagreement. Legacy validation evidence is provisional and must not be selected.
 
@@ -1133,7 +1494,7 @@ ${PRODUCT_DECISION_INSTRUCTIONS}
 ${evidence}
 
 Recorded disagreement:
-${JSON.stringify(result.disagreement, null, 2)}
+${JSON.stringify(state().validationMigrationDisagreement, null, 2)}
 
 Independent validation evidence:
 ${JSON.stringify(
@@ -1144,20 +1505,10 @@ ${JSON.stringify(
   null,
   2,
 )}`,
-      {
-        checkpoint: "validation-migration",
-        recoveryContext: workContext({ includePolishSummary: true }),
-      },
-    );
-    if (arbitrationOutput === null) {
+      normalize: normalizeValidationMigrationArbitrationOutput,
+    });
+    if (arbitration === null) {
       return false;
-    }
-    const arbitration = normalizeBootstrapArbitration(arbitrationOutput);
-    if (arbitration.direction === "PRODUCT_DECISION_REQUIRED") {
-      throw workflowError(
-        "Validation migration cannot require a product decision.",
-        "ERR_INVALID_POLISHING_OUTPUT",
-      );
     }
     return completeValidationMigration("arbiter");
   }
@@ -1168,6 +1519,9 @@ ${JSON.stringify(
     }
     if (state().reviewerValidation === null) {
       return rediscoverValidationRole("reviewer");
+    }
+    if (state().validationMigrationDisagreement !== null) {
+      return arbitrateValidationMigration();
     }
     return reconcileValidationMigration();
   }
@@ -1690,10 +2044,12 @@ ${JSON.stringify(
   }
 
   async function bootstrapRole(role) {
-    const output = await runRole(
+    const result = await runBootstrapContract({
       role,
-      BOOTSTRAP_SCHEMA,
-      (evidence) => `${BOOTSTRAP_INSTRUCTIONS}${
+      schema: BOOTSTRAP_SCHEMA,
+      checkpoint: "bootstrap",
+      recoveryContext: workContext(),
+      buildPrompt: (evidence) => `${BOOTSTRAP_INSTRUCTIONS}${
         role === "reviewer"
           ? "\nAs Reviewer, also state what you intend to verify."
           : ""
@@ -1706,16 +2062,14 @@ ${trustedValidationInstructions()}
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
 ${evidence}`,
-      { checkpoint: "bootstrap", recoveryContext: workContext() },
-    );
-    if (output === null) {
+      normalize: (output) => normalizeBootstrapRoleOutput(output, role),
+    });
+    if (result === null) {
       return false;
     }
-    const result = normalizeBootstrapResult(output, role);
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "BOOTSTRAP");
     }
-    assertTrustedValidationInventory(result);
     await writeContext(`context/${role}.md`, result.summary);
     await transition(
       {
@@ -1739,10 +2093,12 @@ ${evidence}`,
   }
 
   async function reconcileBootstrap() {
-    const output = await runRole(
-      "worker",
-      BOOTSTRAP_RECONCILIATION_SCHEMA,
-      (evidence) => `${BOOTSTRAP_RECONCILIATION_INSTRUCTIONS}
+    const result = await runBootstrapContract({
+      role: "worker",
+      schema: BOOTSTRAP_RECONCILIATION_SCHEMA,
+      checkpoint: "bootstrap",
+      recoveryContext: workContext(),
+      buildPrompt: (evidence) => `${BOOTSTRAP_RECONCILIATION_INSTRUCTIONS}
 
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
@@ -1755,12 +2111,11 @@ Reviewer bootstrap summary:
 ${state().reviewerSummary}
 
 The runner will derive validation inventories from the independently accepted role evidence.`,
-      { checkpoint: "bootstrap", recoveryContext: workContext() },
-    );
-    if (output === null) {
+      normalize: normalizeBootstrapReconciliationOutput,
+    });
+    if (result === null) {
       return false;
     }
-    const result = normalizeReconciliationResult(output);
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "BOOTSTRAP");
     }
@@ -1800,10 +2155,12 @@ The runner will derive validation inventories from the independently accepted ro
   }
 
   async function arbitrateBootstrap() {
-    const output = await runRole(
-      "arbiter",
-      BOOTSTRAP_ARBITRATION_SCHEMA,
-      (evidence) => `${BOOTSTRAP_ARBITRATION_INSTRUCTIONS}
+    const result = await runBootstrapContract({
+      role: "arbiter",
+      schema: BOOTSTRAP_ARBITRATION_SCHEMA,
+      checkpoint: "arbitration",
+      recoveryContext: workContext(),
+      buildPrompt: (evidence) => `${BOOTSTRAP_ARBITRATION_INSTRUCTIONS}
 
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
@@ -1819,15 +2176,11 @@ Recorded disagreement:
 ${JSON.stringify(state().bootstrapDisagreement, null, 2)}
 
 The runner will derive validation inventories from the independently accepted role evidence.`,
-      {
-        checkpoint: "arbitration",
-        recoveryContext: workContext(),
-      },
-    );
-    if (output === null) {
+      normalize: normalizeBootstrapArbitrationOutput,
+    });
+    if (result === null) {
       return false;
     }
-    const result = normalizeBootstrapArbitration(output);
     if (result.direction === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "BOOTSTRAP");
     }

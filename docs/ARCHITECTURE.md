@@ -452,6 +452,18 @@ Retained `BLOCKED` and `NOT_RUN` entries in paused or immutable failed evidence
 become `FAIL` without losing their bounded diagnostics. Immutable terminal
 evidence is shape-upgraded without replaying work.
 
+Polishing state version 4 adds its bounded bootstrap-correction ledger and
+pending one-shot diagnostic. Its version-3 migration initializes both without
+changing accepted bootstrap context, validation evidence, workspace content,
+or workflow position. As in plan execution, each producing role, bootstrap or
+validation-migration phase, and contract may consume one read-only correction;
+only attempt `1` and the bounded role, phase, contract, field, and constraint
+are durable. A valid replacement clears the pending copy, an interrupted turn
+reconstructs it from state, and a second invalid result fails closed without
+retaining rejected values or provider output. Validation migration also
+persists its accepted bounded disagreement before arbitration, resumes that
+checkpoint directly, and clears it when the migration completes.
+
 Common run-envelope version 3 adds `activeTurn`, either `null` or the current
 bounded `{ role, phase }`. Version-1 and version-2 runs project it as `null`
 without rewriting state or history; the next mutating continuation persists the
@@ -579,8 +591,8 @@ content, validation-infrastructure, ordered-command, and trusted-configuration
 fingerprints. This service does not broaden any agent turn's sandbox and
 introduces no daemon or shell DSL.
 
-Before plan execution accepts a producing role's bootstrap or legacy
-validation-migration inventory, the root Git boundary verifies every
+Before plan execution or polishing accepts a producing role's bootstrap or
+legacy validation-migration inventory, the root Git boundary verifies every
 validation-infrastructure entry is an existing regular file whose canonical
 repository-relative path exactly matches the proposed path. Missing files,
 directories, symlinks, and paths traversing a symlink are field-specific

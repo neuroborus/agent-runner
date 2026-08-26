@@ -22,6 +22,7 @@ import {
   createPolishingState,
   migratePolishingStateV1,
   migratePolishingStateV2,
+  migratePolishingStateV3,
   polishingPipeline,
   runPolishing,
 } from "../src/index.js";
@@ -112,6 +113,14 @@ function versionTwoState(state) {
   return legacy;
 }
 
+function versionThreeState(state) {
+  const legacy = { ...state };
+  delete legacy.bootstrapCorrections;
+  delete legacy.pendingBootstrapCorrection;
+  delete legacy.validationMigrationDisagreement;
+  return legacy;
+}
+
 function versionTwoFailedFinalizationState(
   state,
   { incompleteStatus, workflowState },
@@ -175,7 +184,8 @@ function versionTwoFailedFinalizationState(
 
 function migrateVersionOneState(state) {
   const versionTwo = migratePolishingStateV1({ pipelineState: state });
-  return migratePolishingStateV2({ pipelineState: versionTwo });
+  const versionThree = migratePolishingStateV2({ pipelineState: versionTwo });
+  return migratePolishingStateV3({ pipelineState: versionThree });
 }
 
 test("rejects incomplete or substituted finalization PASS evidence", () => {
@@ -329,6 +339,228 @@ test("derives one stable complete inventory from independent role evidence", asy
   ]);
 });
 
+test("corrects duplicate Worker bootstrap commands once without retaining them", async (t) => {
+  const rejectedCommand = "DO_NOT_PERSIST_DUPLICATE_COMMAND";
+  const fixture = await createFixture(t, {
+    worker: [
+      clarificationReady(),
+      {
+        ...bootstrapReady("Worker"),
+        requiredChecks: [
+          { id: "C1", command: rejectedCommand },
+          { id: "C2", command: rejectedCommand },
+        ],
+      },
+      bootstrapReady("Corrected Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationPassed(),
+    ],
+  });
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.deepEqual(completed.pipelineState.bootstrapCorrections, [
+    {
+      attempt: 1,
+      role: "worker",
+      phase: "bootstrap",
+      contract: "bootstrap",
+      field: "requiredChecks",
+      constraint: "unique-ids-and-commands",
+    },
+  ]);
+  assert.equal(completed.pipelineState.pendingBootstrapCorrection, null);
+  assert.match(fixture.calls.worker[2].prompt, /Correction diagnostic/u);
+  assert.doesNotMatch(JSON.stringify(completed), /DO_NOT_PERSIST/u);
+});
+
+test("corrects a multiline Reviewer bootstrap command once", async (t) => {
+  const fixture = await createFixture(t, {
+    reviewer: [
+      {
+        ...bootstrapReady("Reviewer"),
+        requiredChecks: [{ id: "C1", command: "npm test\nnpm run lint" }],
+      },
+      bootstrapReady("Corrected Reviewer"),
+      reviewApproved(),
+    ],
+  });
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.deepEqual(completed.pipelineState.bootstrapCorrections, [
+    {
+      attempt: 1,
+      role: "reviewer",
+      phase: "bootstrap",
+      contract: "bootstrap",
+      field: "requiredChecks[0].command",
+      constraint: "exact-single-line-command-up-to-4000-characters",
+    },
+  ]);
+  assert.match(fixture.calls.reviewer[1].prompt, /one read-only correction/u);
+});
+
+test("corrects missing and symlinked validation-infrastructure paths", async (t) => {
+  const cases = [
+    { name: "missing", invalidPath: "validation/missing.js" },
+    {
+      name: "symlink alias",
+      invalidPath: ".claude/skills/finalization/SKILL.md",
+      prepareProject: (projectPath) =>
+        symlink(".agents", join(projectPath, ".claude")),
+    },
+  ];
+
+  for (const testCase of cases) {
+    await t.test(testCase.name, async (t) => {
+      const fixture = await createFixture(t, {
+        prepareProject: testCase.prepareProject,
+        worker: [
+          clarificationReady(),
+          {
+            ...bootstrapReady("Worker"),
+            validationInfrastructure: [testCase.invalidPath],
+          },
+          bootstrapReady("Corrected Worker"),
+          reconciliationResolved(),
+          polishingCompleted(),
+          finalizationPassed(),
+        ],
+      });
+
+      const completed = await fixture.run();
+
+      assert.equal(completed.pipelineState.workflowState, "DONE");
+      assert.deepEqual(completed.pipelineState.bootstrapCorrections, [
+        {
+          attempt: 1,
+          role: "worker",
+          phase: "bootstrap",
+          contract: "bootstrap",
+          field: "validationInfrastructure[0]",
+          constraint: "existing-canonical-repository-file",
+        },
+      ]);
+    });
+  }
+});
+
+test("reconstructs a persisted bootstrap correction after interruption", async (t) => {
+  let interrupted = false;
+  const fixture = await createFixture(t, {
+    onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        request.prompt.includes("Make one read-only correction") &&
+        !interrupted
+      ) {
+        interrupted = true;
+        const error = new Error("Transient provider interruption.");
+        error.code = "ERR_TEST_PROVIDER_INTERRUPTED";
+        error.recoverable = true;
+        throw error;
+      }
+    },
+    worker: [
+      clarificationReady(),
+      {
+        ...bootstrapReady("Worker"),
+        requiredChecks: [
+          { id: "C1", command: "npm test" },
+          { id: "C2", command: "npm test" },
+        ],
+      },
+      bootstrapReady("Corrected Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationPassed(),
+    ],
+  });
+
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "backend_unavailable");
+  assert.equal(paused.pause.resumeState, "BOOTSTRAP");
+  assert.deepEqual(
+    paused.pipelineState.pendingBootstrapCorrection,
+    paused.pipelineState.bootstrapCorrections[0],
+  );
+
+  await fixture.recover();
+  const completed = await fixture.run();
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.pipelineState.pendingBootstrapCorrection, null);
+  assert.match(fixture.calls.worker[3].prompt, /Correction diagnostic/u);
+});
+
+test("fails closed after a repeated invalid bootstrap result", async (t) => {
+  const rejected = {
+    ...bootstrapReady("Worker"),
+    requiredChecks: [
+      { id: "C1", command: "npm test" },
+      { id: "C2", command: "npm test" },
+    ],
+  };
+  const fixture = await createFixture(t, {
+    worker: [clarificationReady(), rejected, rejected],
+  });
+
+  await assert.rejects(
+    fixture.run(),
+    (cause) => cause.code === "ERR_INVALID_POLISHING_OUTPUT",
+  );
+
+  assert.equal(fixture.currentRun.pipelineState.workflowState, "FAILED");
+  assert.deepEqual(fixture.currentRun.pause.diagnostic, {
+    role: "worker",
+    phase: "bootstrap",
+    contract: "bootstrap",
+    field: "requiredChecks",
+    constraint: "unique-ids-and-commands",
+  });
+  assert.equal(fixture.currentRun.pipelineState.bootstrapCorrections.length, 1);
+  assert.equal(fixture.calls.worker.length, 3);
+});
+
+test("corrects a classified structured-output failure without provider text", async (t) => {
+  const sensitiveMarker = "DO_NOT_PERSIST_PROVIDER_OUTPUT";
+  let rejected = false;
+  const fixture = await createFixture(t, {
+    onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        request.prompt.includes("concise bootstrap summary") &&
+        !rejected
+      ) {
+        rejected = true;
+        const error = new Error(sensitiveMarker);
+        error.failureClass = "structured-output";
+        error.nativeResponse = { message: sensitiveMarker };
+        error.stderr = sensitiveMarker;
+        throw error;
+      }
+    },
+  });
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.deepEqual(completed.pipelineState.bootstrapCorrections, [
+    {
+      attempt: 1,
+      role: "worker",
+      phase: "bootstrap",
+      contract: "bootstrap",
+      field: "result",
+      constraint: "semantic-contract",
+    },
+  ]);
+  assert.doesNotMatch(JSON.stringify(completed), /DO_NOT_PERSIST/u);
+});
+
 test("migrates version-1 polishing state to the fail-closed shape", () => {
   const legacy = versionOneState(createPolishingState());
   const migrated = migrateVersionOneState(legacy);
@@ -344,7 +576,8 @@ test("migrates version-2 state with empty trust and invalidates its active gate"
     ...completed.pipelineState,
     workflowState: "REVIEW",
   });
-  const migrated = migratePolishingStateV2({ pipelineState: legacy });
+  const versionThree = migratePolishingStateV2({ pipelineState: legacy });
+  const migrated = migratePolishingStateV3({ pipelineState: versionThree });
 
   assert.equal(migrated.workflowState, "FINALIZE");
   assert.equal(migrated.polishSummary, completed.pipelineState.polishSummary);
@@ -354,7 +587,38 @@ test("migrates version-2 state with empty trust and invalidates its active gate"
   assert.deepEqual(migrated.settings.trustedChecks, []);
   assert.deepEqual(migrated.trustedValidation.commands, []);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(polishingPipeline.stateVersion, 3);
+  assert.equal(polishingPipeline.stateVersion, 4);
+});
+
+test("migrates version-3 state with no consumed bootstrap corrections", () => {
+  const current = createPolishingState();
+  const migrated = migratePolishingStateV3({
+    pipelineState: versionThreeState(current),
+  });
+
+  assert.deepEqual(migrated.bootstrapCorrections, []);
+  assert.equal(migrated.pendingBootstrapCorrection, null);
+  assert.equal(migrated.validationMigrationDisagreement, null);
+  assert.doesNotThrow(() => normalizePipelineState(migrated));
+});
+
+test("rejects pending bootstrap correction without matching history", () => {
+  const current = createPolishingState();
+  assert.throws(
+    () =>
+      normalizePipelineState({
+        ...current,
+        pendingBootstrapCorrection: {
+          attempt: 1,
+          role: "worker",
+          phase: "bootstrap",
+          contract: "bootstrap",
+          field: "result",
+          constraint: "semantic-contract",
+        },
+      }),
+    /pending bootstrap correction is inconsistent/u,
+  );
 });
 
 test("migrates incomplete paused and terminal version-2 checks fail closed", async (t) => {
@@ -381,7 +645,10 @@ test("migrates incomplete paused and terminal version-2 checks fail closed", asy
         completed.pipelineState,
         migrationCase,
       );
-      const migrated = migratePolishingStateV2({ pipelineState: legacy });
+      const versionThree = migratePolishingStateV2({ pipelineState: legacy });
+      const migrated = migratePolishingStateV3({
+        pipelineState: versionThree,
+      });
 
       assert.deepEqual(
         migrated.finalizationResult.checks.map(({ status }) => status),
@@ -413,6 +680,13 @@ test("invalidates version-1 validation evidence before completed polishing resum
       reconciliationResolved(),
       polishingCompleted(),
       finalizationPassed(),
+      {
+        ...bootstrapReady("Invalid Migrating Worker"),
+        requiredChecks: [
+          { id: "C1", command: "npm test" },
+          { id: "C2", command: "npm test" },
+        ],
+      },
       bootstrapReady("Migrating Worker"),
       reconciliationResolved(),
       finalizationPassed(),
@@ -435,6 +709,16 @@ test("invalidates version-1 validation evidence before completed polishing resum
   const revalidated = await fixture.run();
   assert.equal(revalidated.pipelineState.workflowState, "DONE");
   assert.equal(revalidated.pipelineState.validationMigrationPending, false);
+  assert.deepEqual(revalidated.pipelineState.bootstrapCorrections, [
+    {
+      attempt: 1,
+      role: "worker",
+      phase: "validation-migration",
+      contract: "bootstrap",
+      field: "requiredChecks",
+      constraint: "unique-ids-and-commands",
+    },
+  ]);
   assert.ok(
     fixture.calls.worker.some(({ prompt }) =>
       prompt.includes("versioned-state migration checkpoint"),
@@ -444,6 +728,132 @@ test("invalidates version-1 validation evidence before completed polishing resum
     fixture.calls.reviewer.some(({ prompt }) =>
       prompt.includes("versioned-state migration checkpoint"),
     ),
+  );
+});
+
+test("persists repeated invalid validation-migration output as terminal", async (t) => {
+  const rejected = {
+    ...bootstrapReady("Invalid Migrating Worker"),
+    requiredChecks: [
+      { id: "C1", command: "npm test" },
+      { id: "C2", command: "npm test" },
+    ],
+  };
+  const fixture = await createFixture(t, {
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationPassed(),
+      rejected,
+      rejected,
+    ],
+  });
+  const completed = await fixture.run();
+  const migrated = migrateVersionOneState(
+    versionOneState(completed.pipelineState),
+  );
+  assert.throws(
+    () => normalizePipelineState({ ...migrated, workflowState: "DONE" }),
+    /validation migration is inapplicable/u,
+  );
+  await fixture.persistPipelineState(migrated);
+
+  await assert.rejects(
+    fixture.run(),
+    (cause) => cause.code === "ERR_INVALID_POLISHING_OUTPUT",
+  );
+  assert.equal(fixture.currentRun.pipelineState.workflowState, "FAILED");
+  assert.equal(fixture.currentRun.pipelineState.validationMigrationPending, true);
+  assert.deepEqual(fixture.currentRun.pause.diagnostic, {
+    role: "worker",
+    phase: "validation-migration",
+    contract: "bootstrap",
+    field: "requiredChecks",
+    constraint: "unique-ids-and-commands",
+  });
+  assert.equal(fixture.currentRun.pipelineState.bootstrapCorrections.length, 1);
+  assert.deepEqual(
+    fixture.currentRun.pipelineState.pendingBootstrapCorrection,
+    fixture.currentRun.pipelineState.bootstrapCorrections[0],
+  );
+
+  const workerCalls = fixture.calls.worker.length;
+  await fixture.recover();
+  const terminal = await fixture.run();
+  assert.equal(terminal.pipelineState.workflowState, "FAILED");
+  assert.equal(fixture.calls.worker.length, workerCalls);
+});
+
+test("resumes an interrupted validation-migration Arbiter correction directly", async (t) => {
+  let interrupted = false;
+  const fixture = await createFixture(t, {
+    onRoleRun(role, request) {
+      if (
+        role === "arbiter" &&
+        request.prompt.includes("Make one read-only correction") &&
+        !interrupted
+      ) {
+        interrupted = true;
+        const error = new Error("Transient provider interruption.");
+        error.code = "ERR_TEST_PROVIDER_INTERRUPTED";
+        error.recoverable = true;
+        throw error;
+      }
+    },
+    reviewer: [
+      bootstrapReady("Reviewer"),
+      reviewApproved(),
+      bootstrapReady("Migrating Reviewer"),
+    ],
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationPassed(),
+      bootstrapReady("Migrating Worker"),
+      reconciliationDisagreement(),
+      reconciliationResolved(),
+    ],
+    arbiter: [{}, arbitrationResolved()],
+  });
+  const completed = await fixture.run();
+  const migrated = {
+    ...migrateVersionOneState(versionOneState(completed.pipelineState)),
+    settings: {
+      ...completed.pipelineState.settings,
+      finalization: ".agents/skills/missing/SKILL.md",
+    },
+  };
+  await fixture.persistPipelineState(migrated);
+
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "backend_unavailable");
+  assert.deepEqual(paused.pipelineState.validationMigrationDisagreement, {
+    description: "The roles selected different owning modules.",
+    evidence: ["The summaries identify different existing boundaries."],
+  });
+  assert.deepEqual(
+    paused.pipelineState.pendingBootstrapCorrection,
+    paused.pipelineState.bootstrapCorrections[0],
+  );
+
+  await fixture.recover();
+  const resumed = await fixture.run();
+  assert.equal(resumed.pause.reason, "finalization_skill_missing");
+  assert.equal(resumed.pipelineState.validationMigrationPending, false);
+  assert.equal(resumed.pipelineState.validationMigrationDisagreement, null);
+  assert.equal(resumed.pipelineState.pendingBootstrapCorrection, null);
+  assert.equal(fixture.calls.arbiter.length, 3);
+  assert.equal(
+    fixture.calls.worker.filter(({ prompt }) =>
+      prompt.includes(
+        "Reconcile only the independently rediscovered validation requirements.",
+      ),
+    ).length,
+    1,
   );
 });
 
@@ -1037,7 +1447,7 @@ async function createFixture(
   const store = createRunStore({ stateRoot });
   let created = await store.createRun({
     pipelineId: "polishing",
-    pipelineStateVersion: 3,
+    pipelineStateVersion: 4,
     projectPath,
     taskPath,
     roles: {
@@ -1812,14 +2222,19 @@ test("runs the dedicated finalization gate without skill guidance", async (t) =>
 });
 
 test("falls back when automatic finalization discovery finds no skill", async (t) => {
+  const withoutSkill = (result) => ({
+    ...result,
+    validationInfrastructure: [],
+  });
   const fixture = await createFixture(t, {
     finalizationSkill: false,
+    reviewer: [withoutSkill(bootstrapReady("Reviewer")), reviewApproved()],
     worker: [
       clarificationReady(),
-      bootstrapReady("Worker"),
+      withoutSkill(bootstrapReady("Worker")),
       reconciliationResolved(),
       polishingCompleted(),
-      finalizationPassed(""),
+      withoutSkill(finalizationPassed("")),
     ],
   });
 
