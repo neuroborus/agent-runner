@@ -302,7 +302,7 @@ function normalizeValidationMigrationRoleOutput(output, role) {
     role,
     "validation-migration",
   );
-  if (result.status !== "READY") {
+  if (!["READY", "CAPACITY_EXHAUSTED"].includes(result.status)) {
     throw invalidRoleOutput(
       "Validation migration requires a ready inventory.",
       bootstrapOutputContext(role, "validation-migration"),
@@ -492,6 +492,21 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       },
     );
     return currentRun;
+  }
+
+  async function pauseForBootstrapCapacity(role, result) {
+    const field = result.capacityField;
+    const limit = result.capacityLimit;
+    await pause("bootstrap_inventory_capacity_exhausted", {
+      code: "ERR_BOOTSTRAP_INVENTORY_CAPACITY_EXHAUSTED",
+      explanation: `The ${role} bootstrap reported that the complete ${field} inventory exceeds the supported per-role limit of ${limit} items. Increase the bounded Runner contract or reduce the validation-controlling surface, then start a new run.`,
+      evidence: [
+        `Bootstrap role: ${role}.`,
+        `Inventory field: ${field}.`,
+        `Per-role item limit: ${limit}.`,
+      ],
+    });
+    return false;
   }
 
   async function fail(cause) {
@@ -1219,7 +1234,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         );
       }
     }
+    const resolvedInventory = result.status === "READY";
     if (
+      resolvedInventory &&
       state().trustedValidation.commands.some(
         ({ command }) =>
           !result.requiredChecks.some(
@@ -1402,6 +1419,9 @@ ${evidence}`,
     });
     if (result === null) {
       return false;
+    }
+    if (result.status === "CAPACITY_EXHAUSTED") {
+      return pauseForBootstrapCapacity(role, result);
     }
     await transition(
       {
@@ -2084,6 +2104,9 @@ ${evidence}`,
     });
     if (result === null) {
       return false;
+    }
+    if (result.status === "CAPACITY_EXHAUSTED") {
+      return pauseForBootstrapCapacity(role, result);
     }
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "BOOTSTRAP");

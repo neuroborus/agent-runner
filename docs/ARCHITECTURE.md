@@ -403,6 +403,14 @@ remotes, and Git identity through completion.
 Plan execution and polishing state version 2 persist the independently
 bootstrapped required-check inventory, the repository-relative files that own
 validation infrastructure, and a runner-computed fingerprint of those files.
+Each pipeline owns a 64-item limit for each inventory field returned by one
+bootstrap role and a separate 128-item limit for each runner-derived inventory
+field, including persisted, finalization, and fingerprint inputs. A role that
+cannot return a complete field within 64 items reports the strict
+`CAPACITY_EXHAUSTED` result with that `capacityField` and `capacityLimit: 64`;
+the pipeline pauses with `bootstrap_inventory_capacity_exhausted` and a bounded
+public diagnostic without consuming a structured-output correction or
+accepting truncated evidence.
 The runner establishes that inventory from accepted Worker evidence followed by
 accepted Reviewer evidence. It deduplicates exact commands and paths in stable
 first-seen order and assigns contiguous `C1`-through-`Cn` IDs; reconciliation

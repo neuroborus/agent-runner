@@ -35,6 +35,8 @@ import {
 } from "../src/schemas.js";
 import {
   assertRun,
+  MAX_BOOTSTRAP_ITEMS,
+  MAX_VALIDATION_ITEMS,
   normalizeBootstrapArbitration,
   normalizeBootstrapResult,
   normalizeFinalizationResult,
@@ -350,12 +352,21 @@ test("bootstrap schemas match conditional deterministic normalization", () => {
       normalize: (value) => normalizeBootstrapResult(value, "Worker"),
       valid: [
         bootstrapReady("Worker"),
+        bootstrapCapacityExhausted("validationInfrastructure"),
         bootstrapPlanRevision,
         bootstrapProductDecision(),
       ],
       invalid: [
         { ...bootstrapReady("Worker"), summary: "" },
         { ...bootstrapReady("Worker"), requiredChecks: [] },
+        {
+          ...bootstrapCapacityExhausted("requiredChecks"),
+          capacityLimit: MAX_BOOTSTRAP_ITEMS - 1,
+        },
+        {
+          ...bootstrapCapacityExhausted("validationInfrastructure"),
+          validationInfrastructure: VALIDATION_INFRASTRUCTURE,
+        },
         { ...bootstrapPlanRevision, summary: "Unexpected summary." },
         { ...bootstrapPlanRevision, requiredChecks: REQUIRED_CHECKS },
         {
@@ -771,6 +782,44 @@ test("invalidates version-1 validation evidence before active execution resumes"
   );
 });
 
+test("pauses on capacity exhaustion during validation migration", async (t) => {
+  const capacityField = "validationInfrastructure";
+  const fixture = await prepareValidationMigration(t, {
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      bootstrapCapacityExhausted(capacityField),
+    ],
+  });
+
+  const paused = await fixture.run();
+  const projected = planExecutionPipeline.projections.pause(paused);
+
+  assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(paused.pipelineState.validationMigrationPending, true);
+  assert.equal(paused.pipelineState.workerValidation, null);
+  assert.deepEqual(paused.pipelineState.bootstrapCorrections, []);
+  assert.equal(paused.pipelineState.pendingBootstrapCorrection, null);
+  assert.equal(
+    fixture.calls.worker.filter(({ prompt }) =>
+      prompt.includes("versioned-state migration checkpoint"),
+    ).length,
+    1,
+  );
+  assert.deepEqual(projected, {
+    reason: "bootstrap_inventory_capacity_exhausted",
+    code: "ERR_BOOTSTRAP_INVENTORY_CAPACITY_EXHAUSTED",
+    explanation: `The worker bootstrap reported that the complete ${capacityField} inventory exceeds the supported per-role limit of ${MAX_BOOTSTRAP_ITEMS} items. Increase the bounded Runner contract or reduce the validation-controlling surface, then start a new run.`,
+    evidence: [
+      "Bootstrap role: worker.",
+      `Inventory field: ${capacityField}.`,
+      `Per-role item limit: ${MAX_BOOTSTRAP_ITEMS}.`,
+    ],
+    resumeState: null,
+    nextActions: [],
+  });
+});
+
 test("redacts precise diagnostics across validation-migration contracts", async (t) => {
   const sensitiveSummary = "DO_NOT_PERSIST_MIGRATION_SUMMARY".repeat(1_000);
   const cases = [
@@ -1010,6 +1059,8 @@ function bootstrapReady(role) {
     summary: `${role} understands the task, architecture, plan, risks, and finalization procedure.`,
     requiredChecks: REQUIRED_CHECKS,
     validationInfrastructure: VALIDATION_INFRASTRUCTURE,
+    capacityField: "",
+    capacityLimit: 0,
     reason: "",
     ...emptyDecision(),
   };
@@ -1021,11 +1072,26 @@ function bootstrapProductDecision() {
     summary: "",
     requiredChecks: [],
     validationInfrastructure: [],
+    capacityField: "",
+    capacityLimit: 0,
     reason: "",
     question: "Which public behavior should be implemented?",
     options: ["Behavior A", "Behavior B"],
     whyBlocked: "Both behaviors are valid but incompatible.",
     evidence: ["The task and plan do not choose a behavior."],
+  };
+}
+
+function bootstrapCapacityExhausted(capacityField) {
+  return {
+    status: "CAPACITY_EXHAUSTED",
+    summary: "",
+    requiredChecks: [],
+    validationInfrastructure: [],
+    capacityField,
+    capacityLimit: MAX_BOOTSTRAP_ITEMS,
+    reason: "",
+    ...emptyDecision(),
   };
 }
 
@@ -2261,7 +2327,10 @@ test("clarifies and bootstraps through independent source-session forks", async 
   const bootstrapSchema = fixture.calls.worker[1].schema;
   const readySchema = bootstrapSchema.properties.result.anyOf[0];
   assert.equal(readySchema.properties.summary.maxLength, 20_000);
-  assert.equal(readySchema.properties.requiredChecks.maxItems, 32);
+  assert.equal(
+    readySchema.properties.requiredChecks.maxItems,
+    MAX_BOOTSTRAP_ITEMS,
+  );
   assert.equal(
     readySchema.properties.requiredChecks.items.properties.command.maxLength,
     4_000,
@@ -2273,7 +2342,10 @@ test("clarifies and bootstraps through independent source-session forks", async 
     ).test("npm test\nnode bypass.js"),
     false,
   );
-  assert.equal(readySchema.properties.validationInfrastructure.maxItems, 32);
+  assert.equal(
+    readySchema.properties.validationInfrastructure.maxItems,
+    MAX_BOOTSTRAP_ITEMS,
+  );
   const validationPathPattern = new RegExp(
     readySchema.properties.validationInfrastructure.items.pattern,
     "u",
@@ -2282,12 +2354,18 @@ test("clarifies and bootstraps through independent source-session forks", async 
   assert.equal(validationPathPattern.test("config/"), false);
   assert.equal(validationPathPattern.test("./"), false);
   assert.equal(validationPathPattern.test("../outside.js"), true);
-  assert.equal(FINALIZATION_SCHEMA.properties.requiredChecks.maxItems, 64);
+  assert.equal(
+    FINALIZATION_SCHEMA.properties.requiredChecks.maxItems,
+    MAX_VALIDATION_ITEMS,
+  );
   assert.equal(
     FINALIZATION_SCHEMA.properties.validationInfrastructure.maxItems,
-    64,
+    MAX_VALIDATION_ITEMS,
   );
-  assert.equal(FINALIZATION_SCHEMA.properties.checks.maxItems, 64);
+  assert.equal(
+    FINALIZATION_SCHEMA.properties.checks.maxItems,
+    MAX_VALIDATION_ITEMS,
+  );
   for (const call of fixture.calls.worker.slice(0, 3)) {
     assert.equal(call.access, "read-only");
   }
@@ -2307,12 +2385,12 @@ test("clarifies and bootstraps through independent source-session forks", async 
 
 test("accepts the advertised maximum bootstrap inventory", async (t) => {
   const maximumSummary = "😀".repeat(20_000);
-  const requiredChecks = Array.from({ length: 32 }, (_, index) => ({
+  const requiredChecks = Array.from({ length: MAX_BOOTSTRAP_ITEMS }, (_, index) => ({
     id: `C${index + 1}`,
     command: `node --test test/check-${index + 1}.test.js`,
   }));
   const validationInfrastructure = Array.from(
-    { length: 32 },
+    { length: MAX_BOOTSTRAP_ITEMS },
     (_, index) => `test/check-${index + 1}.test.js`,
   );
   const ready = (role) => ({
@@ -2348,6 +2426,123 @@ test("accepts the advertised maximum bootstrap inventory", async (t) => {
   await assert.rejects(fixture.run(), (cause) => cause === stop);
 
   assert.equal(implementationStarted, true);
+});
+
+test("persists and finalizes a disjoint maximum role-derived inventory", async (t) => {
+  const roleInventory = (role) => ({
+    requiredChecks: Array.from(
+      { length: MAX_BOOTSTRAP_ITEMS },
+      (_, index) => ({
+        id: `C${index + 1}`,
+        command: `node --test validation/${role}-${index + 1}.test.js`,
+      }),
+    ),
+    validationInfrastructure: Array.from(
+      { length: MAX_BOOTSTRAP_ITEMS },
+      (_, index) => `validation/${role}-${index + 1}.test.js`,
+    ),
+  });
+  const workerInventory = roleInventory("worker");
+  const reviewerInventory = roleInventory("reviewer");
+  const derivedCommands = [
+    ...workerInventory.requiredChecks,
+    ...reviewerInventory.requiredChecks,
+  ].map(({ command }, index) => ({ id: `C${index + 1}`, command }));
+  const derivedPaths = [
+    ...workerInventory.validationInfrastructure,
+    ...reviewerInventory.validationInfrastructure,
+  ];
+  const fixture = await createFixture(t, {
+    async prepareProject(projectPath) {
+      await mkdir(join(projectPath, "validation"));
+      await Promise.all(
+        derivedPaths.map((path) =>
+          writeFile(join(projectPath, path), `// ${path}\n`),
+        ),
+      );
+    },
+    reviewer: [
+      { ...bootstrapReady("Reviewer"), ...reviewerInventory },
+    ],
+    worker: [
+      clarificationReady(),
+      { ...bootstrapReady("Worker"), ...workerInventory },
+      reconciliationResolved(),
+    ],
+    workWorker: [
+      implementationCompleted(),
+      {
+        ...finalizationPassed(),
+        requiredChecks: derivedCommands,
+        validationInfrastructure: derivedPaths,
+        checks: derivedCommands.map(({ id, command }) => ({
+          checkId: id,
+          command,
+          status: "PASS",
+          evidence: ["The derived inventory check passed."],
+        })),
+      },
+    ],
+  });
+
+  const completed = await fixture.run();
+  const state = completed.pipelineState;
+
+  assert.equal(state.workerValidation.requiredChecks.length, MAX_BOOTSTRAP_ITEMS);
+  assert.equal(
+    state.reviewerValidation.validationInfrastructure.length,
+    MAX_BOOTSTRAP_ITEMS,
+  );
+  assert.equal(state.requiredChecks.length, MAX_VALIDATION_ITEMS);
+  assert.equal(state.validationInfrastructure.length, MAX_VALIDATION_ITEMS);
+  assert.equal(
+    state.finalizationResult.requiredChecks.length,
+    MAX_VALIDATION_ITEMS,
+  );
+  assert.equal(state.finalizationResult.checks.length, MAX_VALIDATION_ITEMS);
+  assert.equal(
+    state.validationInfrastructureFingerprint,
+    hash(JSON.stringify(derivedPaths.map((path) => [path, `// ${path}\n`]))),
+  );
+  assert.equal(
+    state.finalizationResult.validationInfrastructureFingerprint,
+    state.validationInfrastructureFingerprint,
+  );
+});
+
+test("pauses deterministically when a bootstrap inventory exceeds capacity", async (t) => {
+  for (const capacityField of [
+    "requiredChecks",
+    "validationInfrastructure",
+  ]) {
+    await t.test(capacityField, async (t) => {
+      const fixture = await createFixture(t, {
+        worker: [
+          clarificationReady(),
+          bootstrapCapacityExhausted(capacityField),
+        ],
+      });
+
+      const paused = await fixture.run();
+      const projected = planExecutionPipeline.projections.pause(paused);
+
+      assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+      assert.deepEqual(paused.pipelineState.bootstrapCorrections, []);
+      assert.equal(fixture.calls.worker.length, 2);
+      assert.deepEqual(projected, {
+        reason: "bootstrap_inventory_capacity_exhausted",
+        code: "ERR_BOOTSTRAP_INVENTORY_CAPACITY_EXHAUSTED",
+        explanation: `The worker bootstrap reported that the complete ${capacityField} inventory exceeds the supported per-role limit of ${MAX_BOOTSTRAP_ITEMS} items. Increase the bounded Runner contract or reduce the validation-controlling surface, then start a new run.`,
+        evidence: [
+          "Bootstrap role: worker.",
+          `Inventory field: ${capacityField}.`,
+          `Per-role item limit: ${MAX_BOOTSTRAP_ITEMS}.`,
+        ],
+        resumeState: null,
+        nextActions: [],
+      });
+    });
+  }
 });
 
 test("derives one stable complete inventory from independent role evidence", async (t) => {

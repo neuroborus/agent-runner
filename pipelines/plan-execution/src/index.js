@@ -115,6 +115,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   arbiter_cannot_resolve:
     "The Arbiter could not resolve the current blocking dispute.",
   backend_unavailable: "The selected backend is temporarily unavailable.",
+  bootstrap_inventory_capacity_exhausted:
+    "A complete bootstrap validation inventory exceeds the supported bounded capacity.",
   clarification_answers_required:
     "Material clarification answers are required before execution can continue.",
   clarification_limit_reached:
@@ -159,6 +161,7 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
 });
 const PUBLIC_DETAIL_REASONS = new Set([
   "environment_blocked",
+  "bootstrap_inventory_capacity_exhausted",
   "finalization_cannot_pass",
   "finalization_skill_invalid",
   "finalization_skill_missing",

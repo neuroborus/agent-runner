@@ -1208,6 +1208,18 @@ path found by either role is preserved. Reconciliation and arbitration return no
 inventory fields and cannot invent, select, or omit commands or repository
 paths. The runner fingerprints the derived file list; an agent-supplied digest
 is never trusted.
+Each role may return at most 64 `requiredChecks` and 64
+`validationInfrastructure` entries. The independently derived, persisted,
+finalization, and fingerprint-input inventories each allow at most 128 entries,
+so two disjoint maximum role inventories remain representable. If a complete
+role field would exceed 64 items, the role must return the strict
+`CAPACITY_EXHAUSTED` result with empty inventory and ordinary result fields,
+`capacityField` equal to `requiredChecks` or `validationInfrastructure`, and
+`capacityLimit: 64`. It checks `requiredChecks` first when both fields are over
+capacity. The runner pauses immediately with
+`bootstrap_inventory_capacity_exhausted` and the bounded public code
+`ERR_BOOTSTRAP_INVENTORY_CAPACITY_EXHAUSTED`; it does not consume a correction
+turn, accept truncation, or persist a placeholder.
 Exact commands and paths retain interior whitespace; validation rejects unsafe,
 non-normalized, multiline, or boundary-whitespace values rather than rewriting
 them.
@@ -1791,6 +1803,7 @@ Typical reasons:
 clarification_answers_required
 clarification_limit_reached
 clarifications_changed
+bootstrap_inventory_capacity_exhausted
 local_artifacts_not_ignored
 product_decision_required
 plan_revision_required
@@ -2062,6 +2075,9 @@ At minimum cover:
 56. every role prompt prohibits delegation, and a backend-reported delegated
     turn remains terminal while its finite class is redacted, durable, and
     projected consistently through CLI and MCP status.
+57. 64-item role inventories, disjoint 128-item derived inventories,
+    persistence, finalization round trips, infrastructure fingerprinting, and
+    strict capacity exhaustion remain bounded and consistent.
 
 Real Codex/Claude smoke tests should be opt-in integration tests.
 

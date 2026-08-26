@@ -106,7 +106,8 @@ export const MAX_TEXT_LENGTH = 4_000;
 export const MAX_SUMMARY_LENGTH = 20_000;
 export const MAX_PLAN_LENGTH = 100_000;
 export const MAX_ITEMS = 32;
-export const MAX_VALIDATION_ITEMS = MAX_ITEMS * 2;
+export const MAX_BOOTSTRAP_ITEMS = MAX_ITEMS * 2;
+export const MAX_VALIDATION_ITEMS = MAX_BOOTSTRAP_ITEMS * 2;
 export const MAX_OPTIONS = 16;
 export const MAX_DIAGNOSTIC_ITEMS = 32;
 const MAX_STRUCTURED_RESULT_BYTES = 256 * 1024;
@@ -139,6 +140,8 @@ const BOOTSTRAP_RESULT_FIELDS = Object.freeze([
   "summary",
   "requiredChecks",
   "validationInfrastructure",
+  "capacityField",
+  "capacityLimit",
   "reason",
   "question",
   "options",
@@ -775,6 +778,7 @@ export function normalizeCompatibilityResult(payload) {
 export function normalizeBootstrapResult(payload, role) {
   const statuses = [
     "READY",
+    "CAPACITY_EXHAUSTED",
     "PLAN_REVISION_REQUIRED",
     "PRODUCT_DECISION_REQUIRED",
   ];
@@ -789,6 +793,35 @@ export function normalizeBootstrapResult(payload, role) {
     outputConstraint("result", "maximum-256-kibibytes"),
   );
   assertExactOutputFields(payload, BOOTSTRAP_RESULT_FIELDS);
+  if (payload.status === "CAPACITY_EXHAUSTED") {
+    if (
+      payload.summary !== "" ||
+      !emptyArray(payload.requiredChecks) ||
+      !emptyArray(payload.validationInfrastructure) ||
+      payload.reason !== "" ||
+      !emptyDecision(payload) ||
+      !["requiredChecks", "validationInfrastructure"].includes(
+        payload.capacityField,
+      ) ||
+      payload.capacityLimit !== MAX_BOOTSTRAP_ITEMS
+    ) {
+      throw outputError(
+        "Bootstrap capacity result contains inapplicable fields.",
+        outputConstraint("status", "status-field-consistency"),
+      );
+    }
+    return Object.freeze({
+      status: payload.status,
+      capacityField: payload.capacityField,
+      capacityLimit: payload.capacityLimit,
+    });
+  }
+  if (payload.capacityField !== "" || payload.capacityLimit !== 0) {
+    throw outputError(
+      "Bootstrap result contains inapplicable capacity fields.",
+      outputConstraint("status", "status-field-consistency"),
+    );
+  }
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
     if (
       payload.summary !== "" ||
@@ -836,12 +869,12 @@ export function normalizeBootstrapResult(payload, role) {
     requiredChecks: normalizeRequiredChecks(
       payload.requiredChecks,
       INVALID_OUTPUT_CODE,
-      { maxItems: MAX_ITEMS },
+      { maxItems: MAX_BOOTSTRAP_ITEMS },
     ),
     validationInfrastructure: normalizeValidationInfrastructure(
       payload.validationInfrastructure,
       INVALID_OUTPUT_CODE,
-      { maxItems: MAX_ITEMS },
+      { maxItems: MAX_BOOTSTRAP_ITEMS },
     ),
   });
 }
@@ -2142,12 +2175,12 @@ function normalizePersistedValidation(value, name) {
   normalizeRequiredChecks(
     value.requiredChecks,
     "ERR_INVALID_PLAN_EXECUTION_STATE",
-    { maxItems: MAX_ITEMS },
+    { maxItems: MAX_BOOTSTRAP_ITEMS },
   );
   normalizeValidationInfrastructure(
     value.validationInfrastructure,
     "ERR_INVALID_PLAN_EXECUTION_STATE",
-    { maxItems: MAX_ITEMS },
+    { maxItems: MAX_BOOTSTRAP_ITEMS },
   );
   return value;
 }

@@ -249,6 +249,8 @@ function createBackend(
             "plan, risks, and finalization procedure.",
           requiredChecks: [{ id: "C1", command: "git diff --check" }],
           validationInfrastructure: [],
+          capacityField: "",
+          capacityLimit: 0,
           reason: "",
           question: "",
           options: [],

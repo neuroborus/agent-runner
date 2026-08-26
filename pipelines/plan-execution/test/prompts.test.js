@@ -29,6 +29,8 @@ test("bootstrap instructions preserve independent evidence and arbitration", () 
   assert.match(BOOTSTRAP_INSTRUCTIONS, /symlink alias/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /independently identify every required check/iu);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /validationInfrastructure/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /capacity of 64 items/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /CAPACITY_EXHAUSTED/u);
   assert.match(
     BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
     /runner derives the final required-check/u,

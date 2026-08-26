@@ -153,7 +153,8 @@ const ADAPTER_FAILURE_FIELDS = Object.freeze([
 export const MAX_TEXT_LENGTH = 4_000;
 export const MAX_SUMMARY_LENGTH = 20_000;
 export const MAX_ITEMS = 32;
-export const MAX_VALIDATION_ITEMS = MAX_ITEMS * 2;
+export const MAX_BOOTSTRAP_ITEMS = MAX_ITEMS * 2;
+export const MAX_VALIDATION_ITEMS = MAX_BOOTSTRAP_ITEMS * 2;
 export const MAX_OPTIONS = 16;
 const MAX_STRUCTURED_RESULT_BYTES = 256 * 1024;
 export const MAX_DURABLE_RUN_BYTES = 960 * 1024;
@@ -650,6 +651,8 @@ export function normalizeBootstrapResult(payload, role) {
     "summary",
     "requiredChecks",
     "validationInfrastructure",
+    "capacityField",
+    "capacityLimit",
     "reason",
     "question",
     "options",
@@ -658,7 +661,9 @@ export function normalizeBootstrapResult(payload, role) {
   ];
   if (
     !isRecord(payload) ||
-    !["READY", "PRODUCT_DECISION_REQUIRED"].includes(payload.status)
+    !["READY", "CAPACITY_EXHAUSTED", "PRODUCT_DECISION_REQUIRED"].includes(
+      payload.status,
+    )
   ) {
     throw outputError(
       `${role} returned an invalid bootstrap status.`,
@@ -670,6 +675,35 @@ export function normalizeBootstrapResult(payload, role) {
     outputConstraint("result", "maximum-256-kibibytes"),
   );
   assertExactOutputFields(payload, fields);
+  if (payload.status === "CAPACITY_EXHAUSTED") {
+    if (
+      payload.summary !== "" ||
+      !emptyArray(payload.requiredChecks) ||
+      !emptyArray(payload.validationInfrastructure) ||
+      payload.reason !== "" ||
+      !emptyDecision(payload) ||
+      !["requiredChecks", "validationInfrastructure"].includes(
+        payload.capacityField,
+      ) ||
+      payload.capacityLimit !== MAX_BOOTSTRAP_ITEMS
+    ) {
+      throw outputError(
+        "Bootstrap capacity result contains inapplicable fields.",
+        outputConstraint("status", "status-field-consistency"),
+      );
+    }
+    return Object.freeze({
+      status: payload.status,
+      capacityField: payload.capacityField,
+      capacityLimit: payload.capacityLimit,
+    });
+  }
+  if (payload.capacityField !== "" || payload.capacityLimit !== 0) {
+    throw outputError(
+      "Bootstrap result contains inapplicable capacity fields.",
+      outputConstraint("status", "status-field-consistency"),
+    );
+  }
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
     if (
       payload.summary !== "" ||
@@ -704,12 +738,12 @@ export function normalizeBootstrapResult(payload, role) {
     requiredChecks: normalizeRequiredChecks(
       payload.requiredChecks,
       INVALID_OUTPUT_CODE,
-      { maxItems: MAX_ITEMS },
+      { maxItems: MAX_BOOTSTRAP_ITEMS },
     ),
     validationInfrastructure: normalizeValidationInfrastructure(
       payload.validationInfrastructure,
       INVALID_OUTPUT_CODE,
-      { maxItems: MAX_ITEMS },
+      { maxItems: MAX_BOOTSTRAP_ITEMS },
     ),
   });
 }
@@ -2064,12 +2098,12 @@ function normalizePersistedValidation(value, name) {
     name,
   );
   normalizeRequiredChecks(value.requiredChecks, "ERR_INVALID_POLISHING_STATE", {
-    maxItems: MAX_ITEMS,
+    maxItems: MAX_BOOTSTRAP_ITEMS,
   });
   normalizeValidationInfrastructure(
     value.validationInfrastructure,
     "ERR_INVALID_POLISHING_STATE",
-    { maxItems: MAX_ITEMS },
+    { maxItems: MAX_BOOTSTRAP_ITEMS },
   );
   return value;
 }

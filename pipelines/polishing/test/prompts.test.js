@@ -32,6 +32,7 @@ import {
   STAGNATION_SCHEMA,
 } from "../src/schemas.js";
 import {
+  MAX_BOOTSTRAP_ITEMS,
   MAX_ITEMS,
   MAX_OPTIONS,
   MAX_SUMMARY_LENGTH,
@@ -58,7 +59,9 @@ function assertSchemaBounds(schema, propertyName = null) {
     assert.ok(
       propertyName === "options"
         ? schema.maxItems === MAX_OPTIONS
-        : [MAX_ITEMS, MAX_VALIDATION_ITEMS].includes(schema.maxItems),
+        : [MAX_ITEMS, MAX_BOOTSTRAP_ITEMS, MAX_VALIDATION_ITEMS].includes(
+            schema.maxItems,
+          ),
       `${propertyName} must have a deterministic collection bound`,
     );
     assertSchemaBounds(schema.items, propertyName);
@@ -86,6 +89,8 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
   assert.match(BOOTSTRAP_INSTRUCTIONS, /unique, single-line/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /canonical repository-relative/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /symlink alias/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /capacity of 64 items/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /CAPACITY_EXHAUSTED/u);
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /one read-only correction/u);
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /rejected result/u);
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /fails closed/u);

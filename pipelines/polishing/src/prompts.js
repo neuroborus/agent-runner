@@ -1,3 +1,5 @@
+import { MAX_BOOTSTRAP_ITEMS } from "./workflow-contract.js";
+
 export const NO_DELEGATION_INSTRUCTIONS = `Produce this turn's result yourself as the authorized role. Do not delegate, spawn subagents, or use multi-agent collaboration.`;
 
 export const PRODUCT_DECISION_INSTRUCTIONS = `Do not ask questions after clarification closes.
@@ -15,8 +17,10 @@ For PRODUCT_DECISION_REQUIRED, set questions to [] and reason to ""; use the pro
 export const BOOTSTRAP_INSTRUCTIONS = `Study the repository, task, existing changes, clarifications, project instructions, relevant finalization guidance, other relevant skills, project checks, tests, and Git history independently and without modifying the repository.
 Return a concise bootstrap summary covering the task, current change set, relevant architecture and files, invariants, risks, and the complete project finalization procedure using the provided schema. Independently identify every required check as a stable C-prefixed ID and exact command, plus every repository-relative file that controls those checks, package scripts, test discovery, test runners, or validation configuration.
 Required-check IDs must be unique. Exact commands must be unique, single-line, and already normalized without leading or trailing whitespace. Validation-infrastructure paths must be unique, existing, canonical repository-relative regular files; never return a symlink or a path through a symlink, including a symlink alias of a canonical path.
-For READY, provide summary, requiredChecks, and validationInfrastructure; set reason, question, and whyBlocked to "", and options and evidence to [].
-For PRODUCT_DECISION_REQUIRED, set summary and reason to "", and requiredChecks and validationInfrastructure to []; use the product-decision fields.`;
+Each inventory field has a per-role capacity of ${MAX_BOOTSTRAP_ITEMS} items. If the complete requiredChecks or validationInfrastructure inventory would exceed that capacity, do not truncate it or invent a placeholder. Check requiredChecks first, then validationInfrastructure, and return CAPACITY_EXHAUSTED for the first over-capacity field with capacityField set to its exact field name and capacityLimit set to ${MAX_BOOTSTRAP_ITEMS}.
+For READY, provide summary, requiredChecks, and validationInfrastructure; set capacityField, reason, question, and whyBlocked to "", capacityLimit to 0, and options and evidence to [].
+For CAPACITY_EXHAUSTED, set summary, reason, question, and whyBlocked to "", requiredChecks, validationInfrastructure, options, and evidence to [], and provide capacityField and capacityLimit as described above.
+For PRODUCT_DECISION_REQUIRED, set summary, capacityField, and reason to "", capacityLimit to 0, and requiredChecks and validationInfrastructure to []; use the product-decision fields.`;
 
 export const BOOTSTRAP_RECONCILIATION_INSTRUCTIONS = `Reconcile the independent Worker and Reviewer bootstrap summaries using the task, existing changes, repository, clarifications, and evidence.
 Do not force agreement or modify the repository. The runner derives the final required-check and validation-infrastructure inventories from the independently accepted role evidence. Do not propose, select, or repeat commands or repository paths.
@@ -33,7 +37,7 @@ For USE_WORKER, USE_REVIEWER, or SYNTHESIZE, provide summary; set reason, questi
 For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-decision fields.`;
 
 export const BOOTSTRAP_CORRECTION_INSTRUCTIONS = `Your previous structured bootstrap result was rejected by deterministic validation. Make one read-only correction and return a complete replacement result using the same schema.
-Correct only the identified contract violation using current repository evidence. Do not repeat or quote the rejected result, ask an ordinary clarification question, or modify the repository. Preserve the exceptional PRODUCT_DECISION_REQUIRED outcome and its required product-decision fields when its existing criteria are met. A repeated invalid result fails closed.`;
+Correct only the identified contract violation using current repository evidence. Do not repeat or quote the rejected result, ask an ordinary clarification question, or modify the repository. Preserve the exceptional PRODUCT_DECISION_REQUIRED outcome and its required product-decision fields when its existing criteria are met. Preserve the CAPACITY_EXHAUSTED outcome and its capacity fields on the same basis. A repeated invalid result fails closed.`;
 
 export const POLISH_INSTRUCTIONS = `Polish the existing local repository changes into a correct, idiomatic, minimal result that satisfies the task and follows the target project's conventions.
 

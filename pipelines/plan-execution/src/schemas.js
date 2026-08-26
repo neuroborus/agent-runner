@@ -1,4 +1,5 @@
 import {
+  MAX_BOOTSTRAP_ITEMS,
   MAX_ITEMS,
   MAX_OPTIONS,
   MAX_SUMMARY_LENGTH,
@@ -72,7 +73,10 @@ const REQUIRED_CHECKS = {
   items: REQUIRED_CHECK,
   maxItems: MAX_VALIDATION_ITEMS,
 };
-const BOOTSTRAP_REQUIRED_CHECKS = { ...REQUIRED_CHECKS, maxItems: MAX_ITEMS };
+const BOOTSTRAP_REQUIRED_CHECKS = {
+  ...REQUIRED_CHECKS,
+  maxItems: MAX_BOOTSTRAP_ITEMS,
+};
 const EMPTY_REQUIRED_CHECKS = { ...BOOTSTRAP_REQUIRED_CHECKS, maxItems: 0 };
 const NONEMPTY_REQUIRED_CHECKS = {
   ...BOOTSTRAP_REQUIRED_CHECKS,
@@ -85,7 +89,7 @@ const VALIDATION_INFRASTRUCTURE = {
 };
 const BOOTSTRAP_VALIDATION_INFRASTRUCTURE = {
   ...VALIDATION_INFRASTRUCTURE,
-  maxItems: MAX_ITEMS,
+  maxItems: MAX_BOOTSTRAP_ITEMS,
 };
 const EMPTY_VALIDATION_INFRASTRUCTURE = {
   ...BOOTSTRAP_VALIDATION_INFRASTRUCTURE,
@@ -132,11 +136,24 @@ const PRODUCT_DECISION_PROPERTIES = {
 const BOOTSTRAP_PROPERTIES = {
   status: {
     type: "string",
-    enum: ["READY", "PLAN_REVISION_REQUIRED", "PRODUCT_DECISION_REQUIRED"],
+    enum: [
+      "READY",
+      "CAPACITY_EXHAUSTED",
+      "PLAN_REVISION_REQUIRED",
+      "PRODUCT_DECISION_REQUIRED",
+    ],
   },
   summary: SUMMARY,
   requiredChecks: BOOTSTRAP_REQUIRED_CHECKS,
   validationInfrastructure: BOOTSTRAP_VALIDATION_INFRASTRUCTURE,
+  capacityField: {
+    type: "string",
+    enum: ["", "requiredChecks", "validationInfrastructure"],
+  },
+  capacityLimit: {
+    type: "integer",
+    enum: [0, MAX_BOOTSTRAP_ITEMS],
+  },
   reason: TEXT,
   ...DECISION_PROPERTIES,
 };
@@ -275,6 +292,20 @@ export const BOOTSTRAP_SCHEMA = deepFreeze(
     variant("status", ["READY"], BOOTSTRAP_PROPERTIES, {
       summary: NONEMPTY_SUMMARY,
       requiredChecks: NONEMPTY_REQUIRED_CHECKS,
+      capacityField: { type: "string", enum: [""] },
+      capacityLimit: { type: "integer", enum: [0] },
+      reason: EMPTY_TEXT,
+      ...EMPTY_DECISION_PROPERTIES,
+    }),
+    variant("status", ["CAPACITY_EXHAUSTED"], BOOTSTRAP_PROPERTIES, {
+      summary: EMPTY_TEXT,
+      requiredChecks: EMPTY_REQUIRED_CHECKS,
+      validationInfrastructure: EMPTY_VALIDATION_INFRASTRUCTURE,
+      capacityField: {
+        type: "string",
+        enum: ["requiredChecks", "validationInfrastructure"],
+      },
+      capacityLimit: { type: "integer", enum: [MAX_BOOTSTRAP_ITEMS] },
       reason: EMPTY_TEXT,
       ...EMPTY_DECISION_PROPERTIES,
     }),
@@ -282,6 +313,8 @@ export const BOOTSTRAP_SCHEMA = deepFreeze(
       summary: EMPTY_TEXT,
       requiredChecks: EMPTY_REQUIRED_CHECKS,
       validationInfrastructure: EMPTY_VALIDATION_INFRASTRUCTURE,
+      capacityField: { type: "string", enum: [""] },
+      capacityLimit: { type: "integer", enum: [0] },
       reason: NONEMPTY_TEXT,
       question: EMPTY_TEXT,
       options: EMPTY_OPTIONS,
@@ -292,6 +325,8 @@ export const BOOTSTRAP_SCHEMA = deepFreeze(
       summary: EMPTY_TEXT,
       requiredChecks: EMPTY_REQUIRED_CHECKS,
       validationInfrastructure: EMPTY_VALIDATION_INFRASTRUCTURE,
+      capacityField: { type: "string", enum: [""] },
+      capacityLimit: { type: "integer", enum: [0] },
       reason: EMPTY_TEXT,
       ...PRODUCT_DECISION_PROPERTIES,
     }),

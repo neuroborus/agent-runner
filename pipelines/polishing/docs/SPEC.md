@@ -258,6 +258,17 @@ IDs. Every command or path found by either role is preserved. Reconciliation
 and arbitration resolve only summaries and material disagreements; their output
 contains no inventory fields and cannot invent, select, or omit commands or
 paths. The runner—not an agent—fingerprints the derived files.
+Each role may return at most 64 `requiredChecks` and 64
+`validationInfrastructure` entries. The independently derived, persisted,
+finalization, and fingerprint-input inventories each allow at most 128 entries,
+so two disjoint maximum role inventories remain representable. If a complete
+role field would exceed 64 items, the role returns `CAPACITY_EXHAUSTED` with
+empty inventory and ordinary result fields, `capacityField` equal to
+`requiredChecks` or `validationInfrastructure`, and `capacityLimit: 64`.
+It checks `requiredChecks` first when both fields are over capacity. The runner
+pauses immediately with `bootstrap_inventory_capacity_exhausted` and public code
+`ERR_BOOTSTRAP_INVENTORY_CAPACITY_EXHAUSTED`; it does not consume a correction
+turn, accept truncation, or persist a placeholder.
 Commands and paths retain interior whitespace exactly; unsafe, non-normalized,
 multiline, or boundary-whitespace values are rejected instead of rewritten.
 Every selected runner-trusted inventory command must appear exactly once in
@@ -468,6 +479,10 @@ instead instructs the user to abandon the contaminated run and start fresh from
 an uncontaminated worktree. `environment_blocked` retains why validation is
 blocked and the precise `POLISH`, `FINALIZE`, or `RESOLVE_FINDINGS` retry
 checkpoint. This read-only projection leaves pipeline state version 4 unchanged.
+Bootstrap capacity exhaustion instead has no retry action: its bounded public
+diagnostic identifies the producing role, full inventory field, and 64-item
+limit so the validation surface or Runner capacity can be addressed before a
+new run.
 
 Each transition is a complete write-ahead event appended and synchronized
 before atomic state replacement. `progress.md` is derived public activity.
@@ -577,6 +592,9 @@ Pipeline tests use fake adapters and temporary repositories. Cover at least:
 - stable runner derivation across conflicting role IDs, cross-role repeated
   commands and paths, role-only entries, trusted commands, and attempted
   reconciliation inventory invention;
+- 64-item role inventories, disjoint 128-item derived inventories,
+  persistence, finalization round trips, infrastructure fingerprinting, and
+  strict bounded capacity exhaustion;
 - duplicate IDs or commands, multiline commands, missing files, directories,
   symlink aliases, successful bounded correction, interrupted reconstruction,
   validation-migration correction including interrupted Arbiter recovery, and
