@@ -3499,6 +3499,64 @@ test("uses an explicitly configured finalization skill", async (t) => {
   );
 });
 
+test("defers skill-guided commit preparation to the constrained commit turn", async (t) => {
+  const skillPath = ".agents/skills/finalization/SKILL.md";
+  const fixture = await createFixture(t, {
+    async prepareProject(projectPath) {
+      await writeFile(
+        join(projectPath, skillPath),
+        `---
+name: finalization
+description: Test validation and handoff.
+---
+
+Run tests and formatting, then stage changes, inspect the cached diff, and draft a commit message.
+`,
+      );
+    },
+    workWorker: [
+      implementationCompleted(),
+      finalizationFailed("F1"),
+      resolution({ id: "F1", decision: "FIX" }),
+      finalizationPassed(),
+    ],
+  });
+
+  const result = await fixture.run({ finalization: skillPath });
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  const implementationCall = fixture.calls.worker.find(({ prompt }) =>
+    prompt.includes("Implement the changes"),
+  );
+  const resolutionCall = fixture.calls.worker.find(({ prompt }) =>
+    prompt.includes("For each finding below"),
+  );
+  const finalizationCalls = fixture.calls.worker.filter(({ prompt }) =>
+    prompt.includes("Run the complete project finalization procedure"),
+  );
+  const commitCall = fixture.calls.worker.find(
+    ({ access }) => access === "local-commit",
+  );
+  assert.ok(implementationCall);
+  assert.ok(resolutionCall);
+  assert.equal(finalizationCalls.length, 2);
+  assert.ok(commitCall);
+  for (const call of [implementationCall, resolutionCall]) {
+    assert.match(call.prompt, /Do not run the project finalization procedure/u);
+    assert.match(call.prompt, /generic commit preparation/u);
+  }
+  for (const call of finalizationCalls) {
+    assert.match(call.prompt, /Follow every substantive instruction/u);
+    assert.match(call.prompt, /post-staging cached-diff inspection/u);
+    assert.match(call.prompt, /independently required read-only cached-diff check/u);
+    assert.match(call.prompt, /neither a validation blocker nor a skipped required check/u);
+    assert.match(call.prompt, /constrained COMMIT executor alone runs git add -A/u);
+  }
+  assert.match(commitCall.prompt, /exact supplied subject/u);
+  assert.match(commitCall.prompt, /constrained executor alone stages/u);
+  assert.match(commitCall.prompt, /Authorized planned commit:\nfeat\(test\): add behavior/u);
+});
+
 test("pauses before invoking a missing explicit finalization skill", async (t) => {
   const fixture = await createFixture(t);
 

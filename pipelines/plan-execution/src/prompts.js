@@ -56,6 +56,7 @@ Correct only the identified contract violation using current repository evidence
 export const IMPLEMENTATION_INSTRUCTIONS = `Implement the changes described in the following planned commit. Keep the implementation idiomatic and minimal, and follow the project's conventions.
 
 Work only on this planned commit.
+Do not run the project finalization procedure or perform generic commit preparation in this turn. Those belong to the dedicated FINALIZE and COMMIT phases.
 Do not create a commit in this turn.
 Before returning, perform a concise self-review.
 For COMPLETED, put all results in summary; set reason, question, and whyBlocked to "", and options and evidence to [].
@@ -80,6 +81,7 @@ Otherwise, return only the approval decision and actionable findings using the p
 export const FINDING_RESOLUTION_INSTRUCTIONS = `For each finding below, fix it idiomatically and minimally, following the project's conventions.
 If a finding is incorrect, dispute it with concise evidence instead of changing the code.
 
+Do not run the project finalization procedure or perform generic commit preparation in this turn. Those belong to the dedicated FINALIZE and COMMIT phases.
 Do not create a commit in this turn.
 For RESOLVED, return exactly one decision per blocker; every decision requires reason; DISPUTE requires evidence, while FIX evidence may be []. Set top-level reason, question, and whyBlocked to "", and options and evidence to [].
 For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or comparable external constraints. Set decisions and options to []; provide reason and evidence; set question and whyBlocked to "".
@@ -88,9 +90,11 @@ Do not weaken sandboxing or grant network or host temporary-directory access to 
 ${PRODUCT_DECISION_INSTRUCTIONS}
 Otherwise, return each FIX or DISPUTE decision using the provided schema.`;
 
-export const FINALIZATION_INSTRUCTIONS = `Run the complete project finalization procedure in this dedicated turn, including project-required formatting or generated output, and report its result using the provided schema.
+export const FINALIZATION_INSTRUCTIONS = `Run the complete project finalization procedure in this dedicated turn and report its result using the provided schema. Follow every substantive instruction in the applicable project guidance, including required checks, project-required formatting or generated output, and staging-independent content review.
 
-Do not perform unrelated fixes, stage changes, or create a commit.
+Do not perform unrelated fixes or create a commit.
+When project finalization guidance includes generic commit preparation, defer only staging, post-staging cached-diff inspection, and commit-message drafting to the authorized COMMIT turn. Do not run git add or draft a commit message in this turn. Continue to run any independently required read-only cached-diff check in the established required-check inventory. This phase-owned deferral is neither a validation blocker nor a skipped required check and must not prevent PASS.
+The validated plan subject remains authoritative. After the fingerprint-bound finalization and review gate passes, the constrained COMMIT executor alone runs git add -A and creates the subject-only commit.
 Use PASS only after every agent-executed required check succeeds without being skipped, excluded, substituted, replaced, or weakened. Return the complete requiredChecks and validationInfrastructure actually used, and exactly one ordered checks entry for every required check with bounded direct evidence. Return NOT_RUN only for a command explicitly listed as runner-trusted in the turn context; the runner executes that persisted vector before it accepts the gate. Do not use any other host-reported or user-attested results.
 Changes to package scripts, test discovery, test runners, validation configuration, the check inventory, or its infrastructure paths are allowed only when this planned commit requires them; never make them merely to evade an environmental blocker.
 Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
@@ -121,8 +125,8 @@ ${required ? "This skill is explicitly configured, so a missing, escaping, or in
 For PASS, FAIL, SKILL_MISSING, SKILL_INVALID, or BLOCKED, set skillPath to ${JSON.stringify(skillPath)}.`;
 }
 
-export const COMMIT_INSTRUCTIONS = `Validate the authorized local commit using the exact supplied subject.
-Do not modify project content, amend history, bypass hooks, change Git identity or configuration, create other refs, or perform any remote write.`;
+export const COMMIT_INSTRUCTIONS = `Validate readiness for the authorized local commit using the exact supplied subject. The constrained executor alone stages the exact finalized and reviewed workspace with git add -A and creates the subject-only commit.
+Do not stage changes yourself, modify project content, amend history, bypass hooks, change Git identity or configuration, create other refs, or perform any remote write.`;
 
 export const DISPUTE_RECONSIDERATION_INSTRUCTIONS = `Reconsider the disputed findings against the task, plan, repository, diff, and Worker evidence.
 

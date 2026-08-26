@@ -94,6 +94,7 @@ test("work instructions preserve their concise mandatory cores", () => {
     `Implement the changes described in the following planned commit. Keep the implementation idiomatic and minimal, and follow the project's conventions.
 
 Work only on this planned commit.
+Do not run the project finalization procedure or perform generic commit preparation in this turn. Those belong to the dedicated FINALIZE and COMMIT phases.
 Do not create a commit in this turn.
 Before returning, perform a concise self-review.
 For COMPLETED, put all results in summary; set reason, question, and whyBlocked to "", and options and evidence to [].
@@ -116,6 +117,7 @@ For that outcome, provide question, whyBlocked, and evidence; options may be [].
     `For each finding below, fix it idiomatically and minimally, following the project's conventions.
 If a finding is incorrect, dispute it with concise evidence instead of changing the code.
 
+Do not run the project finalization procedure or perform generic commit preparation in this turn. Those belong to the dedicated FINALIZE and COMMIT phases.
 Do not create a commit in this turn.
 For RESOLVED, return exactly one decision per blocker; every decision requires reason; DISPUTE requires evidence, while FIX evidence may be []. Set top-level reason, question, and whyBlocked to "", and options and evidence to [].
 For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or comparable external constraints. Set decisions and options to []; provide reason and evidence; set question and whyBlocked to "".
@@ -136,7 +138,23 @@ test("finalization and dispute prompts preserve their narrow roles", () => {
   );
   assert.match(
     FINALIZATION_INSTRUCTIONS,
-    /Do not perform unrelated fixes, stage changes, or create a commit\./u,
+    /Follow every substantive instruction in the applicable project guidance/u,
+  );
+  assert.match(
+    FINALIZATION_INSTRUCTIONS,
+    /defer only staging, post-staging cached-diff inspection, and commit-message drafting/u,
+  );
+  assert.match(
+    FINALIZATION_INSTRUCTIONS,
+    /independently required read-only cached-diff check/u,
+  );
+  assert.match(
+    FINALIZATION_INSTRUCTIONS,
+    /neither a validation blocker nor a skipped required check/u,
+  );
+  assert.match(
+    FINALIZATION_INSTRUCTIONS,
+    /constrained COMMIT executor alone runs git add -A/u,
   );
   assert.match(
     FINALIZATION_INSTRUCTIONS,
@@ -203,8 +221,8 @@ ${PRODUCT_DECISION_INSTRUCTIONS}`,
 test("commit instructions preserve the one-shot local boundary", () => {
   assert.equal(
     COMMIT_INSTRUCTIONS,
-    `Validate the authorized local commit using the exact supplied subject.
-Do not modify project content, amend history, bypass hooks, change Git identity or configuration, create other refs, or perform any remote write.`,
+    `Validate readiness for the authorized local commit using the exact supplied subject. The constrained executor alone stages the exact finalized and reviewed workspace with git add -A and creates the subject-only commit.
+Do not stage changes yourself, modify project content, amend history, bypass hooks, change Git identity or configuration, create other refs, or perform any remote write.`,
   );
 });
 

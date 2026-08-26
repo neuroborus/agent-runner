@@ -572,6 +572,20 @@ repository-relative infrastructure paths are validated and compared without
 rewriting interior whitespace. Host-reported results and user attestations are
 outside this trust boundary.
 
+Plan execution gives each preparation phase one owner. Implementation and
+finding-resolution turns do not invoke project finalization or perform generic
+commit preparation. The dedicated finalization turn follows every substantive
+instruction in the selected guidance, including checks, formatting, generation,
+and staging-independent content review. Guidance that asks to stage, inspect a
+post-staging cached diff, or draft a commit message is deferred to `COMMIT`;
+an independently required read-only cached-diff check still runs as part of the
+established inventory. This deferral is neither a validation blocker nor a
+skipped check. After finalization and independent review bind the same content
+and validation-infrastructure fingerprints, the constrained local-commit
+executor alone runs `git add -A` and creates the subject-only commit with the
+validated plan subject. The contract is identical for Codex and Claude and does
+not broaden ordinary Worker access to Git metadata.
+
 A selected runner-trusted command is the only exception to agent-side check
 execution. The runner-derived bootstrap inventory must contain its exact
 configured command.

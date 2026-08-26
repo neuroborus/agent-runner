@@ -895,6 +895,14 @@ automatically discovered skill falls back without skipping finalization.
 The same repository finalization procedure must therefore work with either
 Worker backend and without skill-specific guidance.
 
+Phase ownership is also backend-neutral. Implementation and finding-resolution
+turns reserve project finalization and generic commit preparation for their
+dedicated phases. The finalization turn follows all substantive guidance but
+defers staging, post-staging cached-diff inspection, and commit-message drafting
+to the constrained `COMMIT` executor. An independently required read-only
+cached-diff check remains part of finalization evidence. This deferral is not a
+validation blocker or a skipped required check.
+
 ---
 
 ## 9. Repository Safety Guards
@@ -956,7 +964,11 @@ when the current branch advances by exactly one non-merge commit whose parent is
 the expected HEAD, every other ref and the effective remote configuration and
 Git identity remain unchanged, and the commit passes the checks in section 13.7.
 
-Staging/index changes by the Worker are allowed because they do not change repository history. Read-only roles are handled more strictly by the mutation guard below.
+Staging/index changes do not change repository history, so the generic
+workspace-write mutation guard can reconcile them. That capability does not
+authorize generic commit preparation: plan-execution prompts reserve staging
+for the constrained `COMMIT` executor. Read-only roles are handled more
+strictly by the mutation guard below.
 
 ### Read-only mutation guard
 
@@ -1370,6 +1382,10 @@ The Worker then:
 2. performs a concise self-review;
 3. returns control to the runner.
 
+Implementation does not invoke the project finalization procedure, stage
+changes, inspect a post-staging cached diff, or draft a commit message. Those
+actions belong to the dedicated `FINALIZE` and `COMMIT` phases.
+
 If required validation cannot run because of an external environment
 constraint, the Worker returns `BLOCKED` with bounded reason and evidence. The
 runner preserves safe implementation content and pauses with
@@ -1382,9 +1398,17 @@ runner-authorized `COMMIT` turn after the gate passes.
 ### 13.2 Finalization
 
 Run the complete project finalization procedure in a dedicated Worker turn for
-every policy mode.
+every policy mode. Follow every substantive instruction in the applicable
+project guidance, including required checks, project-required formatting or
+generation, hygiene, and staging-independent review of the exact content.
 
-The finalization turn should execute the validation procedure and report its result. It should not perform unrelated discretionary fixes in the same turn.
+The finalization turn should execute the validation procedure and report its
+result. It should not perform unrelated discretionary fixes in the same turn.
+When guidance includes generic commit preparation, defer only staging,
+post-staging cached-diff inspection, and commit-message drafting to `COMMIT`.
+Continue to execute any independently required read-only cached-diff check in
+the established inventory. This phase-owned deferral is neither a validation
+blocker nor a skipped required check and must not prevent `PASS`.
 
 Every non-availability result carries the complete inventory actually used and
 exactly one ordered result for each required check. `PASS` requires every result
@@ -1542,6 +1566,10 @@ When review finishes successfully, persist the reviewed content fingerprint.
 
 The Worker receives all currently open findings together.
 
+Finding resolution fixes or disputes the current blockers and then returns
+control. It does not invoke project finalization or perform generic commit
+preparation; a content-changing fix returns to the dedicated `FINALIZE` gate.
+
 For each finding it returns:
 
 ```text
@@ -1688,7 +1716,9 @@ current branch/ref context == expected branch/ref context
 Only the Worker creates the planned commit, and only in a dedicated one-shot
 turn explicitly authorized by the runner after the commit gate passes. The
 runner controls the transition and verifies the result; it does not run
-`git commit` itself.
+`git commit` itself. The Worker's confirmation turn remains read-only. Only the
+adapter's constrained local-commit executor stages content and creates the
+commit.
 
 Once the gate passes:
 
@@ -1698,9 +1728,10 @@ Once the gate passes:
 3. record the expected HEAD, branch/ref context, local refs, effective remote
    configuration and Git-identity fingerprints, and finalized/reviewed content
    fingerprint;
-4. start or continue the Worker with a narrow instruction to stage the current
-   non-ignored workspace (`git add -A`) and create exactly one local commit using
-   the exact supplied message;
+4. start or continue the Worker with a narrow readiness instruction, then have
+   its constrained executor stage the current non-ignored workspace
+   (`git add -A`) and create exactly one local commit using the exact supplied
+   message;
 5. require the Worker to use the repository's existing Git identity and prohibit
    changing `user.name`, `user.email`, author/committer metadata, commit-message
    hooks, remotes, branches, tags, or unrelated Git configuration;
@@ -2105,6 +2136,10 @@ At minimum cover:
     inputs and Git controls, preserve only authorized partial content and index
     changes, invalidate dependent evidence, replace and clear activity in
     order, and never replay a consumed commit authorization.
+59. skill-guided implementation, finding-resolution, finalization, and commit
+    prompts preserve phase ownership: all substantive finalization work runs,
+    commit preparation is deferred without blocking validation, and only the
+    constrained commit executor stages the finalized and reviewed content.
 
 Real Codex/Claude smoke tests should be opt-in integration tests.
 
@@ -2217,6 +2252,10 @@ Do not build:
 34. Every role produces its own result without delegation; adapter collaboration
     auditing remains fail closed and a violation is never an environment pause
     or transparent retry.
+35. Plan-execution implementation and finding-resolution turns do not perform
+    project finalization or generic commit preparation; finalization defers only
+    commit-preparation guidance, and the constrained `COMMIT` executor alone
+    stages and creates the exact validated subject-only commit.
 
 ---
 
@@ -2238,6 +2277,8 @@ V1 is complete when:
 - task/plan input changes are detected;
 - each plan step is implemented separately;
 - project finalization is the validation gate;
+- finalization follows all substantive project guidance while commit preparation
+  remains owned by the constrained `COMMIT` executor;
 - finalization and review are tied to the same staging-independent content fingerprint;
 - Worker can fix or dispute findings;
 - unresolved disputes can be arbitrated;
