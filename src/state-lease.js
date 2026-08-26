@@ -1,8 +1,8 @@
 import { join } from "node:path";
 
 import {
-  createExclusiveFile,
-  readOptionalText,
+  publishExclusiveFile,
+  readOptionalPublishedText,
   removeFile,
 } from "./state-files.js";
 import { assertRunId, RunStoreError } from "./state-validation.js";
@@ -17,22 +17,27 @@ const LEASE_FIELDS = new Set([
   "acquiredAt",
 ]);
 
-function parseJson(source, description) {
+function parseJson(source, description, invalidLeaseCode) {
   try {
     return JSON.parse(source);
   } catch (cause) {
     throw new RunStoreError(`${description} contains invalid JSON.`, {
       cause,
-      code: "ERR_INVALID_RUN_LEASE",
+      code: invalidLeaseCode,
     });
   }
 }
 
-function parseLease(source, runId, description) {
-  const value = parseJson(source, description);
+function parseLease(
+  source,
+  expectedRunId,
+  description,
+  invalidLeaseCode,
+) {
+  const value = parseJson(source, description, invalidLeaseCode);
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new RunStoreError(`${description} must be an object.`, {
-      code: "ERR_INVALID_RUN_LEASE",
+      code: invalidLeaseCode,
     });
   }
   const unknownField = Object.keys(value).find(
@@ -40,7 +45,7 @@ function parseLease(source, runId, description) {
   );
   if (unknownField !== undefined) {
     throw new RunStoreError(`lease.${unknownField} is not supported.`, {
-      code: "ERR_INVALID_RUN_LEASE",
+      code: invalidLeaseCode,
     });
   }
 
@@ -50,12 +55,12 @@ function parseLease(source, runId, description) {
   } catch (cause) {
     throw new RunStoreError(`${description} identity is invalid.`, {
       cause,
-      code: "ERR_INVALID_RUN_LEASE",
+      code: invalidLeaseCode,
     });
   }
   const acquiredAt = new Date(value.acquiredAt);
   if (
-    value.runId !== runId ||
+    (expectedRunId !== null && value.runId !== expectedRunId) ||
     !Number.isSafeInteger(value.pid) ||
     value.pid < 1 ||
     typeof value.hostname !== "string" ||
@@ -66,34 +71,66 @@ function parseLease(source, runId, description) {
     acquiredAt.toISOString() !== value.acquiredAt
   ) {
     throw new RunStoreError(`${description} is invalid.`, {
-      code: "ERR_INVALID_RUN_LEASE",
+      code: invalidLeaseCode,
     });
   }
 
   return value;
 }
 
-async function readLease(filePath, runId, description = "Run lease") {
-  const source = await readOptionalText(filePath);
-  return source === null ? null : parseLease(source, runId, description);
+async function readLease(
+  filePath,
+  expectedRunId,
+  description,
+  invalidLeaseCode,
+) {
+  const source = await readOptionalPublishedText(filePath);
+  return source === null
+    ? null
+    : parseLease(
+        source,
+        expectedRunId,
+        description,
+        invalidLeaseCode,
+      );
 }
 
 export function createLeaseManager({
+  activeLeaseDescription = "Execution lease",
+  conflictCode = "ERR_RUN_LEASED",
   currentDate,
   hostName,
+  invalidLeaseCode = "ERR_INVALID_RUN_LEASE",
+  leaseDescription = "Run lease",
+  leaseSubject = (runId) => `Run ${runId}`,
   processId,
   processIsAlive,
+  onPublicationBoundary,
+  reclaimingLeaseDescription = "Reclaiming lease",
+  requireMatchingRunId = true,
   staleMs,
   timestamp,
   tokenFactory,
 }) {
   const activeLeases = new WeakMap();
+  const activeLeaseName =
+    `${activeLeaseDescription[0].toLowerCase()}` +
+    activeLeaseDescription.slice(1);
 
-  async function leaseIsStale(lease) {
-    const age = currentDate().valueOf() - Date.parse(lease.acquiredAt);
-    if (age < staleMs || lease.hostname !== hostName) {
-      return false;
-    }
+  function expectedRunId(runId) {
+    return requireMatchingRunId ? runId : null;
+  }
+
+  function readManagedLease(filePath, runId, description = leaseDescription) {
+    return readLease(
+      filePath,
+      expectedRunId(runId),
+      description,
+      invalidLeaseCode,
+    );
+  }
+
+  async function ownerProcessIsAlive(lease) {
     const processAlive = await processIsAlive(lease.pid);
     if (typeof processAlive !== "boolean") {
       throw new RunStoreError(
@@ -101,7 +138,15 @@ export function createLeaseManager({
         { code: "ERR_INVALID_RUN_STORE_OPTIONS" },
       );
     }
-    return !processAlive;
+    return processAlive;
+  }
+
+  async function leaseIsStale(lease) {
+    const age = currentDate().valueOf() - Date.parse(lease.acquiredAt);
+    if (age < staleMs || lease.hostname !== hostName) {
+      return false;
+    }
+    return !(await ownerProcessIsAlive(lease));
   }
 
   function createLeaseHandle(runDirectory, record) {
@@ -132,7 +177,9 @@ export function createLeaseManager({
   }
 
   async function writeLeaseFile(filePath, record) {
-    await createExclusiveFile(filePath, `${JSON.stringify(record)}\n`);
+    await publishExclusiveFile(filePath, `${JSON.stringify(record)}\n`, {
+      onPublicationBoundary,
+    });
   }
 
   async function createLeaseFile(runDirectory, runId) {
@@ -143,7 +190,11 @@ export function createLeaseManager({
 
   async function removeOwnedMarker(runDirectory, runId, token) {
     const markerPath = join(runDirectory, RECLAIMING_LEASE_FILENAME);
-    const marker = await readLease(markerPath, runId, "Reclaiming lease");
+    const marker = await readManagedLease(
+      markerPath,
+      runId,
+      reclaimingLeaseDescription,
+    );
     if (marker?.token === token) {
       await removeFile(markerPath);
     }
@@ -151,14 +202,19 @@ export function createLeaseManager({
 
   async function clearRecoverableMarker(runDirectory, runId) {
     const markerPath = join(runDirectory, RECLAIMING_LEASE_FILENAME);
-    const marker = await readLease(markerPath, runId, "Reclaiming lease");
+    const marker = await readManagedLease(
+      markerPath,
+      runId,
+      reclaimingLeaseDescription,
+    );
     if (marker === null) {
       return;
     }
     if (!(await leaseIsStale(marker))) {
-      throw new RunStoreError(`Run ${runId} lease recovery is active.`, {
-        code: "ERR_RUN_LEASED",
-      });
+      throw new RunStoreError(
+        `${leaseSubject(runId)} lease recovery is active.`,
+        { code: conflictCode },
+      );
     }
     await removeOwnedMarker(runDirectory, runId, marker.token);
   }
@@ -177,13 +233,13 @@ export function createLeaseManager({
         }
       }
 
-      const existingLease = await readLease(leasePath, runId);
+      const existingLease = await readManagedLease(leasePath, runId);
       if (existingLease === null) {
         continue;
       }
       if (!(await leaseIsStale(existingLease))) {
-        throw new RunStoreError(`Run ${runId} is already leased.`, {
-          code: "ERR_RUN_LEASED",
+        throw new RunStoreError(`${leaseSubject(runId)} is already leased.`, {
+          code: conflictCode,
         });
       }
 
@@ -197,7 +253,7 @@ export function createLeaseManager({
         throw cause;
       }
 
-      const currentLease = await readLease(leasePath, runId);
+      const currentLease = await readManagedLease(leasePath, runId);
       if (currentLease?.token !== existingLease.token) {
         await removeOwnedMarker(
           runDirectory,
@@ -222,33 +278,54 @@ export function createLeaseManager({
           reclaimingLease.token,
         );
         if (cause?.code === "EEXIST") {
-          throw new RunStoreError(`Run ${runId} is already leased.`, {
+          throw new RunStoreError(`${leaseSubject(runId)} is already leased.`, {
             cause,
-            code: "ERR_RUN_LEASED",
+            code: conflictCode,
           });
         }
         throw cause;
       }
     }
 
-    throw new RunStoreError(`Run ${runId} lease could not be acquired.`, {
-      code: "ERR_RUN_LEASED",
-    });
+    throw new RunStoreError(
+      `${leaseSubject(runId)} lease could not be acquired.`,
+      { code: conflictCode },
+    );
+  }
+
+  async function owner(runDirectory, runId) {
+    const lease = await readManagedLease(
+      join(runDirectory, LEASE_FILENAME),
+      runId,
+    );
+    return lease !== null && !(await leaseIsStale(lease))
+      ? lease.runId
+      : null;
   }
 
   async function isLeased(runDirectory, runId) {
-    const lease = await readLease(join(runDirectory, LEASE_FILENAME), runId);
-    return lease !== null && !(await leaseIsStale(lease));
+    return (await owner(runDirectory, runId)) !== null;
+  }
+
+  async function ownerIsLive(runDirectory, runId) {
+    const lease = await readManagedLease(
+      join(runDirectory, LEASE_FILENAME),
+      runId,
+    );
+    return (
+      lease !== null &&
+      (lease.hostname !== hostName || (await ownerProcessIsAlive(lease)))
+    );
   }
 
   async function assertLeaseFile(metadata) {
-    const persistedLease = await readLease(
+    const persistedLease = await readManagedLease(
       join(metadata.runDirectory, LEASE_FILENAME),
       metadata.record.runId,
     );
     if (persistedLease?.token !== metadata.record.token) {
-      throw new RunStoreError("Execution lease is no longer owned.", {
-        code: "ERR_INVALID_RUN_LEASE",
+      throw new RunStoreError(`${activeLeaseDescription} is no longer owned.`, {
+        code: invalidLeaseCode,
       });
     }
   }
@@ -256,14 +333,15 @@ export function createLeaseManager({
   async function runExclusive(lease, operation) {
     const metadata = activeLeases.get(lease);
     if (metadata === undefined || metadata.released) {
-      throw new RunStoreError("A current execution lease is required.", {
-        code: "ERR_INVALID_RUN_LEASE",
+      throw new RunStoreError(`A current ${activeLeaseName} is required.`, {
+        code: invalidLeaseCode,
       });
     }
     if (metadata.busy) {
-      throw new RunStoreError("Execution lease already has an active write.", {
-        code: "ERR_RUN_LEASE_BUSY",
-      });
+      throw new RunStoreError(
+        `${activeLeaseDescription} already has an active write.`,
+        { code: "ERR_RUN_LEASE_BUSY" },
+      );
     }
 
     metadata.busy = true;
@@ -281,7 +359,7 @@ export function createLeaseManager({
       return;
     }
     if (metadata.busy) {
-      throw new RunStoreError("Cannot release a busy execution lease.", {
+      throw new RunStoreError(`Cannot release a busy ${activeLeaseName}.`, {
         code: "ERR_RUN_LEASE_BUSY",
       });
     }
@@ -291,5 +369,5 @@ export function createLeaseManager({
     metadata.released = true;
   }
 
-  return Object.freeze({ acquire, isLeased, runExclusive });
+  return Object.freeze({ acquire, isLeased, owner, ownerIsLive, runExclusive });
 }

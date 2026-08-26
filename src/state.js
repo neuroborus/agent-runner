@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { watch } from "node:fs";
 import { lstat, mkdir, realpath, rm, rmdir } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
@@ -23,15 +23,25 @@ import {
   normalizePublicActivity,
   normalizeRunState,
   normalizeTransitionPatch,
+  RUNTIME_COMPATIBILITY,
+  RUNTIME_COMPATIBILITY_TOKEN,
+  RUNTIME_VERSION_SKEW_EXIT_CODE,
   RUN_STATE_SCHEMA_VERSION,
   RunStoreError,
 } from "./state-validation.js";
 
-export { RUN_STATE_SCHEMA_VERSION, RunStoreError };
+export {
+  RUNTIME_COMPATIBILITY,
+  RUNTIME_COMPATIBILITY_TOKEN,
+  RUNTIME_VERSION_SKEW_EXIT_CODE,
+  RUN_STATE_SCHEMA_VERSION,
+  RunStoreError,
+};
 
 const DEFAULT_LEASE_STALE_MS = 5 * 60 * 1_000;
 
 const RUNS_DIRECTORY = "runs";
+const WORKTREES_DIRECTORY = "worktrees";
 const CREATE_RUN_FIELDS = new Set([
   "runId",
   "pipelineId",
@@ -43,6 +53,7 @@ const CREATE_RUN_FIELDS = new Set([
   "hashes",
   "pause",
   "sourceSession",
+  "sourceProfile",
   "childSessions",
   "pipelineState",
   "activity",
@@ -188,6 +199,7 @@ export function createRunStore({
   processId = process.pid,
   processIsAlive = defaultProcessIsAlive,
   leaseStaleMs = DEFAULT_LEASE_STALE_MS,
+  onLeasePublicationBoundary = async () => {},
   onTransitionBoundary = async () => {},
 } = {}) {
   if (typeof stateRoot !== "string" || !isAbsolute(stateRoot)) {
@@ -200,6 +212,7 @@ export function createRunStore({
     typeof runIdFactory !== "function" ||
     typeof leaseTokenFactory !== "function" ||
     typeof processIsAlive !== "function" ||
+    typeof onLeasePublicationBoundary !== "function" ||
     typeof onTransitionBoundary !== "function" ||
     typeof hostName !== "string" ||
     hostName.length === 0 ||
@@ -244,11 +257,29 @@ export function createRunStore({
   }
 
   const journal = createStateJournal({ onTransitionBoundary });
-  const leases = createLeaseManager({
+  const runLeases = createLeaseManager({
     currentDate,
     hostName,
     processId,
     processIsAlive,
+    onPublicationBoundary: onLeasePublicationBoundary,
+    staleMs: leaseStaleMs,
+    timestamp,
+    tokenFactory: leaseTokenFactory,
+  });
+  const worktreeLeases = createLeaseManager({
+    activeLeaseDescription: "Worktree lease",
+    conflictCode: "ERR_WORKTREE_LEASED",
+    currentDate,
+    hostName,
+    invalidLeaseCode: "ERR_INVALID_WORKTREE_LEASE",
+    leaseDescription: "Worktree lease",
+    leaseSubject: (runId) => `Run ${runId}'s Git worktree`,
+    processId,
+    processIsAlive,
+    onPublicationBoundary: onLeasePublicationBoundary,
+    reclaimingLeaseDescription: "Reclaiming worktree lease",
+    requireMatchingRunId: false,
     staleMs: leaseStaleMs,
     timestamp,
     tokenFactory: leaseTokenFactory,
@@ -258,6 +289,7 @@ export function createRunStore({
     hostName,
     processId,
     processIsAlive,
+    onPublicationBoundary: onLeasePublicationBoundary,
     stateRoot: requestedStateRoot,
     tokenFactory: leaseTokenFactory,
   });
@@ -288,6 +320,52 @@ export function createRunStore({
     }
     await rootInitialization;
     return inspectRoot();
+  }
+
+  async function ensureManagedDirectory(directoryPath, description) {
+    try {
+      await mkdir(directoryPath, { mode: 0o700 });
+    } catch (cause) {
+      if (cause?.code !== "EEXIST") {
+        throw cause;
+      }
+    }
+    const metadata = await lstat(directoryPath);
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      throw new RunStoreError(`${description} must be a real directory.`, {
+        code: "ERR_UNSAFE_STATE_ROOT",
+      });
+    }
+    return directoryPath;
+  }
+
+  async function getWorktreeLeaseDirectory(projectPath) {
+    const [canonicalProjectPath, potentialStateRoot] = await Promise.all([
+      canonicalDirectory(projectPath, "Project path"),
+      canonicalPotentialPath(requestedStateRoot),
+    ]);
+    assertStateRootOutside(
+      potentialStateRoot,
+      canonicalProjectPath,
+      canonicalProjectPath,
+    );
+    const { rootPath } = await ensureRoot();
+    assertStateRootOutside(
+      rootPath,
+      canonicalProjectPath,
+      canonicalProjectPath,
+    );
+    const worktreesPath = await ensureManagedDirectory(
+      join(rootPath, WORKTREES_DIRECTORY),
+      "State worktrees path",
+    );
+    const key = createHash("sha256")
+      .update(canonicalProjectPath)
+      .digest("hex");
+    return ensureManagedDirectory(
+      join(worktreesPath, key),
+      "Worktree lease path",
+    );
   }
 
   async function getRunDirectory(runId) {
@@ -374,7 +452,7 @@ export function createRunStore({
 
     let lease;
     try {
-      lease = await leases.acquire(runDirectory, runId);
+      lease = await runLeases.acquire(runDirectory, runId);
       const createdAt = timestamp();
       const state = normalizeRunState(
         {
@@ -383,6 +461,7 @@ export function createRunStore({
           runId,
           pipelineId: input.pipelineId,
           pipelineStateVersion: input.pipelineStateVersion,
+          runtimeCompatibility: RUNTIME_COMPATIBILITY,
           projectPath,
           taskPath,
           roles: input.roles,
@@ -392,9 +471,12 @@ export function createRunStore({
           sessionLineage: {
             source:
               input.sourceSession === undefined ? null : input.sourceSession,
+            sourceProfile:
+              input.sourceProfile === undefined ? null : input.sourceProfile,
             children:
               input.childSessions === undefined ? [] : input.childSessions,
           },
+          activeTurn: null,
           pipelineState:
             input.pipelineState === undefined ? {} : input.pipelineState,
           createdAt,
@@ -455,9 +537,9 @@ export function createRunStore({
   async function acquireRunLease(runId) {
     const runDirectory = await getRunDirectory(runId);
     await loadSnapshot(runDirectory, runId);
-    const lease = await leases.acquire(runDirectory, runId);
+    const lease = await runLeases.acquire(runDirectory, runId);
     try {
-      await leases.runExclusive(lease, () =>
+      await runLeases.runExclusive(lease, () =>
         loadSnapshot(runDirectory, runId),
       );
       return lease;
@@ -484,7 +566,30 @@ export function createRunStore({
 
   async function runIsLeased(runId) {
     const runDirectory = await getRunDirectory(runId);
-    return leases.isLeased(runDirectory, runId);
+    return runLeases.isLeased(runDirectory, runId);
+  }
+
+  async function runLeaseOwnerIsLive(runId) {
+    const runDirectory = await getRunDirectory(runId);
+    return runLeases.ownerIsLive(runDirectory, runId);
+  }
+
+  async function acquireWorktreeLease(projectPath, runId) {
+    assertRunId(runId);
+    const worktreeDirectory = await getWorktreeLeaseDirectory(projectPath);
+    return worktreeLeases.acquire(worktreeDirectory, runId);
+  }
+
+  async function worktreeIsLeased(projectPath, runId) {
+    assertRunId(runId);
+    const worktreeDirectory = await getWorktreeLeaseDirectory(projectPath);
+    return worktreeLeases.isLeased(worktreeDirectory, runId);
+  }
+
+  async function worktreeLeaseOwner(projectPath, runId) {
+    assertRunId(runId);
+    const worktreeDirectory = await getWorktreeLeaseDirectory(projectPath);
+    return worktreeLeases.owner(worktreeDirectory, runId);
   }
 
   async function waitForRunChange(
@@ -578,10 +683,65 @@ export function createRunStore({
   }
 
   async function recoverRun(lease) {
-    return leases.runExclusive(lease, async ({ record, runDirectory }) => {
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
       await journal.recover(runDirectory, snapshot);
       return deepFreeze(snapshot.state);
+    });
+  }
+
+  async function migrateRun(
+    lease,
+    { pipelineState, pipelineStateVersion },
+    { activity } = {},
+  ) {
+    const normalizedActivity = normalizePublicActivity(activity);
+    if (
+      normalizedActivity?.actor !== "runner" ||
+      normalizedActivity.phase !== "runtime" ||
+      normalizedActivity.kind !== "migrated"
+    ) {
+      throw new RunStoreError("Run migration activity is invalid.", {
+        code: "ERR_INVALID_RUN_MIGRATION",
+      });
+    }
+
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
+      const snapshot = await loadSnapshot(runDirectory, record.runId);
+      if (
+        !Number.isSafeInteger(pipelineStateVersion) ||
+        pipelineStateVersion < snapshot.state.pipelineStateVersion ||
+        pipelineStateVersion < 1 ||
+        (snapshot.state.schemaVersion === RUN_STATE_SCHEMA_VERSION &&
+          snapshot.state.runtimeCompatibility?.runnerVersion ===
+            RUNTIME_COMPATIBILITY.runnerVersion &&
+          snapshot.state.runtimeCompatibility?.runStateVersion ===
+            RUNTIME_COMPATIBILITY.runStateVersion &&
+          pipelineStateVersion === snapshot.state.pipelineStateVersion)
+      ) {
+        throw new RunStoreError("Run migration target is invalid.", {
+          code: "ERR_INVALID_RUN_MIGRATION",
+        });
+      }
+      const nextState = normalizeRunState(
+        {
+          ...snapshot.state,
+          schemaVersion: RUN_STATE_SCHEMA_VERSION,
+          revision: snapshot.state.revision + 1,
+          pipelineStateVersion,
+          runtimeCompatibility: RUNTIME_COMPATIBILITY,
+          pipelineState,
+          updatedAt: timestamp(snapshot.state.updatedAt),
+        },
+        record.runId,
+      );
+      await journal.appendTransition(
+        runDirectory,
+        nextState,
+        snapshot,
+        normalizedActivity,
+      );
+      return deepFreeze(nextState);
     });
   }
 
@@ -598,7 +758,7 @@ export function createRunStore({
       );
     }
 
-    return leases.runExclusive(lease, async ({ record, runDirectory }) => {
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
       if (
         normalizedActivity === null &&
@@ -630,6 +790,57 @@ export function createRunStore({
     });
   }
 
+  async function startAgentTurn(lease, activeTurn, { activity } = {}) {
+    const normalizedPatch = normalizeTransitionPatch({ activeTurn });
+    const normalizedActivity = normalizePublicActivity(activity);
+    if (
+      normalizedPatch.activeTurn === null ||
+      normalizedActivity?.actor !== normalizedPatch.activeTurn.role ||
+      normalizedActivity.phase !== normalizedPatch.activeTurn.phase ||
+      normalizedActivity.kind !== "turn-started"
+    ) {
+      throw new RunStoreError("Agent turn activity is invalid.", {
+        code: "ERR_INVALID_AGENT_TURN",
+      });
+    }
+    return transitionRun(lease, normalizedPatch, {
+      activity: normalizedActivity,
+    });
+  }
+
+  async function finishAgentTurn(lease, activeTurn) {
+    const normalized = normalizeTransitionPatch({ activeTurn }).activeTurn;
+    if (normalized === null) {
+      throw new RunStoreError("Active agent turn is invalid.", {
+        code: "ERR_INVALID_AGENT_TURN",
+      });
+    }
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
+      const snapshot = await loadSnapshot(runDirectory, record.runId);
+      if (!isDeepStrictEqual(snapshot.state.activeTurn, normalized)) {
+        throw new RunStoreError("Active agent turn does not match.", {
+          code: "ERR_INVALID_AGENT_TURN",
+        });
+      }
+      const nextState = normalizeRunState(
+        {
+          ...snapshot.state,
+          activeTurn: null,
+          revision: snapshot.state.revision + 1,
+          updatedAt: timestamp(snapshot.state.updatedAt),
+        },
+        record.runId,
+      );
+      await journal.appendTransition(
+        runDirectory,
+        nextState,
+        snapshot,
+        null,
+      );
+      return deepFreeze(nextState);
+    });
+  }
+
   async function recordChildSession(
     lease,
     childSession,
@@ -638,7 +849,7 @@ export function createRunStore({
     const normalizedChild = normalizeChildSession(childSession);
     const normalizedActivity = normalizePublicActivity(activity);
 
-    return leases.runExclusive(lease, async ({ record, runDirectory }) => {
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
       if (
         snapshot.state.sessionLineage.children.some(
@@ -686,7 +897,7 @@ export function createRunStore({
       );
     }
 
-    return leases.runExclusive(lease, async ({ runDirectory }) => {
+    return runLeases.runExclusive(lease, async ({ runDirectory }) => {
       const artifactPath = await resolveRunArtifactPath(
         runDirectory,
         relativePath,
@@ -746,17 +957,24 @@ export function createRunStore({
     beginAction: actions.begin,
     rootPath: requestedStateRoot,
     acquireRunLease,
+    acquireWorktreeLease,
     createRun,
     getRunDirectory,
+    finishAgentTurn,
     loadRun,
+    migrateRun,
     readPublicActivity,
     readAction: actions.read,
     recordChildSession,
     recoverRun,
     runIsLeased,
+    runLeaseOwnerIsLive,
+    startAgentTurn,
     transitionRun,
     validateStateBoundary,
     waitForRunChange,
+    worktreeIsLeased,
+    worktreeLeaseOwner,
     writeRunArtifact,
   });
 }

@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
+  link,
   lstat,
   mkdir,
   open,
+  readdir,
   realpath,
   rename,
   unlink,
@@ -155,23 +157,133 @@ export async function appendDurableLine(filePath, value) {
   await syncDirectory(dirname(filePath));
 }
 
-export async function createExclusiveFile(filePath, content) {
-  let handle;
-  let created = false;
+function isPublicationTemporaryName(filePath, name) {
+  const prefix = `.${basename(filePath)}.publish.`;
+  if (!name.startsWith(prefix) || !name.endsWith(".tmp")) {
+    return false;
+  }
+  const identity = name.slice(prefix.length, -4);
+  const separator = identity.indexOf(".");
+  return (
+    /^[1-9][0-9]*$/u.test(identity.slice(0, separator)) &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
+      identity.slice(separator + 1),
+    )
+  );
+}
+
+async function settleExclusivePublication(filePath) {
+  let publishedMetadata;
   try {
-    handle = await open(filePath, "wx", 0o600);
-    created = true;
+    publishedMetadata = await lstat(filePath);
+  } catch (cause) {
+    if (cause?.code === "ENOENT") {
+      return;
+    }
+    throw cause;
+  }
+  if (
+    publishedMetadata.isSymbolicLink() ||
+    !publishedMetadata.isFile() ||
+    publishedMetadata.nlink !== 2
+  ) {
+    return;
+  }
+
+  const directoryPath = dirname(filePath);
+  const names = await readdir(directoryPath);
+  for (const name of names) {
+    if (!isPublicationTemporaryName(filePath, name)) {
+      continue;
+    }
+    const temporaryPath = join(directoryPath, name);
+    let temporaryMetadata;
+    try {
+      temporaryMetadata = await lstat(temporaryPath);
+    } catch (cause) {
+      if (cause?.code === "ENOENT") {
+        continue;
+      }
+      throw cause;
+    }
+    if (
+      !temporaryMetadata.isSymbolicLink() &&
+      temporaryMetadata.isFile() &&
+      temporaryMetadata.dev === publishedMetadata.dev &&
+      temporaryMetadata.ino === publishedMetadata.ino
+    ) {
+      await unlinkIfPresent(temporaryPath);
+      await syncDirectory(directoryPath);
+      return;
+    }
+  }
+}
+
+export async function publishExclusiveFile(
+  filePath,
+  content,
+  { onPublicationBoundary = async () => {} } = {},
+) {
+  const directoryPath = dirname(filePath);
+  const temporaryPath = join(
+    directoryPath,
+    `.${basename(filePath)}.publish.${process.pid}.${randomUUID()}.tmp`,
+  );
+  let handle;
+  let preparedMetadata;
+  let published = false;
+  try {
+    handle = await open(temporaryPath, "wx", 0o600);
     await handle.writeFile(content);
     await handle.sync();
+    preparedMetadata = await handle.stat();
+    if (!preparedMetadata.isFile() || preparedMetadata.nlink !== 1) {
+      throw new RunStoreError(
+        `Managed state path is not a regular file: ${temporaryPath}.`,
+        { code: "ERR_UNSAFE_STATE_FILE" },
+      );
+    }
     await handle.close();
     handle = undefined;
-    await syncDirectory(dirname(filePath));
+
+    await onPublicationBoundary({ filePath, phase: "prepared" });
+    await link(temporaryPath, filePath);
+    published = true;
+    await onPublicationBoundary({ filePath, phase: "published" });
+    await unlinkIfPresent(temporaryPath);
+    await syncDirectory(directoryPath);
+    const publishedMetadata = await lstat(filePath);
+    if (
+      !publishedMetadata.isFile() ||
+      publishedMetadata.nlink !== 1 ||
+      publishedMetadata.dev !== preparedMetadata.dev ||
+      publishedMetadata.ino !== preparedMetadata.ino
+    ) {
+      throw new RunStoreError(
+        `Managed state path is not a regular file: ${filePath}.`,
+        { code: "ERR_UNSAFE_STATE_FILE" },
+      );
+    }
   } catch (cause) {
     await handle?.close();
     handle = undefined;
-    if (created) {
-      await unlinkIfPresent(filePath);
+    await unlinkIfPresent(temporaryPath);
+    if (published && preparedMetadata !== undefined) {
+      try {
+        const currentMetadata = await lstat(filePath);
+        if (
+          currentMetadata.dev === preparedMetadata.dev &&
+          currentMetadata.ino === preparedMetadata.ino
+        ) {
+          await unlinkIfPresent(filePath);
+        }
+      } catch (cleanupCause) {
+        if (cleanupCause?.code !== "ENOENT") {
+          throw cleanupCause;
+        }
+      }
     }
+    await syncDirectory(directoryPath);
     throw cause;
   } finally {
     await handle?.close();
@@ -191,6 +303,11 @@ export async function readOptionalText(filePath) {
   } finally {
     await handle?.close();
   }
+}
+
+export async function readOptionalPublishedText(filePath) {
+  await settleExclusivePublication(filePath);
+  return readOptionalText(filePath);
 }
 
 export async function removeFile(filePath) {

@@ -5,7 +5,8 @@ import { join } from "node:path";
 
 import {
   atomicWriteFile,
-  createExclusiveFile,
+  publishExclusiveFile,
+  readOptionalPublishedText,
   readOptionalText,
   removeFile,
 } from "./state-files.js";
@@ -17,7 +18,12 @@ const ACTION_FILENAME = "action.json";
 const LEASE_FILENAME = ".lease";
 const MAX_KEY_LENGTH = 1_024;
 const MAX_ACTION_BYTES = 256 * 1_024;
-const TOOLS = new Set(["run_start", "run_respond", "run_resume"]);
+const TOOLS = new Set([
+  "run_start",
+  "run_respond",
+  "run_resume",
+  "unexpected_issue_report",
+]);
 const LEASE_FIELDS = new Set(["token", "pid", "hostname", "acquiredAt"]);
 const ACTION_FIELDS = new Set([
   "schemaVersion",
@@ -176,6 +182,7 @@ export function createActionStore({
   hostName = hostname(),
   processId = process.pid,
   processIsAlive: checkProcess = processIsAlive,
+  onPublicationBoundary,
   tokenFactory = randomUUID,
 }) {
   function timestamp(notBefore) {
@@ -201,9 +208,11 @@ export function createActionStore({
       const serializedLease = `${JSON.stringify(lease)}\n`;
       parseLease(serializedLease);
       try {
-        await createExclusiveFile(leasePath, serializedLease);
+        await publishExclusiveFile(leasePath, serializedLease, {
+          onPublicationBoundary,
+        });
         return async () => {
-          const current = await readOptionalText(leasePath);
+          const current = await readOptionalPublishedText(leasePath);
           if (current !== null && parseLease(current).token === lease.token) {
             await removeFile(leasePath);
           }
@@ -213,7 +222,7 @@ export function createActionStore({
           throw cause;
         }
       }
-      const source = await readOptionalText(leasePath);
+      const source = await readOptionalPublishedText(leasePath);
       if (source === null) {
         continue;
       }
@@ -234,7 +243,7 @@ export function createActionStore({
           "ERR_MCP_ACTION_IN_PROGRESS",
         );
       }
-      const current = await readOptionalText(leasePath);
+      const current = await readOptionalPublishedText(leasePath);
       if (current !== null && parseLease(current).token === existing.token) {
         await removeFile(leasePath);
       }

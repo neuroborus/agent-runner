@@ -1,10 +1,13 @@
-import { join } from "node:path";
 import { parseArgs } from "node:util";
 
 import packageMetadata from "../package.json" with { type: "json" };
-import { serveMcp } from "./mcp.js";
+import {
+  DETACHED_RUNTIME_COMPATIBILITY_ENV,
+  serveMcp,
+} from "./mcp.js";
 import { getPipeline, listPipelines } from "./pipeline-registry.js";
 import { createRunner, parseSourceSession } from "./runner.js";
+import { RUNTIME_VERSION_SKEW_EXIT_CODE } from "./state.js";
 
 const COMMAND_OPTIONS = Object.freeze({
   resume: Object.freeze(["run", "extra-fix-rounds", "override-finding"]),
@@ -12,7 +15,15 @@ const COMMAND_OPTIONS = Object.freeze({
   pipelines: Object.freeze([]),
   mcp: Object.freeze([]),
 });
-const COMMON_RUN_OPTIONS = Object.freeze(["clarify", "fork-from"]);
+const COMMON_RUN_OPTIONS = Object.freeze([
+  "clarify",
+  "context-size",
+  "fork-from",
+  "fork-profile",
+  "model",
+  "profile",
+  "project-config",
+]);
 const REQUIRED_COMMAND_OPTIONS = Object.freeze({
   resume: Object.freeze(["run"]),
   status: Object.freeze(["run"]),
@@ -26,7 +37,9 @@ const PIPELINES = listPipelines();
 const PIPELINE_RUN_OPTIONS = new Set(
   PIPELINES.flatMap((pipeline) => [
     ...pipeline.runOptions,
+    ...pipeline.roles.map((role) => `${role}-context-size`),
     ...pipeline.roles.map((role) => `${role}-model`),
+    ...pipeline.roles.map((role) => `${role}-profile`),
   ]),
 );
 
@@ -37,6 +50,11 @@ const OPTIONS = Object.freeze({
   "extra-fix-rounds": { type: "string" },
   "override-finding": { type: "string" },
   "fork-from": { type: "string" },
+  "fork-profile": { type: "string" },
+  "context-size": { type: "string" },
+  model: { type: "string" },
+  profile: { type: "string" },
+  "project-config": { type: "string" },
   ...Object.fromEntries(
     [...PIPELINE_RUN_OPTIONS].map((option) => [option, { type: "string" }]),
   ),
@@ -50,7 +68,7 @@ const PIPELINE_USAGE = PIPELINES.map(
 const USAGE = `Agent Runner
 
 Usage:
-  agent-run run <pipeline> --project <repo> --task <task-dir> [--clarify] [--fork-from <backend>:<session-id>]
+  agent-run run <pipeline> --project <repo> --task <task-dir> [--clarify] [--profile <alias>] [--fork-from <backend>:<session-id>]
   agent-run resume --run <run-id> [--extra-fix-rounds <count> | --override-finding <finding-id>]
   agent-run status --run <run-id>
   agent-run pipelines
@@ -62,8 +80,15 @@ ${PIPELINE_USAGE}
 Options:
       --clarify            Open the clarification editor before agent questions
       --fork-from          Fork primary and review roles from a backend session
+      --fork-profile       Trusted profile alias used by the source session
+      --profile            Set the run-wide trusted profile alias
+      --project-config     Load an explicit ignored project configuration
+      --model              Set the run-wide backend-native model
+      --context-size       Set the run-wide decimal token context size
       --<role>             Override a role backend
+      --<role>-profile     Override a role trusted profile alias
       --<role>-model       Override a role model
+      --<role>-context-size Override a role decimal token context size
       --extra-fix-rounds   Grant a positive additional fix budget on resume
       --override-finding   Override one applicable open finding on resume
   -h, --help               Show this help
@@ -86,43 +111,77 @@ function shortFingerprint(value) {
   return typeof value === "string" ? value.slice(0, 12) : null;
 }
 
+function pauseActionLine(runId, action) {
+  if (action.type === "respond") {
+    return `  Respond to pending input ${action.requestId} through MCP, or edit the clarification artifact and resume.`;
+  }
+  if (action.type === "start-new-run") {
+    return action.requirement === "revised-plan"
+      ? "  Revise the plan and start a fresh plan-execution run."
+      : "  Abandon this run and start a fresh run from an uncontaminated worktree.";
+  }
+  if (action.action === null) {
+    return `  Retry with: agent-run resume --run ${runId}`;
+  }
+  if (action.action.type === "extra-fix-rounds") {
+    return `  Grant another fix round with: agent-run resume --run ${runId} --extra-fix-rounds ${action.action.amount}`;
+  }
+  return `  Override finding ${action.action.findingId} with: agent-run resume --run ${runId} --override-finding ${action.action.findingId}`;
+}
+
 function runSummary({ directoryPath, run }) {
   const state = run.pipelineState;
+  const pipeline = getPipeline(run.pipelineId);
+  const status = pipeline.projections.status(run);
+  const clarification = pipeline.projections.clarification(run);
+  const pause = pipeline.projections.pause(run);
   const lines = [
     `Run: ${run.runId}`,
     `Pipeline: ${run.pipelineId}`,
     `State: ${state.workflowState}`,
   ];
-  if (state.currentStep !== undefined && state.currentStep !== null) {
-    lines.push(`Step: ${state.currentStep}`);
+  if (status.currentStep !== null) {
+    lines.push(`Step: ${status.currentStep}`);
   }
-  if (run.pause?.reason !== undefined) {
-    lines.push(`Pause: ${run.pause.reason}`);
-  }
-  const clarificationPath =
-    state.clarificationPath ??
-    (run.pipelineId === "plan-authoring"
-      ? join(run.taskPath, "clarifications.md")
-      : null);
-  if (clarificationPath !== null) {
-    lines.push(`Clarifications: ${clarificationPath}`);
-  }
-  lines.push(`Plan: ${state.planPath ?? join(run.taskPath, "plan.md")}`);
-  if (Array.isArray(state.findings) && state.findings.length > 0) {
-    lines.push("Open findings:");
-    for (const finding of state.findings) {
-      lines.push(
-        `  ${finding.id}: ${finding.problem ?? finding.description ?? "open"}`,
-      );
+  if (pause !== null) {
+    lines.push(`Pause: ${pause.reason}`);
+    if (pause.code !== null) {
+      lines.push(`Pause code: ${pause.code}`);
+    }
+    lines.push(`Explanation: ${pause.explanation}`);
+    if (pause.evidence.length > 0) {
+      lines.push("Evidence:");
+      for (const entry of pause.evidence) {
+        lines.push(`  ${entry}`);
+      }
+    }
+    if (pause.resumeState !== null) {
+      lines.push(`Resume state: ${pause.resumeState}`);
+    }
+    if (pause.nextActions.length > 0) {
+      lines.push("Next actions:");
+      for (const action of pause.nextActions) {
+        lines.push(pauseActionLine(run.runId, action));
+      }
     }
   }
-  const stagnation =
-    state.stagnationDirection?.direction ?? state.arbiterDirection?.direction;
-  if (stagnation !== undefined) {
-    lines.push(`Stagnation direction: ${stagnation}`);
+  if (clarification.path !== null) {
+    lines.push(`Clarifications: ${clarification.path}`);
   }
-  const finalized = shortFingerprint(state.finalizedFingerprint);
-  const reviewed = shortFingerprint(state.reviewedFingerprint);
+  if (status.planPath !== null) {
+    lines.push(`Plan: ${status.planPath}`);
+  }
+  if (status.findings.length > 0) {
+    lines.push("Open findings:");
+    for (const finding of status.findings) {
+      lines.push(`  ${finding.id}: ${finding.summary}`);
+    }
+  }
+  if (status.stagnationDirection !== null) {
+    lines.push(`Stagnation direction: ${status.stagnationDirection}`);
+  }
+  const finalized = shortFingerprint(status.finalizedFingerprint);
+  const reviewed = shortFingerprint(status.reviewedFingerprint);
   if (finalized !== null) {
     lines.push(`Finalized fingerprint: ${finalized}`);
   }
@@ -130,11 +189,10 @@ function runSummary({ directoryPath, run }) {
     lines.push(`Reviewed fingerprint: ${reviewed}`);
   }
   if (
-    Array.isArray(state.completedCommits) &&
-    state.completedCommits.length > 0
+    status.completedCommits.length > 0
   ) {
     lines.push(
-      `Commits: ${state.completedCommits.map(shortFingerprint).join(", ")}`,
+      `Commits: ${status.completedCommits.map(shortFingerprint).join(", ")}`,
     );
   }
   lines.push(`State directory: ${directoryPath}`);
@@ -152,8 +210,15 @@ function roleOverrides(pipeline, values) {
   return Object.fromEntries(
     pipeline.roles.flatMap((role) => {
       const backend = values[role];
+      const profile = values[`${role}-profile`];
       const model = values[`${role}-model`];
-      if (backend === undefined && model === undefined) {
+      const contextSize = values[`${role}-context-size`];
+      if (
+        backend === undefined &&
+        profile === undefined &&
+        model === undefined &&
+        contextSize === undefined
+      ) {
         return [];
       }
       return [
@@ -161,12 +226,24 @@ function roleOverrides(pipeline, values) {
           role,
           {
             ...(backend === undefined ? {} : { backend }),
+            ...(profile === undefined ? {} : { profile }),
             ...(model === undefined ? {} : { model }),
+            ...(contextSize === undefined ? {} : { contextSize }),
           },
         ],
       ];
     }),
   );
+}
+
+function executionOverrides(values) {
+  return Object.freeze({
+    ...(values.profile === undefined ? {} : { profile: values.profile }),
+    ...(values.model === undefined ? {} : { model: values.model }),
+    ...(values["context-size"] === undefined
+      ? {}
+      : { contextSize: values["context-size"] }),
+  });
 }
 
 function resumeAction(values) {
@@ -199,6 +276,7 @@ export async function main(
     stderr = process.stderr,
     runner,
     startMcp = serveMcp,
+    environment = process.env,
   } = {},
 ) {
   let parsed;
@@ -274,7 +352,9 @@ export async function main(
     supportedOptions = [
       ...COMMON_RUN_OPTIONS,
       ...pipeline.runOptions,
+      ...pipeline.roles.map((role) => `${role}-context-size`),
       ...pipeline.roles.map((role) => `${role}-model`),
+      ...pipeline.roles.map((role) => `${role}-profile`),
     ];
     requiredOptions = pipeline.requiredRunOptions;
     commandLabel = `${command} ${pipelineId}`;
@@ -310,7 +390,7 @@ export async function main(
   }
   if (command === "mcp") {
     try {
-      startMcp({ stderr });
+      await startMcp({ stderr });
       return 0;
     } catch {
       stderr.write("Agent Runner MCP failed to start.\n");
@@ -327,16 +407,33 @@ export async function main(
         },
       });
     if (command === "run") {
+      if (
+        values["fork-profile"] !== undefined &&
+        values["fork-from"] === undefined
+      ) {
+        throw new Error("--fork-profile requires --fork-from.");
+      }
+      const parsedSource =
+        values["fork-from"] === undefined
+          ? null
+          : parseSourceSession(values["fork-from"]);
       const result = await commandRunner.run({
         pipelineId: pipeline.id,
         projectPath: values.project,
         taskPath: values.task,
         proactiveClarification: values.clarify ?? false,
+        projectConfigurationPath: values["project-config"],
         roleOverrides: roleOverrides(pipeline, values),
+        executionOverrides: executionOverrides(values),
         sourceSession:
-          values["fork-from"] === undefined
+          parsedSource === null
             ? null
-            : parseSourceSession(values["fork-from"]),
+            : {
+                ...parsedSource,
+                ...(values["fork-profile"] === undefined
+                  ? {}
+                  : { profile: values["fork-profile"] }),
+              },
       });
       stdout.write(runSummary(result));
       return workflowExitCode(result.run);
@@ -345,6 +442,12 @@ export async function main(
       const result = await commandRunner.resume({
         runId: values.run,
         action: resumeAction(values),
+        ...(environment[DETACHED_RUNTIME_COMPATIBILITY_ENV] === undefined
+          ? {}
+          : {
+              expectedRuntimeCompatibility:
+                environment[DETACHED_RUNTIME_COMPATIBILITY_ENV],
+            }),
       });
       stdout.write(runSummary(result));
       return workflowExitCode(result.run);
@@ -354,6 +457,8 @@ export async function main(
     return 0;
   } catch (error) {
     stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-    return 1;
+    return error?.code === "ERR_RUNTIME_VERSION_SKEW"
+      ? RUNTIME_VERSION_SKEW_EXIT_CODE
+      : 1;
   }
 }

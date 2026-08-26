@@ -1,9 +1,14 @@
 import { planAuthoringPipeline } from "@agent-runner/plan-authoring";
 import { planExecutionPipeline } from "@agent-runner/plan-execution";
+import { polishingPipeline } from "@agent-runner/polishing";
 
 const PIPELINES = new Map();
 
-for (const pipeline of [planAuthoringPipeline, planExecutionPipeline]) {
+for (const pipeline of [
+  planAuthoringPipeline,
+  planExecutionPipeline,
+  polishingPipeline,
+]) {
   if (PIPELINES.has(pipeline.id)) {
     throw new Error(`Duplicate pipeline id: ${pipeline.id}`);
   }

@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import packageMetadata from "../package.json" with { type: "json" };
-import { main, parseSourceSession, RunnerError } from "../src/index.js";
+import {
+  DETACHED_RUNTIME_COMPATIBILITY_ENV,
+  main,
+  parseSourceSession,
+  RUNTIME_COMPATIBILITY_TOKEN,
+  RUNTIME_VERSION_SKEW_EXIT_CODE,
+  RunnerError,
+} from "../src/index.js";
 
 const RUN_ID = "11111111-1111-4111-8111-111111111111";
 
@@ -31,12 +38,21 @@ function commandResult({
       runId: RUN_ID,
       pipelineId,
       taskPath: "/task",
-      pause: state === "WAITING_FOR_USER" ? { reason: "review_required" } : null,
+      pause:
+        state === "WAITING_FOR_USER"
+          ? { reason: "fix_limit_reached", resumeState: "IMPLEMENT" }
+          : null,
       pipelineState: {
         workflowState: state,
+        pendingEdit: null,
+        preflightComplete: state === "WAITING_FOR_USER",
         clarificationPath:
           pipelineId === "plan-execution" ? "/project/clarifications.md" : null,
         currentStep: state === "DONE" ? null : 2,
+        additionalFixRounds: 0,
+        settings: { maxFixRoundsPerStep: 5 },
+        finalizationResult:
+          state === "WAITING_FOR_USER" ? { status: "PASS" } : null,
         findings:
           state === "WAITING_FOR_USER"
             ? [{ id: "R1", problem: "Review is incomplete." }]
@@ -80,7 +96,9 @@ test("help describes the required commands", async () => {
   assert.match(stdout.read(), /agent-run mcp/);
   assert.match(stdout.read(), /plan-authoring/);
   assert.match(stdout.read(), /plan-execution/);
+  assert.match(stdout.read(), /polishing/);
   assert.match(stdout.read(), /--clarify/);
+  assert.doesNotMatch(stdout.read(), /unexpected_issue_report|issue report/iu);
   assert.equal(stderr.read(), "");
 });
 
@@ -110,7 +128,7 @@ test("mcp reports a bounded startup failure on stderr", async () => {
   const exitCode = await main(["mcp"], {
     stdout: stdout.stream,
     stderr: stderr.stream,
-    startMcp() {
+    async startMcp() {
       throw new Error("sensitive startup detail");
     },
   });
@@ -249,7 +267,10 @@ test("status dispatches and renders concise persisted state", async () => {
   assert.equal(requestedRunId, RUN_ID);
   assert.match(stdout.read(), new RegExp(`Run: ${RUN_ID}`, "u"));
   assert.match(stdout.read(), /State: WAITING_FOR_USER/u);
-  assert.match(stdout.read(), /Pause: review_required/u);
+  assert.match(stdout.read(), /Pause: fix_limit_reached/u);
+  assert.match(stdout.read(), /Explanation: The current step reached/u);
+  assert.match(stdout.read(), /--extra-fix-rounds 1/u);
+  assert.match(stdout.read(), /--override-finding R1/u);
   assert.match(stdout.read(), /R1: Review is incomplete\./u);
   assert.match(stdout.read(), /Finalized fingerprint: a{12}/u);
   assert.match(stdout.read(), /Commits: b{12}/u);
@@ -257,7 +278,7 @@ test("status dispatches and renders concise persisted state", async () => {
   assert.equal(stderr.read(), "");
 });
 
-for (const pipeline of ["plan-authoring", "plan-execution"]) {
+for (const pipeline of ["plan-authoring", "plan-execution", "polishing"]) {
   test(`run ${pipeline} dispatches --clarify`, async () => {
     const stdout = createSink();
     const stderr = createSink();
@@ -293,7 +314,7 @@ for (const pipeline of ["plan-authoring", "plan-execution"]) {
   });
 }
 
-test("run derives role, model, and source-session inputs", async () => {
+test("run derives execution, role, and opaque source-session inputs", async () => {
   const stdout = createSink();
   const stderr = createSink();
   let request;
@@ -310,12 +331,28 @@ test("run derives role, model, and source-session inputs", async () => {
       "claude",
       "--worker-model",
       "sonnet",
+      "--worker-profile",
+      "claude-primary",
+      "--worker-context-size",
+      "300000",
       "--reviewer",
       "claude",
+      "--reviewer-profile",
+      "claude-primary",
       "--arbiter",
       "codex",
+      "--profile",
+      "claude-primary",
+      "--model",
+      "run-model",
+      "--context-size",
+      "200000",
+      "--project-config",
+      "/tmp/project/ignored/runner.json",
       "--fork-from",
       "claude:source:opaque",
+      "--fork-profile",
+      "claude-primary",
     ],
     {
       stdout: stdout.stream,
@@ -331,15 +368,56 @@ test("run derives role, model, and source-session inputs", async () => {
 
   assert.equal(exitCode, 0);
   assert.deepEqual(request.roleOverrides, {
-    worker: { backend: "claude", model: "sonnet" },
-    reviewer: { backend: "claude" },
+    worker: {
+      backend: "claude",
+      profile: "claude-primary",
+      model: "sonnet",
+      contextSize: "300000",
+    },
+    reviewer: { backend: "claude", profile: "claude-primary" },
     arbiter: { backend: "codex" },
   });
+  assert.deepEqual(request.executionOverrides, {
+    profile: "claude-primary",
+    model: "run-model",
+    contextSize: "200000",
+  });
+  assert.equal(
+    request.projectConfigurationPath,
+    "/tmp/project/ignored/runner.json",
+  );
   assert.deepEqual(request.sourceSession, {
     backend: "claude",
     id: "source:opaque",
+    profile: "claude-primary",
   });
   assert.equal(stderr.read(), "");
+});
+
+test("fork profile requires a source session", async () => {
+  const stderr = createSink();
+
+  assert.equal(
+    await main(
+      [
+        "run",
+        "plan-authoring",
+        "--project",
+        "/tmp/project",
+        "--task",
+        "/tmp/task",
+        "--fork-profile",
+        "codex-work",
+      ],
+      {
+        stdout: createSink().stream,
+        stderr: stderr.stream,
+        runner: fakeRunner(),
+      },
+    ),
+    1,
+  );
+  assert.match(stderr.read(), /--fork-profile requires --fork-from/u);
 });
 
 test("resume dispatches one validated action and preserves pause exit", async () => {
@@ -366,8 +444,125 @@ test("resume dispatches one validated action and preserves pause exit", async ()
     runId: RUN_ID,
     action: { type: "extra-fix-rounds", amount: 3 },
   });
-  assert.match(stdout.read(), /Pause: review_required/u);
+  assert.match(stdout.read(), /Pause: fix_limit_reached/u);
   assert.equal(stderr.read(), "");
+});
+
+test("status renders bounded pause details without private provider data", async () => {
+  const stdout = createSink();
+  const result = commandResult({ state: "WAITING_FOR_USER" });
+  result.run.pause = {
+    reason: "environment_blocked",
+    code: "ERR_LOOPBACK_UNAVAILABLE",
+    explanation: "Check C2 cannot bind a loopback listener.",
+    evidence: ["C2: listener creation was denied."],
+    resumeState: "IMPLEMENT",
+    prompt: "private prompt",
+    transcript: "private transcript",
+    rawStderr: "private stderr",
+  };
+  result.run.pipelineState.findings = [];
+
+  assert.equal(
+    await main(["status", "--run", RUN_ID], {
+      stdout: stdout.stream,
+      stderr: createSink().stream,
+      runner: fakeRunner({
+        async status() {
+          return result;
+        },
+      }),
+    }),
+    0,
+  );
+
+  assert.match(stdout.read(), /Pause: environment_blocked/u);
+  assert.match(stdout.read(), /Pause code: ERR_LOOPBACK_UNAVAILABLE/u);
+  assert.match(stdout.read(), /Check C2 cannot bind a loopback listener/u);
+  assert.match(stdout.read(), /C2: listener creation was denied/u);
+  assert.match(stdout.read(), /Resume state: IMPLEMENT/u);
+  assert.match(stdout.read(), /agent-run resume --run/u);
+  assert.doesNotMatch(
+    stdout.read(),
+    /private prompt|private transcript|private stderr/u,
+  );
+});
+
+test("status explains a terminal forbidden-delegation diagnostic", async () => {
+  const stdout = createSink();
+  const result = commandResult({ state: "FAILED" });
+  result.run.pause = {
+    reason: "internal_failure",
+    code: "ERR_CODEX_ISOLATION",
+    diagnosticClass: "operation_multi_agent",
+  };
+
+  assert.equal(
+    await main(["status", "--run", RUN_ID], {
+      stdout: stdout.stream,
+      stderr: createSink().stream,
+      runner: fakeRunner({
+        async status() {
+          return result;
+        },
+      }),
+    }),
+    0,
+  );
+
+  assert.match(stdout.read(), /Pause code: ERR_CODEX_ISOLATION/u);
+  assert.match(
+    stdout.read(),
+    /Plan execution failed\. Adapter diagnostic: operation_multi_agent\./u,
+  );
+});
+
+test("status renders input and fresh-run pause actions", async () => {
+  for (const { pause, state, expected } of [
+    {
+      pause: {
+        reason: "clarification_answers_required",
+        inputRequest: { id: "edit-1" },
+      },
+      state: { pendingEdit: { id: "edit-1" } },
+      expected: /Respond to pending input edit-1 through MCP/u,
+    },
+    {
+      pause: {
+        reason: "plan_revision_required",
+        explanation: "The accepted clarification conflicts with Commit 2.",
+        evidence: ["The plan requires the opposite behavior."],
+      },
+      state: {},
+      expected: /Revise the plan and start a fresh plan-execution run/u,
+    },
+    {
+      pause: {
+        reason: "read_only_agent_mutated_repository",
+        code: "ERR_READ_ONLY_REPOSITORY_CHANGED",
+      },
+      state: {},
+      expected: /Abandon this run and start a fresh run/u,
+    },
+  ]) {
+    const stdout = createSink();
+    const result = commandResult({ state: "WAITING_FOR_USER" });
+    result.run.pause = pause;
+    Object.assign(result.run.pipelineState, state);
+    assert.equal(
+      await main(["status", "--run", RUN_ID], {
+        stdout: stdout.stream,
+        stderr: createSink().stream,
+        runner: fakeRunner({
+          async status() {
+            return result;
+          },
+        }),
+      }),
+      0,
+    );
+    assert.match(stdout.read(), expected);
+  }
 });
 
 test("resume dispatches one finding override", async () => {
@@ -391,6 +586,34 @@ test("resume dispatches one finding override", async () => {
     type: "override-finding",
     findingId: "R7",
   });
+});
+
+test("detached resume rejects runtime skew with a distinct exit code", async () => {
+  let request;
+  const stderr = createSink();
+  const exitCode = await main(["resume", "--run", RUN_ID], {
+    environment: {
+      [DETACHED_RUNTIME_COMPATIBILITY_ENV]:
+        `${RUNTIME_COMPATIBILITY_TOKEN}-old`,
+    },
+    stdout: createSink().stream,
+    stderr: stderr.stream,
+    runner: fakeRunner({
+      async resume(input) {
+        request = input;
+        const error = new Error("Runtime mismatch.");
+        error.code = "ERR_RUNTIME_VERSION_SKEW";
+        throw error;
+      },
+    }),
+  });
+
+  assert.equal(exitCode, RUNTIME_VERSION_SKEW_EXIT_CODE);
+  assert.equal(
+    request.expectedRuntimeCompatibility,
+    `${RUNTIME_COMPATIBILITY_TOKEN}-old`,
+  );
+  assert.match(stderr.read(), /Runtime mismatch/u);
 });
 
 test("resume rejects conflicting or invalid fix actions", async () => {
@@ -497,5 +720,6 @@ test("pipelines lists the statically registered pipelines", async () => {
   assert.equal(exitCode, 0);
   assert.match(stdout.read(), /^plan-authoring\t/mu);
   assert.match(stdout.read(), /^plan-execution\t/mu);
+  assert.match(stdout.read(), /^polishing\t/mu);
   assert.equal(stderr.read(), "");
 });

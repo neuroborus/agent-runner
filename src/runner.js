@@ -6,26 +6,45 @@ import {
   BACKEND_IDS,
   createClaudeAdapter,
   createCodexAdapter,
+  normalizeAdapterFailure,
 } from "./agents/index.js";
 import { createClarificationService } from "./clarifications.js";
 import {
-  loadRepositoryConfiguration,
+  loadProjectConfiguration,
+  loadRunnerConfiguration,
   resolvePipelineConfiguration,
 } from "./config.js";
 import { createGitService } from "./git.js";
 import { getPipeline } from "./pipeline-registry.js";
-import { createRunStore } from "./state.js";
+import { deepFreeze } from "./state-validation.js";
+import {
+  createRunStore,
+  RUNTIME_COMPATIBILITY,
+  RUNTIME_COMPATIBILITY_TOKEN,
+  RUN_STATE_SCHEMA_VERSION,
+} from "./state.js";
+import { createTrustedValidationService } from "./trusted-validation.js";
 
 const BACKENDS = new Set(BACKEND_IDS);
+const WORKTREE_LEASE_PIPELINES = new Set([
+  "plan-execution",
+  "polishing",
+]);
 const RUN_FIELDS = new Set([
   "pipelineId",
   "projectPath",
   "taskPath",
   "proactiveClarification",
   "roleOverrides",
+  "executionOverrides",
+  "projectConfigurationPath",
   "sourceSession",
 ]);
-const RESUME_FIELDS = new Set(["runId", "action"]);
+const RESUME_FIELDS = new Set([
+  "runId",
+  "action",
+  "expectedRuntimeCompatibility",
+]);
 const CREATE_OPTIONS_FIELDS = new Set(["runId"]);
 const INPUT_FIELDS = new Set([
   "runId",
@@ -35,7 +54,7 @@ const INPUT_FIELDS = new Set([
   "responseHash",
 ]);
 const ANSWER_FIELDS = new Set(["questionId", "answer"]);
-const SOURCE_SESSION_FIELDS = new Set(["backend", "id"]);
+const SOURCE_SESSION_FIELDS = new Set(["backend", "id", "profile"]);
 const RUNNER_OPTION_FIELDS = new Set([
   "adapters",
   "clarifications",
@@ -43,6 +62,7 @@ const RUNNER_OPTION_FIELDS = new Set([
   "loadConfiguration",
   "onActivity",
   "runStore",
+  "trustedValidation",
 ]);
 
 export class RunnerError extends Error {
@@ -119,7 +139,19 @@ function normalizeSourceSession(value) {
       code: "ERR_INVALID_SOURCE_SESSION",
     });
   }
-  return Object.freeze({ backend: value.backend, id: value.id });
+  if (
+    value.profile !== undefined &&
+    (typeof value.profile !== "string" || value.profile.trim().length === 0)
+  ) {
+    throw new RunnerError("sourceSession is invalid.", {
+      code: "ERR_INVALID_SOURCE_SESSION",
+    });
+  }
+  return Object.freeze({
+    backend: value.backend,
+    id: value.id,
+    ...(value.profile === undefined ? {} : { profile: value.profile }),
+  });
 }
 
 function fileHash(content) {
@@ -139,24 +171,21 @@ async function inputFile(path, { optional = false } = {}) {
   return Object.freeze({ path, content, hash: fileHash(content) });
 }
 
-async function readInputs(pipelineId, taskPath) {
-  const task = await inputFile(join(taskPath, "task.md"));
-  const context = await inputFile(join(taskPath, "context.md"), {
-    optional: true,
-  });
-  if (pipelineId === "plan-authoring") {
-    return Object.freeze({ task, context });
-  }
-  if (pipelineId === "plan-execution") {
-    const [plan, taskClarifications] = await Promise.all([
-      inputFile(join(taskPath, "plan.md")),
-      inputFile(join(taskPath, "clarifications.md"), { optional: true }),
-    ]);
-    return Object.freeze({ task, plan, taskClarifications, context });
-  }
-  throw new RunnerError(`Unknown pipeline: ${pipelineId}.`, {
-    code: "ERR_UNKNOWN_PIPELINE",
-  });
+async function readInputs(pipeline, taskPath) {
+  return Object.freeze(
+    Object.fromEntries(
+      await Promise.all(
+        Object.entries(pipeline.taskInputs).map(
+          async ([name, definition]) => [
+            name,
+            await inputFile(join(taskPath, definition.filename), {
+              optional: definition.optional,
+            }),
+          ],
+        ),
+      ),
+    ),
+  );
 }
 
 async function writePlan(taskPath, options) {
@@ -232,6 +261,22 @@ function validateCapabilities(
   return capabilities;
 }
 
+function executionOptions(configuration) {
+  return Object.freeze({
+    profile: configuration.profile,
+    model: configuration.model,
+    contextSize: configuration.contextSize,
+  });
+}
+
+async function runAdapter(adapter, backend, request) {
+  try {
+    return await adapter.run(request);
+  } catch (cause) {
+    throw normalizeAdapterFailure(backend, cause);
+  }
+}
+
 function lazyArbiterAdapter(run, configuration, adapters) {
   let adapter;
   let capabilitiesPromise;
@@ -246,7 +291,7 @@ function lazyArbiterAdapter(run, configuration, adapters) {
   };
   const resolveCapabilities = async () => {
     capabilitiesPromise ??= Promise.resolve()
-      .then(() => resolve().probe())
+      .then(() => resolve().probe(executionOptions(configuration)))
       .then((capabilities) =>
         validateCapabilities(capabilities, {
           backend: configuration.backend,
@@ -266,8 +311,21 @@ function lazyArbiterAdapter(run, configuration, adapters) {
     probe: resolveCapabilities,
     async run(request) {
       await resolveCapabilities();
-      return resolve().run(request);
+      return runAdapter(resolve(), configuration.backend, request);
     },
+  });
+}
+
+function configuredAdapter(run, role, configuration, adapters) {
+  const adapter = resolveAdapter(
+    adapters,
+    run.pipelineId,
+    role,
+    configuration.backend,
+  );
+  return Object.freeze({
+    probe: () => adapter.probe(executionOptions(configuration)),
+    run: (request) => runAdapter(adapter, configuration.backend, request),
   });
 }
 
@@ -278,12 +336,7 @@ function roleAdapters(run, adapters) {
         role,
         role === "arbiter"
           ? lazyArbiterAdapter(run, configuration, adapters)
-          : resolveAdapter(
-              adapters,
-              run.pipelineId,
-              role,
-              configuration.backend,
-            ),
+          : configuredAdapter(run, role, configuration, adapters),
       ]),
     ),
   );
@@ -306,14 +359,19 @@ function validateSourceRoles(pipeline, roles, sourceSession) {
 
 async function probeRequiredRoles(pipeline, roles, adapters, sourceSession) {
   const requiredRoles = pipeline.roles.filter((role) => role !== "arbiter");
-  const capabilitiesByBackend = new Map();
+  const capabilitiesByConfiguration = new Map();
   for (const role of requiredRoles) {
-    const backend = roles[role].backend;
-    if (!capabilitiesByBackend.has(backend)) {
+    const configuration = roles[role];
+    const backend = configuration.backend;
+    const key = JSON.stringify(configuration);
+    if (!capabilitiesByConfiguration.has(key)) {
       const adapter = resolveAdapter(adapters, pipeline.id, role, backend);
-      capabilitiesByBackend.set(backend, await adapter.probe());
+      capabilitiesByConfiguration.set(
+        key,
+        await adapter.probe(executionOptions(configuration)),
+      );
     }
-    validateCapabilities(capabilitiesByBackend.get(backend), {
+    validateCapabilities(capabilitiesByConfiguration.get(key), {
       backend,
       pipelineId: pipeline.id,
       role,
@@ -333,15 +391,40 @@ function normalizeRunInput(input) {
         ? false
         : input.proactiveClarification,
     roleOverrides: input.roleOverrides ?? {},
+    executionOverrides: input.executionOverrides ?? {},
+    projectConfigurationPath:
+      input.projectConfigurationPath === undefined
+        ? undefined
+        : assertNonEmptyString(
+            input.projectConfigurationPath,
+            "run.projectConfigurationPath",
+          ),
     sourceSession: normalizeSourceSession(input.sourceSession),
   });
 }
 
 function normalizeResumeInput(input) {
   rejectUnknownFields(input, RESUME_FIELDS, "resume");
+  if (
+    input.expectedRuntimeCompatibility !== undefined &&
+    input.expectedRuntimeCompatibility !== RUNTIME_COMPATIBILITY_TOKEN
+  ) {
+    throw new RunnerError(
+      "Detached continuation runtime is incompatible with the process that " +
+        "dispatched it; restart the Agent Runner MCP server and retry with " +
+        "the same idempotency key.",
+      { code: "ERR_RUNTIME_VERSION_SKEW" },
+    );
+  }
   return Object.freeze({
     runId: assertNonEmptyString(input.runId, "resume.runId"),
     action: input.action ?? null,
+    ...(input.expectedRuntimeCompatibility === undefined
+      ? {}
+      : {
+          expectedRuntimeCompatibility:
+            input.expectedRuntimeCompatibility,
+        }),
   });
 }
 
@@ -437,22 +520,88 @@ function orderedInputAnswers(run, input) {
   return Object.freeze(expectedIds.map((id) => byId.get(id)));
 }
 
-function pipelineForRun(run, knownPipeline) {
+export function preparePipelineMigration(run, pipeline) {
+  if (run.pipelineStateVersion > pipeline.stateVersion) {
+    throw new RunnerError(
+      `Run ${run.runId} uses newer ${pipeline.id} state version ` +
+        `${run.pipelineStateVersion}; this runtime supports version ` +
+        `${pipeline.stateVersion}. Use a compatible Agent Runner version.`,
+      { code: "ERR_PIPELINE_VERSION_SKEW" },
+    );
+  }
+
+  const originalVersion = run.pipelineStateVersion;
+  let migrated = run;
+  while (migrated.pipelineStateVersion < pipeline.stateVersion) {
+    const migration = pipeline.migrations?.[migrated.pipelineStateVersion];
+    if (typeof migration !== "function") {
+      throw new RunnerError(
+        `Run ${run.runId} requires an unavailable ${pipeline.id} migration ` +
+          `from state version ${migrated.pipelineStateVersion}. Use an ` +
+          "Agent Runner version with that migration.",
+        { code: "ERR_PIPELINE_VERSION_SKEW" },
+      );
+    }
+    let pipelineState;
+    try {
+      pipelineState = migration(migrated);
+    } catch (cause) {
+      throw new RunnerError(
+        `Run ${run.runId} could not migrate ${pipeline.id} state version ` +
+          `${migrated.pipelineStateVersion}.`,
+        { cause, code: "ERR_PIPELINE_MIGRATION_FAILED" },
+      );
+    }
+    if (!isRecord(pipelineState)) {
+      throw new RunnerError(
+        `${pipeline.id} migration from state version ` +
+          `${migrated.pipelineStateVersion} returned invalid state.`,
+        { code: "ERR_PIPELINE_MIGRATION_FAILED" },
+      );
+    }
+    migrated = deepFreeze({
+      ...migrated,
+      pipelineStateVersion: migrated.pipelineStateVersion + 1,
+      pipelineState,
+    });
+  }
+  try {
+    pipeline.workflow.validateRun(migrated);
+  } catch (cause) {
+    if (migrated.pipelineStateVersion === originalVersion) {
+      throw cause;
+    }
+    throw new RunnerError(
+      `Run ${run.runId} produced invalid ${pipeline.id} state after ` +
+        `migration from version ${originalVersion}.`,
+      { cause, code: "ERR_PIPELINE_MIGRATION_FAILED" },
+    );
+  }
+  return migrated;
+}
+
+function pipelineForRun(run, knownPipeline, { allowMigration = false } = {}) {
   const pipeline = knownPipeline ?? getPipeline(run.pipelineId);
   if (pipeline === undefined) {
     throw new RunnerError(`Unknown pipeline: ${run.pipelineId}.`, {
       code: "ERR_UNKNOWN_PIPELINE",
     });
   }
-  if (run.pipelineStateVersion !== pipeline.stateVersion) {
+  const compatibleRun = preparePipelineMigration(run, pipeline);
+  if (
+    !allowMigration &&
+    compatibleRun.pipelineStateVersion !== run.pipelineStateVersion
+  ) {
     throw new RunnerError(
-      `Run ${run.runId} uses unsupported ${pipeline.id} state version ` +
-        `${run.pipelineStateVersion}.`,
-      { code: "ERR_UNSUPPORTED_PIPELINE_STATE_VERSION" },
+      `Run ${run.runId} requires a persisted ${pipeline.id} state migration.`,
+      { code: "ERR_PIPELINE_MIGRATION_REQUIRED" },
     );
   }
-  pipeline.workflow.validateRun(run);
-  return pipeline;
+  return Object.freeze({ pipeline, run: compatibleRun });
+}
+
+export function pipelineRequiresWorktreeLease(pipelineId) {
+  return WORKTREE_LEASE_PIPELINES.has(pipelineId);
 }
 
 export function createRunner(options = {}) {
@@ -462,16 +611,21 @@ export function createRunner(options = {}) {
     options.clarifications ?? createClarificationService();
   const git = options.git ?? createGitService();
   const loadConfiguration =
-    options.loadConfiguration ?? loadRepositoryConfiguration;
+    options.loadConfiguration ?? loadRunnerConfiguration;
   const onActivity = options.onActivity ?? (async () => {});
   const runStore = options.runStore ?? createRunStore();
+  const trustedValidation =
+    options.trustedValidation ?? createTrustedValidationService({ git });
   if (
     !isRecord(adapters) ||
     !isRecord(clarifications) ||
     !isRecord(git) ||
     typeof loadConfiguration !== "function" ||
     typeof onActivity !== "function" ||
-    !isRecord(runStore)
+    !isRecord(runStore) ||
+    !isRecord(trustedValidation) ||
+    typeof trustedValidation.preflight !== "function" ||
+    typeof trustedValidation.execute !== "function"
   ) {
     throw new RunnerError("Runner services are invalid.", {
       code: "ERR_INVALID_RUNNER_OPTIONS",
@@ -497,7 +651,33 @@ export function createRunner(options = {}) {
       adapters: selectedAdapters,
       clarifications,
       git,
-      readInputs: ({ taskPath }) => readInputs(pipeline.id, taskPath),
+      trustedValidation,
+      readInputs: ({ taskPath }) => readInputs(pipeline, taskPath),
+      async startAgentTurn(activeTurn) {
+        const current = await runStore.loadRun(run.runId);
+        pipeline.workflow.validateRun(
+          deepFreeze({
+            ...current,
+            activeTurn,
+            revision: current.revision + 1,
+          }),
+        );
+        const activity = {
+          actor: activeTurn?.role,
+          phase: activeTurn?.phase,
+          kind: "turn-started",
+          message: `${activeTurn?.role} ${activeTurn?.phase} turn started.`,
+        };
+        const next = await runStore.startAgentTurn(
+          lease,
+          activeTurn,
+          { activity },
+        );
+        await publish(activity, next);
+        return next;
+      },
+      finishAgentTurn: (activeTurn) =>
+        runStore.finishAgentTurn(lease, activeTurn),
       async recordChildSession(child, { activity } = {}) {
         const next = await runStore.recordChildSession(lease, child, {
           activity,
@@ -517,6 +697,18 @@ export function createRunner(options = {}) {
   }
 
   async function execute(pipeline, run, lease, action = null) {
+    if (
+      run.schemaVersion !== RUN_STATE_SCHEMA_VERSION ||
+      run.runtimeCompatibility?.runnerVersion !==
+        RUNTIME_COMPATIBILITY.runnerVersion ||
+      run.runtimeCompatibility?.runStateVersion !==
+        RUNTIME_COMPATIBILITY.runStateVersion
+    ) {
+      throw new RunnerError(
+        `Run ${run.runId} requires a persisted runtime migration.`,
+        { code: "ERR_RUNTIME_MIGRATION_REQUIRED" },
+      );
+    }
     pipelineForRun(run, pipeline);
     const settings = run.pipelineState.settings;
     if (!isRecord(settings)) {
@@ -535,6 +727,21 @@ export function createRunner(options = {}) {
       ),
       settings,
     });
+  }
+
+  async function withWorktreeLease(run, operation) {
+    if (!pipelineRequiresWorktreeLease(run.pipelineId)) {
+      return operation();
+    }
+    const worktreeLease = await runStore.acquireWorktreeLease(
+      run.projectPath,
+      run.runId,
+    );
+    try {
+      return await operation();
+    } finally {
+      await worktreeLease.release();
+    }
   }
 
   async function validateBoundary(input) {
@@ -572,6 +779,51 @@ export function createRunner(options = {}) {
     });
   }
 
+  async function recoverCompatibleRun(
+    lease,
+    runId,
+    { validatePreparedRun } = {},
+  ) {
+    const storedRun = await runStore.loadRun(runId);
+    const prepared = pipelineForRun(storedRun, undefined, {
+      allowMigration: true,
+    });
+    validatePreparedRun?.(prepared.run);
+    const runtimeMigrationRequired =
+      storedRun.schemaVersion !== RUN_STATE_SCHEMA_VERSION ||
+      storedRun.runtimeCompatibility?.runnerVersion !==
+        RUNTIME_COMPATIBILITY.runnerVersion ||
+      storedRun.runtimeCompatibility?.runStateVersion !==
+        RUNTIME_COMPATIBILITY.runStateVersion;
+    const pipelineMigrationRequired =
+      storedRun.pipelineStateVersion !== prepared.run.pipelineStateVersion;
+    let run;
+    if (runtimeMigrationRequired || pipelineMigrationRequired) {
+      const activity = {
+        actor: "runner",
+        phase: "runtime",
+        kind: "migrated",
+        message:
+          `Migrated run state for ${prepared.pipeline.id} to runtime ` +
+          `${RUNTIME_COMPATIBILITY_TOKEN} and pipeline state ` +
+          `${prepared.run.pipelineStateVersion}.`,
+      };
+      run = await runStore.migrateRun(
+        lease,
+        {
+          pipelineState: prepared.run.pipelineState,
+          pipelineStateVersion: prepared.run.pipelineStateVersion,
+        },
+        { activity },
+      );
+      await publish(activity, run);
+    } else {
+      run = await runStore.recoverRun(lease);
+    }
+    pipelineForRun(run, prepared.pipeline);
+    return Object.freeze({ pipeline: prepared.pipeline, run });
+  }
+
   async function prepare(input, options = {}) {
     const normalized = normalizeRunInput(input);
     const createOptions = normalizeCreateOptions(options);
@@ -585,6 +837,11 @@ export function createRunner(options = {}) {
         code: "ERR_INVALID_RUNNER_INPUT",
       });
     }
+    if (!isRecord(normalized.executionOverrides)) {
+      throw new RunnerError("run.executionOverrides must be an object.", {
+        code: "ERR_INVALID_RUNNER_INPUT",
+      });
+    }
     const pipeline = getPipeline(normalized.pipelineId);
     if (pipeline === undefined) {
       throw new RunnerError(`Unknown pipeline: ${normalized.pipelineId}.`, {
@@ -592,13 +849,36 @@ export function createRunner(options = {}) {
       });
     }
     const { projectPath, taskPath } = await validateBoundary(normalized);
-    const configuration = await loadConfiguration(projectPath);
-    const resolved = resolvePipelineConfiguration(
-      pipeline.id,
-      configuration,
-      normalized.roleOverrides,
-    );
+    const configuration = await loadConfiguration();
+    const projectConfiguration = await loadProjectConfiguration({
+      configurationPath: normalized.projectConfigurationPath,
+      inspectPath: (options) => git.inspectPath(options),
+      projectPath,
+      runnerConfiguration: configuration,
+    });
+    let resolved;
+    try {
+      resolved = resolvePipelineConfiguration(
+        pipeline.id,
+        configuration,
+        normalized.roleOverrides,
+        normalized.executionOverrides,
+        normalized.sourceSession,
+        projectConfiguration?.configuration ?? null,
+      );
+    } catch (cause) {
+      if (cause?.code !== "ERR_SOURCE_BACKEND_MISMATCH") {
+        throw cause;
+      }
+      throw new RunnerError(cause.message, {
+        cause,
+        code: "ERR_SOURCE_BACKEND_MISMATCH",
+      });
+    }
     validateSourceRoles(pipeline, resolved.roles, normalized.sourceSession);
+    if ((resolved.trustedValidation?.commands.length ?? 0) > 0) {
+      await trustedValidation.preflight({ projectPath });
+    }
     await probeRequiredRoles(
       pipeline,
       resolved.roles,
@@ -606,8 +886,12 @@ export function createRunner(options = {}) {
       normalized.sourceSession,
     );
     const pipelineState = pipeline.workflow.createState({
+      artifactRoot: resolved.artifactRoot,
       proactiveClarification: normalized.proactiveClarification,
       settings: resolved.settings,
+      ...(resolved.trustedValidation === undefined
+        ? {}
+        : { trustedValidation: resolved.trustedValidation }),
     });
     const created = await runStore.createRun({
       ...(createOptions.runId === undefined
@@ -619,6 +903,7 @@ export function createRunner(options = {}) {
       taskPath,
       roles: resolved.roles,
       sourceSession: normalized.sourceSession?.id ?? null,
+      sourceProfile: resolved.sourceProfile,
       pipelineState,
       activity: {
         actor: "runner",
@@ -657,7 +942,9 @@ export function createRunner(options = {}) {
     const { created, pipeline } = await prepare(input);
     try {
       return await result(
-        await execute(pipeline, created.state, created.lease),
+        await withWorktreeLease(created.state, () =>
+          execute(pipeline, created.state, created.lease),
+        ),
       );
     } finally {
       await created.lease.release();
@@ -668,21 +955,30 @@ export function createRunner(options = {}) {
     const normalized = normalizeResumeInput(input);
     const lease = await runStore.acquireRunLease(normalized.runId);
     try {
-      const recovered = await runStore.recoverRun(lease);
-      const pipeline = getPipeline(recovered.pipelineId);
-      if (pipeline === undefined) {
-        throw new RunnerError(`Unknown pipeline: ${recovered.pipelineId}.`, {
-          code: "ERR_UNKNOWN_PIPELINE",
-        });
+      const { pipeline, run: recovered } = await recoverCompatibleRun(
+        lease,
+        normalized.runId,
+      );
+      if ((recovered.pipelineState.trustedValidation?.commands.length ?? 0) > 0) {
+        await trustedValidation.preflight({ projectPath: recovered.projectPath });
       }
-      if (normalized.action !== null && pipeline.id !== "plan-execution") {
-        throw new RunnerError(
-          `Resume actions are not supported for ${pipeline.id}.`,
-          { code: "ERR_INAPPLICABLE_RESUME_ACTION" },
-        );
+      if (
+        recovered.pipelineState.workflowState === "WAITING_FOR_USER" ||
+        normalized.action !== null
+      ) {
+        try {
+          pipeline.validateResumeAction(recovered, normalized.action);
+        } catch (cause) {
+          throw new RunnerError(cause.message, {
+            cause,
+            code: "ERR_INAPPLICABLE_RESUME_ACTION",
+          });
+        }
       }
       return await result(
-        await execute(pipeline, recovered, lease, normalized.action),
+        await withWorktreeLease(recovered, () =>
+          execute(pipeline, recovered, lease, normalized.action),
+        ),
       );
     } finally {
       await lease.release();
@@ -691,8 +987,10 @@ export function createRunner(options = {}) {
 
   async function status(runId) {
     assertNonEmptyString(runId, "runId");
-    const run = await runStore.loadRun(runId);
-    pipelineForRun(run);
+    const storedRun = await runStore.loadRun(runId);
+    const { run } = pipelineForRun(storedRun, undefined, {
+      allowMigration: true,
+    });
     return result(run);
   }
 
@@ -718,44 +1016,53 @@ export function createRunner(options = {}) {
     });
     const lease = await runStore.acquireRunLease(normalized.runId);
     try {
-      const run = await runStore.recoverRun(lease);
-      pipelineForRun(run);
-      const answers = orderedInputAnswers(run, normalized);
-      const transcript = await clarifications.writeEditAnswers(
-        run.pipelineState.pendingEdit,
-        answers,
-        { expectedHash: normalized.responseHash },
-      );
-      const next = await runStore.transitionRun(
+      let answers;
+      const { run } = await recoverCompatibleRun(
         lease,
+        normalized.runId,
         {
-          pause: {
-            ...run.pause,
-            inputResponse: {
-              requestId: normalized.requestId,
-              transcriptHash: transcript.hash,
-            },
+          validatePreparedRun(preparedRun) {
+            answers = orderedInputAnswers(preparedRun, normalized);
           },
         },
-        {
-          activity: {
+      );
+      return await withWorktreeLease(run, async () => {
+        const transcript = await clarifications.writeEditAnswers(
+          run.pipelineState.pendingEdit,
+          answers,
+          { expectedHash: normalized.responseHash },
+        );
+        const next = await runStore.transitionRun(
+          lease,
+          {
+            pause: {
+              ...run.pause,
+              inputResponse: {
+                requestId: normalized.requestId,
+                transcriptHash: transcript.hash,
+              },
+            },
+          },
+          {
+            activity: {
+              actor: "runner",
+              phase: "clarification",
+              kind: "submitted",
+              message: "Pending user input was recorded.",
+            },
+          },
+        );
+        await publish(
+          {
             actor: "runner",
             phase: "clarification",
             kind: "submitted",
             message: "Pending user input was recorded.",
           },
-        },
-      );
-      await publish(
-        {
-          actor: "runner",
-          phase: "clarification",
-          kind: "submitted",
-          message: "Pending user input was recorded.",
-        },
-        next,
-      );
-      return result(next);
+          next,
+        );
+        return result(next);
+      });
     } finally {
       await lease.release();
     }

@@ -10,6 +10,7 @@ import {
   CLARIFICATION_INSTRUCTIONS,
   DRAFT_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
+  NO_DELEGATION_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
   REVIEW_INSTRUCTIONS,
   STAGNATION_INSTRUCTIONS,
@@ -56,9 +57,27 @@ const INPUT_DRIFT_ERROR_CODES = new Set([
   "ENOTDIR",
   "EPERM",
 ]);
+const ADAPTER_DIAGNOSTIC_CLASS_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
 
 function activity(actor, phase, kind, message) {
   return Object.freeze({ actor, phase, kind, message });
+}
+
+function rolePrompt(prompt) {
+  return `${prompt}\n\n${NO_DELEGATION_INSTRUCTIONS}`;
+}
+
+function adapterDiagnosticClass(cause) {
+  return ADAPTER_DIAGNOSTIC_CLASS_PATTERN.test(cause?.diagnosticClass)
+    ? cause.diagnosticClass
+    : undefined;
+}
+
+function activeTurn(role, workflowState) {
+  return Object.freeze({
+    role,
+    phase: workflowState.toLowerCase().replaceAll("_", "-"),
+  });
 }
 
 function isWithin(parentPath, childPath) {
@@ -85,6 +104,13 @@ ${context}
 
 Clarifications (${clarification.transcriptPath}):
 ${clarifications}`;
+}
+
+function contextKeyFor(role, checkpoint, context) {
+  if (typeof checkpoint !== "string" || checkpoint.length === 0) {
+    throw workflowError("Plan-authoring session checkpoint is invalid.");
+  }
+  return sha256(`${role}\0${checkpoint}\0${context}`);
 }
 
 function findingPrompt(pipelineState) {
@@ -178,16 +204,23 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
       typeof cause?.code === "string" && /^[A-Z0-9_]{1,64}$/u.test(cause.code)
         ? cause.code
         : "ERR_PLAN_AUTHORING_FAILED";
+    const diagnosticClass = adapterDiagnosticClass(cause);
     try {
       await transition(
         { ...pipelineState(), workflowState: "FAILED" },
         {
-          pause: { reason: "internal_failure", code },
+          pause: {
+            reason: "internal_failure",
+            code,
+            ...(diagnosticClass === undefined ? {} : { diagnosticClass }),
+          },
           publicActivity: activity(
             "runner",
             "plan-authoring",
             "failed",
-            `Plan authoring failed: ${code}.`,
+            diagnosticClass === undefined
+              ? `Plan authoring failed: ${code}.`
+              : `Plan authoring failed: ${code} (${diagnosticClass}).`,
           ),
         },
       );
@@ -274,7 +307,12 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
     return Object.freeze({ inputs, clarification });
   }
 
-  async function recordSession(role, sessionId, continuedSessionId) {
+  async function recordSession(
+    role,
+    sessionId,
+    continuedSessionId,
+    contextKey,
+  ) {
     if (typeof sessionId !== "string" || sessionId.length === 0) {
       throw workflowError(
         `${role} returned no session ID.`,
@@ -290,8 +328,18 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
     if (sessionId === continuedSessionId) {
       return;
     }
+    if (
+      currentRun.sessionLineage.children.some(
+        (child) => child.sessionId === sessionId,
+      )
+    ) {
+      throw workflowError(
+        `${role} returned an existing session ID for a fresh turn.`,
+        "ERR_INVALID_PLAN_AUTHORING_OUTPUT",
+      );
+    }
     currentRun = await runtime.recordChildSession(
-      { role, sessionId },
+      { role, sessionId, contextKey },
       {
         activity: activity(
           role,
@@ -304,7 +352,7 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
     assertRun(currentRun);
   }
 
-  async function runRole(role, schema, buildPrompt) {
+  async function runRole(role, schema, buildPrompt, { checkpoint }) {
     const evidence = await readCurrentInputs();
     if (evidence === null) {
       return null;
@@ -314,9 +362,18 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
       allowedPaths: [],
       projectPath: currentRun.projectPath,
     });
-    const previousSession = [...currentRun.sessionLineage.children]
+    const evidenceContext = evidencePrompt(
+      evidence.inputs,
+      evidence.clarification,
+    );
+    const contextKey = contextKeyFor(role, checkpoint, evidenceContext);
+    const latestSession = [...currentRun.sessionLineage.children]
       .reverse()
-      .find((child) => child.role === role)?.sessionId;
+      .find((child) => child.role === role);
+    const previousSession =
+      role !== "arbiter" && latestSession?.contextKey === contextKey
+        ? latestSession.sessionId
+        : undefined;
     const sourceSession = currentRun.sessionLineage.source;
     const session =
       previousSession !== undefined
@@ -325,25 +382,44 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
           ? { id: sourceSession, mode: "fork" }
           : undefined;
     const roleConfiguration = currentRun.roles[role];
+    const recoveryPrompt = rolePrompt(buildPrompt(evidenceContext));
+    const executionPreferences = Object.fromEntries(
+      ["profile", "model", "contextSize"].flatMap((field) =>
+        typeof roleConfiguration[field] === "string" &&
+        roleConfiguration[field] !== "current"
+          ? [[field, roleConfiguration[field]]]
+          : [],
+      ),
+    );
     const request = {
       access: "read-only",
       cwd: currentRun.projectPath,
-      prompt: buildPrompt(evidencePrompt(evidence.inputs, evidence.clarification)),
+      prompt:
+        session?.mode === "continue"
+          ? rolePrompt(buildPrompt(""))
+          : recoveryPrompt,
+      recoveryPrompt,
       schema,
-      ...(roleConfiguration.model === null
-        ? {}
-        : { model: roleConfiguration.model }),
+      ...executionPreferences,
       ...(session === undefined ? {} : { session }),
     };
     let response;
     let agentError;
+    const turn = activeTurn(role, pipelineState().workflowState);
+    currentRun = await runtime.startAgentTurn(turn);
+    assertRun(currentRun);
     try {
-      response = await runtime.adapters[role].run(request);
-    } catch (cause) {
-      agentError = cause;
+      try {
+        response = await runtime.adapters[role].run(request);
+      } catch (cause) {
+        agentError = cause;
+      }
+      await runtime.git.assertUnchanged(snapshot);
+      await runtime.git.assertUnchanged(pipelineState().repositoryBaseline);
+    } finally {
+      currentRun = await runtime.finishAgentTurn(turn);
+      assertRun(currentRun);
     }
-    await runtime.git.assertUnchanged(snapshot);
-    await runtime.git.assertUnchanged(pipelineState().repositoryBaseline);
     if (agentError !== undefined) {
       throw agentError;
     }
@@ -353,7 +429,12 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
         "ERR_INVALID_PLAN_AUTHORING_OUTPUT",
       );
     }
-    await recordSession(role, response.sessionId, previousSession);
+    await recordSession(
+      role,
+      response.sessionId,
+      previousSession,
+      contextKey,
+    );
     if (!isRecord(response.structured)) {
       throw workflowError(
         `${role} returned no structured result.`,
@@ -558,7 +639,6 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
 Do not modify the repository or artifact files. This result cannot approve the plan.
-Name exactly the current finding IDs only for RECONSIDER_FINDINGS; otherwise leave findingIds empty. Use empty product-decision fields unless a product decision is required.
 
 ${evidence}
 
@@ -574,6 +654,7 @@ ${JSON.stringify(
   null,
   2,
 )}`,
+      { checkpoint: "arbitration" },
     );
     if (output === null) {
       return false;
@@ -755,7 +836,19 @@ ${JSON.stringify(
 
   try {
     if (pipelineState().workflowState === "WAITING_FOR_USER") {
-      if (!(await resumeEdit())) {
+      if (pipelineState().pendingEdit !== null) {
+        if (!(await resumeEdit())) {
+          return currentRun;
+        }
+      } else if (currentRun.pause.reason === "backend_unavailable") {
+        await transition(
+          {
+            ...pipelineState(),
+            workflowState: currentRun.pause.resumeState,
+          },
+          { pause: null },
+        );
+      } else {
         return currentRun;
       }
     }
@@ -790,6 +883,7 @@ ${JSON.stringify(
           (evidence) => `${CLARIFICATION_INSTRUCTIONS}
 
 ${evidence}`,
+          { checkpoint: "clarification" },
         );
         if (output === null) {
           return currentRun;
@@ -911,9 +1005,8 @@ ${evidence}`,
           PLANNER_SCHEMA,
           (evidence) => `${DRAFT_INSTRUCTIONS}
 
-Use status DRAFT with empty product-decision fields, or PRODUCT_DECISION_REQUIRED with an empty plan.
-
 ${evidence}`,
+          { checkpoint: "planning" },
         );
         if (output === null) {
           return currentRun;
@@ -956,12 +1049,11 @@ ${evidence}`,
           REVIEW_SCHEMA,
           (evidence) => `${REVIEW_INSTRUCTIONS}
 
-Use stable lowercase kebab-case finding IDs. Use empty product-decision fields unless status is PRODUCT_DECISION_REQUIRED.
-
 ${evidence}
 
 Plan under review:
 ${pipelineState().draft}${reviewDirectionPrompt(pipelineState())}`,
+          { checkpoint: "planning" },
         );
         if (output === null) {
           return currentRun;
@@ -1024,7 +1116,6 @@ ${pipelineState().draft}${reviewDirectionPrompt(pipelineState())}`,
           PLANNER_SCHEMA,
           (evidence) => `${FINDING_RESOLUTION_INSTRUCTIONS}
 
-Use status DRAFT with empty product-decision fields, or PRODUCT_DECISION_REQUIRED with an empty plan.
 Treat deterministic validation issues as blocking correction input; do not waive or rewrite the validation rules.
 
 ${evidence}
@@ -1034,6 +1125,7 @@ ${pipelineState().draft}
 
 Blocking correction input:
 ${findingPrompt(pipelineState())}`,
+          { checkpoint: "planning" },
         );
         if (output === null) {
           return currentRun;
@@ -1184,6 +1276,16 @@ ${findingPrompt(pipelineState())}`,
     }
     if (preflightComplete && inputPathDrift) {
       return invalidateDependentWork("input_changed");
+    }
+    if (cause?.recoverable === true) {
+      const code =
+        typeof cause.code === "string" && /^[A-Z0-9_]{1,64}$/u.test(cause.code)
+          ? cause.code
+          : "ERR_BACKEND_UNAVAILABLE";
+      return pause("backend_unavailable", {
+        code,
+        resumeState: pipelineState().workflowState,
+      });
     }
     return fail(cause);
   }

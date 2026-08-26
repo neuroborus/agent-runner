@@ -16,7 +16,7 @@ choice affects the shared plan contract.
 - `src/index.js`: expose the root source API to the executable and root tests.
 - `src/cli.js`: own argument parsing, validation, concise terminal output, and dispatch.
 - `src/mcp.js`: own STDIO MCP schemas, projections, revision waits, and detached dispatch without duplicating runner logic.
-- `src/config.js`: own repository configuration loading, strict validation, and role resolution precedence.
+- `src/config.js`: own runner-local configuration loading, strict validation, and role resolution precedence.
 - `src/clarifications.js`: expose and coordinate the clarification boundary.
 - `src/clarification-*.js`: keep its confined file and editor helpers internal
   to the root clarification boundary.
@@ -53,7 +53,8 @@ choice affects the shared plan contract.
 - Keep the backend contract small and functional; contain CLI-specific details inside adapters.
 - Keep the configuration envelope and precedence in the root runtime while
   pipeline descriptors own roles, settings, defaults, and persisted-run
-  validators.
+  validators; load runtime defaults from the runner root, never from a target
+  repository.
 - Keep plan parsing and Conventional Commit subject validation deterministic, shared, and separate from pipeline prompting.
 - Keep Git snapshots and fingerprints deterministic and side-effect free.
 - Allow a Worker commit only through a one-shot runner authorization after the commit gate; reject co-author trailers and remote-configuration changes.

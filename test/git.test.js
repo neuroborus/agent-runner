@@ -78,7 +78,7 @@ async function createFixture(t, { identity = true } = {}) {
       "fixture@example.com",
     );
   }
-  await writeFile(join(repositoryPath, ".gitignore"), ".agent-runner.json\n");
+  await writeFile(join(repositoryPath, ".gitignore"), "ignored.txt\n");
   await writeFile(join(repositoryPath, "tracked.txt"), "initial\n");
   await runGit(repositoryPath, env, "add", ".gitignore", "tracked.txt");
   await runGit(
@@ -133,8 +133,10 @@ test("preflights clean repositories and records branch or detached state", async
   assert.equal(detached.branch, null);
   assert.equal(detached.detached, true);
 
+  const nonWorkingTree = join(workspace, "bare.git");
+  await runGit(workspace, env, "init", "--bare", "-q", nonWorkingTree);
   await assert.rejects(
-    service.snapshot({ projectPath: workspace }),
+    service.snapshot({ projectPath: nonWorkingTree }),
     isGitError("ERR_NOT_GIT_REPOSITORY"),
   );
   await assert.rejects(
@@ -222,50 +224,25 @@ test("enforces caller-selected cleanliness and identity requirements", async (t)
   );
 });
 
-test("requires local runner configuration to be ignored and untracked", async (t) => {
+test("ignores target-repository runner configuration files", async (t) => {
   const { env, repositoryPath, service } = await createFixture(t);
-  const configurationPath = join(repositoryPath, ".agent-runner.json");
-  const absent = await service.preflight({ projectPath: repositoryPath });
-  assert.equal(absent.configuration.exists, false);
-  assert.equal(absent.configuration.ignored, true);
-
-  await writeFile(join(repositoryPath, ".gitignore"), "");
-  await runGit(repositoryPath, env, "add", ".gitignore");
-  await runGit(repositoryPath, env, "commit", "-qm", "expose local config");
-
-  await assert.rejects(
-    service.preflight({ projectPath: repositoryPath }),
-    isGitError("ERR_UNIGNORED_RUNNER_CONFIGURATION"),
+  await writeFile(
+    join(repositoryPath, ".agent-runner.json"),
+    '{"schemaVersion":99}\n',
   );
 
-  await writeFile(configurationPath, '{"schemaVersion":1}\n');
-  await assert.rejects(
-    service.preflight({ projectPath: repositoryPath }),
-    isGitError("ERR_UNIGNORED_RUNNER_CONFIGURATION"),
-  );
+  const untracked = await service.preflight({ projectPath: repositoryPath });
+  assert.equal(untracked.configuration, undefined);
 
-  await writeFile(join(repositoryPath, ".gitignore"), ".agent-runner.json\n");
-  await runGit(repositoryPath, env, "add", ".gitignore");
-  await runGit(repositoryPath, env, "commit", "-qm", "ignore local config");
-  const ignored = await service.preflight({ projectPath: repositoryPath });
-  assert.equal(ignored.configuration.exists, true);
-  assert.equal(ignored.configuration.ignored, true);
-  assert.equal(ignored.configuration.tracked, false);
-
-  await runGit(repositoryPath, env, "add", "-f", ".agent-runner.json");
+  await runGit(repositoryPath, env, "add", ".agent-runner.json");
   await runGit(repositoryPath, env, "commit", "-qm", "track local config");
-  await assert.rejects(
-    service.preflight({ projectPath: repositoryPath }),
-    isGitError("ERR_TRACKED_RUNNER_CONFIGURATION"),
-  );
+  const tracked = await service.preflight({ projectPath: repositoryPath });
+  assert.equal(tracked.snapshot.clean, true);
 });
 
 test("validates ignored repository-local artifact paths without creating them", async (t) => {
   const { env, repositoryPath, service, workspace } = await createFixture(t);
-  await writeFile(
-    join(repositoryPath, ".gitignore"),
-    ".agent-runner.json\nLOCAL_ARTIFACTS/\n",
-  );
+  await writeFile(join(repositoryPath, ".gitignore"), "LOCAL_ARTIFACTS/\n");
   await runGit(repositoryPath, env, "add", ".gitignore");
   await runGit(repositoryPath, env, "commit", "-qm", "ignore local artifacts");
   const clarificationPath = join(
@@ -281,6 +258,8 @@ test("validates ignored repository-local artifact paths without creating them", 
     requiredIgnoredPaths: [clarificationPath],
   });
   assert.equal(accepted.ignoredPaths[0].exists, false);
+  assert.equal(accepted.ignoredPaths[0].kind, null);
+  assert.equal(accepted.ignoredPaths[0].changed, false);
   assert.equal(accepted.ignoredPaths[0].ignored, true);
   assert.equal(accepted.ignoredPaths[0].tracked, false);
 
@@ -320,14 +299,35 @@ test("validates ignored repository-local artifact paths without creating them", 
   );
 });
 
+test("identifies paths that belong to a dirty worktree change set", async (t) => {
+  const { repositoryPath, service } = await createFixture(t);
+  const trackedPath = join(repositoryPath, "tracked.txt");
+  const untrackedPath = join(repositoryPath, "untracked.txt");
+  const ignoredPath = join(repositoryPath, "ignored.txt");
+
+  await writeFile(trackedPath, "changed\n");
+  await writeFile(untrackedPath, "untracked\n");
+  await writeFile(ignoredPath, "ignored\n");
+
+  const [tracked, untracked, ignored] = await Promise.all(
+    [trackedPath, untrackedPath, ignoredPath].map((path) =>
+      service.inspectPath({ path, projectPath: repositoryPath }),
+    ),
+  );
+
+  assert.equal(tracked.tracked, true);
+  assert.equal(tracked.kind, "file");
+  assert.equal(tracked.changed, true);
+  assert.equal(untracked.tracked, false);
+  assert.equal(untracked.ignored, false);
+  assert.equal(untracked.changed, true);
+  assert.equal(ignored.tracked, false);
+  assert.equal(ignored.ignored, true);
+  assert.equal(ignored.changed, false);
+});
+
 test("content fingerprints ignore staging placement and ignored files", async (t) => {
   const { env, repositoryPath, service } = await createFixture(t);
-  await writeFile(
-    join(repositoryPath, ".gitignore"),
-    ".agent-runner.json\nignored.txt\n",
-  );
-  await runGit(repositoryPath, env, "add", ".gitignore");
-  await runGit(repositoryPath, env, "commit", "-qm", "add ignores");
   const initial = await service.contentFingerprint({
     projectPath: repositoryPath,
   });
@@ -373,6 +373,34 @@ test("content fingerprints ignore staging placement and ignored files", async (t
   );
 });
 
+test("validation-infrastructure fingerprints cover only the selected files", async (t) => {
+  const { repositoryPath, service } = await createFixture(t);
+  const validationPath = "validation  strict.json";
+  await writeFile(join(repositoryPath, validationPath), "{\"strict\":true}\n");
+  const initial = await service.validationInfrastructureFingerprint({
+    paths: [validationPath],
+    projectPath: repositoryPath,
+  });
+
+  await writeFile(join(repositoryPath, "tracked.txt"), "unrelated\n");
+  assert.equal(
+    await service.validationInfrastructureFingerprint({
+      paths: [validationPath],
+      projectPath: repositoryPath,
+    }),
+    initial,
+  );
+
+  await writeFile(join(repositoryPath, validationPath), "{\"strict\":false}\n");
+  assert.notEqual(
+    await service.validationInfrastructureFingerprint({
+      paths: [validationPath],
+      projectPath: repositoryPath,
+    }),
+    initial,
+  );
+});
+
 test("content fingerprints follow worktree content when index content diverges", async (t) => {
   const { env, repositoryPath, service } = await createFixture(t);
   const initial = await service.contentFingerprint({
@@ -385,6 +413,17 @@ test("content fingerprints follow worktree content when index content diverges",
   assert.equal(
     await service.contentFingerprint({ projectPath: repositoryPath }),
     initial,
+  );
+  assert.equal(
+    (await service.snapshot({ projectPath: repositoryPath })).clean,
+    false,
+  );
+  await assert.rejects(
+    service.preflight({
+      projectPath: repositoryPath,
+      requireClean: true,
+    }),
+    isGitError("ERR_REPOSITORY_NOT_CLEAN"),
   );
 
   await writeFile(join(repositoryPath, "new.txt"), "staged new\n");
@@ -434,7 +473,19 @@ test("content fingerprints guard index-hidden tracked paths", async (t) => {
     "tracked.txt",
   );
   const assumed = await service.snapshot({ projectPath: repositoryPath });
+  assert.equal(assumed.clean, true);
   await writeFile(trackedPath, "changed while assumed\n");
+  assert.equal(
+    (await service.inspectPath({
+      path: trackedPath,
+      projectPath: repositoryPath,
+    })).changed,
+    true,
+  );
+  assert.equal(
+    (await service.snapshot({ projectPath: repositoryPath })).clean,
+    false,
+  );
   await assert.rejects(
     service.assertUnchanged(assumed),
     (error) =>
@@ -452,7 +503,19 @@ test("content fingerprints guard index-hidden tracked paths", async (t) => {
     "tracked.txt",
   );
   const skipped = await service.snapshot({ projectPath: repositoryPath });
+  assert.equal(skipped.clean, true);
   await writeFile(trackedPath, "changed while skipped\n");
+  assert.equal(
+    (await service.inspectPath({
+      path: trackedPath,
+      projectPath: repositoryPath,
+    })).changed,
+    true,
+  );
+  assert.equal(
+    (await service.snapshot({ projectPath: repositoryPath })).clean,
+    false,
+  );
   await assert.rejects(
     service.assertUnchanged(skipped),
     (error) =>

@@ -11,15 +11,16 @@ import {
 } from "./git-command.js";
 import { createGitCommitService } from "./git-commit.js";
 import {
+  contentChangesAtRoot,
   contentFingerprintsAtRoot,
   inspectPathAtRoot,
   normalizeAllowedPaths,
+  pathsFingerprintAtRoot,
 } from "./git-content.js";
 
 export { GitSafetyError };
 
 const GIT_SNAPSHOT_SCHEMA_VERSION = 1;
-const LOCAL_CONFIGURATION_PATH = ".agent-runner.json";
 const SNAPSHOT_COMPARISONS = Object.freeze([
   ["head", "head"],
   ["branch", "branch"],
@@ -145,6 +146,10 @@ export function createGitService(options = {}) {
   }
 
   const contentContext = Object.freeze({ currentHead, runGit });
+
+  async function resolveProject(projectPath) {
+    return resolveRepository(runGit, projectPath);
+  }
 
   async function inspectPath(options) {
     assertOptions(options, "Path-inspection options");
@@ -332,7 +337,7 @@ export function createGitService(options = {}) {
       "--untracked-files=all",
       "--ignore-submodules=none",
     ]);
-    const content = await contentFingerprintsAtRoot(
+    const { changedPaths, ...content } = await contentChangesAtRoot(
       contentContext,
       repositoryPath,
       normalizedAllowedPaths,
@@ -345,7 +350,7 @@ export function createGitService(options = {}) {
       head,
       branch,
       detached: branch === null && head !== null,
-      clean: status.stdout.length === 0,
+      clean: status.stdout.length === 0 && changedPaths.length === 0,
       refsFingerprint: (await refsFingerprints(repositoryPath)).all,
       ...content,
       indexFingerprint: await indexFingerprint(repositoryPath),
@@ -385,6 +390,18 @@ export function createGitService(options = {}) {
     ).contentFingerprint;
   }
 
+  async function validationInfrastructureFingerprint(options) {
+    assertOptions(options, "Validation-infrastructure options");
+    const { paths, projectPath } = options;
+    assertPathList(paths, "paths");
+    const repositoryPath = await resolveRepository(runGit, projectPath);
+    return pathsFingerprintAtRoot(
+      contentContext,
+      repositoryPath,
+      paths,
+    );
+  }
+
   async function preflight(options) {
     assertOptions(options, "Git-preflight options");
     const {
@@ -399,23 +416,6 @@ export function createGitService(options = {}) {
     assertBoolean(requireIdentity, "requireIdentity");
     assertPathList(requiredIgnoredPaths, "requiredIgnoredPaths");
     const repositoryPath = await resolveRepository(runGit, projectPath);
-    const configuration = await inspectPathAtRoot(
-      contentContext,
-      repositoryPath,
-      LOCAL_CONFIGURATION_PATH,
-    );
-    if (configuration.tracked) {
-      throw new GitSafetyError(
-        `${LOCAL_CONFIGURATION_PATH} must remain untracked.`,
-        { code: "ERR_TRACKED_RUNNER_CONFIGURATION" },
-      );
-    }
-    if (!configuration.ignored) {
-      throw new GitSafetyError(
-        `${LOCAL_CONFIGURATION_PATH} must be ignored by the repository.`,
-        { code: "ERR_UNIGNORED_RUNNER_CONFIGURATION" },
-      );
-    }
     const ignoredPaths = [];
     for (const path of requiredIgnoredPaths) {
       const inspected = await inspectPathAtRoot(
@@ -447,7 +447,6 @@ export function createGitService(options = {}) {
       );
     }
     return Object.freeze({
-      configuration,
       ignoredPaths: Object.freeze(ignoredPaths),
       snapshot: repositorySnapshot,
     });
@@ -487,6 +486,8 @@ export function createGitService(options = {}) {
     contentFingerprint,
     inspectPath,
     preflight,
+    resolveProject,
     snapshot,
+    validationInfrastructureFingerprint,
   });
 }
