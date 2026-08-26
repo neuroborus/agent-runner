@@ -1426,6 +1426,8 @@ async function createFixture(
         },
         async run(request) {
           calls[role].push(request);
+          assert.match(request.prompt, /Do not delegate/u);
+          assert.match(request.recoveryPrompt, /Do not delegate/u);
           await onRoleRun?.(role, request, calls[role].length, { projectPath });
           assert.ok(queues[role].length > 0, `Unexpected ${role} turn.`);
           const structured = queues[role].shift();
@@ -4092,6 +4094,38 @@ test("fails closed after an ambiguous writable Claude process failure", async (t
   assert.doesNotMatch(
     await readFile(join(fixture.directoryPath, "events.jsonl"), "utf8"),
     /provider-native/u,
+  );
+});
+
+test("persists a forbidden-delegation diagnostic without provider data", async (t) => {
+  const sensitiveMarker = "DO_NOT_PERSIST_DELEGATED_TURN_DATA";
+  const fixture = await createFixture(t, {
+    onRoleRun(role) {
+      if (role === "worker") {
+        const error = new Error(sensitiveMarker);
+        error.code = "ERR_CODEX_ISOLATION";
+        error.diagnosticClass = "operation_multi_agent";
+        error.subAgentActivity = sensitiveMarker;
+        error.transcript = sensitiveMarker;
+        throw error;
+      }
+    },
+  });
+
+  await assert.rejects(
+    fixture.run(),
+    (error) => error.code === "ERR_CODEX_ISOLATION",
+  );
+
+  assert.deepEqual(fixture.currentRun.pause, {
+    reason: "internal_failure",
+    code: "ERR_CODEX_ISOLATION",
+    diagnosticClass: "operation_multi_agent",
+  });
+  assert.doesNotMatch(JSON.stringify(fixture.currentRun), /DO_NOT_PERSIST/u);
+  assert.doesNotMatch(
+    await readFile(join(fixture.directoryPath, "events.jsonl"), "utf8"),
+    /DO_NOT_PERSIST/u,
   );
 });
 

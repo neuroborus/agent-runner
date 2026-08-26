@@ -488,6 +488,35 @@ test("status renders bounded pause details without private provider data", async
   );
 });
 
+test("status explains a terminal forbidden-delegation diagnostic", async () => {
+  const stdout = createSink();
+  const result = commandResult({ state: "FAILED" });
+  result.run.pause = {
+    reason: "internal_failure",
+    code: "ERR_CODEX_ISOLATION",
+    diagnosticClass: "operation_multi_agent",
+  };
+
+  assert.equal(
+    await main(["status", "--run", RUN_ID], {
+      stdout: stdout.stream,
+      stderr: createSink().stream,
+      runner: fakeRunner({
+        async status() {
+          return result;
+        },
+      }),
+    }),
+    0,
+  );
+
+  assert.match(stdout.read(), /Pause code: ERR_CODEX_ISOLATION/u);
+  assert.match(
+    stdout.read(),
+    /Plan execution failed\. Adapter diagnostic: operation_multi_agent\./u,
+  );
+});
+
 test("status renders input and fresh-run pause actions", async () => {
   for (const { pause, state, expected } of [
     {

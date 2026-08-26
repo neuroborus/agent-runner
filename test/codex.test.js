@@ -6,10 +6,12 @@ import test from "node:test";
 
 import packageMetadata from "../package.json" with { type: "json" };
 import {
+  AgentBoundaryError,
   CODEX_BACKEND_ID,
   CodexAdapterError,
   STRUCTURED_OUTPUT_FAILURE_CLASS,
   createCodexAdapter,
+  normalizeAdapterFailure,
 } from "../src/agents/index.js";
 
 const PROJECT_PATH = process.cwd();
@@ -37,6 +39,34 @@ function hasFailureClass(code, failureClass) {
   return (error) =>
     hasCode(code)(error) && error.failureClass === failureClass;
 }
+
+test("normalizes finite adapter diagnostics at the root agent boundary", () => {
+  const sensitiveMarker = "DO_NOT_RETAIN_NATIVE_PROVIDER_TEXT";
+  const nativeFailure = Object.assign(new Error(sensitiveMarker), {
+    code: "ERR_CODEX_ISOLATION",
+    diagnosticClass: "operation_multi_agent",
+    nativeResponse: sensitiveMarker,
+    prompt: sensitiveMarker,
+  });
+  const normalized = normalizeAdapterFailure("codex", nativeFailure);
+
+  assert.ok(normalized instanceof AgentBoundaryError);
+  assert.equal(normalized.message, "Agent backend turn failed.");
+  assert.equal(normalized.code, "ERR_CODEX_ISOLATION");
+  assert.equal(normalized.diagnosticClass, "operation_multi_agent");
+  assert.equal(normalized.cause, undefined);
+  assert.equal(normalized.nativeResponse, undefined);
+  assert.equal(normalized.prompt, undefined);
+  assert.equal(
+    normalizeAdapterFailure(
+      "codex",
+      Object.assign(new Error(sensitiveMarker), {
+        diagnosticClass: "native_provider_value",
+      }),
+    ).diagnosticClass,
+    undefined,
+  );
+});
 
 function completedTurn(threadId, turnId, output = "done", items = []) {
   return {

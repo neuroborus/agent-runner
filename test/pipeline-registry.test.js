@@ -136,6 +136,36 @@ test("pipeline pause projections preserve bounded details and redact private fie
   }
 });
 
+test("every pipeline projects bounded adapter diagnostics", () => {
+  for (const [pipelineId, explanation] of [
+    ["plan-authoring", "Plan authoring failed."],
+    ["plan-execution", "Plan execution failed."],
+    ["polishing", "Polishing failed."],
+  ]) {
+    assert.deepEqual(
+      getPipeline(pipelineId).projections.pause(
+        pausedRun(
+          {
+            reason: "internal_failure",
+            code: "ERR_CODEX_ISOLATION",
+            diagnosticClass: "operation_multi_agent",
+          },
+          { workflowState: "FAILED" },
+        ),
+      ),
+      {
+        reason: "internal_failure",
+        code: "ERR_CODEX_ISOLATION",
+        explanation:
+          `${explanation} Adapter diagnostic: operation_multi_agent.`,
+        evidence: [],
+        resumeState: null,
+        nextActions: [],
+      },
+    );
+  }
+});
+
 test("plan-execution pause projection distinguishes fresh-run requirements", () => {
   const projectPause = getPipeline("plan-execution").projections.pause;
 

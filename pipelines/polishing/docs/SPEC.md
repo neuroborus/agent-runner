@@ -196,6 +196,9 @@ First, forked, fresh, and context-invalidated turns receive the complete durable
 request. Compatible continuations receive only the current instruction and
 state delta while retaining the complete request for adapter recovery after
 unavailable continuation or failed compaction.
+Every role request also requires the authorized role to produce its own result
+without delegation, subagents, or multi-agent collaboration. Adapter
+collaboration auditing remains independently fail closed.
 Claude classifies structured permission denials, HTTP status, result subtype,
 and terminal reason before consulting a bounded native-text slice. Only finite
 allowlisted backend, capability, configuration, usage, provider, expected-tool
@@ -214,6 +217,14 @@ fingerprint-bound results before pausing so the complete durable request can be
 reconstructed after capacity returns. Classified usage and provider failures
 from writable turns use this path only after workspace and repository-control
 reconciliation; no native session is required.
+The root agent boundary normalizes the selected adapter's finite diagnostic
+class before workflow code sees a terminal failure. Only its fixed message,
+bounded code, safe control flags, shared structured-output class, and validated
+diagnostic class cross the boundary. Codex collaboration activity despite a
+disabled multi-agent capability remains terminal `operation_multi_agent`; it is
+not an environment blocker or a transparent retry. Native messages, prompts,
+commands, provider responses, transcripts, credentials, and process causes are
+discarded.
 
 A writable Worker turn that cannot execute required validation because of
 sandbox, IPC, loopback, process-isolation, missing-service, permission, or a
@@ -441,6 +452,8 @@ mutating continuation persists the explicit runtime migration.
 Persist concise structured decisions and public summaries, never raw model
 transcripts, chain-of-thought, credentials, or unhashed remote and identity
 values.
+Terminal failures may retain only the root-normalized finite adapter diagnostic
+class, which the descriptor renders as a deterministic CLI/MCP explanation.
 
 The descriptor projects each pause through one bounded public contract shared
 by CLI status, MCP status, and MCP wait. It contains the finite reason, optional
@@ -589,6 +602,8 @@ Pipeline tests use fake adapters and temporary repositories. Cover at least:
 - finite redacted Claude failure classification, durable read-only request
   reconstruction, writable usage/provider reconciliation, and terminal
   authentication, forbidden-operation, and ambiguous writable boundaries;
+- non-delegating role prompts plus terminal, redacted, durable, and publicly
+  projected forbidden-collaboration diagnostics;
 - the invariant that `HEAD` never changes and completion never commits.
 
 Root tests cover workspace imports and metadata, static registration,

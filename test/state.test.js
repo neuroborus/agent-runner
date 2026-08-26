@@ -559,6 +559,34 @@ test("validates the shared structured input envelope", async (t) => {
   );
 });
 
+test("accepts only finite adapter diagnostics in durable pause state", async (t) => {
+  const { created, store } = await createFixture(t);
+
+  const transitioned = await store.transitionRun(created.lease, {
+    pause: {
+      reason: "internal_failure",
+      code: "ERR_CODEX_ISOLATION",
+      diagnosticClass: "operation_multi_agent",
+    },
+  });
+  assert.equal(
+    transitioned.pause.diagnosticClass,
+    "operation_multi_agent",
+  );
+
+  await assert.rejects(
+    store.transitionRun(created.lease, {
+      pause: {
+        reason: "internal_failure",
+        code: "ERR_CODEX_ISOLATION",
+        diagnosticClass: "native_provider_value",
+      },
+    }),
+    (error) =>
+      error instanceof RunStoreError && error.code === "ERR_INVALID_RUN_STATE",
+  );
+});
+
 test("recovers every transition write boundary from the complete event", async (t) => {
   const workspace = await mkdtemp(join(tmpdir(), "agent-runner-crash-"));
   t.after(() => rm(workspace, { recursive: true, force: true }));

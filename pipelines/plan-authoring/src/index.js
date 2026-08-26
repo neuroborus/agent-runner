@@ -13,6 +13,7 @@ export {
   CLARIFICATION_INSTRUCTIONS,
   DRAFT_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
+  NO_DELEGATION_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
   REVIEW_INSTRUCTIONS,
   STAGNATION_INSTRUCTIONS,
@@ -72,6 +73,14 @@ function publicCode(value) {
     : null;
 }
 
+function publicExplanation(pause, fallback) {
+  return pause.reason === "internal_failure" &&
+    typeof pause.diagnosticClass === "string" &&
+    /^[a-z][a-z0-9_]{0,63}$/u.test(pause.diagnosticClass)
+    ? `${fallback} Adapter diagnostic: ${pause.diagnosticClass}.`
+    : fallback;
+}
+
 function publicResumeState(run) {
   return run.pipelineState.workflowState === "WAITING_FOR_USER" &&
     run.pause.reason === "backend_unavailable" &&
@@ -118,7 +127,7 @@ function projectPause(run) {
   return Object.freeze({
     reason,
     code: knownReason ? publicCode(run.pause.code) : null,
-    explanation,
+    explanation: publicExplanation(run.pause, explanation),
     evidence: Object.freeze([]),
     resumeState: publicResumeState(run),
     nextActions: Object.freeze(nextActions),

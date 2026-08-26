@@ -355,6 +355,8 @@ async function createFixture(
       {
         async run(request) {
           calls[role].push(request);
+          assert.match(request.prompt, /Do not delegate/u);
+          assert.match(request.recoveryPrompt, /Do not delegate/u);
           await onRoleRun?.(role, request, calls[role].length);
           assert.ok(queues[role].length > 0, `Unexpected ${role} turn.`);
           const freshSessionCount = freshSessionCounts[role];
@@ -1389,6 +1391,35 @@ test("keeps Claude authentication terminal for a read-only turn", async (t) => {
     JSON.stringify(fixture.transitions),
     /authentication secret/u,
   );
+});
+
+test("persists a forbidden-delegation diagnostic without provider data", async (t) => {
+  const sensitiveMarker = "DO_NOT_PERSIST_DELEGATED_TURN_DATA";
+  const fixture = await createFixture(t, {
+    onRoleRun(role) {
+      if (role === "planner") {
+        const error = new Error(sensitiveMarker);
+        error.code = "ERR_CODEX_ISOLATION";
+        error.diagnosticClass = "operation_multi_agent";
+        error.subAgentActivity = sensitiveMarker;
+        error.transcript = sensitiveMarker;
+        throw error;
+      }
+    },
+    reviewer: [],
+  });
+
+  await assert.rejects(
+    fixture.run(),
+    (error) => error.code === "ERR_CODEX_ISOLATION",
+  );
+
+  assert.deepEqual(fixture.currentRun.pause, {
+    reason: "internal_failure",
+    code: "ERR_CODEX_ISOLATION",
+    diagnosticClass: "operation_multi_agent",
+  });
+  assert.doesNotMatch(JSON.stringify(fixture.transitions), /DO_NOT_PERSIST/u);
 });
 
 test("pauses when an agent changes ignored clarifications", async (t) => {

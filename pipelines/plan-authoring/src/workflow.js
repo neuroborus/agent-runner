@@ -10,6 +10,7 @@ import {
   CLARIFICATION_INSTRUCTIONS,
   DRAFT_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
+  NO_DELEGATION_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
   REVIEW_INSTRUCTIONS,
   STAGNATION_INSTRUCTIONS,
@@ -56,9 +57,20 @@ const INPUT_DRIFT_ERROR_CODES = new Set([
   "ENOTDIR",
   "EPERM",
 ]);
+const ADAPTER_DIAGNOSTIC_CLASS_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
 
 function activity(actor, phase, kind, message) {
   return Object.freeze({ actor, phase, kind, message });
+}
+
+function rolePrompt(prompt) {
+  return `${prompt}\n\n${NO_DELEGATION_INSTRUCTIONS}`;
+}
+
+function adapterDiagnosticClass(cause) {
+  return ADAPTER_DIAGNOSTIC_CLASS_PATTERN.test(cause?.diagnosticClass)
+    ? cause.diagnosticClass
+    : undefined;
 }
 
 function activeTurn(role, workflowState) {
@@ -192,16 +204,23 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
       typeof cause?.code === "string" && /^[A-Z0-9_]{1,64}$/u.test(cause.code)
         ? cause.code
         : "ERR_PLAN_AUTHORING_FAILED";
+    const diagnosticClass = adapterDiagnosticClass(cause);
     try {
       await transition(
         { ...pipelineState(), workflowState: "FAILED" },
         {
-          pause: { reason: "internal_failure", code },
+          pause: {
+            reason: "internal_failure",
+            code,
+            ...(diagnosticClass === undefined ? {} : { diagnosticClass }),
+          },
           publicActivity: activity(
             "runner",
             "plan-authoring",
             "failed",
-            `Plan authoring failed: ${code}.`,
+            diagnosticClass === undefined
+              ? `Plan authoring failed: ${code}.`
+              : `Plan authoring failed: ${code} (${diagnosticClass}).`,
           ),
         },
       );
@@ -363,7 +382,7 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
           ? { id: sourceSession, mode: "fork" }
           : undefined;
     const roleConfiguration = currentRun.roles[role];
-    const recoveryPrompt = buildPrompt(evidenceContext);
+    const recoveryPrompt = rolePrompt(buildPrompt(evidenceContext));
     const executionPreferences = Object.fromEntries(
       ["profile", "model", "contextSize"].flatMap((field) =>
         typeof roleConfiguration[field] === "string" &&
@@ -376,7 +395,9 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
       access: "read-only",
       cwd: currentRun.projectPath,
       prompt:
-        session?.mode === "continue" ? buildPrompt("") : recoveryPrompt,
+        session?.mode === "continue"
+          ? rolePrompt(buildPrompt(""))
+          : recoveryPrompt,
       recoveryPrompt,
       schema,
       ...executionPreferences,

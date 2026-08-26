@@ -21,6 +21,7 @@ import {
   FINDING_ARBITRATION_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
   IMPLEMENTATION_INSTRUCTIONS,
+  NO_DELEGATION_INSTRUCTIONS,
   PLAN_COMPATIBILITY_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
   REVIEW_INSTRUCTIONS,
@@ -54,7 +55,6 @@ import {
   createPlanExecutionState,
   isRecord,
   isOutputDiagnostic,
-  isTerminalTurnDiagnosticClass,
   normalizeAdapterCapabilities,
   normalizeBootstrapArbitration,
   normalizeBootstrapResult,
@@ -113,9 +113,20 @@ const INVALID_BOOTSTRAP_PATH_CODES = new Set([
   "ERR_UNSUPPORTED_GIT_PATH",
 ]);
 const STRUCTURED_OUTPUT_FAILURE_CLASS = "structured-output";
+const ADAPTER_DIAGNOSTIC_CLASS_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
 
 function activity(actor, phase, kind, message) {
   return Object.freeze({ actor, phase, kind, message });
+}
+
+function rolePrompt(prompt) {
+  return `${prompt}\n\n${NO_DELEGATION_INSTRUCTIONS}`;
+}
+
+function adapterDiagnosticClass(cause) {
+  return ADAPTER_DIAGNOSTIC_CLASS_PATTERN.test(cause?.diagnosticClass)
+    ? cause.diagnosticClass
+    : undefined;
 }
 
 function deriveValidationInventory(workerValidation, reviewerValidation) {
@@ -513,11 +524,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       cause?.code === "ERR_INVALID_PLAN_EXECUTION_OUTPUT"
         ? persistedOutputDiagnostic(cause.diagnostic)
         : undefined;
-    const diagnosticClass =
-      code === "ERR_CODEX_TURN_FAILED" &&
-      isTerminalTurnDiagnosticClass(cause?.diagnosticClass)
-        ? cause.diagnosticClass
-        : undefined;
+    const diagnosticClass = adapterDiagnosticClass(cause);
     const message =
       diagnostic !== undefined
         ? `Plan execution failed: ${code} (${diagnostic.role}/${diagnostic.phase} ${diagnostic.field}: ${diagnostic.constraint}).`
@@ -831,7 +838,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           ? { id: sourceSession, mode: "fork" }
           : undefined;
     const roleConfiguration = currentRun.roles[role];
-    const recoveryPrompt = buildPrompt(context);
+    const recoveryPrompt = rolePrompt(buildPrompt(context));
     const executionPreferences = Object.fromEntries(
       ["profile", "model", "contextSize"].flatMap((field) =>
         typeof roleConfiguration[field] === "string" &&
@@ -844,7 +851,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       access,
       cwd: currentRun.projectPath,
       prompt:
-        session?.mode === "continue" ? buildPrompt("") : recoveryPrompt,
+        session?.mode === "continue"
+          ? rolePrompt(buildPrompt(""))
+          : recoveryPrompt,
       recoveryPrompt,
       schema,
       ...executionPreferences,
@@ -3463,10 +3472,10 @@ ${JSON.stringify(
       );
       const request = {
         ...baseRequest,
-        prompt: `${COMMIT_INSTRUCTIONS}
+        prompt: rolePrompt(`${COMMIT_INSTRUCTIONS}
 
 Authorized planned commit:
-${step.subject}`,
+${step.subject}`),
         ...executionPreferences,
         ...(previousSession === undefined
           ? {}

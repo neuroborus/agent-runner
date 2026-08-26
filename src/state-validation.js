@@ -1,5 +1,7 @@
 import { isAbsolute, resolve } from "node:path";
 
+import { isAdapterDiagnosticClass } from "./agents/index.js";
+
 export const RUN_STATE_SCHEMA_VERSION = 3;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
@@ -169,6 +171,12 @@ function assertInputText(value, path, maximumLength = MAX_INPUT_TEXT_LENGTH) {
 
 function normalizePause(value) {
   const pause = cloneRecord(value, "run.pause");
+  if (
+    Object.hasOwn(pause, "diagnosticClass") &&
+    !isAdapterDiagnosticClass(pause.diagnosticClass)
+  ) {
+    fail("run.pause.diagnosticClass is invalid.");
+  }
   const hasRequest = Object.hasOwn(pause, "inputRequest");
   const hasResponse = Object.hasOwn(pause, "inputResponse");
   if (!hasRequest) {

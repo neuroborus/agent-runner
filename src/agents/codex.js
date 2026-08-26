@@ -223,6 +223,10 @@ const SAFE_TURN_ITEM_TYPES = new Set([
 ]);
 const TERMINAL_ITEM_STATUSES = new Set(["completed", "declined", "failed"]);
 
+export function normalizeCodexDiagnosticClass(value) {
+  return CODEX_DIAGNOSTIC_CLASSES.has(value) ? value : undefined;
+}
+
 export class CodexAdapterError extends Error {
   constructor(
     message,
@@ -248,8 +252,11 @@ export class CodexAdapterError extends Error {
     if (failureClass === STRUCTURED_OUTPUT_FAILURE_CLASS) {
       this.failureClass = failureClass;
     }
-    if (CODEX_DIAGNOSTIC_CLASSES.has(diagnosticClass)) {
-      this.diagnosticClass = diagnosticClass;
+    const normalizedDiagnosticClass = normalizeCodexDiagnosticClass(
+      diagnosticClass,
+    );
+    if (normalizedDiagnosticClass !== undefined) {
+      this.diagnosticClass = normalizedDiagnosticClass;
     }
     if (method !== undefined) {
       this.method = method;

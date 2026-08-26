@@ -29,6 +29,7 @@ export {
   FINDING_ARBITRATION_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
   IMPLEMENTATION_INSTRUCTIONS,
+  NO_DELEGATION_INSTRUCTIONS,
   PLAN_COMPATIBILITY_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
   REVIEW_INSTRUCTIONS,
@@ -178,6 +179,13 @@ function publicResumeState(run) {
 }
 
 function publicExplanation(pause, fallback) {
+  if (
+    pause.reason === "internal_failure" &&
+    typeof pause.diagnosticClass === "string" &&
+    /^[a-z][a-z0-9_]{0,63}$/u.test(pause.diagnosticClass)
+  ) {
+    return `${fallback} Adapter diagnostic: ${pause.diagnosticClass}.`;
+  }
   return PUBLIC_DETAIL_REASONS.has(pause.reason) &&
     typeof pause.explanation === "string" &&
     pause.explanation.length > 0 &&

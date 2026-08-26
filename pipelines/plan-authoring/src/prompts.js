@@ -4,6 +4,8 @@ Do not modify the repository.
 For READY, set questions to [].
 For QUESTIONS, provide one or more actionable questions with question and whyItMatters.`;
 
+export const NO_DELEGATION_INSTRUCTIONS = `Produce this turn's result yourself as the authorized role. Do not delegate, spawn subagents, or use multi-agent collaboration.`;
+
 export const PRODUCT_DECISION_INSTRUCTIONS = `Do not ask questions after clarification closes.
 A blocking product-decision outcome is allowed only when the task, repository, conventions, and prior clarifications leave a choice between materially different product requirements or behaviors unresolved and progress is otherwise impossible.
 Do not use it for technical choices, implementation difficulty, naming, or ordinary review findings.

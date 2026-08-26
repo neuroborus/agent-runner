@@ -1694,6 +1694,11 @@ async function createFixture(
         },
         async run(request) {
           calls[role].push(request);
+          assert.match(request.prompt, /Do not delegate/u);
+          assert.match(
+            request.recoveryPrompt ?? request.prompt,
+            /Do not delegate/u,
+          );
           await onRoleRun?.(role, request, calls[role].length);
           if (request.access === "local-commit") {
             if (onCommitRun === undefined) {
@@ -2395,7 +2400,7 @@ test("derives one stable complete inventory from independent role evidence", asy
   ]);
 });
 
-test("persists only the bounded class for a terminal Codex bootstrap failure", async (
+test("persists a forbidden-delegation class for a terminal bootstrap failure", async (
   t,
 ) => {
   const sensitiveMarker = "DO_NOT_PERSIST_TERMINAL_TURN_DATA";
@@ -2406,8 +2411,8 @@ test("persists only the bounded class for a terminal Codex bootstrap failure", a
         request.prompt.includes("Provide a concise bootstrap summary")
       ) {
         const error = new Error(sensitiveMarker);
-        error.code = "ERR_CODEX_TURN_FAILED";
-        error.diagnosticClass = "turn_bad_request";
+        error.code = "ERR_CODEX_ISOLATION";
+        error.diagnosticClass = "operation_multi_agent";
         error.nativeResponse = { message: sensitiveMarker };
         error.prompt = sensitiveMarker;
         error.transcript = sensitiveMarker;
@@ -2418,18 +2423,18 @@ test("persists only the bounded class for a terminal Codex bootstrap failure", a
 
   await assert.rejects(
     fixture.run(),
-    (cause) => cause.code === "ERR_CODEX_TURN_FAILED",
+    (cause) => cause.code === "ERR_CODEX_ISOLATION",
   );
 
   assert.deepEqual(fixture.currentRun.pause, {
     reason: "internal_failure",
-    code: "ERR_CODEX_TURN_FAILED",
-    diagnosticClass: "turn_bad_request",
+    code: "ERR_CODEX_ISOLATION",
+    diagnosticClass: "operation_multi_agent",
   });
   const failureActivity = fixture.transitions.find(
     ({ options }) => options.activity?.kind === "failed",
   )?.options.activity;
-  assert.match(failureActivity.message, /turn_bad_request/u);
+  assert.match(failureActivity.message, /operation_multi_agent/u);
   assert.doesNotMatch(JSON.stringify(fixture.currentRun), /DO_NOT_PERSIST/u);
   assert.doesNotMatch(JSON.stringify(fixture.transitions), /DO_NOT_PERSIST/u);
 });
@@ -4141,12 +4146,12 @@ test("rejects inconsistent persisted workflow state", async (t) => {
     };
   });
 
-  await rejectsState("unknown terminal turn diagnostic", (run) => {
+  await rejectsState("invalid adapter diagnostic", (run) => {
     run.pipelineState.workflowState = "FAILED";
     run.pause = {
       reason: "internal_failure",
       code: "ERR_CODEX_TURN_FAILED",
-      diagnosticClass: "turn_unknown_provider_value",
+      diagnosticClass: "native provider value",
     };
   });
 

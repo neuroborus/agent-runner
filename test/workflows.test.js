@@ -827,7 +827,7 @@ test("does not replace an unavailable source session", async (t) => {
   }
 });
 
-test("recovers a bounded Codex terminal diagnostic from durable execution state", async (
+test("projects a forbidden-delegation diagnostic without durable provider data", async (
   t,
 ) => {
   const sensitiveMarker = "DO_NOT_PERSIST_CODEX_TERMINAL_DATA";
@@ -840,8 +840,8 @@ test("recovers a bounded Codex terminal diagnostic from durable execution state"
       !request.prompt.includes("As Reviewer")
     ) {
       const error = new Error(sensitiveMarker);
-      error.code = "ERR_CODEX_TURN_FAILED";
-      error.diagnosticClass = "turn_bad_request";
+      error.code = "ERR_CODEX_ISOLATION";
+      error.diagnosticClass = "operation_multi_agent";
       error.nativeResponse = { message: sensitiveMarker };
       error.prompt = sensitiveMarker;
       error.transcript = sensitiveMarker;
@@ -861,20 +861,33 @@ test("recovers a bounded Codex terminal diagnostic from durable execution state"
       roleOverrides: {},
       sourceSession: null,
     }),
-    (error) => error.code === "ERR_CODEX_TURN_FAILED",
+    (error) => error.code === "ERR_CODEX_ISOLATION",
   );
 
   const failed = await onlyRun(firstRuntime.runStore);
   assert.equal(failed.pipelineState.workflowState, "FAILED");
   assert.deepEqual(failed.pause, {
     reason: "internal_failure",
-    code: "ERR_CODEX_TURN_FAILED",
-    diagnosticClass: "turn_bad_request",
+    code: "ERR_CODEX_ISOLATION",
+    diagnosticClass: "operation_multi_agent",
   });
 
   const reopened = runtime(paths, { codex }, configuration);
   const recovered = await reopened.runStore.loadRun(failed.runId);
   assert.deepEqual(recovered.pause, failed.pause);
+  const projected = await createMcpControlPlane({
+    runner: reopened.runner,
+    runStore: reopened.runStore,
+  }).runStatus({ runId: failed.runId });
+  assert.deepEqual(projected.pause, {
+    reason: "internal_failure",
+    code: "ERR_CODEX_ISOLATION",
+    explanation:
+      "Plan execution failed. Adapter diagnostic: operation_multi_agent.",
+    evidence: [],
+    resumeState: null,
+    nextActions: [],
+  });
   const runPath = join(paths.stateRoot, "runs", failed.runId);
   const durableData = (
     await Promise.all(
@@ -883,7 +896,7 @@ test("recovers a bounded Codex terminal diagnostic from durable execution state"
       ),
     )
   ).join("\n");
-  assert.match(durableData, /turn_bad_request/u);
+  assert.match(durableData, /operation_multi_agent/u);
   assert.doesNotMatch(durableData, /DO_NOT_PERSIST/u);
   assert.doesNotMatch(durableData, /nativeResponse|"prompt":/u);
 });

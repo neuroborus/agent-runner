@@ -178,6 +178,10 @@ const IGNORED_CONTROL_ENVIRONMENT = new Set([
   "DISABLE_COMPACT",
 ]);
 
+export function normalizeClaudeDiagnosticClass(value) {
+  return CLAUDE_DIAGNOSTIC_CLASSES.has(value) ? value : undefined;
+}
+
 function executeFile(file, argumentsList, { input, ...options }) {
   const execution = executeFileAsync(file, argumentsList, options);
   execution.child.stdin.once("error", () => execution.child.kill());
@@ -212,8 +216,11 @@ export class ClaudeAdapterError extends Error {
     if (failureClass === STRUCTURED_OUTPUT_FAILURE_CLASS) {
       this.failureClass = failureClass;
     }
-    if (CLAUDE_DIAGNOSTIC_CLASSES.has(diagnosticClass)) {
-      this.diagnosticClass = diagnosticClass;
+    const normalizedDiagnosticClass = normalizeClaudeDiagnosticClass(
+      diagnosticClass,
+    );
+    if (normalizedDiagnosticClass !== undefined) {
+      this.diagnosticClass = normalizedDiagnosticClass;
     }
     if (sessionId !== undefined) {
       this.sessionId = sessionId;

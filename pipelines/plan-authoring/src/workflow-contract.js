@@ -67,6 +67,12 @@ const MAX_ITEMS = 32;
 const MAX_PRODUCT_DECISION_OPTIONS = 16;
 const MAX_STRUCTURED_RESULT_BYTES = 256 * 1024;
 const INVALID_OUTPUT_CODE = "ERR_INVALID_PLAN_AUTHORING_OUTPUT";
+const FAILURE_FIELDS = Object.freeze(["reason", "code"]);
+const ADAPTER_FAILURE_FIELDS = Object.freeze([
+  ...FAILURE_FIELDS,
+  "diagnosticClass",
+]);
+const ADAPTER_DIAGNOSTIC_CLASS_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
 const BACKEND_RESUME_STATES = Object.freeze([
   "CLARIFY",
   "DRAFT",
@@ -90,6 +96,13 @@ export function isRecord(value) {
   }
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
+}
+
+function hasExactFields(value, fields) {
+  return (
+    Object.keys(value).length === fields.length &&
+    fields.every((field) => Object.hasOwn(value, field))
+  );
 }
 
 export function workflowError(
@@ -990,6 +1003,28 @@ export function assertRun(run) {
         run.pause.reason.length === 0))
   ) {
     throw workflowError("Plan-authoring pause state is invalid.");
+  }
+  if (pipelineState.workflowState === "FAILED") {
+    const hasAdapterDiagnostic = Object.hasOwn(
+      run.pause,
+      "diagnosticClass",
+    );
+    const fields = hasAdapterDiagnostic
+      ? ADAPTER_FAILURE_FIELDS
+      : FAILURE_FIELDS;
+    if (
+      run.pause.reason !== "internal_failure" ||
+      !hasExactFields(run.pause, fields) ||
+      typeof run.pause.code !== "string" ||
+      !/^[A-Z0-9_]{1,64}$/u.test(run.pause.code) ||
+      (hasAdapterDiagnostic &&
+        (typeof run.pause.diagnosticClass !== "string" ||
+          !ADAPTER_DIAGNOSTIC_CLASS_PATTERN.test(
+            run.pause.diagnosticClass,
+          )))
+    ) {
+      throw workflowError("Plan-authoring adapter diagnostic is invalid.");
+    }
   }
   assertInputPause(run, pipelineState);
   if (pipelineState.workflowState === "WAITING_FOR_USER") {

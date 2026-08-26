@@ -6,6 +6,7 @@ import {
   BACKEND_IDS,
   createClaudeAdapter,
   createCodexAdapter,
+  normalizeAdapterFailure,
 } from "./agents/index.js";
 import { createClarificationService } from "./clarifications.js";
 import {
@@ -268,6 +269,14 @@ function executionOptions(configuration) {
   });
 }
 
+async function runAdapter(adapter, backend, request) {
+  try {
+    return await adapter.run(request);
+  } catch (cause) {
+    throw normalizeAdapterFailure(backend, cause);
+  }
+}
+
 function lazyArbiterAdapter(run, configuration, adapters) {
   let adapter;
   let capabilitiesPromise;
@@ -302,7 +311,7 @@ function lazyArbiterAdapter(run, configuration, adapters) {
     probe: resolveCapabilities,
     async run(request) {
       await resolveCapabilities();
-      return resolve().run(request);
+      return runAdapter(resolve(), configuration.backend, request);
     },
   });
 }
@@ -316,7 +325,7 @@ function configuredAdapter(run, role, configuration, adapters) {
   );
   return Object.freeze({
     probe: () => adapter.probe(executionOptions(configuration)),
-    run: (request) => adapter.run(request),
+    run: (request) => runAdapter(adapter, configuration.backend, request),
   });
 }
 

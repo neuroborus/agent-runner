@@ -84,6 +84,11 @@ pipeline-checkpoint context keys, and opaque plan-authoring state.
 Drafts, findings, correction-round snapshots, and stagnation evidence remain
 pipeline-owned structured data in the external run state rather than task
 artifacts.
+For a terminal role failure, the pause may also retain the finite adapter
+diagnostic class normalized by the root agent boundary. It retains no native
+message, provider response, prompt, command, transcript, credential, or process
+cause, and CLI/MCP status derives its explanation from the class
+deterministically.
 
 Every transition appends and syncs its complete write-ahead event before
 atomically replacing `state.json`; `progress.md` is a derived public projection.
@@ -246,6 +251,9 @@ For each finding below, fix the plan idiomatically and minimally, following the 
 
 Stagnation Arbiter:
 Diagnose why the plan revision loop is not converging and choose the minimal valid next direction using the provided schema.
+
+Every role:
+Produce this turn's result yourself as the authorized role. Do not delegate, spawn subagents, or use multi-agent collaboration.
 ```
 
 The pipeline may append finalized inputs, access restrictions, output schemas,
@@ -266,6 +274,10 @@ unclassified valid read-only result or process failure may use this path only
 after the repository guard proves the turn remained read-only. Authentication,
 forbidden-operation permission denials, protocol failures, and isolation
 failures remain terminal. Denied input and native provider text are discarded.
+The root agent boundary normalizes those finite adapter-owned classes before
+workflow code sees the failure. In particular, Codex collaboration activity
+despite disabled multi-agent support remains terminal
+`operation_multi_agent`; it is not an environment blocker and is not retried.
 An explicit rate, quota, credit, or spend-limit rejection is not retried through
 compaction, a fresh session, or provider fallback. Persist
 `backend_unavailable` with the current authoring state and resume by
@@ -348,3 +360,5 @@ path is ignored and untracked.
 - Cover finite redacted Claude classification, durable reconstruction of a
   failed read-only request, and terminal authentication and forbidden-operation
   boundaries without retaining native provider text.
+- Cover redacted terminal adapter diagnostics, including forbidden delegated
+  turns, through durable state and the shared CLI/MCP pause projection.

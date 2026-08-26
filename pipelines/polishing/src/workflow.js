@@ -14,6 +14,7 @@ import {
   finalizationGuidanceInstructions,
   FINDING_ARBITRATION_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
+  NO_DELEGATION_INSTRUCTIONS,
   POLISH_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
   REVIEW_INSTRUCTIONS,
@@ -97,6 +98,17 @@ const INVALID_BOOTSTRAP_PATH_CODES = new Set([
   "ERR_UNSUPPORTED_GIT_PATH",
 ]);
 const STRUCTURED_OUTPUT_FAILURE_CLASS = "structured-output";
+const ADAPTER_DIAGNOSTIC_CLASS_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
+
+function rolePrompt(prompt) {
+  return `${prompt}\n\n${NO_DELEGATION_INSTRUCTIONS}`;
+}
+
+function adapterDiagnosticClass(cause) {
+  return ADAPTER_DIAGNOSTIC_CLASS_PATTERN.test(cause?.diagnosticClass)
+    ? cause.diagnosticClass
+    : undefined;
+}
 
 function deriveValidationInventory(workerValidation, reviewerValidation) {
   const commands = [];
@@ -488,10 +500,13 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       cause?.code === "ERR_INVALID_POLISHING_OUTPUT"
         ? persistedOutputDiagnostic(cause.diagnostic)
         : undefined;
+    const diagnosticClass = adapterDiagnosticClass(cause);
     const message =
-      diagnostic === undefined
-        ? `Polishing failed: ${code}.`
-        : `Polishing failed: ${code} (${diagnostic.role}/${diagnostic.phase} ${diagnostic.field}: ${diagnostic.constraint}).`;
+      diagnostic !== undefined
+        ? `Polishing failed: ${code} (${diagnostic.role}/${diagnostic.phase} ${diagnostic.field}: ${diagnostic.constraint}).`
+        : diagnosticClass === undefined
+          ? `Polishing failed: ${code}.`
+          : `Polishing failed: ${code} (${diagnosticClass}).`;
     try {
       await transition(
         { ...state(), workflowState: "FAILED" },
@@ -500,6 +515,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
             reason: "internal_failure",
             code,
             ...(diagnostic === undefined ? {} : { diagnostic }),
+            ...(diagnosticClass === undefined ? {} : { diagnosticClass }),
           },
           publicActivity: activity(
             "runner",
@@ -773,7 +789,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           ? { id: sourceSession, mode: "fork" }
           : undefined;
     const configuration = currentRun.roles[role];
-    const recoveryPrompt = buildPrompt(context);
+    const recoveryPrompt = rolePrompt(buildPrompt(context));
     const executionPreferences = Object.fromEntries(
       ["profile", "model", "contextSize"].flatMap((field) =>
         typeof configuration[field] === "string" &&
@@ -786,7 +802,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       access,
       cwd: currentRun.projectPath,
       prompt:
-        session?.mode === "continue" ? buildPrompt("") : recoveryPrompt,
+        session?.mode === "continue"
+          ? rolePrompt(buildPrompt(""))
+          : recoveryPrompt,
       recoveryPrompt,
       schema,
       ...executionPreferences,

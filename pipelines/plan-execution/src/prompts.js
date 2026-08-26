@@ -7,6 +7,8 @@ For QUESTIONS, provide one or more actionable questions with question and whyItM
 For PLAN_REVISION_REQUIRED, set questions and options to []; provide reason and evidence; set question and whyBlocked to "".
 For PRODUCT_DECISION_REQUIRED, set questions to [] and reason to ""; use the product-decision fields.`;
 
+export const NO_DELEGATION_INSTRUCTIONS = `Produce this turn's result yourself as the authorized role. Do not delegate, spawn subagents, or use multi-agent collaboration.`;
+
 export const PRODUCT_DECISION_INSTRUCTIONS = `Do not ask questions after clarification closes.
 A blocking product-decision outcome is allowed only when the task, plan, repository, conventions, and prior clarifications leave a choice between materially different product requirements or behaviors unresolved and progress is otherwise impossible.
 Do not use it for technical choices, implementation difficulty, naming, or ordinary review findings.

@@ -496,6 +496,10 @@ A checkpoint's complete prompt is reconstructed from validated inputs, durable
 resolved summaries, its current plan step or change-set fingerprint, active
 blockers, and the pipeline's bounded decision history. These inputs remain
 durable even when the native session is gone.
+Every pipeline role turn also states that the authorized role must produce the
+result itself without delegation, subagents, or multi-agent collaboration.
+Prompt compliance supplements rather than replaces the adapters' fail-closed
+collaboration audit.
 
 When a native context is full, an adapter may compact it and retry the complete
 recovery prompt once. If continuation still fails, writable and read-only work
@@ -607,18 +611,24 @@ without resuming or mutating the source. If the source cannot be forked, the
 turn fails before agent work rather than silently losing lineage.
 
 Adapter failures retain only bounded diagnostics. Codex capability, isolation,
-and prohibited-operation errors carry one allowlisted diagnostic class rather
-than a command or native response. Claude classifies unavailable source and
-continuation sessions from the attempted session mode, distinguishes those
-from effective-profile, authentication, backend, capability, configuration,
-usage, provider, permission, and process failures, and derives recoverability
-only from its finite class allowlist. No classification retains native output,
-denied input, credentials, or raw transcripts.
-For a failed Codex turn, recognized App Server `codexErrorInfo` variants map to
-a finite terminal diagnostic-class allowlist. Plan execution may persist only
-that validated class with `ERR_CODEX_TURN_FAILED`; native messages, additional
-details, provider responses, prompts, and transcripts remain excluded. Context
-exhaustion and interruption retain their dedicated recovery paths.
+prohibited-operation, and recognized App Server failures carry one allowlisted
+diagnostic class rather than a command or native response. Claude classifies
+unavailable sessions, effective-profile, authentication, backend, capability,
+configuration, usage, provider, permission, and process failures and derives
+recoverability only from its finite class allowlist. The root agent boundary
+uses those adapter-owned allowlists to normalize every thrown turn failure into
+a fixed message and safe control fields; it does not duplicate backend class
+lists. Every pipeline may persist the normalized class for a terminal failure
+and projects it only through a deterministic CLI/MCP explanation. Native
+messages, additional details, denied input, provider responses, prompts,
+commands, credentials, transcripts, and process causes never cross that
+boundary or enter durable state.
+
+Codex `subAgentActivity` or another collaboration audit signal remains a
+terminal `operation_multi_agent` isolation failure even though collaboration is
+disabled at launch. A backend that ignores that disabled capability cannot be
+accepted, reclassified as an environment blocker, or transparently retried.
+Context exhaustion and interruption retain their dedicated recovery paths.
 
 Interrupted one-shot effects are also different. In particular, a
 `local-commit` turn is never replayed; control returns to the runner for pending

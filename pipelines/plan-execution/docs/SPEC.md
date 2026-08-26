@@ -387,8 +387,8 @@ Persist at least:
   fingerprints, and bounded executor provenance for accepted check evidence;
 - latest reviewed content fingerprint;
 - escalation reason when paused;
-- an optional allowlisted terminal diagnostic class for a failed Codex turn,
-  without native provider data.
+- an optional finite adapter diagnostic class normalized by the root boundary
+  for any terminal role turn, without native provider data.
 
 The common envelope also persists an optional opaque source-session reference,
 its resolved trusted profile when known, and every direct Worker, Reviewer, or
@@ -578,6 +578,13 @@ reconstructing and retrying the durable request is safe. Safety, protocol, and
 isolation failures are not recoverable; an ambiguous `local-commit` outcome is
 never retried and must instead return to Git-state verification.
 
+The root agent boundary normalizes thrown failures through the selected
+adapter's own finite diagnostic-class validator. It exposes only a fixed
+message, bounded code, safe effect/recovery flags, the shared structured-output
+class, and the validated adapter diagnostic class. Pipelines never duplicate
+backend allowlists or receive native messages, denied inputs, prompts,
+commands, responses, transcripts, credentials, or process causes.
+
 When a requested structured result cannot be produced, each adapter retains
 its backend-specific bounded error code and additionally exposes only the
 shared `failureClass: "structured-output"` classification. Pipeline workflow
@@ -689,6 +696,10 @@ Capability, isolation, and prohibited-operation failures expose only one
 bounded allowlisted diagnostic class identifying the rejected capability or
 operation class. Do not retain the reported command, native error response,
 credentials, or transcript as diagnostic evidence.
+Reported `subAgentActivity` or any other collaboration use remains a terminal
+`operation_multi_agent` isolation failure. Disabled multi-agent launch
+configuration does not authorize accepting or transparently retrying a backend
+that ignores the restriction.
 For `ERR_CODEX_TURN_FAILED`, map only recognized App Server
 `codexErrorInfo` variants to finite allowlisted terminal classes. Persist the
 validated class in plan-execution failure state, but discard the native error
@@ -1291,6 +1302,7 @@ Keep role prompts short. Their mandatory English cores are:
 Worker: Implement the changes described in the following planned commit. Keep the implementation idiomatic and minimal, and follow the project's conventions.
 Reviewer: Review the changes and verify that they are correct, idiomatic, minimal, and consistent with the project's conventions.
 Finding resolution: For each finding below, fix it idiomatically and minimally, following the project's conventions.
+Every role: Produce this turn's result yourself as the authorized role. Do not delegate, spawn subagents, or use multi-agent collaboration.
 ```
 
 The pipeline may append turn-specific context, access restrictions, and output
@@ -2047,6 +2059,9 @@ At minimum cover:
 55. conflicting role IDs, cross-role repeated commands and paths, role-only
     entries, runner-trusted commands, and attempted reconciliation inventory
     invention produce one stable complete runner-derived inventory.
+56. every role prompt prohibits delegation, and a backend-reported delegated
+    turn remains terminal while its finite class is redacted, durable, and
+    projected consistently through CLI and MCP status.
 
 Real Codex/Claude smoke tests should be opt-in integration tests.
 
@@ -2156,6 +2171,9 @@ Do not build:
     bounded evidence cannot pass unless every fingerprint and repository guard
     remains unchanged. The isolated executor denies remote writes and ambient
     credentials and retires the complete process tree before reconciliation.
+34. Every role produces its own result without delegation; adapter collaboration
+    auditing remains fail closed and a violation is never an environment pause
+    or transparent retry.
 
 ---
 

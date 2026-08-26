@@ -144,6 +144,12 @@ const TRUSTED_VALIDATION_FIELDS = Object.freeze([
   "configurationFingerprint",
 ]);
 const TRUSTED_ALIAS_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
+const ADAPTER_DIAGNOSTIC_CLASS_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
+const FAILURE_FIELDS = Object.freeze(["reason", "code"]);
+const ADAPTER_FAILURE_FIELDS = Object.freeze([
+  ...FAILURE_FIELDS,
+  "diagnosticClass",
+]);
 export const MAX_TEXT_LENGTH = 4_000;
 export const MAX_SUMMARY_LENGTH = 20_000;
 export const MAX_ITEMS = 32;
@@ -3163,6 +3169,30 @@ export function assertRun(run) {
       ))
   ) {
     throw workflowError("Polishing output diagnostic is invalid.");
+  }
+  const adapterFailure =
+    state.workflowState === "FAILED" &&
+    run.pause?.reason === "internal_failure" &&
+    !outputFailure;
+  const hasAdapterDiagnostic = Object.hasOwn(
+    run.pause ?? {},
+    "diagnosticClass",
+  );
+  if (
+    (hasAdapterDiagnostic &&
+      (!adapterFailure ||
+        !hasExactFields(run.pause, ADAPTER_FAILURE_FIELDS) ||
+        typeof run.pause.diagnosticClass !== "string" ||
+        !ADAPTER_DIAGNOSTIC_CLASS_PATTERN.test(
+          run.pause.diagnosticClass,
+        ))) ||
+    (adapterFailure &&
+      !hasExactFields(
+        run.pause,
+        hasAdapterDiagnostic ? ADAPTER_FAILURE_FIELDS : FAILURE_FIELDS,
+      ))
+  ) {
+    throw workflowError("Polishing adapter diagnostic is invalid.");
   }
   if (state.workflowState === "WAITING_FOR_USER") {
     const expectedReason = EDIT_PAUSE_REASONS[state.pendingEdit?.action];
