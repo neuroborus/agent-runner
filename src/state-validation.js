@@ -1,6 +1,25 @@
 import { isAbsolute, resolve } from "node:path";
 
-export const RUN_STATE_SCHEMA_VERSION = 1;
+import { isAdapterDiagnosticClass } from "./agents/index.js";
+
+export const RUN_STATE_SCHEMA_VERSION = 3;
+export const RUNTIME_COMPATIBILITY_VERSION = 1;
+export const RUNTIME_COMPATIBILITY = Object.freeze({
+  runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
+  runStateVersion: RUN_STATE_SCHEMA_VERSION,
+});
+export const RUNTIME_COMPATIBILITY_TOKEN =
+  `${RUNTIME_COMPATIBILITY.runnerVersion}:` +
+  `${RUNTIME_COMPATIBILITY.runStateVersion}`;
+export const RUNTIME_VERSION_SKEW_EXIT_CODE = 78;
+
+const LEGACY_RUN_STATE_SCHEMA_VERSION = 1;
+const ACTIVITY_RUN_STATE_SCHEMA_VERSION = 3;
+const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
+  LEGACY_RUN_STATE_SCHEMA_VERSION,
+  2,
+  RUN_STATE_SCHEMA_VERSION,
+]);
 
 const IDENTIFIER_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const ACTIVITY_KIND_PATTERN = /^[a-z][a-z0-9.-]{0,63}$/u;
@@ -13,6 +32,7 @@ const STATE_FIELDS = new Set([
   "runId",
   "pipelineId",
   "pipelineStateVersion",
+  "runtimeCompatibility",
   "projectPath",
   "taskPath",
   "roles",
@@ -20,13 +40,19 @@ const STATE_FIELDS = new Set([
   "hashes",
   "pause",
   "sessionLineage",
+  "activeTurn",
   "pipelineState",
   "createdAt",
   "updatedAt",
 ]);
-const SESSION_LINEAGE_FIELDS = new Set(["source", "children"]);
-const CHILD_SESSION_FIELDS = new Set(["role", "sessionId"]);
+const SESSION_LINEAGE_FIELDS = new Set([
+  "source",
+  "sourceProfile",
+  "children",
+]);
+const CHILD_SESSION_FIELDS = new Set(["role", "sessionId", "contextKey"]);
 const ACTIVITY_FIELDS = new Set(["actor", "phase", "kind", "message"]);
+const ACTIVE_TURN_FIELDS = new Set(["role", "phase"]);
 const INPUT_REQUEST_FIELDS = new Set([
   "id",
   "kind",
@@ -45,7 +71,12 @@ const TRANSITION_FIELDS = new Set([
   "counters",
   "hashes",
   "pause",
+  "activeTurn",
   "pipelineState",
+]);
+const RUNTIME_COMPATIBILITY_FIELDS = new Set([
+  "runnerVersion",
+  "runStateVersion",
 ]);
 const MAX_STATE_BYTES = 1024 * 1024;
 const MAX_JSON_DEPTH = 20;
@@ -118,6 +149,14 @@ function assertSessionReference(value, path) {
   return value;
 }
 
+function assertContextKey(value, path) {
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/u.test(value)) {
+    fail(`${path} is invalid.`);
+  }
+
+  return value;
+}
+
 function assertInputText(value, path, maximumLength = MAX_INPUT_TEXT_LENGTH) {
   if (
     typeof value !== "string" ||
@@ -132,6 +171,12 @@ function assertInputText(value, path, maximumLength = MAX_INPUT_TEXT_LENGTH) {
 
 function normalizePause(value) {
   const pause = cloneRecord(value, "run.pause");
+  if (
+    Object.hasOwn(pause, "diagnosticClass") &&
+    !isAdapterDiagnosticClass(pause.diagnosticClass)
+  ) {
+    fail("run.pause.diagnosticClass is invalid.");
+  }
   const hasRequest = Object.hasOwn(pause, "inputRequest");
   const hasResponse = Object.hasOwn(pause, "inputResponse");
   if (!hasRequest) {
@@ -301,6 +346,48 @@ function normalizeTimestamp(value, path) {
   return value;
 }
 
+function normalizeRuntimeCompatibility(value, schemaVersion) {
+  if (schemaVersion === LEGACY_RUN_STATE_SCHEMA_VERSION) {
+    if (value !== undefined && value !== null) {
+      fail(
+        "Legacy run state must not declare runtime compatibility.",
+        "ERR_RUNTIME_VERSION_SKEW",
+      );
+    }
+    return null;
+  }
+
+  assertRecord(value, "run.runtimeCompatibility");
+  rejectUnknownFields(
+    value,
+    RUNTIME_COMPATIBILITY_FIELDS,
+    "run.runtimeCompatibility",
+  );
+  if (
+    Object.keys(value).length !== RUNTIME_COMPATIBILITY_FIELDS.size ||
+    !Number.isSafeInteger(value.runnerVersion) ||
+    value.runnerVersion < 1 ||
+    !Number.isSafeInteger(value.runStateVersion) ||
+    value.runStateVersion < 1
+  ) {
+    fail("run.runtimeCompatibility is invalid.");
+  }
+  if (
+    value.runnerVersion !== RUNTIME_COMPATIBILITY.runnerVersion ||
+    value.runStateVersion !== schemaVersion
+  ) {
+    fail(
+      "Run state requires an incompatible Agent Runner runtime " +
+        `(runner ${value.runnerVersion}, state ${value.runStateVersion}); ` +
+        "use the Agent Runner version that created the run or a version " +
+        "with an explicit migration.",
+      "ERR_RUNTIME_VERSION_SKEW",
+    );
+  }
+
+  return { ...value };
+}
+
 export function assertRunId(runId) {
   if (typeof runId !== "string" || !RUN_ID_PATTERN.test(runId)) {
     fail("Run ID is invalid.", "ERR_INVALID_RUN_ID");
@@ -316,6 +403,14 @@ export function normalizeChildSession(value, path = "childSession") {
   return {
     role: assertIdentifier(value.role, `${path}.role`),
     sessionId: assertSessionReference(value.sessionId, `${path}.sessionId`),
+    ...(value.contextKey === undefined
+      ? {}
+      : {
+          contextKey: assertContextKey(
+            value.contextKey,
+            `${path}.contextKey`,
+          ),
+        }),
   };
 }
 
@@ -327,6 +422,16 @@ function normalizeSessionLineage(value) {
     value.source === null
       ? null
       : assertSessionReference(value.source, "run.sessionLineage.source");
+  const sourceProfile =
+    value.sourceProfile === undefined || value.sourceProfile === null
+      ? null
+      : assertIdentifier(
+          value.sourceProfile,
+          "run.sessionLineage.sourceProfile",
+        );
+  if (source === null && sourceProfile !== null) {
+    fail("run.sessionLineage.sourceProfile requires a source session.");
+  }
   if (!Array.isArray(value.children)) {
     fail("run.sessionLineage.children must be an array.");
   }
@@ -348,15 +453,68 @@ function normalizeSessionLineage(value) {
     fail("run.sessionLineage.children must contain unique session IDs.");
   }
 
-  return { source, children };
+  return { source, sourceProfile, children };
+}
+
+function normalizeRoles(value) {
+  assertRecord(value, "run.roles");
+  const roles = cloneRecord(value, "run.roles");
+  for (const [role, configuration] of Object.entries(roles)) {
+    assertRecord(configuration, `run.roles.${role}`);
+    for (const field of ["profile", "model", "contextSize"]) {
+      if (
+        !Object.hasOwn(configuration, field) ||
+        (field === "model" && configuration[field] === null)
+      ) {
+        configuration[field] = "current";
+      }
+    }
+  }
+  return roles;
+}
+
+function normalizeActiveTurn(
+  value,
+  schemaVersion = RUN_STATE_SCHEMA_VERSION,
+) {
+  if (schemaVersion < ACTIVITY_RUN_STATE_SCHEMA_VERSION) {
+    if (value !== undefined) {
+      fail("Legacy run state must not declare an active turn.");
+    }
+    return null;
+  }
+  if (value === null) {
+    return null;
+  }
+
+  assertRecord(value, "run.activeTurn");
+  rejectUnknownFields(value, ACTIVE_TURN_FIELDS, "run.activeTurn");
+  if (Object.keys(value).length !== ACTIVE_TURN_FIELDS.size) {
+    fail("run.activeTurn is invalid.");
+  }
+  return {
+    role: assertIdentifier(value.role, "run.activeTurn.role"),
+    phase: assertIdentifier(value.phase, "run.activeTurn.phase"),
+  };
 }
 
 export function normalizeRunState(value, expectedRunId) {
   assertRecord(value, "run");
   rejectUnknownFields(value, STATE_FIELDS, "run");
 
-  if (value.schemaVersion !== RUN_STATE_SCHEMA_VERSION) {
-    fail(`Unsupported run.schemaVersion: ${String(value.schemaVersion)}.`);
+  if (
+    !Number.isSafeInteger(value.schemaVersion) ||
+    value.schemaVersion < 1
+  ) {
+    fail("run.schemaVersion must be a positive safe integer.");
+  }
+  if (!SUPPORTED_RUN_STATE_SCHEMA_VERSIONS.has(value.schemaVersion)) {
+    fail(
+      `Unsupported run.schemaVersion: ${String(value.schemaVersion)}; ` +
+        "use the Agent Runner version that created the run or a version " +
+        "with an explicit migration.",
+      "ERR_RUNTIME_VERSION_SKEW",
+    );
   }
   if (!Number.isSafeInteger(value.revision) || value.revision < 1) {
     fail("run.revision must be a positive safe integer.");
@@ -394,18 +552,23 @@ export function normalizeRunState(value, expectedRunId) {
   }
 
   const normalized = {
-    schemaVersion: RUN_STATE_SCHEMA_VERSION,
+    schemaVersion: value.schemaVersion,
     revision: value.revision,
     runId,
     pipelineId,
     pipelineStateVersion: value.pipelineStateVersion,
+    runtimeCompatibility: normalizeRuntimeCompatibility(
+      value.runtimeCompatibility,
+      value.schemaVersion,
+    ),
     projectPath: value.projectPath,
     taskPath: value.taskPath,
-    roles: cloneRecord(value.roles, "run.roles"),
+    roles: normalizeRoles(value.roles),
     counters: cloneRecord(value.counters, "run.counters"),
     hashes: cloneRecord(value.hashes, "run.hashes"),
     pause,
     sessionLineage: normalizeSessionLineage(value.sessionLineage),
+    activeTurn: normalizeActiveTurn(value.activeTurn, value.schemaVersion),
     pipelineState: cloneRecord(value.pipelineState, "run.pipelineState"),
     createdAt,
     updatedAt,
@@ -430,6 +593,9 @@ export function normalizeTransitionPatch(value) {
       patch.pause === null
         ? null
         : normalizePause(patch.pause);
+  }
+  if (Object.hasOwn(patch, "activeTurn")) {
+    normalized.activeTurn = normalizeActiveTurn(patch.activeTurn);
   }
 
   return normalized;

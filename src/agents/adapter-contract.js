@@ -9,12 +9,16 @@ const REQUEST_FIELDS = Object.freeze([
   "access",
   "authorizationId",
   "commit",
+  "contextSize",
   "cwd",
   "model",
+  "profile",
   "prompt",
+  "recoveryPrompt",
   "schema",
   "session",
 ]);
+const EXECUTION_FIELDS = Object.freeze(["contextSize", "model", "profile"]);
 const SESSION_FIELDS = Object.freeze(["id", "mode"]);
 const COMMIT_FIELDS = Object.freeze(["expectedHead", "message"]);
 const OBJECT_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
@@ -47,6 +51,8 @@ const SCHEMA_MAP_KEYWORDS = Object.freeze([
   "patternProperties",
   "properties",
 ]);
+
+export const STRUCTURED_OUTPUT_FAILURE_CLASS = "structured-output";
 
 export function isRecord(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -257,6 +263,18 @@ export function createAdapterContract({ AdapterError, backendName }) {
     });
   }
 
+  function normalizePrompt(value, name) {
+    if (
+      typeof value !== "string" ||
+      value.trim().length === 0 ||
+      /\0/u.test(value) ||
+      Buffer.byteLength(value) > MAX_PROMPT_BYTES
+    ) {
+      throw optionsError(`${name} is invalid.`);
+    }
+    return value;
+  }
+
   function normalizeCommit(value) {
     assertFields(value, COMMIT_FIELDS, `${backendName} commit constraint`);
     if (
@@ -276,6 +294,28 @@ export function createAdapterContract({ AdapterError, backendName }) {
     });
   }
 
+  function normalizeExecutionOptions(value = {}) {
+    assertFields(value, EXECUTION_FIELDS, `${backendName} execution options`);
+    return Object.freeze({
+      contextSize:
+        value.contextSize === undefined || value.contextSize === "current"
+          ? undefined
+          : assertString(
+              value.contextSize,
+              `${backendName} context size`,
+              64,
+            ),
+      model:
+        value.model === undefined || value.model === "current"
+          ? undefined
+          : assertString(value.model, `${backendName} model`, 256),
+      profile:
+        value.profile === undefined || value.profile === "current"
+          ? undefined
+          : assertString(value.profile, `${backendName} profile`),
+    });
+  }
+
   function normalizeRequest(value) {
     assertFields(value, REQUEST_FIELDS, `${backendName} request`);
     if (
@@ -283,22 +323,28 @@ export function createAdapterContract({ AdapterError, backendName }) {
       !isAbsolute(value.cwd) ||
       isFilesystemRoot(value.cwd) ||
       /[\0\r\n]/u.test(value.cwd) ||
-      !ACCESS_MODES.has(value.access) ||
-      typeof value.prompt !== "string" ||
-      value.prompt.trim().length === 0 ||
-      /\0/u.test(value.prompt) ||
-      Buffer.byteLength(value.prompt) > MAX_PROMPT_BYTES
+      !ACCESS_MODES.has(value.access)
     ) {
       throw optionsError(`${backendName} request is invalid.`);
     }
+    const prompt = normalizePrompt(value.prompt, `${backendName} prompt`);
+    const execution = normalizeExecutionOptions({
+      contextSize: value.contextSize,
+      model: value.model,
+      profile: value.profile,
+    });
     const normalized = {
       access: value.access,
+      ...execution,
       cwd: value.cwd,
-      model:
-        value.model === undefined
-          ? undefined
-          : assertString(value.model, `${backendName} model`, 256),
-      prompt: value.prompt,
+      prompt,
+      recoveryPrompt:
+        value.recoveryPrompt === undefined
+          ? prompt
+          : normalizePrompt(
+              value.recoveryPrompt,
+              `${backendName} recovery prompt`,
+            ),
       schema: normalizeSchema(value.schema),
       session: normalizeSession(value.session),
     };
@@ -322,5 +368,9 @@ export function createAdapterContract({ AdapterError, backendName }) {
     return Object.freeze(normalized);
   }
 
-  return Object.freeze({ assertFields, normalizeRequest });
+  return Object.freeze({
+    assertFields,
+    normalizeExecutionOptions,
+    normalizeRequest,
+  });
 }

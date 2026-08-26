@@ -8,8 +8,12 @@ export {
   CONFIG_FILENAME,
   CONFIG_SCHEMA_VERSION,
   ConfigurationError,
-  loadRepositoryConfiguration,
-  parseRepositoryConfiguration,
+  DEFAULT_ARTIFACT_ROOT,
+  loadProjectConfiguration,
+  loadRunnerConfiguration,
+  parseProjectConfiguration,
+  parseRunnerConfiguration,
+  PROJECT_CONFIG_FILENAME,
   resolvePipelineConfiguration,
 } from "./config.js";
 export { createGitService, GitSafetyError } from "./git.js";
@@ -17,6 +21,7 @@ export {
   createDetachedLauncher,
   createMcpControlPlane,
   createMcpServer,
+  DETACHED_RUNTIME_COMPATIBILITY_ENV,
   launchDetachedRun,
   MCP_INSTRUCTIONS,
   serveMcp,
@@ -30,6 +35,15 @@ export {
 export {
   createRunStore,
   resolveStateRoot,
+  RUNTIME_COMPATIBILITY,
+  RUNTIME_COMPATIBILITY_TOKEN,
+  RUNTIME_VERSION_SKEW_EXIT_CODE,
   RUN_STATE_SCHEMA_VERSION,
   RunStoreError,
 } from "./state.js";
+export {
+  createTrustedValidationService,
+  createTrustedValidationSnapshot,
+  TrustedValidationError,
+  validateTrustedValidationSnapshot,
+} from "./trusted-validation.js";

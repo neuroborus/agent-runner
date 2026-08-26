@@ -67,6 +67,18 @@ const MAX_ITEMS = 32;
 const MAX_PRODUCT_DECISION_OPTIONS = 16;
 const MAX_STRUCTURED_RESULT_BYTES = 256 * 1024;
 const INVALID_OUTPUT_CODE = "ERR_INVALID_PLAN_AUTHORING_OUTPUT";
+const FAILURE_FIELDS = Object.freeze(["reason", "code"]);
+const ADAPTER_FAILURE_FIELDS = Object.freeze([
+  ...FAILURE_FIELDS,
+  "diagnosticClass",
+]);
+const ADAPTER_DIAGNOSTIC_CLASS_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
+const BACKEND_RESUME_STATES = Object.freeze([
+  "CLARIFY",
+  "DRAFT",
+  "REVIEW",
+  "REVISE",
+]);
 
 export const MAX_DIAGNOSTIC_ITEMS = MAX_ITEMS;
 
@@ -84,6 +96,13 @@ export function isRecord(value) {
   }
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
+}
+
+function hasExactFields(value, fields) {
+  return (
+    Object.keys(value).length === fields.length &&
+    fields.every((field) => Object.hasOwn(value, field))
+  );
 }
 
 export function workflowError(
@@ -872,11 +891,22 @@ export function assertRun(run) {
   for (const role of ["planner", "reviewer", "arbiter"]) {
     if (
       !isRecord(run.roles[role]) ||
+      Object.keys(run.roles[role]).some(
+        (field) =>
+          !["backend", "profile", "model", "contextSize"].includes(field),
+      ) ||
       typeof run.roles[role].backend !== "string" ||
       run.roles[role].backend.length === 0 ||
-      (run.roles[role].model !== null &&
+      (run.roles[role].model !== undefined &&
+        run.roles[role].model !== null &&
         (typeof run.roles[role].model !== "string" ||
-          run.roles[role].model.length === 0))
+          run.roles[role].model.length === 0)) ||
+      ["profile", "contextSize"].some(
+        (field) =>
+          run.roles[role][field] !== undefined &&
+          (typeof run.roles[role][field] !== "string" ||
+            run.roles[role][field].length === 0),
+      )
     ) {
       throw workflowError(`Plan-authoring role ${role} is invalid.`);
     }
@@ -888,16 +918,34 @@ export function assertRun(run) {
   ) {
     throw workflowError("Plan-authoring source session is invalid.");
   }
+  if (
+    run.sessionLineage.sourceProfile !== undefined &&
+    run.sessionLineage.sourceProfile !== null &&
+    (run.sessionLineage.source === null ||
+      typeof run.sessionLineage.sourceProfile !== "string" ||
+      run.sessionLineage.sourceProfile.length === 0)
+  ) {
+    throw workflowError("Plan-authoring source profile is invalid.");
+  }
   for (const child of run.sessionLineage.children) {
     if (
       !isRecord(child) ||
       !["planner", "reviewer", "arbiter"].includes(child.role) ||
       typeof child.sessionId !== "string" ||
       child.sessionId.length === 0 ||
-      child.sessionId === run.sessionLineage.source
+      child.sessionId === run.sessionLineage.source ||
+      (Object.hasOwn(child, "contextKey") &&
+        (typeof child.contextKey !== "string" ||
+          !/^[a-f0-9]{64}$/u.test(child.contextKey)))
     ) {
       throw workflowError("Plan-authoring child session is invalid.");
     }
+  }
+  const childSessionIds = run.sessionLineage.children.map(
+    (child) => child.sessionId,
+  );
+  if (new Set(childSessionIds).size !== childSessionIds.length) {
+    throw workflowError("Plan-authoring child sessions must be unique.");
   }
   const pipelineState = normalizePipelineState(run.pipelineState);
   if (pipelineState.repositoryBaseline !== null) {
@@ -956,6 +1004,28 @@ export function assertRun(run) {
   ) {
     throw workflowError("Plan-authoring pause state is invalid.");
   }
+  if (pipelineState.workflowState === "FAILED") {
+    const hasAdapterDiagnostic = Object.hasOwn(
+      run.pause,
+      "diagnosticClass",
+    );
+    const fields = hasAdapterDiagnostic
+      ? ADAPTER_FAILURE_FIELDS
+      : FAILURE_FIELDS;
+    if (
+      run.pause.reason !== "internal_failure" ||
+      !hasExactFields(run.pause, fields) ||
+      typeof run.pause.code !== "string" ||
+      !/^[A-Z0-9_]{1,64}$/u.test(run.pause.code) ||
+      (hasAdapterDiagnostic &&
+        (typeof run.pause.diagnosticClass !== "string" ||
+          !ADAPTER_DIAGNOSTIC_CLASS_PATTERN.test(
+            run.pause.diagnosticClass,
+          )))
+    ) {
+      throw workflowError("Plan-authoring adapter diagnostic is invalid.");
+    }
+  }
   assertInputPause(run, pipelineState);
   if (pipelineState.workflowState === "WAITING_FOR_USER") {
     const expectedReason = {
@@ -971,6 +1041,15 @@ export function assertRun(run) {
           run.pause.reason !== expectedReason))
     ) {
       throw workflowError("Plan-authoring pending edit pause is invalid.");
+    }
+    const hasResumeState = Object.hasOwn(run.pause, "resumeState");
+    if (
+      (run.pause.reason === "backend_unavailable") !== hasResumeState ||
+      (hasResumeState &&
+        (!pipelineState.preflightComplete ||
+          !BACKEND_RESUME_STATES.includes(run.pause.resumeState)))
+    ) {
+      throw workflowError("Plan-authoring pause resume state is invalid.");
     }
   }
   const hashFields = ["task", "context", "clarifications"];
@@ -1043,8 +1122,10 @@ export function assertRuntime(runtime) {
     }
   }
   for (const name of [
+    "finishAgentTurn",
     "readInputs",
     "recordChildSession",
+    "startAgentTurn",
     "transition",
     "writePlan",
   ]) {

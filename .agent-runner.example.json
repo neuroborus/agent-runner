@@ -1,6 +1,26 @@
 {
   "schemaVersion": 1,
+  "artifactRoot": "LOCAL_ARTIFACTS",
+  "issueReporting": true,
   "defaultBackend": "codex",
+  "defaultProfile": "current",
+  "defaultModel": "current",
+  "defaultContextSize": "current",
+  "trustedCommands": {},
+  "profiles": {
+    "codex-work": {
+      "backend": "codex",
+      "profile": "work"
+    },
+    "claude-primary": {
+      "backend": "claude",
+      "configDirectory": "/profiles/claude-primary"
+    },
+    "claude-secondary": {
+      "backend": "claude",
+      "configDirectory": "/profiles/claude-secondary"
+    }
+  },
   "pipelines": {
     "plan-authoring": {
       "maxRevisionRounds": 15,
@@ -9,20 +29,44 @@
         "planner": {},
         "reviewer": {
           "backend": "claude",
+          "profile": "claude-primary",
           "model": "sonnet"
         },
         "arbiter": {}
       }
     },
     "plan-execution": {
+      "finalization": "auto",
       "maxFixRoundsPerStep": 5,
       "maxDisputesPerFinding": 2,
       "maxSameFindingRounds": 3,
       "stagnationWindowRounds": 3,
+      "trustedChecks": [],
       "roles": {
         "worker": {},
         "reviewer": {
-          "backend": "claude"
+          "backend": "claude",
+          "profile": "claude-primary",
+          "model": "current",
+          "contextSize": "current"
+        },
+        "arbiter": {}
+      }
+    },
+    "polishing": {
+      "finalization": "auto",
+      "maxFixRounds": 5,
+      "maxDisputesPerFinding": 2,
+      "maxSameFindingRounds": 3,
+      "stagnationWindowRounds": 3,
+      "trustedChecks": [],
+      "roles": {
+        "worker": {},
+        "reviewer": {
+          "backend": "claude",
+          "profile": "claude-primary",
+          "model": "current",
+          "contextSize": "current"
         },
         "arbiter": {}
       }

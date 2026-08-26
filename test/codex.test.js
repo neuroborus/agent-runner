@@ -6,14 +6,17 @@ import test from "node:test";
 
 import packageMetadata from "../package.json" with { type: "json" };
 import {
+  AgentBoundaryError,
   CODEX_BACKEND_ID,
   CodexAdapterError,
+  STRUCTURED_OUTPUT_FAILURE_CLASS,
   createCodexAdapter,
+  normalizeAdapterFailure,
 } from "../src/agents/index.js";
 
 const PROJECT_PATH = process.cwd();
 const EXPECTED_HEAD = "a".repeat(40);
-const HELP = "--disable\n--listen\n--strict-config\n";
+const HELP = "--disable\n--enable\n--listen\n--strict-config\n";
 const STRICT_SCHEMA = Object.freeze({
   type: "object",
   properties: {
@@ -26,6 +29,44 @@ const STRICT_SCHEMA = Object.freeze({
 function hasCode(code) {
   return (error) => error instanceof CodexAdapterError && error.code === code;
 }
+
+function hasDiagnostic(code, diagnosticClass) {
+  return (error) =>
+    hasCode(code)(error) && error.diagnosticClass === diagnosticClass;
+}
+
+function hasFailureClass(code, failureClass) {
+  return (error) =>
+    hasCode(code)(error) && error.failureClass === failureClass;
+}
+
+test("normalizes finite adapter diagnostics at the root agent boundary", () => {
+  const sensitiveMarker = "DO_NOT_RETAIN_NATIVE_PROVIDER_TEXT";
+  const nativeFailure = Object.assign(new Error(sensitiveMarker), {
+    code: "ERR_CODEX_ISOLATION",
+    diagnosticClass: "operation_multi_agent",
+    nativeResponse: sensitiveMarker,
+    prompt: sensitiveMarker,
+  });
+  const normalized = normalizeAdapterFailure("codex", nativeFailure);
+
+  assert.ok(normalized instanceof AgentBoundaryError);
+  assert.equal(normalized.message, "Agent backend turn failed.");
+  assert.equal(normalized.code, "ERR_CODEX_ISOLATION");
+  assert.equal(normalized.diagnosticClass, "operation_multi_agent");
+  assert.equal(normalized.cause, undefined);
+  assert.equal(normalized.nativeResponse, undefined);
+  assert.equal(normalized.prompt, undefined);
+  assert.equal(
+    normalizeAdapterFailure(
+      "codex",
+      Object.assign(new Error(sensitiveMarker), {
+        diagnosticClass: "native_provider_value",
+      }),
+    ).diagnosticClass,
+    undefined,
+  );
+});
 
 function completedTurn(threadId, turnId, output = "done", items = []) {
   return {
@@ -42,6 +83,22 @@ function completedTurn(threadId, turnId, output = "done", items = []) {
   };
 }
 
+function failedTurn(threadId, turnId, error) {
+  return {
+    method: "turn/completed",
+    params: {
+      threadId,
+      turn: {
+        id: turnId,
+        itemsView: "full",
+        status: "failed",
+        error,
+        items: [],
+      },
+    },
+  };
+}
+
 function isolatedConfiguration() {
   return {
     features: {
@@ -51,7 +108,7 @@ function isolatedConfiguration() {
       browser_use_external: false,
       browser_use_full_cdp_access: false,
       code_mode: false,
-      code_mode_host: false,
+      code_mode_host: true,
       code_mode_only: false,
       computer_use: false,
       goals: false,
@@ -111,7 +168,7 @@ function createFixture({
     if (file === "git") {
       return { stdout: `${PROJECT_PATH}/.git\n.git\n`, stderr: "" };
     }
-    if (argumentsList[0] === "--version") {
+    if (argumentsList.includes("--version")) {
       return { stdout: `codex-cli ${version}\n`, stderr: "" };
     }
     if (argumentsList.includes("mcp")) {
@@ -294,6 +351,18 @@ function request(overrides = {}) {
 
 test("constructs with the native environment and probes capabilities", async () => {
   assert.doesNotThrow(() => createCodexAdapter());
+  assert.equal(
+    new CodexAdapterError("invalid diagnostic", {
+      diagnosticClass: "command_with_secret_value",
+    }).diagnosticClass,
+    undefined,
+  );
+  assert.equal(
+    new CodexAdapterError("invalid failure class", {
+      failureClass: "native-provider-text",
+    }).failureClass,
+    undefined,
+  );
   assert.throws(
     () => createCodexAdapter({ env: new Map() }),
     hasCode("ERR_INVALID_CODEX_OPTIONS"),
@@ -307,6 +376,10 @@ test("constructs with the native environment and probes capabilities", async () 
     invalidRequestFixture.adapter.run(
       request({ cwd: parse(PROJECT_PATH).root }),
     ),
+    hasCode("ERR_INVALID_CODEX_OPTIONS"),
+  );
+  await assert.rejects(
+    invalidRequestFixture.adapter.run(request({ recoveryPrompt: "" })),
     hasCode("ERR_INVALID_CODEX_OPTIONS"),
   );
   assert.equal(invalidRequestFixture.executeCalls.length, 0);
@@ -341,10 +414,25 @@ test("fails preflight when the installed Codex cannot enforce access", async () 
 
     await assert.rejects(
       fixture.adapter.run(request()),
-      hasCode("ERR_UNSUPPORTED_CODEX_CAPABILITY"),
+      hasDiagnostic(
+        "ERR_UNSUPPORTED_CODEX_CAPABILITY",
+        "capability_remote_write_blocked",
+      ),
     );
     assert.equal(fixture.processes.length, 0);
   }
+
+  const missingFlagFixture = createFixture({
+    help: HELP.replace("--enable\n", ""),
+  });
+  await assert.rejects(
+    missingFlagFixture.adapter.run(request()),
+    hasDiagnostic(
+      "ERR_UNSUPPORTED_CODEX_CAPABILITY",
+      "capability_remote_write_blocked",
+    ),
+  );
+  assert.equal(missingFlagFixture.processes.length, 0);
 });
 
 test(
@@ -373,7 +461,10 @@ test(
           },
         }),
       ),
-      hasCode("ERR_UNSUPPORTED_CODEX_CAPABILITY"),
+      hasDiagnostic(
+        "ERR_UNSUPPORTED_CODEX_CAPABILITY",
+        "capability_local_commit",
+      ),
     );
     assert.equal(fixture.processes.length, 0);
   },
@@ -474,6 +565,8 @@ test("runs a structured read-only turn with an explicit model", async () => {
     "--listen",
     "stdio://",
     "--strict-config",
+    "--enable",
+    "code_mode_host",
     "--disable",
     "apps",
     "--disable",
@@ -486,8 +579,6 @@ test("runs a structured read-only turn with an explicit model", async () => {
     "browser_use_full_cdp_access",
     "--disable",
     "code_mode",
-    "--disable",
-    "code_mode_host",
     "--disable",
     "code_mode_only",
     "--disable",
@@ -553,6 +644,100 @@ test("runs a structured read-only turn with an explicit model", async () => {
   assert.deepEqual(turnRequest.params.outputSchema, STRICT_SCHEMA);
 });
 
+test("applies native profile and context selections to Codex", async () => {
+  const fixture = createFixture();
+  const execution = {
+    profile: "work_profile",
+    model: "gpt-test",
+    contextSize: "200000",
+  };
+
+  const capabilities = await fixture.adapter.probe(execution);
+  await fixture.adapter.run(request(execution));
+
+  assert.strictEqual(await fixture.adapter.probe(execution), capabilities);
+  const expectedPrefix = [
+    "--profile",
+    "work_profile",
+    "-c",
+    "model_context_window=200000",
+  ];
+  for (const call of fixture.executeCalls.slice(0, 2)) {
+    assert.ok(!call.argumentsList.includes("--profile"));
+    assert.ok(!call.argumentsList.includes("model_context_window=200000"));
+  }
+  const discovery = fixture.executeCalls.find(({ argumentsList }) =>
+    argumentsList.includes("mcp"),
+  );
+  assert.deepEqual(discovery.argumentsList.slice(0, 4), expectedPrefix);
+  assert.deepEqual(
+    fixture.processes[0].argumentsList.slice(0, 4),
+    expectedPrefix,
+  );
+  const thread = fixture.processes[0].messages.find(
+    ({ method }) => method === "thread/start",
+  );
+  const turn = fixture.processes[0].messages.find(
+    ({ method }) => method === "turn/start",
+  );
+  assert.equal(thread.params.model, "gpt-test");
+  assert.equal(turn.params.model, "gpt-test");
+});
+
+test("omits current Codex execution overrides", async () => {
+  const fixture = createFixture();
+
+  await fixture.adapter.run(
+    request({ profile: "current", model: "current", contextSize: "current" }),
+  );
+
+  assert.equal(
+    fixture.executeCalls.some(({ argumentsList }) =>
+      argumentsList.includes("--profile"),
+    ),
+    false,
+  );
+  assert.equal(
+    fixture.processes[0].argumentsList.some((argument) =>
+      argument.startsWith("model_context_window="),
+    ),
+    false,
+  );
+  assert.equal(
+    fixture.processes[0].messages.some(
+      ({ method }) => method === "model/list",
+    ),
+    false,
+  );
+  const thread = fixture.processes[0].messages.find(
+    ({ method }) => method === "thread/start",
+  );
+  assert.equal(thread.params.model, undefined);
+});
+
+test("rejects invalid Codex profiles and context sizes", async () => {
+  const fixture = createFixture();
+
+  for (const execution of [
+    { profile: "../work" },
+    { profile: "-work" },
+    { contextSize: "0" },
+    { contextSize: "0200000" },
+    { contextSize: "200k" },
+    { contextSize: "9223372036854775808" },
+  ]) {
+    assert.throws(
+      () => fixture.adapter.probe(execution),
+      hasCode("ERR_INVALID_CODEX_OPTIONS"),
+    );
+    await assert.rejects(
+      fixture.adapter.run(request(execution)),
+      hasCode("ERR_INVALID_CODEX_OPTIONS"),
+    );
+  }
+  assert.equal(fixture.executeCalls.length, 0);
+});
+
 test("accepts the protocol-default full completed-turn view", async () => {
   const fixture = createFixture({
     handle({ message }) {
@@ -573,6 +758,54 @@ test("accepts the protocol-default full completed-turn view", async () => {
 
   assert.equal((await fixture.adapter.run(request())).output, "done");
 });
+
+for (const itemsView of ["notLoaded", "summary"]) {
+  test(`hydrates a ${itemsView} completed turn from thread history`, async () => {
+    const turnId = `${itemsView}-turn`;
+    const fixture = createFixture({
+      handle({ message }) {
+        if (message.method === "turn/start") {
+          const notification = completedTurn(
+            message.params.threadId,
+            turnId,
+            "Partial.",
+          );
+          notification.params.turn.itemsView = itemsView;
+          if (itemsView === "notLoaded") {
+            notification.params.turn.items = [];
+          }
+          return {
+            result: { turn: { id: turnId } },
+            notification,
+          };
+        }
+        if (message.method === "thread/read") {
+          assert.deepEqual(message.params, {
+            threadId: "thread-0",
+            includeTurns: true,
+          });
+          return {
+            result: {
+              thread: {
+                id: "thread-0",
+                turns: [
+                  completedTurn(
+                    "thread-0",
+                    turnId,
+                    "Hydrated.",
+                  ).params.turn,
+                ],
+              },
+            },
+          };
+        }
+        return undefined;
+      },
+    });
+
+    assert.equal((await fixture.adapter.run(request())).output, "Hydrated.");
+  });
+}
 
 test("rejects a null completed-turn view", async () => {
   const fixture = createFixture({
@@ -648,13 +881,29 @@ test("rejects substitution of an explicit model", async () => {
 });
 
 test("fails before starting a thread when isolation is incomplete", async () => {
-  const configurations = Array.from({ length: 4 }, isolatedConfiguration);
+  const configurations = Array.from({ length: 9 }, isolatedConfiguration);
   configurations[0].mcp_servers["configured-server"].enabled = true;
   configurations[1].features.multi_agent = true;
   configurations[2].shell_environment_policy.inherit = "all";
   delete configurations[3].mcp_servers["configured-server"];
+  configurations[4].features.code_mode_host = false;
+  configurations[5] = { nativeOutput: "sensitive-native-output" };
+  configurations[6].memories.generate_memories = true;
+  configurations[7].notify.push("sensitive-native-output");
+  configurations[8].web_search = "enabled";
 
-  for (const config of configurations) {
+  const diagnostics = [
+    "isolation_mcp",
+    "isolation_feature",
+    "isolation_shell_environment",
+    "isolation_mcp",
+    "isolation_command_host",
+    "isolation_effective_configuration",
+    "isolation_memory",
+    "isolation_notification",
+    "isolation_network",
+  ];
+  for (const [index, config] of configurations.entries()) {
     const fixture = createFixture({
       handle({ message }) {
         return message.method === "config/read"
@@ -665,7 +914,16 @@ test("fails before starting a thread when isolation is incomplete", async () => 
 
     await assert.rejects(
       fixture.adapter.run(request()),
-      hasCode("ERR_CODEX_ISOLATION"),
+      (error) => {
+        assert.ok(
+          hasDiagnostic("ERR_CODEX_ISOLATION", diagnostics[index])(error),
+        );
+        assert.equal(error.message, "Codex external tools are not isolated.");
+        assert.equal(error.cause, undefined);
+        assert.equal(error.config, undefined);
+        assert.doesNotMatch(JSON.stringify(error), /sensitive-native-output/u);
+        return true;
+      },
     );
     assert.equal(
       fixture.processes[0].messages.some(
@@ -688,9 +946,95 @@ test("rejects MCP names that cannot be overridden safely", async () => {
 
   await assert.rejects(
     fixture.adapter.run(request()),
-    hasCode("ERR_CODEX_ISOLATION"),
+    hasDiagnostic("ERR_CODEX_ISOLATION", "isolation_mcp"),
   );
   assert.equal(fixture.processes.length, 0);
+});
+
+test("retries transient MCP discovery before forking a source", async () => {
+  let discoveryCalls = 0;
+  const fixture = createFixture({
+    executeHandle({ argumentsList, options }) {
+      if (!argumentsList.includes("mcp")) {
+        return undefined;
+      }
+      discoveryCalls += 1;
+      assert.equal(options.timeout, 30_000);
+      if (discoveryCalls === 1) {
+        throw new Error("MCP discovery timed out");
+      }
+      return undefined;
+    },
+  });
+
+  const result = await fixture.adapter.run(
+    request({ session: { mode: "fork", id: "source-thread" } }),
+  );
+  assert.equal(discoveryCalls, 2);
+  assert.equal(fixture.processes.length, 1);
+  assert.equal(result.sessionId, "child-0");
+  assert.deepEqual(
+    fixture.processes[0].messages
+      .map(({ method }) => method)
+      .filter((method) => method?.startsWith("thread/")),
+    ["thread/fork"],
+  );
+});
+
+test("reports persistent MCP discovery failure as recoverable", async () => {
+  let discoveryCalls = 0;
+  const fixture = createFixture({
+    executeHandle({ argumentsList }) {
+      if (argumentsList.includes("mcp")) {
+        discoveryCalls += 1;
+        throw new Error("MCP discovery timed out");
+      }
+      return undefined;
+    },
+  });
+
+  await assert.rejects(fixture.adapter.run(request()), (error) => {
+    assert.ok(error instanceof CodexAdapterError);
+    assert.equal(error.code, "ERR_CODEX_UNAVAILABLE");
+    assert.equal(error.diagnosticClass, "isolation_mcp_discovery");
+    assert.equal(error.method, "mcp/list");
+    assert.equal(error.recoverable, true);
+    return true;
+  });
+  assert.equal(discoveryCalls, 2);
+  assert.equal(fixture.processes.length, 0);
+});
+
+test("preserves session recovery after transient MCP discovery", async () => {
+  let discoveryCalls = 0;
+  const fixture = createFixture({
+    executeHandle({ argumentsList }) {
+      if (argumentsList.includes("mcp")) {
+        discoveryCalls += 1;
+        if (discoveryCalls === 1) {
+          throw new Error("MCP discovery timed out");
+        }
+      }
+      return undefined;
+    },
+    handle({ message }) {
+      if (message.method === "thread/resume") {
+        return { error: { code: -32000, message: "missing" } };
+      }
+      return undefined;
+    },
+  });
+
+  const result = await fixture.adapter.run(
+    request({
+      access: "workspace-write",
+      session: { mode: "continue", id: "source-thread" },
+    }),
+  );
+
+  assert.equal(discoveryCalls, 3);
+  assert.equal(fixture.processes.length, 2);
+  assert.equal(result.sessionId, "thread-1");
 });
 
 test("validates strict schemas and structured output", async () => {
@@ -772,7 +1116,10 @@ test("validates strict schemas and structured output", async () => {
   assert.equal(fixture.processes.length, 0);
   await assert.rejects(
     fixture.adapter.run(request({ schema: schemaWithObjectData })),
-    hasCode("ERR_CODEX_STRUCTURED_OUTPUT"),
+    hasFailureClass(
+      "ERR_CODEX_STRUCTURED_OUTPUT",
+      STRUCTURED_OUTPUT_FAILURE_CLASS,
+    ),
   );
 });
 
@@ -789,6 +1136,8 @@ test("falls back to a fresh session when continuation is unavailable", async () 
   const result = await fixture.adapter.run(
     request({
       access: "workspace-write",
+      prompt: "Continue from the current session.",
+      recoveryPrompt: "Inspect the complete durable request.",
       session: { mode: "continue", id: "source-thread" },
     }),
   );
@@ -804,6 +1153,8 @@ test("falls back to a fresh session when continuation is unavailable", async () 
     ({ method }) => method === "turn/start",
   );
   assert.match(retry.params.input[0].text, /^The previous Codex session/u);
+  assert.match(retry.params.input[0].text, /complete durable request/u);
+  assert.doesNotMatch(retry.params.input[0].text, /current session/u);
   assert.deepEqual(retry.params.sandboxPolicy, {
     type: "workspaceWrite",
     writableRoots: [PROJECT_PATH],
@@ -1052,7 +1403,21 @@ test("rejects forbidden Git and remote-write commands reported by Codex", async 
           },
         }),
       ),
-      hasCode(code),
+      (error) => {
+        assert.ok(hasCode(code)(error));
+        assert.equal(error.effectStarted, false);
+        assert.equal(
+          error.diagnosticClass,
+          code === "ERR_CODEX_REMOTE_WRITE_ATTEMPT"
+            ? "operation_remote_write"
+            : "operation_local_commit",
+        );
+        assert.equal(error.cause, undefined);
+        assert.equal(error.command, undefined);
+        assert.ok(!error.message.includes(command));
+        assert.ok(!JSON.stringify(error).includes(command));
+        return true;
+      },
     );
   }
 });
@@ -1108,28 +1473,40 @@ test("rejects disabled hosted web search reported by Codex", async () => {
 
   await assert.rejects(
     fixture.adapter.run(request()),
-    hasCode("ERR_CODEX_NETWORK_POLICY"),
+    hasDiagnostic("ERR_CODEX_NETWORK_POLICY", "operation_hosted_tool"),
   );
 });
 
 test("rejects disabled integrations reported by Codex", async () => {
-  for (const item of [
-    {
-      type: "mcpToolCall",
-      readOnlyHint: true,
-      server: "configured-server",
-      tool: "read",
-    },
-    { type: "collabAgentToolCall", tool: "spawnAgent" },
-    { type: "subAgentActivity", kind: "spawned" },
-    { type: "hookPrompt", fragments: [] },
-    { type: "agentMessage", text: "Done.", memoryCitation: {} },
-    {
-      type: "commandExecution",
-      command: "pwd",
-      pluginId: "plugin",
-      status: "completed",
-    },
+  for (const [item, diagnosticClass] of [
+    [
+      {
+        type: "mcpToolCall",
+        readOnlyHint: true,
+        server: "configured-server",
+        tool: "read",
+      },
+      "operation_mcp_tool",
+    ],
+    [
+      { type: "collabAgentToolCall", tool: "spawnAgent" },
+      "operation_multi_agent",
+    ],
+    [{ type: "subAgentActivity", kind: "spawned" }, "operation_multi_agent"],
+    [{ type: "hookPrompt", fragments: [] }, "operation_lifecycle_hook"],
+    [
+      { type: "agentMessage", text: "Done.", memoryCitation: {} },
+      "operation_memory",
+    ],
+    [
+      {
+        type: "commandExecution",
+        command: "pwd",
+        pluginId: "plugin",
+        status: "completed",
+      },
+      "operation_plugin",
+    ],
   ]) {
     const fixture = createFixture({
       handle({ message }) {
@@ -1150,17 +1527,33 @@ test("rejects disabled integrations reported by Codex", async () => {
 
     await assert.rejects(
       fixture.adapter.run(request()),
-      hasCode("ERR_CODEX_ISOLATION"),
+      hasDiagnostic("ERR_CODEX_ISOLATION", diagnosticClass),
     );
   }
 });
 
-test("rejects disabled hosted tools and read-only file changes", async () => {
-  for (const [item, code] of [
-    [{ type: "imageGeneration" }, "ERR_CODEX_NETWORK_POLICY"],
+test("rejects hosted, dynamic, and read-only policy violations", async () => {
+  for (const [item, code, diagnosticClass, message] of [
+    [
+      { type: "imageGeneration" },
+      "ERR_CODEX_NETWORK_POLICY",
+      "operation_hosted_tool",
+      "Codex attempted a disabled hosted tool.",
+    ],
+    [
+      {
+        type: "dynamicToolCall",
+        input: "sensitive-native-output",
+      },
+      "ERR_CODEX_REMOTE_WRITE_ATTEMPT",
+      "operation_dynamic_tool",
+      "Codex attempted an untrusted dynamic tool call.",
+    ],
     [
       { type: "fileChange", changes: [], status: "completed" },
       "ERR_CODEX_READ_ONLY_POLICY",
+      "operation_read_only_write",
+      "Codex reported a file change during a read-only turn.",
     ],
   ]) {
     const fixture = createFixture({
@@ -1180,7 +1573,17 @@ test("rejects disabled hosted tools and read-only file changes", async () => {
       },
     });
 
-    await assert.rejects(fixture.adapter.run(request()), hasCode(code));
+    await assert.rejects(
+      fixture.adapter.run(request()),
+      (error) => {
+        assert.ok(hasDiagnostic(code, diagnosticClass)(error));
+        assert.equal(error.message, message);
+        assert.equal(error.cause, undefined);
+        assert.equal(error.command, undefined);
+        assert.doesNotMatch(JSON.stringify(error), /sensitive-native-output/u);
+        return true;
+      },
+    );
   }
 });
 
@@ -1248,7 +1651,9 @@ test("does not invoke the commit executor when Codex is not ready", async () => 
         },
       }),
     ),
-    hasCode("ERR_CODEX_LOCAL_COMMIT_POLICY"),
+    (error) =>
+      hasCode("ERR_CODEX_LOCAL_COMMIT_POLICY")(error) &&
+      error.effectStarted === false,
   );
   assert.equal(
     fixture.executeCalls.filter(({ file }) => file === "git").length,
@@ -1293,13 +1698,16 @@ test("never replays an interrupted local-commit turn", async () => {
         },
       }),
     ),
-    hasCode("ERR_CODEX_LOCAL_COMMIT_INTERRUPTED"),
+    (error) =>
+      hasCode("ERR_CODEX_TURN_INTERRUPTED")(error) &&
+      error.recoverable === true &&
+      error.effectStarted === false,
   );
   assert.equal(turns, 1);
   assert.equal(fixture.processes.length, 1);
 });
 
-test("never commits from an incomplete completed-turn view", async () => {
+test("never commits when a partial completed turn cannot be hydrated", async () => {
   const fixture = createFixture({
     handle({ message }) {
       if (message.method === "turn/start") {
@@ -1343,7 +1751,7 @@ test("never commits from an incomplete completed-turn view", async () => {
   );
 });
 
-test("never replays an incomplete completed-turn view", async () => {
+test("never replays when a partial completed turn cannot be hydrated", async () => {
   let turns = 0;
   const fixture = createFixture({
     handle({ message }) {
@@ -1375,6 +1783,118 @@ test("never replays an incomplete completed-turn view", async () => {
   );
   assert.equal(turns, 1);
   assert.equal(fixture.processes.length, 1);
+});
+
+test("classifies recognized terminal turn failures without retaining native details", async (
+  t,
+) => {
+  const variants = [
+    [
+      { activeTurnNotSteerable: { turnKind: "review" } },
+      "turn_active_not_steerable",
+    ],
+    ["badRequest", "turn_bad_request"],
+    ["cyberPolicy", "turn_cyber_policy"],
+    [
+      { httpConnectionFailed: { httpStatusCode: 429 } },
+      "turn_http_connection_failed",
+    ],
+    ["internalServerError", "turn_internal_server_error"],
+    ["misalignmentPolicyViolation", "turn_misalignment_policy_violation"],
+    ["other", "turn_other"],
+    [
+      { responseStreamConnectionFailed: { httpStatusCode: 503 } },
+      "turn_response_stream_connection_failed",
+    ],
+    [
+      { responseStreamDisconnected: { httpStatusCode: null } },
+      "turn_response_stream_disconnected",
+    ],
+    [
+      { responseTooManyFailedAttempts: { httpStatusCode: 500 } },
+      "turn_response_too_many_failed_attempts",
+    ],
+    ["sandboxError", "turn_sandbox_error"],
+    ["serverOverloaded", "turn_server_overloaded"],
+    ["sessionBudgetExceeded", "turn_session_budget_exceeded"],
+    ["threadRollbackFailed", "turn_thread_rollback_failed"],
+    ["unauthorized", "turn_unauthorized"],
+    ["usageLimitExceeded", "turn_usage_limit_exceeded"],
+  ];
+
+  for (const [codexErrorInfo, diagnosticClass] of variants) {
+    await t.test(diagnosticClass, async () => {
+      const fixture = createFixture({
+        handle({ message }) {
+          if (message.method !== "turn/start") {
+            return undefined;
+          }
+          return {
+            result: { turn: { id: "failed-turn" } },
+            notification: failedTurn(message.params.threadId, "failed-turn", {
+              message: "DO_NOT_RETAIN_NATIVE_MESSAGE",
+              codexErrorInfo,
+              additionalDetails: "DO_NOT_RETAIN_ADDITIONAL_DETAILS",
+            }),
+          };
+        },
+      });
+
+      await assert.rejects(
+        fixture.adapter.run(request()),
+        (error) => {
+          assert.ok(
+            hasDiagnostic("ERR_CODEX_TURN_FAILED", diagnosticClass)(error),
+          );
+          assert.equal(error.cause, undefined);
+          const retainedError = JSON.stringify({
+            ...error,
+            message: error.message,
+          });
+          assert.doesNotMatch(
+            retainedError,
+            /DO_NOT_RETAIN/u,
+          );
+          assert.doesNotMatch(retainedError, /httpStatusCode|turnKind/u);
+          return true;
+        },
+      );
+    });
+  }
+});
+
+test("discards unknown terminal turn classifications", async () => {
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method !== "turn/start") {
+        return undefined;
+      }
+      return {
+        result: { turn: { id: "failed-turn" } },
+        notification: failedTurn(message.params.threadId, "failed-turn", {
+          message: "DO_NOT_RETAIN_UNKNOWN_MESSAGE",
+          codexErrorInfo: {
+            unknownProviderVariant: "DO_NOT_RETAIN_UNKNOWN_DETAILS",
+          },
+          additionalDetails: "DO_NOT_RETAIN_UNKNOWN_ADDITIONAL_DETAILS",
+        }),
+      };
+    },
+  });
+
+  await assert.rejects(
+    fixture.adapter.run(request()),
+    (error) => {
+      assert.ok(hasCode("ERR_CODEX_TURN_FAILED")(error));
+      assert.equal(error.diagnosticClass, undefined);
+      assert.equal(error.cause, undefined);
+      assert.doesNotMatch(
+        JSON.stringify({ ...error, message: error.message }),
+        /DO_NOT_RETAIN/u,
+      );
+      return true;
+    },
+  );
 });
 
 test("returns commit-executor failures for Git-state verification", async () => {
@@ -1415,16 +1935,46 @@ test("returns commit-executor failures for Git-state verification", async () => 
         },
       }),
     ),
-    hasCode("ERR_CODEX_LOCAL_COMMIT_INTERRUPTED"),
+    (error) => {
+      assert.ok(hasCode("ERR_CODEX_LOCAL_COMMIT_INTERRUPTED")(error));
+      assert.notEqual(error.effectStarted, false);
+      return true;
+    },
   );
   assert.equal(sandboxCalls, 2);
   assert.equal(fixture.processes.length, 1);
 });
 
-test("compacts a full native context and retries the turn once", async () => {
+test("hydrates summarized compaction and retries a full context once", async () => {
   let turns = 0;
   const fixture = createFixture({
     handle({ message }) {
+      if (message.method === "thread/compact/start") {
+        const notification = completedTurn(
+          message.params.threadId,
+          "compact-turn",
+          "Compacted.",
+        );
+        notification.params.turn.itemsView = "summary";
+        return { result: {}, notification };
+      }
+      if (message.method === "thread/read") {
+        return {
+          result: {
+            thread: {
+              id: message.params.threadId,
+              turns: [
+                completedTurn(
+                  message.params.threadId,
+                  "compact-turn",
+                  "Compacted.",
+                  [{ type: "contextCompaction" }],
+                ).params.turn,
+              ],
+            },
+          },
+        };
+      }
       if (message.method !== "turn/start") {
         return undefined;
       }
@@ -1455,16 +2005,30 @@ test("compacts a full native context and retries the turn once", async () => {
     },
   });
 
-  const result = await fixture.adapter.run(request());
+  const result = await fixture.adapter.run(
+    request({
+      prompt: "Continue from the current session.",
+      recoveryPrompt: "Inspect the complete durable request.",
+    }),
+  );
 
   assert.equal(result.output, "Recovered.");
   assert.equal(fixture.processes.length, 1);
   assert.deepEqual(
     fixture.processes[0].messages
       .map(({ method }) => method)
-      .filter((method) => method === "turn/start" || method === "thread/compact/start"),
-    ["turn/start", "thread/compact/start", "turn/start"],
+      .filter((method) =>
+        ["turn/start", "thread/compact/start", "thread/read"].includes(method),
+      ),
+    ["turn/start", "thread/compact/start", "thread/read", "turn/start"],
   );
+  const turnPrompts = fixture.processes[0].messages
+    .filter(({ method }) => method === "turn/start")
+    .map(({ params }) => params.input[0].text);
+  assert.equal(turnPrompts[0], "Continue from the current session.");
+  assert.match(turnPrompts[1], /^Compact the existing Codex/u);
+  assert.match(turnPrompts[1], /complete durable request/u);
+  assert.doesNotMatch(turnPrompts[1], /current session/u);
 });
 
 test("reconstructs a fresh turn when compaction cannot free the context", async () => {
@@ -1501,7 +2065,13 @@ test("reconstructs a fresh turn when compaction cannot free the context", async 
     },
   });
 
-  const result = await fixture.adapter.run(request({ access: "workspace-write" }));
+  const result = await fixture.adapter.run(
+    request({
+      access: "workspace-write",
+      prompt: "Continue from the current session.",
+      recoveryPrompt: "Inspect the complete durable request.",
+    }),
+  );
 
   assert.equal(result.sessionId, "thread-1");
   assert.equal(fixture.processes.length, 2);
@@ -1509,6 +2079,8 @@ test("reconstructs a fresh turn when compaction cannot free the context", async 
     ({ method }) => method === "turn/start",
   );
   assert.match(retry.params.input[0].text, /^The previous Codex session/u);
+  assert.match(retry.params.input[0].text, /complete durable request/u);
+  assert.doesNotMatch(retry.params.input[0].text, /current session/u);
 });
 
 test(
@@ -1521,10 +2093,24 @@ test(
     const adapter = createCodexAdapter();
     const result = await adapter.run(
       request({
-        prompt: "Return JSON with ok set to true. Do not inspect files.",
-        schema: STRICT_SCHEMA,
+        prompt:
+          "Use a repository command to read package.json. Return JSON with " +
+          "packageName set to its name field and commandWorked set to true. " +
+          "Do not modify anything.",
+        schema: {
+          type: "object",
+          properties: {
+            packageName: { type: "string" },
+            commandWorked: { type: "boolean" },
+          },
+          required: ["packageName", "commandWorked"],
+          additionalProperties: false,
+        },
       }),
     );
-    assert.deepEqual(result.structured, { ok: true });
+    assert.deepEqual(result.structured, {
+      packageName: packageMetadata.name,
+      commandWorked: true,
+    });
   },
 );

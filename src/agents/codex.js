@@ -11,6 +11,7 @@ import {
   isEnvironment,
   isRecord,
   isolateGitEnvironment,
+  STRUCTURED_OUTPUT_FAILURE_CLASS,
 } from "./adapter-contract.js";
 import { createCodexAppServerClient } from "./codex-app-server.js";
 import {
@@ -23,8 +24,63 @@ export const CODEX_BACKEND_ID = "codex";
 const executeFile = promisify(executeFileCallback);
 const MINIMUM_CODEX_VERSION = Object.freeze([0, 147, 0]);
 const MAX_MCP_SERVERS = 256;
+const MCP_DISCOVERY_TIMEOUT_MS = 30_000;
 const MCP_SERVER_NAME_PATTERN = /^[A-Za-z0-9_-]+$/u;
 const MAX_MODEL_PAGES = 32;
+const CODEX_PROFILE_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,255}$/u;
+const DECIMAL_CONTEXT_SIZE_PATTERN = /^[1-9][0-9]*$/u;
+const MAX_CONTEXT_SIZE = 9_223_372_036_854_775_807n;
+const CAPABILITY_DIAGNOSTICS = Object.freeze({
+  autonomousWrite: "capability_autonomous_write",
+  localCommit: "capability_local_commit",
+  nativeSessionContinuation: "capability_session_continuation",
+  nativeSessionFork: "capability_session_fork",
+  readOnly: "capability_read_only",
+  remoteWriteBlocked: "capability_remote_write_blocked",
+  structuredOutput: "capability_structured_output",
+  workspaceWrite: "capability_workspace_write",
+});
+const TERMINAL_TURN_DIAGNOSTICS = Object.freeze({
+  activeTurnNotSteerable: "turn_active_not_steerable",
+  badRequest: "turn_bad_request",
+  cyberPolicy: "turn_cyber_policy",
+  httpConnectionFailed: "turn_http_connection_failed",
+  internalServerError: "turn_internal_server_error",
+  misalignmentPolicyViolation: "turn_misalignment_policy_violation",
+  other: "turn_other",
+  responseStreamConnectionFailed: "turn_response_stream_connection_failed",
+  responseStreamDisconnected: "turn_response_stream_disconnected",
+  responseTooManyFailedAttempts: "turn_response_too_many_failed_attempts",
+  sandboxError: "turn_sandbox_error",
+  serverOverloaded: "turn_server_overloaded",
+  sessionBudgetExceeded: "turn_session_budget_exceeded",
+  threadRollbackFailed: "turn_thread_rollback_failed",
+  unauthorized: "turn_unauthorized",
+  usageLimitExceeded: "turn_usage_limit_exceeded",
+});
+const CODEX_DIAGNOSTIC_CLASSES = new Set([
+  ...Object.values(CAPABILITY_DIAGNOSTICS),
+  ...Object.values(TERMINAL_TURN_DIAGNOSTICS),
+  "isolation_command_host",
+  "isolation_effective_configuration",
+  "isolation_feature",
+  "isolation_mcp",
+  "isolation_mcp_discovery",
+  "isolation_memory",
+  "isolation_network",
+  "isolation_notification",
+  "isolation_shell_environment",
+  "operation_dynamic_tool",
+  "operation_hosted_tool",
+  "operation_lifecycle_hook",
+  "operation_local_commit",
+  "operation_mcp_tool",
+  "operation_memory",
+  "operation_multi_agent",
+  "operation_plugin",
+  "operation_read_only_write",
+  "operation_remote_write",
+]);
 const DISABLED_FEATURES = Object.freeze([
   "apps",
   "artifact",
@@ -32,7 +88,6 @@ const DISABLED_FEATURES = Object.freeze([
   "browser_use_external",
   "browser_use_full_cdp_access",
   "code_mode",
-  "code_mode_host",
   "code_mode_only",
   "computer_use",
   "goals",
@@ -54,6 +109,8 @@ const APP_SERVER_BASE_ARGUMENTS = Object.freeze([
   "--listen",
   "stdio://",
   "--strict-config",
+  "--enable",
+  "code_mode_host",
   ...DISABLED_FEATURES.flatMap((feature) => ["--disable", feature]),
   "-c",
   "notify=[]",
@@ -75,6 +132,10 @@ const LOCAL_COMMIT_OUTPUT_SCHEMA = Object.freeze({
   required: Object.freeze(["ready"]),
   additionalProperties: false,
 });
+const COMPACTION_PREFIX =
+  "Compact the existing Codex session context, preserving decisions and " +
+  "valid progress. Then complete this durable request from the observed " +
+  "current workspace without repeating completed work.";
 const RECOVERY_PREFIX =
   "The previous Codex session could not continue. Reconstruct context from " +
   "this durable request and the observed current workspace. Preserve valid " +
@@ -162,6 +223,10 @@ const SAFE_TURN_ITEM_TYPES = new Set([
 ]);
 const TERMINAL_ITEM_STATUSES = new Set(["completed", "declined", "failed"]);
 
+export function normalizeCodexDiagnosticClass(value) {
+  return CODEX_DIAGNOSTIC_CLASSES.has(value) ? value : undefined;
+}
+
 export class CodexAdapterError extends Error {
   constructor(
     message,
@@ -169,6 +234,9 @@ export class CodexAdapterError extends Error {
       ambiguous = false,
       cause,
       code = "ERR_CODEX_ADAPTER",
+      diagnosticClass,
+      effectStarted,
+      failureClass,
       method,
       recoverable = false,
     } = {},
@@ -178,16 +246,75 @@ export class CodexAdapterError extends Error {
     this.code = code;
     this.ambiguous = ambiguous;
     this.recoverable = recoverable;
+    if (typeof effectStarted === "boolean") {
+      this.effectStarted = effectStarted;
+    }
+    if (failureClass === STRUCTURED_OUTPUT_FAILURE_CLASS) {
+      this.failureClass = failureClass;
+    }
+    const normalizedDiagnosticClass = normalizeCodexDiagnosticClass(
+      diagnosticClass,
+    );
+    if (normalizedDiagnosticClass !== undefined) {
+      this.diagnosticClass = normalizedDiagnosticClass;
+    }
     if (method !== undefined) {
       this.method = method;
     }
   }
 }
 
-const { assertFields, normalizeRequest } = createAdapterContract({
+const {
+  assertFields,
+  normalizeExecutionOptions: normalizeContractExecutionOptions,
+  normalizeRequest: normalizeContractRequest,
+} = createAdapterContract({
   AdapterError: CodexAdapterError,
   backendName: "Codex",
 });
+
+function validateExecutionOptions(options) {
+  if (
+    (options.profile !== undefined &&
+      !CODEX_PROFILE_PATTERN.test(options.profile)) ||
+    (options.contextSize !== undefined &&
+      (!DECIMAL_CONTEXT_SIZE_PATTERN.test(options.contextSize) ||
+        BigInt(options.contextSize) > MAX_CONTEXT_SIZE))
+  ) {
+    throw new CodexAdapterError("Codex execution options are invalid.", {
+      code: "ERR_INVALID_CODEX_OPTIONS",
+    });
+  }
+  return options;
+}
+
+function normalizeExecutionOptions(value) {
+  return validateExecutionOptions(normalizeContractExecutionOptions(value));
+}
+
+function normalizeRequest(value) {
+  return validateExecutionOptions(normalizeContractRequest(value));
+}
+
+function executionOptionsFor(request) {
+  return Object.freeze({
+    contextSize: request.contextSize,
+    model: request.model,
+    profile: request.profile,
+  });
+}
+
+function nativeArguments(options, argumentsList) {
+  const result = [];
+  if (options.profile !== undefined) {
+    result.push("--profile", options.profile);
+  }
+  if (options.contextSize !== undefined) {
+    result.push("-c", `model_context_window=${options.contextSize}`);
+  }
+  result.push(...argumentsList);
+  return result;
+}
 
 function isolateCommandEnvironment(value) {
   const environment = { ...value };
@@ -249,15 +376,16 @@ function parseMcpServerNames(value) {
   let servers;
   try {
     servers = JSON.parse(value);
-  } catch (cause) {
+  } catch {
     throw new CodexAdapterError("Codex returned invalid MCP configuration.", {
-      cause,
       code: "ERR_CODEX_ISOLATION",
+      diagnosticClass: "isolation_mcp",
     });
   }
   if (!Array.isArray(servers) || servers.length > MAX_MCP_SERVERS) {
     throw new CodexAdapterError("Codex returned invalid MCP configuration.", {
       code: "ERR_CODEX_ISOLATION",
+      diagnosticClass: "isolation_mcp",
     });
   }
   const names = servers.map((server) => server?.name);
@@ -273,6 +401,7 @@ function parseMcpServerNames(value) {
   ) {
     throw new CodexAdapterError("Codex returned invalid MCP configuration.", {
       code: "ERR_CODEX_ISOLATION",
+      diagnosticClass: "isolation_mcp",
     });
   }
   return names;
@@ -284,15 +413,24 @@ function assertIsolatedConfiguration(value, expectedMcpServers) {
   const memories = config?.memories;
   const mcpServers = config?.mcp_servers;
   const shellEnvironment = config?.shell_environment_policy;
-  if (
-    !isRecord(config) ||
-    !isRecord(features) ||
-    DISABLED_FEATURES.some((feature) => features[feature] !== false) ||
+  let diagnosticClass;
+  if (!isRecord(config) || !isRecord(features)) {
+    diagnosticClass = "isolation_effective_configuration";
+  } else if (
+    DISABLED_FEATURES.some((feature) => features[feature] !== false)
+  ) {
+    diagnosticClass = "isolation_feature";
+  } else if (features.code_mode_host !== true) {
+    diagnosticClass = "isolation_command_host";
+  } else if (
     !isRecord(memories) ||
     memories.generate_memories !== false ||
-    memories.use_memories !== false ||
-    !Array.isArray(config.notify) ||
-    config.notify.length !== 0 ||
+    memories.use_memories !== false
+  ) {
+    diagnosticClass = "isolation_memory";
+  } else if (!Array.isArray(config.notify) || config.notify.length !== 0) {
+    diagnosticClass = "isolation_notification";
+  } else if (
     !isRecord(shellEnvironment) ||
     shellEnvironment.inherit !== "core" ||
     shellEnvironment.ignore_default_excludes !== false ||
@@ -301,16 +439,24 @@ function assertIsolatedConfiguration(value, expectedMcpServers) {
     Object.keys(shellEnvironment.set).length !== 0 ||
     shellEnvironment.exclude !== null ||
     shellEnvironment.include_only !== null ||
-    shellEnvironment.filters !== null ||
-    config.web_search !== "disabled" ||
+    shellEnvironment.filters !== null
+  ) {
+    diagnosticClass = "isolation_shell_environment";
+  } else if (config.web_search !== "disabled") {
+    diagnosticClass = "isolation_network";
+  } else if (
     !isRecord(mcpServers) ||
     expectedMcpServers.some((name) => !Object.hasOwn(mcpServers, name)) ||
     Object.values(mcpServers).some(
       (server) => !isRecord(server) || server.enabled !== false,
     )
   ) {
+    diagnosticClass = "isolation_mcp";
+  }
+  if (diagnosticClass !== undefined) {
     throw new CodexAdapterError("Codex external tools are not isolated.", {
       code: "ERR_CODEX_ISOLATION",
+      diagnosticClass,
     });
   }
 }
@@ -348,7 +494,16 @@ function threadOptions(request) {
 }
 
 function turnPrompt(request, recovery) {
-  let prompt = recovery ? `${RECOVERY_PREFIX}\n\n${request.prompt}` : request.prompt;
+  const prefix =
+    recovery === "compact"
+      ? COMPACTION_PREFIX
+      : recovery === "fresh"
+        ? RECOVERY_PREFIX
+        : undefined;
+  let prompt =
+    prefix === undefined
+      ? request.prompt
+      : `${prefix}\n\n${request.recoveryPrompt}`;
   if (request.access === "local-commit") {
     prompt +=
       `\n\nConfirm that HEAD is ${request.commit.expectedHead} and that the ` +
@@ -517,25 +672,90 @@ function isContextWindowExceeded(turn) {
   );
 }
 
+function terminalTurnDiagnosticClass(turn) {
+  const info = turn?.error?.codexErrorInfo;
+  const variant =
+    typeof info === "string"
+      ? info
+      : isRecord(info) && Object.keys(info).length === 1
+        ? Object.keys(info)[0]
+        : undefined;
+  return Object.hasOwn(TERMINAL_TURN_DIAGNOSTICS, variant)
+    ? TERMINAL_TURN_DIAGNOSTICS[variant]
+    : undefined;
+}
+
 function hasFullItemsView(turn) {
   return turn.itemsView === undefined || turn.itemsView === "full";
 }
 
-function assertCompletedTurn(value, threadId, turnId) {
+function invalidCompletedTurn(cause) {
+  return new CodexAdapterError("Codex returned an invalid completed turn.", {
+    cause,
+    code: "ERR_CODEX_PROTOCOL",
+  });
+}
+
+function assertCompletedTurnEnvelope(value, threadId, turnId) {
   if (
     !isRecord(value) ||
     value.threadId !== threadId ||
     !isRecord(value.turn) ||
-    value.turn.id !== turnId ||
+    typeof value.turn.id !== "string" ||
+    value.turn.id.length === 0 ||
+    (turnId !== undefined && value.turn.id !== turnId) ||
     !Array.isArray(value.turn.items) ||
-    !hasFullItemsView(value.turn) ||
     typeof value.turn.status !== "string"
   ) {
-    throw new CodexAdapterError("Codex returned an invalid completed turn.", {
-      code: "ERR_CODEX_PROTOCOL",
-    });
+    throw invalidCompletedTurn();
   }
   return value.turn;
+}
+
+function assertCompletedTurn(value, threadId, turnId) {
+  const turn = assertCompletedTurnEnvelope(value, threadId, turnId);
+  if (!hasFullItemsView(turn)) {
+    throw invalidCompletedTurn();
+  }
+  return turn;
+}
+
+async function resolveCompletedTurn(client, value, threadId, turnId) {
+  const turn = assertCompletedTurnEnvelope(value, threadId, turnId);
+  if (hasFullItemsView(turn)) {
+    return turn;
+  }
+  if (turn.itemsView !== "summary" && turn.itemsView !== "notLoaded") {
+    throw invalidCompletedTurn();
+  }
+  let response;
+  try {
+    response = await client.request("thread/read", {
+      threadId,
+      includeTurns: true,
+    });
+  } catch (cause) {
+    throw invalidCompletedTurn(cause);
+  }
+  if (
+    !isRecord(response) ||
+    !isRecord(response.thread) ||
+    response.thread.id !== threadId ||
+    !Array.isArray(response.thread.turns)
+  ) {
+    throw invalidCompletedTurn();
+  }
+  const matches = response.thread.turns.filter(
+    (candidate) => isRecord(candidate) && candidate.id === turnId,
+  );
+  if (matches.length !== 1) {
+    throw invalidCompletedTurn();
+  }
+  return assertCompletedTurn(
+    { threadId, turn: matches[0] },
+    threadId,
+    turnId,
+  );
 }
 
 async function startTurn(client, request, threadId, prompt) {
@@ -586,7 +806,7 @@ async function startTurn(client, request, threadId, prompt) {
       recoverable: true,
     });
   }
-  return assertCompletedTurn(completion, threadId, response.turn.id);
+  return resolveCompletedTurn(client, completion, threadId, response.turn.id);
 }
 
 async function compactThread(client, threadId) {
@@ -596,12 +816,16 @@ async function compactThread(client, threadId) {
       "turn/completed",
       (params) => isRecord(params) && params.threadId === threadId,
     );
+    const notificationTurn = assertCompletedTurnEnvelope(completion, threadId);
+    const turn = await resolveCompletedTurn(
+      client,
+      completion,
+      threadId,
+      notificationTurn.id,
+    );
     if (
-      !isRecord(completion.turn) ||
-      completion.turn.status !== "completed" ||
-      !Array.isArray(completion.turn.items) ||
-      !hasFullItemsView(completion.turn) ||
-      !completion.turn.items.some(
+      turn.status !== "completed" ||
+      !turn.items.some(
         (item) => isRecord(item) && item.type === "contextCompaction",
       )
     ) {
@@ -618,7 +842,7 @@ async function compactThread(client, threadId) {
   }
 }
 
-async function runTurn(client, request, threadId, prompt) {
+async function runTurn(client, request, threadId, prompt, recoveryPrompt) {
   let turn = await startTurn(client, request, threadId, prompt);
   if (isContextWindowExceeded(turn)) {
     if (request.access === "local-commit") {
@@ -631,7 +855,7 @@ async function runTurn(client, request, threadId, prompt) {
       );
     }
     await compactThread(client, threadId);
-    turn = await startTurn(client, request, threadId, prompt);
+    turn = await startTurn(client, request, threadId, recoveryPrompt);
     if (isContextWindowExceeded(turn)) {
       throw new CodexAdapterError("Codex context remains full after compaction.", {
         code: "ERR_CODEX_CONTEXT_RECOVERY_FAILED",
@@ -649,6 +873,7 @@ async function runTurn(client, request, threadId, prompt) {
   if (turn.status !== "completed") {
     throw new CodexAdapterError("Codex turn failed.", {
       code: "ERR_CODEX_TURN_FAILED",
+      diagnosticClass: terminalTurnDiagnosticClass(turn),
     });
   }
   return turn;
@@ -687,7 +912,10 @@ function auditItems(items, request) {
     if (item.type === "mcpToolCall") {
       throw new CodexAdapterError(
         "Codex used a disabled MCP server.",
-        { code: "ERR_CODEX_ISOLATION" },
+        {
+          code: "ERR_CODEX_ISOLATION",
+          diagnosticClass: "operation_mcp_tool",
+        },
       );
     }
     if (
@@ -696,24 +924,34 @@ function auditItems(items, request) {
     ) {
       throw new CodexAdapterError(
         "Codex used disabled multi-agent collaboration.",
-        { code: "ERR_CODEX_ISOLATION" },
+        {
+          code: "ERR_CODEX_ISOLATION",
+          diagnosticClass: "operation_multi_agent",
+        },
       );
     }
     if (item.type === "hookPrompt") {
       throw new CodexAdapterError("Codex used a disabled lifecycle hook.", {
         code: "ERR_CODEX_ISOLATION",
+        diagnosticClass: "operation_lifecycle_hook",
       });
     }
     if (item.type === "dynamicToolCall") {
       throw new CodexAdapterError(
         "Codex attempted an untrusted dynamic tool call.",
-        { code: "ERR_CODEX_REMOTE_WRITE_ATTEMPT" },
+        {
+          code: "ERR_CODEX_REMOTE_WRITE_ATTEMPT",
+          diagnosticClass: "operation_dynamic_tool",
+        },
       );
     }
     if (item.type === "webSearch" || item.type === "imageGeneration") {
       throw new CodexAdapterError(
         "Codex attempted a disabled hosted tool.",
-        { code: "ERR_CODEX_NETWORK_POLICY" },
+        {
+          code: "ERR_CODEX_NETWORK_POLICY",
+          diagnosticClass: "operation_hosted_tool",
+        },
       );
     }
     if (request.access !== "workspace-write" && item.type === "fileChange") {
@@ -724,6 +962,10 @@ function auditItems(items, request) {
             request.access === "local-commit"
               ? "ERR_CODEX_LOCAL_COMMIT_POLICY"
               : "ERR_CODEX_READ_ONLY_POLICY",
+          diagnosticClass:
+            request.access === "local-commit"
+              ? "operation_local_commit"
+              : "operation_read_only_write",
         },
       );
     }
@@ -734,6 +976,7 @@ function auditItems(items, request) {
     ) {
       throw new CodexAdapterError("Codex used disabled memories.", {
         code: "ERR_CODEX_ISOLATION",
+        diagnosticClass: "operation_memory",
       });
     }
     if (item.type === "commandExecution") {
@@ -746,6 +989,7 @@ function auditItems(items, request) {
       if (item.pluginId !== undefined && item.pluginId !== null) {
         throw new CodexAdapterError("Codex used a disabled plugin.", {
           code: "ERR_CODEX_ISOLATION",
+          diagnosticClass: "operation_plugin",
         });
       }
       const violation = commandPolicyViolation(
@@ -755,12 +999,16 @@ function auditItems(items, request) {
       if (violation === "remote") {
         throw new CodexAdapterError("Codex attempted a remote write.", {
           code: "ERR_CODEX_REMOTE_WRITE_ATTEMPT",
+          diagnosticClass: "operation_remote_write",
         });
       }
       if (violation === "local-commit") {
         throw new CodexAdapterError(
           "Codex attempted a forbidden local-commit operation.",
-          { code: "ERR_CODEX_LOCAL_COMMIT_POLICY" },
+          {
+            code: "ERR_CODEX_LOCAL_COMMIT_POLICY",
+            diagnosticClass: "operation_local_commit",
+          },
         );
       }
     }
@@ -791,12 +1039,16 @@ function normalizeResult(turn, request, sessionId) {
       throw new CodexAdapterError("Codex returned invalid structured output.", {
         cause,
         code: "ERR_CODEX_STRUCTURED_OUTPUT",
+        failureClass: STRUCTURED_OUTPUT_FAILURE_CLASS,
       });
     }
     if (!isRecord(structured)) {
       throw new CodexAdapterError(
         "Codex structured output must be an object.",
-        { code: "ERR_CODEX_STRUCTURED_OUTPUT" },
+        {
+          code: "ERR_CODEX_STRUCTURED_OUTPUT",
+          failureClass: STRUCTURED_OUTPUT_FAILURE_CLASS,
+        },
       );
     }
     deepFreeze(structured);
@@ -807,7 +1059,10 @@ function normalizeResult(turn, request, sessionId) {
   ) {
     throw new CodexAdapterError(
       "Codex did not confirm the authorized local commit.",
-      { code: "ERR_CODEX_LOCAL_COMMIT_POLICY" },
+      {
+        code: "ERR_CODEX_LOCAL_COMMIT_POLICY",
+        diagnosticClass: "operation_local_commit",
+      },
     );
   }
   return Object.freeze({ output, structured, sessionId });
@@ -852,12 +1107,16 @@ export function createCodexAdapter(options = {}) {
           maxBuffer: 1024 * 1024,
           timeout: 10_000,
         }),
-        execute(codexBinary, ["app-server", "--help"], {
-          encoding: "utf8",
-          env: processEnvironment,
-          maxBuffer: 1024 * 1024,
-          timeout: 10_000,
-        }),
+        execute(
+          codexBinary,
+          ["app-server", "--help"],
+          {
+            encoding: "utf8",
+            env: processEnvironment,
+            maxBuffer: 1024 * 1024,
+            timeout: 10_000,
+          },
+        ),
       ]);
     } catch (cause) {
       throw processError("Codex CLI is unavailable.", cause);
@@ -867,7 +1126,7 @@ export function createCodexAdapter(options = {}) {
       processOutput(helpResult.stdout) + processOutput(helpResult.stderr);
     const supported =
       versionAtLeast(version, MINIMUM_CODEX_VERSION) &&
-      ["--disable", "--listen", "--strict-config"].every((flag) =>
+      ["--disable", "--enable", "--listen", "--strict-config"].every((flag) =>
         help.includes(flag),
       );
     const localCommit =
@@ -890,33 +1149,49 @@ export function createCodexAdapter(options = {}) {
     });
   }
 
-  function probe() {
+  function probe(value) {
+    normalizeExecutionOptions(value);
     probePromise ??= inspectCapabilities();
     return probePromise;
   }
 
-  async function appServerLaunch(cwd) {
+  async function appServerLaunch(request) {
     let result;
-    try {
-      result = await execute(
-        codexBinary,
-        ["-C", cwd, "mcp", "list", "--json"],
-        {
-          encoding: "utf8",
-          env: processEnvironment,
-          maxBuffer: 1024 * 1024,
-          timeout: 10_000,
-        },
-      );
-    } catch (cause) {
-      throw processError(
-        "Cannot inspect Codex MCP configuration.",
-        cause,
-        "ERR_CODEX_ISOLATION",
-      );
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        result = await execute(
+          codexBinary,
+          nativeArguments(request, [
+            "-C",
+            request.cwd,
+            "mcp",
+            "list",
+            "--json",
+          ]),
+          {
+            encoding: "utf8",
+            env: processEnvironment,
+            maxBuffer: 1024 * 1024,
+            timeout: MCP_DISCOVERY_TIMEOUT_MS,
+          },
+        );
+        break;
+      } catch {
+        if (attempt === 1) {
+          throw new CodexAdapterError(
+            "Codex MCP configuration is temporarily unavailable.",
+            {
+              code: "ERR_CODEX_UNAVAILABLE",
+              diagnosticClass: "isolation_mcp_discovery",
+              method: "mcp/list",
+              recoverable: true,
+            },
+          );
+        }
+      }
     }
     const mcpServerNames = parseMcpServerNames(processOutput(result.stdout));
-    const argumentsList = [...APP_SERVER_BASE_ARGUMENTS];
+    const argumentsList = nativeArguments(request, APP_SERVER_BASE_ARGUMENTS);
     for (const name of mcpServerNames) {
       argumentsList.push("-c", `mcp_servers.${name}.enabled=false`);
     }
@@ -927,7 +1202,7 @@ export function createCodexAdapter(options = {}) {
   }
 
   async function assertCapabilities(request) {
-    const capabilities = await probe();
+    const capabilities = await probe(executionOptionsFor(request));
     const required = ["remoteWriteBlocked"];
     if (outputSchemaFor(request) !== undefined) {
       required.push("structuredOutput");
@@ -946,10 +1221,16 @@ export function createCodexAdapter(options = {}) {
     if (request.session?.mode === "fork") {
       required.push("nativeSessionFork");
     }
-    if (required.some((capability) => capabilities[capability] !== true)) {
+    const missingCapability = required.find(
+      (capability) => capabilities[capability] !== true,
+    );
+    if (missingCapability !== undefined) {
       throw new CodexAdapterError(
         "Installed Codex CLI cannot enforce the requested capability.",
-        { code: "ERR_UNSUPPORTED_CODEX_CAPABILITY" },
+        {
+          code: "ERR_UNSUPPORTED_CODEX_CAPABILITY",
+          diagnosticClass: CAPABILITY_DIAGNOSTICS[missingCapability],
+        },
       );
     }
   }
@@ -977,7 +1258,7 @@ export function createCodexAdapter(options = {}) {
   }
 
   async function runAttempt(request, { fresh = false, recovery = false } = {}) {
-    const launch = await appServerLaunch(request.cwd);
+    const launch = await appServerLaunch(request);
     let child;
     try {
       child = spawnProcess(codexBinary, launch.argumentsList, {
@@ -1012,6 +1293,7 @@ export function createCodexAdapter(options = {}) {
         request,
         threadId,
         turnPrompt(request, recovery),
+        turnPrompt(request, "compact"),
       );
       if (
         request.model !== undefined &&
@@ -1035,44 +1317,60 @@ export function createCodexAdapter(options = {}) {
         }
       }
     }
-    if (request.access === "local-commit") {
-      await createAuthorizedCommit(request);
-    }
     return result;
   }
 
   async function run(value) {
     const request = normalizeRequest(value);
-    await assertCapabilities(request);
     try {
-      return await runAttempt(request);
+      await assertCapabilities(request);
     } catch (cause) {
       if (
         request.access === "local-commit" &&
-        cause instanceof CodexAdapterError &&
-        (cause.ambiguous || cause.recoverable)
+        cause instanceof CodexAdapterError
       ) {
-        if (cause.code === "ERR_CODEX_LOCAL_COMMIT_INTERRUPTED") {
-          throw cause;
+        cause.effectStarted = false;
+      }
+      throw cause;
+    }
+    let result;
+    try {
+      result = await runAttempt(request);
+    } catch (cause) {
+      if (
+        cause instanceof CodexAdapterError &&
+        cause.recoverable &&
+        cause.method === "mcp/list"
+      ) {
+        if (request.access === "local-commit") {
+          cause.effectStarted = false;
         }
-        throw new CodexAdapterError(
-          "Codex local-commit outcome requires Git-state verification.",
-          {
-            ambiguous: true,
-            cause,
-            code: "ERR_CODEX_LOCAL_COMMIT_INTERRUPTED",
-          },
-        );
+        throw cause;
+      }
+      if (
+        request.access === "local-commit" &&
+        cause instanceof CodexAdapterError
+      ) {
+        cause.effectStarted = false;
+        throw cause;
       }
       if (
         cause instanceof CodexAdapterError &&
         cause.recoverable &&
         request.session?.mode !== "fork"
       ) {
-        return runAttempt(request, { fresh: true, recovery: true });
+        result = await runAttempt(request, {
+          fresh: true,
+          recovery: "fresh",
+        });
+      } else {
+        throw cause;
       }
-      throw cause;
     }
+    if (request.access === "local-commit") {
+      await createAuthorizedCommit(request);
+    }
+    return result;
   }
 
   return Object.freeze({ id: CODEX_BACKEND_ID, probe, run });

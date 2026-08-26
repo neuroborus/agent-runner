@@ -1,11 +1,6 @@
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { realpath } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-
-import {
-  CommitPlanValidationError,
-  parseCommitPlan,
-  serializeCommitPlan,
-} from "@agent-runner/commit-plan";
 
 import {
   BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
@@ -13,16 +8,14 @@ import {
   BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
-  COMMIT_INSTRUCTIONS,
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
   finalizationBootstrapInstructions,
   finalizationGuidanceInstructions,
   FINDING_ARBITRATION_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
-  IMPLEMENTATION_INSTRUCTIONS,
   NO_DELEGATION_INSTRUCTIONS,
-  PLAN_COMPATIBILITY_INSTRUCTIONS,
+  POLISH_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
   REVIEW_INSTRUCTIONS,
   STAGNATION_INSTRUCTIONS,
@@ -36,77 +29,69 @@ import {
   FINALIZATION_SCHEMA,
   FINDING_ARBITRATION_SCHEMA,
   FINDING_RESOLUTION_SCHEMA,
-  IMPLEMENTATION_SCHEMA,
-  PLAN_COMPATIBILITY_SCHEMA,
+  POLISH_SCHEMA,
   REVIEW_SCHEMA,
   STAGNATION_SCHEMA,
 } from "./schemas.js";
 import {
-  CONVENTIONAL_FINALIZATION_SKILL_PATHS,
-  INVALID_EXECUTION_INPUT_CODE,
-  MAX_CLARIFICATION_ROUNDS,
-  MAX_DIAGNOSTIC_ITEMS,
-  MAX_PLAN_LENGTH,
-  PlanExecutionWorkflowError,
-  WORKFLOW_STATES,
+  activeTurn,
+  activity,
   assertRun,
   assertRuntime,
   assertSettings,
-  createPlanExecutionState,
-  isRecord,
+  createPolishingState,
+  CONVENTIONAL_FINALIZATION_SKILL_PATHS,
+  diagnosticCode,
+  disputeHistoryCapacity,
+  disputeHistoryFits,
+  INVALID_POLISHING_INPUT_CODE,
   isOutputDiagnostic,
+  isRecord,
+  MAX_DIAGNOSTIC_ITEMS,
+  MAX_CLARIFICATION_ROUNDS,
   normalizeAdapterCapabilities,
   normalizeBootstrapArbitration,
   normalizeBootstrapResult,
   normalizeClarificationResult,
-  normalizeCompatibilityResult,
   normalizeFinalizationResult,
   normalizeFindingArbitration,
   normalizeInputSnapshot,
-  normalizeImplementationResult,
   normalizePipelineState,
-  normalizeReconsiderationResult,
+  normalizePolishResult,
   normalizeReconciliationResult,
+  normalizeReconsiderationResult,
   normalizeResolutionResult,
   normalizeResumeAction,
   normalizeReviewResult,
   normalizeStagnationResult,
   normalizedCounters,
+  PolishingWorkflowError,
   sha256,
   workflowError,
+  WORKFLOW_STATES,
 } from "./workflow-contract.js";
 
 export {
+  createPolishingState,
   MAX_CLARIFICATION_ROUNDS,
-  PlanExecutionWorkflowError,
+  PolishingWorkflowError,
   WORKFLOW_STATES,
-  createPlanExecutionState,
 };
 
-const INPUT_DRIFT_ERROR_CODES = new Set([
-  "EACCES",
-  "EISDIR",
-  "ELOOP",
+const INPUT_DRIFT_CODES = new Set([
   "ENOENT",
+  "EISDIR",
   "ENOTDIR",
-  "EPERM",
+  "ERR_INVALID_POLISHING_INPUT",
 ]);
-const RETRYABLE_PAUSE_REASONS = new Set([
-  "backend_unavailable",
-  "environment_blocked",
-  "finalization_cannot_pass",
-  "finalization_skill_invalid",
-  "finalization_skill_missing",
-  "local_artifacts_not_ignored",
-  "unsafe_git_state",
-]);
-const GIT_PREFLIGHT_CODES = new Set([
-  "ERR_GIT_IDENTITY_REQUIRED",
+const SAFE_PREFLIGHT_PAUSE_CODES = new Set([
   "ERR_GIT_UNAVAILABLE",
   "ERR_NOT_GIT_REPOSITORY",
-  "ERR_REPOSITORY_NOT_CLEAN",
+  "ERR_UNSAFE_GIT_STATE",
   "ERR_UNSAFE_REPOSITORY_PATH",
   "ERR_UNSUPPORTED_GIT_CONFIGURATION",
+  "ERR_UNSUPPORTED_GIT_PATH",
+  "ERR_GIT_SNAPSHOT_RACE",
 ]);
 const INVALID_BOOTSTRAP_PATH_CODES = new Set([
   "ERR_UNSAFE_REPOSITORY_PATH",
@@ -114,10 +99,6 @@ const INVALID_BOOTSTRAP_PATH_CODES = new Set([
 ]);
 const STRUCTURED_OUTPUT_FAILURE_CLASS = "structured-output";
 const ADAPTER_DIAGNOSTIC_CLASS_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
-
-function activity(actor, phase, kind, message) {
-  return Object.freeze({ actor, phase, kind, message });
-}
 
 function rolePrompt(prompt) {
   return `${prompt}\n\n${NO_DELEGATION_INSTRUCTIONS}`;
@@ -158,13 +139,6 @@ function deriveValidationInventory(workerValidation, reviewerValidation) {
   });
 }
 
-function activeTurn(role, workflowState) {
-  return Object.freeze({
-    role,
-    phase: workflowState.toLowerCase().replaceAll("_", "-"),
-  });
-}
-
 function isWithin(parentPath, childPath) {
   const pathFromParent = relative(parentPath, childPath);
   return (
@@ -175,25 +149,22 @@ function isWithin(parentPath, childPath) {
   );
 }
 
-function inputEvidence(inputs, canonicalPlan, clarification) {
+function inputEvidence(inputs, clarification) {
   const taskClarifications =
-    inputs.taskClarifications?.content.length > 0
-      ? inputs.taskClarifications.content
-      : "(not provided)";
+    inputs.taskClarifications === null
+      ? "(not provided)"
+      : inputs.taskClarifications.content;
   const context =
-    inputs.context?.content.length > 0 ? inputs.context.content : "(not provided)";
+    inputs.context === null ? "(not provided)" : inputs.context.content;
   const executionClarifications =
-    clarification.content.length > 0 ? clarification.content : "(empty)";
+    clarification.content.length === 0 ? "(empty)" : clarification.content;
   return `Task (${inputs.task.path}):
 ${inputs.task.content}
 
-Validated plan (${inputs.plan.path}):
-${canonicalPlan}
-
-Plan-authoring clarifications (${inputs.taskClarifications?.path ?? join(dirname(inputs.task.path), "clarifications.md")}):
+Task-level clarifications:
 ${taskClarifications}
 
-Context (${inputs.context?.path ?? join(dirname(inputs.task.path), "context.md")}):
+Context:
 ${context}
 
 Execution clarifications (${clarification.transcriptPath}):
@@ -208,53 +179,15 @@ function durableContext(evidence, recoveryContext) {
 
 function contextKeyFor(role, checkpoint, context) {
   if (typeof checkpoint !== "string" || checkpoint.length === 0) {
-    throw workflowError("Plan-execution session checkpoint is invalid.");
+    throw workflowError("Polishing session checkpoint is invalid.");
   }
   return sha256(`${role}\0${checkpoint}\0${context}`);
-}
-
-function canonicalPlan(source) {
-  if (typeof source === "string" && source.length > MAX_PLAN_LENGTH) {
-    throw new PlanExecutionWorkflowError(
-      `plan.md must not exceed ${MAX_PLAN_LENGTH} characters.`,
-      { code: "ERR_INVALID_EXECUTION_PLAN" },
-    );
-  }
-  let plan;
-  try {
-    plan = serializeCommitPlan(parseCommitPlan(source));
-  } catch (cause) {
-    if (!(cause instanceof CommitPlanValidationError)) {
-      throw cause;
-    }
-    throw new PlanExecutionWorkflowError("plan.md is invalid.", {
-      cause,
-      code: "ERR_INVALID_EXECUTION_PLAN",
-    });
-  }
-  if (plan.length > MAX_PLAN_LENGTH) {
-    throw new PlanExecutionWorkflowError(
-      `plan.md must not exceed ${MAX_PLAN_LENGTH} characters.`,
-      { code: "ERR_INVALID_EXECUTION_PLAN" },
-    );
-  }
-  return plan;
-}
-
-function diagnosticCode(cause, fallback) {
-  return typeof cause?.code === "string" && /^[A-Z0-9_]{1,64}$/u.test(cause.code)
-    ? cause.code
-    : fallback;
 }
 
 function outputDiagnostic(cause, context) {
   const field = cause?.diagnostic?.field;
   const constraint = cause?.diagnostic?.constraint;
-  const candidate = Object.freeze({
-    ...context,
-    field,
-    constraint,
-  });
+  const candidate = Object.freeze({ ...context, field, constraint });
   return isOutputDiagnostic(candidate)
     ? candidate
     : Object.freeze({
@@ -300,8 +233,8 @@ function bootstrapOutputContextFor(role, schema, checkpoint) {
 }
 
 function invalidRoleOutput(message, context, diagnostic) {
-  return new PlanExecutionWorkflowError(message, {
-    code: "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+  return new PolishingWorkflowError(message, {
+    code: "ERR_INVALID_POLISHING_OUTPUT",
     diagnostic: outputDiagnostic({ diagnostic }, context),
   });
 }
@@ -314,23 +247,19 @@ function persistedOutputDiagnostic(value) {
 
 function normalizeRoleOutput(normalize, output, context) {
   try {
-    if (
-      !isRecord(output) ||
-      Object.keys(output).length !== 1 ||
-      !isRecord(output.result)
-    ) {
+    if (!isRecord(output)) {
       throw invalidRoleOutput(
-        "Structured bootstrap role result must contain one result object.",
+        "Structured bootstrap role result must be an object.",
         context,
-        { field: "result", constraint: "single-object-wrapper" },
+        { field: "result", constraint: "single-object" },
       );
     }
-    return normalize(output.result);
+    return normalize(output);
   } catch (cause) {
-    if (cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT") {
+    if (cause?.code !== "ERR_INVALID_POLISHING_OUTPUT") {
       throw cause;
     }
-    throw new PlanExecutionWorkflowError(
+    throw new PolishingWorkflowError(
       "Structured bootstrap role result violates its contract.",
       {
         code: cause.code,
@@ -420,7 +349,7 @@ function normalizeValidationMigrationArbitrationOutput(output) {
   return result;
 }
 
-export async function runPlanExecution({ action, run, runtime, settings }) {
+export async function runPolishing({ action, run, runtime, settings }) {
   assertRun(run);
   assertRuntime(runtime);
   const resumeAction = normalizeResumeAction(action);
@@ -438,9 +367,18 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
     return normalizedCounters(currentRun.counters);
   }
 
-  function resolvedContext() {
-    const summary = state().resolvedSummary;
-    return summary === null ? "" : `Resolved bootstrap context:\n${summary}`;
+  function workContext({ includePolishSummary = false } = {}) {
+    const current = state();
+    return [
+      current.resolvedSummary === null
+        ? ""
+        : `Resolved bootstrap context:\n${current.resolvedSummary}`,
+      includePolishSummary && current.polishSummary !== null
+        ? `Worker polishing summary:\n${current.polishSummary}`
+        : "",
+    ]
+      .filter((part) => part.length > 0)
+      .join("\n\n");
   }
 
   function trustedValidationInstructions() {
@@ -453,6 +391,66 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
     return `Runner-trusted validation commands selected before agent work:
 ${JSON.stringify(commands, null, 2)}
 Include every listed command exactly once in requiredChecks. Do not execute these commands in an agent turn. During finalization, return NOT_RUN for only these checks with evidence that each is reserved for the runner; the runner will execute their persisted exact vectors outside the agent turn.`;
+  }
+
+  function assertTrustedValidationInventory(result) {
+    if (
+      state().trustedValidation.commands.some(
+        ({ command }) =>
+          !result.requiredChecks.some(
+            (required) => required.command === command,
+          ),
+      )
+    ) {
+      throw workflowError(
+        "Bootstrap validation inventory omits a runner-trusted command.",
+        "ERR_INVALID_POLISHING_OUTPUT",
+      );
+    }
+    return result;
+  }
+
+  function clearedWorkState(current, { clearBootstrap = false } = {}) {
+    return {
+      ...current,
+      ...(clearBootstrap
+        ? {
+            workerSummary: null,
+            reviewerSummary: null,
+            workerValidation: null,
+            reviewerValidation: null,
+            resolvedSummary: null,
+            bootstrapDisagreement: null,
+            bootstrapArbitrationUsed: false,
+            pendingBootstrapCorrection: null,
+            requiredChecks: null,
+            validationInfrastructure: null,
+            validationInfrastructureFingerprint: null,
+            validationMigrationPending: false,
+            validationMigrationDisagreement: null,
+          }
+        : {}),
+      polishSummary: null,
+      finalizationResult: null,
+      finalizedFingerprint: null,
+      reviewResult: null,
+      reviewedFingerprint: null,
+      findings: [],
+      previousFindings: [],
+      pendingDisputes: [],
+      disputeCounts: {},
+      disputeHistory: [],
+      findingArbitrations: [],
+      correctionHistory: [],
+      sameFindingRounds: {},
+      pendingCorrection: false,
+      blockedSinceStagnation: 0,
+      stagnationArbitrationUsed: false,
+      stagnationDirection: null,
+      reviewReconsideration: [],
+      additionalFixRounds: clearBootstrap ? 0 : current.additionalFixRounds,
+      findingOverrides: [],
+    };
   }
 
   async function transition(
@@ -470,7 +468,11 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       pause,
       pipelineState: nextPipelineState,
     };
-    assertRun({ ...currentRun, ...patch });
+    assertRun({
+      ...currentRun,
+      ...patch,
+      revision: currentRun.revision + 1,
+    });
     currentRun = await runtime.transition(patch, { activity: publicActivity });
     assertRun(currentRun);
     return currentRun;
@@ -483,35 +485,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         pause: { ...details, reason },
         publicActivity: activity(
           "runner",
-          "plan-execution",
+          "polishing",
           "paused",
-          `Plan execution paused: ${reason}.`,
-        ),
-      },
-    );
-    return currentRun;
-  }
-
-  async function pausePreEffectCommitRejection(rejection) {
-    const reason =
-      rejection.recoverable ? "backend_unavailable" : "commit_failed";
-    await transition(
-      {
-        ...state(),
-        workflowState: "WAITING_FOR_USER",
-        pendingCommit: null,
-      },
-      {
-        pause: {
-          reason,
-          code: rejection.code,
-          resumeState: "COMMIT",
-        },
-        publicActivity: activity(
-          "runner",
-          "commit",
-          "authorization-retired",
-          `Commit authorization retired before effect: ${reason}.`,
+          `Polishing paused: ${reason}.`,
         ),
       },
     );
@@ -519,18 +495,18 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
   }
 
   async function fail(cause) {
-    const code = diagnosticCode(cause, "ERR_PLAN_EXECUTION_FAILED");
+    const code = diagnosticCode(cause, "ERR_POLISHING_FAILED");
     const diagnostic =
-      cause?.code === "ERR_INVALID_PLAN_EXECUTION_OUTPUT"
+      cause?.code === "ERR_INVALID_POLISHING_OUTPUT"
         ? persistedOutputDiagnostic(cause.diagnostic)
         : undefined;
     const diagnosticClass = adapterDiagnosticClass(cause);
     const message =
       diagnostic !== undefined
-        ? `Plan execution failed: ${code} (${diagnostic.role}/${diagnostic.phase} ${diagnostic.field}: ${diagnostic.constraint}).`
+        ? `Polishing failed: ${code} (${diagnostic.role}/${diagnostic.phase} ${diagnostic.field}: ${diagnostic.constraint}).`
         : diagnosticClass === undefined
-          ? `Plan execution failed: ${code}.`
-          : `Plan execution failed: ${code} (${diagnosticClass}).`;
+          ? `Polishing failed: ${code}.`
+          : `Polishing failed: ${code} (${diagnosticClass}).`;
     try {
       await transition(
         { ...state(), workflowState: "FAILED" },
@@ -543,7 +519,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           },
           publicActivity: activity(
             "runner",
-            "plan-execution",
+            "polishing",
             "failed",
             message,
           ),
@@ -553,57 +529,14 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     throw cause;
   }
 
-  async function invalidateInputs(
-    reason,
-    {
-      code,
-      message = "Plan-execution input changed outside an authorized window.",
-      phase = "inputs",
-    } = {},
-  ) {
-    const current = state();
+  async function invalidateInputs(reason, message) {
     await transition(
       {
-        ...current,
+        ...clearedWorkState(state(), { clearBootstrap: true }),
         workflowState: "WAITING_FOR_USER",
         clarificationFrozen: false,
         pendingEdit: null,
-        workerSummary: null,
-        reviewerSummary: null,
-        workerValidation: null,
-        reviewerValidation: null,
-        resolvedSummary: null,
-        bootstrapDisagreement: null,
-        bootstrapArbitrationUsed: false,
-        pendingBootstrapCorrection: null,
-        compatibilityCheckRequired: false,
-        currentStep: null,
-        reviewerStep: null,
-        implementationDirection: null,
-        finalizationResult: null,
-        finalizedFingerprint: null,
-        requiredChecks: null,
-        validationInfrastructure: null,
-        validationInfrastructureFingerprint: null,
-        validationMigrationPending: false,
-        reviewResult: null,
-        reviewedFingerprint: null,
-        findings: [],
-        previousFindings: [],
-        pendingDisputes: [],
-        disputeCounts: {},
-        disputeHistory: [],
-        findingArbitrations: [],
-        correctionHistory: [],
-        sameFindingRounds: {},
-        pendingCorrection: false,
-        blockedSinceStagnation: 0,
-        stagnationArbitrationUsed: false,
-        stagnationDirection: null,
-        reviewReconsideration: [],
-        additionalFixRounds: 0,
-        findingOverrides: [],
-        pendingCommit: null,
+        refreezeRequired: false,
       },
       {
         nextCounters: {
@@ -611,37 +544,35 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           fixRounds: 0,
           correctionRounds: 0,
         },
-        pause: { reason, ...(code === undefined ? {} : { code }) },
-        publicActivity: activity("runner", phase, "changed", message),
+        pause: { reason },
+        publicActivity: activity("runner", "inputs", "changed", message),
       },
     );
     return currentRun;
   }
 
   async function readInputs() {
-    const inputs = normalizeInputSnapshot(
+    return normalizeInputSnapshot(
       await runtime.readInputs({ taskPath: currentRun.taskPath }),
       currentRun.taskPath,
     );
-    return Object.freeze({
-      inputs,
-      canonicalPlan: canonicalPlan(inputs.plan.content),
-    });
   }
 
   async function readCurrentInputs() {
-    let input;
+    let inputs;
     try {
-      input = await readInputs();
+      inputs = await readInputs();
     } catch (cause) {
       if (
-        !INPUT_DRIFT_ERROR_CODES.has(cause?.code) &&
-        cause?.code !== INVALID_EXECUTION_INPUT_CODE &&
-        cause?.code !== "ERR_INVALID_EXECUTION_PLAN"
+        !INPUT_DRIFT_CODES.has(cause?.code) &&
+        cause?.code !== INVALID_POLISHING_INPUT_CODE
       ) {
         throw cause;
       }
-      await invalidateInputs("task_input_changed");
+      await invalidateInputs(
+        "task_input_changed",
+        "Polishing task input changed outside an authorized window.",
+      );
       return null;
     }
     let clarification;
@@ -651,34 +582,39 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         transcriptPath: state().clarificationPath,
       });
     } catch (cause) {
-      if (!INPUT_DRIFT_ERROR_CODES.has(cause?.code)) {
+      if (
+        !INPUT_DRIFT_CODES.has(cause?.code) &&
+        !cause?.code?.startsWith("ERR_CLARIFICATION")
+      ) {
         throw cause;
       }
-      await invalidateInputs("clarifications_changed");
-      return null;
-    }
-    const nextHashes = {
-      task: input.inputs.task.hash,
-      plan: input.inputs.plan.hash,
-      taskClarifications: input.inputs.taskClarifications?.hash ?? null,
-      context: input.inputs.context?.hash ?? null,
-      executionClarifications: clarification.hash,
-    };
-    const changedField = Object.keys(nextHashes).find(
-      (field) => currentRun.hashes[field] !== nextHashes[field],
-    );
-    if (
-      changedField !== undefined ||
-      input.canonicalPlan !== state().canonicalPlan
-    ) {
       await invalidateInputs(
-        changedField === "executionClarifications"
-          ? "clarifications_changed"
-          : "task_input_changed",
+        "clarifications_changed",
+        "Polishing clarification changed outside an authorized window.",
       );
       return null;
     }
-    return Object.freeze({ ...input, clarification });
+    const nextHashes = {
+      task: inputs.task.hash,
+      taskClarifications: inputs.taskClarifications?.hash ?? null,
+      context: inputs.context?.hash ?? null,
+      executionClarifications: clarification.hash,
+    };
+    const changed = Object.keys(nextHashes).find(
+      (field) => nextHashes[field] !== currentRun.hashes[field],
+    );
+    if (changed !== undefined) {
+      await invalidateInputs(
+        changed === "executionClarifications"
+          ? "clarifications_changed"
+          : "task_input_changed",
+        changed === "executionClarifications"
+          ? "Polishing clarification changed outside an authorized window."
+          : "Polishing task input changed outside an authorized window.",
+      );
+      return null;
+    }
+    return Object.freeze({ inputs, clarification });
   }
 
   async function verifyPersistedRepository() {
@@ -703,13 +639,13 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     if (typeof sessionId !== "string" || sessionId.length === 0) {
       throw workflowError(
         `${role} returned no session ID.`,
-        "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+        "ERR_INVALID_POLISHING_OUTPUT",
       );
     }
     if (sessionId === currentRun.sessionLineage.source) {
       throw workflowError(
         `${role} returned the source session ID instead of a child session.`,
-        "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+        "ERR_INVALID_POLISHING_OUTPUT",
       );
     }
     if (sessionId === continuedSessionId) {
@@ -722,9 +658,20 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     ) {
       throw workflowError(
         `${role} returned an existing session ID for a fresh turn.`,
-        "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+        "ERR_INVALID_POLISHING_OUTPUT",
       );
     }
+    assertRun({
+      ...currentRun,
+      revision: currentRun.revision + 1,
+      sessionLineage: {
+        ...currentRun.sessionLineage,
+        children: [
+          ...currentRun.sessionLineage.children,
+          { role, sessionId, contextKey },
+        ],
+      },
+    });
     currentRun = await runtime.recordChildSession(
       { role, sessionId, contextKey },
       {
@@ -746,9 +693,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         currentRun.sessionLineage.source,
       );
     } catch (cause) {
-      throw new PlanExecutionWorkflowError(`${role} backend is unavailable.`, {
+      throw new PolishingWorkflowError(`${role} backend is unavailable.`, {
         cause,
-        code: "ERR_PLAN_EXECUTION_BACKEND_UNAVAILABLE",
+        code: "ERR_POLISHING_BACKEND_UNAVAILABLE",
       });
     }
     await transition(
@@ -800,28 +747,32 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       access = "read-only",
       checkpoint,
       recoveryContext = "",
+      reportWorkspaceChange = false,
     } = {},
   ) {
     const outputContext = bootstrapOutputContextFor(role, schema, checkpoint);
     await ensureRoleCapabilities(role);
     const evidence = await readCurrentInputs();
-    if (evidence === null) {
+    if (evidence === null || !(await verifyPersistedRepository())) {
       return null;
     }
     const baseline = state().repositoryBaseline;
-    if (!(await verifyPersistedRepository())) {
-      return null;
-    }
     const turnSnapshot = await runtime.git.snapshot({
-      allowedPaths: [],
+      allowedPaths: baseline.allowedPaths,
       projectPath: baseline.projectPath,
     });
     const evidenceContext = inputEvidence(
       evidence.inputs,
-      evidence.canonicalPlan,
       evidence.clarification,
     );
-    const context = durableContext(evidenceContext, recoveryContext);
+    const checkpointContext =
+      checkpoint === "clarification"
+        ? recoveryContext
+        : durableContext(
+            `Change-set fingerprint before this turn:\n${turnSnapshot.contentFingerprint}`,
+            recoveryContext,
+          );
+    const context = durableContext(evidenceContext, checkpointContext);
     const contextKey = contextKeyFor(role, checkpoint, evidenceContext);
     const latestSession = [...currentRun.sessionLineage.children]
       .reverse()
@@ -837,13 +788,13 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         : sourceSession !== null && role !== "arbiter"
           ? { id: sourceSession, mode: "fork" }
           : undefined;
-    const roleConfiguration = currentRun.roles[role];
+    const configuration = currentRun.roles[role];
     const recoveryPrompt = rolePrompt(buildPrompt(context));
     const executionPreferences = Object.fromEntries(
       ["profile", "model", "contextSize"].flatMap((field) =>
-        typeof roleConfiguration[field] === "string" &&
-        roleConfiguration[field] !== "current"
-          ? [[field, roleConfiguration[field]]]
+        typeof configuration[field] === "string" &&
+        configuration[field] !== "current"
+          ? [[field, configuration[field]]]
           : [],
       ),
     );
@@ -864,13 +815,14 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     const turn = activeTurn(role, state().workflowState);
     currentRun = await runtime.startAgentTurn(turn);
     assertRun(currentRun);
+    let nextRepositoryBaseline;
     try {
       try {
         response = await runtime.adapters[role].run(request);
       } catch (cause) {
         agentError = cause;
       }
-      let nextRepositoryBaseline = baseline;
+      nextRepositoryBaseline = baseline;
       if (access === "read-only") {
         await runtime.git.assertUnchanged(turnSnapshot);
         await runtime.git.assertUnchanged(baseline);
@@ -887,22 +839,22 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           await pause(reason);
           return null;
         }
-      }
-      if ((await readCurrentInputs()) === null) {
-        return null;
-      }
-      if (access !== "read-only") {
-        const current = state();
-        const changedCorrection =
-          current.workflowState === "RESOLVE_FINDINGS" &&
-          turnSnapshot.contentFingerprint !==
-            nextRepositoryBaseline.contentFingerprint;
-        if (
-          changedCorrection ||
-          !isDeepStrictEqual(nextRepositoryBaseline, baseline)
-        ) {
+        const contentChanged =
+          baseline.contentFingerprint !==
+          nextRepositoryBaseline.contentFingerprint;
+        const workspaceChanged = [
+          "clean",
+          "trackedContentFingerprint",
+          "untrackedContentFingerprint",
+          "contentFingerprint",
+          "indexFingerprint",
+        ].some((field) => baseline[field] !== nextRepositoryBaseline[field]);
+        if (workspaceChanged) {
+          const current = state();
+          const contentChangingCorrection =
+            contentChanged && current.workflowState === "RESOLVE_FINDINGS";
           await transition(
-            changedCorrection
+            contentChangingCorrection
               ? {
                   ...current,
                   workflowState: "FINALIZE",
@@ -922,17 +874,30 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
               : {
                   ...current,
                   repositoryBaseline: nextRepositoryBaseline,
+                  ...(contentChanged
+                    ? {
+                        finalizationResult: null,
+                        finalizedFingerprint: null,
+                        reviewResult: null,
+                        reviewedFingerprint: null,
+                        findings: [],
+                        reviewReconsideration: [],
+                      }
+                    : {}),
                 },
-            changedCorrection
+            contentChangingCorrection
               ? {
                   nextCounters: {
                     ...counters(),
                     fixRounds: counters().fixRounds + 1,
                   },
                 }
-              : {},
+              : undefined,
           );
         }
+      }
+      if ((await readCurrentInputs()) === null) {
+        return null;
       }
     } finally {
       currentRun = await runtime.finishAgentTurn(turn);
@@ -950,13 +915,16 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       }
       throw agentError;
     }
-    if (!isRecord(response)) {
+    if (!isRecord(response) || !isRecord(response.structured)) {
       throw outputContext === undefined
         ? workflowError(
-            `${role} returned no response.`,
-            "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+            `${role} returned no structured result.`,
+            "ERR_INVALID_POLISHING_OUTPUT",
           )
-        : invalidRoleOutput(`${role} returned no response.`, outputContext);
+        : invalidRoleOutput(
+            `${role} returned no structured result.`,
+            outputContext,
+          );
     }
     await recordSession(
       role,
@@ -964,18 +932,14 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       previousSession,
       contextKey,
     );
-    if (!isRecord(response.structured)) {
-      throw outputContext === undefined
-        ? workflowError(
-            `${role} returned no structured result.`,
-            "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
-          )
-        : invalidRoleOutput(
-            `${role} returned no structured result.`,
-            outputContext,
-          );
-    }
-    return response.structured;
+    return reportWorkspaceChange
+      ? Object.freeze({
+          output: response.structured,
+          workspaceChanged:
+            baseline.contentFingerprint !==
+            nextRepositoryBaseline.contentFingerprint,
+        })
+      : response.structured;
   }
 
   async function persistEdit(
@@ -1018,13 +982,14 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     );
   }
 
-  async function prepareEdit(action, suspendedState, reason, options) {
+  async function prepareEdit(actionName, suspendedState, reason, options) {
     return runtime.clarifications.prepareEdit({
       artifactRoot: state().repositoryBaseline.projectPath,
       transcriptPath: state().clarificationPath,
-      expectedHash: options?.expectedHash ?? currentRun.hashes.executionClarifications,
+      expectedHash:
+        options?.expectedHash ?? currentRun.hashes.executionClarifications,
       suspendedState,
-      action,
+      action: actionName,
       persistPendingEdit: (authorization) =>
         persistEdit(authorization, reason, options),
     });
@@ -1052,9 +1017,12 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     const productDecision = result.action === "product-decision";
     const bootstrapDecision =
       productDecision && result.suspendedState === "BOOTSTRAP";
+    const resumedState = bootstrapDecision
+      ? clearedWorkState(current, { clearBootstrap: true })
+      : current;
     await transition(
       {
-        ...current,
+        ...resumedState,
         workflowState: result.suspendedState,
         pendingEdit: null,
         proactiveClarificationComplete:
@@ -1062,19 +1030,16 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
             ? true
             : current.proactiveClarificationComplete,
         clarificationFrozen: false,
-        workerSummary: bootstrapDecision ? null : current.workerSummary,
-        reviewerSummary: bootstrapDecision ? null : current.reviewerSummary,
-        resolvedSummary: bootstrapDecision ? null : current.resolvedSummary,
+        refreezeRequired: bootstrapDecision,
+        workerSummary: bootstrapDecision ? null : resumedState.workerSummary,
+        reviewerSummary: bootstrapDecision ? null : resumedState.reviewerSummary,
+        resolvedSummary: bootstrapDecision ? null : resumedState.resolvedSummary,
         bootstrapDisagreement: bootstrapDecision
           ? null
-          : current.bootstrapDisagreement,
+          : resumedState.bootstrapDisagreement,
         bootstrapArbitrationUsed: bootstrapDecision
           ? false
-          : current.bootstrapArbitrationUsed,
-        compatibilityCheckRequired:
-          productDecision &&
-          ["BOOTSTRAP", "IMPLEMENT"].includes(result.suspendedState),
-        currentStep: bootstrapDecision ? null : current.currentStep,
+          : resumedState.bootstrapArbitrationUsed,
       },
       {
         nextHashes: {
@@ -1092,9 +1057,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     );
   }
 
-  async function requestEdit(action, suspendedState, reason, options) {
+  async function requestEdit(actionName, suspendedState, reason, options) {
     const authorization = await prepareEdit(
-      action,
+      actionName,
       suspendedState,
       reason,
       options,
@@ -1105,7 +1070,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     if (editorResult.status === "WAITING_FOR_USER") {
       return false;
     }
-    return editorResult.result.changed || action === "proactive-clarification";
+    return editorResult.result.changed || actionName === "proactive-clarification";
   }
 
   async function resumeEdit() {
@@ -1120,15 +1085,14 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
   }
 
   async function productDecision(decision, suspendedState) {
-    const count = counters().productDecisions + 1;
+    const number = counters().productDecisions + 1;
     const transcript = await runtime.clarifications.appendProductDecision({
       artifactRoot: state().repositoryBaseline.projectPath,
       transcriptPath: state().clarificationPath,
       expectedHash: currentRun.hashes.executionClarifications,
-      number: count,
+      number,
       ...decision,
     });
-    const current = state();
     const bootstrapDecision = suspendedState === "BOOTSTRAP";
     return requestEdit(
       "product-decision",
@@ -1148,55 +1112,20 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           rationale: decision.whyBlocked,
         },
         nextPipelineState: {
-          ...current,
+          ...clearedWorkState(state(), { clearBootstrap: bootstrapDecision }),
           clarificationFrozen: false,
-          workerSummary: bootstrapDecision ? null : current.workerSummary,
-          reviewerSummary: bootstrapDecision ? null : current.reviewerSummary,
-          workerValidation: bootstrapDecision ? null : current.workerValidation,
-          reviewerValidation: bootstrapDecision
-            ? null
-            : current.reviewerValidation,
-          resolvedSummary: bootstrapDecision ? null : current.resolvedSummary,
-          bootstrapDisagreement: bootstrapDecision
-            ? null
-            : current.bootstrapDisagreement,
-          bootstrapArbitrationUsed: bootstrapDecision
-            ? false
-            : current.bootstrapArbitrationUsed,
-          compatibilityCheckRequired: false,
-          currentStep: bootstrapDecision ? null : current.currentStep,
-          implementationDirection: null,
-          finalizationResult: null,
-          finalizedFingerprint: null,
-          requiredChecks: bootstrapDecision ? null : current.requiredChecks,
-          validationInfrastructure: bootstrapDecision
-            ? null
-            : current.validationInfrastructure,
-          validationInfrastructureFingerprint: bootstrapDecision
-            ? null
-            : current.validationInfrastructureFingerprint,
-          validationMigrationPending: bootstrapDecision
-            ? false
-            : current.validationMigrationPending,
-          reviewResult: null,
-          reviewedFingerprint: null,
-          findings: [],
-          previousFindings:
-            current.findings.length === 0
-              ? current.previousFindings
-              : current.findings,
-          pendingDisputes: [],
-          disputeCounts: {},
-          disputeHistory: [],
-          findingArbitrations: [],
-          sameFindingRounds: {},
-          pendingCorrection: false,
-          blockedSinceStagnation: 0,
-          stagnationArbitrationUsed: false,
-          stagnationDirection: null,
-          reviewReconsideration: [],
+          refreezeRequired: false,
+          resolvedSummary: null,
+          bootstrapDisagreement: null,
+          bootstrapArbitrationUsed: false,
         },
-        nextCounters: { ...counters(), productDecisions: count },
+        nextCounters: {
+          ...counters(),
+          productDecisions: number,
+          ...(bootstrapDecision
+            ? { fixRounds: 0, correctionRounds: 0 }
+            : {}),
+        },
         nextHashes: {
           ...currentRun.hashes,
           executionClarifications: transcript.hash,
@@ -1211,36 +1140,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     );
   }
 
-  async function pauseForPlanRevision(result) {
-    return pause("plan_revision_required", {
-      explanation: result.reason,
-      evidence: result.evidence,
-    });
-  }
-
   async function writeContext(path, content) {
     await runtime.writeRunArtifact({ path, content: `${content.trim()}\n` });
-  }
-
-  function planStep() {
-    return parseCommitPlan(state().canonicalPlan).steps[state().currentStep - 1];
-  }
-
-  function fixBudget() {
-    return state().settings.maxFixRoundsPerStep + state().additionalFixRounds;
-  }
-
-  function activeBlockers() {
-    if (state().finalizationResult?.status === "FAIL") {
-      return state().finalizationResult.issues.map((issue) => ({
-        ...issue,
-        source: "finalization",
-      }));
-    }
-    return state().findings.map((finding) => ({
-      ...finding,
-      source: "review",
-    }));
   }
 
   async function contentFingerprint() {
@@ -1318,13 +1219,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         );
       }
     }
-    const resolvedInventory =
-      ["READY", "RESOLVED"].includes(result.status) ||
-      ["USE_WORKER", "USE_REVIEWER", "SYNTHESIZE"].includes(
-        result.direction,
-      );
     if (
-      resolvedInventory &&
       state().trustedValidation.commands.some(
         ({ command }) =>
           !result.requiredChecks.some(
@@ -1351,6 +1246,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     recoveryContext = "",
     buildPrompt,
     normalize,
+    deferCorrectionClear = false,
   }) {
     const context = bootstrapOutputContextFor(role, schema, checkpoint);
     while (true) {
@@ -1374,7 +1270,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           normalize(output),
           context,
         );
-        if (correction !== undefined) {
+        if (correction !== undefined && !deferCorrectionClear) {
           await transition({
             ...state(),
             pendingBootstrapCorrection: null,
@@ -1383,7 +1279,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         return result;
       } catch (cause) {
         if (
-          cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT" ||
+          cause?.code !== "ERR_INVALID_POLISHING_OUTPUT" ||
           !isOutputDiagnostic(cause.diagnostic)
         ) {
           throw cause;
@@ -1420,6 +1316,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       state().workerValidation,
       state().reviewerValidation,
     );
+    assertTrustedValidationInventory(result);
     return {
       requiredChecks: result.requiredChecks,
       validationInfrastructure: result.validationInfrastructure,
@@ -1445,7 +1342,6 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       findings: [],
       pendingDisputes: [],
       reviewReconsideration: [],
-      pendingCommit: null,
     };
   }
 
@@ -1458,35 +1354,26 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     ) {
       return false;
     }
-    const verifyConsumedCommit =
-      current.pendingCommit?.status === "consumed" &&
-      (["commit_failed", "commit_contract_violated"].includes(
-        currentRun.pause?.reason,
-      ) || currentRun.pause?.resumeState === "COMMIT");
-    const resumeImplementation =
-      currentRun.pause?.resumeState === "IMPLEMENT" &&
+    const resumePolishing =
+      currentRun.pause?.resumeState === "POLISH" &&
       current.finalizationResult === null;
     const additionalFixRounds =
       resumeAction?.type === "extra-fix-rounds"
         ? current.additionalFixRounds + resumeAction.amount
         : current.additionalFixRounds;
     await transition(
-      verifyConsumedCommit
-        ? { ...current, workflowState: "COMMIT", additionalFixRounds }
-        : {
-            ...invalidatedLegacyValidation(current),
-            workflowState: resumeImplementation ? "IMPLEMENT" : "FINALIZE",
-            additionalFixRounds,
-          },
+      {
+        ...invalidatedLegacyValidation(current),
+        workflowState: resumePolishing ? "POLISH" : "FINALIZE",
+        additionalFixRounds,
+      },
       {
         pause: null,
         publicActivity: activity(
           "runner",
           "migration",
           "validation-invalidated",
-          verifyConsumedCommit
-            ? "Legacy commit authorization retained for verification."
-            : "Legacy validation evidence invalidated before resume.",
+          "Legacy validation evidence invalidated before resume.",
         ),
       },
     );
@@ -1498,7 +1385,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       role,
       schema: BOOTSTRAP_SCHEMA,
       checkpoint: "validation-migration",
-      recoveryContext: resolvedContext(),
+      recoveryContext: workContext({ includePolishSummary: true }),
       buildPrompt: (evidence) => `${BOOTSTRAP_INSTRUCTIONS}
 
 This is a versioned-state migration checkpoint. Treat every persisted legacy check, path, fingerprint, and aggregate validation result as provisional. Independently rediscover the complete current validation inventory from repository evidence before work can advance.
@@ -1542,6 +1429,8 @@ ${evidence}`,
       {
         ...state(),
         ...validation,
+        pendingBootstrapCorrection: null,
+        validationMigrationDisagreement: null,
       },
       {
         publicActivity: activity(
@@ -1560,7 +1449,7 @@ ${evidence}`,
       role: "worker",
       schema: BOOTSTRAP_RECONCILIATION_SCHEMA,
       checkpoint: "validation-migration",
-      recoveryContext: resolvedContext(),
+      recoveryContext: workContext({ includePolishSummary: true }),
       buildPrompt: (evidence) => `${BOOTSTRAP_RECONCILIATION_INSTRUCTIONS}
 
 Reconcile only the independently rediscovered validation requirements. Legacy validation evidence is provisional and must not be selected.
@@ -1588,11 +1477,30 @@ ${JSON.stringify(
     if (result.status === "RESOLVED") {
       return completeValidationMigration("worker");
     }
+    await transition(
+      {
+        ...state(),
+        validationMigrationDisagreement: result.disagreement,
+      },
+      {
+        publicActivity: activity(
+          "worker",
+          "migration",
+          "validation-disagreement",
+          "Validation migration disagreement requires arbitration.",
+        ),
+      },
+    );
+    return true;
+  }
+
+  async function arbitrateValidationMigration() {
     const arbitration = await runBootstrapContract({
       role: "arbiter",
       schema: BOOTSTRAP_ARBITRATION_SCHEMA,
       checkpoint: "validation-migration",
-      recoveryContext: resolvedContext(),
+      recoveryContext: workContext({ includePolishSummary: true }),
+      deferCorrectionClear: true,
       buildPrompt: (evidence) => `${BOOTSTRAP_ARBITRATION_INSTRUCTIONS}
 
 Resolve only this validation-inventory migration disagreement. Legacy validation evidence is provisional and must not be selected.
@@ -1604,7 +1512,7 @@ ${PRODUCT_DECISION_INSTRUCTIONS}
 ${evidence}
 
 Recorded disagreement:
-${JSON.stringify(result.disagreement, null, 2)}
+${JSON.stringify(state().validationMigrationDisagreement, null, 2)}
 
 Independent validation evidence:
 ${JSON.stringify(
@@ -1629,6 +1537,9 @@ ${JSON.stringify(
     }
     if (state().reviewerValidation === null) {
       return rediscoverValidationRole("reviewer");
+    }
+    if (state().validationMigrationDisagreement !== null) {
+      return arbitrateValidationMigration();
     }
     return reconcileValidationMigration();
   }
@@ -1682,92 +1593,337 @@ ${JSON.stringify(
     return Object.freeze({ required: false, skillPath: null });
   }
 
+  function fixBudget() {
+    return state().settings.maxFixRounds + state().additionalFixRounds;
+  }
+
+  function activeBlockers() {
+    if (state().finalizationResult?.status === "FAIL") {
+      return state().finalizationResult.issues.map((issue) => ({
+        ...issue,
+        source: "finalization",
+      }));
+    }
+    return state().findings.map((finding) => ({
+      ...finding,
+      source: "review",
+    }));
+  }
+
+  function priorFindingDecisions(ids) {
+    const wanted = ids === undefined ? null : new Set(ids);
+    const includes = ({ findingId }) =>
+      wanted === null || wanted.has(findingId);
+    return {
+      disputes: state().disputeHistory.filter(includes),
+      arbitrations: state().findingArbitrations.filter(includes),
+      overrides: state().findingOverrides.filter(includes),
+    };
+  }
+
+  function latestFindingEntries(entries) {
+    const byFinding = new Map();
+    for (const entry of entries) {
+      byFinding.delete(entry.findingId);
+      byFinding.set(entry.findingId, entry);
+    }
+    return [...byFinding.values()];
+  }
+
+  function compactFindingDecisions(
+    current,
+    updates = {},
+    { additionalDisputeHistory = [], overflowCode } = {},
+  ) {
+    const next = { ...current, ...updates };
+    const disputeCounts = { ...next.disputeCounts };
+    let disputeHistory = [...next.disputeHistory];
+    let findingArbitrations = latestFindingEntries(next.findingArbitrations);
+    let findingOverrides = latestFindingEntries(next.findingOverrides);
+    const protectedIds = new Set([
+      ...next.findings.map(({ id }) => id),
+      ...next.previousFindings.map(({ id }) => id),
+      ...next.pendingDisputes.map(({ findingId }) => findingId),
+      ...next.reviewReconsideration,
+    ]);
+    const recordedIds = new Set([
+      ...protectedIds,
+      ...disputeHistory.map(({ findingId }) => findingId),
+      ...findingArbitrations.map(({ findingId }) => findingId),
+      ...findingOverrides.map(({ findingId }) => findingId),
+    ]);
+    for (const findingId of Object.keys(disputeCounts)) {
+      if (!recordedIds.has(findingId)) {
+        delete disputeCounts[findingId];
+      }
+    }
+    const orderedIds = [
+      ...new Set([
+        ...Object.keys(disputeCounts),
+        ...disputeHistory.map(({ findingId }) => findingId),
+        ...findingArbitrations.map(({ findingId }) => findingId),
+        ...findingOverrides.map(({ findingId }) => findingId),
+      ]),
+    ];
+    const historyCapacity = disputeHistoryCapacity(next.settings);
+    const capacityExceeded = () =>
+      orderedIds.length > MAX_DIAGNOSTIC_ITEMS ||
+      Object.keys(disputeCounts).length > MAX_DIAGNOSTIC_ITEMS ||
+      disputeHistory.length + additionalDisputeHistory.length >
+        historyCapacity ||
+      !disputeHistoryFits([
+        ...disputeHistory,
+        ...additionalDisputeHistory,
+      ]) ||
+      findingArbitrations.length > MAX_DIAGNOSTIC_ITEMS ||
+      findingOverrides.length > MAX_DIAGNOSTIC_ITEMS;
+    while (capacityExceeded()) {
+      const removableIndex = orderedIds.findIndex(
+        (findingId) => !protectedIds.has(findingId),
+      );
+      if (removableIndex === -1) {
+        throw workflowError(
+          overflowCode === "ERR_INVALID_POLISHING_OUTPUT"
+            ? "Polishing dispute evidence exceeds its durable history limit."
+            : "Polishing finding-decision capacity is exhausted.",
+          overflowCode,
+        );
+      }
+      const [findingId] = orderedIds.splice(removableIndex, 1);
+      delete disputeCounts[findingId];
+      disputeHistory = disputeHistory.filter(
+        (entry) => entry.findingId !== findingId,
+      );
+      findingArbitrations = findingArbitrations.filter(
+        (entry) => entry.findingId !== findingId,
+      );
+      findingOverrides = findingOverrides.filter(
+        (entry) => entry.findingId !== findingId,
+      );
+    }
+    return {
+      disputeCounts,
+      disputeHistory,
+      findingArbitrations,
+      findingOverrides,
+    };
+  }
+
   function correctionUpdate({ fingerprint, finalizationIssueIds, findingIds }) {
     const current = state();
-    const currentCounters = counters();
     if (!current.pendingCorrection) {
       return Object.freeze({
-        counters: currentCounters,
+        counters: counters(),
         history: current.correctionHistory,
         sameFindingRounds: current.sameFindingRounds,
         blockedSinceStagnation: current.blockedSinceStagnation,
       });
     }
-    const correctionRounds = currentCounters.correctionRounds + 1;
+    const correctionRounds = counters().correctionRounds + 1;
+    const findingSet = new Set(findingIds);
+    const sameFindingRounds = Object.fromEntries(
+      findingIds.map((id) => [id, (current.sameFindingRounds[id] ?? 0) + 1]),
+    );
+    for (const id of Object.keys(current.sameFindingRounds)) {
+      if (!findingSet.has(id)) {
+        delete sameFindingRounds[id];
+      }
+    }
     return Object.freeze({
-      counters: {
-        ...currentCounters,
-        correctionRounds,
-      },
+      counters: { ...counters(), correctionRounds },
       history: [
         ...current.correctionHistory,
-        {
-          round: correctionRounds,
-          fingerprint,
-          finalizationIssueIds,
-          findingIds,
-        },
+        { round: correctionRounds, fingerprint, finalizationIssueIds, findingIds },
       ].slice(-MAX_DIAGNOSTIC_ITEMS),
-      sameFindingRounds: Object.fromEntries(
-        findingIds.map((id) => [id, (current.sameFindingRounds[id] ?? 0) + 1]),
-      ),
+      sameFindingRounds,
       blockedSinceStagnation: current.blockedSinceStagnation + 1,
     });
   }
 
-  function exhaustedStableFindingIds() {
-    return state().findings
-      .map(({ id }) => id)
-      .filter(
-        (id) =>
-          (state().sameFindingRounds[id] ?? 0) >=
-          state().settings.maxSameFindingRounds,
+  async function completeIfReady() {
+    const current = state();
+    if (
+      current.finalizationResult?.status !== "PASS" ||
+      current.findings.length !== 0 ||
+      current.pendingDisputes.length !== 0 ||
+      current.finalizedFingerprint === null ||
+      current.reviewedFingerprint !== current.finalizedFingerprint
+    ) {
+      return false;
+    }
+    if ((await contentFingerprint()) !== current.finalizedFingerprint) {
+      await transition({
+        ...current,
+        workflowState: "FINALIZE",
+        finalizationResult: null,
+        finalizedFingerprint: null,
+        reviewResult: null,
+        reviewedFingerprint: null,
+        previousFindings: current.previousFindings,
+        pendingCorrection: true,
+      });
+      return false;
+    }
+    if (!(await verifyPersistedRepository())) {
+      return false;
+    }
+    await transition(
+      { ...current, workflowState: "DONE" },
+      {
+        publicActivity: activity(
+          "runner",
+          "polishing",
+          "completed",
+          "Polishing completed with finalized, reviewed, uncommitted changes.",
+        ),
+      },
+    );
+    return true;
+  }
+
+  async function applyResumeAction() {
+    if (resumeAction === null) {
+      return;
+    }
+    const current = state();
+    if (current.workflowState !== "WAITING_FOR_USER" || current.pendingEdit !== null) {
+      throw workflowError("Polishing resume action is not applicable.");
+    }
+    if (resumeAction.type === "extra-fix-rounds") {
+      const additionalFixRounds =
+        current.additionalFixRounds + resumeAction.amount;
+      const totalFixRounds =
+        current.settings.maxFixRounds + additionalFixRounds;
+      if (
+        currentRun.pause.reason !== "fix_limit_reached" ||
+        !["POLISH", "RESOLVE_FINDINGS"].includes(
+          currentRun.pause.resumeState,
+        )
+      ) {
+        throw workflowError("Additional fix rounds are not applicable.");
+      }
+      if (
+        !Number.isSafeInteger(additionalFixRounds) ||
+        !Number.isSafeInteger(totalFixRounds)
+      ) {
+        throw workflowError("Additional fix-round budget is too large.");
+      }
+      await transition(
+        {
+          ...current,
+          workflowState: currentRun.pause.resumeState,
+          additionalFixRounds,
+        },
+        {
+          pause: null,
+          publicActivity: activity(
+            "runner",
+            "resolution",
+            "budget-extended",
+            `Added ${resumeAction.amount} polishing fix rounds.`,
+          ),
+        },
       );
-  }
-
-  function latestDispute(findingId) {
-    return [...state().disputeHistory]
-      .reverse()
-      .find((entry) => entry.findingId === findingId);
-  }
-
-  function priorFindingDecisions(findingIds) {
-    const relevantIds =
-      findingIds === undefined ? null : new Set(findingIds);
-    return {
-      disputes: state().disputeHistory.filter(({ findingId }) =>
-        relevantIds === null || relevantIds.has(findingId),
-      ),
-      arbitrations: state().findingArbitrations.filter(({ findingId }) =>
-        relevantIds === null || relevantIds.has(findingId),
-      ),
-    };
-  }
-
-  function disputeNeedsArbitration(dispute) {
-    const count = state().disputeCounts[dispute.findingId] ?? 0;
-    const latest = latestDispute(dispute.findingId);
-    return (
-      count >= state().settings.maxDisputesPerFinding &&
-      latest?.attempt === count &&
-      latest.direction === "UPHOLD"
+      return;
+    }
+    const finding = current.findings.find(
+      ({ id }) => id === resumeAction.findingId,
+    );
+    if (
+      finding === undefined ||
+      current.reviewedFingerprint === null ||
+      !["fix_limit_reached", "no_progress"].includes(currentRun.pause.reason)
+    ) {
+      throw workflowError("Finding override is not applicable.");
+    }
+    if (!(await verifyPersistedRepository())) {
+      return;
+    }
+    if ((await contentFingerprint()) !== current.reviewedFingerprint) {
+      await pause("unsafe_git_state", {
+        code: "ERR_OVERRIDE_FINGERPRINT_CHANGED",
+      });
+      return;
+    }
+    const findings = current.findings.filter(({ id }) => id !== finding.id);
+    const pendingDisputes = current.pendingDisputes.filter(
+      ({ findingId }) => findingId !== finding.id,
+    );
+    const findingDecisions = compactFindingDecisions(current, {
+      findings,
+      pendingDisputes,
+      findingOverrides: [
+        ...current.findingOverrides.filter(
+          ({ findingId }) => findingId !== finding.id,
+        ),
+        { findingId: finding.id, fingerprint: current.reviewedFingerprint },
+      ],
+    });
+    await transition(
+      {
+        ...current,
+        workflowState:
+          findings.length === 0 &&
+          pendingDisputes.length === 0 &&
+          current.reviewResult?.validationChange === "REJECTED"
+            ? "REVIEW"
+            : "RESOLVE_FINDINGS",
+        findings,
+        pendingDisputes,
+        ...findingDecisions,
+      },
+      {
+        pause: null,
+        publicActivity: activity(
+          "runner",
+          "resolution",
+          "finding-overridden",
+          `Finding ${finding.id} explicitly overridden.`,
+        ),
+      },
     );
   }
 
+  function assertResumeActionApplicable() {
+    if (resumeAction?.type !== "extra-fix-rounds") {
+      return;
+    }
+    const current = state();
+    const additionalFixRounds =
+      current.additionalFixRounds + resumeAction.amount;
+    const totalFixRounds =
+      (current.settings?.maxFixRounds ?? 0) + additionalFixRounds;
+    if (
+      current.workflowState !== "WAITING_FOR_USER" ||
+      current.pendingEdit !== null ||
+      currentRun.pause?.reason !== "fix_limit_reached" ||
+      !["POLISH", "RESOLVE_FINDINGS"].includes(
+        currentRun.pause?.resumeState,
+      )
+    ) {
+      throw workflowError("Additional fix rounds are not applicable.");
+    }
+    if (
+      !Number.isSafeInteger(additionalFixRounds) ||
+      !Number.isSafeInteger(totalFixRounds)
+    ) {
+      throw workflowError("Additional fix-round budget is too large.");
+    }
+  }
+
   async function initializeInputs() {
-    const input = await readInputs();
-    const discoveryOptions = {
-      allowedPaths: [],
-      projectPath: currentRun.projectPath,
-      requireClean: true,
-      requireIdentity: true,
-      requiredIgnoredPaths: [],
-    };
+    const inputs = await readInputs();
     let discovery;
     try {
-      discovery = await runtime.git.preflight(discoveryOptions);
+      discovery = await runtime.git.preflight({
+        allowedPaths: [],
+        projectPath: currentRun.projectPath,
+        requireClean: false,
+        requireIdentity: false,
+        requiredIgnoredPaths: [],
+      });
     } catch (cause) {
-      if (GIT_PREFLIGHT_CODES.has(cause?.code)) {
+      if (SAFE_PREFLIGHT_PAUSE_CODES.has(cause?.code)) {
         await pause("unsafe_git_state", { code: cause.code });
         return false;
       }
@@ -1783,6 +1939,27 @@ ${JSON.stringify(
     ) {
       throw workflowError("Git preflight returned an invalid repository root.");
     }
+    for (const input of [
+      inputs.task,
+      inputs.taskClarifications,
+      inputs.context,
+    ]) {
+      const resolvedInputPath =
+        input === null ? null : await realpath(input.path);
+      if (
+        resolvedInputPath !== null &&
+        isWithin(repositoryPath, resolvedInputPath)
+      ) {
+        const inspection = await runtime.git.inspectPath({
+          path: resolvedInputPath,
+          projectPath: repositoryPath,
+        });
+        if (inspection.changed) {
+          await pause("task_input_overlaps_changes", { path: input.path });
+          return false;
+        }
+      }
+    }
     const clarificationPath = join(
       repositoryPath,
       state().artifactRoot,
@@ -1795,8 +1972,8 @@ ${JSON.stringify(
       preflight = await runtime.git.preflight({
         allowedPaths: [clarificationPath],
         projectPath: repositoryPath,
-        requireClean: true,
-        requireIdentity: true,
+        requireClean: false,
+        requireIdentity: false,
         requiredIgnoredPaths: [clarificationPath],
       });
     } catch (cause) {
@@ -1804,7 +1981,7 @@ ${JSON.stringify(
         await pause("local_artifacts_not_ignored", { path: clarificationPath });
         return false;
       }
-      if (GIT_PREFLIGHT_CODES.has(cause?.code)) {
+      if (SAFE_PREFLIGHT_PAUSE_CODES.has(cause?.code)) {
         await pause("unsafe_git_state", { code: cause.code });
         return false;
       }
@@ -1812,6 +1989,10 @@ ${JSON.stringify(
     }
     if (preflight?.snapshot?.projectPath !== repositoryPath) {
       throw workflowError("Git preflight returned an unstable repository root.");
+    }
+    if (preflight.snapshot.clean) {
+      await pause("no_changes");
+      return false;
     }
     let workerCapabilities;
     let reviewerCapabilities;
@@ -1850,6 +2031,10 @@ ${JSON.stringify(
       {
         ...state(),
         preflightComplete: true,
+        settings:
+          state().settings === null
+            ? Object.freeze({ ...settings })
+            : state().settings,
         repositoryBaseline: preflight.snapshot,
         backendVersions: {
           worker: workerCapabilities.version,
@@ -1857,21 +2042,19 @@ ${JSON.stringify(
           arbiter: null,
         },
         clarificationPath,
-        canonicalPlan: input.canonicalPlan,
       },
       {
         nextHashes: {
-          task: input.inputs.task.hash,
-          plan: input.inputs.plan.hash,
-          taskClarifications: input.inputs.taskClarifications?.hash ?? null,
-          context: input.inputs.context?.hash ?? null,
+          task: inputs.task.hash,
+          taskClarifications: inputs.taskClarifications?.hash ?? null,
+          context: inputs.context?.hash ?? null,
           executionClarifications: clarification.hash,
         },
         publicActivity: activity(
           "runner",
           "preflight",
           "passed",
-          "Plan-execution preflight passed and inputs were recorded.",
+          "Polishing preflight passed and dirty inputs were recorded.",
         ),
       },
     );
@@ -1883,6 +2066,7 @@ ${JSON.stringify(
       role,
       schema: BOOTSTRAP_SCHEMA,
       checkpoint: "bootstrap",
+      recoveryContext: workContext(),
       buildPrompt: (evidence) => `${BOOTSTRAP_INSTRUCTIONS}${
         role === "reviewer"
           ? "\nAs Reviewer, also state what you intend to verify."
@@ -1903,10 +2087,6 @@ ${evidence}`,
     }
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "BOOTSTRAP");
-    }
-    if (result.status === "PLAN_REVISION_REQUIRED") {
-      await pauseForPlanRevision(result);
-      return false;
     }
     await writeContext(`context/${role}.md`, result.summary);
     await transition(
@@ -1935,6 +2115,7 @@ ${evidence}`,
       role: "worker",
       schema: BOOTSTRAP_RECONCILIATION_SCHEMA,
       checkpoint: "bootstrap",
+      recoveryContext: workContext(),
       buildPrompt: (evidence) => `${BOOTSTRAP_RECONCILIATION_INSTRUCTIONS}
 
 ${PRODUCT_DECISION_INSTRUCTIONS}
@@ -1956,10 +2137,6 @@ The runner will derive validation inventories from the independently accepted ro
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "BOOTSTRAP");
     }
-    if (result.status === "PLAN_REVISION_REQUIRED") {
-      await pauseForPlanRevision(result);
-      return false;
-    }
     if (result.status === "DISAGREEMENT") {
       await transition(
         { ...state(), bootstrapDisagreement: result.disagreement },
@@ -1979,17 +2156,16 @@ The runner will derive validation inventories from the independently accepted ro
     await transition(
       {
         ...state(),
-        workflowState: "IMPLEMENT",
+        workflowState: "POLISH",
         resolvedSummary: result.summary,
         ...validation,
-        currentStep: 1,
       },
       {
         publicActivity: activity(
           "worker",
           "bootstrap",
           "resolved",
-          "Bootstrap context resolved.",
+          "Bootstrap context resolved; workspace is prepared for polishing.",
         ),
       },
     );
@@ -2001,6 +2177,7 @@ The runner will derive validation inventories from the independently accepted ro
       role: "arbiter",
       schema: BOOTSTRAP_ARBITRATION_SCHEMA,
       checkpoint: "arbitration",
+      recoveryContext: workContext(),
       buildPrompt: (evidence) => `${BOOTSTRAP_ARBITRATION_INSTRUCTIONS}
 
 ${PRODUCT_DECISION_INSTRUCTIONS}
@@ -2025,21 +2202,16 @@ The runner will derive validation inventories from the independently accepted ro
     if (result.direction === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "BOOTSTRAP");
     }
-    if (result.direction === "PLAN_REVISION_REQUIRED") {
-      await pauseForPlanRevision(result);
-      return false;
-    }
     await writeContext("context/resolved.md", result.summary);
     const validation = await establishedValidation();
     await transition(
       {
         ...state(),
-        workflowState: "IMPLEMENT",
+        workflowState: "POLISH",
         resolvedSummary: result.summary,
         ...validation,
         bootstrapDisagreement: null,
         bootstrapArbitrationUsed: true,
-        currentStep: 1,
       },
       {
         publicActivity: activity(
@@ -2053,133 +2225,97 @@ The runner will derive validation inventories from the independently accepted ro
     return true;
   }
 
-  async function applyResumeAction() {
-    if (resumeAction === null) {
-      return true;
-    }
-    if (
-      state().workflowState !== "WAITING_FOR_USER" ||
-      state().pendingEdit !== null
-    ) {
-      throw workflowError("Resume action is not applicable to this run.");
-    }
-    if (
-      (await readCurrentInputs()) === null ||
-      !(await verifyPersistedRepository())
-    ) {
+  async function runPolishTurn() {
+    const current = state();
+    if (current.pendingCorrection && counters().fixRounds >= fixBudget()) {
+      await pause("fix_limit_reached", {
+        fixRounds: counters().fixRounds,
+        resumeState: "POLISH",
+      });
       return false;
     }
-    if (resumeAction.type === "extra-fix-rounds") {
-      if (
-        currentRun.pause.reason !== "fix_limit_reached" ||
-        !["IMPLEMENT", "RESOLVE_FINDINGS"].includes(
-          currentRun.pause.resumeState,
-        )
-      ) {
-        throw workflowError("Additional fix rounds are not applicable.");
-      }
-      const additionalFixRounds =
-        state().additionalFixRounds + resumeAction.amount;
-      if (
-        !Number.isSafeInteger(additionalFixRounds) ||
-        !Number.isSafeInteger(
-          state().settings.maxFixRoundsPerStep + additionalFixRounds,
-        )
-      ) {
-        throw workflowError("Additional fix-round budget is too large.");
-      }
-      await transition(
-        {
-          ...state(),
-          workflowState: currentRun.pause.resumeState,
-          additionalFixRounds,
-        },
-        {
-          pause: null,
-          publicActivity: activity(
-            "runner",
-            "resolution",
-            "extra-fix-rounds",
-            `${resumeAction.amount} additional fix rounds granted.`,
-          ),
-        },
-      );
-      return true;
-    }
-    if (
-      !["fix_limit_reached", "no_progress", "dispute_limit_reached"].includes(
-        currentRun.pause.reason,
-      ) ||
-      state().finalizationResult?.status !== "PASS" ||
-      state().reviewedFingerprint === null
-    ) {
-      throw workflowError("Finding override is not applicable.");
-    }
-    const finding = state().findings.find(
-      ({ id }) => id === resumeAction.findingId,
+    const output = await runRole(
+      "worker",
+      POLISH_SCHEMA,
+      (evidence) => `${POLISH_INSTRUCTIONS}
+
+${PRODUCT_DECISION_INSTRUCTIONS}
+
+${evidence}${
+        current.stagnationDirection?.direction === "REWORK_IMPLEMENTATION"
+          ? `\n\nStagnation Arbiter direction:\n${JSON.stringify(current.stagnationDirection, null, 2)}`
+          : ""
+      }`,
+      {
+        access: "workspace-write",
+        checkpoint: "work",
+        recoveryContext: workContext(),
+      },
     );
-    if (
-      finding === undefined ||
-      (await contentFingerprint()) !== state().reviewedFingerprint
-    ) {
-      throw workflowError("Finding override is stale or inapplicable.");
+    if (output === null) {
+      return false;
     }
-    const findings = state().findings.filter(
-      ({ id }) => id !== resumeAction.findingId,
-    );
-    const pendingDisputes = state().pendingDisputes.filter(
-      ({ findingId }) => findingId !== resumeAction.findingId,
-    );
+    const result = normalizePolishResult(output);
+    if (result.status === "PRODUCT_DECISION_REQUIRED") {
+      return productDecision(result.decision, "BOOTSTRAP");
+    }
+    if (result.status === "BLOCKED") {
+      await pause("environment_blocked", {
+        explanation: result.reason,
+        evidence: result.evidence,
+        resumeState: "POLISH",
+      });
+      return false;
+    }
     await transition(
       {
         ...state(),
-        workflowState:
-          findings.length === 0 && pendingDisputes.length === 0
-            ? state().reviewResult?.validationChange === "REJECTED"
-              ? "REVIEW"
-              : "COMMIT"
-            : "RESOLVE_FINDINGS",
-        findings,
-        pendingDisputes,
-        reviewReconsideration: state().reviewReconsideration.filter(
-          (id) => id !== resumeAction.findingId,
-        ),
-        findingOverrides: [
-          ...state().findingOverrides,
-          {
-            findingId: resumeAction.findingId,
-            fingerprint: state().reviewedFingerprint,
-          },
-        ].slice(-MAX_DIAGNOSTIC_ITEMS),
+        workflowState: "FINALIZE",
+        polishSummary: result.summary,
+        finalizationResult: null,
+        finalizedFingerprint: null,
+        reviewResult: null,
+        reviewedFingerprint: null,
+        previousFindings:
+          current.findings.length === 0
+            ? current.previousFindings
+            : current.findings,
+        findings: [],
+        pendingDisputes: [],
+        pendingCorrection: current.pendingCorrection,
+        reviewReconsideration: [],
       },
       {
-        pause: null,
+        nextCounters: current.pendingCorrection
+          ? { ...counters(), fixRounds: counters().fixRounds + 1 }
+          : counters(),
         publicActivity: activity(
-          "runner",
-          "resolution",
-          "finding-overridden",
-          `Finding ${resumeAction.findingId} explicitly overridden.`,
+          "worker",
+          "polishing",
+          "completed",
+          "Worker polishing and self-review completed.",
         ),
       },
     );
     return true;
   }
 
-  async function runImplementationTurn() {
-    const current = state();
-    const correction = current.implementationDirection !== null;
-    if (correction && counters().fixRounds >= fixBudget()) {
-      await pause("fix_limit_reached", {
-        fixRounds: counters().fixRounds,
-        resumeState: "IMPLEMENT",
-      });
+  async function runFinalizationTurn() {
+    const beforeFingerprint = await contentFingerprint();
+    const guidance = await resolveFinalizationGuidance();
+    if (guidance === null) {
       return false;
     }
-    const step = planStep();
-    const output = await runRole(
-      "worker",
-      IMPLEMENTATION_SCHEMA,
-      (evidence) => `${IMPLEMENTATION_INSTRUCTIONS}
+    async function requestFinalization(selectedGuidance) {
+      const output = await runRole(
+        "worker",
+        FINALIZATION_SCHEMA,
+        (evidence) => `${FINALIZATION_INSTRUCTIONS}
+
+${PRODUCT_DECISION_INSTRUCTIONS}
+${finalizationGuidanceInstructions(selectedGuidance)}
+
+${trustedValidationInstructions()}
 
 ${evidence}
 
@@ -2194,106 +2330,11 @@ ${JSON.stringify(
   },
   null,
   2,
-)}
-
-Current planned commit:
-## Commit ${step.number}: ${step.subject}
-
-${step.body}${
-        current.implementationDirection === null
-          ? ""
-          : `\n\nRequired rework direction:\n${JSON.stringify(current.implementationDirection, null, 2)}\n\nPersisted correction context:\n${JSON.stringify(
-              {
-                previousFindings: current.previousFindings,
-                pendingDisputes: current.pendingDisputes,
-                correctionHistory: current.correctionHistory,
-                priorDecisions: priorFindingDecisions(),
-              },
-              null,
-              2,
-            )}`
-      }`,
-      {
-        access: "workspace-write",
-        checkpoint: `commit:${current.currentStep}`,
-        recoveryContext: resolvedContext(),
-      },
-    );
-    if (output === null) {
-      return false;
-    }
-    const result = normalizeImplementationResult(output);
-    if (result.status === "PRODUCT_DECISION_REQUIRED") {
-      return productDecision(result.decision, "IMPLEMENT");
-    }
-    if (result.status === "BLOCKED") {
-      await pause("environment_blocked", {
-        explanation: result.reason,
-        evidence: result.evidence,
-        resumeState: "IMPLEMENT",
-      });
-      return false;
-    }
-    const nextCounters = correction
-      ? { ...counters(), fixRounds: counters().fixRounds + 1 }
-      : counters();
-    await transition(
-      {
-        ...state(),
-        workflowState: "FINALIZE",
-        implementationDirection: null,
-        finalizationResult: null,
-        finalizedFingerprint: null,
-        reviewResult: null,
-        reviewedFingerprint: null,
-        findings: [],
-        pendingDisputes: correction ? current.pendingDisputes : [],
-        pendingCorrection: correction,
-        reviewReconsideration: [],
-      },
-      {
-        nextCounters,
-        publicActivity: activity(
-          "worker",
-          "implementation",
-          correction ? "reworked" : "completed",
-          correction
-            ? "Implementation rework completed."
-            : "Planned implementation completed.",
-        ),
-      },
-    );
-    return true;
-  }
-
-  async function runFinalizationTurn() {
-    const step = planStep();
-    const beforeFingerprint = await contentFingerprint();
-    const guidance = await resolveFinalizationGuidance();
-    if (guidance === null) {
-      return false;
-    }
-    async function requestFinalization(selectedGuidance) {
-      const output = await runRole(
-        "worker",
-        FINALIZATION_SCHEMA,
-        (evidence) => `${FINALIZATION_INSTRUCTIONS}
-
-${finalizationGuidanceInstructions(selectedGuidance)}
-
-${trustedValidationInstructions()}
-
-${evidence}
-
-Current planned commit:
-## Commit ${step.number}: ${step.subject}
-
-${step.body}
-`,
+)}`,
         {
           access: "workspace-write",
-          checkpoint: `commit:${state().currentStep}`,
-          recoveryContext: resolvedContext(),
+          checkpoint: "work",
+          recoveryContext: workContext({ includePolishSummary: true }),
         },
       );
       if (output === null) {
@@ -2310,7 +2351,7 @@ ${step.body}
       ) {
         throw workflowError(
           "Worker returned a skill availability status without selected finalization skill guidance.",
-          "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+          "ERR_INVALID_POLISHING_OUTPUT",
         );
       }
       if (
@@ -2319,7 +2360,7 @@ ${step.body}
       ) {
         throw workflowError(
           "Worker returned a finalization result for the wrong skill path.",
-          "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+          "ERR_INVALID_POLISHING_OUTPUT",
         );
       }
       return result;
@@ -2351,7 +2392,7 @@ ${step.body}
       }
     }
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
-      return productDecision(result.decision, "IMPLEMENT");
+      return productDecision(result.decision, "BOOTSTRAP");
     }
     if (
       !["SKILL_MISSING", "SKILL_INVALID"].includes(result.status) &&
@@ -2364,7 +2405,7 @@ ${step.body}
     ) {
       throw workflowError(
         "Worker omitted a runner-trusted finalization command.",
-        "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+        "ERR_INVALID_POLISHING_OUTPUT",
       );
     }
     if (result.status === "BLOCKED") {
@@ -2453,9 +2494,7 @@ ${step.body}
         ) {
           throw cause;
         }
-        await pause("unsafe_git_state", {
-          code: cause.code,
-        });
+        await pause("unsafe_git_state", { code: cause.code });
         return false;
       }
       const completedValidationFingerprint =
@@ -2545,7 +2584,6 @@ ${step.body}
           reviewResult: null,
           reviewedFingerprint: null,
           findings: [],
-          pendingDisputes: state().pendingDisputes,
           correctionHistory: correction.history,
           sameFindingRounds: correction.sameFindingRounds,
           pendingCorrection: false,
@@ -2573,7 +2611,6 @@ ${step.body}
         reviewResult: null,
         reviewedFingerprint: null,
         findings: [],
-        pendingDisputes: state().pendingDisputes,
         reviewReconsideration: [],
       },
       {
@@ -2592,22 +2629,26 @@ ${step.body}
     const current = state();
     const fingerprint = await contentFingerprint();
     if (fingerprint !== current.finalizedFingerprint) {
-      throw workflowError("Finalized content changed before review.");
+      await transition({
+        ...current,
+        workflowState: "FINALIZE",
+        finalizationResult: null,
+        finalizedFingerprint: null,
+        reviewResult: null,
+        reviewedFingerprint: null,
+        findings: [],
+        pendingCorrection: true,
+      });
+      return true;
     }
-    const step = planStep();
     const output = await runRole(
       "reviewer",
       REVIEW_SCHEMA,
       (evidence) => `${REVIEW_INSTRUCTIONS}
 
-Reuse an existing ID for an unchanged finding. Use FINDINGS with every actionable blocker.
+${PRODUCT_DECISION_INSTRUCTIONS}
 
 ${evidence}
-
-Current planned commit:
-## Commit ${step.number}: ${step.subject}
-
-${step.body}
 
 Established validation tuple:
 ${JSON.stringify(
@@ -2628,20 +2669,20 @@ ${JSON.stringify(
 Candidate validation tuple and finalization evidence:
 ${JSON.stringify(current.finalizationResult, null, 2)}
 
-The Reviewer must return ACCEPTED only when any validation inventory or infrastructure change is authorized by this planned commit and remains complete; return REJECTED with a finding for evasive, omitted, substituted, or weakened validation. Return UNCHANGED only when finalizationResult.validationChanged is false.
+The Reviewer must return ACCEPTED only when any validation inventory or infrastructure change is authorized by the task and remains complete; return REJECTED with a finding for evasive, omitted, substituted, or weakened validation. Return UNCHANGED only when finalizationResult.validationChanged is false.
 
-Previous findings for this step:
+Previous findings:
 ${JSON.stringify(current.previousFindings, null, 2)}${
         current.reviewReconsideration.length === 0
           ? ""
           : `\n\nReconsider these current finding IDs as requested by the Arbiter:\n${current.reviewReconsideration.join(", ")}`
       }
 
-Prior decisions for this step:
+Prior decisions:
 ${JSON.stringify(priorFindingDecisions(), null, 2)}`,
       {
-        checkpoint: `commit:${current.currentStep}`,
-        recoveryContext: resolvedContext(),
+        checkpoint: "review",
+        recoveryContext: workContext({ includePolishSummary: true }),
       },
     );
     if (output === null) {
@@ -2649,7 +2690,7 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}`,
     }
     const result = normalizeReviewResult(output, current.previousFindings);
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
-      return productDecision(result.decision, "IMPLEMENT");
+      return productDecision(result.decision, "BOOTSTRAP");
     }
     const reviewedFingerprint = await contentFingerprint();
     if (reviewedFingerprint !== fingerprint) {
@@ -2665,7 +2706,7 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}`,
     ) {
       throw workflowError(
         "Reviewer returned an inconsistent validation-change decision.",
-        "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+        "ERR_INVALID_POLISHING_OUTPUT",
       );
     }
     const reviewResult = {
@@ -2680,22 +2721,15 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}`,
         finalizationIssueIds: [],
         findingIds: result.findings.map(({ id }) => id),
       });
-      const pendingDisputes = result.findings.flatMap(({ id }) => {
-        const latest = latestDispute(id);
-        return latest?.direction === "UPHOLD" &&
-          latest.attempt === current.disputeCounts[id] &&
-          current.disputeCounts[id] >= current.settings.maxDisputesPerFinding &&
-          !current.findingArbitrations.some(
-            ({ findingId }) => findingId === id,
-          )
-          ? [
-              {
-                findingId: id,
-                reason: latest.workerReason,
-                evidence: latest.workerEvidence,
-              },
-            ]
-          : [];
+      const findingIds = new Set(result.findings.map(({ id }) => id));
+      const pendingDisputes = current.pendingDisputes.filter(({ findingId }) =>
+        findingIds.has(findingId),
+      );
+      const findingDecisions = compactFindingDecisions(current, {
+        findings: result.findings,
+        previousFindings: result.findings,
+        pendingDisputes,
+        reviewReconsideration: [],
       });
       await transition(
         {
@@ -2716,11 +2750,11 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}`,
           findings: result.findings,
           previousFindings: result.findings,
           pendingDisputes,
+          ...findingDecisions,
           correctionHistory: correction.history,
           sameFindingRounds: correction.sameFindingRounds,
           pendingCorrection: false,
           blockedSinceStagnation: correction.blockedSinceStagnation,
-          reviewerStep: current.currentStep,
           reviewReconsideration: [],
         },
         {
@@ -2735,10 +2769,16 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}`,
       );
       return true;
     }
+    const findingDecisions = compactFindingDecisions(current, {
+      findings: [],
+      previousFindings: [],
+      pendingDisputes: [],
+      reviewReconsideration: [],
+    });
     await transition(
       {
         ...state(),
-        workflowState: "COMMIT",
+        workflowState: "RESOLVE_FINDINGS",
         ...(result.validationChange === "ACCEPTED"
           ? {
               requiredChecks: current.finalizationResult.requiredChecks,
@@ -2754,8 +2794,8 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}`,
         findings: [],
         previousFindings: [],
         pendingDisputes: [],
+        ...findingDecisions,
         pendingCorrection: false,
-        reviewerStep: current.currentStep,
         reviewReconsideration: [],
       },
       {
@@ -2763,7 +2803,7 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}`,
           "reviewer",
           "review",
           "approved",
-          "Review approved the finalized content.",
+          "Independent review approved the finalized content.",
         ),
       },
     );
@@ -2772,50 +2812,38 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}`,
 
   async function reconsiderDisputes() {
     const current = state();
-    const disputedFindings =
-      current.findings.length === 0
-        ? current.previousFindings.filter((finding) =>
-            current.pendingDisputes.some(
-              ({ findingId }) => findingId === finding.id,
-            ),
-          )
-        : current.findings;
     const output = await runRole(
       "reviewer",
       DISPUTE_RECONSIDERATION_SCHEMA,
       (evidence) => `${DISPUTE_RECONSIDERATION_INSTRUCTIONS}
 
+${PRODUCT_DECISION_INSTRUCTIONS}
+
 ${evidence}
 
 Current findings:
-${JSON.stringify(disputedFindings, null, 2)}
+${JSON.stringify(current.findings, null, 2)}
 
 Worker disputes:
 ${JSON.stringify(current.pendingDisputes, null, 2)}`,
       {
-        checkpoint: `commit:${current.currentStep}`,
-        recoveryContext: resolvedContext(),
+        checkpoint: "review",
+        recoveryContext: workContext({ includePolishSummary: true }),
       },
     );
     if (output === null) {
       return false;
     }
-    const result = normalizeReconsiderationResult(
-      output,
-      current.pendingDisputes,
-    );
+    const result = normalizeReconsiderationResult(output, current.pendingDisputes);
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
-      return productDecision(result.decision, "IMPLEMENT");
+      return productDecision(result.decision, "BOOTSTRAP");
     }
     const decisions = new Map(
       result.decisions.map((decision) => [decision.findingId, decision]),
     );
-    const reviewPending =
-      current.reviewedFingerprint === null ||
-      current.reviewResult?.validationChange === "REJECTED";
-    const findings = disputedFindings.filter((finding) => {
-      return decisions.get(finding.id)?.direction !== "WITHDRAW";
-    });
+    const findings = current.findings.filter(
+      ({ id }) => decisions.get(id)?.direction !== "WITHDRAW",
+    );
     const pendingDisputes = current.pendingDisputes.filter((dispute) => {
       const decision = decisions.get(dispute.findingId);
       return (
@@ -2824,7 +2852,7 @@ ${JSON.stringify(current.pendingDisputes, null, 2)}`,
           current.settings.maxDisputesPerFinding
       );
     });
-    const history = [
+    const disputeHistory = [
       ...current.disputeHistory,
       ...current.pendingDisputes.map((dispute) => {
         const decision = decisions.get(dispute.findingId);
@@ -2838,18 +2866,22 @@ ${JSON.stringify(current.pendingDisputes, null, 2)}`,
           reviewerEvidence: decision.evidence,
         };
       }),
-    ].slice(-MAX_DIAGNOSTIC_ITEMS);
+    ];
+    const findingDecisions = compactFindingDecisions(
+      current,
+      {
+        findings,
+        pendingDisputes,
+        disputeHistory,
+      },
+      { overflowCode: "ERR_INVALID_POLISHING_OUTPUT" },
+    );
     await transition(
       {
         ...current,
-        workflowState: reviewPending
-          ? "REVIEW"
-          : findings.length === 0 && pendingDisputes.length === 0
-            ? "COMMIT"
-            : "RESOLVE_FINDINGS",
-        findings: reviewPending ? [] : findings,
-        pendingDisputes: reviewPending ? [] : pendingDisputes,
-        disputeHistory: history,
+        findings,
+        pendingDisputes,
+        ...findingDecisions,
       },
       {
         publicActivity: activity(
@@ -2865,10 +2897,10 @@ ${JSON.stringify(current.pendingDisputes, null, 2)}`,
 
   async function arbitrateFinding(dispute) {
     const current = state();
-    const finding = current.findings.find(
-      ({ id }) => id === dispute.findingId,
-    );
-    const reviewerResponse = latestDispute(dispute.findingId);
+    const finding = current.findings.find(({ id }) => id === dispute.findingId);
+    const reviewerResponse = [...current.disputeHistory]
+      .reverse()
+      .find(({ findingId }) => findingId === dispute.findingId);
     const output = await runRole(
       "arbiter",
       FINDING_ARBITRATION_SCHEMA,
@@ -2887,11 +2919,11 @@ ${JSON.stringify(dispute, null, 2)}
 Reviewer response:
 ${JSON.stringify(reviewerResponse, null, 2)}
 
-Prior decisions for this finding:
+Prior decisions:
 ${JSON.stringify(priorFindingDecisions([dispute.findingId]), null, 2)}`,
       {
         checkpoint: "arbitration",
-        recoveryContext: resolvedContext(),
+        recoveryContext: workContext({ includePolishSummary: true }),
       },
     );
     if (output === null) {
@@ -2899,7 +2931,7 @@ ${JSON.stringify(priorFindingDecisions([dispute.findingId]), null, 2)}`,
     }
     const result = normalizeFindingArbitration(output);
     if (result.direction === "REQUIREMENT_AMBIGUOUS") {
-      return productDecision(result.decision, "IMPLEMENT");
+      return productDecision(result.decision, "BOOTSTRAP");
     }
     const findings =
       result.direction === "WORKER_CORRECT"
@@ -2908,25 +2940,30 @@ ${JSON.stringify(priorFindingDecisions([dispute.findingId]), null, 2)}`,
     const pendingDisputes = current.pendingDisputes.filter(
       ({ findingId }) => findingId !== dispute.findingId,
     );
+    const findingDecisions = compactFindingDecisions(current, {
+      findings,
+      pendingDisputes,
+      findingArbitrations: [
+        ...current.findingArbitrations,
+        {
+          findingId: dispute.findingId,
+          direction: result.direction,
+          rationale: result.rationale,
+        },
+      ],
+    });
     await transition(
       {
         ...state(),
         workflowState:
-          findings.length === 0 && pendingDisputes.length === 0
-            ? current.reviewResult?.validationChange === "REJECTED"
-              ? "REVIEW"
-              : "COMMIT"
-            : "RESOLVE_FINDINGS",
+          findings.length === 0 &&
+          pendingDisputes.length === 0 &&
+          current.reviewResult?.validationChange === "REJECTED"
+            ? "REVIEW"
+            : state().workflowState,
         findings,
         pendingDisputes,
-        findingArbitrations: [
-          ...current.findingArbitrations,
-          {
-            findingId: dispute.findingId,
-            direction: result.direction,
-            rationale: result.rationale,
-          },
-        ].slice(-MAX_DIAGNOSTIC_ITEMS),
+        ...findingDecisions,
       },
       {
         publicActivity: activity(
@@ -2948,15 +2985,12 @@ ${JSON.stringify(priorFindingDecisions([dispute.findingId]), null, 2)}`,
       (evidence) => `${STAGNATION_INSTRUCTIONS}
 
 ${PRODUCT_DECISION_INSTRUCTIONS}
-Do not modify the repository. This result cannot approve the implementation or satisfy review.
-Name only current Reviewer finding IDs for RECONSIDER_FINDINGS.
 
 ${evidence}
 
-Current blockers and compact correction history:
+Current blockers and correction history:
 ${JSON.stringify(
   {
-    currentStep: current.currentStep,
     finalizationResult: current.finalizationResult,
     findings: current.findings,
     pendingDisputes: current.pendingDisputes,
@@ -2967,7 +3001,7 @@ ${JSON.stringify(
 )}`,
       {
         checkpoint: "arbitration",
-        recoveryContext: resolvedContext(),
+        recoveryContext: workContext({ includePolishSummary: true }),
       },
     );
     if (output === null) {
@@ -2975,66 +3009,33 @@ ${JSON.stringify(
     }
     const result = normalizeStagnationResult(output, current);
     if (result.direction === "PRODUCT_DECISION_REQUIRED") {
-      return productDecision(result.decision, "IMPLEMENT");
+      return productDecision(result.decision, "BOOTSTRAP");
     }
-    if (result.direction === "PLAN_REVISION_REQUIRED") {
-      await pauseForPlanRevision(result);
-      return false;
-    }
-    const direction = {
-      direction: result.direction,
-      rationale: result.rationale,
-    };
+    const direction = { direction: result.direction, rationale: result.rationale };
     if (result.direction === "REWORK_IMPLEMENTATION") {
-      const nextState = {
-        ...state(),
-        implementationDirection: direction,
-        finalizationResult: null,
-        finalizedFingerprint: null,
-        reviewResult: null,
-        reviewedFingerprint: null,
-        previousFindings:
-          current.findings.length === 0
-            ? current.previousFindings
-            : current.findings,
-        findings: [],
-        pendingDisputes: current.pendingDisputes,
-        pendingCorrection: false,
-        blockedSinceStagnation: 0,
-        stagnationArbitrationUsed: true,
-        stagnationDirection: direction,
-        reviewReconsideration: [],
-      };
-      if (counters().fixRounds >= fixBudget()) {
-        await transition(
-          { ...nextState, workflowState: "WAITING_FOR_USER" },
-          {
-            pause: {
-              reason: "fix_limit_reached",
-              fixRounds: counters().fixRounds,
-              resumeState: "IMPLEMENT",
-            },
-            publicActivity: activity(
-              "runner",
-              "resolution",
-              "paused",
-              "Plan execution paused: fix_limit_reached.",
-            ),
-          },
-        );
-        return false;
-      }
       await transition(
         {
-          ...nextState,
-          workflowState: "IMPLEMENT",
+          ...current,
+          workflowState: "POLISH",
+          finalizationResult: null,
+          finalizedFingerprint: null,
+          reviewResult: null,
+          reviewedFingerprint: null,
+          previousFindings: current.findings,
+          findings: [],
+          pendingDisputes: [],
+          pendingCorrection: true,
+          blockedSinceStagnation: 0,
+          stagnationArbitrationUsed: true,
+          stagnationDirection: direction,
+          reviewReconsideration: [],
         },
         {
           publicActivity: activity(
             "arbiter",
             "resolution",
-            "rework-implementation",
-            "Stagnation Arbiter requested implementation rework.",
+            "rework-polishing",
+            "Stagnation Arbiter requested full polishing rework.",
           ),
         },
       );
@@ -3043,7 +3044,7 @@ ${JSON.stringify(
     if (result.direction === "RECONSIDER_FINDINGS") {
       await transition(
         {
-          ...state(),
+          ...current,
           workflowState: "REVIEW",
           blockedSinceStagnation: 0,
           stagnationArbitrationUsed: true,
@@ -3063,7 +3064,7 @@ ${JSON.stringify(
     }
     await transition(
       {
-        ...state(),
+        ...current,
         blockedSinceStagnation: 0,
         stagnationArbitrationUsed: true,
         stagnationDirection: direction,
@@ -3082,10 +3083,24 @@ ${JSON.stringify(
 
   async function runResolutionTurn() {
     const current = state();
-    if (current.finalizationResult?.status === "PASS") {
-      const arbitration = current.pendingDisputes.find(
-        disputeNeedsArbitration,
-      );
+    if (current.findings.length === 0 && current.finalizationResult?.status === "PASS") {
+      if (await completeIfReady()) {
+        return false;
+      }
+      return true;
+    }
+    if (current.finalizationResult?.status !== "FAIL") {
+      const arbitration = current.pendingDisputes.find(({ findingId }) => {
+        const latest = [...current.disputeHistory]
+          .reverse()
+          .find((entry) => entry.findingId === findingId);
+        return (
+          current.disputeCounts[findingId] >=
+            current.settings.maxDisputesPerFinding &&
+          latest?.attempt === current.disputeCounts[findingId] &&
+          latest.direction === "UPHOLD"
+        );
+      });
       if (arbitration !== undefined) {
         return arbitrateFinding(arbitration);
       }
@@ -3093,7 +3108,13 @@ ${JSON.stringify(
         return reconsiderDisputes();
       }
     }
-    const stableFindingIds = exhaustedStableFindingIds();
+    const stableFindingIds = current.findings
+      .filter(
+        ({ id }) =>
+          (current.sameFindingRounds[id] ?? 0) >=
+          current.settings.maxSameFindingRounds,
+      )
+      .map(({ id }) => id);
     if (stableFindingIds.length > 0) {
       await pause("no_progress", {
         findingIds: stableFindingIds,
@@ -3103,8 +3124,7 @@ ${JSON.stringify(
       return false;
     }
     if (
-      current.blockedSinceStagnation >=
-      current.settings.stagnationWindowRounds
+      current.blockedSinceStagnation >= current.settings.stagnationWindowRounds
     ) {
       if (current.stagnationArbitrationUsed) {
         await pause("no_progress", {
@@ -3118,19 +3138,28 @@ ${JSON.stringify(
     }
     const budgetExhausted = counters().fixRounds >= fixBudget();
     const blockers = activeBlockers();
-    const disputableFindingIds = new Set(
-      current.findings
+    const blockerIds = new Set(blockers.map(({ id }) => id));
+    const nonDisputableIds = new Set([
+      ...current.findingArbitrations
         .filter(
-          ({ id }) =>
-            !current.findingArbitrations.some(
-              (entry) =>
-                entry.findingId === id &&
-                entry.direction === "REVIEWER_CORRECT",
-            ),
+          ({ findingId, direction }) =>
+            blockerIds.has(findingId) && direction === "REVIEWER_CORRECT",
         )
-        .map(({ id }) => id),
-    );
-    if (budgetExhausted && disputableFindingIds.size === 0) {
+        .map(({ findingId }) => findingId),
+      ...Object.entries(current.disputeCounts)
+        .filter(
+          ([findingId, count]) =>
+            blockerIds.has(findingId) &&
+            count >= current.settings.maxDisputesPerFinding,
+        )
+        .map(([findingId]) => findingId),
+    ]);
+    if (
+      budgetExhausted &&
+      blockers.every(
+        ({ id }) => id.startsWith("F") || nonDisputableIds.has(id),
+      )
+    ) {
       await pause("fix_limit_reached", {
         fixRounds: counters().fixRounds,
         resumeState: "RESOLVE_FINDINGS",
@@ -3138,59 +3167,52 @@ ${JSON.stringify(
       return false;
     }
     const beforeFingerprint = await contentFingerprint();
-    const output = await runRole(
+    const turn = await runRole(
       "worker",
       FINDING_RESOLUTION_SCHEMA,
-      (evidence) => `${FINDING_RESOLUTION_INSTRUCTIONS}
-
-Finalization failures must be fixed and cannot be disputed. A finding already upheld by the Arbiter must be fixed.${
+      (evidence) => `${FINDING_RESOLUTION_INSTRUCTIONS}${
         budgetExhausted
-          ? "\nThe fix budget is exhausted: do not modify the repository and return DISPUTE only where supported by evidence; a required FIX will pause for additional budget."
+          ? "\nThe fix budget is exhausted: do not modify the repository and return DISPUTE only where valid; a required FIX will pause for additional budget."
           : ""
       }
+
+${PRODUCT_DECISION_INSTRUCTIONS}
 
 ${evidence}
 
 Current blockers:
 ${JSON.stringify(blockers, null, 2)}${
+        nonDisputableIds.size === 0
+          ? ""
+          : `\n\nThese finding IDs cannot be disputed and must be fixed:\n${[
+              ...nonDisputableIds,
+            ].join(", ")}`
+      }${
         current.stagnationDirection?.direction === "CONTINUE_FIXES"
           ? `\n\nStagnation Arbiter direction:\n${JSON.stringify(current.stagnationDirection, null, 2)}`
           : ""
       }
 
-Prior decisions for these blockers:
-${JSON.stringify(
-  priorFindingDecisions(blockers.map(({ id }) => id)),
-  null,
-  2,
-)}`,
+Prior decisions:
+${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`,
       {
         access: budgetExhausted ? "read-only" : "workspace-write",
-        checkpoint: `commit:${current.currentStep}`,
-        recoveryContext: resolvedContext(),
+        checkpoint: "work",
+        recoveryContext: workContext({ includePolishSummary: true }),
+        reportWorkspaceChange: true,
       },
     );
-    if (output === null) {
+    if (turn === null) {
       return false;
     }
+    const { output, workspaceChanged } = turn;
     const result = normalizeResolutionResult(
       output,
       blockers,
-      new Set(
-        [
-          ...current.findingArbitrations
-            .filter(({ direction }) => direction === "REVIEWER_CORRECT")
-            .map(({ findingId }) => findingId),
-          ...Object.entries(current.disputeCounts)
-            .filter(
-              ([, count]) => count >= current.settings.maxDisputesPerFinding,
-            )
-            .map(([findingId]) => findingId),
-        ],
-      ),
+      nonDisputableIds,
     );
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
-      return productDecision(result.decision, "IMPLEMENT");
+      return productDecision(result.decision, "BOOTSTRAP");
     }
     if (result.status === "BLOCKED") {
       await pause("environment_blocked", {
@@ -3203,27 +3225,49 @@ ${JSON.stringify(
       });
       return false;
     }
-    if (
-      budgetExhausted &&
-      result.decisions.some(({ decision }) => decision === "FIX")
-    ) {
-      const disputes = result.decisions
-        .filter(({ decision }) => decision === "DISPUTE")
-        .map((decision) => ({
-          findingId: decision.id,
-          reason: decision.reason,
-          evidence: decision.evidence,
-        }));
-      const disputeCounts = { ...current.disputeCounts };
-      for (const { findingId } of disputes) {
-        disputeCounts[findingId] = (disputeCounts[findingId] ?? 0) + 1;
-      }
+    const requiresFix = result.decisions.some(({ decision }) => decision === "FIX");
+    const newDisputes = result.decisions
+      .filter(({ decision }) => decision === "DISPUTE")
+      .map((decision) => ({
+        findingId: decision.id,
+        reason: decision.reason,
+        evidence: decision.evidence,
+      }));
+    const pendingDisputes =
+      current.finalizationResult?.status === "FAIL"
+        ? current.pendingDisputes
+        : newDisputes;
+    const disputeCounts = { ...current.disputeCounts };
+    for (const { findingId } of newDisputes) {
+      disputeCounts[findingId] = (disputeCounts[findingId] ?? 0) + 1;
+    }
+    const reservedDisputeHistory = newDisputes.map((dispute) => ({
+      findingId: dispute.findingId,
+      attempt: disputeCounts[dispute.findingId],
+      direction: "UPHOLD",
+      workerReason: dispute.reason,
+      workerEvidence: dispute.evidence,
+      reviewerReason: ".",
+      reviewerEvidence: [],
+    }));
+    const findingDecisions = compactFindingDecisions(
+      current,
+      {
+        pendingDisputes,
+        disputeCounts,
+      },
+      {
+        additionalDisputeHistory: reservedDisputeHistory,
+        overflowCode: "ERR_INVALID_POLISHING_OUTPUT",
+      },
+    );
+    if (budgetExhausted && requiresFix) {
       await transition(
         {
           ...state(),
           workflowState: "WAITING_FOR_USER",
-          pendingDisputes: disputes,
-          disputeCounts,
+          pendingDisputes,
+          ...findingDecisions,
         },
         {
           pause: {
@@ -3233,37 +3277,26 @@ ${JSON.stringify(
           },
           publicActivity: activity(
             "runner",
-            "resolution",
+            "polishing",
             "paused",
-            "Plan execution paused: fix_limit_reached.",
+            "Polishing paused: fix_limit_reached.",
           ),
         },
       );
       return false;
     }
     const changed = (await contentFingerprint()) !== beforeFingerprint;
-    const correction =
-      changed || result.decisions.some(({ decision }) => decision === "FIX");
-    if (correction) {
-      const newDisputes = result.decisions
-        .filter(({ decision }) => decision === "DISPUTE")
-        .map((decision) => ({
-          findingId: decision.id,
-          reason: decision.reason,
-          evidence: decision.evidence,
-        }));
-      const disputes = [
-        ...new Map(
-          [...current.pendingDisputes, ...newDisputes].map((dispute) => [
-            dispute.findingId,
-            dispute,
-          ]),
-        ).values(),
-      ];
-      const disputeCounts = { ...current.disputeCounts };
-      for (const { findingId } of newDisputes) {
-        disputeCounts[findingId] = (disputeCounts[findingId] ?? 0) + 1;
+    if (workspaceChanged) {
+      if (newDisputes.length > 0) {
+        await transition({
+          ...state(),
+          pendingDisputes,
+          ...findingDecisions,
+        });
       }
+      return true;
+    }
+    if (requiresFix || changed) {
       await transition(
         {
           ...state(),
@@ -3277,372 +3310,52 @@ ${JSON.stringify(
               ? current.previousFindings
               : current.findings,
           findings: [],
-          pendingDisputes: disputes,
-          disputeCounts,
+          pendingDisputes,
+          ...findingDecisions,
           pendingCorrection: true,
           reviewReconsideration: [],
         },
         {
-          nextCounters: {
-            ...counters(),
-            fixRounds: counters().fixRounds + (changed ? 0 : 1),
-          },
+          nextCounters: { ...counters(), fixRounds: counters().fixRounds + 1 },
           publicActivity: activity(
             "worker",
             "resolution",
             "fixed",
-            "Worker completed a finding-resolution fix round.",
+            "Worker completed a batched blocker fix round.",
           ),
         },
       );
       return true;
     }
-    const disputes = result.decisions.map((decision) => ({
-      findingId: decision.id,
-      reason: decision.reason,
-      evidence: decision.evidence,
-    }));
-    const disputeCounts = { ...current.disputeCounts };
-    for (const { findingId } of disputes) {
-      disputeCounts[findingId] = (disputeCounts[findingId] ?? 0) + 1;
-    }
     await transition(
       {
         ...state(),
-        pendingDisputes: disputes,
-        disputeCounts,
+        pendingDisputes,
+        ...findingDecisions,
       },
       {
         publicActivity: activity(
           "worker",
           "resolution",
           "disputed",
-          `Worker disputed ${disputes.length} findings with evidence.`,
+          `Worker disputed ${newDisputes.length} findings with evidence.`,
         ),
       },
     );
     return true;
   }
 
-  async function runCommitTurn() {
-    const current = state();
-    const step = planStep();
-    let pendingCommit = current.pendingCommit;
-
-    if (pendingCommit === null) {
-      if ((await readCurrentInputs()) === null) {
-        return false;
-      }
-      const fingerprint = await contentFingerprint();
-      if (
-        fingerprint !== current.finalizedFingerprint ||
-        fingerprint !== current.reviewedFingerprint ||
-        !(await verifyPersistedRepository())
-      ) {
-        if (state().workflowState !== "WAITING_FOR_USER") {
-          await pause("unsafe_git_state", {
-            code: "ERR_COMMIT_GATE_CHANGED",
-          });
-        }
-        return false;
-      }
-      let authorization;
-      try {
-        authorization = await runtime.git.prepareCommit({
-          expectedSnapshot: current.repositoryBaseline,
-          subject: step.subject,
-          persistPendingCommit: async (preparedAuthorization) => {
-            await transition(
-              {
-                ...state(),
-                pendingCommit: {
-                  status: "prepared",
-                  authorization: preparedAuthorization,
-                  preEffectRejection: null,
-                },
-              },
-              {
-                publicActivity: activity(
-                  "runner",
-                  "commit",
-                  "authorized",
-                  `Commit ${current.currentStep} authorized.`,
-                ),
-              },
-            );
-          },
-        });
-      } catch (cause) {
-        if (cause?.code === "ERR_COMMIT_GATE_CHANGED") {
-          await pause("unsafe_git_state", { code: cause.code });
-          return false;
-        }
-        throw cause;
-      }
-      pendingCommit = {
-        status: "prepared",
-        authorization,
-        preEffectRejection: null,
-      };
-    }
-
-    let agentError;
-    const commitTurn = activeTurn("worker", "COMMIT");
-    let commitTurnNeedsReconciliation =
-      currentRun.activeTurn !== undefined &&
-      currentRun.activeTurn !== null;
-    if (
-      commitTurnNeedsReconciliation &&
-      !isDeepStrictEqual(currentRun.activeTurn, commitTurn)
-    ) {
-      throw workflowError(
-        "Persisted agent turn does not match commit verification.",
-        "ERR_INVALID_PLAN_EXECUTION_STATE",
-      );
-    }
-    async function finishCommitTurn() {
-      if (!commitTurnNeedsReconciliation) {
-        return;
-      }
-      currentRun = await runtime.finishAgentTurn(commitTurn);
-      assertRun(currentRun);
-      commitTurnNeedsReconciliation = false;
-    }
-    if (pendingCommit.status === "prepared") {
-      const previousSession = [...currentRun.sessionLineage.children]
-        .reverse()
-        .find((child) => child.role === "worker")?.sessionId;
-      let baseRequest;
-      try {
-        baseRequest = await runtime.git.consumeCommit(
-          pendingCommit.authorization,
-          {
-            consumePendingCommit: async () => {
-              await transition(
-                {
-                  ...state(),
-                  pendingCommit: {
-                    status: "consumed",
-                    authorization: pendingCommit.authorization,
-                    preEffectRejection: null,
-                  },
-                },
-                {
-                  publicActivity: activity(
-                    "runner",
-                    "commit",
-                    "started",
-                    `Commit ${current.currentStep} authorization consumed.`,
-                  ),
-                },
-              );
-            },
-          },
-        );
-      } catch (cause) {
-        if (cause?.code === "ERR_COMMIT_GATE_CHANGED") {
-          await transition(
-            {
-              ...state(),
-              workflowState: "WAITING_FOR_USER",
-              pendingCommit: null,
-            },
-            {
-              pause: { reason: "unsafe_git_state", code: cause.code },
-              publicActivity: activity(
-                "runner",
-                "commit",
-                "paused",
-                "Plan execution paused: unsafe_git_state.",
-              ),
-            },
-          );
-          return false;
-        }
-        throw cause;
-      }
-      const roleConfiguration = currentRun.roles.worker;
-      const executionPreferences = Object.fromEntries(
-        ["profile", "model", "contextSize"].flatMap((field) =>
-          typeof roleConfiguration[field] === "string" &&
-          roleConfiguration[field] !== "current"
-            ? [[field, roleConfiguration[field]]]
-            : [],
-        ),
-      );
-      const request = {
-        ...baseRequest,
-        prompt: rolePrompt(`${COMMIT_INSTRUCTIONS}
-
-Authorized planned commit:
-${step.subject}`),
-        ...executionPreferences,
-        ...(previousSession === undefined
-          ? {}
-          : { session: { id: previousSession, mode: "continue" } }),
-      };
-      currentRun = await runtime.startAgentTurn(commitTurn);
-      assertRun(currentRun);
-      commitTurnNeedsReconciliation = true;
-      try {
-        await runtime.adapters.worker.run(request);
-      } catch (cause) {
-        agentError = cause;
-      }
-      const preEffectRejection =
-        agentError?.effectStarted === false
-          ? Object.freeze({
-              code: diagnosticCode(
-                agentError,
-                "ERR_COMMIT_ADAPTER_REJECTED",
-              ),
-              recoverable: agentError?.recoverable === true,
-            })
-          : null;
-      pendingCommit = {
-        status: "consumed",
-        authorization: pendingCommit.authorization,
-        preEffectRejection,
-      };
-      if (preEffectRejection !== null) {
-        await transition(
-          { ...state(), pendingCommit },
-          {
-            publicActivity: activity(
-              "runner",
-              "commit",
-              "pre-effect-rejection-recorded",
-              `Commit ${current.currentStep} pre-effect rejection recorded.`,
-            ),
-          },
-        );
-      }
-    }
-
-    let verified;
-    try {
-      verified = await runtime.git.verifyCommit(pendingCommit.authorization);
-      await finishCommitTurn();
-    } catch (cause) {
-      if (
-        ![
-          "ERR_COMMIT_NOT_CREATED",
-          "ERR_COMMIT_CONTRACT_VIOLATED",
-        ].includes(cause?.code)
-      ) {
-        throw cause;
-      }
-      await finishCommitTurn();
-      if (
-        cause.code === "ERR_COMMIT_NOT_CREATED" &&
-        pendingCommit.preEffectRejection !== null
-      ) {
-        await pausePreEffectCommitRejection(
-          pendingCommit.preEffectRejection,
-        );
-        return false;
-      }
-      const contractViolation =
-        cause?.code === "ERR_COMMIT_CONTRACT_VIOLATED";
-      await pause(
-        contractViolation ? "commit_contract_violated" : "commit_failed",
-        {
-          code: diagnosticCode(cause, "ERR_COMMIT_FAILED"),
-          ...(Array.isArray(cause?.changes)
-            ? { changes: cause.changes }
-            : {}),
-          ...(agentError === undefined
-            ? {}
-            : {
-                adapterCode: diagnosticCode(
-                  agentError,
-                  "ERR_COMMIT_ADAPTER_FAILED",
-                ),
-              }),
-        },
-      );
-      return false;
-    }
-
-    const nextRepositoryBaseline = await runtime.git.snapshot({
-      allowedPaths: current.repositoryBaseline.allowedPaths,
-      projectPath: current.repositoryBaseline.projectPath,
-    });
-    if (
-      nextRepositoryBaseline.head !== verified.head ||
-      nextRepositoryBaseline.clean !== true
-    ) {
-      await pause("commit_contract_violated", {
-        code: "ERR_COMMIT_CONTRACT_VIOLATED",
-      });
-      return false;
-    }
-    const completedCommits = [...current.completedCommits, verified.head];
-    const stepCount = parseCommitPlan(current.canonicalPlan).steps.length;
-    const done = current.currentStep === stepCount;
-    const nextStepState = done
-      ? {}
-      : {
-          implementationDirection: null,
-          finalizationResult: null,
-          finalizedFingerprint: null,
-          reviewResult: null,
-          reviewedFingerprint: null,
-          findings: [],
-          previousFindings: [],
-          pendingDisputes: [],
-          disputeCounts: {},
-          disputeHistory: [],
-          findingArbitrations: [],
-          correctionHistory: [],
-          sameFindingRounds: {},
-          pendingCorrection: false,
-          blockedSinceStagnation: 0,
-          stagnationArbitrationUsed: false,
-          stagnationDirection: null,
-          reviewReconsideration: [],
-          additionalFixRounds: 0,
-          findingOverrides: [],
-        };
-    await transition(
-      {
-        ...state(),
-        ...nextStepState,
-        workflowState: done ? "DONE" : "IMPLEMENT",
-        validationMigrationPending:
-          done ? false : current.validationMigrationPending,
-        repositoryBaseline: nextRepositoryBaseline,
-        currentStep: done ? null : current.currentStep + 1,
-        reviewerStep: null,
-        pendingCommit: null,
-        completedCommits,
-      },
-      {
-        nextCounters: done
-          ? counters()
-          : {
-              ...counters(),
-              fixRounds: 0,
-              correctionRounds: 0,
-            },
-        publicActivity: activity(
-          "worker",
-          "commit",
-          "created",
-          `Commit ${current.currentStep} created: ${verified.head}.`,
-        ),
-      },
-    );
-    return true;
-  }
-
+  assertResumeActionApplicable();
   try {
-    if (state().settings === null) {
-      await transition({ ...state(), settings }, { pause: null });
-    }
     const resumeActionSuperseded = await prepareValidationMigrationResume();
-    if (!resumeActionSuperseded && !(await applyResumeAction())) {
+    if (["DONE", "FAILED"].includes(state().workflowState)) {
+      if (resumeAction !== null) {
+        throw workflowError("Polishing resume action is not applicable.");
+      }
       return currentRun;
+    }
+    if (resumeAction !== null && !resumeActionSuperseded) {
+      await applyResumeAction();
     }
     if (state().workflowState === "WAITING_FOR_USER") {
       if (state().pendingEdit !== null) {
@@ -3650,34 +3363,27 @@ ${step.subject}`),
           return currentRun;
         }
       } else if (
-        currentRun.pause.reason === "commit_failed" &&
-        (state().pendingCommit?.status === "consumed" ||
-          (state().pendingCommit === null &&
-            currentRun.pause.resumeState === "COMMIT"))
-      ) {
-        await transition(
-          { ...state(), workflowState: "COMMIT" },
-          { pause: null },
-        );
-      } else if (
-        RETRYABLE_PAUSE_REASONS.has(currentRun.pause.reason) &&
-        (!state().preflightComplete ||
-          ([
+        (!state().preflightComplete &&
+          [
             "backend_unavailable",
-            "environment_blocked",
-            "finalization_cannot_pass",
-            "finalization_skill_invalid",
-            "finalization_skill_missing",
-          ].includes(currentRun.pause.reason) &&
-            [
-              "CLARIFY",
-              "BOOTSTRAP",
-              "IMPLEMENT",
-              "FINALIZE",
-              "REVIEW",
-              "RESOLVE_FINDINGS",
-              "COMMIT",
-            ].includes(currentRun.pause.resumeState)))
+            "local_artifacts_not_ignored",
+            "unsafe_git_state",
+          ].includes(currentRun.pause.reason)) ||
+        ([
+          "backend_unavailable",
+          "environment_blocked",
+          "finalization_cannot_pass",
+          "finalization_skill_invalid",
+          "finalization_skill_missing",
+        ].includes(currentRun.pause.reason) &&
+          [
+            "CLARIFY",
+            "BOOTSTRAP",
+            "POLISH",
+            "FINALIZE",
+            "REVIEW",
+            "RESOLVE_FINDINGS",
+          ].includes(currentRun.pause.resumeState))
       ) {
         await transition(
           {
@@ -3692,81 +3398,22 @@ ${step.subject}`),
         return currentRun;
       }
     }
-    if (["DONE", "FAILED"].includes(state().workflowState)) {
-      return currentRun;
-    }
-    const commitVerificationPending =
-      state().workflowState === "COMMIT" &&
-      state().pendingCommit?.status === "consumed";
     if (
       state().preflightComplete &&
-      !["WAITING_FOR_USER", "FAILED", "DONE"].includes(state().workflowState) &&
-      (!commitVerificationPending &&
-        ((await readCurrentInputs()) === null ||
-          !(await verifyPersistedRepository())))
+      ((await readCurrentInputs()) === null ||
+        !(await verifyPersistedRepository()))
     ) {
       return currentRun;
     }
 
     while (true) {
       const current = state();
-
-      if (
-        current.validationMigrationPending &&
-        !(
-          current.workflowState === "COMMIT" &&
-          current.pendingCommit?.status === "consumed"
-        )
-      ) {
+      if (current.validationMigrationPending) {
         if (!(await runValidationMigration())) {
           return currentRun;
         }
         continue;
       }
-
-      if (current.compatibilityCheckRequired) {
-        const output = await runRole(
-          "worker",
-          PLAN_COMPATIBILITY_SCHEMA,
-          (evidence) => `${PLAN_COMPATIBILITY_INSTRUCTIONS}
-
-${evidence}`,
-          { checkpoint: "compatibility" },
-        );
-        if (output === null) {
-          return currentRun;
-        }
-        const result = normalizeCompatibilityResult(output);
-        if (result.status === "PLAN_REVISION_REQUIRED") {
-          return pauseForPlanRevision(result);
-        }
-        const frozen = await runtime.clarifications.freezeTranscript({
-          artifactRoot: state().repositoryBaseline.projectPath,
-          transcriptPath: state().clarificationPath,
-          expectedHash: currentRun.hashes.executionClarifications,
-        });
-        await transition(
-          {
-            ...state(),
-            clarificationFrozen: true,
-            compatibilityCheckRequired: false,
-          },
-          {
-            nextHashes: {
-              ...currentRun.hashes,
-              executionClarifications: frozen.hash,
-            },
-            publicActivity: activity(
-              "worker",
-              "clarification",
-              "compatible",
-              "Product decision remains compatible with the plan.",
-            ),
-          },
-        );
-        continue;
-      }
-
       if (current.workflowState === "CLARIFY") {
         if (!current.preflightComplete && !(await initializeInputs())) {
           return currentRun;
@@ -3799,9 +3446,6 @@ ${evidence}`,
           return currentRun;
         }
         const result = normalizeClarificationResult(output);
-        if (result.status === "PLAN_REVISION_REQUIRED") {
-          return pauseForPlanRevision(result);
-        }
         if (result.status === "PRODUCT_DECISION_REQUIRED") {
           if (!(await productDecision(result.decision, "CLARIFY"))) {
             return currentRun;
@@ -3829,7 +3473,7 @@ ${evidence}`,
                 "worker",
                 "clarification",
                 "ready",
-                "Execution clarification completed.",
+                "Polishing clarification completed.",
               ),
             },
           );
@@ -3879,6 +3523,33 @@ ${evidence}`,
       }
 
       if (current.workflowState === "BOOTSTRAP") {
+        if (current.refreezeRequired) {
+          const frozen = await runtime.clarifications.freezeTranscript({
+            artifactRoot: current.repositoryBaseline.projectPath,
+            transcriptPath: current.clarificationPath,
+            expectedHash: currentRun.hashes.executionClarifications,
+          });
+          await transition(
+            {
+              ...current,
+              clarificationFrozen: true,
+              refreezeRequired: false,
+            },
+            {
+              nextHashes: {
+                ...currentRun.hashes,
+                executionClarifications: frozen.hash,
+              },
+              publicActivity: activity(
+                "runner",
+                "clarification",
+                "refrozen",
+                "Product decision was accepted and clarification refrozen.",
+              ),
+            },
+          );
+          continue;
+        }
         if (current.workerSummary === null) {
           if (!(await bootstrapRole("worker"))) {
             return currentRun;
@@ -3903,8 +3574,8 @@ ${evidence}`,
         continue;
       }
 
-      if (current.workflowState === "IMPLEMENT") {
-        if (!(await runImplementationTurn())) {
+      if (current.workflowState === "POLISH") {
+        if (!(await runPolishTurn())) {
           return currentRun;
         }
         continue;
@@ -3918,12 +3589,6 @@ ${evidence}`,
       }
 
       if (current.workflowState === "REVIEW") {
-        if (current.pendingDisputes.length > 0) {
-          if (!(await reconsiderDisputes())) {
-            return currentRun;
-          }
-          continue;
-        }
         if (!(await runReviewTurn())) {
           return currentRun;
         }
@@ -3937,75 +3602,31 @@ ${evidence}`,
         continue;
       }
 
-      if (current.workflowState === "COMMIT") {
-        if (!(await runCommitTurn())) {
-          return currentRun;
-        }
-        continue;
-      }
-
       if (
-        [
-          "WAITING_FOR_USER",
-          "DONE",
-          "FAILED",
-        ].includes(current.workflowState)
+        ["WAITING_FOR_USER", "DONE", "FAILED"].includes(
+          current.workflowState,
+        )
       ) {
         return currentRun;
       }
-
-      throw workflowError(`Unsupported workflow state: ${current.workflowState}.`);
+      throw workflowError(`Unsupported polishing state: ${current.workflowState}.`);
     }
   } catch (cause) {
-    const preflightComplete = state().preflightComplete;
-    const causePath = cause?.path ?? cause?.cause?.path;
-    const filesystemDrift =
-      INPUT_DRIFT_ERROR_CODES.has(cause?.code) ||
-      INPUT_DRIFT_ERROR_CODES.has(cause?.cause?.code);
-    const inputPaths = [
-      join(currentRun.taskPath, "task.md"),
-      join(currentRun.taskPath, "plan.md"),
-      join(currentRun.taskPath, "clarifications.md"),
-      join(currentRun.taskPath, "context.md"),
-    ];
-    if (
-      state().workflowState === "COMMIT" &&
-      state().pendingCommit?.status === "consumed"
-    ) {
-      return pause("commit_failed", {
-        code: diagnosticCode(cause, "ERR_COMMIT_VERIFICATION_FAILED"),
-      });
-    }
     if (cause?.code === "ERR_READ_ONLY_REPOSITORY_CHANGED") {
-      return invalidateInputs("read_only_agent_mutated_repository", {
+      return pause("read_only_agent_mutated_repository", {
         code: cause.code,
-        phase: "repository",
-        message: "Repository changed during a read-only plan-execution turn.",
       });
     }
     if (
-      cause?.code === "ERR_PLAN_EXECUTION_BACKEND_UNAVAILABLE" ||
+      cause?.code === "ERR_POLISHING_BACKEND_UNAVAILABLE" ||
       cause?.recoverable === true
     ) {
       return pause("backend_unavailable", {
         code: diagnosticCode(cause, "ERR_BACKEND_UNAVAILABLE"),
-        resumeState: state().workflowState,
+        ...(state().preflightComplete
+          ? { resumeState: state().workflowState }
+          : {}),
       });
-    }
-    if (
-      preflightComplete &&
-      ([
-        "ERR_CLARIFICATIONS_CHANGED",
-        "ERR_CLARIFICATION_NOT_FOUND",
-        "ERR_INVALID_CLARIFICATION",
-        "ERR_UNSAFE_CLARIFICATION_PATH",
-      ].includes(cause?.code) ||
-        (filesystemDrift && causePath === state().clarificationPath))
-    ) {
-      return invalidateInputs("clarifications_changed");
-    }
-    if (preflightComplete && filesystemDrift && inputPaths.includes(causePath)) {
-      return invalidateInputs("task_input_changed");
     }
     return fail(cause);
   }

@@ -31,25 +31,45 @@ may change.
 ## Configuration
 
 The pipeline descriptor declares the `planner`, `reviewer`, and on-demand
-`arbiter` roles and owns these positive-integer repository settings:
+`arbiter` roles and owns these positive-integer runner settings:
 
 ```text
 maxRevisionRounds = 15
 stagnationWindowRounds = 3
 ```
 
-Values may be overridden under `pipelines.plan-authoring` in the repository's
-versioned `.agent-runner.json` contract. Role objects live under
-`pipelines.plan-authoring.roles` and may contain an optional `backend` and
-backend-specific `model`. The root runtime applies the shared precedence rules
+Values may be overridden under `pipelines.plan-authoring` in the runner's
+versioned `.agent-runner.json` contract or its safe project overlay. Role
+objects live under
+`pipelines.plan-authoring.roles` and may contain optional string `backend`,
+trusted `profile`, backend-specific `model`, and decimal `contextSize`
+selections. The root runtime applies the shared precedence rules
 documented in [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md); this
-pipeline owns only its roles, setting validation, and defaults.
+pipeline owns only its roles, setting validation, and defaults. The root loads
+an optional ignored `LOCAL_ARTIFACTS/agent-runner.json`, or an explicitly
+selected confined project file, and permits it to select only runner-trusted
+profiles and safe execution and pipeline values. CLI/MCP values win over the
+project overlay, which wins over runner-root values. Resolved roles and settings
+are persisted and not reloaded on resume.
+
+A configured runner artifact root does not affect this pipeline. Its task-owned
+`clarifications.md` and `plan.md` remain beside `task.md`.
 
 CLI overrides use `--planner`, `--reviewer`, and `--arbiter`, with corresponding
-`--planner-model`, `--reviewer-model`, and `--arbiter-model` flags. A new run may
-also use `--fork-from <backend>:<session-id>` when Planner and Plan Reviewer both
-use that backend. Their first turns fork the source independently; the Arbiter
-remains fresh and `resume` uses the persisted lineage without another flag.
+derived profile, model, and context-size flags. Run-wide `--profile`, `--model`,
+and `--context-size` defaults apply below role-specific CLI values. A new run
+may also use `--fork-from <backend>:<session-id>` and optional separate
+`--fork-profile <trusted-alias>` when Planner and Plan Reviewer match the
+source. Known source profiles supply their `current` profile; unknown source
+profiles require `current` and omit the native override. Each role's first
+eligible turn in a pipeline-owned checkpoint forks the source independently;
+the Arbiter remains fresh and independent, and `resume` uses the persisted
+lineage without another flag. MCP leaves the source unset unless the user
+deliberately selects a compatible current session after being offered a fresh
+start. It includes the known trusted profile with that choice, or offers only
+`current` inheritance when the profile is unknown. Because Planner and Plan
+Reviewer each fork the complete source context, prefer a fresh start for a
+long, multi-topic, or uncertain session.
 
 ## Persistent Run State
 
@@ -58,11 +78,17 @@ directories using the common contract in
 [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md). Its versioned envelope
 records canonical inputs, resolved Planner, Reviewer, and Arbiter configuration,
 resolved pipeline settings, the initial repository baseline, hashes, revision
-and clarification counters, pause state, optional source-session reference,
-direct child role/session IDs, and opaque plan-authoring state.
+and clarification counters, pause state, optional source-session reference and
+resolved profile, direct child role/session IDs with accepted-input and
+pipeline-checkpoint context keys, and opaque plan-authoring state.
 Drafts, findings, correction-round snapshots, and stagnation evidence remain
 pipeline-owned structured data in the external run state rather than task
 artifacts.
+For a terminal role failure, the pause may also retain the finite adapter
+diagnostic class normalized by the root agent boundary. It retains no native
+message, provider response, prompt, command, transcript, credential, or process
+cause, and CLI/MCP status derives its explanation from the class
+deterministically.
 
 Every transition appends and syncs its complete write-ahead event before
 atomically replacing `state.json`; `progress.md` is a derived public projection.
@@ -73,6 +99,29 @@ lock-free. The pipeline creates concise public activity messages only from
 validated structured role results and deterministic runner outcomes. Never
 persist raw model transcripts, chain-of-thought, credentials, or unhashed
 remote or identity data.
+
+Common run-envelope version 3 adds nullable bounded active provider role and
+phase. The runner persists a `turn-started` write-ahead transition immediately
+before each Planner, Reviewer, or Arbiter invocation and clears it only after
+the read-only repository guard reconciles the turn. Version-1 and version-2
+envelopes project null activity until the next mutating continuation persists
+the explicit runtime migration. If execution stops first, lock-free MCP status
+and timed-out wait combine the retained activity with the absence of a live
+execution owner to report interruption, even before stale lease recovery;
+resume reconstructs the same checkpoint request
+from durable inputs without depending on the native session. Same-host status
+reads check owner process liveness immediately without changing the lease
+staleness threshold used for exclusive acquisition and recovery.
+
+The descriptor projects each pause as bounded public data for both CLI and MCP:
+its finite reason, optional validated bounded error code, a deterministic
+explanation, empty evidence for this pipeline, a validated backend retry state
+when present, and only the applicable input-response or null-resume action. It
+never projects the stored input request itself, authorization metadata,
+question snapshots, revision counters, prompts, transcripts, native output, or
+raw standard error; the root's separate pending-input projection owns the
+identified questions. This projection does not change the version-1 persisted
+state contract.
 
 ## Clarification
 
@@ -179,12 +228,14 @@ Unrecoverable internal failure              → FAILED
 ```
 
 The Planner and Plan Reviewer study the finalized inputs, repository
-instructions, relevant architecture, tests, and Git history independently. If
-a compatible source session was supplied, their first turns are separate direct
-forks of that source and only the returned child IDs are persisted. Neither role
-ever continues the source in place or forks from the other role. The on-demand
-Arbiter always starts fresh. The Reviewer checks scope, ordering, atomic commit
-boundaries, dependencies, acceptance criteria, and commit-subject validity.
+instructions, relevant architecture, tests, and Git history independently.
+Planner clarification and planning are separate checkpoints; correction turns
+reuse the planning checkpoint. If a compatible source session was supplied,
+the first eligible turn of each checkpoint forks it directly and only the
+returned child IDs are persisted. Neither role ever continues the source in
+place or forks from the other role. Every on-demand Arbiter turn starts fresh.
+The Reviewer checks scope, ordering, atomic commit boundaries, dependencies,
+acceptance criteria, and commit-subject validity.
 
 Keep role prompts short. Their mandatory English cores are:
 
@@ -200,10 +251,42 @@ For each finding below, fix the plan idiomatically and minimally, following the 
 
 Stagnation Arbiter:
 Diagnose why the plan revision loop is not converging and choose the minimal valid next direction using the provided schema.
+
+Every role:
+Produce this turn's result yourself as the authorized role. Do not delegate, spawn subagents, or use multi-agent collaboration.
 ```
 
 The pipeline may append finalized inputs, access restrictions, output schemas,
 the concise shared plan format, and the common product-decision instructions.
+First, forked, fresh, and context-invalidated turns receive that complete
+durable context. A compatible role continuation receives only its current
+instruction and state delta; the complete prompt remains attached for adapter
+recovery after unavailable continuation or failed compaction.
+Claude classifies structured permission, HTTP status, result subtype, and
+terminal-reason fields before bounded native-text matching. Only finite
+allowlisted backend, capability, configuration, usage, provider, expected-tool
+permission, and harmless read-only execution failures are resumable. A Bash
+denial is an expected-tool capability failure only for a positively recognized
+safe repository inspection; all other Bash denials fail closed. Provider
+recovery requires an explicit transient HTTP status, while non-transient client
+statuses and an unqualified structured `api_error` are terminal. An
+unclassified valid read-only result or process failure may use this path only
+after the repository guard proves the turn remained read-only. Authentication,
+forbidden-operation permission denials, protocol failures, and isolation
+failures remain terminal. Denied input and native provider text are discarded.
+The root agent boundary normalizes those finite adapter-owned classes before
+workflow code sees the failure. In particular, Codex collaboration activity
+despite disabled multi-agent support remains terminal
+`operation_multi_agent`; it is not an environment blocker and is not retried.
+An explicit rate, quota, credit, or spend-limit rejection is not retried through
+compaction, a fresh session, or provider fallback. Persist
+`backend_unavailable` with the current authoring state and resume by
+reconstructing the complete durable request after availability returns; do not
+require the failed native session. This uses the existing version-1 pipeline
+state and common run envelope without a migration.
+The planning checkpoint is seeded from the validated inputs and its current
+draft, blockers, and bounded correction history. A product-decision edit
+invalidates it before planning resumes.
 The Reviewer returns structured actionable findings instead of editing the
 draft. When findings exist, the pipeline sends them to the Planner together
 with the finding-resolution core. The Planner returns a revised draft, and the
@@ -264,7 +347,18 @@ path is ignored and untracked.
 - Keep clarification and revision budgets finite, apply the resolved
   `maxRevisionRounds`, and pause rather than accepting unresolved input or an
   invalid plan.
+- Apply safe project role and setting overrides without relocating task-owned
+  artifacts under the runner artifact root.
+- Keep MCP source-session fields additive and unset until the user deliberately
+  selects a fork.
 - Do not turn clarifications into an open-ended chat after work begins.
 - Do not automatically start plan execution after authoring completes.
 - Keep MCP start, wait, response, and detached-process behavior in the root
   runtime; this pipeline continues to own the same states and transitions.
+- Cover blocked provider activity, interrupted-owner projection, and resumed
+  request reconstruction with fake adapters and external temporary state.
+- Cover finite redacted Claude classification, durable reconstruction of a
+  failed read-only request, and terminal authentication and forbidden-operation
+  boundaries without retaining native provider text.
+- Cover redacted terminal adapter diagnostics, including forbidden delegated
+  turns, through durable state and the shared CLI/MCP pause projection.

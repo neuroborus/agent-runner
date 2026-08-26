@@ -339,7 +339,7 @@ async function createFixture(
   await writeFile(join(taskPath, "task.md"), "Implement the requested behavior.\n");
   await writeFile(
     join(projectPath, ".gitignore"),
-    `/.agent-runner.json\n${clarificationIgnored ? "/task/clarifications.md\n" : ""}`,
+    clarificationIgnored ? "/task/clarifications.md\n" : "",
   );
   if (emptyClarification) {
     await writeFile(clarificationPath, "");
@@ -348,21 +348,30 @@ async function createFixture(
 
   const queues = { planner: [...planner], reviewer: [...reviewer], arbiter: [...arbiter] };
   const calls = { planner: [], reviewer: [], arbiter: [] };
+  const freshSessionCounts = { planner: 0, reviewer: 0, arbiter: 0 };
   const adapters = Object.fromEntries(
     Object.keys(queues).map((role) => [
       role,
       {
         async run(request) {
           calls[role].push(request);
+          assert.match(request.prompt, /Do not delegate/u);
+          assert.match(request.recoveryPrompt, /Do not delegate/u);
           await onRoleRun?.(role, request, calls[role].length);
           assert.ok(queues[role].length > 0, `Unexpected ${role} turn.`);
+          const freshSessionCount = freshSessionCounts[role];
+          if (request.session?.mode !== "continue") {
+            freshSessionCounts[role] += 1;
+          }
           return {
             output: "structured",
             structured: queues[role].shift(),
             sessionId:
               request.session?.mode === "continue"
                 ? request.session.id
-                : sessionIds[role],
+                : freshSessionCount === 0
+                  ? sessionIds[role]
+                  : `${sessionIds[role]}-${freshSessionCount}`,
           };
         },
       },
@@ -397,6 +406,7 @@ async function createFixture(
     counters: {},
     hashes: {},
     pause: null,
+    activeTurn: null,
     sessionLineage: { source: sourceSession, children: [] },
     pipelineState: createPlanAuthoringState({ proactiveClarification }),
   };
@@ -455,6 +465,25 @@ async function createFixture(
     async transition(patch, options) {
       currentRun = { ...currentRun, ...patch, revision: currentRun.revision + 1 };
       transitions.push({ patch, options });
+      return currentRun;
+    },
+    async startAgentTurn(activeTurn) {
+      currentRun = {
+        ...currentRun,
+        activeTurn,
+        revision: currentRun.revision + 1,
+      };
+      transitions.push({ activeTurn, kind: "turn-started", options: {} });
+      return currentRun;
+    },
+    async finishAgentTurn(activeTurn) {
+      assert.deepEqual(currentRun.activeTurn, activeTurn);
+      currentRun = {
+        ...currentRun,
+        activeTurn: null,
+        revision: currentRun.revision + 1,
+      };
+      transitions.push({ activeTurn, kind: "turn-finished", options: {} });
       return currentRun;
     },
     async recordChildSession(child, options) {
@@ -518,21 +547,37 @@ test("writes one validated plan through independent source-session forks", async
   assert.equal(await readFile(fixture.planPath, "utf8"), PLAN);
   assert.deepEqual(
     result.sessionLineage.children.map(({ role }) => role),
-    ["planner", "reviewer"],
+    ["planner", "planner", "reviewer"],
   );
   assert.deepEqual(fixture.calls.planner[0].session, {
     id: SOURCE_SESSION,
     mode: "fork",
   });
   assert.deepEqual(fixture.calls.planner[1].session, {
-    id: ROLE_SESSIONS.planner,
-    mode: "continue",
+    id: SOURCE_SESSION,
+    mode: "fork",
   });
+  assert.match(fixture.calls.planner[0].prompt, /Task \(/u);
+  assert.equal(
+    fixture.calls.planner[0].recoveryPrompt,
+    fixture.calls.planner[0].prompt,
+  );
+  assert.equal(
+    fixture.calls.planner[1].recoveryPrompt,
+    fixture.calls.planner[1].prompt,
+  );
+  assert.notEqual(
+    result.sessionLineage.children[0].contextKey,
+    result.sessionLineage.children[1].contextKey,
+  );
   assert.deepEqual(fixture.calls.reviewer[0].session, {
     id: SOURCE_SESSION,
     mode: "fork",
   });
   assert.equal(fixture.calls.arbiter.length, 0);
+  for (const child of result.sessionLineage.children) {
+    assert.match(child.contextKey, /^[a-f0-9]{64}$/u);
+  }
   for (const request of fixture.calls.planner) {
     assert.equal(request.access, "read-only");
     assert.equal(request.cwd, fixture.projectPath);
@@ -579,6 +624,20 @@ test("rejects persisted child lineage that reuses the source session", async (t)
   };
 
   await assert.rejects(fixture.run(), /child session is invalid/u);
+});
+
+test("rejects duplicate persisted child sessions", async (t) => {
+  const fixture = await createFixture(t);
+  await fixture.run();
+  fixture.currentRun.sessionLineage = {
+    ...fixture.currentRun.sessionLineage,
+    children: [
+      ...fixture.currentRun.sessionLineage.children,
+      fixture.currentRun.sessionLineage.children[0],
+    ],
+  };
+
+  await assert.rejects(fixture.run(), /child sessions must be unique/u);
 });
 
 test("rejects a persisted write state that bypasses review", async (t) => {
@@ -767,6 +826,12 @@ test("pauses for questions and resumes after an authorized edit", async (t) => {
 
   assert.equal(completed.pipelineState.workflowState, "DONE");
   assert.equal(completed.pause, null);
+  assert.equal(fixture.calls.planner[1].session, undefined);
+  assert.match(fixture.calls.planner[1].prompt, /Task \(/u);
+  assert.notEqual(
+    completed.sessionLineage.children[0].contextKey,
+    completed.sessionLineage.children[1].contextKey,
+  );
 });
 
 test("atomically replaces an unanswered edit authorization", async (t) => {
@@ -885,6 +950,14 @@ test("invalid deterministic plans return to the Planner", async (t) => {
   assert.equal(result.counters.revisionRounds, 1);
   assert.equal(result.counters.correctionRounds, 0);
   assert.match(fixture.calls.planner[2].prompt, /must contain at least one/u);
+  assert.deepEqual(fixture.calls.planner[2].session, {
+    id: fixture.currentRun.sessionLineage.children[1].sessionId,
+    mode: "continue",
+  });
+  for (const heading of [/Task \(/u, /Context \(/u, /Clarifications \(/u]) {
+    assert.doesNotMatch(fixture.calls.planner[2].prompt, heading);
+    assert.match(fixture.calls.planner[2].recoveryPrompt, heading);
+  }
 });
 
 test("rejects reviewer finding IDs that are not kebab-case", async (t) => {
@@ -945,6 +1018,16 @@ test("routes product decisions through the transcript and invalidates inputs", a
 
   assert.equal(completed.pipelineState.workflowState, "DONE");
   assert.equal(fixture.calls.planner.length, 3);
+  assert.equal(fixture.calls.planner[2].session, undefined);
+  assert.equal(
+    fixture.calls.planner[2].prompt,
+    fixture.calls.planner[2].recoveryPrompt,
+  );
+  const planningKeys = completed.sessionLineage.children
+    .filter(({ role }) => role === "planner")
+    .slice(-2)
+    .map(({ contextKey }) => contextKey);
+  assert.notEqual(planningKeys[0], planningKeys[1]);
 });
 
 test("rejects product decisions that exceed the transcript contract", async (t) => {
@@ -1049,7 +1132,7 @@ test("records finding churn and invokes one fresh stagnation Arbiter", async (t)
   );
 });
 
-test("continues a recorded Arbiter after an interrupted result transition", async (t) => {
+test("restarts the Arbiter after an interrupted result transition", async (t) => {
   const fixture = await createFixture(t, {
     planner: [
       ready(),
@@ -1084,10 +1167,11 @@ test("continues a recorded Arbiter after an interrupted result transition", asyn
   const result = await fixture.run({ stagnationWindowRounds: 2 });
 
   assert.equal(result.pause.reason, "product_decision_required");
-  assert.deepEqual(fixture.calls.arbiter[1].session, {
-    id: ROLE_SESSIONS.arbiter,
-    mode: "continue",
-  });
+  assert.equal(fixture.calls.arbiter[1].session, undefined);
+  assert.notEqual(
+    result.sessionLineage.children.at(-2).sessionId,
+    result.sessionLineage.children.at(-1).sessionId,
+  );
 });
 
 test("routes applicable finding reconsideration back to the Reviewer", async (t) => {
@@ -1247,6 +1331,95 @@ test("invalidates dependent work after a read-only repository mutation", async (
   assert.equal(result.pipelineState.draft, null);
   assert.equal(result.pipelineState.reviewApproved, false);
   assert.equal(fixture.calls.reviewer.length, 1);
+});
+
+test("reconstructs an allowlisted failed Claude read-only turn", async (t) => {
+  let unavailable = true;
+  const fixture = await createFixture(t, {
+    onRoleRun(role) {
+      if (role === "reviewer" && unavailable) {
+        unavailable = false;
+        const error = new Error("provider-native secret text");
+        error.code = "ERR_CLAUDE_READ_ONLY_TURN_FAILED";
+        error.recoverable = true;
+        throw error;
+      }
+    },
+  });
+
+  const paused = await fixture.run();
+
+  assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(paused.pause.reason, "backend_unavailable");
+  assert.equal(paused.pause.code, "ERR_CLAUDE_READ_ONLY_TURN_FAILED");
+  assert.equal(paused.pause.resumeState, "REVIEW");
+  assert.notEqual(paused.pipelineState.draft, null);
+  assert.doesNotMatch(JSON.stringify(fixture.transitions), /provider-native/u);
+
+  const completed = await fixture.run();
+  const resumedRequest = fixture.calls.reviewer.at(-1);
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(resumedRequest.session, undefined);
+  assert.equal(resumedRequest.prompt, resumedRequest.recoveryPrompt);
+});
+
+test("keeps Claude authentication terminal for a read-only turn", async (t) => {
+  const fixture = await createFixture(t, {
+    onRoleRun(role) {
+      if (role === "planner") {
+        const error = new Error("provider-native authentication secret");
+        error.code = "ERR_CLAUDE_AUTHENTICATION_UNAVAILABLE";
+        throw error;
+      }
+    },
+    reviewer: [],
+  });
+
+  await assert.rejects(
+    fixture.run(),
+    (error) => error.code === "ERR_CLAUDE_AUTHENTICATION_UNAVAILABLE",
+  );
+
+  assert.equal(fixture.currentRun.pipelineState.workflowState, "FAILED");
+  assert.equal(fixture.currentRun.pause.reason, "internal_failure");
+  assert.equal(
+    fixture.currentRun.pause.code,
+    "ERR_CLAUDE_AUTHENTICATION_UNAVAILABLE",
+  );
+  assert.doesNotMatch(
+    JSON.stringify(fixture.transitions),
+    /authentication secret/u,
+  );
+});
+
+test("persists a forbidden-delegation diagnostic without provider data", async (t) => {
+  const sensitiveMarker = "DO_NOT_PERSIST_DELEGATED_TURN_DATA";
+  const fixture = await createFixture(t, {
+    onRoleRun(role) {
+      if (role === "planner") {
+        const error = new Error(sensitiveMarker);
+        error.code = "ERR_CODEX_ISOLATION";
+        error.diagnosticClass = "operation_multi_agent";
+        error.subAgentActivity = sensitiveMarker;
+        error.transcript = sensitiveMarker;
+        throw error;
+      }
+    },
+    reviewer: [],
+  });
+
+  await assert.rejects(
+    fixture.run(),
+    (error) => error.code === "ERR_CODEX_ISOLATION",
+  );
+
+  assert.deepEqual(fixture.currentRun.pause, {
+    reason: "internal_failure",
+    code: "ERR_CODEX_ISOLATION",
+    diagnosticClass: "operation_multi_agent",
+  });
+  assert.doesNotMatch(JSON.stringify(fixture.transitions), /DO_NOT_PERSIST/u);
 });
 
 test("pauses when an agent changes ignored clarifications", async (t) => {

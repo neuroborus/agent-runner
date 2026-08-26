@@ -1,10 +1,8 @@
-import { join } from "node:path";
-
 import {
-  createPlanExecutionState,
+  createPolishingState,
   MAX_CLARIFICATION_ROUNDS,
-  PlanExecutionWorkflowError,
-  runPlanExecution,
+  PolishingWorkflowError,
+  runPolishing,
   WORKFLOW_STATES,
 } from "./workflow.js";
 import {
@@ -12,6 +10,7 @@ import {
   DEFAULT_FINALIZATION_POLICY,
   EMPTY_TRUSTED_VALIDATION,
   isFinalizationPolicy,
+  MAX_DISPUTES_PER_FINDING,
   sha256,
 } from "./workflow-contract.js";
 
@@ -21,35 +20,39 @@ export {
   BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
-  COMMIT_INSTRUCTIONS,
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
   finalizationBootstrapInstructions,
   finalizationGuidanceInstructions,
   FINDING_ARBITRATION_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
-  IMPLEMENTATION_INSTRUCTIONS,
   NO_DELEGATION_INSTRUCTIONS,
-  PLAN_COMPATIBILITY_INSTRUCTIONS,
+  POLISH_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
   REVIEW_INSTRUCTIONS,
   STAGNATION_INSTRUCTIONS,
 } from "./prompts.js";
 export {
-  createPlanExecutionState,
+  createPolishingState,
   MAX_CLARIFICATION_ROUNDS,
-  PlanExecutionWorkflowError,
-  runPlanExecution,
+  PolishingWorkflowError,
+  runPolishing,
   WORKFLOW_STATES,
 };
 
-export const PLAN_EXECUTION_PIPELINE_ID = "plan-execution";
+export const POLISHING_PIPELINE_ID = "polishing";
 
-function positiveIntegerSetting(defaultValue) {
+function positiveIntegerSetting(defaultValue, maximum = null) {
   return Object.freeze({
     defaultValue,
-    errorMessage: "must be a positive integer",
-    validate: (value) => Number.isSafeInteger(value) && value > 0,
+    errorMessage:
+      maximum === null
+        ? "must be a positive integer"
+        : `must be a positive integer no greater than ${maximum}`,
+    validate: (value) =>
+      Number.isSafeInteger(value) &&
+      value > 0 &&
+      (maximum === null || value <= maximum),
   });
 }
 
@@ -73,20 +76,21 @@ const SETTINGS = Object.freeze({
       "must be auto, none, or a normalized repository-relative SKILL.md path",
     validate: isFinalizationPolicy,
   }),
-  maxFixRoundsPerStep: positiveIntegerSetting(5),
-  maxDisputesPerFinding: positiveIntegerSetting(2),
+  maxFixRounds: positiveIntegerSetting(5),
+  maxDisputesPerFinding: positiveIntegerSetting(
+    2,
+    MAX_DISPUTES_PER_FINDING,
+  ),
   maxSameFindingRounds: positiveIntegerSetting(3),
   stagnationWindowRounds: positiveIntegerSetting(3),
   trustedChecks: Object.freeze({
     defaultValue: Object.freeze([]),
-    errorMessage:
-      "must be an array of unique trusted command aliases",
+    errorMessage: "must be an array of unique trusted command aliases",
     validate: trustedCheckSelection,
   }),
 });
 const TASK_INPUTS = Object.freeze({
   task: Object.freeze({ filename: "task.md", optional: false }),
-  plan: Object.freeze({ filename: "plan.md", optional: false }),
   taskClarifications: Object.freeze({
     filename: "clarifications.md",
     optional: true,
@@ -99,33 +103,27 @@ const RETRYABLE_PAUSE_REASONS = new Set([
   "finalization_cannot_pass",
   "finalization_skill_invalid",
   "finalization_skill_missing",
+]);
+const RETRYABLE_PREFLIGHT_PAUSE_REASONS = new Set([
   "local_artifacts_not_ignored",
   "unsafe_git_state",
 ]);
 const RESUMABLE_WORKFLOW_STATES = new Set([
   "CLARIFY",
   "BOOTSTRAP",
-  "IMPLEMENT",
+  "POLISH",
   "FINALIZE",
   "REVIEW",
   "RESOLVE_FINDINGS",
-  "COMMIT",
 ]);
 const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
-  arbiter_cannot_resolve:
-    "The Arbiter could not resolve the current blocking dispute.",
   backend_unavailable: "The selected backend is temporarily unavailable.",
   clarification_answers_required:
-    "Material clarification answers are required before execution can continue.",
+    "Material clarification answers are required before polishing can continue.",
   clarification_limit_reached:
     "Clarification reached its configured question-round limit.",
   clarifications_changed:
     "The execution clarification artifact changed outside an authorized editor window.",
-  commit_contract_violated:
-    "The attempted commit did not satisfy its one-shot authorization contract.",
-  commit_failed: "The authorized commit could not be verified as complete.",
-  dispute_limit_reached:
-    "A finding reached its configured dispute limit.",
   environment_blocked:
     "Required validation is blocked by the execution environment.",
   finalization_cannot_pass:
@@ -134,26 +132,27 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "The explicitly configured finalization skill is invalid.",
   finalization_skill_missing:
     "The explicitly configured finalization skill is missing.",
-  fix_limit_reached: "The current step reached its configured fix limit.",
-  internal_failure: "Plan execution failed.",
+  fix_limit_reached: "Polishing reached its configured fix limit.",
+  internal_failure: "Polishing failed.",
   local_artifacts_not_ignored:
     "The configured repository-local artifact path is not ignored.",
+  no_changes: "The repository has no changes to polish.",
   no_progress: "The correction loop reached a bounded no-progress condition.",
-  plan_revision_required:
-    "The validated plan must be revised and execution must restart in a fresh run.",
   proactive_clarification:
-    "Optional proactive execution clarification input is pending.",
+    "Optional proactive polishing clarification input is pending.",
   product_decision_required:
-    "A material product decision is required before execution can continue.",
+    "A material product decision is required before polishing can continue.",
   read_only_agent_mutated_repository:
     "A read-only turn contaminated the repository; abandon this run and restart from an uncontaminated worktree.",
-  task_input_changed: "A task or plan input changed after the run began.",
+  task_input_changed: "A task input changed after the run began.",
+  task_input_overlaps_changes:
+    "A task input overlaps the writable change set.",
   unexpected_git_identity_change:
-    "The effective Git identity changed during execution.",
+    "The effective Git identity changed during polishing.",
   unexpected_git_ref_change:
-    "Git history or refs changed outside the authorized commit turn.",
+    "Git history or refs changed during polishing.",
   unexpected_remote_configuration_change:
-    "Git remote configuration changed during execution.",
+    "Git remote configuration changed during polishing.",
   unsafe_git_state:
     "The repository is not at a state that can be reconciled safely.",
 });
@@ -162,7 +161,6 @@ const PUBLIC_DETAIL_REASONS = new Set([
   "finalization_cannot_pass",
   "finalization_skill_invalid",
   "finalization_skill_missing",
-  "plan_revision_required",
 ]);
 
 function publicCode(value) {
@@ -189,7 +187,7 @@ function publicExplanation(pause, fallback) {
   return PUBLIC_DETAIL_REASONS.has(pause.reason) &&
     typeof pause.explanation === "string" &&
     pause.explanation.length > 0 &&
-    [...pause.explanation].length <= 4_000
+    pause.explanation.length <= 4_000
     ? pause.explanation
     : fallback;
 }
@@ -202,7 +200,7 @@ function publicEvidence(pause) {
             (entry) =>
               typeof entry === "string" &&
               entry.length > 0 &&
-              [...entry].length <= 4_000,
+              entry.length <= 4_000,
           )
           .slice(0, 32)
       : [],
@@ -246,11 +244,7 @@ function projectPause(run) {
     run.pipelineState.workflowState === "WAITING_FOR_USER" &&
     run.pause.inputResponse === undefined
   ) {
-    if (run.pause.reason === "plan_revision_required") {
-      nextActions.push(
-        Object.freeze({ type: "start-new-run", requirement: "revised-plan" }),
-      );
-    } else if (run.pause.reason === "read_only_agent_mutated_repository") {
+    if (run.pause.reason === "read_only_agent_mutated_repository") {
       nextActions.push(
         Object.freeze({
           type: "start-new-run",
@@ -305,8 +299,8 @@ function projectClarification(run) {
 function projectStatus(run) {
   const state = run.pipelineState;
   return Object.freeze({
-    currentStep: state.currentStep,
-    planPath: state.planPath ?? join(run.taskPath, "plan.md"),
+    currentStep: null,
+    planPath: null,
     findings: Object.freeze(
       Array.isArray(state.findings)
         ? state.findings.map(({ id, problem }) =>
@@ -314,9 +308,7 @@ function projectStatus(run) {
           )
         : [],
     ),
-    completedCommits: Object.freeze(
-      Array.isArray(state.completedCommits) ? [...state.completedCommits] : [],
-    ),
+    completedCommits: Object.freeze([]),
     stagnationDirection: state.stagnationDirection?.direction ?? null,
     finalizedFingerprint: state.finalizedFingerprint,
     reviewedFingerprint: state.reviewedFingerprint,
@@ -338,11 +330,9 @@ function validateResumeAction(run, action) {
     const additionalFixRounds = state.additionalFixRounds + action.amount;
     if (
       run.pause?.reason !== "fix_limit_reached" ||
-      !["IMPLEMENT", "RESOLVE_FINDINGS"].includes(run.pause.resumeState) ||
+      !["POLISH", "RESOLVE_FINDINGS"].includes(run.pause.resumeState) ||
       !Number.isSafeInteger(additionalFixRounds) ||
-      !Number.isSafeInteger(
-        state.settings.maxFixRoundsPerStep + additionalFixRounds,
-      )
+      !Number.isSafeInteger(state.settings.maxFixRounds + additionalFixRounds)
     ) {
       throw new Error("Additional fix rounds are not applicable.");
     }
@@ -350,9 +340,7 @@ function validateResumeAction(run, action) {
   }
   if (action?.type === "override-finding") {
     if (
-      !["fix_limit_reached", "no_progress", "dispute_limit_reached"].includes(
-        run.pause?.reason,
-      ) ||
+      !["fix_limit_reached", "no_progress"].includes(run.pause?.reason) ||
       state.finalizationResult?.status !== "PASS" ||
       state.reviewedFingerprint === null ||
       !state.findings?.some(({ id }) => id === action.findingId)
@@ -363,20 +351,11 @@ function validateResumeAction(run, action) {
   }
   if (
     action === null &&
-    ((run.pause?.reason === "commit_failed" &&
-      (state.pendingCommit?.status === "consumed" ||
-        (state.pendingCommit === null &&
-          run.pause.resumeState === "COMMIT"))) ||
+    ((RETRYABLE_PREFLIGHT_PAUSE_REASONS.has(run.pause?.reason) &&
+      !state.preflightComplete) ||
       (RETRYABLE_PAUSE_REASONS.has(run.pause?.reason) &&
         (!state.preflightComplete ||
-          ([
-            "backend_unavailable",
-            "environment_blocked",
-            "finalization_cannot_pass",
-            "finalization_skill_invalid",
-            "finalization_skill_missing",
-          ].includes(run.pause?.reason) &&
-            RESUMABLE_WORKFLOW_STATES.has(run.pause?.resumeState)))))
+          RESUMABLE_WORKFLOW_STATES.has(run.pause?.resumeState))))
   ) {
     return;
   }
@@ -421,25 +400,20 @@ function upgradedLegacyFinalization(result) {
   });
 }
 
-export function migratePlanExecutionStateV1(run) {
+export function migratePolishingStateV1(run) {
   const current = run.pipelineState;
   const prepared = current.resolvedSummary !== null;
-  const immutableTerminal = ["DONE", "FAILED"].includes(current.workflowState);
+  const immutableTerminal = current.workflowState === "FAILED";
   const validationMigrationPending = prepared && !immutableTerminal;
   const paused = current.workflowState === "WAITING_FOR_USER";
-  const commitVerificationPending =
-    validationMigrationPending &&
-    current.workflowState === "COMMIT" &&
-    current.pendingCommit?.status === "consumed";
   const rerunFinalization =
     validationMigrationPending &&
     !paused &&
-    !commitVerificationPending &&
-    ["FINALIZE", "REVIEW", "RESOLVE_FINDINGS", "COMMIT"].includes(
+    current.polishSummary !== null &&
+    ["FINALIZE", "REVIEW", "RESOLVE_FINDINGS", "DONE"].includes(
       current.workflowState,
     );
-  const keepLegacyGate =
-    immutableTerminal || paused || commitVerificationPending;
+  const keepLegacyGate = immutableTerminal || paused;
   const finalizationResult = keepLegacyGate
     ? upgradedLegacyFinalization(current.finalizationResult)
     : null;
@@ -486,32 +460,6 @@ export function migratePlanExecutionStateV1(run) {
     reviewReconsideration: keepLegacyGate
       ? current.reviewReconsideration
       : Object.freeze([]),
-    pendingCommit:
-      immutableTerminal || paused || commitVerificationPending
-        ? current.pendingCommit
-        : null,
-  });
-}
-
-export function migratePlanExecutionStateV2(run) {
-  const current = run.pipelineState;
-  return Object.freeze({
-    ...current,
-    pendingCommit:
-      current.pendingCommit === null
-        ? null
-        : Object.freeze({
-            ...current.pendingCommit,
-            preEffectRejection: null,
-          }),
-  });
-}
-
-export function migratePlanExecutionStateV3(run) {
-  return Object.freeze({
-    ...run.pipelineState,
-    bootstrapCorrections: Object.freeze([]),
-    pendingBootstrapCorrection: null,
   });
 }
 
@@ -525,6 +473,9 @@ function upgradedTrustedFinalization(result) {
       result.checks.map((check) =>
         Object.freeze({
           ...check,
+          status: ["BLOCKED", "NOT_RUN"].includes(check.status)
+            ? "FAIL"
+            : check.status,
           executor: "agent",
           commandIdentity: null,
           exitCode: null,
@@ -540,25 +491,21 @@ function upgradedTrustedFinalization(result) {
   });
 }
 
-export function migratePlanExecutionStateV4(run) {
+export function migratePolishingStateV2(run) {
   const current = run.pipelineState;
   const prepared = current.resolvedSummary !== null;
-  const immutableTerminal = ["DONE", "FAILED"].includes(current.workflowState);
+  const immutableTerminal = ["DONE", "FAILED"].includes(
+    current.workflowState,
+  );
   const validationMigrationPending = prepared && !immutableTerminal;
   const paused = current.workflowState === "WAITING_FOR_USER";
-  const commitVerificationPending =
-    validationMigrationPending &&
-    current.workflowState === "COMMIT" &&
-    current.pendingCommit?.status === "consumed";
   const rerunFinalization =
     validationMigrationPending &&
     !paused &&
-    !commitVerificationPending &&
-    ["FINALIZE", "REVIEW", "RESOLVE_FINDINGS", "COMMIT"].includes(
+    ["FINALIZE", "REVIEW", "RESOLVE_FINDINGS"].includes(
       current.workflowState,
     );
-  const keepLegacyGate =
-    immutableTerminal || paused || commitVerificationPending;
+  const keepLegacyGate = immutableTerminal || paused;
   const reviewedFingerprint = keepLegacyGate
     ? current.reviewedFingerprint
     : null;
@@ -595,28 +542,32 @@ export function migratePlanExecutionStateV4(run) {
     reviewReconsideration: keepLegacyGate
       ? current.reviewReconsideration
       : Object.freeze([]),
-    pendingCommit:
-      immutableTerminal || paused || commitVerificationPending
-        ? current.pendingCommit
-        : null,
   });
 }
 
-export const planExecutionPipeline = Object.freeze({
-  id: PLAN_EXECUTION_PIPELINE_ID,
-  stateVersion: 5,
+export function migratePolishingStateV3(run) {
+  return Object.freeze({
+    ...run.pipelineState,
+    bootstrapCorrections: Object.freeze([]),
+    pendingBootstrapCorrection: null,
+    validationMigrationDisagreement: null,
+  });
+}
+
+export const polishingPipeline = Object.freeze({
+  id: POLISHING_PIPELINE_ID,
+  stateVersion: 4,
   migrations: Object.freeze({
-    1: migratePlanExecutionStateV1,
-    2: migratePlanExecutionStateV2,
-    3: migratePlanExecutionStateV3,
-    4: migratePlanExecutionStateV4,
+    1: migratePolishingStateV1,
+    2: migratePolishingStateV2,
+    3: migratePolishingStateV3,
   }),
   roles: ROLES,
   settings: SETTINGS,
   taskInputs: TASK_INPUTS,
   runOptions: Object.freeze(["project", "task", ...ROLES]),
   requiredRunOptions: Object.freeze(["project", "task"]),
-  description: "Execute, finalize, review, and commit each step of a commit plan.",
+  description: "Polish and review an existing dirty worktree without committing it.",
   projections: Object.freeze({
     clarification: projectClarification,
     pause: projectPause,
@@ -624,8 +575,8 @@ export const planExecutionPipeline = Object.freeze({
   }),
   validateResumeAction,
   workflow: Object.freeze({
-    createState: createPlanExecutionState,
-    run: runPlanExecution,
+    createState: createPolishingState,
+    run: runPolishing,
     validateRun,
   }),
 });

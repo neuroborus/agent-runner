@@ -20,6 +20,7 @@ import {
   createRunner,
   createRunStore,
   main,
+  parseRunnerConfiguration,
 } from "../src/index.js";
 
 const executeFile = promisify(execFile);
@@ -84,6 +85,7 @@ function createBackend(
   {
     authoringQuestion = false,
     bootstrapDisagreement = false,
+    failAuthoringClarification = false,
     failExecutionClarification = false,
     implementationGate = null,
     rejectSource = false,
@@ -178,6 +180,12 @@ function createBackend(
       if (request.prompt.includes("Study the task, existing clarifications")) {
         role = "planner";
         authoringClarifications += 1;
+        if (failAuthoringClarification && authoringClarifications === 1) {
+          const error = new Error("Claude usage capacity is unavailable.");
+          error.code = "ERR_CLAUDE_USAGE_LIMIT";
+          error.recoverable = true;
+          throw error;
+        }
         structured =
           authoringQuestion && authoringClarifications === 1
             ? {
@@ -223,6 +231,13 @@ function createBackend(
         }
         structured = readyForExecution();
       } else if (
+        request.prompt.includes(
+          "Study the task, existing changes, task-level clarifications",
+        )
+      ) {
+        structured = readyForExecution();
+      } else if (
+        request.prompt.includes("Provide a concise bootstrap summary") ||
         request.prompt.includes("Return a concise bootstrap summary")
       ) {
         const reviewer = request.prompt.includes("As Reviewer");
@@ -232,6 +247,8 @@ function createBackend(
           summary:
             `${reviewer ? "Reviewer" : "Worker"} understands the task, ` +
             "plan, risks, and finalization procedure.",
+          requiredChecks: [{ id: "C1", command: "git diff --check" }],
+          validationInfrastructure: [],
           reason: "",
           question: "",
           options: [],
@@ -279,26 +296,51 @@ function createBackend(
       } else if (request.prompt.includes("Implement the changes described")) {
         structured = await implement(request);
       } else if (
-        request.prompt.includes(
-          "Locate and validate the project's finalization skill",
-        )
+        request.prompt.includes("Polish the existing local repository changes")
       ) {
         structured = {
-          status: "PASS",
-          skillPath: ".agents/skills/finalization/SKILL.md",
-          summary: "The repository finalization procedure passed.",
-          issues: [],
+          status: "COMPLETED",
+          summary: "The existing dirty change is already idiomatic and minimal.",
           reason: "",
           question: "",
           options: [],
           whyBlocked: "",
           evidence: [],
         };
-      } else if (request.prompt.includes("Review the changes and verify")) {
+      } else if (
+        request.prompt.includes("Run the complete project finalization procedure")
+      ) {
+        structured = {
+          status: "PASS",
+          skillPath: "",
+          summary: "The repository finalization procedure passed.",
+          issues: [],
+          requiredChecks: [{ id: "C1", command: "git diff --check" }],
+          validationInfrastructure: [],
+          checks: [
+            {
+              checkId: "C1",
+              command: "git diff --check",
+              status: "PASS",
+              evidence: ["git diff --check exited successfully."],
+            },
+          ],
+          reason: "",
+          question: "",
+          options: [],
+          whyBlocked: "",
+          evidence: [],
+        };
+      } else if (
+        request.prompt.includes("Review the changes and verify") ||
+        request.prompt.includes("Review the complete current change set")
+      ) {
         role = "reviewer";
         structured = {
           status: "APPROVED",
           findings: [],
+          validationChange: "UNCHANGED",
+          validationEvidence: [],
           question: "",
           options: [],
           whyBlocked: "",
@@ -310,18 +352,17 @@ function createBackend(
 
       return {
         output: "structured",
-        structured,
+        structured:
+          request.schema?.properties?.result?.anyOf === undefined
+            ? structured
+            : { result: structured },
         sessionId: sessionId(request, role),
       };
     },
   };
 }
 
-async function fixture(
-  t,
-  configuration,
-  { autoCleanup = true, plan = TWO_STEP_PLAN } = {},
-) {
+async function fixture(t, { autoCleanup = true, plan = TWO_STEP_PLAN } = {}) {
   const workspace = await mkdtemp(join(tmpdir(), "agent-runner-workflows-"));
   const projectPath = join(workspace, "project");
   const taskPath = join(workspace, "task");
@@ -346,10 +387,7 @@ async function fixture(
     "test@example.com",
   ]);
   await Promise.all([
-    writeFile(
-      join(projectPath, ".gitignore"),
-      "/.agent-runner.json\n/LOCAL_ARTIFACTS/\n",
-    ),
+    writeFile(join(projectPath, ".gitignore"), "/LOCAL_ARTIFACTS/\n"),
     writeFile(join(projectPath, "src", "base.js"), "export const base = 1;\n"),
     writeFile(join(taskPath, "task.md"), "Implement the requested value.\n"),
   ]);
@@ -372,10 +410,6 @@ async function fixture(
     "origin",
     "https://example.invalid/repository.git",
   ]);
-  await writeFile(
-    join(projectPath, ".agent-runner.json"),
-    `${JSON.stringify(configuration)}\n`,
-  );
   const cleanup = () => rm(workspace, { recursive: true, force: true });
   if (autoCleanup) {
     t.after(cleanup);
@@ -383,12 +417,14 @@ async function fixture(
   return { cleanup, projectPath, stateRoot, taskPath };
 }
 
-function runtime(paths, adapters) {
+function runtime(paths, adapters, configuration) {
   const runStore = createRunStore({ stateRoot: paths.stateRoot });
   const runner = createRunner({
     adapters,
     clarifications: createClarificationService({ interactive: false }),
     git: createGitService(),
+    loadConfiguration: async () =>
+      parseRunnerConfiguration(JSON.stringify(configuration)),
     runStore,
   });
   return { runner, runStore };
@@ -448,14 +484,14 @@ function detached(runner) {
 }
 
 test("authors a complete plan through mixed CLI roles", async (t) => {
-  const paths = await fixture(
-    t,
-    { schemaVersion: 1, defaultBackend: "codex" },
-    { plan: null },
-  );
+  const paths = await fixture(t, { plan: null });
   const codex = createBackend("codex");
   const claude = createBackend("claude");
-  const { runner, runStore } = runtime(paths, { claude, codex });
+  const { runner, runStore } = runtime(
+    paths,
+    { claude, codex },
+    { schemaVersion: 1, defaultBackend: "codex" },
+  );
   const stdout = sink();
   const stderr = sink();
 
@@ -494,24 +530,122 @@ test("authors a complete plan through mixed CLI roles", async (t) => {
   );
 });
 
+test("persists and resumes plan authoring after a Claude usage limit", async (t) => {
+  const paths = await fixture(t, { plan: null });
+  const claude = createBackend("claude", {
+    failAuthoringClarification: true,
+  });
+  const configuration = { schemaVersion: 1, defaultBackend: "claude" };
+  const firstRuntime = runtime(paths, { claude }, configuration);
+
+  const paused = await firstRuntime.runner.run({
+    pipelineId: "plan-authoring",
+    projectPath: paths.projectPath,
+    taskPath: paths.taskPath,
+    roleOverrides: {},
+    sourceSession: null,
+  });
+
+  assert.equal(paused.run.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.deepEqual(paused.run.pause, {
+    reason: "backend_unavailable",
+    code: "ERR_CLAUDE_USAGE_LIMIT",
+    resumeState: "CLARIFY",
+  });
+  assert.equal(claude.calls.length, 1);
+  assert.equal(
+    (await firstRuntime.runStore.loadRun(paused.run.runId)).revision,
+    paused.run.revision,
+  );
+
+  const reopened = runtime(paths, { claude }, configuration);
+  const completed = await reopened.runner.resume({
+    runId: paused.run.runId,
+    action: null,
+  });
+
+  assert.equal(completed.run.pipelineState.workflowState, "DONE");
+  assert.equal(completed.run.pause, null);
+  assert.equal(claude.calls.length, 4);
+  assert.equal(await readFile(join(paths.taskPath, "plan.md"), "utf8"), TWO_STEP_PLAN);
+  assert.equal(await gitOutput(paths.projectPath, ["status", "--porcelain"]), "");
+});
+
+test("polishes a dirty worktree through mixed CLI roles without committing", async (t) => {
+  const paths = await fixture(t, { plan: null });
+  await writeFile(
+    join(paths.projectPath, "src", "base.js"),
+    "export const base = 2;\n",
+  );
+  const initialHead = await gitOutput(paths.projectPath, ["rev-parse", "HEAD"]);
+  const codex = createBackend("codex");
+  const claude = createBackend("claude");
+  const { runner, runStore } = runtime(
+    paths,
+    { claude, codex },
+    { schemaVersion: 1, defaultBackend: "codex" },
+  );
+  const stdout = sink();
+  const stderr = sink();
+
+  const exitCode = await main(
+    [
+      "run",
+      "polishing",
+      "--project",
+      paths.projectPath,
+      "--task",
+      paths.taskPath,
+      "--worker",
+      "codex",
+      "--reviewer",
+      "claude",
+      "--arbiter",
+      "codex",
+    ],
+    { runner, stderr: stderr.stream, stdout: stdout.stream },
+  );
+
+  assert.equal(exitCode, 0);
+  assert.equal(stderr.value(), "");
+  assert.match(stdout.value(), /Pipeline: polishing/u);
+  assert.match(stdout.value(), /State: DONE/u);
+  assert.doesNotMatch(stdout.value(), /^Plan:/mu);
+  const run = await onlyRun(runStore);
+  assert.equal(run.pipelineState.workflowState, "DONE");
+  assert.equal(run.roles.worker.backend, "codex");
+  assert.equal(run.roles.reviewer.backend, "claude");
+  assert.equal(
+    [...codex.calls, ...claude.calls].some(
+      (call) => call.access === "local-commit",
+    ),
+    false,
+  );
+  assert.equal(await gitOutput(paths.projectPath, ["rev-parse", "HEAD"]), initialHead);
+  assert.equal(
+    await gitOutput(paths.projectPath, ["status", "--porcelain"]),
+    "M src/base.js",
+  );
+});
+
 test("executes every planned commit across backend configurations", async (t) => {
   const cases = [
     {
-      name: "Codex repository default",
+      name: "Codex runner default",
       configuration: { schemaVersion: 1, defaultBackend: "codex" },
       args: ["--fork-from", "codex:source-codex"],
       roles: { worker: "codex", reviewer: "codex", arbiter: "codex" },
       source: "source-codex",
     },
     {
-      name: "Claude repository default",
+      name: "Claude runner default",
       configuration: { schemaVersion: 1, defaultBackend: "claude" },
       args: ["--fork-from", "claude:source-claude"],
       roles: { worker: "claude", reviewer: "claude", arbiter: "claude" },
       source: "source-claude",
     },
     {
-      name: "repository role overrides",
+      name: "runner role overrides",
       configuration: {
         schemaVersion: 1,
         defaultBackend: "codex",
@@ -546,14 +680,18 @@ test("executes every planned commit across backend configurations", async (t) =>
 
   for (const scenario of cases) {
     await t.test(scenario.name, async (t) => {
-      const paths = await fixture(t, scenario.configuration);
+      const paths = await fixture(t);
       const codex = createBackend("codex", {
         bootstrapDisagreement: scenario.bootstrapDisagreement,
       });
       const claude = createBackend("claude", {
         bootstrapDisagreement: scenario.bootstrapDisagreement,
       });
-      const { runner, runStore } = runtime(paths, { claude, codex });
+      const { runner, runStore } = runtime(
+        paths,
+        { claude, codex },
+        scenario.configuration,
+      );
       const stdout = sink();
       const stderr = sink();
 
@@ -630,16 +768,16 @@ test("executes every planned commit across backend configurations", async (t) =>
           call.prompt.includes("Review the changes and verify"),
         );
         assert.equal(stepReviews.length, 2);
-        assert.equal(stepReviews[0].session?.mode, "continue");
-        assert.notEqual(stepReviews[0].session?.id, scenario.source);
-        assert.deepEqual(stepReviews[1].session, {
-          mode: "fork",
-          id: scenario.source,
-        });
+        assert.ok(
+          stepReviews.every(
+            ({ session }) =>
+              session?.mode === "fork" && session.id === scenario.source,
+          ),
+        );
         assert.equal(
           run.sessionLineage.children.filter(({ role }) => role === "reviewer")
             .length,
-          2,
+          3,
         );
       }
       if (scenario.bootstrapDisagreement) {
@@ -663,12 +801,13 @@ test("executes every planned commit across backend configurations", async (t) =>
 test("does not replace an unavailable source session", async (t) => {
   for (const backend of ["codex", "claude"]) {
     await t.test(backend, async (t) => {
-      const paths = await fixture(t, {
-        schemaVersion: 1,
-        defaultBackend: backend,
-      });
+      const paths = await fixture(t);
       const adapter = createBackend(backend, { rejectSource: true });
-      const { runner } = runtime(paths, { [backend]: adapter });
+      const { runner } = runtime(
+        paths,
+        { [backend]: adapter },
+        { schemaVersion: 1, defaultBackend: backend },
+      );
       const result = await runner.run({
         pipelineId: "plan-execution",
         projectPath: paths.projectPath,
@@ -688,12 +827,82 @@ test("does not replace an unavailable source session", async (t) => {
   }
 });
 
-test("runs both pipelines through recoverable MCP controls", async (t) => {
-  const paths = await fixture(
-    t,
-    { schemaVersion: 1, defaultBackend: "codex" },
-    { autoCleanup: false, plan: null },
+test("projects a forbidden-delegation diagnostic without durable provider data", async (
+  t,
+) => {
+  const sensitiveMarker = "DO_NOT_PERSIST_CODEX_TERMINAL_DATA";
+  const paths = await fixture(t);
+  const codex = createBackend("codex");
+  const runCodex = codex.run.bind(codex);
+  codex.run = async (request) => {
+    if (
+      request.prompt.includes("Provide a concise bootstrap summary") &&
+      !request.prompt.includes("As Reviewer")
+    ) {
+      const error = new Error(sensitiveMarker);
+      error.code = "ERR_CODEX_ISOLATION";
+      error.diagnosticClass = "operation_multi_agent";
+      error.nativeResponse = { message: sensitiveMarker };
+      error.prompt = sensitiveMarker;
+      error.transcript = sensitiveMarker;
+      error.credentials = sensitiveMarker;
+      throw error;
+    }
+    return runCodex(request);
+  };
+  const configuration = { schemaVersion: 1, defaultBackend: "codex" };
+  const firstRuntime = runtime(paths, { codex }, configuration);
+
+  await assert.rejects(
+    firstRuntime.runner.run({
+      pipelineId: "plan-execution",
+      projectPath: paths.projectPath,
+      taskPath: paths.taskPath,
+      roleOverrides: {},
+      sourceSession: null,
+    }),
+    (error) => error.code === "ERR_CODEX_ISOLATION",
   );
+
+  const failed = await onlyRun(firstRuntime.runStore);
+  assert.equal(failed.pipelineState.workflowState, "FAILED");
+  assert.deepEqual(failed.pause, {
+    reason: "internal_failure",
+    code: "ERR_CODEX_ISOLATION",
+    diagnosticClass: "operation_multi_agent",
+  });
+
+  const reopened = runtime(paths, { codex }, configuration);
+  const recovered = await reopened.runStore.loadRun(failed.runId);
+  assert.deepEqual(recovered.pause, failed.pause);
+  const projected = await createMcpControlPlane({
+    runner: reopened.runner,
+    runStore: reopened.runStore,
+  }).runStatus({ runId: failed.runId });
+  assert.deepEqual(projected.pause, {
+    reason: "internal_failure",
+    code: "ERR_CODEX_ISOLATION",
+    explanation:
+      "Plan execution failed. Adapter diagnostic: operation_multi_agent.",
+    evidence: [],
+    resumeState: null,
+    nextActions: [],
+  });
+  const runPath = join(paths.stateRoot, "runs", failed.runId);
+  const durableData = (
+    await Promise.all(
+      ["state.json", "events.jsonl", "progress.md"].map((filename) =>
+        readFile(join(runPath, filename), "utf8"),
+      ),
+    )
+  ).join("\n");
+  assert.match(durableData, /operation_multi_agent/u);
+  assert.doesNotMatch(durableData, /DO_NOT_PERSIST/u);
+  assert.doesNotMatch(durableData, /nativeResponse|"prompt":/u);
+});
+
+test("runs registered workflows through recoverable MCP controls", async (t) => {
+  const paths = await fixture(t, { autoCleanup: false, plan: null });
   const implementationGate = {
     entered: deferred(),
     release: deferred(),
@@ -703,7 +912,11 @@ test("runs both pipelines through recoverable MCP controls", async (t) => {
     failExecutionClarification: true,
     implementationGate,
   });
-  const { runner, runStore } = runtime(paths, { codex });
+  const { runner, runStore } = runtime(
+    paths,
+    { codex },
+    { schemaVersion: 1, defaultBackend: "codex" },
+  );
   const pipelineProcess = detached(runner);
   t.after(async () => {
     implementationGate.release.resolve();
@@ -797,7 +1010,14 @@ test("runs both pipelines through recoverable MCP controls", async (t) => {
     progress: false,
   });
   assert.equal(executionPause.status, "WAITING_FOR_USER");
-  assert.equal(executionPause.pause, "backend_unavailable");
+  assert.deepEqual(executionPause.pause, {
+    reason: "backend_unavailable",
+    code: "ERR_BACKEND_UNAVAILABLE",
+    explanation: "The selected backend is temporarily unavailable.",
+    evidence: [],
+    resumeState: "CLARIFY",
+    nextActions: [{ type: "resume", action: null }],
+  });
 
   const reconnected = createMcpControlPlane({
     launchRun: pipelineProcess.launchRun,
@@ -812,7 +1032,7 @@ test("runs both pipelines through recoverable MCP controls", async (t) => {
   });
   await within(
     implementationGate.entered.promise,
-    5_000,
+    30_000,
     "Execution did not reach implementation.",
   );
   const timedOut = await reconnected.runWait({
@@ -854,5 +1074,58 @@ test("runs both pipelines through recoverable MCP controls", async (t) => {
   assert.equal(
     await gitOutput(paths.projectPath, ["remote", "get-url", "origin"]),
     "https://example.invalid/repository.git",
+  );
+
+  await writeFile(
+    join(paths.projectPath, "src", "base.js"),
+    "export const base = 2;\n",
+  );
+  const polishingHead = await gitOutput(paths.projectPath, [
+    "rev-parse",
+    "HEAD",
+  ]);
+  const callCount = codex.calls.length;
+  const polishing = await afterDisconnect.runStart({
+    idempotencyKey: "polishing-start",
+    pipelineId: "polishing",
+    projectPath: paths.projectPath,
+    taskPath: paths.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    sourceSession: null,
+  });
+  assert.deepEqual(
+    await afterDisconnect.runStart({
+      idempotencyKey: "polishing-start",
+      pipelineId: "polishing",
+      projectPath: paths.projectPath,
+      taskPath: paths.taskPath,
+      proactiveClarification: false,
+      roleOverrides: {},
+      sourceSession: null,
+    }),
+    polishing,
+  );
+  const polishingDone = await afterDisconnect.runWait({
+    runId: polishing.runId,
+    cursor: 0,
+    timeoutMs: 5_000,
+    progress: false,
+  });
+  await pipelineProcess.settle();
+  assert.equal(polishingDone.status, "DONE");
+  assert.equal(polishingDone.planPath, null);
+  assert.equal(polishingDone.completedCommits.length, 0);
+  assert.equal(
+    codex.calls.slice(callCount).some(({ access }) => access === "local-commit"),
+    false,
+  );
+  assert.equal(
+    await gitOutput(paths.projectPath, ["rev-parse", "HEAD"]),
+    polishingHead,
+  );
+  assert.equal(
+    await gitOutput(paths.projectPath, ["status", "--porcelain"]),
+    "M src/base.js",
   );
 });

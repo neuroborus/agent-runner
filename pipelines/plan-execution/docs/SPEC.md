@@ -12,7 +12,7 @@ The runner must:
 - allow Worker, Reviewer, and Arbiter to use different backends;
 - complete a bounded clarification phase before implementation begins;
 - let the Worker operate unattended during normal execution;
-- validate each implementation through the target project's own `finalization` skill;
+- validate each implementation through a dedicated, optionally skill-guided finalization gate;
 - independently review each planned commit;
 - allow the Worker to fix or dispute review findings;
 - advance only when the exact current workspace has passed finalization and review with no unresolved findings;
@@ -129,13 +129,15 @@ task/
 The execution run keeps its own clarification transcript at:
 
 ```text
-<project>/LOCAL_ARTIFACTS/agent-runner/<run-id>/clarifications.md
+<project>/<artifactRoot>/agent-runner/<run-id>/clarifications.md
 ```
 
 This local artifact uses the common Markdown transcript format and contains
 execution-specific questions and answers. Before creating it, preflight must
 use `git check-ignore` to verify that the target
-repository ignores the resolved `LOCAL_ARTIFACTS` path. If it does not, pause
+repository ignores the resolved path. `artifactRoot` is a persisted normalized
+repository-relative selection and defaults to `LOCAL_ARTIFACTS`. If the path is
+not ignored, pause
 with `local_artifacts_not_ignored`; never edit `.gitignore` or
 `.git/info/exclude` automatically. The artifact is not runner state and must
 never enter a planned commit. The task directory may be located inside or
@@ -181,16 +183,21 @@ Without the flag, `CLARIFY` still runs but opens the editor only if the Worker
 returns questions. In a non-interactive environment, persist the pause and print
 the clarification artifact path instead of attempting terminal dialogue.
 
-Use role-specific model flags when an explicit backend model is required:
+Use run-wide or role-specific execution flags when native overrides are
+required:
 
 ```bash
 agent-run run plan-execution \
   --project /path/to/repo \
   --task /path/to/task \
   --worker codex \
+  --worker-profile codex-work \
   --worker-model <codex-model-id> \
+  --worker-context-size 200000 \
   --reviewer claude \
-  --reviewer-model <claude-model-id>
+  --reviewer-profile claude-primary \
+  --reviewer-model <claude-model-id> \
+  --reviewer-context-size 200000
 ```
 
 A new run may seed Worker and Reviewer from one existing session only when both
@@ -202,13 +209,22 @@ agent-run run plan-execution \
   --task /path/to/task \
   --worker codex \
   --reviewer codex \
-  --fork-from codex:<session-id>
+  --fork-from codex:<session-id> \
+  --fork-profile codex-work
 ```
 
 The runner splits only the backend prefix, keeps the session ID opaque, probes
-native fork support, and persists the resolved source. Worker and Reviewer fork
-it independently; the Arbiter remains independent and `resume` never requires
-the flag again.
+native fork support, and persists the resolved source and known trusted
+profile. A known source profile supplies `current` for Worker and Reviewer and
+requires every explicit backend/profile selection to match. An unknown source
+profile requires both profiles to remain `current` and omits the native profile
+override. Worker and Reviewer fork it independently; the Arbiter remains
+independent and `resume` never requires either flag again. MCP leaves the
+source unset unless the user deliberately selects a compatible current session
+after being offered a fresh start. It includes a known trusted profile with the
+fork choice, or offers only `current` inheritance when the profile is unknown.
+Because Worker and Reviewer each fork the complete source context, recommend a
+fresh start for a long, multi-topic, or uncertain session.
 
 Role backends must be independently configurable:
 
@@ -240,18 +256,43 @@ Claude worker + Codex reviewer
 The Arbiter must also support either backend.
 
 The pipeline descriptor declares the `worker`, `reviewer`, and `arbiter` roles.
-Role objects under `pipelines.plan-execution.roles` in `.agent-runner.json` may
-provide an optional `backend` and backend-specific `model`. Backend precedence
-is CLI role override, repository pipeline-role value, repository-wide default,
-then preflight failure. Model precedence is CLI role override, repository
-pipeline-role value, then the selected backend's native default. Do not
-hard-code model names into workflow logic.
+Role objects under `pipelines.plan-execution.roles` in the runner's
+`.agent-runner.json` or its safe project overlay may provide optional string
+`backend`, trusted `profile`, backend-specific `model`, and decimal
+`contextSize` selections. The project file may only select aliases defined by
+runner-root configuration; it cannot define profile implementations,
+credentials, binaries, or environment values. Role-specific CLI/MCP values
+take precedence over run-wide values, project values, runner values, and
+built-in `current`. A trusted profile pins
+its backend; conflicting explicit backend selection is invalid. `current`
+omits the corresponding native override and uses the effective source-session,
+process, profile, or backend default. Do not hard-code model names into
+workflow logic.
 
 The descriptor also owns the positive-integer settings and built-in defaults
 listed under [Retry Limits and No-Progress Detection](#14-retry-limits-and-no-progress-detection).
-Repository overrides live directly under `pipelines.plan-execution`. The root
-loader strictly validates the versioned envelope and delegates these values to
-the descriptor rather than duplicating pipeline policy.
+It additionally owns the string `finalization` setting. Its default `auto`
+discovers a conventional confined repository `finalization` skill and otherwise
+falls back to repository instructions and project-defined checks. `none`
+selects that fallback directly; any other valid value is a normalized
+repository-relative path ending in `SKILL.md` and requires that exact skill.
+Runner overrides live directly under `pipelines.plan-execution`. The root
+loader strictly validates both versioned envelopes and delegates these values
+to the descriptor rather than duplicating pipeline policy. It discovers only
+the ignored `LOCAL_ARTIFACTS/agent-runner.json` project file unless CLI/MCP
+explicitly selects another confined ignored path. It never creates the file or
+changes ignore rules. Resolved roles, settings, and `artifactRoot` are persisted
+and never reloaded on resume.
+
+The descriptor also owns `trustedChecks`, an ordered list of unique lowercase
+aliases that defaults to `[]`. Only runner-root `trustedCommands`
+configuration may define an alias, its exact inventory command, and its
+executable/argument vector. A safe project overlay may select runner-defined
+aliases through `trustedChecks`, but cannot define or alter binaries,
+arguments, environment values, aliases, or host commands. Before agent work,
+the root persists every resolved vector and alias, deterministic command
+identities, an ordered command fingerprint, and a trusted-configuration
+fingerprint. Resume uses that durable snapshot without reloading configuration.
 
 Codex and Claude do **not** both need to be installed for every run. Preflight validates the Worker and Reviewer selected for the run. The Arbiter backend may be validated lazily when arbitration is first needed.
 
@@ -292,12 +333,21 @@ State layout:
     └── resolved.md
 ```
 
+Worktree ownership is separate from run identity:
+
+```text
+<state-root>/worktrees/<sha256(canonical-worktree-path)>/
+└── .lease            # present only while one run owns this worktree
+```
+
 A mutating `run` or `resume` must acquire the atomic per-run execution lease
-before recovery or workflow advancement. A competing owner is rejected. Stale
-recovery requires both the configured age threshold and proof that the recorded
-same-host process is no longer alive; age alone or a foreign host is
-insufficient. `status` and public activity reads are lock-free and never acquire
-the execution lease.
+before recovery or workflow advancement, then acquire the canonical-worktree
+lease before pipeline mutation. Release occurs in reverse order. A competing
+run ID cannot own the same canonical Git worktree. Each release verifies its
+opaque owner token. Stale recovery for either lease requires both the configured
+age threshold and proof that the recorded same-host process is no longer alive;
+age alone or a foreign host is insufficient. `status` and public activity reads
+are lock-free and acquire neither lease.
 
 ### `state.json`
 
@@ -307,6 +357,7 @@ Persist at least:
 
 - run ID;
 - pipeline ID and pipeline state-schema version;
+- root run-envelope schema and runtime-compatibility tuple;
 - canonical project path;
 - canonical task path;
 - hashes of `task.md`, `plan.md`, and optional task `clarifications.md` and `context.md`;
@@ -326,12 +377,25 @@ Persist at least:
 - current findings;
 - fix/dispute counters;
 - latest finalized content fingerprint;
+- complete required-check inventory, validation-infrastructure file list, and
+  runner-computed infrastructure fingerprint;
+- bounded bootstrap-correction attempts containing only role, phase, contract,
+  field, constraint, and attempt number;
+- exact per-check finalization evidence and the fingerprint-bound Reviewer
+  validation-change decision;
+- the resolved runner-trusted command snapshot, command/configuration
+  fingerprints, and bounded executor provenance for accepted check evidence;
 - latest reviewed content fingerprint;
-- escalation reason when paused.
+- escalation reason when paused;
+- an optional finite adapter diagnostic class normalized by the root boundary
+  for any terminal role turn, without native provider data.
 
 The common envelope also persists an optional opaque source-session reference,
-every direct Worker, Reviewer, or Arbiter child session ID, monotonic revision
-and timestamps, and an opaque pipeline-owned state object. Store
+its resolved trusted profile when known, and every direct Worker, Reviewer, or
+Arbiter child session ID with its
+accepted-input and pipeline-checkpoint context key, monotonic revision and
+timestamps, a nullable bounded active provider role/phase, and an opaque
+pipeline-owned state object. Store
 correction-round snapshots and arbitration episodes there without asking the
 root runtime to interpret them. Native backend session resume is optional; the
 persisted task, plan, decisions, summaries, and lineage must be sufficient to
@@ -339,6 +403,58 @@ continue with a new native session.
 
 Validate the complete next pipeline state before handing a transition to the
 root state service. Write state atomically using temporary-file + rename.
+The descriptor exposes an ordered migration for every supported prior pipeline
+state version. Status may evaluate those migrations in memory without rewriting
+history. Before execution resumes, the root evaluates the complete chain,
+validates the resulting current shape, and persists one complete migration
+event under the per-run execution lease. An unsupported forward version or a
+missing migration returns an actionable version-skew error; invalid migration
+output returns a specific migration failure instead of treating the run as
+generically invalid.
+
+Pipeline state version 2 adds the required-check and validation-infrastructure
+evidence. Its version-1 migration preserves safe content and commit history,
+marks resumable legacy evidence provisional, and routes active validated work
+back through independent validation discovery and `FINALIZE`. A paused retry or
+finding override cannot advance until that discovery completes. A consumed
+commit authorization remains in `COMMIT` for Git verification and is never
+cleared into a replayable effect. Immutable terminal history is upgraded without
+replaying an effect.
+
+Pipeline state version 3 adds a nullable pre-effect rejection record to a
+pending commit. The record contains only a bounded diagnostic code and whether
+the rejection is recoverable. Its version-2 migration sets the record to
+`null`, retaining every legacy consumed authorization on the verification-only
+path rather than inventing proof.
+
+Pipeline state version 4 adds the bounded bootstrap-correction ledger. Its
+version-3 migration initializes an empty ledger without changing accepted
+bootstrap context, validation evidence, workflow position, safe workspace
+content, or commit authority. A ledger entry records only attempt `1` plus the
+producing role, phase, contract, field, and violated constraint. It never
+contains the rejected value, raw structured output, or provider text. A
+matching bounded pending record is cleared when the replacement is accepted;
+the retained history still enforces the one-attempt limit if bootstrap later
+restarts after authorized product input.
+
+Pipeline state version 5 adds the resolved trusted-validation snapshot and
+runner/agent executor provenance to accepted per-check evidence. The version-4
+migration defaults legacy runs to empty trust and invalidates active
+finalization and review evidence through the existing independent validation-
+migration checkpoint. Immutable terminal evidence is shape-upgraded. A
+consumed one-shot commit authorization remains on the verification-only path,
+and migration never creates a replayable authorization.
+
+Common run-envelope version 3 independently adds nullable bounded active
+provider role and phase. Version-1 and version-2 envelopes project it as `null`
+without rewriting; the next mutating continuation persists the explicit runtime
+migration under the per-run lease.
+MCP status and timed-out wait combine that field with the live execution lease:
+`running` identifies a current execution owner, including a detached
+continuation; `interrupted` identifies retained provider activity with no owner,
+and `idle` identifies neither. This projection uses no polling, daemon, or
+heartbeat. Same-host reads check owner process liveness immediately while
+exclusive acquisition and stale recovery retain their existing age threshold.
 
 ### `events.jsonl`
 
@@ -361,6 +477,17 @@ summaries, findings, and decisions only from validated structured results. The
 state service validates generic shape and size limits without interpreting
 roles or outcomes, and cursor readers expose only this safe projection rather
 than private pipeline state.
+
+Immediately before every Worker, Reviewer, or Arbiter provider call, append and
+sync a `turn-started` transition containing the bounded active role and current
+pipeline phase. Clear it only after read-only or writable repository
+reconciliation. For the one-shot commit turn, retain it until independent Git
+verification resolves the consumed authorization; an interrupted verification
+never clears it or replays the Worker. A stopped ordinary turn retains its
+activity without a live execution owner, even while its lease record awaits
+stale recovery, and resume reconstructs the request from
+the persisted checkpoint before replacing and eventually clearing that
+activity.
 
 ### `progress.md`
 
@@ -430,6 +557,7 @@ A request should contain only runner-level concepts such as:
   cwd,
   access: "read-only" | "workspace-write" | "local-commit",
   prompt,
+  recoveryPrompt, // optional; defaults to prompt
   schema,
   session: { mode: "fork" | "continue", id }, // optional
   authorizationId, // local-commit only
@@ -439,10 +567,75 @@ A request should contain only runner-level concepts such as:
 
 Backend-specific CLI flags belong only inside the adapter.
 
+`probe()` validates installed CLI features and enforceable local isolation. It
+does not apply a selected native profile or attest that the profile's
+authentication and provider are usable. The first real `run()` request uses the
+effective profile and reports a bounded classified failure when it cannot be
+used.
+
 For non-commit turns, an adapter error may set `recoverable: true` only when
 reconstructing and retrying the durable request is safe. Safety, protocol, and
 isolation failures are not recoverable; an ambiguous `local-commit` outcome is
 never retried and must instead return to Git-state verification.
+
+The root agent boundary normalizes thrown failures through the selected
+adapter's own finite diagnostic-class validator. It exposes only a fixed
+message, bounded code, safe effect/recovery flags, the shared structured-output
+class, and the validated adapter diagnostic class. Pipelines never duplicate
+backend allowlists or receive native messages, denied inputs, prompts,
+commands, responses, transcripts, credentials, or process causes.
+
+When a requested structured result cannot be produced, each adapter retains
+its backend-specific bounded error code and additionally exposes only the
+shared `failureClass: "structured-output"` classification. Pipeline workflow
+logic consumes that class rather than backend IDs or native error codes.
+
+A `local-commit` adapter error may additionally set `effectStarted: false`
+only when the adapter proves that its isolated commit executor was never
+invoked. This marker is independent of `recoverable`: policy rejection may be
+non-recoverable while provider unavailability is recoverable. The absent
+marker is the safe default for executor failures and every other outcome that
+could have started the effect. The runner never renews an authorization from
+the marker alone. It first persists the bounded code and recoverable
+classification on the consumed authorization, then Git must verify that no
+commit was created. An interrupted verification retains that durable proof for
+resume.
+
+Claude recoverability is derived from a finite adapter-owned diagnostic-class
+allowlist. Structured permission denials, HTTP status, result subtype, and
+terminal reason take precedence over bounded message matching. Backend,
+capability, configuration, usage, provider, and expected-tool permission
+failures may be recoverable, but Bash permission recovery requires a positively
+recognized safe repository inspection. Authentication, every other Bash
+denial, and permission denials proving a forbidden operation remain terminal.
+Provider recovery requires an explicit transient HTTP status; non-transient
+client statuses and an unqualified structured `api_error` fail closed. An
+otherwise unclassified valid result or process failure is recoverable only for
+a read-only turn. Denied tool input,
+native result text, raw standard error, and process causes are discarded.
+
+An explicit Claude rate, quota, credit, or spend-limit rejection is recoverable
+backend unavailability, but the rejected turn itself is never retried through
+compaction, a fresh session, or provider fallback. Persist
+`backend_unavailable` with the resumable pipeline state, reconcile any prepared
+one-shot commit authorization, preserve safe workspace changes, and enter
+`WAITING_FOR_USER` after the single rejected invocation. Classified usage and
+provider failures from non-commit writable turns use the same path only after
+workspace and repository-control reconciliation. Unknown writable process
+outcomes remain terminal. Resume reconstructs the complete request from durable
+state rather than requiring the failed native session. These rules add no new
+pipeline-state field or migration.
+
+When a writable Worker turn cannot execute required validation because of
+sandbox, IPC, loopback, process-isolation, missing-service, permission, or a
+comparable external constraint, it returns structured `BLOCKED` with bounded
+reason and evidence. The pipeline persists `environment_blocked`; it does not
+turn the external constraint into a code finding or weaken the sandbox,
+network, process, or host temporary-directory boundary. Safe content remains in
+the workspace. A content-changing finding-resolution turn invalidates stale
+fingerprint-bound evidence and resumes at `FINALIZE`; an unchanged turn resumes
+at `RESOLVE_FINDINGS`. Initial implementation and finalization resume at their
+original `IMPLEMENT` and `FINALIZE` checkpoints respectively.
 
 `local-commit` is a one-turn capability used only after the runner's commit gate
 and requires the `commit` constraint. It allows the Worker to stage and create
@@ -452,9 +645,13 @@ writes, and remote configuration changes. Fail preflight if the selected Worker
 backend cannot provide that boundary; do not rely on prompt compliance alone.
 
 Native session continuation is optional. Runner correctness must not depend on
-it. If a backend session cannot be continued, reconstruct the next prompt from
-persisted runner state and the observed workspace. A supplied fork source must
-be forked directly; never resume it or silently replace an unavailable source.
+it. `prompt` is the compact instruction and state delta for a compatible
+continuation. `recoveryPrompt` is the complete durable request used for first,
+forked, fresh, context-invalidated, compacted, or reconstructed turns. Continue
+a persisted child only when its context key matches the accepted inputs, role,
+and pipeline-owned checkpoint. The first eligible turn of each new primary or
+review checkpoint forks a supplied source directly; never resume it or silently
+replace an unavailable source.
 
 Use structured output for all machine-actionable decisions:
 
@@ -495,6 +692,21 @@ environment, and expose only Codex's filtered core environment without injected
 values or shell-profile loading to agent commands. Remove key-, secret-, and
 token-named variables from the isolated local-commit executor while retaining
 the ordinary environment needed by Git and hooks.
+Capability, isolation, and prohibited-operation failures expose only one
+bounded allowlisted diagnostic class identifying the rejected capability or
+operation class. Do not retain the reported command, native error response,
+credentials, or transcript as diagnostic evidence.
+Reported `subAgentActivity` or any other collaboration use remains a terminal
+`operation_multi_agent` isolation failure. Disabled multi-agent launch
+configuration does not authorize accepting or transparently retrying a backend
+that ignores the restriction.
+For `ERR_CODEX_TURN_FAILED`, map only recognized App Server
+`codexErrorInfo` variants to finite allowlisted terminal classes. Persist the
+validated class in plan-execution failure state, but discard the native error
+message, HTTP status and other variant data, additional details, provider
+response, prompt, and transcript. Unknown variants add no diagnostic class.
+Keep context-exhaustion compaction and interruption handling on their existing
+dedicated paths.
 
 Worker:
 
@@ -518,6 +730,11 @@ a supplied source session uses `thread/fork`, with the returned child thread ID
 persisted as role lineage. Unavailable continuation may fall back to a fresh
 reconstructed turn, while an unavailable fork source is an error.
 
+Map a trusted Codex alias only to its configured native profile name and pass
+it with `--profile`. Map an explicit decimal context size to
+`model_context_window`. Omit both controls for `current`; do not derive them
+from native session storage.
+
 On native context exhaustion, request thread compaction and retry the turn once.
 If the context remains full, start a fresh turn reconstructed from durable
 runner input and the current workspace. Never replay an interrupted
@@ -537,7 +754,10 @@ Probe this isolated commit profile by verifying outside-workspace write denial,
 Git-metadata writes, and network denial. Report `localCommit: false` and fail
 preflight if any boundary cannot be enforced. Any interrupted or failed commit
 executor returns an ambiguous outcome for the runner's one-shot authorization
-and final Git-state verification; it is never replayed.
+and final Git-state verification; it is never replayed. Policy, capability,
+provider, or confirmation-turn rejection before executor invocation carries
+`effectStarted: false`, including `ERR_CODEX_LOCAL_COMMIT_POLICY`. The adapter
+preserves the original bounded error code and recoverable classification.
 
 ### Claude Code
 
@@ -552,7 +772,14 @@ directories. Use native sandbox credential-deny entries so Bash commands cannot
 inherit provider credentials without enabling subprocess hardening that
 downgrades `auto` to Manual mode, and reject any reported permission-mode
 fallback. Fail preflight when the host cannot enforce those settings. Plan-mode
-turns do not expose editing tools and also deny command writes to the workspace.
+turns derive their advertised read-only capability and invocation arguments
+from the same access envelope. They do not expose editing tools, deny command
+writes to the workspace and Git metadata, and set
+`sandbox.autoAllowBashIfSandboxed: true` so repository inspection proceeds
+without a prompt only inside the required native sandbox. Unsandboxed fallback
+and command network access remain disabled. The opt-in real Claude smoke test
+must exercise a representative repository-inspection command through this
+exact envelope.
 
 Worker default:
 
@@ -583,11 +810,34 @@ partial response as success. Pass an explicit model without a fallback chain
 and reject a full model ID when the result's model usage reports a different
 model.
 
+Classify `permission_denials`, `api_error_status`, result subtype, and
+`terminal_reason` before consulting at most one bounded native-text slice.
+Expose only fixed error codes and messages plus a finite non-sensitive
+diagnostic class. Never attach denied `tool_input`, provider result text, raw
+standard error, or the native process error. A denial of an unexposed tool or a
+Bash command outside the positive repository-inspection allowlist is a terminal
+safety failure. An exposed non-Bash tool or a positively recognized safe Bash
+inspection may be a recoverable capability/configuration failure. Treat only
+explicit transient HTTP statuses as provider unavailability; fail closed on
+non-transient client statuses and `api_error` without such a status. Unknown
+valid read-only result failures and unclassified read-only process exits are
+recoverable; the same unknown outcomes during workspace-write or one-shot
+commit work are not.
+
+Map a trusted Claude alias only to its configured absolute isolated
+configuration directory through `CLAUDE_CONFIG_DIR`. Map an explicit decimal
+context size to the native `--autocompact` token window. Omit both controls for
+`current`, and never accept profile-provided arbitrary environment or
+credential material.
+
 Fresh turns omit resume flags. Continuation uses `--resume <session-id>`, and a
 supplied source session uses `--resume <session-id> --fork-session`; persist the
 returned child ID and reject the source ID as invalid fork lineage. An
 unavailable continuation may reconstruct a fresh turn, but an unavailable fork
-source is an error.
+source is an error. Classify source-session and continuation-session failures
+from the attempted session mode. On a fresh turn, distinguish effective-profile,
+authentication, and provider failures instead of reporting a generic missing
+session, and retain no native error text.
 
 Enable native auto-compaction for every turn. On an explicit context-exhaustion
 result, retry the durable request once in the same session with compaction
@@ -603,17 +853,30 @@ subject-only commit with the exact supplied message. It preserves Git hooks and
 configured identity, strips ambient Git redirection and sensitive command
 environment values, and never adds Claude attribution. Report
 `localCommit: false` when this profile or Claude's required Linux sandbox
-dependencies cannot be probed.
+dependencies cannot be probed. Policy, capability, provider, or confirmation-
+turn rejection before executor invocation carries `effectStarted: false`,
+including `ERR_CLAUDE_LOCAL_COMMIT_POLICY`, while preserving the classified
+profile, authentication, provider, continuation, or process error and its
+recoverability; an executor failure does not carry the marker.
 
-### Backend-neutral `finalization` skill
+### Backend-neutral finalization guidance
 
-`finalization` is a repository-defined instruction/skill, not a Codex-only or Claude-only feature.
+Finalization is a dedicated pipeline gate, not a Codex-only or Claude-only
+feature. A repository-defined skill may guide it, but the gate does not depend
+on optional guidance being present.
 
-During bootstrap, the agent must locate the project's finalization instructions through the repository's agent instructions/skills.
+During bootstrap, the agent follows the persisted policy: use an explicitly
+selected confined skill, discover a conventional skill in `auto`, or derive the
+complete procedure from repository instructions and project-defined checks when
+no skill is selected or discovered.
 
-When the selected backend supports the skill natively, it may invoke it natively. Otherwise it must read and follow the skill instructions directly.
+When the selected backend supports a resolved skill natively, it may invoke it
+natively. Otherwise it reads and follows the instructions directly. An
+explicitly selected missing, escaping, or invalid skill blocks; an unavailable
+automatically discovered skill falls back without skipping finalization.
 
-The same repository finalization procedure must therefore work with either Worker backend.
+The same repository finalization procedure must therefore work with either
+Worker backend and without skill-specific guidance.
 
 ---
 
@@ -735,7 +998,7 @@ A practical implementation may hash:
 
 Do not modify the Git index to compute the fingerprint.
 
-The ignored `LOCAL_ARTIFACTS` clarification transcript is not commit content and
+The ignored configured-root clarification transcript is not commit content and
 must not affect this fingerprint. Its independently persisted hash protects it
 as a run input.
 
@@ -834,7 +1097,20 @@ for optional proactive clarification or one exact answer per Worker question
 through `run_respond`. A product decision requires explicit user context; the
 controlling agent asks the user when that context is absent. An external edit
 followed by `run_resume` remains an equivalent path. Detached continuation does
-not change this pipeline's lease, compatibility, Git, or commit gates.
+not change this pipeline's lease, compatibility, Git, or commit gates. An MCP
+dispatch that encounters another run's canonical-worktree lease leaves its
+durable run and incomplete idempotency intent available for exact retry instead
+of launching a conflicting child. After a mutating child is spawned, MCP does
+not complete the intent until the run advances or that child owns the worktree;
+a child that loses a concurrent acquisition race leaves the intent retryable.
+The launcher's correlated exit acknowledgement preserves that result when the
+winning lease is released between MCP polls. The dispatcher also passes its
+runtime tuple to the child. A mismatch is rejected before the child takes the
+run lease, and its distinct exit leaves the run and incomplete intent unchanged
+for an exact retry after the MCP process is restarted.
+The additive MCP start fields leave `sourceSession` unset by default and pass it
+only after the user deliberately selects a fork; native IDs remain opaque and
+an unknown source profile offers only `current` inheritance.
 
 When the Worker returns `READY`, persist and freeze the artifact hash. `READY`
 is valid only when the clarification input is compatible with the validated
@@ -884,6 +1160,8 @@ context.
 No implementation changes may occur before bootstrap completes.
 
 Run Worker bootstrap and Reviewer bootstrap independently and in read-only mode.
+Clarification and bootstrap use distinct role checkpoints. Reconciliation may
+continue the Worker bootstrap session, but implementation and review never do.
 
 Both study:
 
@@ -895,7 +1173,8 @@ Both study:
 - optional `context.md`;
 - repository agent instructions;
 - relevant repository skills;
-- the `finalization` skill;
+- the persisted finalization policy, its resolved guidance when present, and
+  repository instructions and project checks for fallback validation;
 - relevant tests;
 - relevant Git history where useful;
 - project conventions related to the task.
@@ -918,6 +1197,57 @@ Each summary should cover:
 - risks/ambiguities;
 - finalization procedure.
 
+Each role also returns an independently discovered ordered inventory of stable
+`C`-prefixed check IDs and exact commands, plus every repository-relative file
+that controls package scripts, test discovery, test runners, skill guidance, or
+validation configuration. The runner establishes the complete inventory from
+accepted Worker evidence followed by accepted Reviewer evidence. It deduplicates
+exact commands and paths in stable first-seen order, ignores conflicting role
+IDs, and assigns the final contiguous `C1`-through-`Cn` IDs. Every command and
+path found by either role is preserved. Reconciliation and arbitration return no
+inventory fields and cannot invent, select, or omit commands or repository
+paths. The runner fingerprints the derived file list; an agent-supplied digest
+is never trusted.
+Exact commands and paths retain interior whitespace; validation rejects unsafe,
+non-normalized, multiline, or boundary-whitespace values rather than rewriting
+them.
+Every inventory-producing bootstrap prompt, including validation-migration
+discovery, requires unique check IDs, unique exact single-line commands already
+normalized without boundary whitespace, and unique existing canonical
+repository-relative validation files. A symlink or path through a symlink is an
+invalid alias even when its target is confined to the repository.
+Provider-facing structured-output schemas are portable approximations limited
+to the common backend Structured Outputs subset and do not use regex
+lookaround. They retain strict objects, bounds, safe lexical patterns, and
+status-specific variants. Deterministic pipeline normalization remains
+authoritative for exact nonempty text, commands, uniqueness, and safe
+repository-relative paths. Each bootstrap schema keeps a strict object root
+and places its discriminated variants in a nested `result` union. A rejected
+bootstrap result persists and publishes only its role, phase, contract field,
+and violated constraint; it never retains the rejected value or raw role
+output.
+
+The producing Worker or Reviewer and each summary-producing reconciliation
+Worker or Arbiter receives one read-only correction turn for an invalid
+bootstrap contract. The runner first
+persists attempt `1` and the bounded diagnostic, then reconstructs the complete
+request from durable state and asks for a complete replacement result. A
+provider interruption does not consume another correction or require the
+native session. Each adapter maps its native structured-output failure to the
+shared bounded `structured-output` failure class. The pipeline maps only that
+class to the bounded `result` semantic diagnostic after the read-only mutation
+guard completes; provider text is discarded. A valid replacement retires the
+pending correction before any product-decision pause, while its history remains
+consumed. A repeated invalid result fails closed.
+
+Before any inventory is accepted or fingerprinted, the runner asks the root
+Git boundary to inspect each validation-infrastructure path. The path must
+exist as a regular file and the returned canonical repository-relative path
+must exactly equal the proposed value. Missing files, directories, symlinks,
+and symlink traversal return to the producing role as a field-specific
+`existing-canonical-repository-file` correction; they do not surface later as
+a generic unsafe-path failure and are never followed or silently rewritten.
+
 The Reviewer summary additionally states what it intends to verify.
 
 ### Reconciliation
@@ -925,6 +1255,11 @@ The Reviewer summary additionally states what it intends to verify.
 After both summaries exist, compare material differences.
 
 Resolve differences from task/plan/repository evidence.
+
+Reconciliation and any arbitration resolve only the summary and a remaining
+material disagreement. The runner independently derives the established
+validation inventory from the two already accepted role inventories regardless
+of which summary direction is selected.
 
 Persist the agreed context:
 
@@ -948,6 +1283,17 @@ reason: product_decision_required
 
 ## 13. Per-Commit Workflow
 
+Start one fresh Worker checkpoint and one fresh Reviewer checkpoint for every
+planned commit. Reuse those role sessions for implementation, finalization,
+finding resolution, complete re-review, and dispute reconsideration within that
+commit. Never carry either work checkpoint into the next commit, and keep every
+Arbiter turn fresh.
+
+Reconstruct each checkpoint from the validated inputs, resolved bootstrap
+summary, current plan step, active blockers, and bounded prior decisions. A
+product-decision edit invalidates the affected work checkpoint before execution
+resumes. Native continuation remains optional.
+
 For each plan step:
 
 Keep role prompts short. Their mandatory English cores are:
@@ -956,6 +1302,7 @@ Keep role prompts short. Their mandatory English cores are:
 Worker: Implement the changes described in the following planned commit. Keep the implementation idiomatic and minimal, and follow the project's conventions.
 Reviewer: Review the changes and verify that they are correct, idiomatic, minimal, and consistent with the project's conventions.
 Finding resolution: For each finding below, fix it idiomatically and minimally, following the project's conventions.
+Every role: Produce this turn's result yourself as the authorized role. Do not delegate, spawn subagents, or use multi-agent collaboration.
 ```
 
 The pipeline may append turn-specific context, access restrictions, and output
@@ -979,7 +1326,7 @@ findings do not qualify.
 
 ### 13.1 Worker implementation
 
-Start or continue the Worker implementation context.
+Start or continue the current commit's Worker checkpoint.
 
 Before editing, the Worker refreshes:
 
@@ -994,23 +1341,88 @@ The Worker then:
 2. performs a concise self-review;
 3. returns control to the runner.
 
+If required validation cannot run because of an external environment
+constraint, the Worker returns `BLOCKED` with bounded reason and evidence. The
+runner preserves safe implementation content and pauses with
+`environment_blocked` at the `IMPLEMENT` checkpoint.
+
 The Worker must not create a Git commit during implementation, finalization, or
 finding resolution. Commit creation is allowed only in the dedicated,
 runner-authorized `COMMIT` turn after the gate passes.
 
 ### 13.2 Finalization
 
-Run the project's `finalization` skill in a dedicated Worker turn.
+Run the complete project finalization procedure in a dedicated Worker turn for
+every policy mode.
 
 The finalization turn should execute the validation procedure and report its result. It should not perform unrelated discretionary fixes in the same turn.
 
+Every non-availability result carries the complete inventory actually used and
+exactly one ordered result for each required check. `PASS` requires every result
+to be `PASS` after the runner replaces the exact selected trusted-command
+placeholders described below; every other omission, `NOT_RUN`, skip, exclusion,
+substitution, replacement, or weakening is invalid structured output. Evidence is bounded and direct;
+external host results and user attestations do not satisfy the gate.
+
+Every selected runner-trusted command must appear exactly once in the inventory
+using its persisted exact command text. The Worker does not execute it and
+returns `NOT_RUN` only for that selected entry. After the Worker turn completes
+and repository changes are reconciled, the root runs the exact persisted
+executable/argument vector directly without a shell and replaces the
+placeholder with bounded runner evidence. It retains no process stdout or
+stderr and accepts no configuration-supplied environment values. The Linux
+executor requires bubblewrap. Before agent work, the root resolves it only from
+fixed system locations to a canonical absolute executable whose file and
+ancestor directories are not writable by the runner identity. Project-relative
+or project-writable `PATH` entries never participate, and resume and execution
+reverify that pinned path. Its private network namespace contains minimal
+read-only system and repository mounts, private runtime and temporary storage,
+a hidden ambient home, and a finite non-credential environment.
+Command-owned loopback listeners remain possible inside that namespace, but raw
+host Unix daemon and control sockets are masked. A Docker daemon must be
+rootless, and every service must run as part of the exact command inside the
+same mount, network, and PID namespaces; it cannot acquire host mounts or
+networking and is retired with the complete process tree. Remote network and
+filesystem writes, hosting credentials, Git credential helpers, and ambient
+authentication variables remain unavailable. The runner supervises the
+complete process tree with a private PID namespace and bounded outer
+process-group TERM/KILL retirement. A one-byte signal from inside the completed
+isolation profile distinguishes setup denial from a nonzero validation-command
+exit without retaining stderr or other native output. A repository snapshot
+before and after every trusted command
+rejects workspace, index, history/ref, remote-configuration, or Git-identity
+mutation, and the complete validation-infrastructure fingerprint is recomputed
+after trusted execution. Missing isolation, an unterminated process tree,
+blocked, skipped, changed, substituted, non-allowlisted, unmatched, or
+fingerprint-drifting commands fail closed. Agent and runner results form one
+ordered evidence tuple bound to the same content, validation-infrastructure,
+ordered-command, and trusted-configuration fingerprints. The executor runs
+outside agent turns and does not grant an agent loopback, Docker, database,
+network, host temporary-directory, or another host-service capability.
+
+The Worker must not change package scripts, test discovery, test runners,
+validation configuration, or the inventory merely to evade an environment
+blocker. A change required by the current planned commit remains possible, but
+the finalization result records the candidate inventory and current
+infrastructure fingerprint for independent review.
+
 Before invocation, the Worker reports a missing or invalid resolved skill and
-does not execute it. A safe structured result is one of `PASS`, `FAIL`,
+does not execute it. An explicitly configured unavailable skill pauses. An
+unavailable automatically discovered skill switches to the same dedicated gate
+using repository instructions and project-defined checks. A safe structured
+result is one of `PASS`, `FAIL`,
 `SKILL_MISSING`, `SKILL_INVALID`, `BLOCKED`, or the narrowly permitted
 `PRODUCT_DECISION_REQUIRED`. `FAIL` supplies stable `F`-prefixed issue IDs for
-the current procedure output; `PASS`, `FAIL`, `SKILL_INVALID`, and `BLOCKED`
-identify the resolved repository-relative skill path. Missing, invalid, or
-blocked finalization pauses without advancing.
+the current procedure output. Skill-guided results identify the resolved
+repository-relative skill path; skill-less `PASS`, `FAIL`, and `BLOCKED`
+results carry no path. A blocked procedure or unavailable explicit skill pauses
+without advancing.
+
+`BLOCKED` is reserved for a required check that cannot execute because of an
+external environment constraint and carries bounded reason and evidence. It
+pauses with `environment_blocked` and resumes at `FINALIZE`; it is not
+`finalization_cannot_pass` and does not become a code failure. A legitimate
+check failure remains `FAIL`.
 
 The finalization procedure may legitimately modify files when the project itself requires this, for example formatting or generated output.
 
@@ -1029,7 +1441,8 @@ Any later content change invalidates the previous finalization result.
 
 After finalization passes, use an independent Reviewer context for the current commit.
 
-Prefer one Reviewer session per planned commit, reused for re-review/dispute handling within that commit.
+Use one Reviewer checkpoint per planned commit, reused for complete re-review
+and dispute handling within that commit.
 
 The Reviewer receives:
 
@@ -1052,6 +1465,15 @@ It reviews:
 - edge cases;
 - unintended scope expansion;
 - project conventions.
+
+It also compares the established and candidate check inventories,
+infrastructure file sets, runner-computed fingerprints, and exact per-check
+evidence. The fresh review request carries both complete tuples rather than
+depending on earlier session context. An unchanged gate is recorded as
+`UNCHANGED`. Any change must be
+explicitly `ACCEPTED` as authorized by the current plan step or `REJECTED` with
+a finding. The decision and its bounded evidence are bound to the same content
+fingerprint as the review.
 
 The Reviewer must not receive the Worker's private implementation reasoning.
 
@@ -1102,6 +1524,13 @@ or:
 ```text
 DISPUTE
 ```
+
+If required validation is externally unavailable during the resolution turn,
+the Worker may instead return `BLOCKED` with no decisions and bounded reason and
+evidence. When the turn changed content, the runner preserves the partial fix,
+invalidates prior finalization and review evidence, and resumes at `FINALIZE`.
+When content is unchanged, it preserves the current blockers and resumes at
+`RESOLVE_FINDINGS`.
 
 #### FIX
 
@@ -1220,6 +1649,7 @@ unresolved disputes == 0
 pending arbitration == false
 current content fingerprint == finalized fingerprint
 current content fingerprint == reviewed fingerprint
+review validation change == UNCHANGED or ACCEPTED
 HEAD == expected HEAD
 current branch/ref context == expected branch/ref context
 ```
@@ -1260,7 +1690,16 @@ The authorization permits one ordinary local commit only. It does not permit
 `commit --amend`, merge commits, rebases, resets, branch switches, tag creation,
 or any other history/ref mutation.
 
-If no commit is created, pause with `commit_failed`. If a commit is created but
+If no commit is created, pause with `commit_failed`. If the adapter also proved
+`effectStarted: false`, persist its bounded rejection metadata before Git
+verification and durably retire the consumed authorization only after that
+verification reports no commit. A non-recoverable policy rejection remains
+`commit_failed`; a recoverable provider rejection remains
+`backend_unavailable`. Either resumes at `COMMIT` by preparing a fresh
+authorization with a new ID. If verification is interrupted, retain both the
+consumed authorization and its proof, then resume verification without invoking
+the Worker again. Without the explicit marker, retain the consumed
+authorization on that verification-only path. If a commit is created but
 violates the authorization contract, pause with `commit_contract_violated`.
 Never amend, reset, or otherwise rewrite the unexpected commit automatically.
 
@@ -1377,8 +1816,27 @@ When paused:
 
 1. persist state;
 2. append an event;
-3. print a concise explanation;
+3. project and print the same bounded public pause used by MCP status and wait;
 4. do not advance.
+
+The descriptor-owned public pause contains only its finite reason, an optional
+validated bounded diagnostic code, concise explanation, bounded evidence,
+validated resume checkpoint, and applicable next actions. It omits prompts,
+transcripts, credentials, native responses, raw standard error, rejected
+structured values, internal diagnostics, and private counters. The root
+separately projects a pending input request without copying it into the pause.
+An input awaiting detached continuation has no second action.
+
+Next actions preserve the existing validation contract: an identified input
+uses `respond`; a safe retry carries a null resume action; an exhausted fix
+budget carries one concrete valid additional round; and each currently
+overridable finding receives its exact ID. `plan_revision_required` preserves
+the validated rationale and evidence but offers only revision of `plan.md` and
+a fresh execution run. `read_only_agent_mutated_repository` explains that the
+run is contaminated and offers only a fresh run from an uncontaminated
+worktree; it never accepts hybrid changes. `environment_blocked` preserves why
+validation is blocked, its bounded evidence, and the exact retry checkpoint.
+This read-only projection adds no fields to pipeline state version 4.
 
 Example:
 
@@ -1501,7 +1959,8 @@ A debug mode may expose backend stdout/stderr.
 - expected/current HEAD;
 - last finalized/reviewed fingerprint;
 - state directory;
-- pause reason when applicable.
+- bounded pause reason, explanation, evidence, retry checkpoint, and applicable
+  next actions when present.
 
 ---
 
@@ -1552,10 +2011,57 @@ At minimum cover:
 35. ordinary questions after `CLARIFY` are rejected;
 36. a valid `PRODUCT_DECISION_REQUIRED` pause records the answer and invalidates dependent results;
 37. a product answer that changes plan scope pauses with `plan_revision_required`;
-38. `LOCAL_ARTIFACTS` remains outside the commit-content fingerprint;
+38. the configured ignored artifact root remains outside the commit-content fingerprint;
 39. preflight rejects a clarification path that the target repository does not ignore.
 40. MCP input uses the same one-shot authorization and preserves exact answers;
 41. MCP continuation cannot bypass the per-run lease or any local-commit gate.
+42. automatic, explicit, and skill-less finalization modes preserve the
+    dedicated gate, resume policy, and matching finalization/review fingerprints.
+43. MCP offers fresh start and compatible current-session fork choices while
+    leaving the source unset unless the user deliberately selects the fork.
+44. independently identified plan-execution or polishing runs cannot own the
+    same canonical Git worktree concurrently, including through detached MCP
+    dispatch, and a demonstrably stale same-host owner is recoverable.
+45. compatible legacy state migrates under the execution lease, incompatible
+    readers and detached children fail with a specific version-skew error, and
+    disconnects leave the durable run and retryable intent intact.
+46. sandbox, IPC, loopback, process-isolation, missing-service, and permission
+    validation blockers pause as `environment_blocked`, preserve safe content,
+    and resume from the correct fingerprint-aware checkpoint.
+47. pre-effect local-commit policy and provider rejections renew only after the
+    adapter proof and no-commit Git verification, while executor ambiguity and
+    interrupted verification never replay the consumed authorization.
+48. a pre-effect rejection followed by interrupted Git verification persists
+    its bounded proof, resumes verification without replay, and renews only
+    after the resumed verification confirms no commit.
+49. blocked provider turns publish bounded role/phase before invocation;
+    owner loss, timed-out MCP wait, ordinary resume, and interrupted one-shot
+    verification preserve the lease-aware activity contract.
+50. invalid Worker, Reviewer, reconciliation, arbitration, and validation-
+    migration bootstrap results receive one durable read-only correction and a
+    repeated invalid result fails closed without persisted rejected values.
+51. missing, directory, symlink, and symlink-traversing validation-
+    infrastructure paths are rejected before inventory acceptance with the
+    producing field identified, while canonical existing files are accepted.
+52. Claude structured status and permission classification is finite and
+    redacted; allowlisted read-only failures reconstruct from durable state,
+    classified writable usage/provider failures preserve reconciled changes,
+    and forbidden, authentication, ambiguous writable, and one-shot outcomes
+    remain fail closed.
+53. runner-only trusted command definitions, project alias selection, durable
+    snapshot resume, exact-vector execution, bounded redaction, fingerprint
+    drift, exact lexical round trips, and non-allowlisted substitutions fail
+    closed.
+54. service-backed runner checks combine with agent checks only for one exact
+    fingerprint tuple, while blocked checks pause and workspace, Git, ref,
+    remote, identity, ignored validation-infrastructure, leaked process-tree,
+    remote-write, or ambient-credential effects are rejected.
+55. conflicting role IDs, cross-role repeated commands and paths, role-only
+    entries, runner-trusted commands, and attempted reconciliation inventory
+    invention produce one stable complete runner-derived inventory.
+56. every role prompt prohibits delegation, and a backend-reported delegated
+    turn remains terminal while its finite class is redacted, durable, and
+    projected consistently through CLI and MCP status.
 
 Real Codex/Claude smoke tests should be opt-in integration tests.
 
@@ -1617,9 +2123,11 @@ Do not build:
 
 1. Worker and Reviewer independently study project/task/plan before implementation.
 2. Clarification, plan-compatibility, bootstrap, review, and arbitration turns are read-only.
-3. The repository's `finalization` skill defines project validation.
-4. Finalization is backend-neutral and must work through either Worker adapter.
-5. The runner never substitutes generic hard-coded test commands for finalization.
+3. A dedicated finalization turn always defines the project validation gate.
+4. Finalization is backend-neutral and must work through either Worker adapter,
+   with an explicit skill, automatic discovery, or no skill guidance.
+5. Skill-less finalization derives checks from repository evidence; the runner
+   never substitutes generic hard-coded test commands.
 6. The Worker is autonomous during normal implementation.
 7. Only the Worker creates planned commits, one at a time, in a dedicated turn
    authorized by the runner after the commit gate passes.
@@ -1648,6 +2156,24 @@ Do not build:
 27. `CLARIFY` never closes while clarification input conflicts with the validated plan.
 28. A product decision invalidates dependent work, and a plan-changing answer requires a revised validated plan.
 29. The runner never creates a repository-local clarification artifact unless its resolved path is ignored.
+30. External validation constraints pause as `environment_blocked`; they never
+    become code failures or justify weakening the execution boundary.
+31. Bootstrap role inventories use unique check IDs, unique normalized exact
+    commands, and unique existing canonical repository-relative validation
+    files; the runner derives the final stable union and assigns contiguous IDs,
+    while invalid output receives at most one read-only correction per producing
+    role, phase, and contract.
+32. Claude recovery persists no denied input or native provider text, retries
+    only finite allowlisted failures, and reconstructs the request from durable
+    runner state without making a native session authoritative.
+33. Only runner-root configuration defines trusted host commands; selected
+    commands execute outside agent turns as exact persisted vectors, and their
+    bounded evidence cannot pass unless every fingerprint and repository guard
+    remains unchanged. The isolated executor denies remote writes and ambient
+    credentials and retires the complete process tree before reconciliation.
+34. Every role produces its own result without delegation; adapter collaboration
+    auditing remains fail closed and a violation is never an environment pause
+    or transparent retry.
 
 ---
 
@@ -1664,7 +2190,7 @@ V1 is complete when:
 - `--clarify` and agent-generated questions use the declared Markdown artifact and configured text editor;
 - execution does not start when clarification input conflicts with the validated plan;
 - clarification input changes are detected and post-start questions require a blocking product decision;
-- preflight refuses to create `LOCAL_ARTIFACTS` when the target repository does not ignore it;
+- preflight refuses to create the configured artifact path when the target repository does not ignore it;
 - read-only agent-turn guarantees are actively checked;
 - task/plan input changes are detected;
 - each plan step is implemented separately;

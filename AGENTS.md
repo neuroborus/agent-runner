@@ -6,6 +6,7 @@
 - Resolve material ambiguity in a bounded clarification phase before work begins.
 - Author reviewed commit-by-commit coding plans with the `plan-authoring` pipeline.
 - Execute predefined coding plans one verified local commit at a time with the `plan-execution` pipeline.
+- Polish and independently review existing workspace changes without committing them with the `polishing` pipeline.
 - Support Codex CLI and Claude Code as independent pipeline role backends.
 - Stay autonomous during normal execution and pause only for explicit escalation conditions.
 - Make workflow correctness, Git safety, and resumable state more important than convenience.
@@ -27,7 +28,7 @@ contracts. `packages/commit-plan/README.md` owns the shared plan contract.
 - Use `node:test`; keep real Codex and Claude smoke tests opt-in.
 - Prefer small functional modules and split them only when they become meaningfully large.
 - Keep backend-specific flags and output normalization inside `src/agents/`.
-- Keep repository configuration loading and precedence in `src/config.js`; let
+- Keep runner configuration loading and precedence in `src/config.js`; let
   pipeline descriptors own their roles, settings, defaults, and persisted-run
   validation.
 - Keep shared plan parsing and structural and subject validation in
@@ -89,6 +90,18 @@ All pipelines additionally require:
 - Keep MCP on STDIO, reserve stdout for protocol traffic, never open an editor,
   and treat wait cancellation as cancellation of the wait only.
 
+`polishing` additionally requires:
+
+- Run Worker and Reviewer bootstrap independently and read-only.
+- Allow only Worker polishing and finding-resolution turns to change workspace
+  content or staging; every other role turn remains read-only.
+- Never request `local-commit`, create a commit, or change `HEAD`, refs, remotes,
+  or Git identity.
+- Tie successful finalization and independent review to the same
+  staging-independent content fingerprint and invalidate both after content
+  changes.
+- Leave the finalized and reviewed workspace changes uncommitted.
+
 ## Repository Map
 
 | Path | Ownership |
@@ -97,7 +110,7 @@ All pipelines additionally require:
 | `src/index.js` | Public root source boundary |
 | `src/cli.js` | Argument parsing and terminal-facing command dispatch |
 | `src/mcp.js` | STDIO MCP schemas, projections, waits, and detached dispatch |
-| `src/config.js` | Repository configuration loading, validation, and role resolution |
+| `src/config.js` | Runner configuration loading, validation, and role resolution |
 | `src/clarifications.js` | Public clarification-service coordination |
 | `src/clarification-*.js` | Internal confined-file and editor helpers |
 | `src/pipeline-registry.js` | Explicit registry of built-in pipelines |
@@ -111,6 +124,7 @@ All pipelines additionally require:
 | `packages/commit-plan/` | Shared deterministic commit-plan contract |
 | `pipelines/plan-authoring/` | Plan-authoring workflow, prompts, tests, and specification |
 | `pipelines/plan-execution/` | Plan-execution workflow, prompts, tests, and specification |
+| `pipelines/polishing/` | Polishing workflow, prompts, tests, and specification |
 | `test/` | Root CLI, registry, adapter, and repository-boundary tests |
 | `docs/` | Cross-cutting architecture documentation |
 | `.agents/skills/` | Shared repository workflow skills |
