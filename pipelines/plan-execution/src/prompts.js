@@ -56,6 +56,9 @@ For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-dec
 export const BOOTSTRAP_CORRECTION_INSTRUCTIONS = `Your previous structured bootstrap result was rejected by deterministic validation. Make one read-only correction and return a complete replacement result using the same schema.
 Correct only the identified contract violation using current repository evidence. Do not repeat or quote the rejected result, ask an ordinary clarification question, or modify the repository. Preserve the exceptional PRODUCT_DECISION_REQUIRED outcome and its required product-decision fields when its existing criteria are met. Preserve the CAPACITY_EXHAUSTED outcome and its capacity fields on the same basis. A repeated invalid result fails closed.`;
 
+export const FINALIZATION_CORRECTION_INSTRUCTIONS = `Your previous structured finalization result was rejected by deterministic validation. Make one read-only correction and return a complete replacement result using the same finalization schema.
+Correct only the identified contract violation using current repository evidence. Re-execute only corrected staging-independent checks as needed to produce complete direct evidence. Do not execute the rejected command, run staging-dependent validation, repeat or quote the rejected result, ask an ordinary clarification question, or modify repository content, staging, history, refs, remotes, or Git identity. Preserve the exceptional PRODUCT_DECISION_REQUIRED outcome and its required product-decision fields when its existing criteria are met. A repeated invalid result fails closed.`;
+
 export const IMPLEMENTATION_INSTRUCTIONS = `Implement the changes described in the following planned commit. Keep the implementation idiomatic and minimal, and follow the project's conventions.
 
 Work only on this planned commit.

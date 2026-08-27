@@ -15,6 +15,7 @@ import {
   CLARIFICATION_INSTRUCTIONS,
   COMMIT_INSTRUCTIONS,
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
+  FINALIZATION_CORRECTION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
   finalizationBootstrapInstructions,
   finalizationGuidanceInstructions,
@@ -284,7 +285,15 @@ function arbitrationOutputContext(phase = "bootstrap") {
   });
 }
 
-function bootstrapOutputContextFor(role, schema, checkpoint) {
+function finalizationOutputContext() {
+  return Object.freeze({
+    role: "worker",
+    phase: "finalization",
+    contract: "finalization",
+  });
+}
+
+function roleOutputContextFor(role, schema, checkpoint) {
   const phase =
     checkpoint === "validation-migration" ? checkpoint : "bootstrap";
   if (schema === BOOTSTRAP_SCHEMA) {
@@ -295,6 +304,9 @@ function bootstrapOutputContextFor(role, schema, checkpoint) {
   }
   if (schema === BOOTSTRAP_ARBITRATION_SCHEMA) {
     return arbitrationOutputContext(phase);
+  }
+  if (schema === FINALIZATION_SCHEMA && role === "worker") {
+    return finalizationOutputContext();
   }
   return undefined;
 }
@@ -418,6 +430,24 @@ function normalizeValidationMigrationArbitrationOutput(output) {
     );
   }
   return result;
+}
+
+function normalizeFinalizationRoleOutput(output, trustedCommands) {
+  const context = finalizationOutputContext();
+  try {
+    return normalizeFinalizationResult(output, { trustedCommands });
+  } catch (cause) {
+    if (cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT") {
+      throw cause;
+    }
+    throw new PlanExecutionWorkflowError(
+      "Structured finalization result violates its contract.",
+      {
+        code: cause.code,
+        diagnostic: outputDiagnostic(cause, context),
+      },
+    );
+  }
 }
 
 export async function runPlanExecution({ action, run, runtime, settings }) {
@@ -599,6 +629,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         bootstrapDisagreement: null,
         bootstrapArbitrationUsed: false,
         pendingBootstrapCorrection: null,
+        finalizationCorrection: null,
+        pendingFinalizationCorrection: null,
         compatibilityCheckRequired: false,
         currentStep: null,
         reviewerStep: null,
@@ -829,8 +861,11 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     if (turn.role !== "worker") {
       return false;
     }
-    if (["implement", "finalize"].includes(turn.phase)) {
+    if (turn.phase === "implement") {
       return true;
+    }
+    if (turn.phase === "finalize") {
+      return state().pendingFinalizationCorrection === null;
     }
     return (
       turn.phase === "resolve-findings" &&
@@ -940,6 +975,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     {
       access = "read-only",
       checkpoint,
+      freshSession = false,
       recoveryContext = "",
     } = {},
   ) {
@@ -951,7 +987,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         "ERR_INVALID_PLAN_EXECUTION_STATE",
       );
     }
-    const outputContext = bootstrapOutputContextFor(role, schema, checkpoint);
+    const outputContext = roleOutputContextFor(role, schema, checkpoint);
     await ensureRoleCapabilities(role);
     const evidence = await readCurrentInputs();
     if (evidence === null) {
@@ -986,11 +1022,13 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         : undefined;
     const sourceSession = currentRun.sessionLineage.source;
     const session =
-      previousSession !== undefined
-        ? { id: previousSession, mode: "continue" }
-        : !recovering && sourceSession !== null && role !== "arbiter"
-          ? { id: sourceSession, mode: "fork" }
-          : undefined;
+      freshSession
+        ? undefined
+        : previousSession !== undefined
+          ? { id: previousSession, mode: "continue" }
+          : !recovering && sourceSession !== null && role !== "arbiter"
+            ? { id: sourceSession, mode: "fork" }
+            : undefined;
     const roleConfiguration = currentRun.roles[role];
     const recoveryPrompt = rolePrompt(buildPrompt(context));
     const executionPreferences = Object.fromEntries(
@@ -1451,6 +1489,25 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       : undefined;
   }
 
+  function finalizationCorrectionAttempt(context) {
+    const correction = state().finalizationCorrection;
+    return correction !== null &&
+      correction.step === state().currentStep &&
+      correctionMatchesContext(correction, context)
+      ? correction
+      : undefined;
+  }
+
+  function pendingFinalizationCorrection(context, guidance) {
+    const correction = state().pendingFinalizationCorrection;
+    return correction !== null &&
+      correction.step === state().currentStep &&
+      correction.guidance === guidance &&
+      correctionMatchesContext(correction, context)
+      ? correction
+      : undefined;
+  }
+
   async function validateBootstrapInventory(result, context) {
     if (!Array.isArray(result.validationInfrastructure)) {
       return result;
@@ -1525,7 +1582,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     buildPrompt,
     normalize,
   }) {
-    const context = bootstrapOutputContextFor(role, schema, checkpoint);
+    const context = roleOutputContextFor(role, schema, checkpoint);
     while (true) {
       const correction = pendingBootstrapCorrection(context);
       try {
@@ -2441,16 +2498,32 @@ ${step.body}${
 
   async function runFinalizationTurn() {
     const step = planStep();
-    const beforeFingerprint = await contentFingerprint();
-    const guidance = await resolveFinalizationGuidance();
+    const persistedCorrection = state().pendingFinalizationCorrection;
+    const beforeFingerprint =
+      persistedCorrection?.contentFingerprint ?? (await contentFingerprint());
+    const fallbackGuidance = Object.freeze({
+      required: false,
+      skillPath: null,
+    });
+    const guidance =
+      persistedCorrection?.guidance === "fallback"
+        ? fallbackGuidance
+        : await resolveFinalizationGuidance();
     if (guidance === null) {
       return false;
     }
-    async function requestFinalization(selectedGuidance) {
-      const output = await runRole(
-        "worker",
-        FINALIZATION_SCHEMA,
-        (evidence) => `${FINALIZATION_INSTRUCTIONS}
+    async function requestFinalization(selectedGuidance, guidanceScope) {
+      const context = finalizationOutputContext();
+      while (true) {
+        const correction = pendingFinalizationCorrection(
+          context,
+          guidanceScope,
+        );
+        try {
+          const output = await runRole(
+            "worker",
+            FINALIZATION_SCHEMA,
+            (evidence) => `${FINALIZATION_INSTRUCTIONS}
 
 ${finalizationGuidanceInstructions(selectedGuidance)}
 
@@ -2462,42 +2535,120 @@ Current planned commit:
 ## Commit ${step.number}: ${step.subject}
 
 ${step.body}
-`,
-        {
-          access: "workspace-write",
-          checkpoint: `commit:${state().currentStep}`,
-          recoveryContext: resolvedContext(),
-        },
-      );
-      if (output === null) {
-        return null;
+${
+              correction === undefined
+                ? ""
+                : `\n${FINALIZATION_CORRECTION_INSTRUCTIONS}\n\nCorrection diagnostic:\n${JSON.stringify(correction, null, 2)}`
+            }`,
+            {
+              access:
+                correction === undefined ? "workspace-write" : "read-only",
+              checkpoint:
+                correction === undefined
+                  ? `commit:${state().currentStep}`
+                  : `finalization-correction:${state().currentStep}`,
+              freshSession: correction !== undefined,
+              recoveryContext: resolvedContext(),
+            },
+          );
+          if (output === null) {
+            return null;
+          }
+          const result = normalizeFinalizationRoleOutput(
+            output,
+            state().trustedValidation.commands.map(({ command }) => command),
+          );
+          if (
+            selectedGuidance.skillPath === null &&
+            ["SKILL_MISSING", "SKILL_INVALID"].includes(result.status)
+          ) {
+            throw invalidRoleOutput(
+              "Worker returned a skill availability status without selected finalization skill guidance.",
+              context,
+              {
+                field: "status",
+                constraint: "selected-finalization-guidance",
+              },
+            );
+          }
+          if (
+            result.status !== "PRODUCT_DECISION_REQUIRED" &&
+            result.skillPath !== selectedGuidance.skillPath
+          ) {
+            throw invalidRoleOutput(
+              "Worker returned a finalization result for the wrong skill path.",
+              context,
+              {
+                field: "skillPath",
+                constraint: "resolved-finalization-skill",
+              },
+            );
+          }
+          if (
+            !["SKILL_MISSING", "SKILL_INVALID"].includes(result.status) &&
+            state().trustedValidation.commands.some(
+              ({ command }) =>
+                !result.requiredChecks.some(
+                  (required) => required.command === command,
+                ),
+            )
+          ) {
+            throw invalidRoleOutput(
+              "Worker omitted a runner-trusted finalization command.",
+              context,
+              {
+                field: "requiredChecks",
+                constraint: "includes-runner-trusted-commands",
+              },
+            );
+          }
+          if (correction !== undefined) {
+            await transition({
+              ...state(),
+              pendingFinalizationCorrection: null,
+            });
+          }
+          return result;
+        } catch (cause) {
+          if (
+            cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT" ||
+            !isOutputDiagnostic(cause.diagnostic)
+          ) {
+            throw cause;
+          }
+          if (finalizationCorrectionAttempt(context) !== undefined) {
+            throw cause;
+          }
+          const diagnostic = outputDiagnostic(cause, context);
+          const correction = {
+            attempt: 1,
+            step: state().currentStep,
+            guidance: guidanceScope,
+            contentFingerprint: beforeFingerprint,
+            ...diagnostic,
+          };
+          await transition(
+            {
+              ...state(),
+              finalizationCorrection: correction,
+              pendingFinalizationCorrection: correction,
+            },
+            {
+              publicActivity: activity(
+                context.role,
+                context.phase,
+                "finalization-correction",
+                `${context.role} must correct ${context.contract} field ${diagnostic.field} (${diagnostic.constraint}).`,
+              ),
+            },
+          );
+        }
       }
-      const result = normalizeFinalizationResult(output, {
-        trustedCommands: state().trustedValidation.commands.map(
-          ({ command }) => command,
-        ),
-      });
-      if (
-        selectedGuidance.skillPath === null &&
-        ["SKILL_MISSING", "SKILL_INVALID"].includes(result.status)
-      ) {
-        throw workflowError(
-          "Worker returned a skill availability status without selected finalization skill guidance.",
-          "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
-        );
-      }
-      if (
-        result.status !== "PRODUCT_DECISION_REQUIRED" &&
-        result.skillPath !== selectedGuidance.skillPath
-      ) {
-        throw workflowError(
-          "Worker returned a finalization result for the wrong skill path.",
-          "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
-        );
-      }
-      return result;
     }
-    let result = await requestFinalization(guidance);
+    let result = await requestFinalization(
+      guidance,
+      persistedCorrection?.guidance ?? "resolved",
+    );
     if (result === null) {
       return false;
     }
@@ -2516,29 +2667,13 @@ ${step.body}
         });
         return false;
       }
-      result = await requestFinalization(
-        Object.freeze({ required: false, skillPath: null }),
-      );
+      result = await requestFinalization(fallbackGuidance, "fallback");
       if (result === null) {
         return false;
       }
     }
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "IMPLEMENT");
-    }
-    if (
-      !["SKILL_MISSING", "SKILL_INVALID"].includes(result.status) &&
-      state().trustedValidation.commands.some(
-        ({ command }) =>
-          !result.requiredChecks.some(
-            (required) => required.command === command,
-          ),
-      )
-    ) {
-      throw workflowError(
-        "Worker omitted a runner-trusted finalization command.",
-        "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
-      );
     }
     if (result.status === "BLOCKED") {
       await pause("environment_blocked", {
@@ -3790,6 +3925,8 @@ ${step.subject}`),
         repositoryBaseline: nextRepositoryBaseline,
         currentStep: done ? null : current.currentStep + 1,
         reviewerStep: null,
+        finalizationCorrection: null,
+        pendingFinalizationCorrection: null,
         pendingCommit: null,
         completedCommits,
       },

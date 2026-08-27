@@ -1789,6 +1789,60 @@ test("waits by revision, emits public progress, and leaves timeouts read-only", 
   assert.equal((await store.loadRun(SECOND_RUN_ID)).revision, 1);
 });
 
+test("projects bounded finalization correction activity without rejected content", async (t) => {
+  const paths = await workspace(t, "agent-runner-mcp-finalization-correction-");
+  const store = createRunStore({ stateRoot: paths.stateRoot });
+  await createStoredRun(store, paths, { pipelineId: "plan-execution" });
+  const lease = await store.acquireRunLease(RUN_ID);
+  try {
+    const run = await store.recoverRun(lease);
+    await store.transitionRun(
+      lease,
+      { pipelineState: run.pipelineState },
+      {
+        activity: {
+          actor: "worker",
+          phase: "finalization",
+          kind: "finalization-correction",
+          message:
+            "worker must correct finalization field requiredChecks[2].command (staging-independent-validation-command).",
+        },
+      },
+    );
+  } finally {
+    await lease.release();
+  }
+  const control = createMcpControlPlane({
+    runner: storedRunner(store, paths),
+    runStore: store,
+  });
+
+  const page = await control.runActivity({
+    runId: RUN_ID,
+    cursor: 1,
+    limit: 50,
+  });
+
+  assert.equal(typeof page.activities[0].recordedAt, "string");
+  assert.deepEqual(
+    page.activities.map(({ recordedAt: _recordedAt, ...activity }) => activity),
+    [
+      {
+        revision: 2,
+        actor: "worker",
+        phase: "finalization",
+        kind: "finalization-correction",
+        message:
+          "worker must correct finalization field requiredChecks[2].command (staging-independent-validation-command).",
+      },
+    ],
+  );
+  assert.doesNotMatch(
+    JSON.stringify(page),
+    /git status|DO_NOT_PERSIST|provider|transcript/u,
+  );
+});
+
 test("projects live and crashed provider activity through status and wait", async (t) => {
   const paths = await workspace(t, "agent-runner-mcp-provider-activity-");
   const ownerProcessId = 424_242;

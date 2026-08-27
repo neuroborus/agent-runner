@@ -466,6 +466,19 @@ authorization and its gate evidence stay on the verification-only path. Git
 verification runs before reconciliation, migration discovery, or another role
 turn, and any still-pending migration resumes only after that effect is resolved.
 
+Plan execution state version 7 adds one finalization-correction record and a
+matching pending marker scoped to the current commit step. Its version-6
+migration initializes both to `null` without changing workflow position or
+evidence. The first invalid Worker finalization result records only attempt `1`,
+the step, bounded guidance and content-fingerprint scope, and the role, phase,
+contract, field, and constraint diagnostic. The runner then reconstructs the
+complete finalization request from durable state and uses the same schema for
+one fresh-session, read-only correction turn. A valid replacement clears the
+pending marker and rejoins the existing gate; a second invalid result fails
+closed. Rejected values, commands, paths, provider text, and transcripts never
+enter state or public activity. Interrupted correction recovery remains
+read-only and does not require a native session.
+
 Polishing state version 3 adopts the same resolved trusted-validation snapshot,
 per-check executor provenance, and fingerprint-bound evidence tuple. Its
 version-2 migration selects empty legacy trust, preserves safe workspace

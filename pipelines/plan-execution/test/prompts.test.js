@@ -9,6 +9,7 @@ import {
   CLARIFICATION_INSTRUCTIONS,
   COMMIT_INSTRUCTIONS,
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
+  FINALIZATION_CORRECTION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
   finalizationBootstrapInstructions,
   finalizationGuidanceInstructions,
@@ -54,6 +55,30 @@ test("bootstrap instructions preserve independent evidence and arbitration", () 
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /ordinary clarification question/u);
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /PRODUCT_DECISION_REQUIRED/u);
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /repeated invalid result fails closed/u);
+  assert.match(
+    FINALIZATION_CORRECTION_INSTRUCTIONS,
+    /one read-only correction/u,
+  );
+  assert.match(
+    FINALIZATION_CORRECTION_INSTRUCTIONS,
+    /same finalization schema/u,
+  );
+  assert.match(
+    FINALIZATION_CORRECTION_INSTRUCTIONS,
+    /Re-execute only corrected staging-independent checks/u,
+  );
+  assert.match(
+    FINALIZATION_CORRECTION_INSTRUCTIONS,
+    /Do not execute the rejected command/u,
+  );
+  assert.match(
+    FINALIZATION_CORRECTION_INSTRUCTIONS,
+    /modify repository content, staging, history, refs, remotes, or Git identity/u,
+  );
+  assert.match(
+    FINALIZATION_CORRECTION_INSTRUCTIONS,
+    /repeated invalid result fails closed/u,
+  );
 });
 
 test("clarification instructions keep questions before implementation", () => {

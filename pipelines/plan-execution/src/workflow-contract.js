@@ -49,6 +49,8 @@ const PIPELINE_STATE_FIELDS = new Set([
   "bootstrapArbitrationUsed",
   "bootstrapCorrections",
   "pendingBootstrapCorrection",
+  "finalizationCorrection",
+  "pendingFinalizationCorrection",
   "compatibilityCheckRequired",
   "currentStep",
   "reviewerStep",
@@ -133,6 +135,13 @@ const ADAPTER_DIAGNOSTIC_CLASS_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
 const OUTPUT_DIAGNOSTIC_VALUE_PATTERN = /^[a-zA-Z0-9_.[\]-]{1,128}$/u;
 const BOOTSTRAP_CORRECTION_FIELDS = Object.freeze([
   "attempt",
+  ...OUTPUT_DIAGNOSTIC_FIELDS,
+]);
+const FINALIZATION_CORRECTION_FIELDS = Object.freeze([
+  "attempt",
+  "step",
+  "guidance",
+  "contentFingerprint",
   ...OUTPUT_DIAGNOSTIC_FIELDS,
 ]);
 const BOOTSTRAP_RESULT_FIELDS = Object.freeze([
@@ -2206,6 +2215,36 @@ function normalizeBootstrapCorrections(value) {
   return value;
 }
 
+function normalizeFinalizationCorrection(value, planSteps) {
+  if (value === null) {
+    return null;
+  }
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, FINALIZATION_CORRECTION_FIELDS) ||
+    value.attempt !== 1 ||
+    !Number.isSafeInteger(value.step) ||
+    value.step < 1 ||
+    value.step > (planSteps?.length ?? 0) ||
+    !["resolved", "fallback"].includes(value.guidance) ||
+    !HASH_PATTERN.test(value.contentFingerprint)
+  ) {
+    throw workflowError("Plan-execution finalization correction is invalid.");
+  }
+  const diagnostic = Object.fromEntries(
+    OUTPUT_DIAGNOSTIC_FIELDS.map((field) => [field, value[field]]),
+  );
+  if (
+    !isOutputDiagnostic(diagnostic) ||
+    value.role !== "worker" ||
+    value.phase !== "finalization" ||
+    value.contract !== "finalization"
+  ) {
+    throw workflowError("Plan-execution finalization correction is invalid.");
+  }
+  return value;
+}
+
 function normalizedSummary(value, name) {
   return value === null ? null : normalizeSummary(value, name);
 }
@@ -2818,6 +2857,25 @@ export function normalizePipelineState(value) {
       "Plan-execution pending bootstrap correction is inconsistent.",
     );
   }
+  const finalizationCorrection = normalizeFinalizationCorrection(
+    value.finalizationCorrection,
+    planSteps,
+  );
+  const pendingFinalizationCorrection = normalizeFinalizationCorrection(
+    value.pendingFinalizationCorrection,
+    planSteps,
+  );
+  if (
+    pendingFinalizationCorrection !== null &&
+    !isDeepStrictEqual(
+      pendingFinalizationCorrection,
+      finalizationCorrection,
+    )
+  ) {
+    throw workflowError(
+      "Plan-execution pending finalization correction is inconsistent.",
+    );
+  }
   if (
     (reviewerSummary !== null && workerSummary === null) ||
     (!value.validationMigrationPending &&
@@ -2869,6 +2927,18 @@ export function normalizePipelineState(value) {
     (!Number.isSafeInteger(value.currentStep) || value.currentStep < 1)
   ) {
     throw workflowError("Plan-execution current step is invalid.");
+  }
+  if (
+    finalizationCorrection !== null &&
+    (value.currentStep !== finalizationCorrection.step ||
+      (pendingFinalizationCorrection !== null &&
+        !["FINALIZE", "WAITING_FOR_USER", "FAILED"].includes(
+          value.workflowState,
+        )))
+  ) {
+    throw workflowError(
+      "Plan-execution finalization correction is inapplicable.",
+    );
   }
   if (
     value.reviewerStep !== null &&
@@ -3198,6 +3268,8 @@ export function normalizePipelineState(value) {
       value.bootstrapArbitrationUsed ||
       bootstrapCorrections.length !== 0 ||
       pendingBootstrapCorrection !== null ||
+      finalizationCorrection !== null ||
+      pendingFinalizationCorrection !== null ||
       value.compatibilityCheckRequired ||
       value.currentStep !== null ||
       value.reviewerStep !== null ||
@@ -3390,6 +3462,8 @@ export function createPlanExecutionState({
     bootstrapArbitrationUsed: false,
     bootstrapCorrections: Object.freeze([]),
     pendingBootstrapCorrection: null,
+    finalizationCorrection: null,
+    pendingFinalizationCorrection: null,
     compatibilityCheckRequired: false,
     currentStep: null,
     reviewerStep: null,
@@ -3468,7 +3542,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 6 ||
+    run.pipelineStateVersion !== 7 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||

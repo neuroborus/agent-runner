@@ -23,6 +23,7 @@ export {
   CLARIFICATION_INSTRUCTIONS,
   COMMIT_INSTRUCTIONS,
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
+  FINALIZATION_CORRECTION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
   finalizationBootstrapInstructions,
   finalizationGuidanceInstructions,
@@ -705,15 +706,24 @@ export function migratePlanExecutionStateV5(run) {
   });
 }
 
+export function migratePlanExecutionStateV6(run) {
+  return Object.freeze({
+    ...run.pipelineState,
+    finalizationCorrection: null,
+    pendingFinalizationCorrection: null,
+  });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
-  stateVersion: 6,
+  stateVersion: 7,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
     3: migratePlanExecutionStateV3,
     4: migratePlanExecutionStateV4,
     5: migratePlanExecutionStateV5,
+    6: migratePlanExecutionStateV6,
   }),
   roles: ROLES,
   settings: SETTINGS,

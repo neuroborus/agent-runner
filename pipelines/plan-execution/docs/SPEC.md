@@ -381,6 +381,9 @@ Persist at least:
   runner-computed infrastructure fingerprint;
 - bounded bootstrap-correction attempts containing only role, phase, contract,
   field, constraint, and attempt number;
+- the current step's optional consumed and pending finalization-correction
+  records, containing only attempt number, step, bounded guidance and content-
+  fingerprint scope, role, phase, contract, field, and constraint;
 - exact per-check finalization evidence and the fingerprint-bound Reviewer
   validation-change decision;
 - the resolved runner-trusted command snapshot, command/configuration
@@ -457,6 +460,18 @@ authorization retains its gate evidence and active verification state; Git
 verification occurs before repository reconciliation, validation rediscovery,
 or another role turn, and any pending validation migration continues only after
 the effect is resolved.
+
+Pipeline state version 7 adds a nullable consumed finalization correction and a
+matching nullable pending marker scoped to the current commit step. The
+version-6 migration initializes both to `null` without changing safe content,
+workflow position, gate evidence, or commit authority. A record contains only
+attempt `1`, the step, resolved-or-fallback guidance scope, the request's
+content fingerprint, and the bounded Worker/finalization contract field and
+constraint diagnostic. It never contains rejected values, commands, paths,
+provider text, or raw structured output. The pending marker is cleared after a
+valid replacement; the consumed record remains until the step commits so a
+later invalid finalization result in the same step fails closed. Starting the
+next step clears both records.
 
 Common run-envelope version 3 independently adds nullable bounded active
 provider role and phase. Version-1 and version-2 envelopes project it as `null`
@@ -1518,6 +1533,23 @@ If finalization fails, enter `RESOLVE_FINDINGS` with the reported validation fai
 
 Any later content change invalidates the previous finalization result.
 
+If deterministic normalization rejects the first Worker finalization result,
+persist the version-7 bounded diagnostic and publish one
+`finalization-correction` activity without rejected content. Reconstruct the
+complete request from durable inputs and ask the Worker for one complete
+replacement with the same finalization schema in a fresh-session, read-only
+turn. The correction may re-execute corrected staging-independent checks needed
+for complete direct evidence, but it does not execute the rejected command or
+staging-dependent validation and cannot modify repository content, staging,
+history, refs, remotes, or Git identity. Interruption before or during that turn
+preserves the pending attempt, reconciles it as read-only, and resumes without
+another attempt or a required native session. A valid corrected `BLOCKED`
+result uses `environment_blocked`; corrected `PASS` and `FAIL` results rejoin
+the existing fingerprint, trusted-validation, review, and commit paths. A
+repeated invalid result fails closed without retaining either rejected result.
+This per-step attempt is independent of bootstrap and validation-migration
+correction ledgers.
+
 ### 13.3 Review
 
 After finalization passes, use an independent Reviewer context for the current commit.
@@ -2176,6 +2208,11 @@ At minimum cover:
     inventories obey the same deterministic policy, and a paused version-5
     implementation run re-establishes phase-safe context before finalization,
     review, and one authorized commit.
+61. a transport-compatible finalization inventory containing `git status`
+    receives one durable, redacted, read-only correction; corrected BLOCKED,
+    PASS, and FAIL outcomes rejoin their existing routes, interruption resumes
+    the same attempt, a second invalid result fails closed, and version-6 state
+    migrates losslessly to the version-7 shape.
 
 Real Codex/Claude smoke tests should be opt-in integration tests.
 
@@ -2293,6 +2330,10 @@ Do not build:
     bootstrap, migration, and finalization inventories are staging-independent,
     and the constrained `COMMIT` executor alone stages, applies fixed staged
     hygiene, and creates the exact validated subject-only commit.
+36. An invalid Worker finalization result receives at most one read-only
+    correction for the current commit step and finalization contract; only its
+    bounded diagnostic is durable or public, and corrected evidence must still
+    pass every existing trusted-validation, Git, and fingerprint gate.
 
 ---
 
