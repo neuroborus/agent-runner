@@ -199,9 +199,16 @@ Backend sessions are disposable. When a native context is full, the adapter
 compacts it and retries once; persistent pressure moves ordinary turns to a
 fresh session reconstructed from durable run state, artifacts, and the current
 workspace. Explicit source sessions retain strict identity and lineage.
-Interrupted local-commit turns are reconciled from Git state. An explicit Claude
-rate, quota, credit, or spend-limit rejection pauses as `backend_unavailable`,
-with durable workflow state and safe workspace changes preserved for resume.
+Interrupted ordinary turns revalidate canonical paths, durable task inputs, and
+Git controls before restarting from the complete request in a fresh native
+session. Read-only turns still require an unchanged repository. Polishing
+Worker turns may preserve partial content, but index drift is rejected; the
+runner owns the later staging handoff. Plan-execution recovery retains its
+pipeline-specific one-shot commit reconciliation.
+Interrupted local-commit turns are reconciled from Git state and never replayed.
+An explicit Claude rate, quota, credit, or spend-limit rejection pauses as
+`backend_unavailable`, with durable workflow state and safe workspace changes
+preserved for resume.
 
 ## Task Inputs
 
@@ -360,6 +367,14 @@ print concise labeled activity as it is persisted; `status` prints the current
 state, pause, artifact paths, findings, fingerprints, commit SHAs, and a bounded
 public activity summary.
 
+An action-free resume also recovers a nonterminal, nonpaused persisted active
+turn after its execution owner is lost. Recovery retains the active marker
+through input and repository reconciliation, replaces it when the complete
+request restarts, and clears it only after normal post-turn reconciliation. If
+correction reconciliation advanced the checkpoint before the marker could be
+cleared, resume clears that completed marker after the same safety checks and
+continues from the advanced checkpoint without replaying the correction.
+
 Plan execution and polishing accept one applicable resume action at a time:
 
 ```bash
@@ -384,12 +399,17 @@ authorization to create the exact planned local commit. Remote state remains
 read-only.
 
 Polishing follows the same fingerprint-bound finalization and independent
-review gate and preserves the reviewed workspace content and staging state for
-a separate commit workflow.
+review gate. Agent turns change content only; after the gate passes, the runner
+stages the complete reviewed change set and leaves it uncommitted for a
+separate commit workflow.
 Its dedicated `FINALIZE` turn runs the target project's complete validation
 procedure, including required formatting or generated output, with configured
 skill guidance when available. Its scope ends with fingerprint-bound validation
-and review.
+and review. Bootstrap, validation migration, and finalization translate
+applicable tracked-content checks to `HEAD` or explicit trees and reject index
+mutation, index-relative inspection, alternate-index workarounds, and commit
+preparation. Staging and staged inspection in selected guidance are deferred to
+the runner-owned handoff.
 
 ## MCP
 
@@ -501,7 +521,10 @@ are appended verbatim to the durable clarification transcript before detached
 execution continues. Editing the artifact and using `run_resume` remains
 supported;
 `run_resume` requires `expectedRevision` from the latest status or wait result,
-a unique idempotency key, and only an action valid for the persisted pause.
+a unique idempotency key, and only an action valid for the persisted pause. The
+only non-pause exception is a null action at the exact revision of a nonterminal
+persisted active turn with no live execution owner; stale revisions, non-null
+actions, and concurrent owners are rejected.
 
 Mutating tools persist an action intent before mutation and a receipt before
 returning. Exact retries return the original result, while reusing a key with
@@ -560,6 +583,7 @@ events, agents, and Git services; pipeline workspaces own workflow policy.
 │   ├── git-commit.js
 │   ├── git-command.js
 │   ├── git-content.js
+│   ├── git-handoff.js
 │   ├── git.js
 │   ├── index.js
 │   ├── mcp.js
@@ -610,7 +634,7 @@ Run the complete repository gate:
 
 ```bash
 npm run check
-git diff --check
+git diff --check HEAD
 git diff --cached --check
 ```
 
@@ -630,5 +654,9 @@ node bin/agent-run.js --help
 Use the repository's `finalization` skill before handing off a completed
 change. It validates the current change; when explicitly asked to finalize, it
 also stages the relevant files and drafts a Conventional Commit message.
+Inside the polishing pipeline, that skill remains staging-independent and the
+runner stages and inspects the complete finalized and reviewed change set
+instead. Its producing roles use `HEAD`-relative or explicit-tree content checks
+and never persist a staged/index-relative required check.
 Finalization stops at the staged handoff boundary. Commit creation requires a
 separate explicit request, and remote state remains read-only in V1.

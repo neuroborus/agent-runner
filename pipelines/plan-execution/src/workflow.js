@@ -15,6 +15,7 @@ import {
   CLARIFICATION_INSTRUCTIONS,
   COMMIT_INSTRUCTIONS,
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
+  FINALIZATION_CORRECTION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
   finalizationBootstrapInstructions,
   finalizationGuidanceInstructions,
@@ -284,7 +285,15 @@ function arbitrationOutputContext(phase = "bootstrap") {
   });
 }
 
-function bootstrapOutputContextFor(role, schema, checkpoint) {
+function finalizationOutputContext() {
+  return Object.freeze({
+    role: "worker",
+    phase: "finalization",
+    contract: "finalization",
+  });
+}
+
+function roleOutputContextFor(role, schema, checkpoint) {
   const phase =
     checkpoint === "validation-migration" ? checkpoint : "bootstrap";
   if (schema === BOOTSTRAP_SCHEMA) {
@@ -295,6 +304,9 @@ function bootstrapOutputContextFor(role, schema, checkpoint) {
   }
   if (schema === BOOTSTRAP_ARBITRATION_SCHEMA) {
     return arbitrationOutputContext(phase);
+  }
+  if (schema === FINALIZATION_SCHEMA && role === "worker") {
+    return finalizationOutputContext();
   }
   return undefined;
 }
@@ -373,7 +385,7 @@ function normalizeValidationMigrationRoleOutput(output, role) {
     role,
     "validation-migration",
   );
-  if (result.status !== "READY") {
+  if (!["READY", "CAPACITY_EXHAUSTED"].includes(result.status)) {
     throw invalidRoleOutput(
       "Validation migration requires a ready inventory.",
       bootstrapOutputContext(role, "validation-migration"),
@@ -420,6 +432,24 @@ function normalizeValidationMigrationArbitrationOutput(output) {
   return result;
 }
 
+function normalizeFinalizationRoleOutput(output, trustedCommands) {
+  const context = finalizationOutputContext();
+  try {
+    return normalizeFinalizationResult(output, { trustedCommands });
+  } catch (cause) {
+    if (cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT") {
+      throw cause;
+    }
+    throw new PlanExecutionWorkflowError(
+      "Structured finalization result violates its contract.",
+      {
+        code: cause.code,
+        diagnostic: outputDiagnostic(cause, context),
+      },
+    );
+  }
+}
+
 export async function runPlanExecution({ action, run, runtime, settings }) {
   assertRun(run);
   assertRuntime(runtime);
@@ -429,6 +459,8 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
   }
 
   let currentRun = run;
+  let interruptedTurn = run.activeTurn;
+  let interruptedRepositoryReconciled = false;
 
   function state() {
     return normalizePipelineState(currentRun.pipelineState);
@@ -440,7 +472,13 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
 
   function resolvedContext() {
     const summary = state().resolvedSummary;
-    return summary === null ? "" : `Resolved bootstrap context:\n${summary}`;
+    if (summary === null || state().validationMigrationPending) {
+      return "";
+    }
+    return `Resolved bootstrap context:
+${summary}
+
+Phase ownership: the established required-check inventory is input only to FINALIZE. Staging, staged/index-relative inspection, alternate-index workarounds, staged handoff, and commit-message drafting belong only to COMMIT.`;
   }
 
   function trustedValidationInstructions() {
@@ -490,6 +528,21 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       },
     );
     return currentRun;
+  }
+
+  async function pauseForBootstrapCapacity(role, result) {
+    const field = result.capacityField;
+    const limit = result.capacityLimit;
+    await pause("bootstrap_inventory_capacity_exhausted", {
+      code: "ERR_BOOTSTRAP_INVENTORY_CAPACITY_EXHAUSTED",
+      explanation: `The ${role} bootstrap reported that the complete ${field} inventory exceeds the supported per-role limit of ${limit} items. Increase the bounded Runner contract or reduce the validation-controlling surface, then start a new run.`,
+      evidence: [
+        `Bootstrap role: ${role}.`,
+        `Inventory field: ${field}.`,
+        `Per-role item limit: ${limit}.`,
+      ],
+    });
+    return false;
   }
 
   async function pausePreEffectCommitRejection(rejection) {
@@ -576,6 +629,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         bootstrapDisagreement: null,
         bootstrapArbitrationUsed: false,
         pendingBootstrapCorrection: null,
+        finalizationCorrection: null,
+        pendingFinalizationCorrection: null,
         compatibilityCheckRequired: false,
         currentStep: null,
         reviewerStep: null,
@@ -792,6 +847,127 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     return null;
   }
 
+  function interruptedControlChange(cause) {
+    if (cause?.changes?.includes("remote-configuration")) {
+      return "unexpected_remote_configuration_change";
+    }
+    if (cause?.changes?.includes("identity")) {
+      return "unexpected_git_identity_change";
+    }
+    return "unexpected_git_ref_change";
+  }
+
+  function interruptedTurnIsWritable(turn) {
+    if (turn.role !== "worker") {
+      return false;
+    }
+    if (turn.phase === "implement") {
+      return true;
+    }
+    if (turn.phase === "finalize") {
+      return state().pendingFinalizationCorrection === null;
+    }
+    return (
+      turn.phase === "resolve-findings" &&
+      counters().fixRounds < fixBudget()
+    );
+  }
+
+  function interruptedCorrectionWasReconciled(turn) {
+    const current = state();
+    return (
+      turn.role === "worker" &&
+      turn.phase === "resolve-findings" &&
+      current.workflowState === "FINALIZE" &&
+      current.pendingCorrection
+    );
+  }
+
+  async function recoverInterruptedTurn() {
+    if (
+      interruptedTurn === null ||
+      (interruptedTurn.phase === "commit" &&
+        state().pendingCommit?.status === "consumed")
+    ) {
+      return true;
+    }
+    if ((await readCurrentInputs()) === null) {
+      return false;
+    }
+    const correctionWasReconciled =
+      interruptedCorrectionWasReconciled(interruptedTurn);
+    const supersededByValidationMigration =
+      state().validationMigrationPending;
+    const allowWorkspaceChanges = interruptedTurnIsWritable(interruptedTurn);
+    let reconciledRepository;
+    try {
+      reconciledRepository = await runtime.git.reconcileInterrupted(
+        state().repositoryBaseline,
+        {
+          allowWorkspaceChanges,
+        },
+      );
+    } catch (cause) {
+      if (cause?.code !== "ERR_INTERRUPTED_REPOSITORY_CONTROL_CHANGED") {
+        throw cause;
+      }
+      await pause(interruptedControlChange(cause), { code: cause.code });
+      return false;
+    }
+    interruptedRepositoryReconciled = true;
+    if (supersededByValidationMigration) {
+      const current = state();
+      const contentChanged =
+        current.repositoryBaseline.contentFingerprint !==
+        reconciledRepository.contentFingerprint;
+      const changedCorrection =
+        interruptedTurn.phase === "resolve-findings" && contentChanged;
+      if (!isDeepStrictEqual(reconciledRepository, current.repositoryBaseline)) {
+        await transition(
+          {
+            ...current,
+            repositoryBaseline: reconciledRepository,
+            ...(contentChanged
+              ? {
+                  finalizationResult: null,
+                  finalizedFingerprint: null,
+                  reviewResult: null,
+                  reviewedFingerprint: null,
+                  previousFindings:
+                    current.findings.length === 0
+                      ? current.previousFindings
+                      : current.findings,
+                  findings: [],
+                  reviewReconsideration: [],
+                  ...(changedCorrection ? { pendingCorrection: true } : {}),
+                }
+              : {}),
+          },
+          changedCorrection
+            ? {
+                nextCounters: {
+                  ...counters(),
+                  fixRounds:
+                    counters().fixRounds +
+                    (current.pendingCorrection ? 0 : 1),
+                },
+              }
+            : {},
+        );
+      }
+      currentRun = await runtime.finishAgentTurn(interruptedTurn);
+      assertRun(currentRun);
+      interruptedTurn = null;
+      interruptedRepositoryReconciled = false;
+    } else if (correctionWasReconciled) {
+      currentRun = await runtime.finishAgentTurn(interruptedTurn);
+      assertRun(currentRun);
+      interruptedTurn = null;
+      interruptedRepositoryReconciled = false;
+    }
+    return true;
+  }
+
   async function runRole(
     role,
     schema,
@@ -799,17 +975,29 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     {
       access = "read-only",
       checkpoint,
+      freshSession = false,
       recoveryContext = "",
     } = {},
   ) {
-    const outputContext = bootstrapOutputContextFor(role, schema, checkpoint);
+    const turn = activeTurn(role, state().workflowState);
+    const recovering = interruptedTurn !== null;
+    if (recovering && !isDeepStrictEqual(interruptedTurn, turn)) {
+      throw workflowError(
+        "Persisted agent turn does not match plan-execution recovery.",
+        "ERR_INVALID_PLAN_EXECUTION_STATE",
+      );
+    }
+    const outputContext = roleOutputContextFor(role, schema, checkpoint);
     await ensureRoleCapabilities(role);
     const evidence = await readCurrentInputs();
     if (evidence === null) {
       return null;
     }
     const baseline = state().repositoryBaseline;
-    if (!(await verifyPersistedRepository())) {
+    if (
+      (!recovering || !interruptedRepositoryReconciled) &&
+      !(await verifyPersistedRepository())
+    ) {
       return null;
     }
     const turnSnapshot = await runtime.git.snapshot({
@@ -827,16 +1015,20 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       .reverse()
       .find((child) => child.role === role);
     const previousSession =
-      role !== "arbiter" && latestSession?.contextKey === contextKey
+      !recovering &&
+      role !== "arbiter" &&
+      latestSession?.contextKey === contextKey
         ? latestSession.sessionId
         : undefined;
     const sourceSession = currentRun.sessionLineage.source;
     const session =
-      previousSession !== undefined
-        ? { id: previousSession, mode: "continue" }
-        : sourceSession !== null && role !== "arbiter"
-          ? { id: sourceSession, mode: "fork" }
-          : undefined;
+      freshSession
+        ? undefined
+        : previousSession !== undefined
+          ? { id: previousSession, mode: "continue" }
+          : !recovering && sourceSession !== null && role !== "arbiter"
+            ? { id: sourceSession, mode: "fork" }
+            : undefined;
     const roleConfiguration = currentRun.roles[role];
     const recoveryPrompt = rolePrompt(buildPrompt(context));
     const executionPreferences = Object.fromEntries(
@@ -861,9 +1053,10 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     };
     let response;
     let agentError;
-    const turn = activeTurn(role, state().workflowState);
     currentRun = await runtime.startAgentTurn(turn);
     assertRun(currentRun);
+    interruptedTurn = null;
+    interruptedRepositoryReconciled = false;
     try {
       try {
         response = await runtime.adapters[role].run(request);
@@ -893,10 +1086,12 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       }
       if (access !== "read-only") {
         const current = state();
+        const contentChanged =
+          baseline.contentFingerprint !==
+          nextRepositoryBaseline.contentFingerprint;
         const changedCorrection =
           current.workflowState === "RESOLVE_FINDINGS" &&
-          turnSnapshot.contentFingerprint !==
-            nextRepositoryBaseline.contentFingerprint;
+          contentChanged;
         if (
           changedCorrection ||
           !isDeepStrictEqual(nextRepositoryBaseline, baseline)
@@ -922,12 +1117,28 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
               : {
                   ...current,
                   repositoryBaseline: nextRepositoryBaseline,
+                  ...(contentChanged
+                    ? {
+                        finalizationResult: null,
+                        finalizedFingerprint: null,
+                        reviewResult: null,
+                        reviewedFingerprint: null,
+                        previousFindings:
+                          current.findings.length === 0
+                            ? current.previousFindings
+                            : current.findings,
+                        findings: [],
+                        reviewReconsideration: [],
+                      }
+                    : {}),
                 },
             changedCorrection
               ? {
                   nextCounters: {
                     ...counters(),
-                    fixRounds: counters().fixRounds + 1,
+                    fixRounds:
+                      counters().fixRounds +
+                      (current.pendingCorrection ? 0 : 1),
                   },
                 }
               : {},
@@ -1278,6 +1489,25 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       : undefined;
   }
 
+  function finalizationCorrectionAttempt(context) {
+    const correction = state().finalizationCorrection;
+    return correction !== null &&
+      correction.step === state().currentStep &&
+      correctionMatchesContext(correction, context)
+      ? correction
+      : undefined;
+  }
+
+  function pendingFinalizationCorrection(context, guidance) {
+    const correction = state().pendingFinalizationCorrection;
+    return correction !== null &&
+      correction.step === state().currentStep &&
+      correction.guidance === guidance &&
+      correctionMatchesContext(correction, context)
+      ? correction
+      : undefined;
+  }
+
   async function validateBootstrapInventory(result, context) {
     if (!Array.isArray(result.validationInfrastructure)) {
       return result;
@@ -1352,7 +1582,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     buildPrompt,
     normalize,
   }) {
-    const context = bootstrapOutputContextFor(role, schema, checkpoint);
+    const context = roleOutputContextFor(role, schema, checkpoint);
     while (true) {
       const correction = pendingBootstrapCorrection(context);
       try {
@@ -1498,10 +1728,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       role,
       schema: BOOTSTRAP_SCHEMA,
       checkpoint: "validation-migration",
-      recoveryContext: resolvedContext(),
       buildPrompt: (evidence) => `${BOOTSTRAP_INSTRUCTIONS}
 
-This is a versioned-state migration checkpoint. Treat every persisted legacy check, path, fingerprint, and aggregate validation result as provisional. Independently rediscover the complete current validation inventory from repository evidence before work can advance.
+This is a versioned-state migration checkpoint. Treat every persisted legacy summary, resolved context, check, path, fingerprint, and aggregate validation result as provisional. Independently re-establish the complete phase-safe summary and current validation inventory from repository evidence before work can advance.
 
 ${finalizationBootstrapInstructions(state().settings.finalization)}
 
@@ -1516,9 +1745,14 @@ ${evidence}`,
     if (result === null) {
       return false;
     }
+    if (result.status === "CAPACITY_EXHAUSTED") {
+      return pauseForBootstrapCapacity(role, result);
+    }
+    await writeContext(`context/${role}.md`, result.summary);
     await transition(
       {
         ...state(),
+        [`${role}Summary`]: result.summary,
         [`${role}Validation`]: {
           requiredChecks: result.requiredChecks,
           validationInfrastructure: result.validationInfrastructure,
@@ -1536,12 +1770,20 @@ ${evidence}`,
     return true;
   }
 
-  async function completeValidationMigration(actor) {
+  async function completeValidationMigration(
+    actor,
+    summary,
+    bootstrapArbitrationUsed,
+  ) {
     const validation = await establishedValidation();
+    await writeContext("context/resolved.md", summary);
     await transition(
       {
         ...state(),
         ...validation,
+        resolvedSummary: summary,
+        bootstrapDisagreement: null,
+        bootstrapArbitrationUsed,
       },
       {
         publicActivity: activity(
@@ -1560,10 +1802,9 @@ ${evidence}`,
       role: "worker",
       schema: BOOTSTRAP_RECONCILIATION_SCHEMA,
       checkpoint: "validation-migration",
-      recoveryContext: resolvedContext(),
       buildPrompt: (evidence) => `${BOOTSTRAP_RECONCILIATION_INSTRUCTIONS}
 
-Reconcile only the independently rediscovered validation requirements. Legacy validation evidence is provisional and must not be selected.
+Reconcile the independently re-established summaries and validation requirements. Every legacy summary, resolved context, and validation result is provisional and must not be selected.
 
 ${trustedValidationInstructions()}
 
@@ -1586,16 +1827,15 @@ ${JSON.stringify(
       return false;
     }
     if (result.status === "RESOLVED") {
-      return completeValidationMigration("worker");
+      return completeValidationMigration("worker", result.summary, false);
     }
     const arbitration = await runBootstrapContract({
       role: "arbiter",
       schema: BOOTSTRAP_ARBITRATION_SCHEMA,
       checkpoint: "validation-migration",
-      recoveryContext: resolvedContext(),
       buildPrompt: (evidence) => `${BOOTSTRAP_ARBITRATION_INSTRUCTIONS}
 
-Resolve only this validation-inventory migration disagreement. Legacy validation evidence is provisional and must not be selected.
+Resolve only this summary and validation-inventory migration disagreement. Legacy summary, resolved context, and validation evidence is provisional and must not be selected.
 
 ${trustedValidationInstructions()}
 
@@ -1620,7 +1860,7 @@ ${JSON.stringify(
     if (arbitration === null) {
       return false;
     }
-    return completeValidationMigration("arbiter");
+    return completeValidationMigration("arbiter", arbitration.summary, true);
   }
 
   async function runValidationMigration() {
@@ -1900,6 +2140,9 @@ ${evidence}`,
     });
     if (result === null) {
       return false;
+    }
+    if (result.status === "CAPACITY_EXHAUSTED") {
+      return pauseForBootstrapCapacity(role, result);
     }
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "BOOTSTRAP");
@@ -2183,19 +2426,6 @@ The runner will derive validation inventories from the independently accepted ro
 
 ${evidence}
 
-Established required-check inventory:
-${JSON.stringify(state().requiredChecks, null, 2)}
-
-Established validation infrastructure:
-${JSON.stringify(
-  {
-    paths: state().validationInfrastructure,
-    fingerprint: state().validationInfrastructureFingerprint,
-  },
-  null,
-  2,
-)}
-
 Current planned commit:
 ## Commit ${step.number}: ${step.subject}
 
@@ -2268,16 +2498,32 @@ ${step.body}${
 
   async function runFinalizationTurn() {
     const step = planStep();
-    const beforeFingerprint = await contentFingerprint();
-    const guidance = await resolveFinalizationGuidance();
+    const persistedCorrection = state().pendingFinalizationCorrection;
+    const beforeFingerprint =
+      persistedCorrection?.contentFingerprint ?? (await contentFingerprint());
+    const fallbackGuidance = Object.freeze({
+      required: false,
+      skillPath: null,
+    });
+    const guidance =
+      persistedCorrection?.guidance === "fallback"
+        ? fallbackGuidance
+        : await resolveFinalizationGuidance();
     if (guidance === null) {
       return false;
     }
-    async function requestFinalization(selectedGuidance) {
-      const output = await runRole(
-        "worker",
-        FINALIZATION_SCHEMA,
-        (evidence) => `${FINALIZATION_INSTRUCTIONS}
+    async function requestFinalization(selectedGuidance, guidanceScope) {
+      const context = finalizationOutputContext();
+      while (true) {
+        const correction = pendingFinalizationCorrection(
+          context,
+          guidanceScope,
+        );
+        try {
+          const output = await runRole(
+            "worker",
+            FINALIZATION_SCHEMA,
+            (evidence) => `${FINALIZATION_INSTRUCTIONS}
 
 ${finalizationGuidanceInstructions(selectedGuidance)}
 
@@ -2289,42 +2535,120 @@ Current planned commit:
 ## Commit ${step.number}: ${step.subject}
 
 ${step.body}
-`,
-        {
-          access: "workspace-write",
-          checkpoint: `commit:${state().currentStep}`,
-          recoveryContext: resolvedContext(),
-        },
-      );
-      if (output === null) {
-        return null;
+${
+              correction === undefined
+                ? ""
+                : `\n${FINALIZATION_CORRECTION_INSTRUCTIONS}\n\nCorrection diagnostic:\n${JSON.stringify(correction, null, 2)}`
+            }`,
+            {
+              access:
+                correction === undefined ? "workspace-write" : "read-only",
+              checkpoint:
+                correction === undefined
+                  ? `commit:${state().currentStep}`
+                  : `finalization-correction:${state().currentStep}`,
+              freshSession: correction !== undefined,
+              recoveryContext: resolvedContext(),
+            },
+          );
+          if (output === null) {
+            return null;
+          }
+          const result = normalizeFinalizationRoleOutput(
+            output,
+            state().trustedValidation.commands.map(({ command }) => command),
+          );
+          if (
+            selectedGuidance.skillPath === null &&
+            ["SKILL_MISSING", "SKILL_INVALID"].includes(result.status)
+          ) {
+            throw invalidRoleOutput(
+              "Worker returned a skill availability status without selected finalization skill guidance.",
+              context,
+              {
+                field: "status",
+                constraint: "selected-finalization-guidance",
+              },
+            );
+          }
+          if (
+            result.status !== "PRODUCT_DECISION_REQUIRED" &&
+            result.skillPath !== selectedGuidance.skillPath
+          ) {
+            throw invalidRoleOutput(
+              "Worker returned a finalization result for the wrong skill path.",
+              context,
+              {
+                field: "skillPath",
+                constraint: "resolved-finalization-skill",
+              },
+            );
+          }
+          if (
+            !["SKILL_MISSING", "SKILL_INVALID"].includes(result.status) &&
+            state().trustedValidation.commands.some(
+              ({ command }) =>
+                !result.requiredChecks.some(
+                  (required) => required.command === command,
+                ),
+            )
+          ) {
+            throw invalidRoleOutput(
+              "Worker omitted a runner-trusted finalization command.",
+              context,
+              {
+                field: "requiredChecks",
+                constraint: "includes-runner-trusted-commands",
+              },
+            );
+          }
+          if (correction !== undefined) {
+            await transition({
+              ...state(),
+              pendingFinalizationCorrection: null,
+            });
+          }
+          return result;
+        } catch (cause) {
+          if (
+            cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT" ||
+            !isOutputDiagnostic(cause.diagnostic)
+          ) {
+            throw cause;
+          }
+          if (finalizationCorrectionAttempt(context) !== undefined) {
+            throw cause;
+          }
+          const diagnostic = outputDiagnostic(cause, context);
+          const correction = {
+            attempt: 1,
+            step: state().currentStep,
+            guidance: guidanceScope,
+            contentFingerprint: beforeFingerprint,
+            ...diagnostic,
+          };
+          await transition(
+            {
+              ...state(),
+              finalizationCorrection: correction,
+              pendingFinalizationCorrection: correction,
+            },
+            {
+              publicActivity: activity(
+                context.role,
+                context.phase,
+                "finalization-correction",
+                `${context.role} must correct ${context.contract} field ${diagnostic.field} (${diagnostic.constraint}).`,
+              ),
+            },
+          );
+        }
       }
-      const result = normalizeFinalizationResult(output, {
-        trustedCommands: state().trustedValidation.commands.map(
-          ({ command }) => command,
-        ),
-      });
-      if (
-        selectedGuidance.skillPath === null &&
-        ["SKILL_MISSING", "SKILL_INVALID"].includes(result.status)
-      ) {
-        throw workflowError(
-          "Worker returned a skill availability status without selected finalization skill guidance.",
-          "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
-        );
-      }
-      if (
-        result.status !== "PRODUCT_DECISION_REQUIRED" &&
-        result.skillPath !== selectedGuidance.skillPath
-      ) {
-        throw workflowError(
-          "Worker returned a finalization result for the wrong skill path.",
-          "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
-        );
-      }
-      return result;
     }
-    let result = await requestFinalization(guidance);
+    let result = await requestFinalization(
+      guidance,
+      persistedCorrection?.guidance ?? "resolved",
+    );
     if (result === null) {
       return false;
     }
@@ -2343,29 +2667,13 @@ ${step.body}
         });
         return false;
       }
-      result = await requestFinalization(
-        Object.freeze({ required: false, skillPath: null }),
-      );
+      result = await requestFinalization(fallbackGuidance, "fallback");
       if (result === null) {
         return false;
       }
     }
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "IMPLEMENT");
-    }
-    if (
-      !["SKILL_MISSING", "SKILL_INVALID"].includes(result.status) &&
-      state().trustedValidation.commands.some(
-        ({ command }) =>
-          !result.requiredChecks.some(
-            (required) => required.command === command,
-          ),
-      )
-    ) {
-      throw workflowError(
-        "Worker omitted a runner-trusted finalization command.",
-        "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
-      );
     }
     if (result.status === "BLOCKED") {
       await pause("environment_blocked", {
@@ -3173,6 +3481,7 @@ ${JSON.stringify(
     if (output === null) {
       return false;
     }
+    const fixRoundAlreadyCounted = state().pendingCorrection;
     const result = normalizeResolutionResult(
       output,
       blockers,
@@ -3285,7 +3594,9 @@ ${JSON.stringify(
         {
           nextCounters: {
             ...counters(),
-            fixRounds: counters().fixRounds + (changed ? 0 : 1),
+            fixRounds:
+              counters().fixRounds +
+              (fixRoundAlreadyCounted ? 0 : 1),
           },
           publicActivity: activity(
             "worker",
@@ -3614,6 +3925,8 @@ ${step.subject}`),
         repositoryBaseline: nextRepositoryBaseline,
         currentStep: done ? null : current.currentStep + 1,
         reviewerStep: null,
+        finalizationCorrection: null,
+        pendingFinalizationCorrection: null,
         pendingCommit: null,
         completedCommits,
       },
@@ -3639,6 +3952,9 @@ ${step.subject}`),
   try {
     if (state().settings === null) {
       await transition({ ...state(), settings }, { pause: null });
+    }
+    if (!(await recoverInterruptedTurn())) {
+      return currentRun;
     }
     const resumeActionSuperseded = await prepareValidationMigrationResume();
     if (!resumeActionSuperseded && !(await applyResumeAction())) {
@@ -3700,6 +4016,7 @@ ${step.subject}`),
       state().pendingCommit?.status === "consumed";
     if (
       state().preflightComplete &&
+      !interruptedRepositoryReconciled &&
       !["WAITING_FOR_USER", "FAILED", "DONE"].includes(state().workflowState) &&
       (!commitVerificationPending &&
         ((await readCurrentInputs()) === null ||
@@ -3713,6 +4030,7 @@ ${step.subject}`),
 
       if (
         current.validationMigrationPending &&
+        !current.compatibilityCheckRequired &&
         !(
           current.workflowState === "COMMIT" &&
           current.pendingCommit?.status === "consumed"

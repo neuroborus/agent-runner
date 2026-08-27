@@ -93,14 +93,19 @@ All pipelines additionally require:
 `polishing` additionally requires:
 
 - Run Worker and Reviewer bootstrap independently and read-only.
-- Allow only Worker polishing and finding-resolution turns to change workspace
-  content or staging; every other role turn remains read-only.
+- Allow only Worker polishing, finalization, and finding-resolution turns to
+  change safe workspace content. No agent turn may change the index; the runner
+  alone stages the finalized and reviewed polishing handoff.
+- Keep bootstrap, validation-migration, and finalization required-check
+  inventories staging-independent. Translate applicable tracked-content checks
+  to `HEAD` or explicit trees; reserve staged and index-relative inspection for
+  `HANDOFF`.
 - Never request `local-commit`, create a commit, or change `HEAD`, refs, remotes,
   or Git identity.
 - Tie successful finalization and independent review to the same
   staging-independent content fingerprint and invalidate both after content
   changes.
-- Leave the finalized and reviewed workspace changes uncommitted.
+- Leave the finalized and reviewed workspace changes staged and uncommitted.
 
 ## Repository Map
 
@@ -138,9 +143,13 @@ Run after source, test, or documentation changes:
 
 ```bash
 npm run check
-git diff --check
+git diff --check HEAD
 git diff --cached --check
 ```
+
+Inside an Agent Runner pipeline, the established inventory ends with the
+`HEAD`-relative content check. The runner-owned `COMMIT` or `HANDOFF` boundary
+performs the staged check after it alone stages the accepted content.
 
 The test suite imports every root and workspace source module and validates
 project skill frontmatter and interface metadata without depending on one agent

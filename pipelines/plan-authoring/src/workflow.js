@@ -1,4 +1,5 @@
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import {
   CommitPlanValidationError,
@@ -150,6 +151,8 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
   }
 
   let currentRun = run;
+  let interruptedTurn = run.activeTurn;
+  let interruptedRepositoryReconciled = false;
   const clarificationPath = join(run.taskPath, "clarifications.md");
   const planPath = join(run.taskPath, "plan.md");
 
@@ -353,11 +356,21 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
   }
 
   async function runRole(role, schema, buildPrompt, { checkpoint }) {
+    const turn = activeTurn(role, pipelineState().workflowState);
+    const recovering = interruptedTurn !== null;
+    if (recovering && !isDeepStrictEqual(interruptedTurn, turn)) {
+      throw workflowError(
+        "Persisted agent turn does not match plan-authoring recovery.",
+        "ERR_INVALID_PLAN_AUTHORING_STATE",
+      );
+    }
     const evidence = await readCurrentInputs();
     if (evidence === null) {
       return null;
     }
-    await runtime.git.assertUnchanged(pipelineState().repositoryBaseline);
+    if (!recovering || !interruptedRepositoryReconciled) {
+      await runtime.git.assertUnchanged(pipelineState().repositoryBaseline);
+    }
     const snapshot = await runtime.git.snapshot({
       allowedPaths: [],
       projectPath: currentRun.projectPath,
@@ -371,14 +384,16 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
       .reverse()
       .find((child) => child.role === role);
     const previousSession =
-      role !== "arbiter" && latestSession?.contextKey === contextKey
+      !recovering &&
+      role !== "arbiter" &&
+      latestSession?.contextKey === contextKey
         ? latestSession.sessionId
         : undefined;
     const sourceSession = currentRun.sessionLineage.source;
     const session =
       previousSession !== undefined
         ? { id: previousSession, mode: "continue" }
-        : sourceSession !== null && role !== "arbiter"
+        : !recovering && sourceSession !== null && role !== "arbiter"
           ? { id: sourceSession, mode: "fork" }
           : undefined;
     const roleConfiguration = currentRun.roles[role];
@@ -405,9 +420,10 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
     };
     let response;
     let agentError;
-    const turn = activeTurn(role, pipelineState().workflowState);
     currentRun = await runtime.startAgentTurn(turn);
     assertRun(currentRun);
+    interruptedTurn = null;
+    interruptedRepositoryReconciled = false;
     try {
       try {
         response = await runtime.adapters[role].run(request);
@@ -834,7 +850,25 @@ ${JSON.stringify(
     );
   }
 
+  async function recoverInterruptedTurn() {
+    if (interruptedTurn === null) {
+      return true;
+    }
+    if ((await readCurrentInputs()) === null) {
+      return false;
+    }
+    await runtime.git.reconcileInterrupted(
+      pipelineState().repositoryBaseline,
+      { allowWorkspaceChanges: false },
+    );
+    interruptedRepositoryReconciled = true;
+    return true;
+  }
+
   try {
+    if (!(await recoverInterruptedTurn())) {
+      return currentRun;
+    }
     if (pipelineState().workflowState === "WAITING_FOR_USER") {
       if (pipelineState().pendingEdit !== null) {
         if (!(await resumeEdit())) {

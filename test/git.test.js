@@ -690,6 +690,46 @@ test("read-only guards preserve dirty baselines and constrain allowed paths", as
   );
 });
 
+test("reconciles interrupted writable drift without accepting Git control changes", async (t) => {
+  const { env, repositoryPath, service } = await createFixture(t);
+  const baseline = await service.snapshot({ projectPath: repositoryPath });
+
+  await writeFile(join(repositoryPath, "tracked.txt"), "interrupted work\n");
+  await runGit(repositoryPath, env, "add", "tracked.txt");
+  const reconciled = await service.reconcileInterrupted(baseline, {
+    allowWorkspaceChanges: true,
+  });
+  assert.notEqual(reconciled.contentFingerprint, baseline.contentFingerprint);
+  assert.notEqual(reconciled.indexFingerprint, baseline.indexFingerprint);
+  await assert.rejects(
+    service.reconcileInterrupted(baseline, {
+      allowIndexChanges: false,
+      allowWorkspaceChanges: true,
+    }),
+    (error) =>
+      error.code === "ERR_INTERRUPTED_REPOSITORY_CONTROL_CHANGED" &&
+      error.changes.includes("index"),
+  );
+  await assert.rejects(
+    service.reconcileInterrupted(baseline, {
+      allowWorkspaceChanges: false,
+    }),
+    (error) => error.code === "ERR_READ_ONLY_REPOSITORY_CHANGED",
+  );
+
+  await runGit(repositoryPath, env, "config", "user.name", "Changed Identity");
+  await assert.rejects(
+    service.reconcileInterrupted(baseline, {
+      allowWorkspaceChanges: true,
+    }),
+    (error) => {
+      assert.equal(error.code, "ERR_INTERRUPTED_REPOSITORY_CONTROL_CHANGED");
+      assert.deepEqual(error.changes, ["identity"]);
+      return true;
+    },
+  );
+});
+
 test("index fingerprints ignore stat-cache refreshes and include semantic flags", async (t) => {
   const { env, repositoryPath, service } = await createFixture(t);
   const baseline = await service.snapshot({ projectPath: repositoryPath });

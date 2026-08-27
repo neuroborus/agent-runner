@@ -112,6 +112,14 @@ resume reconstructs the same checkpoint request
 from durable inputs without depending on the native session. Same-host status
 reads check owner process liveness immediately without changing the lease
 staleness threshold used for exclusive acquisition and recovery.
+Before replaying an ownerless interrupted turn, resume revalidates the canonical
+project and task paths, `task.md`, optional `context.md`, the accepted
+clarification hash, and the persisted repository baseline. Because every
+provider turn is read-only, any content, index, history/ref, remote, or Git
+identity drift is rejected before a new turn starts. A safe recovery uses the
+complete reconstructed prompt in a fresh native session; its `turn-started`
+transition replaces the retained marker, which remains durable until the normal
+post-turn read-only reconciliation completes.
 
 The descriptor projects each pause as bounded public data for both CLI and MCP:
 its finite reason, optional validated bounded error code, a deterministic
@@ -356,7 +364,9 @@ path is ignored and untracked.
 - Keep MCP start, wait, response, and detached-process behavior in the root
   runtime; this pipeline continues to own the same states and transitions.
 - Cover blocked provider activity, interrupted-owner projection, and resumed
-  request reconstruction with fake adapters and external temporary state.
+  request reconstruction with fake adapters and external temporary state,
+  including input drift, read-only mutation rejection, fresh recovery context,
+  and retained activity until reconciliation.
 - Cover finite redacted Claude classification, durable reconstruction of a
   failed read-only request, and terminal authentication and forbidden-operation
   boundaries without retaining native provider text.

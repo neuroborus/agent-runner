@@ -15,6 +15,7 @@ export const WORKFLOW_STATES = Object.freeze([
   "FINALIZE",
   "REVIEW",
   "RESOLVE_FINDINGS",
+  "HANDOFF",
   "WAITING_FOR_USER",
   "DONE",
   "FAILED",
@@ -130,6 +131,37 @@ const PERSISTED_CHECK_RESULT_FIELDS = Object.freeze([
   "timedOut",
 ]);
 const REQUIRED_CHECK_FIELDS = Object.freeze(["id", "command"]);
+const INDEX_WRITING_GIT_COMMANDS = new Set([
+  "add",
+  "am",
+  "checkout",
+  "checkout-index",
+  "cherry-pick",
+  "clean",
+  "commit",
+  "commit-tree",
+  "merge",
+  "merge-index",
+  "read-tree",
+  "rebase",
+  "reset",
+  "restore",
+  "revert",
+  "rm",
+  "stash",
+  "switch",
+  "update-index",
+  "write-tree",
+]);
+const INDEX_INSPECTING_GIT_COMMANDS = new Set([
+  "diff-files",
+  "diff-index",
+  "ls-files",
+  "status",
+]);
+const SHELL_SEPARATOR_PATTERN = /^[;&|()<>]$/u;
+const EXPLICIT_TREE_PATTERN =
+  /^(?:HEAD(?:[~^][0-9]*)*|[a-f0-9]{7,64}|refs\/(?:heads|remotes|tags)\/[^\s]+)$/iu;
 const TRUSTED_COMMAND_FIELDS = Object.freeze([
   "alias",
   "command",
@@ -153,7 +185,8 @@ const ADAPTER_FAILURE_FIELDS = Object.freeze([
 export const MAX_TEXT_LENGTH = 4_000;
 export const MAX_SUMMARY_LENGTH = 20_000;
 export const MAX_ITEMS = 32;
-export const MAX_VALIDATION_ITEMS = MAX_ITEMS * 2;
+export const MAX_BOOTSTRAP_ITEMS = MAX_ITEMS * 2;
+export const MAX_VALIDATION_ITEMS = MAX_BOOTSTRAP_ITEMS * 2;
 export const MAX_OPTIONS = 16;
 const MAX_STRUCTURED_RESULT_BYTES = 256 * 1024;
 export const MAX_DURABLE_RUN_BYTES = 960 * 1024;
@@ -650,6 +683,8 @@ export function normalizeBootstrapResult(payload, role) {
     "summary",
     "requiredChecks",
     "validationInfrastructure",
+    "capacityField",
+    "capacityLimit",
     "reason",
     "question",
     "options",
@@ -658,7 +693,9 @@ export function normalizeBootstrapResult(payload, role) {
   ];
   if (
     !isRecord(payload) ||
-    !["READY", "PRODUCT_DECISION_REQUIRED"].includes(payload.status)
+    !["READY", "CAPACITY_EXHAUSTED", "PRODUCT_DECISION_REQUIRED"].includes(
+      payload.status,
+    )
   ) {
     throw outputError(
       `${role} returned an invalid bootstrap status.`,
@@ -670,6 +707,35 @@ export function normalizeBootstrapResult(payload, role) {
     outputConstraint("result", "maximum-256-kibibytes"),
   );
   assertExactOutputFields(payload, fields);
+  if (payload.status === "CAPACITY_EXHAUSTED") {
+    if (
+      payload.summary !== "" ||
+      !emptyArray(payload.requiredChecks) ||
+      !emptyArray(payload.validationInfrastructure) ||
+      payload.reason !== "" ||
+      !emptyDecision(payload) ||
+      !["requiredChecks", "validationInfrastructure"].includes(
+        payload.capacityField,
+      ) ||
+      payload.capacityLimit !== MAX_BOOTSTRAP_ITEMS
+    ) {
+      throw outputError(
+        "Bootstrap capacity result contains inapplicable fields.",
+        outputConstraint("status", "status-field-consistency"),
+      );
+    }
+    return Object.freeze({
+      status: payload.status,
+      capacityField: payload.capacityField,
+      capacityLimit: payload.capacityLimit,
+    });
+  }
+  if (payload.capacityField !== "" || payload.capacityLimit !== 0) {
+    throw outputError(
+      "Bootstrap result contains inapplicable capacity fields.",
+      outputConstraint("status", "status-field-consistency"),
+    );
+  }
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
     if (
       payload.summary !== "" ||
@@ -701,15 +767,15 @@ export function normalizeBootstrapResult(payload, role) {
       INVALID_OUTPUT_CODE,
       outputConstraint("summary", "concise-markdown-up-to-20000-characters"),
     ),
-    requiredChecks: normalizeRequiredChecks(
+    requiredChecks: normalizePhaseSafeRequiredChecks(
       payload.requiredChecks,
       INVALID_OUTPUT_CODE,
-      { maxItems: MAX_ITEMS },
+      { maxItems: MAX_BOOTSTRAP_ITEMS },
     ),
     validationInfrastructure: normalizeValidationInfrastructure(
       payload.validationInfrastructure,
       INVALID_OUTPUT_CODE,
-      { maxItems: MAX_ITEMS },
+      { maxItems: MAX_BOOTSTRAP_ITEMS },
     ),
   });
 }
@@ -915,6 +981,160 @@ function normalizeExactCommand(value, name, code, diagnostic) {
     );
   }
   return value;
+}
+
+function shellWords(command) {
+  const words = [];
+  let word = "";
+  let quote = null;
+  let escaped = false;
+  function finishWord() {
+    if (word.length > 0) {
+      words.push(word);
+      word = "";
+    }
+  }
+  for (const character of command) {
+    if (escaped) {
+      word += character;
+      escaped = false;
+    } else if (character === "\\" && quote !== "'") {
+      escaped = true;
+    } else if (quote !== null) {
+      if (character === quote) {
+        quote = null;
+      } else {
+        word += character;
+      }
+    } else if (character === "'" || character === '"') {
+      quote = character;
+    } else if (/\s/u.test(character)) {
+      finishWord();
+    } else if (SHELL_SEPARATOR_PATTERN.test(character)) {
+      finishWord();
+      words.push(character);
+    } else {
+      word += character;
+    }
+  }
+  finishWord();
+  return words.flatMap((candidate) =>
+    /\s/u.test(candidate) ? shellWords(candidate) : candidate,
+  );
+}
+
+function gitSubcommand(words, gitIndex) {
+  let index = gitIndex + 1;
+  while (index < words.length && !SHELL_SEPARATOR_PATTERN.test(words[index])) {
+    const word = words[index];
+    if (
+      [
+        "-C",
+        "-c",
+        "--config-env",
+        "--git-dir",
+        "--namespace",
+        "--work-tree",
+      ].includes(word)
+    ) {
+      index += 2;
+    } else if (word.startsWith("-")) {
+      index += 1;
+    } else {
+      return Object.freeze({ command: word.toLowerCase(), index });
+    }
+  }
+  return null;
+}
+
+function diffUsesExplicitTrees(words, commandIndex) {
+  for (let index = commandIndex + 1; index < words.length; index += 1) {
+    const word = words[index];
+    if (SHELL_SEPARATOR_PATTERN.test(word)) {
+      break;
+    }
+    if (word === "--no-index" || EXPLICIT_TREE_PATTERN.test(word)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function gitArgumentsUseIndex(words, commandIndex) {
+  const argumentsList = [];
+  for (let index = commandIndex + 1; index < words.length; index += 1) {
+    if (SHELL_SEPARATOR_PATTERN.test(words[index])) {
+      break;
+    }
+    argumentsList.push(words[index]);
+  }
+  return (
+    argumentsList.some(
+      (word) =>
+        /^:(?:[0-3]:)?[^/]/u.test(word) ||
+        [
+          "--3way",
+          "--index",
+          "--intent-to-add",
+          "--ita-invisible-in-index",
+          "--ita-visible-in-index",
+        ].includes(word),
+    ) ||
+    argumentsList.some(
+      (word, index) =>
+        word === "--git-path" && argumentsList[index + 1] === "index",
+    )
+  );
+}
+
+function isStagingIndependentCommand(command) {
+  if (
+    /(?:^|[^a-zA-Z0-9_])GIT_INDEX_FILE\s*=/u.test(command) ||
+    /(?:^|[\s'"(])(?:\.git|\$GIT_DIR)\/index(?:$|[\s'"),;&|])/u.test(
+      command,
+    ) ||
+    /(?:^|[\s'"=])--(?:cached|staged)(?:$|[\s'",);&|])/iu.test(command) ||
+    /(?:draft|prepare)[-_:]?commit(?:[-_:]?(?:msg|message))?/iu.test(command)
+  ) {
+    return false;
+  }
+  const words = shellWords(command);
+  for (const [index, word] of words.entries()) {
+    if (!/(?:^|\/)git$/iu.test(word)) {
+      continue;
+    }
+    const subcommand = gitSubcommand(words, index);
+    if (subcommand === null) {
+      continue;
+    }
+    if (
+      INDEX_WRITING_GIT_COMMANDS.has(subcommand.command) ||
+      INDEX_INSPECTING_GIT_COMMANDS.has(subcommand.command) ||
+      gitArgumentsUseIndex(words, subcommand.index) ||
+      (subcommand.command === "diff" &&
+        !diffUsesExplicitTrees(words, subcommand.index))
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function normalizePhaseSafeRequiredChecks(value, code, options) {
+  const checks = normalizeRequiredChecks(value, code, options);
+  for (const [index, check] of checks.entries()) {
+    if (!isStagingIndependentCommand(check.command)) {
+      throw workflowError(
+        "Required check must be staging-independent.",
+        code,
+        outputConstraint(
+          `requiredChecks[${index}].command`,
+          "staging-independent-validation-command",
+        ),
+      );
+    }
+  }
+  return checks;
 }
 
 function normalizeValidationInfrastructurePath(value, name, code, diagnostic) {
@@ -1280,7 +1500,7 @@ export function normalizeFinalizationResult(
     if (payload.status === "SKILL_INVALID" && payload.skillPath === "") {
       throw outputError("Finalization skill path is inapplicable.");
     }
-    const requiredChecks = normalizeRequiredChecks(
+    const requiredChecks = normalizePhaseSafeRequiredChecks(
       payload.requiredChecks,
       INVALID_OUTPUT_CODE,
       { allowEmpty: payload.status !== "BLOCKED" },
@@ -1334,7 +1554,7 @@ export function normalizeFinalizationResult(
     throw outputError("Finalization result contains inapplicable fields.");
   }
   const issues = normalizeFinalizationIssues(payload.issues);
-  const requiredChecks = normalizeRequiredChecks(
+  const requiredChecks = normalizePhaseSafeRequiredChecks(
     payload.requiredChecks,
     INVALID_OUTPUT_CODE,
   );
@@ -2064,12 +2284,12 @@ function normalizePersistedValidation(value, name) {
     name,
   );
   normalizeRequiredChecks(value.requiredChecks, "ERR_INVALID_POLISHING_STATE", {
-    maxItems: MAX_ITEMS,
+    maxItems: MAX_BOOTSTRAP_ITEMS,
   });
   normalizeValidationInfrastructure(
     value.validationInfrastructure,
     "ERR_INVALID_POLISHING_STATE",
-    { maxItems: MAX_ITEMS },
+    { maxItems: MAX_BOOTSTRAP_ITEMS },
   );
   return value;
 }
@@ -2747,6 +2967,7 @@ export function normalizePipelineState(value) {
       "FINALIZE",
       "REVIEW",
       "RESOLVE_FINDINGS",
+      "HANDOFF",
       "DONE",
       "WAITING_FOR_USER",
       "FAILED",
@@ -2828,9 +3049,14 @@ export function normalizePipelineState(value) {
     throw workflowError("Polishing bootstrap state is inconsistent.");
   }
   if (
-    ["POLISH", "FINALIZE", "REVIEW", "RESOLVE_FINDINGS", "DONE"].includes(
-      value.workflowState,
-    ) &&
+    [
+      "POLISH",
+      "FINALIZE",
+      "REVIEW",
+      "RESOLVE_FINDINGS",
+      "HANDOFF",
+      "DONE",
+    ].includes(value.workflowState) &&
     (!value.clarificationFrozen ||
       value.refreezeRequired ||
       resolvedSummary === null ||
@@ -2839,7 +3065,7 @@ export function normalizePipelineState(value) {
     throw workflowError("Polishing prepared state is inconsistent.");
   }
   if (
-    (["FINALIZE", "REVIEW", "RESOLVE_FINDINGS", "DONE"].includes(
+    (["FINALIZE", "REVIEW", "RESOLVE_FINDINGS", "HANDOFF", "DONE"].includes(
       value.workflowState,
     ) &&
       polishSummary === null)
@@ -2881,7 +3107,7 @@ export function normalizePipelineState(value) {
     throw workflowError("Polishing finding resolution has no blockers.");
   }
   if (
-    value.workflowState === "DONE" &&
+    ["HANDOFF", "DONE"].includes(value.workflowState) &&
     (!completionReady || value.reviewReconsideration.length !== 0)
   ) {
     throw workflowError("Completed polishing state is inconsistent.");
@@ -3028,7 +3254,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "polishing" ||
-    run.pipelineStateVersion !== 4 ||
+    run.pipelineStateVersion !== 6 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -3407,6 +3633,7 @@ export function assertRuntime(runtime) {
     "inspectPath",
     "preflight",
     "snapshot",
+    "stagePolishingHandoff",
     "validationInfrastructureFingerprint",
   ]) {
     if (typeof runtime.git[name] !== "function") {
@@ -3446,6 +3673,7 @@ export function normalizeAdapterCapabilities(value, role, sourceSession) {
           "structuredOutput",
           "readOnly",
           "autonomousWrite",
+          "gitMetadataWriteBlocked",
           "workspaceWrite",
           "remoteWriteBlocked",
         ]

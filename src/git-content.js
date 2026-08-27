@@ -557,6 +557,108 @@ async function headContentEntry(
   });
 }
 
+async function indexContentEntry(runGit, repositoryPath, path, entry) {
+  if (entry === undefined) {
+    return deletedEntry(path);
+  }
+  const { mode, objectId, stage } = entry;
+  if (stage !== "0") {
+    throw new GitSafetyError("Git index contains an unresolved entry.", {
+      code: "ERR_UNSAFE_GIT_STATE",
+    });
+  }
+  if (mode === "160000") {
+    return Object.freeze({
+      hash: hashBuffer(`${objectId}\0${EMPTY_CONTENT_FINGERPRINT}`),
+      kind: "gitlink",
+      mode,
+      path,
+      size: objectId.length,
+    });
+  }
+  if (!["100644", "100755", "120000"].includes(mode)) {
+    throw new GitSafetyError("Git index entry has unsupported type.", {
+      code: "ERR_UNSUPPORTED_GIT_PATH",
+    });
+  }
+  const blob = await runGit(repositoryPath, ["cat-file", "blob", objectId]);
+  return Object.freeze({
+    hash: hashBuffer(blob.stdout),
+    kind: mode === "120000" ? "symlink" : "file",
+    mode,
+    path,
+    size: blob.stdout.length,
+  });
+}
+
+export async function indexContentFingerprintAtRoot(
+  { currentHead, runGit },
+  repositoryPath,
+  allowedPaths,
+) {
+  const excludedPaths = new Set(allowedPaths);
+  const head = await currentHead(repositoryPath);
+  const changedResult =
+    head === null
+      ? await runGit(repositoryPath, ["ls-files", "--cached", "-z"])
+      : await runGit(repositoryPath, [
+          "diff",
+          "--cached",
+          "--name-only",
+          "--ita-invisible-in-index",
+          "--no-ext-diff",
+          "--no-textconv",
+          "--no-renames",
+          "--ignore-submodules=none",
+          "-z",
+          head,
+          "--",
+        ]);
+  const changedPaths = decodeNullList(
+    changedResult.stdout,
+    "Staged Git paths",
+  ).filter((path) => !excludedPaths.has(path));
+  const entriesResult = await runGit(repositoryPath, [
+    "ls-files",
+    "--stage",
+    "-z",
+  ]);
+  const entries = new Map();
+  for (const record of decodeNullList(entriesResult.stdout, "Git index entries")) {
+    const separator = record.indexOf("\t");
+    const metadata = separator === -1 ? [] : record.slice(0, separator).split(" ");
+    const path = separator === -1 ? "" : record.slice(separator + 1);
+    if (
+      metadata.length !== 3 ||
+      !/^[0-7]{6}$/u.test(metadata[0]) ||
+      !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(metadata[1]) ||
+      !/^[0-3]$/u.test(metadata[2]) ||
+      path.length === 0
+    ) {
+      throw new GitSafetyError("Git index entry is invalid.", {
+        code: "ERR_UNSUPPORTED_GIT_PATH",
+      });
+    }
+    if (entries.has(path)) {
+      throw new GitSafetyError("Git index contains unresolved entries.", {
+        code: "ERR_UNSAFE_GIT_STATE",
+      });
+    }
+    entries.set(path, {
+      mode: metadata[0],
+      objectId: metadata[1],
+      stage: metadata[2],
+    });
+  }
+  return hashEntries(
+    await Promise.all(
+      changedPaths.map((path) =>
+        indexContentEntry(runGit, repositoryPath, path, entries.get(path)),
+      ),
+    ),
+  );
+}
+
 function entriesMatch(left, right) {
   return (
     right !== null &&

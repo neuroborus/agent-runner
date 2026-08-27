@@ -32,6 +32,7 @@ import {
   STAGNATION_SCHEMA,
 } from "../src/schemas.js";
 import {
+  MAX_BOOTSTRAP_ITEMS,
   MAX_ITEMS,
   MAX_OPTIONS,
   MAX_SUMMARY_LENGTH,
@@ -58,7 +59,9 @@ function assertSchemaBounds(schema, propertyName = null) {
     assert.ok(
       propertyName === "options"
         ? schema.maxItems === MAX_OPTIONS
-        : [MAX_ITEMS, MAX_VALIDATION_ITEMS].includes(schema.maxItems),
+        : [MAX_ITEMS, MAX_BOOTSTRAP_ITEMS, MAX_VALIDATION_ITEMS].includes(
+            schema.maxItems,
+          ),
       `${propertyName} must have a deterministic collection bound`,
     );
     assertSchemaBounds(schema.items, propertyName);
@@ -86,7 +89,14 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
   assert.match(BOOTSTRAP_INSTRUCTIONS, /unique, single-line/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /canonical repository-relative/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /symlink alias/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /capacity of 64 items/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /CAPACITY_EXHAUSTED/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /staging-independent/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /HEAD or explicit trees/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /only to HANDOFF/u);
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /one read-only correction/u);
+  assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /rejected command/u);
+  assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /staging-dependent/u);
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /rejected result/u);
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /fails closed/u);
   assert.match(BOOTSTRAP_RECONCILIATION_INSTRUCTIONS, /Do not force agreement/u);
@@ -95,6 +105,8 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
     BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
     BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
   ]) {
+    assert.match(instructions, /staging-independent/u);
+    assert.match(instructions, /input only to the dedicated FINALIZE/u);
     assert.match(instructions, /runner derives the final required-check/u);
     assert.match(instructions, /Do not propose, select, or repeat commands/u);
     assert.doesNotMatch(instructions, /provide .*requiredChecks/iu);
@@ -112,15 +124,26 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
   assert.match(PRODUCT_DECISION_INSTRUCTIONS, /Do not ask questions/u);
   assert.match(PRODUCT_DECISION_INSTRUCTIONS, /materially different product/u);
   assert.match(POLISH_INSTRUCTIONS, /Do not create a commit/u);
+  assert.match(POLISH_INSTRUCTIONS, /runner alone stages/u);
+  assert.match(POLISH_INSTRUCTIONS, /Do not stage or unstage/u);
   assert.match(POLISH_INSTRUCTIONS, /self-review/u);
   assert.match(POLISH_INSTRUCTIONS, /sandbox, IPC, loopback/u);
+  assert.match(POLISH_INSTRUCTIONS, /required-check inventory is input only/u);
   assert.match(FINALIZATION_INSTRUCTIONS, /finalization procedure/u);
   assert.match(FINALIZATION_INSTRUCTIONS, /Do not.*stage/u);
+  assert.match(FINALIZATION_INSTRUCTIONS, /staged\/index-relative inspection/u);
+  assert.match(FINALIZATION_INSTRUCTIONS, /HEAD or explicit trees/u);
+  assert.match(FINALIZATION_INSTRUCTIONS, /HANDOFF alone stages/u);
   assert.match(FINALIZATION_INSTRUCTIONS, /external constraints/u);
   assert.match(FINALIZATION_INSTRUCTIONS, /Do not weaken sandboxing/u);
   assert.match(REVIEW_INSTRUCTIONS, /Do not modify/u);
   assert.match(REVIEW_INSTRUCTIONS, /stable IDs/u);
   assert.match(FINDING_RESOLUTION_INSTRUCTIONS, /one batch/u);
+  assert.match(FINDING_RESOLUTION_INSTRUCTIONS, /runner owns final staging/u);
+  assert.match(
+    FINDING_RESOLUTION_INSTRUCTIONS,
+    /established required-check inventory/u,
+  );
   assert.match(FINDING_RESOLUTION_INSTRUCTIONS, /For BLOCKED/u);
   assert.match(DISPUTE_RECONSIDERATION_INSTRUCTIONS, /Withdraw/u);
   assert.match(FINDING_ARBITRATION_INSTRUCTIONS, /WORKER_CORRECT/u);

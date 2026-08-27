@@ -118,6 +118,8 @@ const RESUMABLE_WORKFLOW_STATES = new Set([
 ]);
 const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   backend_unavailable: "The selected backend is temporarily unavailable.",
+  bootstrap_inventory_capacity_exhausted:
+    "A complete bootstrap validation inventory exceeds the supported bounded capacity.",
   clarification_answers_required:
     "Material clarification answers are required before polishing can continue.",
   clarification_limit_reached:
@@ -149,6 +151,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "A task input overlaps the writable change set.",
   unexpected_git_identity_change:
     "The effective Git identity changed during polishing.",
+  unexpected_git_index_change:
+    "The Git index changed during a content-only polishing turn.",
   unexpected_git_ref_change:
     "Git history or refs changed during polishing.",
   unexpected_remote_configuration_change:
@@ -158,6 +162,7 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
 });
 const PUBLIC_DETAIL_REASONS = new Set([
   "environment_blocked",
+  "bootstrap_inventory_capacity_exhausted",
   "finalization_cannot_pass",
   "finalization_skill_invalid",
   "finalization_skill_missing",
@@ -554,20 +559,211 @@ export function migratePolishingStateV3(run) {
   });
 }
 
+export function migratePolishingStateV4(run) {
+  const current = run.pipelineState;
+  const immutableTerminal = ["DONE", "FAILED"].includes(
+    current.workflowState,
+  );
+  const resumeState = run.pause?.resumeState;
+  const checkpoint =
+    current.workflowState === "WAITING_FOR_USER" &&
+    WORKFLOW_STATES.includes(resumeState)
+      ? resumeState
+      : current.workflowState;
+  if (immutableTerminal || !current.preflightComplete) {
+    return Object.freeze({ ...current });
+  }
+  const unfinishedBootstrap =
+    checkpoint === "BOOTSTRAP" ||
+    (current.workflowState === "WAITING_FOR_USER" &&
+      current.resolvedSummary === null &&
+      (current.workerSummary !== null ||
+        current.reviewerSummary !== null ||
+        current.pendingEdit?.suspendedState === "BOOTSTRAP" ||
+        run.pause?.reason === "bootstrap_inventory_capacity_exhausted"));
+  if (unfinishedBootstrap) {
+    return Object.freeze({
+      ...current,
+      workerSummary: null,
+      reviewerSummary: null,
+      workerValidation: null,
+      reviewerValidation: null,
+      resolvedSummary: null,
+      bootstrapDisagreement: null,
+      bootstrapArbitrationUsed: false,
+      bootstrapCorrections: Object.freeze([]),
+      pendingBootstrapCorrection: null,
+      requiredChecks: null,
+      validationInfrastructure: null,
+      validationInfrastructureFingerprint: null,
+      validationMigrationPending: false,
+      validationMigrationDisagreement: null,
+      finalizationResult: null,
+      finalizedFingerprint: null,
+      reviewResult: null,
+      reviewedFingerprint: null,
+      findings: Object.freeze([]),
+      previousFindings: Object.freeze([]),
+      pendingDisputes: Object.freeze([]),
+      reviewReconsideration: Object.freeze([]),
+    });
+  }
+  const prepared = current.resolvedSummary !== null;
+  if (!prepared || checkpoint === "CLARIFY") {
+    return Object.freeze({ ...current });
+  }
+  const paused = current.workflowState === "WAITING_FOR_USER";
+  const rerunFinalization =
+    !paused &&
+    ["FINALIZE", "REVIEW", "RESOLVE_FINDINGS"].includes(
+      current.workflowState,
+    );
+  const keepProvisionalGate = paused;
+  return Object.freeze({
+    ...current,
+    workflowState: rerunFinalization ? "FINALIZE" : current.workflowState,
+    workerValidation: null,
+    reviewerValidation: null,
+    validationMigrationPending: true,
+    validationMigrationDisagreement: null,
+    finalizationResult: keepProvisionalGate
+      ? current.finalizationResult
+      : null,
+    finalizedFingerprint: keepProvisionalGate
+      ? current.finalizedFingerprint
+      : null,
+    reviewResult: keepProvisionalGate ? current.reviewResult : null,
+    reviewedFingerprint: keepProvisionalGate
+      ? current.reviewedFingerprint
+      : null,
+    previousFindings: keepProvisionalGate
+      ? current.previousFindings
+      : current.findings.length === 0
+        ? current.previousFindings
+        : current.findings,
+    findings: keepProvisionalGate ? current.findings : Object.freeze([]),
+    pendingDisputes: keepProvisionalGate
+      ? current.pendingDisputes
+      : Object.freeze([]),
+    reviewReconsideration: keepProvisionalGate
+      ? current.reviewReconsideration
+      : Object.freeze([]),
+  });
+}
+
+export function migratePolishingStateV5(run) {
+  const current = run.pipelineState;
+  const immutableTerminal = ["DONE", "FAILED"].includes(
+    current.workflowState,
+  );
+  const resumeState = run.pause?.resumeState;
+  const checkpoint =
+    current.workflowState === "WAITING_FOR_USER" &&
+    WORKFLOW_STATES.includes(resumeState)
+      ? resumeState
+      : current.workflowState;
+  if (immutableTerminal || !current.preflightComplete) {
+    return Object.freeze({ ...current });
+  }
+  const unfinishedBootstrap =
+    checkpoint === "BOOTSTRAP" ||
+    (current.workflowState === "WAITING_FOR_USER" &&
+      current.resolvedSummary === null &&
+      (current.workerSummary !== null ||
+        current.reviewerSummary !== null ||
+        current.pendingEdit?.suspendedState === "BOOTSTRAP" ||
+        run.pause?.reason === "bootstrap_inventory_capacity_exhausted"));
+  if (unfinishedBootstrap) {
+    return Object.freeze({
+      ...current,
+      workerSummary: null,
+      reviewerSummary: null,
+      workerValidation: null,
+      reviewerValidation: null,
+      resolvedSummary: null,
+      bootstrapDisagreement: null,
+      bootstrapArbitrationUsed: false,
+      requiredChecks: null,
+      validationInfrastructure: null,
+      validationInfrastructureFingerprint: null,
+      validationMigrationPending: false,
+      validationMigrationDisagreement: null,
+      finalizationResult: null,
+      finalizedFingerprint: null,
+      reviewResult: null,
+      reviewedFingerprint: null,
+      findings: Object.freeze([]),
+      previousFindings: Object.freeze([]),
+      pendingDisputes: Object.freeze([]),
+      reviewReconsideration: Object.freeze([]),
+    });
+  }
+  const prepared = current.resolvedSummary !== null;
+  if (!prepared || checkpoint === "CLARIFY") {
+    return Object.freeze({ ...current });
+  }
+  if (current.workflowState === "HANDOFF") {
+    return Object.freeze({
+      ...current,
+      validationMigrationPending: true,
+      validationMigrationDisagreement: null,
+    });
+  }
+  const paused = current.workflowState === "WAITING_FOR_USER";
+  const rerunFinalization =
+    !paused &&
+    ["FINALIZE", "REVIEW", "RESOLVE_FINDINGS"].includes(
+      current.workflowState,
+    );
+  const keepProvisionalGate = paused;
+  return Object.freeze({
+    ...current,
+    workflowState: rerunFinalization ? "FINALIZE" : current.workflowState,
+    workerValidation: null,
+    reviewerValidation: null,
+    validationMigrationPending: true,
+    validationMigrationDisagreement: null,
+    finalizationResult: keepProvisionalGate
+      ? current.finalizationResult
+      : null,
+    finalizedFingerprint: keepProvisionalGate
+      ? current.finalizedFingerprint
+      : null,
+    reviewResult: keepProvisionalGate ? current.reviewResult : null,
+    reviewedFingerprint: keepProvisionalGate
+      ? current.reviewedFingerprint
+      : null,
+    previousFindings: keepProvisionalGate
+      ? current.previousFindings
+      : current.findings.length === 0
+        ? current.previousFindings
+        : current.findings,
+    findings: keepProvisionalGate ? current.findings : Object.freeze([]),
+    pendingDisputes: keepProvisionalGate
+      ? current.pendingDisputes
+      : Object.freeze([]),
+    reviewReconsideration: keepProvisionalGate
+      ? current.reviewReconsideration
+      : Object.freeze([]),
+  });
+}
+
 export const polishingPipeline = Object.freeze({
   id: POLISHING_PIPELINE_ID,
-  stateVersion: 4,
+  stateVersion: 6,
   migrations: Object.freeze({
     1: migratePolishingStateV1,
     2: migratePolishingStateV2,
     3: migratePolishingStateV3,
+    4: migratePolishingStateV4,
+    5: migratePolishingStateV5,
   }),
   roles: ROLES,
   settings: SETTINGS,
   taskInputs: TASK_INPUTS,
   runOptions: Object.freeze(["project", "task", ...ROLES]),
   requiredRunOptions: Object.freeze(["project", "task"]),
-  description: "Polish and review an existing dirty worktree without committing it.",
+  description: "Polish, review, and stage an existing dirty worktree without committing it.",
   projections: Object.freeze({
     clarification: projectClarification,
     pause: projectPause,
