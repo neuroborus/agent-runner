@@ -13,10 +13,12 @@ import { createGitCommitService } from "./git-commit.js";
 import {
   contentChangesAtRoot,
   contentFingerprintsAtRoot,
+  indexContentFingerprintAtRoot,
   inspectPathAtRoot,
   normalizeAllowedPaths,
   pathsFingerprintAtRoot,
 } from "./git-content.js";
+import { createGitHandoffService } from "./git-handoff.js";
 
 export { GitSafetyError };
 
@@ -482,10 +484,20 @@ export function createGitService(options = {}) {
 
   async function reconcileInterrupted(
     previousSnapshot,
-    { allowWorkspaceChanges = false } = {},
+    {
+      allowWorkspaceChanges = false,
+      allowIndexChanges = allowWorkspaceChanges,
+    } = {},
   ) {
     assertSnapshot(previousSnapshot);
     assertBoolean(allowWorkspaceChanges, "allowWorkspaceChanges");
+    assertBoolean(allowIndexChanges, "allowIndexChanges");
+    if (allowIndexChanges && !allowWorkspaceChanges) {
+      throw new GitSafetyError(
+        "allowIndexChanges requires allowWorkspaceChanges.",
+        { code: "ERR_INVALID_GIT_OPTIONS" },
+      );
+    }
     if (!allowWorkspaceChanges) {
       return assertUnchanged(previousSnapshot);
     }
@@ -505,6 +517,12 @@ export function createGitService(options = {}) {
           )
         ),
     ).map(([, change]) => change);
+    if (
+      !allowIndexChanges &&
+      previousSnapshot.indexFingerprint !== currentSnapshot.indexFingerprint
+    ) {
+      changes.push("index");
+    }
     if (changes.length > 0) {
       throw new GitSafetyError(
         "Repository controls changed during an interrupted writable turn.",
@@ -526,10 +544,22 @@ export function createGitService(options = {}) {
     runGit,
     snapshot,
   });
+  const handoffService = createGitHandoffService({
+    assertSnapshot,
+    indexContentFingerprint: (repositoryPath, allowedPaths) =>
+      indexContentFingerprintAtRoot(
+        contentContext,
+        repositoryPath,
+        allowedPaths,
+      ),
+    runGit,
+    snapshot,
+  });
 
   return Object.freeze({
     assertUnchanged,
     ...commitService,
+    ...handoffService,
     contentFingerprint,
     inspectPath,
     preflight,

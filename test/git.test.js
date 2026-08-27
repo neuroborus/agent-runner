@@ -703,6 +703,15 @@ test("reconciles interrupted writable drift without accepting Git control change
   assert.notEqual(reconciled.indexFingerprint, baseline.indexFingerprint);
   await assert.rejects(
     service.reconcileInterrupted(baseline, {
+      allowIndexChanges: false,
+      allowWorkspaceChanges: true,
+    }),
+    (error) =>
+      error.code === "ERR_INTERRUPTED_REPOSITORY_CONTROL_CHANGED" &&
+      error.changes.includes("index"),
+  );
+  await assert.rejects(
+    service.reconcileInterrupted(baseline, {
       allowWorkspaceChanges: false,
     }),
     (error) => error.code === "ERR_READ_ONLY_REPOSITORY_CHANGED",

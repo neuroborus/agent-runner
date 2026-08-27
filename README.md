@@ -201,9 +201,10 @@ fresh session reconstructed from durable run state, artifacts, and the current
 workspace. Explicit source sessions retain strict identity and lineage.
 Interrupted ordinary turns revalidate canonical paths, durable task inputs, and
 Git controls before restarting from the complete request in a fresh native
-session. Read-only turns still require an unchanged repository; authorized
-plan-execution and polishing Worker turns may preserve partial content and
-staging changes while rejecting history/ref, remote, or identity drift.
+session. Read-only turns still require an unchanged repository. Polishing
+Worker turns may preserve partial content, but index drift is rejected; the
+runner owns the later staging handoff. Plan-execution recovery retains its
+pipeline-specific one-shot commit reconciliation.
 Interrupted local-commit turns are reconciled from Git state and never replayed.
 An explicit Claude rate, quota, credit, or spend-limit rejection pauses as
 `backend_unavailable`, with durable workflow state and safe workspace changes
@@ -398,12 +399,14 @@ authorization to create the exact planned local commit. Remote state remains
 read-only.
 
 Polishing follows the same fingerprint-bound finalization and independent
-review gate and preserves the reviewed workspace content and staging state for
-a separate commit workflow.
+review gate. Agent turns change content only; after the gate passes, the runner
+stages the complete reviewed change set and leaves it uncommitted for a
+separate commit workflow.
 Its dedicated `FINALIZE` turn runs the target project's complete validation
 procedure, including required formatting or generated output, with configured
 skill guidance when available. Its scope ends with fingerprint-bound validation
-and review.
+and review; staging instructions in selected guidance are deferred to the
+runner-owned handoff.
 
 ## MCP
 
@@ -577,6 +580,7 @@ events, agents, and Git services; pipeline workspaces own workflow policy.
 │   ├── git-commit.js
 │   ├── git-command.js
 │   ├── git-content.js
+│   ├── git-handoff.js
 │   ├── git.js
 │   ├── index.js
 │   ├── mcp.js
@@ -647,5 +651,7 @@ node bin/agent-run.js --help
 Use the repository's `finalization` skill before handing off a completed
 change. It validates the current change; when explicitly asked to finalize, it
 also stages the relevant files and drafts a Conventional Commit message.
+Inside the polishing pipeline, that skill remains staging-independent and the
+runner stages the complete finalized and reviewed change set instead.
 Finalization stops at the staged handoff boundary. Commit creation requires a
 separate explicit request, and remote state remains read-only in V1.

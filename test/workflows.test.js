@@ -60,6 +60,7 @@ function capabilities() {
     structuredOutput: true,
     readOnly: true,
     autonomousWrite: true,
+    gitMetadataWriteBlocked: true,
     workspaceWrite: true,
     localCommit: true,
     remoteWriteBlocked: true,
@@ -626,7 +627,7 @@ test("polishes a dirty worktree through mixed CLI roles without committing", asy
   assert.equal(await gitOutput(paths.projectPath, ["rev-parse", "HEAD"]), initialHead);
   assert.equal(
     await gitOutput(paths.projectPath, ["status", "--porcelain"]),
-    "M src/base.js",
+    "M  src/base.js",
   );
 });
 
@@ -1128,6 +1129,6 @@ test("runs registered workflows through recoverable MCP controls", async (t) => 
   );
   assert.equal(
     await gitOutput(paths.projectPath, ["status", "--porcelain"]),
-    "M src/base.js",
+    "M  src/base.js",
   );
 });

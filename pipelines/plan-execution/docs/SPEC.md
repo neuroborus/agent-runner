@@ -577,6 +577,7 @@ const backend = {
       structuredOutput: true,
       readOnly: true,
       autonomousWrite: true,
+      gitMetadataWriteBlocked: true,
       workspaceWrite: true,
       localCommit: true,
       remoteWriteBlocked: true,

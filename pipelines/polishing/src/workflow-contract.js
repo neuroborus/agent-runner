@@ -15,6 +15,7 @@ export const WORKFLOW_STATES = Object.freeze([
   "FINALIZE",
   "REVIEW",
   "RESOLVE_FINDINGS",
+  "HANDOFF",
   "WAITING_FOR_USER",
   "DONE",
   "FAILED",
@@ -2670,7 +2671,9 @@ export function normalizePipelineState(value) {
     value.validationMigrationPending &&
     (!value.preflightComplete ||
       resolvedSummary === null ||
-      ["CLARIFY", "BOOTSTRAP", "DONE"].includes(value.workflowState))
+      ["CLARIFY", "BOOTSTRAP", "HANDOFF", "DONE"].includes(
+        value.workflowState,
+      ))
   ) {
     throw workflowError("Polishing validation migration is inapplicable.");
   }
@@ -2781,6 +2784,7 @@ export function normalizePipelineState(value) {
       "FINALIZE",
       "REVIEW",
       "RESOLVE_FINDINGS",
+      "HANDOFF",
       "DONE",
       "WAITING_FOR_USER",
       "FAILED",
@@ -2862,9 +2866,14 @@ export function normalizePipelineState(value) {
     throw workflowError("Polishing bootstrap state is inconsistent.");
   }
   if (
-    ["POLISH", "FINALIZE", "REVIEW", "RESOLVE_FINDINGS", "DONE"].includes(
-      value.workflowState,
-    ) &&
+    [
+      "POLISH",
+      "FINALIZE",
+      "REVIEW",
+      "RESOLVE_FINDINGS",
+      "HANDOFF",
+      "DONE",
+    ].includes(value.workflowState) &&
     (!value.clarificationFrozen ||
       value.refreezeRequired ||
       resolvedSummary === null ||
@@ -2873,7 +2882,7 @@ export function normalizePipelineState(value) {
     throw workflowError("Polishing prepared state is inconsistent.");
   }
   if (
-    (["FINALIZE", "REVIEW", "RESOLVE_FINDINGS", "DONE"].includes(
+    (["FINALIZE", "REVIEW", "RESOLVE_FINDINGS", "HANDOFF", "DONE"].includes(
       value.workflowState,
     ) &&
       polishSummary === null)
@@ -2915,7 +2924,7 @@ export function normalizePipelineState(value) {
     throw workflowError("Polishing finding resolution has no blockers.");
   }
   if (
-    value.workflowState === "DONE" &&
+    ["HANDOFF", "DONE"].includes(value.workflowState) &&
     (!completionReady || value.reviewReconsideration.length !== 0)
   ) {
     throw workflowError("Completed polishing state is inconsistent.");
@@ -3062,7 +3071,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "polishing" ||
-    run.pipelineStateVersion !== 4 ||
+    run.pipelineStateVersion !== 5 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -3441,6 +3450,7 @@ export function assertRuntime(runtime) {
     "inspectPath",
     "preflight",
     "snapshot",
+    "stagePolishingHandoff",
     "validationInfrastructureFingerprint",
   ]) {
     if (typeof runtime.git[name] !== "function") {
@@ -3480,6 +3490,7 @@ export function normalizeAdapterCapabilities(value, role, sourceSession) {
           "structuredOutput",
           "readOnly",
           "autonomousWrite",
+          "gitMetadataWriteBlocked",
           "workspaceWrite",
           "remoteWriteBlocked",
         ]

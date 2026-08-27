@@ -753,6 +753,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     if (before.identityFingerprint !== after.identityFingerprint) {
       return "unexpected_git_identity_change";
     }
+    if (before.indexFingerprint !== after.indexFingerprint) {
+      return "unexpected_git_index_change";
+    }
     return null;
   }
 
@@ -762,6 +765,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     }
     if (cause?.changes?.includes("identity")) {
       return "unexpected_git_identity_change";
+    }
+    if (cause?.changes?.includes("index")) {
+      return "unexpected_git_index_change";
     }
     return "unexpected_git_ref_change";
   }
@@ -801,6 +807,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     const allowWorkspaceChanges = interruptedTurnIsWritable(interruptedTurn);
     try {
       await runtime.git.reconcileInterrupted(state().repositoryBaseline, {
+        allowIndexChanges: false,
         allowWorkspaceChanges,
       });
     } catch (cause) {
@@ -1843,7 +1850,7 @@ ${JSON.stringify(
     });
   }
 
-  async function completeIfReady() {
+  async function prepareHandoffIfReady() {
     const current = state();
     if (
       current.finalizationResult?.status !== "PASS" ||
@@ -1871,13 +1878,38 @@ ${JSON.stringify(
       return false;
     }
     await transition(
-      { ...current, workflowState: "DONE" },
+      { ...current, workflowState: "HANDOFF" },
       {
         publicActivity: activity(
           "runner",
-          "polishing",
+          "handoff",
+          "prepared",
+          "Finalized and reviewed content is ready for runner staging.",
+        ),
+      },
+    );
+    return true;
+  }
+
+  async function runHandoff() {
+    const current = state();
+    const repositoryBaseline = await runtime.git.stagePolishingHandoff({
+      expectedSnapshot: current.repositoryBaseline,
+      finalizedFingerprint: current.finalizedFingerprint,
+      reviewedFingerprint: current.reviewedFingerprint,
+    });
+    await transition(
+      {
+        ...current,
+        workflowState: "DONE",
+        repositoryBaseline,
+      },
+      {
+        publicActivity: activity(
+          "runner",
+          "handoff",
           "completed",
-          "Polishing completed with finalized, reviewed, uncommitted changes.",
+          "Polishing completed with finalized, reviewed, staged, uncommitted changes.",
         ),
       },
     );
@@ -3190,9 +3222,7 @@ ${JSON.stringify(
   async function runResolutionTurn() {
     const current = state();
     if (current.findings.length === 0 && current.finalizationResult?.status === "PASS") {
-      if (await completeIfReady()) {
-        return false;
-      }
+      await prepareHandoffIfReady();
       return true;
     }
     if (current.finalizationResult?.status !== "FAIL") {
@@ -3511,7 +3541,8 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
       state().preflightComplete &&
       !interruptedRepositoryReconciled &&
       ((await readCurrentInputs()) === null ||
-        !(await verifyPersistedRepository()))
+        (state().workflowState !== "HANDOFF" &&
+          !(await verifyPersistedRepository())))
     ) {
       return currentRun;
     }
@@ -3707,6 +3738,13 @@ ${evidence}`,
 
       if (current.workflowState === "RESOLVE_FINDINGS") {
         if (!(await runResolutionTurn())) {
+          return currentRun;
+        }
+        continue;
+      }
+
+      if (current.workflowState === "HANDOFF") {
+        if (!(await runHandoff())) {
           return currentRun;
         }
         continue;

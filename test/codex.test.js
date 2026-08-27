@@ -391,6 +391,7 @@ test("constructs with the native environment and probes capabilities", async () 
     structuredOutput: true,
     readOnly: true,
     autonomousWrite: true,
+    gitMetadataWriteBlocked: true,
     workspaceWrite: true,
     localCommit: true,
     remoteWriteBlocked: true,
@@ -846,6 +847,10 @@ test("limits workspace writes to the requested repository", async () => {
     excludeTmpdirEnvVar: true,
     excludeSlashTmp: true,
   });
+  assert.equal(
+    (await fixture.adapter.probe()).gitMetadataWriteBlocked,
+    true,
+  );
 });
 
 test("rejects substitution of an explicit model", async () => {

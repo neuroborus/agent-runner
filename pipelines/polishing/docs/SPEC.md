@@ -5,7 +5,8 @@
 The `polishing` pipeline takes an existing non-empty set of local repository
 changes and brings it to a correct, idiomatic, minimal state that follows the
 target project's conventions. It finalizes and independently reviews the exact
-result, then leaves every change uncommitted.
+result, then stages the complete change set while leaving every change
+uncommitted.
 
 The pipeline is independently owned. It reuses the root Agent Runner services
 for Git inspection, clarification files, agent adapters, external state,
@@ -77,6 +78,12 @@ and execution-preference precedence rules. Each role accepts string trusted
 role-specific CLI/MCP values win over run-wide and runner values, with
 `current` omitting the native override. Worker and Reviewer may use any
 Codex/Claude combination; Arbiter supports either backend.
+
+Worker capability preflight requires structured output, read-only inspection,
+autonomous safe content writes, remote-write blocking, and the explicit
+`gitMetadataWriteBlocked` guarantee. Codex satisfies it through workspace-write
+isolation; Claude satisfies it through its Git-directory write and `git add`
+denials. Neither backend receives broader `.git` access for polishing.
 
 The pipeline owns these positive-integer settings and defaults:
 
@@ -300,6 +307,7 @@ POLISH
 FINALIZE
 REVIEW
 RESOLVE_FINDINGS
+HANDOFF
 WAITING_FOR_USER
 DONE
 FAILED
@@ -316,9 +324,11 @@ change-set fingerprint, resolved context, active blockers, and bounded decision
 history. It receives workspace-write access and brings the whole existing
 change set to a correct, idiomatic, minimal result, follows the task and project
 conventions, and performs a concise self-review. Finalization and finding fixes
-reuse this checkpoint. The Worker may add or remove content when correctness
-requires it. It must not create a commit, change `HEAD` or refs, reconfigure
-remotes or Git identity, or perform a remote write.
+reuse this checkpoint. The Worker may add or remove safe workspace content when
+correctness requires it. It must not stage or unstage changes, alter the index
+or other Git metadata, create a commit, change `HEAD` or refs, reconfigure
+remotes or Git identity, or perform a remote write. The runner owns final
+staging after the content passes finalization and independent review.
 
 An external validation blocker pauses at `POLISH` without discarding safe
 Worker changes. Any stale fingerprint-bound finalization and review results are
@@ -331,7 +341,9 @@ Worker turn in every policy mode. Locate and validate resolved skill guidance
 first. When no skill is selected or automatic discovery finds none, derive the
 same complete gate from repository instructions and project-defined checks;
 never skip validation. Execute required formatting or generated output, but do
-not stage or commit as a discretionary handoff action. Report strict `PASS`, `FAIL`,
+not stage, unstage, or commit. When selected guidance requests staging or
+index-relative handoff inspection, defer that portion to the runner and
+complete the staging-independent content gate. Report strict `PASS`, `FAIL`,
 `SKILL_MISSING`, `SKILL_INVALID`, `BLOCKED`, or the narrowly allowed product
 decision outcome.
 
@@ -405,7 +417,7 @@ pause. Additional fix rounds do not reset history. One stagnation arbitration
 may direct further fixes, implementation rework, or Reviewer reconsideration;
 another complete blocked window pauses.
 
-### Completion Gate
+### Handoff And Completion Gate
 
 Completion requires:
 
@@ -420,9 +432,20 @@ review validation change == UNCHANGED or ACCEPTED
 HEAD and repository control fingerprints == recorded baseline
 ```
 
-The pipeline enters `DONE` with the polished workspace still uncommitted. It
-never invokes `local-commit` access and never stages or creates a commit as a
-completion effect.
+After this staging-independent gate passes, the pipeline persists `HANDOFF`
+before any index effect. The root Git boundary first requires the current
+content fingerprint to equal both recorded fingerprints and verifies the
+expected index, `HEAD`, branch/detached state, refs, remotes, and Git identity.
+It then accepts only one of two recovery states: an already-complete verified
+handoff, or the exact unchanged pre-effect state on which it runs `git add -A`.
+An incomplete or contaminated index fails closed.
+
+Before returning the post-effect snapshot, the Git boundary reverifies content
+and every Git control, requires a nonempty staged diff whose staged content is
+the complete tracked and non-ignored untracked change set, requires no unstaged
+or non-ignored untracked remnants, and runs staged-diff whitespace hygiene. The
+pipeline updates its baseline and enters `DONE` only after those postconditions
+pass. It never invokes `local-commit` access or creates a commit.
 
 ## Safety Guards
 
@@ -436,10 +459,12 @@ turns are read-only. Snapshot comparison before and after every such turn must
 detect tracked or untracked content changes, deletions, index changes, `HEAD`,
 refs, remotes, and identity. Mutation pauses without automatic rollback.
 
-Writable Worker turns may change repository content and staging placement, but
-the runner actively rejects any `HEAD`, branch, ref, remote-configuration, or
-Git-identity change. No role may push, mutate a remote ref, use a hosting API to
-write, alter a remote, change Git identity, create a commit, amend, reset,
+Writable Worker turns may change safe repository content only. The runner
+rejects index drift as well as any `HEAD`, branch, ref, remote-configuration,
+or Git-identity change. The persisted `HANDOFF` transition is the only
+polishing owner allowed to stage. No role may push, mutate a remote ref, use a
+hosting API to write, alter a remote, change Git identity, create a commit,
+amend, reset,
 rebase, stash, switch branches, or create tags. `HEAD` must remain unchanged for
 the entire run.
 
@@ -478,7 +503,8 @@ continue to use the existing resume validation. A read-only repository mutation
 instead instructs the user to abandon the contaminated run and start fresh from
 an uncontaminated worktree. `environment_blocked` retains why validation is
 blocked and the precise `POLISH`, `FINALIZE`, or `RESOLVE_FINDINGS` retry
-checkpoint. This read-only projection leaves pipeline state version 4 unchanged.
+checkpoint. This read-only projection does not itself change the pipeline state
+version. The runner-owned handoff is represented by pipeline state version 5.
 Bootstrap capacity exhaustion instead has no retry action: its bounded public
 diagnostic identifies the producing role, full inventory field, and 64-item
 limit so the validation surface or Runner capacity can be addressed before a
@@ -514,7 +540,8 @@ resume revalidates the canonical project and task paths and every task, context,
 task-clarification, and execution-clarification hash. The root Git boundary
 requires an unchanged workspace and index for read-only phases. For an interrupted
 Worker phase that had workspace-write authority, it may instead preserve
-content and staging drift after proving that `HEAD`, branch/detached state,
+content drift, but any index drift is rejected after proving that `HEAD`,
+branch/detached state,
 refs, remotes, Git identity, canonical root, and allowed runner paths did not
 change. The pipeline then advances its baseline, invalidates stale
 fingerprint-bound finalization and review evidence, and counts interrupted
@@ -525,8 +552,8 @@ reconciliation already advanced the state to `FINALIZE`, resume instead clears
 the retained `worker`/`resolve-findings` marker after the same safety checks and
 continues from `FINALIZE` without replaying or recounting the correction.
 
-Claude read-only recovery uses the same pipeline state version 4 and common run
-envelope. A valid but otherwise unclassified read-only result or process failure
+Claude read-only recovery uses the common run envelope. A valid but otherwise
+unclassified read-only result or process failure
 may pause only after the read-only mutation guard succeeds. Resume rebuilds the
 complete role request from the persisted inputs and checkpoint. No denied tool
 input, native provider text, raw standard error, or new recovery field is
@@ -571,6 +598,16 @@ read-only correction, acceptance clears it, and a repeated invalid result is
 terminal. When validation migration requires arbitration, its accepted bounded
 disagreement is persisted before the Arbiter turn, resumed directly after an
 interruption, and cleared atomically with successful migration completion.
+
+Pipeline state version 5 adds the durable `HANDOFF` boundary and makes every
+ordinary polishing Worker turn content-only. Its version-4 migration preserves
+immutable `DONE` and `FAILED` history and preflight-only state, clears unfinished
+bootstrap evidence, and sends applicable prepared nonterminal runs through
+fresh independent staging-free validation before advancement. Paused legacy
+gate evidence remains provisional until resume invalidates it through that
+checkpoint. A version-5 `HANDOFF` resume lets the Git boundary accept a proven
+complete effect, retry an unchanged pre-effect state, or fail closed; it never
+replays an ambiguous partial effect.
 
 MCP uses the common STDIO tools, persists idempotency intents before mutation
 and receipts before returning, and launches detached continuation under the
@@ -620,7 +657,7 @@ Pipeline tests use fake adapters and temporary repositories. Cover at least:
 - read-only mutation plus ref, remote, and identity guards;
 - durable transitions, interrupted turns, and journal recovery;
 - action-free owner-loss continuation, input and Git-control drift rejection,
-  read-only replay guards, preserved partial Worker content and staging,
+  read-only replay guards, preserved partial Worker content with rejected index drift,
   evidence invalidation, exact-once correction accounting, and activity-marker
   continuity;
 - blocked provider activity plus lease-aware running, interrupted, and idle MCP
@@ -644,6 +681,9 @@ Pipeline tests use fake adapters and temporary repositories. Cover at least:
   authentication, forbidden-operation, and ambiguous writable boundaries;
 - non-delegating role prompts plus terminal, redacted, durable, and publicly
   projected forbidden-collaboration diagnostics;
+- actual Codex workspace-write and Claude Git-directory/`git add` access
+  envelopes, content-only added and updated files, successful and recovered
+  runner handoffs, and every staging postcondition;
 - the invariant that `HEAD` never changes and completion never commits.
 
 Root tests cover workspace imports and metadata, static registration,

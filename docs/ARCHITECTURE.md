@@ -27,7 +27,8 @@ dependency before an actual import needs it.
 - Clarification files, editor invocation, transcript updates, and input hashes.
 - Codex and Claude adapter execution and access-mode enforcement.
 - Git snapshots, content fingerprints, read-only guards, remote/identity guards,
-  and constrained local-commit verification.
+  constrained local-commit verification, and verified polishing staging
+  handoffs.
 - Runner-trusted exact-vector validation outside agent turns, with bounded
   results and repository mutation guards.
 - Static pipeline registration.
@@ -60,7 +61,7 @@ V1 registers:
 - `plan-execution`: consumes `plan.md` and implements one reviewed local commit
   per step.
 - `polishing`: polishes, finalizes, and independently reviews an existing dirty
-  worktree while leaving its changes uncommitted.
+  worktree, then stages the complete result while leaving it uncommitted.
 
 The registry is static. V1 has no dynamic plugins, workflow DSL, or generic DAG
 executor.
@@ -500,6 +501,13 @@ retaining rejected values or provider output. Validation migration also
 persists its accepted bounded disagreement before arbitration, resumes that
 checkpoint directly, and clears it when the migration completes.
 
+Polishing state version 5 adds the durable runner-owned `HANDOFF` boundary.
+Its version-4 migration preserves immutable terminal history and untouched
+preflight state, clears partial bootstrap evidence, and routes applicable
+prepared nonterminal runs through fresh independent staging-free validation
+before they can advance. Legacy paused evidence remains provisional until
+resume invalidates it through that checkpoint.
+
 Common run-envelope version 3 adds `activeTurn`, either `null` or the current
 bounded `{ role, phase }`. Version-1 and version-2 runs project it as `null`
 without rewriting state or history; the next mutating continuation persists the
@@ -517,7 +525,11 @@ plan-mode access envelope. It exposes only repository-inspection tools, allows
 Bash without prompting only when the required native sandbox is active, denies
 workspace and Git-metadata writes, closes command network access, and forbids
 unsandboxed fallback. Workspace-write turns retain Claude's separate `auto`
-permission policy and background classifier.
+permission policy and background classifier while denying Git-directory writes
+and `git add`. Codex workspace-write isolation likewise exposes safe content
+writes without Git-metadata writes. Both adapters advertise
+`gitMetadataWriteBlocked`; the runner, not an agent turn, owns effects that
+require the index.
 Every retryable request carries a turn prompt and a complete recovery prompt
 reconstructed from validated run state, durable artifacts, and the observed
 workspace. A role session is continued only when its persisted key matches the
@@ -611,6 +623,17 @@ nonempty-diff hygiene, and the subject-only commit with the validated plan
 subject. The contract is
 identical for Codex and Claude and does not broaden ordinary Worker access to
 Git metadata.
+
+Polishing uses the same ownership rule without requesting `local-commit`.
+Worker polishing, finalization, and finding-resolution turns are content-only,
+including when selected finalization guidance normally requests staging. Once
+finalization and independent review bind the same staging-independent content
+and validation-infrastructure fingerprints, the pipeline persists `HANDOFF`.
+The root Git boundary then accepts either an unchanged pre-effect state or an
+already-complete recovered effect, runs `git add -A` only for the former, and
+verifies unchanged content and Git controls, a nonempty complete staged set,
+no unstaged or non-ignored untracked remnants, and staged whitespace hygiene
+before the pipeline can enter `DONE`.
 
 A selected runner-trusted command is the only exception to agent-side check
 execution. The runner-derived bootstrap inventory must contain its exact
@@ -731,8 +754,9 @@ the canonical project and task directories and the owning pipeline revalidates
 every durable task, context, plan, and accepted clarification input. The root
 Git boundary then compares the persisted snapshot with the current repository.
 Read-only turns still require an unchanged workspace and index. An interrupted
-plan-execution or polishing Worker may retain content and staging drift only
-for a phase that originally had workspace-write authority; `HEAD`, branch and
+polishing Worker may retain content drift only for a phase that originally had
+workspace-write authority; any index drift is rejected. Plan execution retains
+its owning pipeline's one-shot commit reconciliation rules. `HEAD`, branch and
 detached state, local refs, remotes, Git identity, canonical root, and allowed
 runner paths must remain unchanged. The pipeline advances its baseline only
 after those checks, invalidates fingerprint-bound finalization and review

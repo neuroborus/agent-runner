@@ -93,14 +93,15 @@ All pipelines additionally require:
 `polishing` additionally requires:
 
 - Run Worker and Reviewer bootstrap independently and read-only.
-- Allow only Worker polishing and finding-resolution turns to change workspace
-  content or staging; every other role turn remains read-only.
+- Allow only Worker polishing, finalization, and finding-resolution turns to
+  change safe workspace content. No agent turn may change the index; the runner
+  alone stages the finalized and reviewed polishing handoff.
 - Never request `local-commit`, create a commit, or change `HEAD`, refs, remotes,
   or Git identity.
 - Tie successful finalization and independent review to the same
   staging-independent content fingerprint and invalidate both after content
   changes.
-- Leave the finalized and reviewed workspace changes uncommitted.
+- Leave the finalized and reviewed workspace changes staged and uncommitted.
 
 ## Repository Map
 

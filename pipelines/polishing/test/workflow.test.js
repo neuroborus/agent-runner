@@ -23,6 +23,7 @@ import {
   migratePolishingStateV1,
   migratePolishingStateV2,
   migratePolishingStateV3,
+  migratePolishingStateV4,
   polishingPipeline,
   runPolishing,
 } from "../src/index.js";
@@ -187,7 +188,8 @@ function versionTwoFailedFinalizationState(
 function migrateVersionOneState(state) {
   const versionTwo = migratePolishingStateV1({ pipelineState: state });
   const versionThree = migratePolishingStateV2({ pipelineState: versionTwo });
-  return migratePolishingStateV3({ pipelineState: versionThree });
+  const versionFour = migratePolishingStateV3({ pipelineState: versionThree });
+  return migratePolishingStateV4({ pipelineState: versionFour });
 }
 
 test("rejects incomplete or substituted finalization PASS evidence", () => {
@@ -707,7 +709,7 @@ test("migrates version-2 state with empty trust and invalidates its active gate"
   assert.deepEqual(migrated.settings.trustedChecks, []);
   assert.deepEqual(migrated.trustedValidation.commands, []);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(polishingPipeline.stateVersion, 4);
+  assert.equal(polishingPipeline.stateVersion, 5);
 });
 
 test("migrates version-3 state with no consumed bootstrap corrections", () => {
@@ -719,6 +721,67 @@ test("migrates version-3 state with no consumed bootstrap corrections", () => {
   assert.deepEqual(migrated.bootstrapCorrections, []);
   assert.equal(migrated.pendingBootstrapCorrection, null);
   assert.equal(migrated.validationMigrationDisagreement, null);
+  assert.doesNotThrow(() => normalizePipelineState(migrated));
+});
+
+test("migrates version-4 runs through the content-only handoff boundary", async (t) => {
+  const fixture = await createFixture(t);
+  const completed = await fixture.run();
+  const active = {
+    ...completed.pipelineState,
+    workflowState: "REVIEW",
+    reviewResult: null,
+    reviewedFingerprint: null,
+  };
+
+  const migrated = migratePolishingStateV4({
+    pause: null,
+    pipelineState: active,
+  });
+  const terminal = migratePolishingStateV4({
+    pause: null,
+    pipelineState: completed.pipelineState,
+  });
+
+  assert.equal(migrated.workflowState, "FINALIZE");
+  assert.equal(migrated.workerValidation, null);
+  assert.equal(migrated.reviewerValidation, null);
+  assert.equal(migrated.validationMigrationPending, true);
+  assert.equal(migrated.finalizationResult, null);
+  assert.equal(migrated.finalizedFingerprint, null);
+  assert.equal(migrated.reviewResult, null);
+  assert.equal(migrated.reviewedFingerprint, null);
+  assert.doesNotThrow(() => normalizePipelineState(migrated));
+  assert.deepEqual(terminal, completed.pipelineState);
+});
+
+test("clears partial version-4 bootstrap evidence", async (t) => {
+  let unavailable = false;
+  const fixture = await createFixture(t, {
+    onRoleRun(role, request) {
+      if (
+        role === "reviewer" &&
+        /concise bootstrap summary/u.test(request.prompt) &&
+        !unavailable
+      ) {
+        unavailable = true;
+        const error = new Error("Reviewer unavailable.");
+        error.recoverable = true;
+        throw error;
+      }
+    },
+  });
+  const paused = await fixture.run();
+  assert.notEqual(paused.pipelineState.workerSummary, null);
+
+  const migrated = migratePolishingStateV4(paused);
+
+  assert.equal(migrated.workerSummary, null);
+  assert.equal(migrated.reviewerSummary, null);
+  assert.equal(migrated.workerValidation, null);
+  assert.equal(migrated.requiredChecks, null);
+  assert.equal(migrated.validationMigrationPending, false);
+  assert.deepEqual(migrated.bootstrapCorrections, []);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
 });
 
@@ -1463,6 +1526,7 @@ function capabilities() {
     structuredOutput: true,
     readOnly: true,
     autonomousWrite: true,
+    gitMetadataWriteBlocked: true,
     workspaceWrite: true,
     localCommit: true,
     remoteWriteBlocked: true,
@@ -1501,6 +1565,11 @@ async function createFixture(
     prepareProject,
     proactiveClarification = false,
     reviewer = [bootstrapReady("Reviewer"), reviewApproved()],
+    roleBackends = {
+      worker: "codex",
+      reviewer: "codex",
+      arbiter: "codex",
+    },
     sessionIdForRole,
     settings = SETTINGS,
     sourceSession = null,
@@ -1630,13 +1699,13 @@ async function createFixture(
   const store = createRunStore({ stateRoot });
   let created = await store.createRun({
     pipelineId: "polishing",
-    pipelineStateVersion: 4,
+    pipelineStateVersion: 5,
     projectPath,
     taskPath,
     roles: {
-      worker: { backend: "codex", model: "worker-model" },
-      reviewer: { backend: "codex", model: "reviewer-model" },
-      arbiter: { backend: "codex", model: "arbiter-model" },
+      worker: { backend: roleBackends.worker, model: "worker-model" },
+      reviewer: { backend: roleBackends.reviewer, model: "reviewer-model" },
+      arbiter: { backend: roleBackends.arbiter, model: "arbiter-model" },
     },
     sourceSession,
     pipelineState: createPolishingState({
@@ -1799,6 +1868,132 @@ async function createFixture(
     taskPath,
   };
 }
+
+for (const testCase of [
+  {
+    backend: "codex",
+    path: "tracked.txt",
+    content: "codex content update\n",
+  },
+  {
+    backend: "claude",
+    path: "claude-added.txt",
+    content: "claude content addition\n",
+  },
+]) {
+  test(`runner stages a content-only ${testCase.backend} Worker handoff`, async (t) => {
+    let changed = false;
+    const fixture = await createFixture(t, {
+      roleBackends: {
+        worker: testCase.backend,
+        reviewer: testCase.backend === "codex" ? "claude" : "codex",
+        arbiter: testCase.backend,
+      },
+      async onRoleRun(role, request, _turn, { projectPath }) {
+        if (
+          role === "worker" &&
+          /Polish the existing local/u.test(request.prompt) &&
+          !changed
+        ) {
+          changed = true;
+          assert.equal(
+            (await runGit(projectPath, "diff", "--cached", "--name-only"))
+              .stdout,
+            "",
+          );
+          await writeFile(
+            join(projectPath, testCase.path),
+            testCase.content,
+          );
+        }
+      },
+    });
+    const before = await fixture.runtime.git.snapshot({
+      projectPath: fixture.projectPath,
+    });
+
+    const completed = await fixture.run();
+    const after = completed.pipelineState.repositoryBaseline;
+
+    assert.equal(completed.pipelineState.workflowState, "DONE");
+    assert.equal(completed.roles.worker.backend, testCase.backend);
+    assert.equal(after.head, before.head);
+    assert.equal(after.refsFingerprint, before.refsFingerprint);
+    assert.equal(
+      after.remoteConfigurationFingerprint,
+      before.remoteConfigurationFingerprint,
+    );
+    assert.equal(after.identityFingerprint, before.identityFingerprint);
+    assert.ok(
+      fixture.calls.worker.every(({ access }) => access !== "local-commit"),
+    );
+    assert.match(
+      (await runGit(
+        fixture.projectPath,
+        "diff",
+        "--cached",
+        "--name-only",
+      )).stdout,
+      new RegExp(`^${testCase.path.replace(".", "\\.")}$`, "mu"),
+    );
+    assert.equal(
+      (await runGit(fixture.projectPath, "diff", "--name-only")).stdout,
+      "",
+    );
+    assert.equal(
+      (
+        await runGit(
+          fixture.projectPath,
+          "ls-files",
+          "--others",
+          "--exclude-standard",
+        )
+      ).stdout,
+      "",
+    );
+  });
+}
+
+test("recovers a verified runner handoff after DONE persistence is interrupted", async (t) => {
+  const processLoss = new Error("Runner process stopped after staging.");
+  const fixture = await createFixture(t);
+  const transition = fixture.runtime.transition;
+  let interrupt = true;
+  fixture.runtime.transition = async (patch, options) => {
+    if (
+      interrupt &&
+      ["DONE", "FAILED"].includes(patch.pipelineState.workflowState)
+    ) {
+      throw processLoss;
+    }
+    return transition(patch, options);
+  };
+
+  await assert.rejects(fixture.run(), (error) => error === processLoss);
+  assert.equal(fixture.currentRun.pipelineState.workflowState, "HANDOFF");
+  assert.notEqual(
+    fixture.currentRun.pipelineState.repositoryBaseline.indexFingerprint,
+    (
+      await fixture.runtime.git.snapshot({ projectPath: fixture.projectPath })
+    ).indexFingerprint,
+  );
+
+  interrupt = false;
+  fixture.runtime.transition = transition;
+  await fixture.recover();
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(
+    completed.pipelineState.repositoryBaseline.indexFingerprint,
+    (
+      await fixture.runtime.git.snapshot({ projectPath: fixture.projectPath })
+    ).indexFingerprint,
+  );
+  assert.ok(
+    fixture.calls.worker.every(({ access }) => access !== "local-commit"),
+  );
+});
 
 test("rejects dispute settings that cannot fit bounded durable history", () => {
   const maximumSettings = {
@@ -2720,15 +2915,21 @@ for (const [name, flag] of [
     assert.equal(fixture.calls.worker.length, 0);
   });
 
-  test(`accepts a hidden-only ${name} worktree change`, async (t) => {
+  test(`fails closed when ${name} hides handoff content`, async (t) => {
     const fixture = await createFixture(t, { dirty: false });
     await runGit(fixture.projectPath, "update-index", flag, "tracked.txt");
     await writeFile(join(fixture.projectPath, "tracked.txt"), "hidden change\n");
 
-    const result = await fixture.run();
-
-    assert.equal(result.pipelineState.workflowState, "DONE");
-    assert.equal(result.pipelineState.repositoryBaseline.clean, false);
+    await assert.rejects(
+      fixture.run(),
+      (error) => error.code === "ERR_POLISHING_HANDOFF_INCOMPLETE",
+    );
+    assert.equal(fixture.currentRun.pipelineState.workflowState, "FAILED");
+    assert.equal(
+      (await runGit(fixture.projectPath, "diff", "--cached", "--name-only"))
+        .stdout,
+      "",
+    );
   });
 }
 
@@ -4311,7 +4512,7 @@ test("persists a forbidden-delegation diagnostic without provider data", async (
   );
 });
 
-test("recovers an ownerless writable turn with partial content and staging", async (t) => {
+test("recovers an ownerless writable turn with content-only changes", async (t) => {
   let interrupt = true;
   let recovering = false;
   const fixture = await createFixture(t, {
@@ -4334,7 +4535,7 @@ test("recovers an ownerless writable turn with partial content and staging", asy
             "partial polish\n",
           );
           const staged = await runGit(projectPath, "diff", "--cached", "--name-only");
-          assert.match(staged.stdout, /^partial\.txt$/mu);
+          assert.doesNotMatch(staged.stdout, /^partial\.txt$/mu);
           recovering = false;
         }
       }
@@ -4350,7 +4551,6 @@ test("recovers an ownerless writable turn with partial content and staging", asy
   );
   await fixture.runtime.startAgentTurn({ role: "worker", phase: "polish" });
   await writeFile(join(fixture.projectPath, "partial.txt"), "partial polish\n");
-  await runGit(fixture.projectPath, "add", "partial.txt");
   await fixture.recover();
   recovering = true;
 
@@ -4364,6 +4564,44 @@ test("recovers an ownerless writable turn with partial content and staging", asy
     "--name-only",
   );
   assert.match(staged.stdout, /^partial\.txt$/mu);
+});
+
+test("rejects ownerless writable-turn index drift before replay", async (t) => {
+  let interrupt = true;
+  const fixture = await createFixture(t, {
+    onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        /Polish the existing local/u.test(request.prompt) &&
+        interrupt
+      ) {
+        interrupt = false;
+        const error = new Error("Provider interrupted.");
+        error.recoverable = true;
+        throw error;
+      }
+    },
+  });
+  const paused = await fixture.run();
+  await fixture.persistPipelineState(
+    { ...paused.pipelineState, workflowState: "POLISH" },
+    paused.counters,
+    null,
+  );
+  await fixture.runtime.startAgentTurn({ role: "worker", phase: "polish" });
+  await writeFile(join(fixture.projectPath, "partial.txt"), "partial polish\n");
+  await runGit(fixture.projectPath, "add", "partial.txt");
+  await fixture.recover();
+  const calls = fixture.calls.worker.length;
+
+  const rejected = await fixture.run();
+
+  assert.equal(rejected.pause.reason, "unexpected_git_index_change");
+  assert.deepEqual(rejected.activeTurn, {
+    role: "worker",
+    phase: "polish",
+  });
+  assert.equal(fixture.calls.worker.length, calls);
 });
 
 test("rejects Git-control drift before recovering an interrupted writable turn", async (t) => {
@@ -4532,7 +4770,7 @@ test("clears a reconciled correction marker without replaying the turn", async (
   );
 });
 
-test("does not charge an interrupted staging-only correction as a fix", async (t) => {
+test("rejects index drift from an interrupted content-only correction", async (t) => {
   let interrupted = false;
   const fixture = await createFixture(t, {
     reviewer: [
@@ -4565,15 +4803,10 @@ test("does not charge an interrupted staging-only correction as a fix", async (t
   });
 
   const interruptedRun = await fixture.run();
-  assert.equal(interruptedRun.pause.reason, "backend_unavailable");
-  assert.equal(interruptedRun.pause.resumeState, "RESOLVE_FINDINGS");
+  assert.equal(interruptedRun.pause.reason, "unexpected_git_index_change");
+  assert.notEqual(interruptedRun.pause.reason, "backend_unavailable");
   assert.equal(interruptedRun.counters.fixRounds, 0);
   assert.equal(interruptedRun.pipelineState.pendingCorrection, false);
-
-  await fixture.recover();
-  const resumed = await fixture.run();
-  assert.equal(resumed.pipelineState.workflowState, "DONE");
-  assert.equal(resumed.counters.fixRounds, 0);
 });
 
 for (const [name, expectedReason, mutate] of [
@@ -4607,6 +4840,11 @@ for (const [name, expectedReason, mutate] of [
     "unexpected_git_identity_change",
     async ({ projectPath }) =>
       runGit(projectPath, "config", "user.name", "Unauthorized Identity"),
+  ],
+  [
+    "index",
+    "unexpected_git_index_change",
+    async ({ projectPath }) => runGit(projectPath, "add", "change.txt"),
   ],
 ]) {
   test(`rejects writable Worker ${name} mutations`, async (t) => {

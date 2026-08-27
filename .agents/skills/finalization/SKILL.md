@@ -68,6 +68,14 @@ check; do not make finalization depend on a backend-specific installation path.
 
 **Finalization never creates a Git commit.**
 
+Inside an Agent Runner pipeline finalization turn, keep this gate
+staging-independent. Follow every substantive validation, formatting,
+generation, and content-review instruction, but defer staging, unstaging,
+index-relative handoff inspection, and commit-message drafting to the owning
+runner phase. Plan execution assigns that work to `COMMIT`; polishing assigns
+it to its runner-owned `HANDOFF`. This phase-owned deferral is not a skipped
+check or a validation blocker.
+
 When the user asks to finalize, finish the checks, then stage only the files that
 belong to the current change set. Stop there.
 

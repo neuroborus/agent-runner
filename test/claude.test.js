@@ -205,6 +205,7 @@ test("constructs and probes enforceable Claude capabilities", async () => {
     structuredOutput: true,
     readOnly: true,
     autonomousWrite: true,
+    gitMetadataWriteBlocked: true,
     workspaceWrite: true,
     localCommit: true,
     remoteWriteBlocked: true,
@@ -444,6 +445,10 @@ test("uses auto mode only for autonomous workspace turns", async () => {
   const settings = JSON.parse(option(turn.argumentsList, "--settings"));
   assert.equal(settings.sandbox.autoAllowBashIfSandboxed, false);
   assert.ok(!settings.sandbox.filesystem.denyWrite.includes(PROJECT_PATH));
+  assert.ok(
+    settings.sandbox.filesystem.denyWrite.includes(`${PROJECT_PATH}/.git`),
+  );
+  assert.ok(settings.permissions.deny.includes("Bash(git add *)"));
 });
 
 test("passes option-like prompts through stdin", async () => {

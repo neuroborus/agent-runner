@@ -41,13 +41,13 @@ Correct only the identified contract violation using current repository evidence
 
 export const POLISH_INSTRUCTIONS = `Polish the existing local repository changes into a correct, idiomatic, minimal result that satisfies the task and follows the target project's conventions.
 
-You may modify workspace content and staging placement when correctness requires it. Preserve unrelated work. Do not create a commit, change HEAD or refs, alter remotes or Git identity, or perform a remote write. Before returning, perform a concise self-review.
+You may modify safe workspace content when correctness requires it. Do not stage or unstage changes or alter the Git index or other Git metadata. Do not create a commit, change HEAD or refs, alter remotes or Git identity, or perform a remote write. The runner alone stages the finalized and reviewed content during handoff. Preserve unrelated work. Before returning, perform a concise self-review.
 For COMPLETED, provide summary; set reason, question, and whyBlocked to "", and options and evidence to [].
 For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or comparable external constraints. Set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
 For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-decision fields.
 Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.`;
 
-export const FINALIZATION_INSTRUCTIONS = `Run the complete project finalization procedure in this dedicated turn, including project-required formatting or generated output. Do not perform unrelated fixes, stage changes as a discretionary handoff action, or create a commit.
+export const FINALIZATION_INSTRUCTIONS = `Run the complete project finalization procedure in this dedicated turn, including project-required formatting or generated output. Do not perform unrelated fixes, stage or unstage changes, alter the Git index or other Git metadata, or create a commit. If finalization guidance requests staging or index-relative handoff inspection, defer that portion to the runner; complete every staging-independent instruction and report the resulting content gate.
 Use PASS only after every agent-executed required check succeeds without being skipped, excluded, substituted, replaced, or weakened. Return the complete requiredChecks and validationInfrastructure actually used, and exactly one ordered checks entry for every required check with bounded direct evidence. Return NOT_RUN only for a command explicitly listed as runner-trusted in the turn context; the runner executes that persisted vector before it accepts the gate. Do not use any other host-reported or user-attested results.
 Changes to package scripts, test discovery, test runners, validation configuration, the check inventory, or its infrastructure paths are allowed only when the task requires them; never make them merely to evade an environmental blocker.
 Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
@@ -86,7 +86,7 @@ For APPROVED, set findings, options, and evidence to []; set question and whyBlo
 For FINDINGS, provide one or more findings with stable IDs, repository-relative file, problem, reason, and suggestedAction; set question and whyBlocked to "", and options and evidence to [].
 For PRODUCT_DECISION_REQUIRED, set findings and validationEvidence to [], and validationChange to UNCHANGED; use the product-decision fields.`;
 
-export const FINDING_RESOLUTION_INSTRUCTIONS = `Resolve every current blocker in one batch. Fix each valid blocker idiomatically and minimally. Dispute an incorrect Reviewer finding only with concise evidence.
+export const FINDING_RESOLUTION_INSTRUCTIONS = `Resolve every current blocker in one batch. Fix each valid blocker idiomatically and minimally. Dispute an incorrect Reviewer finding only with concise evidence. Modify safe workspace content only; do not stage or unstage changes or alter the Git index. The runner owns final staging after finalization and review.
 
 Do not create a commit. Finalization failures must be fixed and cannot be disputed. A finding already upheld by the Arbiter must be fixed.
 For RESOLVED, return exactly one decision per blocker; every decision requires reason; DISPUTE requires evidence, while FIX evidence may be []. Set top-level reason, question, and whyBlocked to "", and options and evidence to [].
