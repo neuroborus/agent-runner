@@ -31,6 +31,8 @@ test("bootstrap instructions preserve independent evidence and arbitration", () 
   assert.match(BOOTSTRAP_INSTRUCTIONS, /validationInfrastructure/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /capacity of 64 items/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /CAPACITY_EXHAUSTED/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /keep the summary and required-check inventory staging-independent/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /against HEAD or explicit trees/u);
   assert.match(
     BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
     /runner derives the final required-check/u,
@@ -44,6 +46,7 @@ test("bootstrap instructions preserve independent evidence and arbitration", () 
     BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
   ]) {
     assert.match(instructions, /Do not propose, select, or repeat commands/u);
+    assert.match(instructions, /belong only to COMMIT/u);
     assert.doesNotMatch(instructions, /provide .*requiredChecks/iu);
   }
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /one read-only correction/u);
@@ -95,6 +98,7 @@ test("work instructions preserve their concise mandatory cores", () => {
 
 Work only on this planned commit.
 Do not run the project finalization procedure or perform generic commit preparation in this turn. Those belong to the dedicated FINALIZE and COMMIT phases.
+The established required-check inventory is input only to the dedicated FINALIZE gate. Do not execute it in this turn.
 Do not create a commit in this turn.
 Before returning, perform a concise self-review.
 For COMPLETED, put all results in summary; set reason, question, and whyBlocked to "", and options and evidence to [].
@@ -118,6 +122,7 @@ For that outcome, provide question, whyBlocked, and evidence; options may be [].
 If a finding is incorrect, dispute it with concise evidence instead of changing the code.
 
 Do not run the project finalization procedure or perform generic commit preparation in this turn. Those belong to the dedicated FINALIZE and COMMIT phases.
+The established required-check inventory is input only to the dedicated FINALIZE gate. Do not execute it in this turn.
 Do not create a commit in this turn.
 For RESOLVED, return exactly one decision per blocker; every decision requires reason; DISPUTE requires evidence, while FIX evidence may be []. Set top-level reason, question, and whyBlocked to "", and options and evidence to [].
 For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or comparable external constraints. Set decisions and options to []; provide reason and evidence; set question and whyBlocked to "".
@@ -142,11 +147,11 @@ test("finalization and dispute prompts preserve their narrow roles", () => {
   );
   assert.match(
     FINALIZATION_INSTRUCTIONS,
-    /defer only staging, post-staging cached-diff inspection, and commit-message drafting/u,
+    /defer staging, staged\/index-relative inspection, alternate-index workarounds/u,
   );
   assert.match(
     FINALIZATION_INSTRUCTIONS,
-    /independently required read-only cached-diff check/u,
+    /against HEAD or explicit trees/u,
   );
   assert.match(
     FINALIZATION_INSTRUCTIONS,
@@ -154,7 +159,7 @@ test("finalization and dispute prompts preserve their narrow roles", () => {
   );
   assert.match(
     FINALIZATION_INSTRUCTIONS,
-    /constrained COMMIT executor alone runs git add -A/u,
+    /constrained COMMIT executor alone runs git add -A, performs fixed runner-owned staged-diff hygiene/u,
   );
   assert.match(
     FINALIZATION_INSTRUCTIONS,
@@ -221,7 +226,7 @@ ${PRODUCT_DECISION_INSTRUCTIONS}`,
 test("commit instructions preserve the one-shot local boundary", () => {
   assert.equal(
     COMMIT_INSTRUCTIONS,
-    `Validate readiness for the authorized local commit using the exact supplied subject. The constrained executor alone stages the exact finalized and reviewed workspace with git add -A and creates the subject-only commit.
+    `Validate readiness for the authorized local commit using the exact supplied subject. The constrained executor alone stages the exact finalized and reviewed workspace with git add -A, performs fixed staged-diff hygiene, and creates the subject-only commit.
 Do not stage changes yourself, modify project content, amend history, bypass hooks, change Git identity or configuration, create other refs, or perform any remote write.`,
   );
 });

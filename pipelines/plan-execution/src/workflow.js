@@ -442,7 +442,13 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
 
   function resolvedContext() {
     const summary = state().resolvedSummary;
-    return summary === null ? "" : `Resolved bootstrap context:\n${summary}`;
+    if (summary === null || state().validationMigrationPending) {
+      return "";
+    }
+    return `Resolved bootstrap context:
+${summary}
+
+Phase ownership: the established required-check inventory is input only to FINALIZE. Staging, staged/index-relative inspection, alternate-index workarounds, staged handoff, and commit-message drafting belong only to COMMIT.`;
   }
 
   function trustedValidationInstructions() {
@@ -855,11 +861,17 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     }
     const correctionWasReconciled =
       interruptedCorrectionWasReconciled(interruptedTurn);
+    const supersededByValidationMigration =
+      state().validationMigrationPending;
     const allowWorkspaceChanges = interruptedTurnIsWritable(interruptedTurn);
+    let reconciledRepository;
     try {
-      await runtime.git.reconcileInterrupted(state().repositoryBaseline, {
-        allowWorkspaceChanges,
-      });
+      reconciledRepository = await runtime.git.reconcileInterrupted(
+        state().repositoryBaseline,
+        {
+          allowWorkspaceChanges,
+        },
+      );
     } catch (cause) {
       if (cause?.code !== "ERR_INTERRUPTED_REPOSITORY_CONTROL_CHANGED") {
         throw cause;
@@ -868,7 +880,51 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       return false;
     }
     interruptedRepositoryReconciled = true;
-    if (correctionWasReconciled) {
+    if (supersededByValidationMigration) {
+      const current = state();
+      const contentChanged =
+        current.repositoryBaseline.contentFingerprint !==
+        reconciledRepository.contentFingerprint;
+      const changedCorrection =
+        interruptedTurn.phase === "resolve-findings" && contentChanged;
+      if (!isDeepStrictEqual(reconciledRepository, current.repositoryBaseline)) {
+        await transition(
+          {
+            ...current,
+            repositoryBaseline: reconciledRepository,
+            ...(contentChanged
+              ? {
+                  finalizationResult: null,
+                  finalizedFingerprint: null,
+                  reviewResult: null,
+                  reviewedFingerprint: null,
+                  previousFindings:
+                    current.findings.length === 0
+                      ? current.previousFindings
+                      : current.findings,
+                  findings: [],
+                  reviewReconsideration: [],
+                  ...(changedCorrection ? { pendingCorrection: true } : {}),
+                }
+              : {}),
+          },
+          changedCorrection
+            ? {
+                nextCounters: {
+                  ...counters(),
+                  fixRounds:
+                    counters().fixRounds +
+                    (current.pendingCorrection ? 0 : 1),
+                },
+              }
+            : {},
+        );
+      }
+      currentRun = await runtime.finishAgentTurn(interruptedTurn);
+      assertRun(currentRun);
+      interruptedTurn = null;
+      interruptedRepositoryReconciled = false;
+    } else if (correctionWasReconciled) {
       currentRun = await runtime.finishAgentTurn(interruptedTurn);
       assertRun(currentRun);
       interruptedTurn = null;
@@ -1615,10 +1671,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       role,
       schema: BOOTSTRAP_SCHEMA,
       checkpoint: "validation-migration",
-      recoveryContext: resolvedContext(),
       buildPrompt: (evidence) => `${BOOTSTRAP_INSTRUCTIONS}
 
-This is a versioned-state migration checkpoint. Treat every persisted legacy check, path, fingerprint, and aggregate validation result as provisional. Independently rediscover the complete current validation inventory from repository evidence before work can advance.
+This is a versioned-state migration checkpoint. Treat every persisted legacy summary, resolved context, check, path, fingerprint, and aggregate validation result as provisional. Independently re-establish the complete phase-safe summary and current validation inventory from repository evidence before work can advance.
 
 ${finalizationBootstrapInstructions(state().settings.finalization)}
 
@@ -1636,9 +1691,11 @@ ${evidence}`,
     if (result.status === "CAPACITY_EXHAUSTED") {
       return pauseForBootstrapCapacity(role, result);
     }
+    await writeContext(`context/${role}.md`, result.summary);
     await transition(
       {
         ...state(),
+        [`${role}Summary`]: result.summary,
         [`${role}Validation`]: {
           requiredChecks: result.requiredChecks,
           validationInfrastructure: result.validationInfrastructure,
@@ -1656,12 +1713,20 @@ ${evidence}`,
     return true;
   }
 
-  async function completeValidationMigration(actor) {
+  async function completeValidationMigration(
+    actor,
+    summary,
+    bootstrapArbitrationUsed,
+  ) {
     const validation = await establishedValidation();
+    await writeContext("context/resolved.md", summary);
     await transition(
       {
         ...state(),
         ...validation,
+        resolvedSummary: summary,
+        bootstrapDisagreement: null,
+        bootstrapArbitrationUsed,
       },
       {
         publicActivity: activity(
@@ -1680,10 +1745,9 @@ ${evidence}`,
       role: "worker",
       schema: BOOTSTRAP_RECONCILIATION_SCHEMA,
       checkpoint: "validation-migration",
-      recoveryContext: resolvedContext(),
       buildPrompt: (evidence) => `${BOOTSTRAP_RECONCILIATION_INSTRUCTIONS}
 
-Reconcile only the independently rediscovered validation requirements. Legacy validation evidence is provisional and must not be selected.
+Reconcile the independently re-established summaries and validation requirements. Every legacy summary, resolved context, and validation result is provisional and must not be selected.
 
 ${trustedValidationInstructions()}
 
@@ -1706,16 +1770,15 @@ ${JSON.stringify(
       return false;
     }
     if (result.status === "RESOLVED") {
-      return completeValidationMigration("worker");
+      return completeValidationMigration("worker", result.summary, false);
     }
     const arbitration = await runBootstrapContract({
       role: "arbiter",
       schema: BOOTSTRAP_ARBITRATION_SCHEMA,
       checkpoint: "validation-migration",
-      recoveryContext: resolvedContext(),
       buildPrompt: (evidence) => `${BOOTSTRAP_ARBITRATION_INSTRUCTIONS}
 
-Resolve only this validation-inventory migration disagreement. Legacy validation evidence is provisional and must not be selected.
+Resolve only this summary and validation-inventory migration disagreement. Legacy summary, resolved context, and validation evidence is provisional and must not be selected.
 
 ${trustedValidationInstructions()}
 
@@ -1740,7 +1803,7 @@ ${JSON.stringify(
     if (arbitration === null) {
       return false;
     }
-    return completeValidationMigration("arbiter");
+    return completeValidationMigration("arbiter", arbitration.summary, true);
   }
 
   async function runValidationMigration() {
@@ -2305,19 +2368,6 @@ The runner will derive validation inventories from the independently accepted ro
       (evidence) => `${IMPLEMENTATION_INSTRUCTIONS}
 
 ${evidence}
-
-Established required-check inventory:
-${JSON.stringify(state().requiredChecks, null, 2)}
-
-Established validation infrastructure:
-${JSON.stringify(
-  {
-    paths: state().validationInfrastructure,
-    fingerprint: state().validationInfrastructureFingerprint,
-  },
-  null,
-  2,
-)}
 
 Current planned commit:
 ## Commit ${step.number}: ${step.subject}
@@ -3843,6 +3893,7 @@ ${step.subject}`),
 
       if (
         current.validationMigrationPending &&
+        !current.compatibilityCheckRequired &&
         !(
           current.workflowState === "COMMIT" &&
           current.pendingCommit?.status === "consumed"

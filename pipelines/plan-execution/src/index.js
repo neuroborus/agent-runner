@@ -605,14 +605,115 @@ export function migratePlanExecutionStateV4(run) {
   });
 }
 
+export function migratePlanExecutionStateV5(run) {
+  const current = run.pipelineState;
+  const immutableTerminal = ["DONE", "FAILED"].includes(
+    current.workflowState,
+  );
+  const resumeState = run.pause?.resumeState;
+  const checkpoint =
+    current.workflowState === "WAITING_FOR_USER" &&
+    WORKFLOW_STATES.includes(resumeState)
+      ? resumeState
+      : current.workflowState;
+  if (immutableTerminal || !current.preflightComplete) {
+    return Object.freeze({ ...current });
+  }
+  const unfinishedBootstrap =
+    checkpoint === "BOOTSTRAP" ||
+    (current.workflowState === "WAITING_FOR_USER" &&
+      current.currentStep === null &&
+      (current.workerSummary !== null ||
+        current.reviewerSummary !== null ||
+        current.pendingEdit?.suspendedState === "BOOTSTRAP" ||
+        run.pause?.reason === "bootstrap_inventory_capacity_exhausted"));
+  if (unfinishedBootstrap) {
+    return Object.freeze({
+      ...current,
+      workerSummary: null,
+      reviewerSummary: null,
+      workerValidation: null,
+      reviewerValidation: null,
+      resolvedSummary: null,
+      bootstrapDisagreement: null,
+      bootstrapArbitrationUsed: false,
+      requiredChecks: null,
+      validationInfrastructure: null,
+      validationInfrastructureFingerprint: null,
+      validationMigrationPending: false,
+      finalizationResult: null,
+      finalizedFingerprint: null,
+      reviewResult: null,
+      reviewedFingerprint: null,
+      findings: Object.freeze([]),
+      previousFindings: Object.freeze([]),
+      pendingDisputes: Object.freeze([]),
+      reviewReconsideration: Object.freeze([]),
+      pendingCommit: null,
+    });
+  }
+  const prepared = current.resolvedSummary !== null;
+  if (!prepared || checkpoint === "CLARIFY") {
+    return Object.freeze({ ...current });
+  }
+  const commitVerificationPending =
+    current.pendingCommit?.status === "consumed";
+  if (commitVerificationPending) {
+    return Object.freeze({
+      ...current,
+      validationMigrationPending: true,
+    });
+  }
+  const paused = current.workflowState === "WAITING_FOR_USER";
+  const rerunFinalization =
+    !paused &&
+    ["FINALIZE", "REVIEW", "RESOLVE_FINDINGS", "COMMIT"].includes(
+      current.workflowState,
+    );
+  const keepProvisionalGate = paused;
+  return Object.freeze({
+    ...current,
+    workflowState: rerunFinalization ? "FINALIZE" : current.workflowState,
+    workerValidation: null,
+    reviewerValidation: null,
+    validationMigrationPending: true,
+    finalizationResult: keepProvisionalGate
+      ? current.finalizationResult
+      : null,
+    finalizedFingerprint: keepProvisionalGate
+      ? current.finalizedFingerprint
+      : null,
+    reviewResult: keepProvisionalGate ? current.reviewResult : null,
+    reviewedFingerprint: keepProvisionalGate
+      ? current.reviewedFingerprint
+      : null,
+    previousFindings: keepProvisionalGate
+      ? current.previousFindings
+      : current.findings.length === 0
+        ? current.previousFindings
+        : current.findings,
+    findings: keepProvisionalGate
+      ? current.findings
+      : Object.freeze([]),
+    pendingDisputes: keepProvisionalGate
+      ? current.pendingDisputes
+      : Object.freeze([]),
+    reviewReconsideration: keepProvisionalGate
+      ? current.reviewReconsideration
+      : Object.freeze([]),
+    pendingCommit: null,
+  });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
-  stateVersion: 5,
+  stateVersion: 6,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
     3: migratePlanExecutionStateV3,
     4: migratePlanExecutionStateV4,
+    5: migratePlanExecutionStateV5,
   }),
   roles: ROLES,
   settings: SETTINGS,

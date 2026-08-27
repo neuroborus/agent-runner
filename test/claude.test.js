@@ -1408,6 +1408,19 @@ test("creates one exact authorized commit in a networkless sandbox", async () =>
   assert.ok(commitCall.argumentsList.includes("--unshare-net"));
   assert.ok(commitCall.argumentsList.includes(EXPECTED_HEAD));
   assert.ok(commitCall.argumentsList.includes(message));
+  const commitScript =
+    commitCall.argumentsList[commitCall.argumentsList.indexOf("-e") + 1];
+  assert.match(commitScript, /runGit\(\["diff", "--quiet"\]\)/u);
+  assert.match(commitScript, /runGit\(\["diff", "--cached", "--check"\]\)/u);
+  assert.match(commitScript, /"diff", "--cached", "--quiet"/u);
+  assert.ok(
+    commitScript.indexOf('["add", "-A"]') <
+      commitScript.lastIndexOf("assertStagedDiff()"),
+  );
+  assert.ok(
+    commitScript.lastIndexOf("assertStagedDiff()") <
+      commitScript.indexOf('["commit", "--message", message]'),
+  );
   assert.equal(commitCall.options.env.ANTHROPIC_API_KEY, undefined);
   assert.equal(commitCall.options.env.HTTP_PROXY, undefined);
   assert.equal(commitCall.options.env.LD_PRELOAD, undefined);

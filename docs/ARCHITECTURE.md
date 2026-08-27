@@ -456,6 +456,16 @@ Immutable terminal evidence is shape-upgraded, and a consumed one-shot commit
 authorization remains on its verification-only path; migration never makes it
 replayable.
 
+Plan execution state version 6 makes validation inventories staging-independent
+and assigns the Git index exclusively to `COMMIT`. Its version-5 migration
+shape-upgrades clarification, preflight, and immutable terminal states without
+rediscovery; clears partial bootstrap evidence at an unfinished bootstrap; and
+routes every other prepared nonterminal run through fresh independent summaries,
+resolved context, and validation before advancement. A consumed commit
+authorization and its gate evidence stay on the verification-only path. Git
+verification runs before reconciliation, migration discovery, or another role
+turn, and any still-pending migration resumes only after that effect is resolved.
+
 Polishing state version 3 adopts the same resolved trusted-validation snapshot,
 per-check executor provenance, and fingerprint-bound evidence tuple. Its
 version-2 migration selects empty legacy trust, preserves safe workspace
@@ -576,15 +586,18 @@ Plan execution gives each preparation phase one owner. Implementation and
 finding-resolution turns do not invoke project finalization or perform generic
 commit preparation. The dedicated finalization turn follows every substantive
 instruction in the selected guidance, including checks, formatting, generation,
-and staging-independent content review. Guidance that asks to stage, inspect a
-post-staging cached diff, or draft a commit message is deferred to `COMMIT`;
-an independently required read-only cached-diff check still runs as part of the
-established inventory. This deferral is neither a validation blocker nor a
-skipped check. After finalization and independent review bind the same content
-and validation-infrastructure fingerprints, the constrained local-commit
-executor alone runs `git add -A` and creates the subject-only commit with the
-validated plan subject. The contract is identical for Codex and Claude and does
-not broaden ordinary Worker access to Git metadata.
+and staging-independent content review. Bootstrap, validation-migration, and
+finalization inventories deterministically reject index mutation, staged or
+index-relative inspection, implicit worktree-versus-index assertions,
+alternate-index workarounds, and commit preparation; applicable content checks
+use `HEAD` or explicit trees. Established checks are input only to `FINALIZE`.
+After finalization and independent review bind the same content and
+validation-infrastructure fingerprints, the constrained local-commit executor
+alone runs `git add -A`, fixed unstaged-clean, staged-diff whitespace, and
+nonempty-diff hygiene, and the subject-only commit with the validated plan
+subject. The contract is
+identical for Codex and Claude and does not broaden ordinary Worker access to
+Git metadata.
 
 A selected runner-trusted command is the only exception to agent-side check
 execution. The runner-derived bootstrap inventory must contain its exact
@@ -631,6 +644,10 @@ bootstrap violations; the runner does not follow or silently canonicalize
 them. The producing role receives the bounded diagnostic on its one correction
 turn, and a second invalid result fails closed. The deterministic aggregate is
 therefore derived only from independently accepted canonical role evidence.
+Plan execution additionally rejects each staging-dependent required command
+with a bounded field-specific diagnostic before accepting that producing result;
+the same policy rejects a finalization candidate inventory without delegating
+index ownership to an ordinary Worker turn.
 
 An explicitly supplied source session is different: the first eligible turn of
 each new primary or review checkpoint creates a direct child and returns its ID

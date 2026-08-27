@@ -24,6 +24,7 @@ import {
   migratePlanExecutionStateV2,
   migratePlanExecutionStateV3,
   migratePlanExecutionStateV4,
+  migratePlanExecutionStateV5,
   planExecutionPipeline,
   runPlanExecution,
 } from "../src/index.js";
@@ -157,7 +158,10 @@ function migrateVersionOneState(state) {
   const versionFour = migratePlanExecutionStateV3({
     pipelineState: versionThree,
   });
-  return migratePlanExecutionStateV4({ pipelineState: versionFour });
+  const versionFive = migratePlanExecutionStateV4({
+    pipelineState: versionFour,
+  });
+  return migratePlanExecutionStateV5({ pipelineState: versionFive });
 }
 
 async function prepareValidationMigration(t, fixtureOptions) {
@@ -592,6 +596,84 @@ test("requires unique bootstrap check IDs, exact commands, and paths", () => {
   }
 });
 
+test("rejects staging-dependent validation commands while allowing HEAD checks", () => {
+  const unsafeCommands = [
+    "git add -A",
+    "git -C . add -A",
+    "GIT_INDEX_FILE=.alternate-index git add -A",
+    "git diff --cached --check",
+    "git diff --exit-code",
+    "git status --short",
+    "git ls-files --error-unmatch source.js",
+    "git apply --index change.patch",
+    "git show :source.js",
+    "git rev-parse --git-path index",
+    "sha256sum .git/index",
+    "npm run prepare-commit-message",
+  ];
+  for (const command of unsafeCommands) {
+    assert.throws(
+      () =>
+        normalizeBootstrapResult(
+          {
+            ...bootstrapReady("Worker"),
+            requiredChecks: [{ id: "C1", command }],
+          },
+          "Worker",
+        ),
+      (cause) => {
+        assert.deepEqual(cause.diagnostic, {
+          field: "requiredChecks[0].command",
+          constraint: "staging-independent-validation-command",
+        });
+        return true;
+      },
+    );
+  }
+
+  for (const command of [
+    "npm test",
+    "git diff --check HEAD",
+    "git diff HEAD --exit-code",
+    "git diff-tree --check HEAD",
+    "git apply --check change.patch",
+  ]) {
+    assert.doesNotThrow(() =>
+      normalizeBootstrapResult(
+        {
+          ...bootstrapReady("Worker"),
+          requiredChecks: [{ id: "C1", command }],
+        },
+        "Worker",
+      ),
+    );
+  }
+
+  const command = "git diff --cached --check";
+  assert.throws(
+    () =>
+      normalizeFinalizationResult({
+        ...finalizationPassed(),
+        requiredChecks: [{ id: "C1", command }],
+        checks: [
+          {
+            checkId: "C1",
+            command,
+            status: "PASS",
+            evidence: ["The staged diff passed."],
+          },
+        ],
+      }),
+    (cause) => {
+      assert.deepEqual(cause.diagnostic, {
+        field: "requiredChecks[0].command",
+        constraint: "staging-independent-validation-command",
+      });
+      return true;
+    },
+  );
+});
+
 test("classifies oversized and unserializable bootstrap contracts", () => {
   const largePaths = Array.from(
     { length: 32 },
@@ -677,7 +759,7 @@ test("migrates version-3 execution state with no consumed bootstrap corrections"
   assert.deepEqual(migrated.bootstrapCorrections, []);
   assert.equal(migrated.pendingBootstrapCorrection, null);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(planExecutionPipeline.stateVersion, 5);
+  assert.equal(planExecutionPipeline.stateVersion, 6);
 });
 
 test("migrates version-4 state with empty trust and invalidates its active gate", async (t) => {
@@ -730,6 +812,179 @@ test("preserves version-4 consumed commit authority for verification", async (t)
   assert.equal(migrated.validationMigrationPending, true);
   assert.equal(migrated.finalizationResult.status, "PASS");
   assert.deepEqual(migrated.trustedValidation.commands, []);
+  assert.doesNotThrow(() => normalizePipelineState(migrated));
+});
+
+test("migrates version-5 states according to their safe checkpoint", async (t) => {
+  const initial = createPlanExecutionState();
+  assert.deepEqual(
+    migratePlanExecutionStateV5({ pipelineState: initial }),
+    initial,
+  );
+
+  const stop = new Error("captured partial bootstrap");
+  let partialBootstrap;
+  const bootstrapFixture = await createFixture(t, {
+    onTransition(run) {
+      if (
+        partialBootstrap === undefined &&
+        run.pipelineState.workflowState === "BOOTSTRAP" &&
+        run.pipelineState.workerSummary !== null
+      ) {
+        partialBootstrap = run.pipelineState;
+        throw stop;
+      }
+    },
+  });
+  await assert.rejects(bootstrapFixture.run(), (cause) => cause === stop);
+  const resetBootstrap = migratePlanExecutionStateV5({
+    pipelineState: partialBootstrap,
+  });
+  assert.equal(resetBootstrap.workflowState, "BOOTSTRAP");
+  assert.equal(resetBootstrap.workerSummary, null);
+  assert.equal(resetBootstrap.reviewerSummary, null);
+  assert.equal(resetBootstrap.workerValidation, null);
+  assert.equal(resetBootstrap.resolvedSummary, null);
+  assert.equal(resetBootstrap.requiredChecks, null);
+  assert.equal(resetBootstrap.validationMigrationPending, false);
+  assert.doesNotThrow(() => normalizePipelineState(resetBootstrap));
+
+  const phaseStates = new Map();
+  const completedFixture = await createFixture(t, {
+    onTransition(run) {
+      const state = run.pipelineState;
+      if (
+        (state.workflowState !== "CLARIFY" || state.preflightComplete) &&
+        ["CLARIFY", "IMPLEMENT", "FINALIZE", "REVIEW", "COMMIT"].includes(
+          state.workflowState,
+        ) &&
+        !phaseStates.has(state.workflowState)
+      ) {
+        phaseStates.set(state.workflowState, state);
+      }
+    },
+  });
+  const completed = await completedFixture.run();
+  assert.deepEqual(
+    migratePlanExecutionStateV5({
+      pipelineState: phaseStates.get("CLARIFY"),
+    }),
+    phaseStates.get("CLARIFY"),
+  );
+  for (const [workflowState, expectedState] of [
+    ["IMPLEMENT", "IMPLEMENT"],
+    ["FINALIZE", "FINALIZE"],
+    ["REVIEW", "FINALIZE"],
+    ["COMMIT", "FINALIZE"],
+  ]) {
+    const current = phaseStates.get(workflowState);
+    const migrated = migratePlanExecutionStateV5({ pipelineState: current });
+    assert.equal(migrated.workflowState, expectedState);
+    assert.equal(migrated.validationMigrationPending, true);
+    assert.equal(migrated.workerValidation, null);
+    assert.equal(migrated.reviewerValidation, null);
+    assert.equal(migrated.finalizationResult, null);
+    assert.equal(migrated.reviewResult, null);
+    assert.deepEqual(migrated.requiredChecks, current.requiredChecks);
+    assert.deepEqual(migrated.repositoryBaseline, current.repositoryBaseline);
+    assert.doesNotThrow(() => normalizePipelineState(migrated));
+  }
+
+  let resolving;
+  const resolvingFixture = await createFixture(t, {
+    workWorker: [
+      implementationCompleted(),
+      finalizationFailed("F1"),
+      resolution({ id: "F1", decision: "FIX" }),
+      finalizationPassed(),
+    ],
+    onTransition(run) {
+      if (
+        resolving === undefined &&
+        run.pipelineState.workflowState === "RESOLVE_FINDINGS"
+      ) {
+        resolving = run.pipelineState;
+      }
+    },
+  });
+  await resolvingFixture.run();
+  const migratedResolution = migratePlanExecutionStateV5({
+    pipelineState: resolving,
+  });
+  assert.equal(migratedResolution.workflowState, "FINALIZE");
+  assert.equal(migratedResolution.validationMigrationPending, true);
+  assert.equal(migratedResolution.finalizationResult, null);
+  assert.deepEqual(migratedResolution.findings, []);
+  assert.deepEqual(migratedResolution.previousFindings, resolving.findings);
+  assert.doesNotThrow(() => normalizePipelineState(migratedResolution));
+
+  for (const workflowState of ["DONE", "FAILED"]) {
+    const immutable = {
+      ...completed.pipelineState,
+      workflowState,
+      workerSummary: "Historical summary requires a staged handoff.",
+      reviewerSummary: "Historical summary requires a staged handoff.",
+      resolvedSummary: "Historical summary requires a staged handoff.",
+      workerValidation: {
+        requiredChecks: [
+          { id: "C1", command: "git diff --cached --check" },
+        ],
+        validationInfrastructure: VALIDATION_INFRASTRUCTURE,
+      },
+      reviewerValidation: {
+        requiredChecks: [
+          { id: "C1", command: "git diff --cached --check" },
+        ],
+        validationInfrastructure: VALIDATION_INFRASTRUCTURE,
+      },
+      requiredChecks: [
+        { id: "C1", command: "git diff --cached --check" },
+      ],
+      finalizationResult: {
+        ...completed.pipelineState.finalizationResult,
+        requiredChecks: [
+          { id: "C1", command: "git diff --cached --check" },
+        ],
+        checks: completed.pipelineState.finalizationResult.checks.map(
+          (check) => ({ ...check, command: "git diff --cached --check" }),
+        ),
+      },
+    };
+    assert.doesNotThrow(() => normalizePipelineState(immutable));
+    assert.deepEqual(
+      migratePlanExecutionStateV5({ pipelineState: immutable }),
+      immutable,
+    );
+  }
+});
+
+test("preserves consumed version-5 commit authorization for verification", async (t) => {
+  let consumed;
+  const interrupted = new Error("commit adapter interrupted");
+  const fixture = await createFixture(t, {
+    onTransition(run) {
+      if (
+        consumed === undefined &&
+        run.pipelineState.pendingCommit?.status === "consumed"
+      ) {
+        consumed = run.pipelineState;
+      }
+    },
+    onCommitRun() {
+      throw interrupted;
+    },
+  });
+
+  await fixture.run();
+  const migrated = migratePlanExecutionStateV5({ pipelineState: consumed });
+
+  assert.equal(migrated.workflowState, "COMMIT");
+  assert.equal(migrated.pendingCommit.status, "consumed");
+  assert.deepEqual(migrated.pendingCommit, consumed.pendingCommit);
+  assert.deepEqual(migrated.finalizationResult, consumed.finalizationResult);
+  assert.equal(migrated.finalizedFingerprint, consumed.finalizedFingerprint);
+  assert.equal(migrated.reviewedFingerprint, consumed.reviewedFingerprint);
+  assert.equal(migrated.validationMigrationPending, true);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
 });
 
@@ -818,6 +1073,42 @@ test("pauses on capacity exhaustion during validation migration", async (t) => {
     resumeState: null,
     nextActions: [],
   });
+});
+
+test("corrects staging-dependent validation-migration checks", async (t) => {
+  const unsafeCommand = "git diff --cached --check";
+  const fixture = await prepareValidationMigration(t, {
+    workReviewer: [bootstrapReady("Migrating Reviewer"), reviewApproved()],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      {
+        ...bootstrapReady("Migrating Worker"),
+        requiredChecks: [{ id: "C1", command: unsafeCommand }],
+      },
+      bootstrapReady("Corrected Migrating Worker"),
+      reconciliationResolved(),
+      finalizationPassed(),
+    ],
+  });
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.deepEqual(completed.pipelineState.bootstrapCorrections, [
+    {
+      attempt: 1,
+      role: "worker",
+      phase: "validation-migration",
+      contract: "bootstrap",
+      field: "requiredChecks[0].command",
+      constraint: "staging-independent-validation-command",
+    },
+  ]);
+  assert.doesNotMatch(
+    completed.pipelineState.resolvedSummary,
+    /staged|cached/iu,
+  );
 });
 
 test("redacts precise diagnostics across validation-migration contracts", async (t) => {
@@ -947,6 +1238,82 @@ test("re-establishes validation before retrying a migrated finalization pause", 
       prompt.includes("versioned-state migration checkpoint"),
     ),
   );
+});
+
+test("resumes a pre-fix paused implementation through phase-safe validation", async (t) => {
+  const unsafeCommand = "git add -A && git diff --cached --check";
+  let implementationTurns = 0;
+  const fixture = await createFixture(t, {
+    workReviewer: [bootstrapReady("Migrating Reviewer"), reviewApproved()],
+    workWorker: [
+      implementationBlocked(),
+      bootstrapReady("Migrating Worker"),
+      reconciliationResolved(),
+      implementationCompleted(),
+      finalizationPassed(),
+    ],
+    async onRoleRun(role, request) {
+      if (role === "worker" && request.prompt.includes("Implement the changes")) {
+        implementationTurns += 1;
+        if (implementationTurns === 1) {
+          await writeFile(
+            join(fixture.projectPath, "safe-partial-implementation.txt"),
+            "safe partial implementation\n",
+          );
+        }
+      }
+    },
+  });
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "environment_blocked");
+  assert.equal(paused.pause.resumeState, "IMPLEMENT");
+
+  const unsafeValidation = {
+    requiredChecks: [{ id: "C1", command: unsafeCommand }],
+    validationInfrastructure: VALIDATION_INFRASTRUCTURE,
+  };
+  const legacy = {
+    ...paused.pipelineState,
+    workerSummary: "A staged handoff is mandatory.",
+    reviewerSummary: "A staged handoff is mandatory.",
+    resolvedSummary: "A staged handoff is mandatory.",
+    workerValidation: unsafeValidation,
+    reviewerValidation: unsafeValidation,
+    requiredChecks: unsafeValidation.requiredChecks,
+  };
+  assert.doesNotThrow(() => normalizePipelineState(legacy));
+  const migrated = migratePlanExecutionStateV5({
+    pipelineState: legacy,
+    pause: paused.pause,
+  });
+  assert.equal(migrated.validationMigrationPending, true);
+  fixture.persistPipelineState(migrated, { pause: paused.pause });
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.pipelineState.validationMigrationPending, false);
+  assert.equal(completed.pipelineState.workerSummary.includes("Migrating"), true);
+  assert.equal(completed.pipelineState.reviewerSummary.includes("Migrating"), true);
+  assert.equal(completed.pipelineState.resolvedSummary.includes("staged"), false);
+  assert.equal(completed.pipelineState.completedCommits.length, 1);
+  assert.equal(
+    fixture.calls.worker.filter(({ access }) => access === "local-commit").length,
+    1,
+  );
+  assert.equal(
+    await readFile(
+      join(fixture.projectPath, "safe-partial-implementation.txt"),
+      "utf8",
+    ),
+    "safe partial implementation\n",
+  );
+  for (const request of fixture.calls.worker.filter(({ prompt }) =>
+    prompt.includes("Implement the changes"),
+  )) {
+    assert.doesNotMatch(request.prompt, /Established required-check inventory/u);
+    assert.doesNotMatch(request.recoveryPrompt, new RegExp(unsafeCommand, "u"));
+  }
 });
 
 test("invalidates migrated findings before applying an override", async (t) => {
@@ -1874,7 +2241,7 @@ async function createFixture(
     revision: 1,
     runId,
     pipelineId: "plan-execution",
-    pipelineStateVersion: 5,
+    pipelineStateVersion: 6,
     projectPath,
     taskPath,
     roles: {
@@ -2216,7 +2583,7 @@ async function createFixture(
   ) {
     currentRun = {
       ...currentRun,
-      pipelineStateVersion: 5,
+      pipelineStateVersion: 6,
       pipelineState,
       pause,
       revision: currentRun.revision + 1,
@@ -2623,6 +2990,68 @@ test("derives one stable complete inventory from independent role evidence", asy
     workerPath,
     reviewerPath,
   ]);
+});
+
+test("corrects staging-dependent bootstrap checks before implementation", async (t) => {
+  const unsafeCommand = "git add -A && git diff --cached --check";
+  const unsafeBootstrap = {
+    ...bootstrapReady("Worker"),
+    summary: "Worker incorrectly requires a staged handoff.",
+    requiredChecks: [{ id: "C1", command: unsafeCommand }],
+  };
+  const fixture = await createFixture(t, {
+    worker: [
+      clarificationReady(),
+      unsafeBootstrap,
+      bootstrapReady("Corrected Worker"),
+      reconciliationResolved(),
+    ],
+    onRoleRun(role, request) {
+      if (role === "worker" && request.prompt.includes("Implement the changes")) {
+        assert.doesNotMatch(request.prompt, /Established required-check inventory/u);
+        assert.doesNotMatch(request.prompt, new RegExp(unsafeCommand, "u"));
+      }
+    },
+  });
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.deepEqual(completed.pipelineState.bootstrapCorrections, [
+    {
+      attempt: 1,
+      role: "worker",
+      phase: "bootstrap",
+      contract: "bootstrap",
+      field: "requiredChecks[0].command",
+      constraint: "staging-independent-validation-command",
+    },
+  ]);
+  const correctionCall = fixture.calls.worker.find(({ prompt }) =>
+    prompt.includes("Correction diagnostic"),
+  );
+  assert.ok(correctionCall);
+  assert.doesNotMatch(correctionCall.prompt, new RegExp(unsafeCommand, "u"));
+});
+
+test("fails closed when corrected bootstrap checks still depend on staging", async (t) => {
+  const unsafeBootstrap = {
+    ...bootstrapReady("Worker"),
+    requiredChecks: [{ id: "C1", command: "git diff --exit-code" }],
+  };
+  const fixture = await createFixture(t, {
+    worker: [clarificationReady(), unsafeBootstrap, unsafeBootstrap],
+  });
+
+  await assert.rejects(
+    fixture.run(),
+    (cause) =>
+      cause.code === "ERR_INVALID_PLAN_EXECUTION_OUTPUT" &&
+      cause.diagnostic?.constraint ===
+        "staging-independent-validation-command",
+  );
+  assert.equal(fixture.currentRun.pipelineState.workflowState, "FAILED");
+  assert.equal(fixture.currentRun.pipelineState.bootstrapCorrections.length, 1);
 });
 
 test("persists a forbidden-delegation class for a terminal bootstrap failure", async (
@@ -3544,11 +3973,13 @@ Run tests and formatting, then stage changes, inspect the cached diff, and draft
   for (const call of [implementationCall, resolutionCall]) {
     assert.match(call.prompt, /Do not run the project finalization procedure/u);
     assert.match(call.prompt, /generic commit preparation/u);
+    assert.match(call.prompt, /required-check inventory is input only/u);
+    assert.doesNotMatch(call.prompt, /Established required-check inventory:/u);
   }
   for (const call of finalizationCalls) {
     assert.match(call.prompt, /Follow every substantive instruction/u);
-    assert.match(call.prompt, /post-staging cached-diff inspection/u);
-    assert.match(call.prompt, /independently required read-only cached-diff check/u);
+    assert.match(call.prompt, /staged\/index-relative inspection/u);
+    assert.match(call.prompt, /against HEAD or explicit trees/u);
     assert.match(call.prompt, /neither a validation blocker nor a skipped required check/u);
     assert.match(call.prompt, /constrained COMMIT executor alone runs git add -A/u);
   }
@@ -5184,6 +5615,39 @@ test("resumes commit verification without replaying the Worker", async (t) => {
   assert.equal(
     fixture.calls.worker.filter(({ access }) => access === "local-commit")
       .length,
+    1,
+  );
+});
+
+test("verifies a consumed version-5 authorization before validation migration", async (t) => {
+  let verificationUnavailable = true;
+  const fixture = await createFixture(t, {
+    onCommitVerify() {
+      if (verificationUnavailable) {
+        verificationUnavailable = false;
+        const error = new Error("Git verification was interrupted.");
+        error.code = "ERR_FAKE_COMMIT_VERIFICATION";
+        throw error;
+      }
+    },
+  });
+  const paused = await fixture.run();
+  const roleCallCount = Object.values(fixture.calls).flat().length;
+  const migrated = migratePlanExecutionStateV5({
+    pipelineState: paused.pipelineState,
+    pause: paused.pause,
+  });
+  assert.equal(migrated.pendingCommit.status, "consumed");
+  assert.equal(migrated.validationMigrationPending, true);
+  fixture.persistPipelineState(migrated, { pause: paused.pause });
+
+  const resumed = await fixture.run();
+
+  assert.equal(resumed.pipelineState.workflowState, "DONE");
+  assert.equal(resumed.pipelineState.validationMigrationPending, false);
+  assert.equal(Object.values(fixture.calls).flat().length, roleCallCount);
+  assert.equal(
+    fixture.calls.worker.filter(({ access }) => access === "local-commit").length,
     1,
   );
 });

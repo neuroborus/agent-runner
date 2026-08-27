@@ -445,6 +445,19 @@ migration checkpoint. Immutable terminal evidence is shape-upgraded. A
 consumed one-shot commit authorization remains on the verification-only path,
 and migration never creates a replayable authorization.
 
+Pipeline state version 6 makes every accepted validation inventory
+staging-independent and gives the Git index one owner in `COMMIT`. Its version-5
+migration shape-upgrades `CLARIFY`, incomplete preflight, `DONE`, and `FAILED`
+states without role work; clears incompatible partial bootstrap evidence before
+an unfinished `BOOTSTRAP` continues; and routes every other prepared
+nonterminal run through fresh independent summaries, resolved context, and
+validation. Safe content, frozen inputs, completed commits, counters, Git
+controls, and trusted-validation state remain unchanged. A consumed commit
+authorization retains its gate evidence and active verification state; Git
+verification occurs before repository reconciliation, validation rediscovery,
+or another role turn, and any pending validation migration continues only after
+the effect is resolved.
+
 Common run-envelope version 3 independently adds nullable bounded active
 provider role and phase. Version-1 and version-2 envelopes project it as `null`
 without rewriting; the next mutating continuation persists the explicit runtime
@@ -762,7 +775,8 @@ second authorization and verifies Git state before deciding how to proceed.
 and exact subject. Its agent turn is read-only and may only confirm readiness
 through the adapter's strict schema; it cannot modify files, stage changes, or
 write Git metadata itself. After confirmation, the Worker adapter runs the
-exact HEAD check, `git add -A`, and ordinary subject-only commit in a dedicated
+exact HEAD check, `git add -A`, fixed unstaged-clean, staged-diff whitespace,
+and nonempty-diff hygiene, and the ordinary subject-only commit in a dedicated
 Codex permission profile. That profile grants write access only to the
 workspace and resolved Git directory, denies command network access, preserves
 Git hooks and configured Git identity, and receives no ambient Git overrides.
@@ -865,10 +879,11 @@ On Linux, the isolated local-commit executor uses a probed `bubblewrap` profile
 with a read-only host filesystem, writable workspace and resolved Git
 directories, private temporary and runtime directories, and no network. The
 agent confirmation turn remains in `plan` mode; after confirmation the executor
-checks the expected HEAD, runs `git add -A`, rechecks HEAD, and creates one
-subject-only commit with the exact supplied message. It preserves Git hooks and
-configured identity, strips ambient Git redirection and sensitive command
-environment values, and never adds Claude attribution. Report
+checks the expected HEAD, runs `git add -A`, rechecks HEAD, applies fixed
+unstaged-clean, staged-diff whitespace, and nonempty-diff hygiene, and creates
+one subject-only commit with the exact supplied message. It preserves Git hooks and configured
+identity, strips ambient Git redirection and sensitive command environment
+values, and never adds Claude attribution. Report
 `localCommit: false` when this profile or Claude's required Linux sandbox
 dependencies cannot be probed. Policy, capability, provider, or confirmation-
 turn rejection before executor invocation carries `effectStarted: false`,
@@ -898,10 +913,11 @@ Worker backend and without skill-specific guidance.
 Phase ownership is also backend-neutral. Implementation and finding-resolution
 turns reserve project finalization and generic commit preparation for their
 dedicated phases. The finalization turn follows all substantive guidance but
-defers staging, post-staging cached-diff inspection, and commit-message drafting
-to the constrained `COMMIT` executor. An independently required read-only
-cached-diff check remains part of finalization evidence. This deferral is not a
-validation blocker or a skipped required check.
+keeps its inventory staging-independent. Staging, staged/index-relative
+inspection, alternate-index workarounds, staged handoff, and commit-message
+drafting belong to the constrained `COMMIT` executor. Applicable content checks
+use `HEAD` or explicit trees. This deferral is not a validation blocker or a
+skipped required check.
 
 ---
 
@@ -1237,6 +1253,15 @@ path found by either role is preserved. Reconciliation and arbitration return no
 inventory fields and cannot invent, select, or omit commands or repository
 paths. The runner fingerprints the derived file list; an agent-supplied digest
 is never trusted.
+Each summary and inventory covers every substantive validation requirement but
+must not require staging, staged handoff, index mutation or inspection, an
+implicit worktree-versus-index assertion, an alternate index, or commit-message
+drafting. Generic commit preparation belongs only to `COMMIT`; an applicable
+content check uses `HEAD` or explicit trees. Deterministic validation reports an
+unsafe command as a field-specific bootstrap violation, consumes the producing
+role's one bounded read-only correction, and fails closed if the replacement
+remains unsafe. Validation-migration discovery uses the same policy, and
+finalization candidate inventories are rejected by that policy as well.
 Each role may return at most 64 `requiredChecks` and 64
 `validationInfrastructure` entries. The independently derived, persisted,
 finalization, and fingerprint-input inventories each allow at most 128 entries,
@@ -1385,6 +1410,8 @@ The Worker then:
 Implementation does not invoke the project finalization procedure, stage
 changes, inspect a post-staging cached diff, or draft a commit message. Those
 actions belong to the dedicated `FINALIZE` and `COMMIT` phases.
+The established required-check inventory is input only to `FINALIZE`; it is not
+included as phase-local implementation work.
 
 If required validation cannot run because of an external environment
 constraint, the Worker returns `BLOCKED` with bounded reason and evidence. The
@@ -1404,11 +1431,12 @@ generation, hygiene, and staging-independent review of the exact content.
 
 The finalization turn should execute the validation procedure and report its
 result. It should not perform unrelated discretionary fixes in the same turn.
-When guidance includes generic commit preparation, defer only staging,
-post-staging cached-diff inspection, and commit-message drafting to `COMMIT`.
-Continue to execute any independently required read-only cached-diff check in
-the established inventory. This phase-owned deferral is neither a validation
-blocker nor a skipped required check and must not prevent `PASS`.
+When guidance includes generic commit preparation, defer staging,
+staged/index-relative inspection, alternate-index workarounds, staged handoff,
+and commit-message drafting to `COMMIT`. Every finalization inventory remains
+staging-independent and expresses an applicable content check against `HEAD` or
+explicit trees. This phase-owned deferral is neither a validation blocker nor a
+skipped required check and must not prevent `PASS`.
 
 Every non-availability result carries the complete inventory actually used and
 exactly one ordered result for each required check. `PASS` requires every result
@@ -1569,6 +1597,8 @@ The Worker receives all currently open findings together.
 Finding resolution fixes or disputes the current blockers and then returns
 control. It does not invoke project finalization or perform generic commit
 preparation; a content-changing fix returns to the dedicated `FINALIZE` gate.
+The established required-check inventory remains input to that gate and is not
+phase-local finding-resolution work.
 
 For each finding it returns:
 
@@ -1730,8 +1760,9 @@ Once the gate passes:
    fingerprint;
 4. start or continue the Worker with a narrow readiness instruction, then have
    its constrained executor stage the current non-ignored workspace
-   (`git add -A`) and create exactly one local commit using the exact supplied
-   message;
+   (`git add -A`), run fixed runner-owned unstaged-clean, staged-diff whitespace,
+   and nonempty-diff hygiene, and create exactly one local commit using the
+   exact supplied message;
 5. require the Worker to use the repository's existing Git identity and prohibit
    changing `user.name`, `user.email`, author/committer metadata, commit-message
    hooks, remotes, branches, tags, or unrelated Git configuration;
@@ -2140,6 +2171,11 @@ At minimum cover:
     prompts preserve phase ownership: all substantive finalization work runs,
     commit preparation is deferred without blocking validation, and only the
     constrained commit executor stages the finalized and reviewed content.
+60. staging-dependent bootstrap and validation-migration inventories receive
+    one field-specific correction and then fail closed, finalization candidate
+    inventories obey the same deterministic policy, and a paused version-5
+    implementation run re-establishes phase-safe context before finalization,
+    review, and one authorized commit.
 
 Real Codex/Claude smoke tests should be opt-in integration tests.
 
@@ -2253,9 +2289,10 @@ Do not build:
     auditing remains fail closed and a violation is never an environment pause
     or transparent retry.
 35. Plan-execution implementation and finding-resolution turns do not perform
-    project finalization or generic commit preparation; finalization defers only
-    commit-preparation guidance, and the constrained `COMMIT` executor alone
-    stages and creates the exact validated subject-only commit.
+    project finalization, established checks, or generic commit preparation;
+    bootstrap, migration, and finalization inventories are staging-independent,
+    and the constrained `COMMIT` executor alone stages, applies fixed staged
+    hygiene, and creates the exact validated subject-only commit.
 
 ---
 

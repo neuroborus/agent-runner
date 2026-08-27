@@ -206,7 +206,7 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
           summary:
             `${reviewer ? "Reviewer" : "Worker"} understands the task, ` +
             "plan, risks, and finalization procedure.",
-          requiredChecks: [{ id: "C1", command: "git diff --check" }],
+          requiredChecks: [{ id: "C1", command: "git diff --check HEAD" }],
           validationInfrastructure: [],
           capacityField: "",
           capacityLimit: 0,
@@ -265,14 +265,14 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
           skillPath: "",
           summary: "The repository finalization procedure passed.",
           issues: [],
-          requiredChecks: [{ id: "C1", command: "git diff --check" }],
+          requiredChecks: [{ id: "C1", command: "git diff --check HEAD" }],
           validationInfrastructure: [],
           checks: [
             {
               checkId: "C1",
-              command: "git diff --check",
+              command: "git diff --check HEAD",
               status: "PASS",
-              evidence: ["git diff --check exited successfully."],
+              evidence: ["git diff --check HEAD exited successfully."],
             },
           ],
           reason: "",
