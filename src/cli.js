@@ -275,6 +275,7 @@ export async function main(
     stdout = process.stdout,
     stderr = process.stderr,
     runner,
+    createCommandRunner = createRunner,
     startMcp = serveMcp,
     environment = process.env,
   } = {},
@@ -401,7 +402,7 @@ export async function main(
   try {
     const commandRunner =
       runner ??
-      createRunner({
+      createCommandRunner({
         onActivity(activity) {
           writeActivity(stdout, activity);
         },

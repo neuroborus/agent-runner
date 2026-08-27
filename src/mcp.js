@@ -744,7 +744,25 @@ export function createMcpControlPlane(options = {}) {
       }
       const run = (await runner.status(input.runId)).run;
       if (run.revision === input.expectedRevision) {
-        getPipeline(run.pipelineId).validateResumeAction(run, input.action);
+        const interrupted =
+          run.activeTurn !== null &&
+          run.pause === null &&
+          !["DONE", "FAILED"].includes(run.pipelineState.workflowState);
+        if (interrupted) {
+          if (input.action !== null) {
+            throw new Error(
+              "An interrupted run accepts only an action-free resume.",
+            );
+          }
+          if (await runStore.runLeaseOwnerIsLive(run.runId)) {
+            throw new RunStoreError(
+              `Run ${run.runId} already has a live execution owner.`,
+              { code: "ERR_RUN_LEASED" },
+            );
+          }
+        } else {
+          getPipeline(run.pipelineId).validateResumeAction(run, input.action);
+        }
       } else if (action.created || run.revision < input.expectedRevision) {
         throw new Error("Resume request revision is stale.");
       }

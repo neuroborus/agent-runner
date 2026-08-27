@@ -278,6 +278,52 @@ test("status dispatches and renders concise persisted state", async () => {
   assert.equal(stderr.read(), "");
 });
 
+test("renders bounded finalization correction activity without rejected content", async () => {
+  const stdout = createSink();
+  const stderr = createSink();
+  const activity = {
+    actor: "worker",
+    phase: "finalization",
+    kind: "finalization-correction",
+    message:
+      "worker must correct finalization field requiredChecks[2].command (staging-independent-validation-command).",
+  };
+
+  const exitCode = await main(
+    [
+      "run",
+      "plan-execution",
+      "--project",
+      "/tmp/project",
+      "--task",
+      "/tmp/task",
+    ],
+    {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      createCommandRunner({ onActivity }) {
+        return fakeRunner({
+          async run() {
+            await onActivity(activity);
+            return commandResult();
+          },
+        });
+      },
+    },
+  );
+
+  assert.equal(exitCode, 0);
+  assert.match(
+    stdout.read(),
+    /^\[worker\/finalization\] worker must correct finalization field requiredChecks\[2\]\.command \(staging-independent-validation-command\)\./u,
+  );
+  assert.doesNotMatch(
+    stdout.read(),
+    /git status|DO_NOT_PERSIST|provider|transcript/u,
+  );
+  assert.equal(stderr.read(), "");
+});
+
 for (const pipeline of ["plan-authoring", "plan-execution", "polishing"]) {
   test(`run ${pipeline} dispatches --clarify`, async () => {
     const stdout = createSink();

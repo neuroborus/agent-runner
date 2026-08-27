@@ -391,6 +391,7 @@ test("constructs with the native environment and probes capabilities", async () 
     structuredOutput: true,
     readOnly: true,
     autonomousWrite: true,
+    gitMetadataWriteBlocked: true,
     workspaceWrite: true,
     localCommit: true,
     remoteWriteBlocked: true,
@@ -846,6 +847,10 @@ test("limits workspace writes to the requested repository", async () => {
     excludeTmpdirEnvVar: true,
     excludeSlashTmp: true,
   });
+  assert.equal(
+    (await fixture.adapter.probe()).gitMetadataWriteBlocked,
+    true,
+  );
 });
 
 test("rejects substitution of an explicit model", async () => {
@@ -1340,6 +1345,21 @@ test("creates an authorized commit through a networkless sandbox", async () => {
   );
   assert.ok(sandboxCalls[1].argumentsList.includes(EXPECTED_HEAD));
   assert.ok(sandboxCalls[1].argumentsList.includes(subject));
+  const commitScript =
+    sandboxCalls[1].argumentsList[
+      sandboxCalls[1].argumentsList.indexOf("-e") + 1
+    ];
+  assert.match(commitScript, /runGit\(\["diff", "--quiet"\]\)/u);
+  assert.match(commitScript, /runGit\(\["diff", "--cached", "--check"\]\)/u);
+  assert.match(commitScript, /"diff", "--cached", "--quiet"/u);
+  assert.ok(
+    commitScript.indexOf('["add", "-A"]') <
+      commitScript.lastIndexOf("assertStagedDiff()"),
+  );
+  assert.ok(
+    commitScript.lastIndexOf("assertStagedDiff()") <
+      commitScript.indexOf('["commit", "--message", message]'),
+  );
   assert.match(
     sandboxCalls[1].argumentsList.join(" "),
     /network=\{enabled=false\}/u,

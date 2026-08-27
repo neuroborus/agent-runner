@@ -32,6 +32,7 @@ const DECIMAL_CONTEXT_SIZE_PATTERN = /^[1-9][0-9]*$/u;
 const MAX_CONTEXT_SIZE = 9_223_372_036_854_775_807n;
 const CAPABILITY_DIAGNOSTICS = Object.freeze({
   autonomousWrite: "capability_autonomous_write",
+  gitMetadataWriteBlocked: "capability_git_metadata_write_blocked",
   localCommit: "capability_local_commit",
   nativeSessionContinuation: "capability_session_continuation",
   nativeSessionFork: "capability_session_fork",
@@ -1141,6 +1142,7 @@ export function createCodexAdapter(options = {}) {
       structuredOutput: supported,
       readOnly: supported,
       autonomousWrite: supported,
+      gitMetadataWriteBlocked: supported,
       workspaceWrite: supported,
       localCommit,
       remoteWriteBlocked: supported,
@@ -1210,7 +1212,7 @@ export function createCodexAdapter(options = {}) {
     if (request.access !== "workspace-write") {
       required.push("readOnly");
     } else {
-      required.push("workspaceWrite");
+      required.push("gitMetadataWriteBlocked", "workspaceWrite");
     }
     if (request.access === "local-commit") {
       required.push("localCommit");

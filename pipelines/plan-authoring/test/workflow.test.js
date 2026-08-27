@@ -444,6 +444,11 @@ async function createFixture(
           throw error;
         }
       },
+      async reconcileInterrupted(snapshot, { allowWorkspaceChanges }) {
+        assert.equal(allowWorkspaceChanges, false);
+        await this.assertUnchanged(snapshot);
+        return gitSnapshot({ allowedPaths: snapshot.allowedPaths });
+      },
     },
     async readInputs() {
       await onReadInputs?.(taskPath);
@@ -596,6 +601,70 @@ test("writes one validated plan through independent source-session forks", async
   await assert.rejects(
     executeFile("git", ["-C", fixture.projectPath, "rev-parse", "HEAD"]),
   );
+});
+
+test("reconstructs an interrupted read-only turn in a fresh session", async (t) => {
+  let interrupt = true;
+  const fixture = await createFixture(t, {
+    onRoleRun(role) {
+      if (role === "reviewer" && interrupt) {
+        interrupt = false;
+        const error = new Error("Provider interrupted.");
+        error.code = "ERR_TEST_INTERRUPTED";
+        error.recoverable = true;
+        throw error;
+      }
+    },
+  });
+
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "backend_unavailable");
+  Object.assign(fixture.currentRun, {
+    activeTurn: { role: "reviewer", phase: "review" },
+    pause: null,
+    pipelineState: {
+      ...paused.pipelineState,
+      workflowState: "REVIEW",
+    },
+  });
+
+  const completed = await fixture.run();
+  const recoveredRequest = fixture.calls.reviewer.at(-1);
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.activeTurn, null);
+  assert.equal(recoveredRequest.session, undefined);
+  assert.equal(recoveredRequest.prompt, recoveredRequest.recoveryPrompt);
+  assert.match(recoveredRequest.prompt, /Task \(/u);
+});
+
+test("rejects repository mutation before replaying an interrupted read-only turn", async (t) => {
+  let interrupt = true;
+  const fixture = await createFixture(t, {
+    onRoleRun(role) {
+      if (role === "reviewer" && interrupt) {
+        interrupt = false;
+        const error = new Error("Provider interrupted.");
+        error.recoverable = true;
+        throw error;
+      }
+    },
+  });
+  const paused = await fixture.run();
+  Object.assign(fixture.currentRun, {
+    activeTurn: { role: "reviewer", phase: "review" },
+    pause: null,
+    pipelineState: { ...paused.pipelineState, workflowState: "REVIEW" },
+  });
+  await writeFile(join(fixture.projectPath, "unexpected.txt"), "mutation\n");
+  const reviewerCalls = fixture.calls.reviewer.length;
+
+  const rejected = await fixture.run();
+  assert.equal(rejected.pause.reason, "read_only_mutation");
+  assert.deepEqual(rejected.activeTurn, {
+    role: "reviewer",
+    phase: "review",
+  });
+  assert.equal(fixture.calls.reviewer.length, reviewerCalls);
 });
 
 test("rejects a fork response that reuses the source session", async (t) => {

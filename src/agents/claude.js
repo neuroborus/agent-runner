@@ -1068,6 +1068,7 @@ export function createClaudeAdapter(options = {}) {
         READ_ONLY_ACCESS.permissionMode === "plan" &&
         READ_ONLY_ACCESS.autoAllowBashIfSandboxed,
       autonomousWrite: isolated,
+      gitMetadataWriteBlocked: isolated,
       workspaceWrite: isolated,
       localCommit: isolated,
       remoteWriteBlocked: isolated,
@@ -1089,7 +1090,11 @@ export function createClaudeAdapter(options = {}) {
       required.push("structuredOutput");
     }
     if (request.access === "workspace-write") {
-      required.push("autonomousWrite", "workspaceWrite");
+      required.push(
+        "autonomousWrite",
+        "gitMetadataWriteBlocked",
+        "workspaceWrite",
+      );
     } else {
       required.push("readOnly");
     }

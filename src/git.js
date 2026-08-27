@@ -13,10 +13,12 @@ import { createGitCommitService } from "./git-commit.js";
 import {
   contentChangesAtRoot,
   contentFingerprintsAtRoot,
+  indexContentFingerprintAtRoot,
   inspectPathAtRoot,
   normalizeAllowedPaths,
   pathsFingerprintAtRoot,
 } from "./git-content.js";
+import { createGitHandoffService } from "./git-handoff.js";
 
 export { GitSafetyError };
 
@@ -34,6 +36,16 @@ const SNAPSHOT_COMPARISONS = Object.freeze([
 const SNAPSHOT_FINGERPRINT_FIELDS = Object.freeze([
   "contentFingerprint",
   ...SNAPSHOT_COMPARISONS.slice(2).map(([field]) => field),
+]);
+const INTERRUPTED_CONTROL_COMPARISONS = Object.freeze([
+  ["projectPath", "project-path"],
+  ["allowedPaths", "allowed-paths"],
+  ["head", "head"],
+  ["branch", "branch"],
+  ["detached", "detached-head"],
+  ["refsFingerprint", "refs"],
+  ["remoteConfigurationFingerprint", "remote-configuration"],
+  ["identityFingerprint", "identity"],
 ]);
 const OBJECT_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
@@ -470,6 +482,59 @@ export function createGitService(options = {}) {
     return currentSnapshot;
   }
 
+  async function reconcileInterrupted(
+    previousSnapshot,
+    {
+      allowWorkspaceChanges = false,
+      allowIndexChanges = allowWorkspaceChanges,
+    } = {},
+  ) {
+    assertSnapshot(previousSnapshot);
+    assertBoolean(allowWorkspaceChanges, "allowWorkspaceChanges");
+    assertBoolean(allowIndexChanges, "allowIndexChanges");
+    if (allowIndexChanges && !allowWorkspaceChanges) {
+      throw new GitSafetyError(
+        "allowIndexChanges requires allowWorkspaceChanges.",
+        { code: "ERR_INVALID_GIT_OPTIONS" },
+      );
+    }
+    if (!allowWorkspaceChanges) {
+      return assertUnchanged(previousSnapshot);
+    }
+    const currentSnapshot = await snapshot({
+      allowedPaths: previousSnapshot.allowedPaths,
+      projectPath: previousSnapshot.projectPath,
+    });
+    const changes = INTERRUPTED_CONTROL_COMPARISONS.filter(
+      ([field]) =>
+        !Object.is(previousSnapshot[field], currentSnapshot[field]) &&
+        !(
+          field === "allowedPaths" &&
+          previousSnapshot.allowedPaths.length ===
+            currentSnapshot.allowedPaths.length &&
+          previousSnapshot.allowedPaths.every(
+            (path, index) => path === currentSnapshot.allowedPaths[index],
+          )
+        ),
+    ).map(([, change]) => change);
+    if (
+      !allowIndexChanges &&
+      previousSnapshot.indexFingerprint !== currentSnapshot.indexFingerprint
+    ) {
+      changes.push("index");
+    }
+    if (changes.length > 0) {
+      throw new GitSafetyError(
+        "Repository controls changed during an interrupted writable turn.",
+        {
+          changes,
+          code: "ERR_INTERRUPTED_REPOSITORY_CONTROL_CHANGED",
+        },
+      );
+    }
+    return currentSnapshot;
+  }
+
   const commitService = createGitCommitService({
     assertSnapshot,
     authorizationIdFactory,
@@ -479,13 +544,26 @@ export function createGitService(options = {}) {
     runGit,
     snapshot,
   });
+  const handoffService = createGitHandoffService({
+    assertSnapshot,
+    indexContentFingerprint: (repositoryPath, allowedPaths) =>
+      indexContentFingerprintAtRoot(
+        contentContext,
+        repositoryPath,
+        allowedPaths,
+      ),
+    runGit,
+    snapshot,
+  });
 
   return Object.freeze({
     assertUnchanged,
     ...commitService,
+    ...handoffService,
     contentFingerprint,
     inspectPath,
     preflight,
+    reconcileInterrupted,
     resolveProject,
     snapshot,
     validationInfrastructureFingerprint,

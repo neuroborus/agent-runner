@@ -48,9 +48,23 @@ function assertExpectedHead() {
   }
 }
 
+function assertStagedDiff() {
+  runGit(["diff", "--quiet"]);
+  runGit(["diff", "--cached", "--check"]);
+  const result = spawnSync(
+    "git",
+    ["-c", "core.fsmonitor=false", "diff", "--cached", "--quiet"],
+    { stdio: "inherit" },
+  );
+  if (result.status !== 1) {
+    process.exit(result.status === 0 ? 65 : (result.status ?? 1));
+  }
+}
+
 assertExpectedHead();
 runGit(["add", "-A"]);
 assertExpectedHead();
+assertStagedDiff();
 runGit(["commit", "--message", message]);
 `.trim();
 

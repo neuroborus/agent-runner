@@ -27,7 +27,8 @@ dependency before an actual import needs it.
 - Clarification files, editor invocation, transcript updates, and input hashes.
 - Codex and Claude adapter execution and access-mode enforcement.
 - Git snapshots, content fingerprints, read-only guards, remote/identity guards,
-  and constrained local-commit verification.
+  constrained local-commit verification, and verified polishing staging
+  handoffs.
 - Runner-trusted exact-vector validation outside agent turns, with bounded
   results and repository mutation guards.
 - Static pipeline registration.
@@ -60,7 +61,7 @@ V1 registers:
 - `plan-execution`: consumes `plan.md` and implements one reviewed local commit
   per step.
 - `polishing`: polishes, finalizes, and independently reviews an existing dirty
-  worktree while leaving its changes uncommitted.
+  worktree, then stages the complete result while leaving it uncommitted.
 
 The registry is static. V1 has no dynamic plugins, workflow DSL, or generic DAG
 executor.
@@ -285,7 +286,12 @@ hash, and execution lease before work is launched again.
 child with no inherited standard streams. `run_respond` atomically writes the
 identified answers, records their transcript hash in run state, then launches
 the same detached continuation. `run_resume` accepts only an action applicable
-to the persisted pause. The child owns the existing per-run execution lease
+to the persisted pause, except that an exact-revision, nonterminal, nonpaused
+run with a persisted active turn and no live execution owner accepts one null
+action to recover that interruption. A non-null action, stale revision, live
+owner, or persisted pause is rejected without weakening ordinary pause-action
+validation. The child owns
+the existing per-run execution lease
 and, for plan execution or polishing, the canonical-worktree lease. Before
 detached dispatch, MCP rejects an already-owned worktree without completing the
 idempotency intent, leaving the reserved durable run available for an exact
@@ -403,6 +409,14 @@ remotes, and Git identity through completion.
 Plan execution and polishing state version 2 persist the independently
 bootstrapped required-check inventory, the repository-relative files that own
 validation infrastructure, and a runner-computed fingerprint of those files.
+Each pipeline owns a 64-item limit for each inventory field returned by one
+bootstrap role and a separate 128-item limit for each runner-derived inventory
+field, including persisted, finalization, and fingerprint inputs. A role that
+cannot return a complete field within 64 items reports the strict
+`CAPACITY_EXHAUSTED` result with that `capacityField` and `capacityLimit: 64`;
+the pipeline pauses with `bootstrap_inventory_capacity_exhausted` and a bounded
+public diagnostic without consuming a structured-output correction or
+accepting truncated evidence.
 The runner establishes that inventory from accepted Worker evidence followed by
 accepted Reviewer evidence. It deduplicates exact commands and paths in stable
 first-seen order and assigns contiguous `C1`-through-`Cn` IDs; reconciliation
@@ -443,6 +457,29 @@ Immutable terminal evidence is shape-upgraded, and a consumed one-shot commit
 authorization remains on its verification-only path; migration never makes it
 replayable.
 
+Plan execution state version 6 makes validation inventories staging-independent
+and assigns the Git index exclusively to `COMMIT`. Its version-5 migration
+shape-upgrades clarification, preflight, and immutable terminal states without
+rediscovery; clears partial bootstrap evidence at an unfinished bootstrap; and
+routes every other prepared nonterminal run through fresh independent summaries,
+resolved context, and validation before advancement. A consumed commit
+authorization and its gate evidence stay on the verification-only path. Git
+verification runs before reconciliation, migration discovery, or another role
+turn, and any still-pending migration resumes only after that effect is resolved.
+
+Plan execution state version 7 adds one finalization-correction record and a
+matching pending marker scoped to the current commit step. Its version-6
+migration initializes both to `null` without changing workflow position or
+evidence. The first invalid Worker finalization result records only attempt `1`,
+the step, bounded guidance and content-fingerprint scope, and the role, phase,
+contract, field, and constraint diagnostic. The runner then reconstructs the
+complete finalization request from durable state and uses the same schema for
+one fresh-session, read-only correction turn. A valid replacement clears the
+pending marker and rejoins the existing gate; a second invalid result fails
+closed. Rejected values, commands, paths, provider text, and transcripts never
+enter state or public activity. Interrupted correction recovery remains
+read-only and does not require a native session.
+
 Polishing state version 3 adopts the same resolved trusted-validation snapshot,
 per-check executor provenance, and fingerprint-bound evidence tuple. Its
 version-2 migration selects empty legacy trust, preserves safe workspace
@@ -464,6 +501,23 @@ retaining rejected values or provider output. Validation migration also
 persists its accepted bounded disagreement before arbitration, resumes that
 checkpoint directly, and clears it when the migration completes.
 
+Polishing state version 5 adds the durable runner-owned `HANDOFF` boundary.
+Its version-4 migration preserves immutable terminal history and untouched
+preflight state, clears partial bootstrap evidence, and routes applicable
+prepared nonterminal runs through fresh independent staging-free validation
+before they can advance. Legacy paused evidence remains provisional until
+resume invalidates it through that checkpoint.
+
+Polishing state version 6 makes bootstrap, validation-migration, and
+finalization inventories staging-independent. Its version-5 migration preserves
+immutable terminal history, frozen inputs, safe content, counters, Git controls,
+and trusted-validation state; clears incompatible partial bootstrap evidence;
+invalidates stale active finalization and review gates; and routes prepared
+nonterminal work through fresh independent inventory discovery. A legacy
+`HANDOFF` is reconciled first: a complete verified effect becomes immutable
+completion, an untouched pre-effect state enters discovery without staging, and
+an incomplete or contaminated index fails closed.
+
 Common run-envelope version 3 adds `activeTurn`, either `null` or the current
 bounded `{ role, phase }`. Version-1 and version-2 runs project it as `null`
 without rewriting state or history; the next mutating continuation persists the
@@ -481,7 +535,11 @@ plan-mode access envelope. It exposes only repository-inspection tools, allows
 Bash without prompting only when the required native sandbox is active, denies
 workspace and Git-metadata writes, closes command network access, and forbids
 unsandboxed fallback. Workspace-write turns retain Claude's separate `auto`
-permission policy and background classifier.
+permission policy and background classifier while denying Git-directory writes
+and `git add`. Codex workspace-write isolation likewise exposes safe content
+writes without Git-metadata writes. Both adapters advertise
+`gitMetadataWriteBlocked`; the runner, not an agent turn, owns effects that
+require the index.
 Every retryable request carries a turn prompt and a complete recovery prompt
 reconstructed from validated run state, durable artifacts, and the observed
 workspace. A role session is continued only when its persisted key matches the
@@ -559,6 +617,38 @@ repository-relative infrastructure paths are validated and compared without
 rewriting interior whitespace. Host-reported results and user attestations are
 outside this trust boundary.
 
+Plan execution gives each preparation phase one owner. Implementation and
+finding-resolution turns do not invoke project finalization or perform generic
+commit preparation. The dedicated finalization turn follows every substantive
+instruction in the selected guidance, including checks, formatting, generation,
+and staging-independent content review. Bootstrap, validation-migration, and
+finalization inventories deterministically reject index mutation, staged or
+index-relative inspection, implicit worktree-versus-index assertions,
+alternate-index workarounds, and commit preparation; applicable content checks
+use `HEAD` or explicit trees. Established checks are input only to `FINALIZE`.
+After finalization and independent review bind the same content and
+validation-infrastructure fingerprints, the constrained local-commit executor
+alone runs `git add -A`, fixed unstaged-clean, staged-diff whitespace, and
+nonempty-diff hygiene, and the subject-only commit with the validated plan
+subject. The contract is
+identical for Codex and Claude and does not broaden ordinary Worker access to
+Git metadata.
+
+Polishing uses the same ownership rule without requesting `local-commit`.
+Worker polishing, finalization, and finding-resolution turns are content-only,
+including when selected finalization guidance normally requests staging.
+Bootstrap, validation-migration, and finalization inventories use the same
+deterministic staging-independence policy as plan execution; applicable tracked
+content checks use `HEAD` or explicit trees, and established checks are input
+only to `FINALIZE`. Once
+finalization and independent review bind the same staging-independent content
+and validation-infrastructure fingerprints, the pipeline persists `HANDOFF`.
+The root Git boundary then accepts either an unchanged pre-effect state or an
+already-complete recovered effect, runs `git add -A` only for the former, and
+verifies unchanged content and Git controls, a nonempty complete staged set,
+no unstaged or non-ignored untracked remnants, and staged whitespace hygiene
+before the pipeline can enter `DONE`.
+
 A selected runner-trusted command is the only exception to agent-side check
 execution. The runner-derived bootstrap inventory must contain its exact
 configured command.
@@ -604,6 +694,10 @@ bootstrap violations; the runner does not follow or silently canonicalize
 them. The producing role receives the bounded diagnostic on its one correction
 turn, and a second invalid result fails closed. The deterministic aggregate is
 therefore derived only from independently accepted canonical role evidence.
+Plan execution and polishing additionally reject each staging-dependent
+required command with a bounded field-specific diagnostic before accepting that
+producing result; the same policy rejects a finalization candidate inventory
+without delegating index ownership to an ordinary Worker turn.
 
 An explicitly supplied source session is different: the first eligible turn of
 each new primary or review checkpoint creates a direct child and returns its ID
@@ -668,6 +762,26 @@ activity when it starts the reconstructed turn, and clears a one-shot commit
 activity only after Git verification deterministically resolves the consumed
 authorization. Native sessions, polling, model-token heartbeats, and daemons
 are not part of this correctness path.
+
+Before an ordinary interrupted turn is reconstructed, the runner revalidates
+the canonical project and task directories and the owning pipeline revalidates
+every durable task, context, plan, and accepted clarification input. The root
+Git boundary then compares the persisted snapshot with the current repository.
+Read-only turns still require an unchanged workspace and index. An interrupted
+polishing Worker may retain content drift only for a phase that originally had
+workspace-write authority; any index drift is rejected. Plan execution retains
+its owning pipeline's one-shot commit reconciliation rules. `HEAD`, branch and
+detached state, local refs, remotes, Git identity, canonical root, and allowed
+runner paths must remain unchanged. The pipeline advances its baseline only
+after those checks, invalidates fingerprint-bound finalization and review
+evidence when content changed, and charges interrupted correction work once.
+The reconstructed request uses the complete recovery prompt in a fresh native
+session, and its `turn-started` event replaces the stale marker before normal
+post-turn reconciliation clears it. If a correction transition was already
+persisted before process loss, recovery clears its retained marker after the
+same input and Git checks and continues from the advanced checkpoint without
+replaying or recounting the correction. Consumed one-shot commit turns remain
+on their verification-only path and are never reconstructed or replayed.
 
 Every mutating run or resume holds one atomic per-run execution lease. Plan
 execution and polishing also hold one atomic lease for the canonical Git

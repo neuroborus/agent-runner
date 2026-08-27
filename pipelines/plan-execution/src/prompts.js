@@ -1,3 +1,5 @@
+import { MAX_BOOTSTRAP_ITEMS } from "./workflow-contract.js";
+
 export const CLARIFICATION_INSTRUCTIONS = `Study the task, validated plan, existing clarifications, and repository before implementation. Ask only questions whose answers could materially change the required behavior, scope, or implementation of the plan.
 
 Do not modify the repository.
@@ -22,13 +24,17 @@ For PLAN_REVISION_REQUIRED, provide reason and evidence.`;
 
 export const BOOTSTRAP_INSTRUCTIONS = `Study the repository, task, validated plan, clarifications, project instructions, relevant finalization guidance, other relevant skills, project checks, tests, and Git history independently and without modifying the repository.
 Return the following fields inside the schema's result object. Provide a concise bootstrap summary covering the task, relevant architecture and files, invariants, planned commits, risks, and the complete project finalization procedure. Independently identify every required check as a stable C-prefixed ID and exact command, plus every repository-relative file that controls those checks, package scripts, test discovery, test runners, or validation configuration.
+Cover every substantive validation requirement, but keep the summary and required-check inventory staging-independent. Do not require staging, a staged handoff, index mutation or inspection, an implicit worktree-versus-index assertion, an alternate index, or commit-message drafting. Generic commit preparation belongs only to COMMIT. Express an applicable content check against HEAD or explicit trees instead of the index.
 Required-check IDs must be unique. Exact commands must be unique, single-line, and already normalized without leading or trailing whitespace. Validation-infrastructure paths must be unique, existing, canonical repository-relative file paths; never return a symlink or a path through a symlink, including a symlink alias of a canonical path.
-For READY, provide summary, requiredChecks, and validationInfrastructure; set reason, question, and whyBlocked to "", and options and evidence to [].
-For PLAN_REVISION_REQUIRED, set summary, question, and whyBlocked to "", and requiredChecks, validationInfrastructure, and options to []; provide reason and evidence.
-For PRODUCT_DECISION_REQUIRED, set summary and reason to "", and requiredChecks and validationInfrastructure to []; use the product-decision fields.`;
+Each inventory field has a per-role capacity of ${MAX_BOOTSTRAP_ITEMS} items. If the complete requiredChecks or validationInfrastructure inventory would exceed that capacity, do not truncate it or invent a placeholder. Check requiredChecks first, then validationInfrastructure, and return CAPACITY_EXHAUSTED for the first over-capacity field with capacityField set to its exact field name and capacityLimit set to ${MAX_BOOTSTRAP_ITEMS}.
+For READY, provide summary, requiredChecks, and validationInfrastructure; set capacityField, reason, question, and whyBlocked to "", capacityLimit to 0, and options and evidence to [].
+For CAPACITY_EXHAUSTED, set summary, reason, question, and whyBlocked to "", requiredChecks, validationInfrastructure, options, and evidence to [], and provide capacityField and capacityLimit as described above.
+For PLAN_REVISION_REQUIRED, set summary, capacityField, question, and whyBlocked to "", capacityLimit to 0, and requiredChecks, validationInfrastructure, and options to []; provide reason and evidence.
+For PRODUCT_DECISION_REQUIRED, set summary, capacityField, and reason to "", capacityLimit to 0, and requiredChecks and validationInfrastructure to []; use the product-decision fields.`;
 
 export const BOOTSTRAP_RECONCILIATION_INSTRUCTIONS = `Reconcile the independent Worker and Reviewer bootstrap summaries using the task, validated plan, repository, and evidence.
 Do not force agreement or modify the repository. Return the following fields inside the schema's result object, with a concise resolved summary or the remaining material disagreement.
+Keep every resolved summary staging-independent. Staging, staged handoff, index-relative checks, alternate-index workarounds, and commit-message drafting belong only to COMMIT; established checks are input only to the dedicated FINALIZE gate.
 The runner derives the final required-check and validation-infrastructure inventories from the independently accepted role evidence. Do not propose, select, or repeat commands or repository paths.
 For RESOLVED, provide summary; set disagreement, reason, question, and whyBlocked to "", and options and evidence to [].
 For DISAGREEMENT, provide disagreement and evidence; set summary, reason, question, and whyBlocked to "", and options to [].
@@ -41,17 +47,23 @@ Return the following fields inside the schema's result object.
 Do not modify the repository. Resolve only the recorded disagreement and do not rewrite requirements.
 Always provide rationale.
 Choose USE_WORKER or USE_REVIEWER only when that summary is correct, and SYNTHESIZE when the evidence supports a combined summary.
+Keep the selected or synthesized summary staging-independent. Staging, staged handoff, index-relative checks, alternate-index workarounds, and commit-message drafting belong only to COMMIT; established checks are input only to the dedicated FINALIZE gate.
 The runner derives the final required-check and validation-infrastructure inventories from the independently accepted role evidence. Do not propose, select, or repeat commands or repository paths.
 For USE_WORKER, USE_REVIEWER, or SYNTHESIZE, provide summary; set reason, question, and whyBlocked to "", and options and evidence to [].
 For PLAN_REVISION_REQUIRED, set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
 For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-decision fields.`;
 
 export const BOOTSTRAP_CORRECTION_INSTRUCTIONS = `Your previous structured bootstrap result was rejected by deterministic validation. Make one read-only correction and return a complete replacement result using the same schema.
-Correct only the identified contract violation using current repository evidence. Do not repeat or quote the rejected result, ask an ordinary clarification question, or modify the repository. Preserve the exceptional PRODUCT_DECISION_REQUIRED outcome and its required product-decision fields when its existing criteria are met. A repeated invalid result fails closed.`;
+Correct only the identified contract violation using current repository evidence. Do not repeat or quote the rejected result, ask an ordinary clarification question, or modify the repository. Preserve the exceptional PRODUCT_DECISION_REQUIRED outcome and its required product-decision fields when its existing criteria are met. Preserve the CAPACITY_EXHAUSTED outcome and its capacity fields on the same basis. A repeated invalid result fails closed.`;
+
+export const FINALIZATION_CORRECTION_INSTRUCTIONS = `Your previous structured finalization result was rejected by deterministic validation. Make one read-only correction and return a complete replacement result using the same finalization schema.
+Correct only the identified contract violation using current repository evidence. Re-execute only corrected staging-independent checks as needed to produce complete direct evidence. Do not execute the rejected command, run staging-dependent validation, repeat or quote the rejected result, ask an ordinary clarification question, or modify repository content, staging, history, refs, remotes, or Git identity. Preserve the exceptional PRODUCT_DECISION_REQUIRED outcome and its required product-decision fields when its existing criteria are met. A repeated invalid result fails closed.`;
 
 export const IMPLEMENTATION_INSTRUCTIONS = `Implement the changes described in the following planned commit. Keep the implementation idiomatic and minimal, and follow the project's conventions.
 
 Work only on this planned commit.
+Do not run the project finalization procedure or perform generic commit preparation in this turn. Those belong to the dedicated FINALIZE and COMMIT phases.
+The established required-check inventory is input only to the dedicated FINALIZE gate. Do not execute it in this turn.
 Do not create a commit in this turn.
 Before returning, perform a concise self-review.
 For COMPLETED, put all results in summary; set reason, question, and whyBlocked to "", and options and evidence to [].
@@ -76,6 +88,8 @@ Otherwise, return only the approval decision and actionable findings using the p
 export const FINDING_RESOLUTION_INSTRUCTIONS = `For each finding below, fix it idiomatically and minimally, following the project's conventions.
 If a finding is incorrect, dispute it with concise evidence instead of changing the code.
 
+Do not run the project finalization procedure or perform generic commit preparation in this turn. Those belong to the dedicated FINALIZE and COMMIT phases.
+The established required-check inventory is input only to the dedicated FINALIZE gate. Do not execute it in this turn.
 Do not create a commit in this turn.
 For RESOLVED, return exactly one decision per blocker; every decision requires reason; DISPUTE requires evidence, while FIX evidence may be []. Set top-level reason, question, and whyBlocked to "", and options and evidence to [].
 For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or comparable external constraints. Set decisions and options to []; provide reason and evidence; set question and whyBlocked to "".
@@ -84,9 +98,11 @@ Do not weaken sandboxing or grant network or host temporary-directory access to 
 ${PRODUCT_DECISION_INSTRUCTIONS}
 Otherwise, return each FIX or DISPUTE decision using the provided schema.`;
 
-export const FINALIZATION_INSTRUCTIONS = `Run the complete project finalization procedure in this dedicated turn, including project-required formatting or generated output, and report its result using the provided schema.
+export const FINALIZATION_INSTRUCTIONS = `Run the complete project finalization procedure in this dedicated turn and report its result using the provided schema. Follow every substantive instruction in the applicable project guidance, including required checks, project-required formatting or generated output, and staging-independent content review.
 
-Do not perform unrelated fixes, stage changes, or create a commit.
+Do not perform unrelated fixes or create a commit.
+Keep the finalization inventory staging-independent. When project finalization guidance includes generic commit preparation, defer staging, staged/index-relative inspection, alternate-index workarounds, staged handoff, and commit-message drafting to the authorized COMMIT turn. Do not run git add, inspect the staged diff, or draft a commit message in this turn. Express each applicable content check against HEAD or explicit trees. This phase-owned deferral is neither a validation blocker nor a skipped required check and must not prevent PASS.
+The validated plan subject remains authoritative. After the fingerprint-bound finalization and review gate passes, the constrained COMMIT executor alone runs git add -A, performs fixed runner-owned staged-diff hygiene, and creates the subject-only commit.
 Use PASS only after every agent-executed required check succeeds without being skipped, excluded, substituted, replaced, or weakened. Return the complete requiredChecks and validationInfrastructure actually used, and exactly one ordered checks entry for every required check with bounded direct evidence. Return NOT_RUN only for a command explicitly listed as runner-trusted in the turn context; the runner executes that persisted vector before it accepts the gate. Do not use any other host-reported or user-attested results.
 Changes to package scripts, test discovery, test runners, validation configuration, the check inventory, or its infrastructure paths are allowed only when this planned commit requires them; never make them merely to evade an environmental blocker.
 Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
@@ -117,8 +133,8 @@ ${required ? "This skill is explicitly configured, so a missing, escaping, or in
 For PASS, FAIL, SKILL_MISSING, SKILL_INVALID, or BLOCKED, set skillPath to ${JSON.stringify(skillPath)}.`;
 }
 
-export const COMMIT_INSTRUCTIONS = `Validate the authorized local commit using the exact supplied subject.
-Do not modify project content, amend history, bypass hooks, change Git identity or configuration, create other refs, or perform any remote write.`;
+export const COMMIT_INSTRUCTIONS = `Validate readiness for the authorized local commit using the exact supplied subject. The constrained executor alone stages the exact finalized and reviewed workspace with git add -A, performs fixed staged-diff hygiene, and creates the subject-only commit.
+Do not stage changes yourself, modify project content, amend history, bypass hooks, change Git identity or configuration, create other refs, or perform any remote write.`;
 
 export const DISPUTE_RECONSIDERATION_INSTRUCTIONS = `Reconsider the disputed findings against the task, plan, repository, diff, and Worker evidence.
 

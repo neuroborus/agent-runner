@@ -60,6 +60,7 @@ function capabilities() {
     structuredOutput: true,
     readOnly: true,
     autonomousWrite: true,
+    gitMetadataWriteBlocked: true,
     workspaceWrite: true,
     localCommit: true,
     remoteWriteBlocked: true,
@@ -247,8 +248,10 @@ function createBackend(
           summary:
             `${reviewer ? "Reviewer" : "Worker"} understands the task, ` +
             "plan, risks, and finalization procedure.",
-          requiredChecks: [{ id: "C1", command: "git diff --check" }],
+          requiredChecks: [{ id: "C1", command: "git diff --check HEAD" }],
           validationInfrastructure: [],
+          capacityField: "",
+          capacityLimit: 0,
           reason: "",
           question: "",
           options: [],
@@ -315,14 +318,14 @@ function createBackend(
           skillPath: "",
           summary: "The repository finalization procedure passed.",
           issues: [],
-          requiredChecks: [{ id: "C1", command: "git diff --check" }],
+          requiredChecks: [{ id: "C1", command: "git diff --check HEAD" }],
           validationInfrastructure: [],
           checks: [
             {
               checkId: "C1",
-              command: "git diff --check",
+              command: "git diff --check HEAD",
               status: "PASS",
-              evidence: ["git diff --check exited successfully."],
+              evidence: ["git diff --check HEAD exited successfully."],
             },
           ],
           reason: "",
@@ -624,7 +627,7 @@ test("polishes a dirty worktree through mixed CLI roles without committing", asy
   assert.equal(await gitOutput(paths.projectPath, ["rev-parse", "HEAD"]), initialHead);
   assert.equal(
     await gitOutput(paths.projectPath, ["status", "--porcelain"]),
-    "M src/base.js",
+    "M  src/base.js",
   );
 });
 
@@ -1126,6 +1129,6 @@ test("runs registered workflows through recoverable MCP controls", async (t) => 
   );
   assert.equal(
     await gitOutput(paths.projectPath, ["status", "--porcelain"]),
-    "M src/base.js",
+    "M  src/base.js",
   );
 });

@@ -302,7 +302,7 @@ function normalizeValidationMigrationRoleOutput(output, role) {
     role,
     "validation-migration",
   );
-  if (result.status !== "READY") {
+  if (!["READY", "CAPACITY_EXHAUSTED"].includes(result.status)) {
     throw invalidRoleOutput(
       "Validation migration requires a ready inventory.",
       bootstrapOutputContext(role, "validation-migration"),
@@ -358,6 +358,8 @@ export async function runPolishing({ action, run, runtime, settings }) {
   }
 
   let currentRun = run;
+  let interruptedTurn = run.activeTurn;
+  let interruptedRepositoryReconciled = false;
 
   function state() {
     return normalizePipelineState(currentRun.pipelineState);
@@ -492,6 +494,21 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       },
     );
     return currentRun;
+  }
+
+  async function pauseForBootstrapCapacity(role, result) {
+    const field = result.capacityField;
+    const limit = result.capacityLimit;
+    await pause("bootstrap_inventory_capacity_exhausted", {
+      code: "ERR_BOOTSTRAP_INVENTORY_CAPACITY_EXHAUSTED",
+      explanation: `The ${role} bootstrap reported that the complete ${field} inventory exceeds the supported per-role limit of ${limit} items. Increase the bounded Runner contract or reduce the validation-controlling surface, then start a new run.`,
+      evidence: [
+        `Bootstrap role: ${role}.`,
+        `Inventory field: ${field}.`,
+        `Per-role item limit: ${limit}.`,
+      ],
+    });
+    return false;
   }
 
   async function fail(cause) {
@@ -736,7 +753,78 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     if (before.identityFingerprint !== after.identityFingerprint) {
       return "unexpected_git_identity_change";
     }
+    if (before.indexFingerprint !== after.indexFingerprint) {
+      return "unexpected_git_index_change";
+    }
     return null;
+  }
+
+  function interruptedControlChange(cause) {
+    if (cause?.changes?.includes("remote-configuration")) {
+      return "unexpected_remote_configuration_change";
+    }
+    if (cause?.changes?.includes("identity")) {
+      return "unexpected_git_identity_change";
+    }
+    if (cause?.changes?.includes("index")) {
+      return "unexpected_git_index_change";
+    }
+    return "unexpected_git_ref_change";
+  }
+
+  function interruptedTurnIsWritable(turn) {
+    if (turn.role !== "worker") {
+      return false;
+    }
+    if (["polish", "finalize"].includes(turn.phase)) {
+      return true;
+    }
+    return (
+      turn.phase === "resolve-findings" &&
+      counters().fixRounds < fixBudget()
+    );
+  }
+
+  function interruptedCorrectionWasReconciled(turn) {
+    const current = state();
+    return (
+      turn.role === "worker" &&
+      turn.phase === "resolve-findings" &&
+      current.workflowState === "FINALIZE" &&
+      current.pendingCorrection
+    );
+  }
+
+  async function recoverInterruptedTurn() {
+    if (interruptedTurn === null) {
+      return true;
+    }
+    if ((await readCurrentInputs()) === null) {
+      return false;
+    }
+    const correctionWasReconciled =
+      interruptedCorrectionWasReconciled(interruptedTurn);
+    const allowWorkspaceChanges = interruptedTurnIsWritable(interruptedTurn);
+    try {
+      await runtime.git.reconcileInterrupted(state().repositoryBaseline, {
+        allowIndexChanges: false,
+        allowWorkspaceChanges,
+      });
+    } catch (cause) {
+      if (cause?.code !== "ERR_INTERRUPTED_REPOSITORY_CONTROL_CHANGED") {
+        throw cause;
+      }
+      await pause(interruptedControlChange(cause), { code: cause.code });
+      return false;
+    }
+    interruptedRepositoryReconciled = true;
+    if (correctionWasReconciled) {
+      currentRun = await runtime.finishAgentTurn(interruptedTurn);
+      assertRun(currentRun);
+      interruptedTurn = null;
+      interruptedRepositoryReconciled = false;
+    }
+    return true;
   }
 
   async function runRole(
@@ -750,10 +838,22 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       reportWorkspaceChange = false,
     } = {},
   ) {
+    const turn = activeTurn(role, state().workflowState);
+    const recovering = interruptedTurn !== null;
+    if (recovering && !isDeepStrictEqual(interruptedTurn, turn)) {
+      throw workflowError(
+        "Persisted agent turn does not match polishing recovery.",
+        "ERR_INVALID_POLISHING_STATE",
+      );
+    }
     const outputContext = bootstrapOutputContextFor(role, schema, checkpoint);
     await ensureRoleCapabilities(role);
     const evidence = await readCurrentInputs();
-    if (evidence === null || !(await verifyPersistedRepository())) {
+    if (
+      evidence === null ||
+      ((!recovering || !interruptedRepositoryReconciled) &&
+        !(await verifyPersistedRepository()))
+    ) {
       return null;
     }
     const baseline = state().repositoryBaseline;
@@ -778,14 +878,16 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       .reverse()
       .find((child) => child.role === role);
     const previousSession =
-      role !== "arbiter" && latestSession?.contextKey === contextKey
+      !recovering &&
+      role !== "arbiter" &&
+      latestSession?.contextKey === contextKey
         ? latestSession.sessionId
         : undefined;
     const sourceSession = currentRun.sessionLineage.source;
     const session =
       previousSession !== undefined
         ? { id: previousSession, mode: "continue" }
-        : sourceSession !== null && role !== "arbiter"
+        : !recovering && sourceSession !== null && role !== "arbiter"
           ? { id: sourceSession, mode: "fork" }
           : undefined;
     const configuration = currentRun.roles[role];
@@ -812,9 +914,10 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     };
     let response;
     let agentError;
-    const turn = activeTurn(role, state().workflowState);
     currentRun = await runtime.startAgentTurn(turn);
     assertRun(currentRun);
+    interruptedTurn = null;
+    interruptedRepositoryReconciled = false;
     let nextRepositoryBaseline;
     try {
       try {
@@ -889,7 +992,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
               ? {
                   nextCounters: {
                     ...counters(),
-                    fixRounds: counters().fixRounds + 1,
+                    fixRounds:
+                      counters().fixRounds +
+                      (current.pendingCorrection ? 0 : 1),
                   },
                 }
               : undefined,
@@ -1219,7 +1324,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         );
       }
     }
+    const resolvedInventory = result.status === "READY";
     if (
+      resolvedInventory &&
       state().trustedValidation.commands.some(
         ({ command }) =>
           !result.requiredChecks.some(
@@ -1402,6 +1509,9 @@ ${evidence}`,
     });
     if (result === null) {
       return false;
+    }
+    if (result.status === "CAPACITY_EXHAUSTED") {
+      return pauseForBootstrapCapacity(role, result);
     }
     await transition(
       {
@@ -1740,7 +1850,7 @@ ${JSON.stringify(
     });
   }
 
-  async function completeIfReady() {
+  async function prepareHandoffIfReady() {
     const current = state();
     if (
       current.finalizationResult?.status !== "PASS" ||
@@ -1768,13 +1878,84 @@ ${JSON.stringify(
       return false;
     }
     await transition(
-      { ...current, workflowState: "DONE" },
+      { ...current, workflowState: "HANDOFF" },
       {
         publicActivity: activity(
           "runner",
-          "polishing",
+          "handoff",
+          "prepared",
+          "Finalized and reviewed content is ready for runner staging.",
+        ),
+      },
+    );
+    return true;
+  }
+
+  async function runHandoff() {
+    const current = state();
+    const repositoryBaseline = await runtime.git.stagePolishingHandoff({
+      expectedSnapshot: current.repositoryBaseline,
+      finalizedFingerprint: current.finalizedFingerprint,
+      reviewedFingerprint: current.reviewedFingerprint,
+    });
+    await transition(
+      {
+        ...current,
+        workflowState: "DONE",
+        repositoryBaseline,
+      },
+      {
+        publicActivity: activity(
+          "runner",
+          "handoff",
           "completed",
-          "Polishing completed with finalized, reviewed, uncommitted changes.",
+          "Polishing completed with finalized, reviewed, staged, uncommitted changes.",
+        ),
+      },
+    );
+    return true;
+  }
+
+  async function reconcileLegacyHandoff() {
+    const current = state();
+    const inspected = await runtime.git.inspectPolishingHandoff({
+      expectedSnapshot: current.repositoryBaseline,
+      finalizedFingerprint: current.finalizedFingerprint,
+      reviewedFingerprint: current.reviewedFingerprint,
+    });
+    if (inspected.status === "complete") {
+      await transition(
+        {
+          ...current,
+          workflowState: "DONE",
+          repositoryBaseline: inspected.snapshot,
+          validationMigrationPending: false,
+        },
+        {
+          publicActivity: activity(
+            "runner",
+            "migration",
+            "handoff-reconciled",
+            "A complete legacy polishing handoff was verified and preserved.",
+          ),
+        },
+      );
+      return true;
+    }
+    await transition(
+      {
+        ...invalidatedLegacyValidation(current),
+        workflowState: "FINALIZE",
+        workerValidation: null,
+        reviewerValidation: null,
+        validationMigrationDisagreement: null,
+      },
+      {
+        publicActivity: activity(
+          "runner",
+          "migration",
+          "handoff-reconciled",
+          "An untouched legacy handoff was routed through independent validation.",
         ),
       },
     );
@@ -2084,6 +2265,9 @@ ${evidence}`,
     });
     if (result === null) {
       return false;
+    }
+    if (result.status === "CAPACITY_EXHAUSTED") {
+      return pauseForBootstrapCapacity(role, result);
     }
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "BOOTSTRAP");
@@ -3084,9 +3268,7 @@ ${JSON.stringify(
   async function runResolutionTurn() {
     const current = state();
     if (current.findings.length === 0 && current.finalizationResult?.status === "PASS") {
-      if (await completeIfReady()) {
-        return false;
-      }
+      await prepareHandoffIfReady();
       return true;
     }
     if (current.finalizationResult?.status !== "FAIL") {
@@ -3347,6 +3529,9 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
 
   assertResumeActionApplicable();
   try {
+    if (!(await recoverInterruptedTurn())) {
+      return currentRun;
+    }
     const resumeActionSuperseded = await prepareValidationMigrationResume();
     if (["DONE", "FAILED"].includes(state().workflowState)) {
       if (resumeAction !== null) {
@@ -3400,14 +3585,25 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
     }
     if (
       state().preflightComplete &&
+      !interruptedRepositoryReconciled &&
       ((await readCurrentInputs()) === null ||
-        !(await verifyPersistedRepository()))
+        (state().workflowState !== "HANDOFF" &&
+          !(await verifyPersistedRepository())))
     ) {
       return currentRun;
     }
 
     while (true) {
       const current = state();
+      if (
+        current.workflowState === "HANDOFF" &&
+        current.validationMigrationPending
+      ) {
+        if (!(await reconcileLegacyHandoff())) {
+          return currentRun;
+        }
+        continue;
+      }
       if (current.validationMigrationPending) {
         if (!(await runValidationMigration())) {
           return currentRun;
@@ -3597,6 +3793,13 @@ ${evidence}`,
 
       if (current.workflowState === "RESOLVE_FINDINGS") {
         if (!(await runResolutionTurn())) {
+          return currentRun;
+        }
+        continue;
+      }
+
+      if (current.workflowState === "HANDOFF") {
+        if (!(await runHandoff())) {
           return currentRun;
         }
         continue;

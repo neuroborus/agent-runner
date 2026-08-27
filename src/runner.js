@@ -788,6 +788,16 @@ export function createRunner(options = {}) {
     const prepared = pipelineForRun(storedRun, undefined, {
       allowMigration: true,
     });
+    const boundary = await validateBoundary(storedRun);
+    if (
+      boundary.projectPath !== storedRun.projectPath ||
+      boundary.taskPath !== storedRun.taskPath
+    ) {
+      throw new RunnerError(
+        `Run ${runId} canonical project or task path changed.`,
+        { code: "ERR_RUN_PATH_CHANGED" },
+      );
+    }
     validatePreparedRun?.(prepared.run);
     const runtimeMigrationRequired =
       storedRun.schemaVersion !== RUN_STATE_SCHEMA_VERSION ||
