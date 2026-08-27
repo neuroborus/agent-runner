@@ -8,6 +8,7 @@ import {
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
+  FINALIZATION_CORRECTION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
   finalizationBootstrapInstructions,
   finalizationGuidanceInstructions,
@@ -99,6 +100,27 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /staging-dependent/u);
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /rejected result/u);
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /fails closed/u);
+  assert.match(
+    FINALIZATION_CORRECTION_INSTRUCTIONS,
+    /one read-only correction/u,
+  );
+  assert.match(
+    FINALIZATION_CORRECTION_INSTRUCTIONS,
+    /same finalization schema/u,
+  );
+  assert.match(
+    FINALIZATION_CORRECTION_INSTRUCTIONS,
+    /Re-execute only corrected staging-independent checks/u,
+  );
+  assert.match(
+    FINALIZATION_CORRECTION_INSTRUCTIONS,
+    /Do not execute the rejected command/u,
+  );
+  assert.match(
+    FINALIZATION_CORRECTION_INSTRUCTIONS,
+    /modify repository content, staging, history, refs, remotes, or Git identity/u,
+  );
+  assert.match(FINALIZATION_CORRECTION_INSTRUCTIONS, /fails closed/u);
   assert.match(BOOTSTRAP_RECONCILIATION_INSTRUCTIONS, /Do not force agreement/u);
   assert.match(BOOTSTRAP_ARBITRATION_INSTRUCTIONS, /Do not modify/u);
   for (const instructions of [

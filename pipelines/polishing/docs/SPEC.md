@@ -396,6 +396,25 @@ external environment constraint. It carries bounded reason and evidence,
 pauses as `environment_blocked`, and resumes at `FINALIZE`; an executable check
 that reports a legitimate failure remains `FAIL`.
 
+If deterministic normalization rejects the first Worker finalization result
+for the current content fingerprint, persist the version-7 bounded diagnostic
+and publish one `finalization-correction` activity without rejected content.
+Reconstruct the complete request from durable inputs and ask the Worker for one
+complete replacement with the same finalization schema in a fresh-session,
+read-only turn. The correction may re-execute corrected staging-independent
+checks needed for complete direct evidence, but it does not execute the
+rejected command or staging-dependent validation and cannot modify repository
+content, staging, history, refs, remotes, or Git identity. Interruption before
+or during that turn preserves the pending attempt, reconciles it as read-only,
+and resumes without another attempt or a required native session. A valid
+corrected availability or product-decision result uses its existing route;
+corrected `BLOCKED`, `PASS`, and `FAIL` results rejoin the existing environment,
+fingerprint, trusted-validation, review, and handoff gates. A repeated invalid
+result for the same content fails closed without retaining either rejected
+result. Content changes clear the consumed scope and permit one correction for
+the new fingerprint. This attempt is independent of the bootstrap and
+validation-migration correction ledger.
+
 ### Review And Findings
 
 After finalization passes, an independent read-only Reviewer checks the task,
@@ -634,6 +653,19 @@ counters, Git controls, and trusted-validation state remain unchanged. A legacy
 discovery without staging, and any incomplete or contaminated index fails
 closed.
 
+Pipeline state version 7 adds a nullable consumed finalization correction and a
+matching nullable pending marker scoped to the current content fingerprint.
+The version-6 migration initializes both to `null` without changing safe
+content, workflow position, validation evidence, counters, or handoff state. A
+record contains only attempt `1`, resolved-or-fallback guidance scope, the
+content fingerprint, and the bounded Worker/finalization contract field and
+constraint diagnostic. It never contains rejected values, commands, paths,
+prompts, provider text, transcripts, credentials, or raw structured output.
+The pending marker is cleared only after a valid replacement; the consumed
+record remains applicable while the fingerprint is unchanged so a later
+invalid finalization result fails closed. A content change clears both records,
+and completed `HANDOFF` clears the exhausted scope.
+
 MCP uses the common STDIO tools, persists idempotency intents before mutation
 and receipts before returning, and launches detached continuation under the
 same lease rules. A worktree conflict leaves the durable run and incomplete
@@ -683,6 +715,10 @@ Pipeline tests use fake adapters and temporary repositories. Cover at least:
   worktree-versus-index checks, alternate indexes, and commit preparation in
   bootstrap, validation migration, and finalization, including corrected and
   repeated-invalid producing-role results;
+- resolved and fallback finalization guidance, corrected availability,
+  `BLOCKED`, `PASS`, and `FAIL` routes, interruption before and during the
+  read-only correction, strict redaction, content-fingerprint reset, and
+  repeated-invalid terminal behavior;
 - read-only mutation plus ref, remote, and identity guards;
 - durable transitions, interrupted turns, and journal recovery;
 - action-free owner-loss continuation, input and Git-control drift rejection,
@@ -713,7 +749,8 @@ Pipeline tests use fake adapters and temporary repositories. Cover at least:
 - actual Codex workspace-write and Claude Git-directory/`git add` access
   envelopes, content-only added and updated files, successful and recovered
   runner handoffs, version-5 complete, untouched, and contaminated handoff
-  migration, and every staging postcondition;
+  migration, correction turns that leave the index unchanged for both
+  backends, and every staging postcondition;
 - the invariant that `HEAD` never changes and completion never commits.
 
 Root tests cover workspace imports and metadata, static registration,
