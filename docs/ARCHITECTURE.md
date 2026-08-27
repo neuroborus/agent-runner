@@ -508,6 +508,16 @@ prepared nonterminal runs through fresh independent staging-free validation
 before they can advance. Legacy paused evidence remains provisional until
 resume invalidates it through that checkpoint.
 
+Polishing state version 6 makes bootstrap, validation-migration, and
+finalization inventories staging-independent. Its version-5 migration preserves
+immutable terminal history, frozen inputs, safe content, counters, Git controls,
+and trusted-validation state; clears incompatible partial bootstrap evidence;
+invalidates stale active finalization and review gates; and routes prepared
+nonterminal work through fresh independent inventory discovery. A legacy
+`HANDOFF` is reconciled first: a complete verified effect becomes immutable
+completion, an untouched pre-effect state enters discovery without staging, and
+an incomplete or contaminated index fails closed.
+
 Common run-envelope version 3 adds `activeTurn`, either `null` or the current
 bounded `{ role, phase }`. Version-1 and version-2 runs project it as `null`
 without rewriting state or history; the next mutating continuation persists the
@@ -626,7 +636,11 @@ Git metadata.
 
 Polishing uses the same ownership rule without requesting `local-commit`.
 Worker polishing, finalization, and finding-resolution turns are content-only,
-including when selected finalization guidance normally requests staging. Once
+including when selected finalization guidance normally requests staging.
+Bootstrap, validation-migration, and finalization inventories use the same
+deterministic staging-independence policy as plan execution; applicable tracked
+content checks use `HEAD` or explicit trees, and established checks are input
+only to `FINALIZE`. Once
 finalization and independent review bind the same staging-independent content
 and validation-infrastructure fingerprints, the pipeline persists `HANDOFF`.
 The root Git boundary then accepts either an unchanged pre-effect state or an
@@ -680,10 +694,10 @@ bootstrap violations; the runner does not follow or silently canonicalize
 them. The producing role receives the bounded diagnostic on its one correction
 turn, and a second invalid result fails closed. The deterministic aggregate is
 therefore derived only from independently accepted canonical role evidence.
-Plan execution additionally rejects each staging-dependent required command
-with a bounded field-specific diagnostic before accepting that producing result;
-the same policy rejects a finalization candidate inventory without delegating
-index ownership to an ordinary Worker turn.
+Plan execution and polishing additionally reject each staging-dependent
+required command with a bounded field-specific diagnostic before accepting that
+producing result; the same policy rejects a finalization candidate inventory
+without delegating index ownership to an ordinary Worker turn.
 
 An explicitly supplied source session is different: the first eligible turn of
 each new primary or review checkpoint creates a direct child and returns its ID

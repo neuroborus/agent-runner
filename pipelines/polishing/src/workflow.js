@@ -1916,6 +1916,52 @@ ${JSON.stringify(
     return true;
   }
 
+  async function reconcileLegacyHandoff() {
+    const current = state();
+    const inspected = await runtime.git.inspectPolishingHandoff({
+      expectedSnapshot: current.repositoryBaseline,
+      finalizedFingerprint: current.finalizedFingerprint,
+      reviewedFingerprint: current.reviewedFingerprint,
+    });
+    if (inspected.status === "complete") {
+      await transition(
+        {
+          ...current,
+          workflowState: "DONE",
+          repositoryBaseline: inspected.snapshot,
+          validationMigrationPending: false,
+        },
+        {
+          publicActivity: activity(
+            "runner",
+            "migration",
+            "handoff-reconciled",
+            "A complete legacy polishing handoff was verified and preserved.",
+          ),
+        },
+      );
+      return true;
+    }
+    await transition(
+      {
+        ...invalidatedLegacyValidation(current),
+        workflowState: "FINALIZE",
+        workerValidation: null,
+        reviewerValidation: null,
+        validationMigrationDisagreement: null,
+      },
+      {
+        publicActivity: activity(
+          "runner",
+          "migration",
+          "handoff-reconciled",
+          "An untouched legacy handoff was routed through independent validation.",
+        ),
+      },
+    );
+    return true;
+  }
+
   async function applyResumeAction() {
     if (resumeAction === null) {
       return;
@@ -3549,6 +3595,15 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
 
     while (true) {
       const current = state();
+      if (
+        current.workflowState === "HANDOFF" &&
+        current.validationMigrationPending
+      ) {
+        if (!(await reconcileLegacyHandoff())) {
+          return currentRun;
+        }
+        continue;
+      }
       if (current.validationMigrationPending) {
         if (!(await runValidationMigration())) {
           return currentRun;

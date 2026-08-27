@@ -76,6 +76,12 @@ runner phase. Plan execution assigns that work to `COMMIT`; polishing assigns
 it to its runner-owned `HANDOFF`. This phase-owned deferral is not a skipped
 check or a validation blocker.
 
+Return only staging-independent required checks to the pipeline. Translate an
+applicable staged or worktree-versus-index check into an equivalent `HEAD`-relative
+or explicit-tree content check; leave staging completeness and staged-diff
+hygiene to the owning runner phase. Never retain a deferred index check as a
+required check that would make the content gate impossible to pass.
+
 When the user asks to finalize, finish the checks, then stage only the files that
 belong to the current change set. Stop there.
 

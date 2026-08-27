@@ -405,8 +405,11 @@ separate commit workflow.
 Its dedicated `FINALIZE` turn runs the target project's complete validation
 procedure, including required formatting or generated output, with configured
 skill guidance when available. Its scope ends with fingerprint-bound validation
-and review; staging instructions in selected guidance are deferred to the
-runner-owned handoff.
+and review. Bootstrap, validation migration, and finalization translate
+applicable tracked-content checks to `HEAD` or explicit trees and reject index
+mutation, index-relative inspection, alternate-index workarounds, and commit
+preparation. Staging and staged inspection in selected guidance are deferred to
+the runner-owned handoff.
 
 ## MCP
 
@@ -631,7 +634,7 @@ Run the complete repository gate:
 
 ```bash
 npm run check
-git diff --check
+git diff --check HEAD
 git diff --cached --check
 ```
 
@@ -652,6 +655,8 @@ Use the repository's `finalization` skill before handing off a completed
 change. It validates the current change; when explicitly asked to finalize, it
 also stages the relevant files and drafts a Conventional Commit message.
 Inside the polishing pipeline, that skill remains staging-independent and the
-runner stages the complete finalized and reviewed change set instead.
+runner stages and inspects the complete finalized and reviewed change set
+instead. Its producing roles use `HEAD`-relative or explicit-tree content checks
+and never persist a staged/index-relative required check.
 Finalization stops at the staged handoff boundary. Commit creation requires a
 separate explicit request, and remote state remains read-only in V1.

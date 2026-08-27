@@ -22,6 +22,41 @@ export function createGitHandoffService({
   runGit,
   snapshot,
 }) {
+  function assertHandoffOptions(options) {
+    if (
+      options === null ||
+      typeof options !== "object" ||
+      Array.isArray(options) ||
+      Object.keys(options).some(
+        (field) =>
+          ![
+            "expectedSnapshot",
+            "finalizedFingerprint",
+            "reviewedFingerprint",
+          ].includes(field),
+      )
+    ) {
+      throw new GitSafetyError("Polishing handoff options are invalid.", {
+        code: "ERR_INVALID_POLISHING_HANDOFF",
+      });
+    }
+    const expectedSnapshot = assertSnapshot(options.expectedSnapshot);
+    if (
+      typeof options.finalizedFingerprint !== "string" ||
+      !SHA256_PATTERN.test(options.finalizedFingerprint) ||
+      options.reviewedFingerprint !== options.finalizedFingerprint ||
+      expectedSnapshot.contentFingerprint !== options.finalizedFingerprint
+    ) {
+      throw new GitSafetyError("Polishing handoff fingerprints are invalid.", {
+        code: "ERR_INVALID_POLISHING_HANDOFF",
+      });
+    }
+    return Object.freeze({
+      expectedSnapshot,
+      finalizedFingerprint: options.finalizedFingerprint,
+    });
+  }
+
   async function inspectComplete(expectedSnapshot, expectedContentFingerprint) {
     const current = await snapshot({
       allowedPaths: expectedSnapshot.allowedPaths,
@@ -124,41 +159,18 @@ export function createGitHandoffService({
     return Object.freeze({ complete: true, snapshot: verified });
   }
 
-  async function stagePolishingHandoff(options) {
-    if (
-      options === null ||
-      typeof options !== "object" ||
-      Array.isArray(options) ||
-      Object.keys(options).some(
-        (field) =>
-          ![
-            "expectedSnapshot",
-            "finalizedFingerprint",
-            "reviewedFingerprint",
-          ].includes(field),
-      )
-    ) {
-      throw new GitSafetyError("Polishing handoff options are invalid.", {
-        code: "ERR_INVALID_POLISHING_HANDOFF",
-      });
-    }
-    const expectedSnapshot = assertSnapshot(options.expectedSnapshot);
-    if (
-      typeof options.finalizedFingerprint !== "string" ||
-      !SHA256_PATTERN.test(options.finalizedFingerprint) ||
-      options.reviewedFingerprint !== options.finalizedFingerprint ||
-      expectedSnapshot.contentFingerprint !== options.finalizedFingerprint
-    ) {
-      throw new GitSafetyError("Polishing handoff fingerprints are invalid.", {
-        code: "ERR_INVALID_POLISHING_HANDOFF",
-      });
-    }
+  async function inspectPolishingHandoff(options) {
+    const { expectedSnapshot, finalizedFingerprint } =
+      assertHandoffOptions(options);
     const inspected = await inspectComplete(
       expectedSnapshot,
-      options.finalizedFingerprint,
+      finalizedFingerprint,
     );
     if (inspected.complete) {
-      return inspected.snapshot;
+      return Object.freeze({
+        status: "complete",
+        snapshot: inspected.snapshot,
+      });
     }
     if (
       inspected.snapshot.indexFingerprint !==
@@ -172,6 +184,18 @@ export function createGitHandoffService({
         },
       );
     }
+    return Object.freeze({
+      status: "untouched",
+      snapshot: inspected.snapshot,
+    });
+  }
+
+  async function stagePolishingHandoff(options) {
+    const inspected = await inspectPolishingHandoff(options);
+    if (inspected.status === "complete") {
+      return inspected.snapshot;
+    }
+    const expectedSnapshot = assertSnapshot(options.expectedSnapshot);
     await runGit(expectedSnapshot.projectPath, ["add", "-A"]);
     const completed = await inspectComplete(
       expectedSnapshot,
@@ -185,5 +209,5 @@ export function createGitHandoffService({
     return completed.snapshot;
   }
 
-  return Object.freeze({ stagePolishingHandoff });
+  return Object.freeze({ inspectPolishingHandoff, stagePolishingHandoff });
 }

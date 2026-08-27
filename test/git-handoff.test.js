@@ -136,6 +136,30 @@ test("stages the complete finalized polishing handoff without committing", async
   );
 });
 
+test("inspects an untouched polishing handoff without staging it", async (t) => {
+  const fixture = await createFixture(t);
+  const baseline = await prepareChanges(fixture);
+
+  const inspected = await fixture.service.inspectPolishingHandoff(
+    handoffOptions(baseline),
+  );
+
+  assert.equal(inspected.status, "untouched");
+  assert.deepEqual(inspected.snapshot, baseline);
+  assert.equal(
+    (
+      await runGit(
+        fixture.repositoryPath,
+        fixture.env,
+        "diff",
+        "--cached",
+        "--name-only",
+      )
+    ).stdout,
+    "",
+  );
+});
+
 test("accepts an already-complete handoff after runner interruption", async (t) => {
   const fixture = await createFixture(t);
   const baseline = await prepareChanges(fixture);

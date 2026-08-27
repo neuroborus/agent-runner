@@ -283,6 +283,16 @@ each accepted inventory. Agents receive only its alias, exact inventory
 command, and deterministic identity; they never receive authority to execute
 the persisted vector outside their ordinary turn sandbox.
 
+Every bootstrap summary and required-check inventory is staging-independent.
+It must not require staging, staged handoff, index mutation or inspection, an
+implicit worktree-versus-index assertion, an alternate index, or commit
+preparation. Staging and staged-handoff inspection belong only to `HANDOFF`; an
+applicable tracked-content check uses `HEAD` or explicit trees. Deterministic
+validation reports an unsafe command as a field-specific bootstrap violation,
+uses the producing role's one bounded read-only correction, and fails closed if
+the replacement remains unsafe. Validation-migration discovery uses the same
+policy, and finalization candidate inventories are rejected by it as well.
+
 Before accepting either role's bootstrap or validation-migration inventory,
 the root Git boundary requires each proposed infrastructure path to identify an
 existing regular file by its exact canonical repository-relative path. Missing
@@ -341,11 +351,14 @@ Worker turn in every policy mode. Locate and validate resolved skill guidance
 first. When no skill is selected or automatic discovery finds none, derive the
 same complete gate from repository instructions and project-defined checks;
 never skip validation. Execute required formatting or generated output, but do
-not stage, unstage, or commit. When selected guidance requests staging or
-index-relative handoff inspection, defer that portion to the runner and
-complete the staging-independent content gate. Report strict `PASS`, `FAIL`,
-`SKILL_MISSING`, `SKILL_INVALID`, `BLOCKED`, or the narrowly allowed product
-decision outcome.
+not stage, unstage, or commit. When selected guidance requests staging,
+index-relative handoff inspection, an alternate-index workaround, or commit
+preparation, defer staging and staged inspection to `HANDOFF`, omit prohibited
+commit preparation, and complete the staging-independent content gate. Express
+an applicable tracked-content check against `HEAD` or explicit trees. This
+deferral is neither a skipped check nor a validation blocker. Report strict
+`PASS`, `FAIL`, `SKILL_MISSING`, `SKILL_INVALID`, `BLOCKED`, or the narrowly
+allowed product decision outcome.
 
 An explicitly selected missing, escaping, or invalid skill pauses. An
 unavailable automatically discovered skill falls back to the skill-less gate.
@@ -609,6 +622,18 @@ checkpoint. A version-5 `HANDOFF` resume lets the Git boundary accept a proven
 complete effect, retry an unchanged pre-effect state, or fail closed; it never
 replays an ambiguous partial effect.
 
+Pipeline state version 6 makes every accepted validation inventory
+staging-independent while preserving `HANDOFF` as the sole Git-index owner. Its
+version-5 migration shape-upgrades `CLARIFY`, incomplete preflight, `DONE`, and
+`FAILED` without role work; clears incompatible partial bootstrap evidence;
+and routes other prepared nonterminal work through fresh independent inventory
+discovery before finalization can advance. Safe content, frozen inputs,
+counters, Git controls, and trusted-validation state remain unchanged. A legacy
+`HANDOFF` is inspected before any role turn: a complete verified effect enters
+`DONE`, an untouched pre-effect state invalidates stale gate evidence and enters
+discovery without staging, and any incomplete or contaminated index fails
+closed.
+
 MCP uses the common STDIO tools, persists idempotency intents before mutation
 and receipts before returning, and launches detached continuation under the
 same lease rules. A worktree conflict leaves the durable run and incomplete
@@ -654,6 +679,10 @@ Pipeline tests use fake adapters and temporary repositories. Cover at least:
   symlink aliases, successful bounded correction, interrupted reconstruction,
   validation-migration correction including interrupted Arbiter recovery, and
   repeated invalid bootstrap output;
+- cached-diff fingerprints, index mutation and inspection, implicit
+  worktree-versus-index checks, alternate indexes, and commit preparation in
+  bootstrap, validation migration, and finalization, including corrected and
+  repeated-invalid producing-role results;
 - read-only mutation plus ref, remote, and identity guards;
 - durable transitions, interrupted turns, and journal recovery;
 - action-free owner-loss continuation, input and Git-control drift rejection,
@@ -683,7 +712,8 @@ Pipeline tests use fake adapters and temporary repositories. Cover at least:
   projected forbidden-collaboration diagnostics;
 - actual Codex workspace-write and Claude Git-directory/`git add` access
   envelopes, content-only added and updated files, successful and recovered
-  runner handoffs, and every staging postcondition;
+  runner handoffs, version-5 complete, untouched, and contaminated handoff
+  migration, and every staging postcondition;
 - the invariant that `HEAD` never changes and completion never commits.
 
 Root tests cover workspace imports and metadata, static registration,
