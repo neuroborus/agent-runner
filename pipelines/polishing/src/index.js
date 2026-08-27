@@ -21,6 +21,7 @@ export {
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
+  FINALIZATION_CORRECTION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
   finalizationBootstrapInstructions,
   finalizationGuidanceInstructions,
@@ -748,15 +749,24 @@ export function migratePolishingStateV5(run) {
   });
 }
 
+export function migratePolishingStateV6(run) {
+  return Object.freeze({
+    ...run.pipelineState,
+    finalizationCorrection: null,
+    pendingFinalizationCorrection: null,
+  });
+}
+
 export const polishingPipeline = Object.freeze({
   id: POLISHING_PIPELINE_ID,
-  stateVersion: 6,
+  stateVersion: 7,
   migrations: Object.freeze({
     1: migratePolishingStateV1,
     2: migratePolishingStateV2,
     3: migratePolishingStateV3,
     4: migratePolishingStateV4,
     5: migratePolishingStateV5,
+    6: migratePolishingStateV6,
   }),
   roles: ROLES,
   settings: SETTINGS,
