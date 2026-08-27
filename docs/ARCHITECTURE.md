@@ -518,6 +518,21 @@ nonterminal work through fresh independent inventory discovery. A legacy
 completion, an untouched pre-effect state enters discovery without staging, and
 an incomplete or contaminated index fails closed.
 
+Polishing state version 7 adds one finalization-correction record and a
+matching pending marker scoped to the current content fingerprint. Its
+version-6 migration initializes both to `null` without changing workflow
+position or evidence. The first invalid Worker finalization result records only
+attempt `1`, bounded resolved-or-fallback guidance and content-fingerprint
+scope, and the role, phase, contract, field, and constraint diagnostic. The
+runner reconstructs the complete finalization request from durable state and
+uses the same schema for one fresh-session, read-only correction turn. A valid
+replacement clears the pending marker and rejoins the existing gate; a second
+invalid result for the same content fails closed. Content changes clear stale
+correction scope. Rejected values, commands, paths, provider text, and
+transcripts never enter state or public activity. Interrupted correction
+recovery remains read-only and does not require a native session. `HANDOFF`
+remains the sole Git-index owner for both Codex and Claude turns.
+
 Common run-envelope version 3 adds `activeTurn`, either `null` or the current
 bounded `{ role, phase }`. Version-1 and version-2 runs project it as `null`
 without rewriting state or history; the next mutating continuation persists the

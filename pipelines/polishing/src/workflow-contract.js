@@ -61,6 +61,8 @@ const PIPELINE_STATE_FIELDS = new Set([
   "bootstrapArbitrationUsed",
   "bootstrapCorrections",
   "pendingBootstrapCorrection",
+  "finalizationCorrection",
+  "pendingFinalizationCorrection",
   "polishSummary",
   "finalizationResult",
   "finalizedFingerprint",
@@ -210,6 +212,12 @@ const OUTPUT_FAILURE_FIELDS = Object.freeze([
 const OUTPUT_DIAGNOSTIC_VALUE_PATTERN = /^[a-zA-Z0-9_.[\]-]{1,128}$/u;
 const BOOTSTRAP_CORRECTION_FIELDS = Object.freeze([
   "attempt",
+  ...OUTPUT_DIAGNOSTIC_FIELDS,
+]);
+const FINALIZATION_CORRECTION_FIELDS = Object.freeze([
+  "attempt",
+  "guidance",
+  "contentFingerprint",
   ...OUTPUT_DIAGNOSTIC_FIELDS,
 ]);
 const EDIT_PAUSE_REASONS = Object.freeze({
@@ -2147,6 +2155,32 @@ function normalizeBootstrapCorrections(value) {
   return value;
 }
 
+function normalizeFinalizationCorrection(value) {
+  if (value === null) {
+    return null;
+  }
+  if (
+    !hasExactFields(value, FINALIZATION_CORRECTION_FIELDS) ||
+    value.attempt !== 1 ||
+    !["resolved", "fallback"].includes(value.guidance) ||
+    !HASH_PATTERN.test(value.contentFingerprint)
+  ) {
+    throw workflowError("Polishing finalization correction is invalid.");
+  }
+  const diagnostic = Object.fromEntries(
+    OUTPUT_DIAGNOSTIC_FIELDS.map((field) => [field, value[field]]),
+  );
+  if (
+    !isOutputDiagnostic(diagnostic) ||
+    value.role !== "worker" ||
+    value.phase !== "finalization" ||
+    value.contract !== "finalization"
+  ) {
+    throw workflowError("Polishing finalization correction is invalid.");
+  }
+  return value;
+}
+
 function normalizePersistedFindings(value, name = "Polishing findings") {
   try {
     return normalizeReviewFindings(value, "ERR_INVALID_POLISHING_STATE");
@@ -2688,6 +2722,23 @@ export function normalizePipelineState(value) {
       "Polishing pending bootstrap correction is inconsistent.",
     );
   }
+  const finalizationCorrection = normalizeFinalizationCorrection(
+    value.finalizationCorrection,
+  );
+  const pendingFinalizationCorrection = normalizeFinalizationCorrection(
+    value.pendingFinalizationCorrection,
+  );
+  if (
+    pendingFinalizationCorrection !== null &&
+    !isDeepStrictEqual(
+      pendingFinalizationCorrection,
+      finalizationCorrection,
+    )
+  ) {
+    throw workflowError(
+      "Polishing pending finalization correction is inconsistent.",
+    );
+  }
   const polishSummary = normalizeOptionalSummary(
     value.polishSummary,
     "polishing summary",
@@ -2861,6 +2912,19 @@ export function normalizePipelineState(value) {
     throw workflowError("Polishing validation migration is inapplicable.");
   }
   if (
+    finalizationCorrection !== null &&
+    (value.repositoryBaseline === null ||
+      value.repositoryBaseline.contentFingerprint !==
+        finalizationCorrection.contentFingerprint ||
+      ["CLARIFY", "BOOTSTRAP"].includes(value.workflowState) ||
+      (pendingFinalizationCorrection !== null &&
+        !["FINALIZE", "WAITING_FOR_USER", "FAILED"].includes(
+          value.workflowState,
+        )))
+  ) {
+    throw workflowError("Polishing finalization correction is inapplicable.");
+  }
+  if (
     (validationMigrationDisagreement !== null &&
       (!value.validationMigrationPending ||
         workerValidation === null ||
@@ -3017,6 +3081,8 @@ export function normalizePipelineState(value) {
       value.bootstrapArbitrationUsed ||
       bootstrapCorrections.length !== 0 ||
       pendingBootstrapCorrection !== null ||
+      finalizationCorrection !== null ||
+      pendingFinalizationCorrection !== null ||
       validationMigrationDisagreement !== null ||
       hasWorkProgress)
   ) {
@@ -3165,6 +3231,8 @@ export function createPolishingState({
     bootstrapArbitrationUsed: false,
     bootstrapCorrections: Object.freeze([]),
     pendingBootstrapCorrection: null,
+    finalizationCorrection: null,
+    pendingFinalizationCorrection: null,
     polishSummary: null,
     finalizationResult: null,
     finalizedFingerprint: null,
@@ -3254,7 +3322,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "polishing" ||
-    run.pipelineStateVersion !== 6 ||
+    run.pipelineStateVersion !== 7 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
