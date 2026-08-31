@@ -714,9 +714,40 @@ export function migratePlanExecutionStateV6(run) {
   });
 }
 
+function upgradeFinalizationCorrection(correction) {
+  if (correction === null) {
+    return null;
+  }
+  const { role, phase, contract, field, constraint, ...scope } = correction;
+  return Object.freeze({
+    ...scope,
+    diagnostics: Object.freeze([
+      Object.freeze({ role, phase, contract, field, constraint }),
+    ]),
+  });
+}
+
+export function migratePlanExecutionStateV7(run) {
+  const {
+    finalizationCorrection,
+    pendingFinalizationCorrection,
+    ...current
+  } = run.pipelineState;
+  const correction = upgradeFinalizationCorrection(finalizationCorrection);
+  return Object.freeze({
+    ...current,
+    finalizationCorrections: Object.freeze(
+      correction === null ? [] : [correction],
+    ),
+    pendingFinalizationCorrection: upgradeFinalizationCorrection(
+      pendingFinalizationCorrection,
+    ),
+  });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
-  stateVersion: 7,
+  stateVersion: 8,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -724,6 +755,7 @@ export const planExecutionPipeline = Object.freeze({
     4: migratePlanExecutionStateV4,
     5: migratePlanExecutionStateV5,
     6: migratePlanExecutionStateV6,
+    7: migratePlanExecutionStateV7,
   }),
   roles: ROLES,
   settings: SETTINGS,

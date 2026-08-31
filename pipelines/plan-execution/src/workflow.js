@@ -47,6 +47,7 @@ import {
   INVALID_EXECUTION_INPUT_CODE,
   MAX_CLARIFICATION_ROUNDS,
   MAX_DIAGNOSTIC_ITEMS,
+  MAX_FINALIZATION_CORRECTION_ATTEMPTS,
   MAX_PLAN_LENGTH,
   PlanExecutionWorkflowError,
   WORKFLOW_STATES,
@@ -265,6 +266,24 @@ function outputDiagnostic(cause, context) {
       });
 }
 
+function outputDiagnostics(cause, context) {
+  const candidates =
+    Array.isArray(cause?.diagnostics) && cause.diagnostics.length !== 0
+      ? cause.diagnostics
+      : [cause?.diagnostic];
+  const diagnostics = candidates.map((diagnostic) =>
+    outputDiagnostic({ diagnostic }, context),
+  );
+  return Object.freeze(
+    diagnostics.filter(
+      (diagnostic, index) =>
+        diagnostics.findIndex((candidate) =>
+          isDeepStrictEqual(candidate, diagnostic),
+        ) === index,
+    ),
+  );
+}
+
 function bootstrapOutputContext(role, phase = "bootstrap") {
   return Object.freeze({ role, phase, contract: "bootstrap" });
 }
@@ -440,11 +459,13 @@ function normalizeFinalizationRoleOutput(output, trustedCommands) {
     if (cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT") {
       throw cause;
     }
+    const diagnostics = outputDiagnostics(cause, context);
     throw new PlanExecutionWorkflowError(
       "Structured finalization result violates its contract.",
       {
         code: cause.code,
-        diagnostic: outputDiagnostic(cause, context),
+        diagnostic: diagnostics[0],
+        diagnostics,
       },
     );
   }
@@ -629,7 +650,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         bootstrapDisagreement: null,
         bootstrapArbitrationUsed: false,
         pendingBootstrapCorrection: null,
-        finalizationCorrection: null,
+        finalizationCorrections: [],
         pendingFinalizationCorrection: null,
         compatibilityCheckRequired: false,
         currentStep: null,
@@ -1489,13 +1510,14 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       : undefined;
   }
 
-  function finalizationCorrectionAttempt(context) {
-    const correction = state().finalizationCorrection;
-    return correction !== null &&
-      correction.step === state().currentStep &&
-      correctionMatchesContext(correction, context)
-      ? correction
-      : undefined;
+  function finalizationCorrectionAttempts(context) {
+    return state().finalizationCorrections.filter(
+      (correction) =>
+        correction.step === state().currentStep &&
+        correction.diagnostics.every((diagnostic) =>
+          correctionMatchesContext(diagnostic, context),
+        ),
+    );
   }
 
   function pendingFinalizationCorrection(context, guidance) {
@@ -1503,7 +1525,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     return correction !== null &&
       correction.step === state().currentStep &&
       correction.guidance === guidance &&
-      correctionMatchesContext(correction, context)
+      correction.diagnostics.every((diagnostic) =>
+        correctionMatchesContext(diagnostic, context),
+      )
       ? correction
       : undefined;
   }
@@ -2498,9 +2522,21 @@ ${step.body}${
 
   async function runFinalizationTurn() {
     const step = planStep();
-    const persistedCorrection = state().pendingFinalizationCorrection;
+    let persistedCorrection = state().pendingFinalizationCorrection;
     const beforeFingerprint =
       persistedCorrection?.contentFingerprint ?? (await contentFingerprint());
+    if (
+      persistedCorrection === null &&
+      state().finalizationCorrections.length !== 0 &&
+      state().finalizationCorrections[0].contentFingerprint !==
+        beforeFingerprint
+    ) {
+      await transition({
+        ...state(),
+        finalizationCorrections: [],
+      });
+      persistedCorrection = null;
+    }
     const fallbackGuidance = Object.freeze({
       required: false,
       skillPath: null,
@@ -2538,7 +2574,8 @@ ${step.body}
 ${
               correction === undefined
                 ? ""
-                : `\n${FINALIZATION_CORRECTION_INSTRUCTIONS}\n\nCorrection diagnostic:\n${JSON.stringify(correction, null, 2)}`
+                : `\n${FINALIZATION_CORRECTION_INSTRUCTIONS}\n\n` +
+                  `Correction diagnostic batch:\n${JSON.stringify(correction, null, 2)}`
             }`,
             {
               access:
@@ -2616,21 +2653,40 @@ ${
           ) {
             throw cause;
           }
-          if (finalizationCorrectionAttempt(context) !== undefined) {
+          const diagnostics = outputDiagnostics(cause, context);
+          const attempts = finalizationCorrectionAttempts(context);
+          const previousDiagnostics = attempts.flatMap(
+            (attempt) => attempt.diagnostics,
+          );
+          if (
+            attempts.length >= MAX_FINALIZATION_CORRECTION_ATTEMPTS ||
+            diagnostics.some((diagnostic) =>
+              previousDiagnostics.some((previous) =>
+                isDeepStrictEqual(previous, diagnostic),
+              ),
+            )
+          ) {
             throw cause;
           }
-          const diagnostic = outputDiagnostic(cause, context);
           const correction = {
-            attempt: 1,
+            attempt: attempts.length + 1,
             step: state().currentStep,
             guidance: guidanceScope,
             contentFingerprint: beforeFingerprint,
-            ...diagnostic,
+            diagnostics,
           };
+          const violationLabel =
+            diagnostics.length === 1 ? "violation" : "violations";
+          const correctionMessage =
+            `${context.role} must correct ${diagnostics.length} ` +
+            `${context.contract} contract ${violationLabel}.`;
           await transition(
             {
               ...state(),
-              finalizationCorrection: correction,
+              finalizationCorrections: [
+                ...state().finalizationCorrections,
+                correction,
+              ],
               pendingFinalizationCorrection: correction,
             },
             {
@@ -2638,7 +2694,7 @@ ${
                 context.role,
                 context.phase,
                 "finalization-correction",
-                `${context.role} must correct ${context.contract} field ${diagnostic.field} (${diagnostic.constraint}).`,
+                correctionMessage,
               ),
             },
           );
@@ -3925,7 +3981,7 @@ ${step.subject}`),
         repositoryBaseline: nextRepositoryBaseline,
         currentStep: done ? null : current.currentStep + 1,
         reviewerStep: null,
-        finalizationCorrection: null,
+        finalizationCorrections: [],
         pendingFinalizationCorrection: null,
         pendingCommit: null,
         completedCommits,

@@ -49,7 +49,7 @@ const PIPELINE_STATE_FIELDS = new Set([
   "bootstrapArbitrationUsed",
   "bootstrapCorrections",
   "pendingBootstrapCorrection",
-  "finalizationCorrection",
+  "finalizationCorrections",
   "pendingFinalizationCorrection",
   "compatibilityCheckRequired",
   "currentStep",
@@ -142,8 +142,9 @@ const FINALIZATION_CORRECTION_FIELDS = Object.freeze([
   "step",
   "guidance",
   "contentFingerprint",
-  ...OUTPUT_DIAGNOSTIC_FIELDS,
+  "diagnostics",
 ]);
+export const MAX_FINALIZATION_CORRECTION_ATTEMPTS = 2;
 const BOOTSTRAP_RESULT_FIELDS = Object.freeze([
   "status",
   "summary",
@@ -292,13 +293,23 @@ const COMMIT_AUTHORIZATION_FIELDS = Object.freeze([
 export class PlanExecutionWorkflowError extends Error {
   constructor(
     message,
-    { cause, code = "ERR_PLAN_EXECUTION_WORKFLOW", diagnostic } = {},
+    {
+      cause,
+      code = "ERR_PLAN_EXECUTION_WORKFLOW",
+      diagnostic,
+      diagnostics,
+    } = {},
   ) {
     super(message, cause === undefined ? undefined : { cause });
     this.name = "PlanExecutionWorkflowError";
     this.code = code;
     if (diagnostic !== undefined) {
       this.diagnostic = Object.freeze({ ...diagnostic });
+    }
+    if (diagnostics !== undefined) {
+      this.diagnostics = Object.freeze(
+        diagnostics.map((entry) => Object.freeze({ ...entry })),
+      );
     }
   }
 }
@@ -1272,18 +1283,27 @@ function isStagingIndependentCommand(command) {
 }
 
 function normalizePhaseSafeRequiredChecks(value, code, options) {
-  const checks = normalizeRequiredChecks(value, code, options);
-  for (const [index, check] of checks.entries()) {
-    if (!isStagingIndependentCommand(check.command)) {
-      throw workflowError(
-        "Required check must be staging-independent.",
+  const { collectDiagnostics = false, ...normalizationOptions } = options ?? {};
+  const checks = normalizeRequiredChecks(value, code, normalizationOptions);
+  const diagnostics = checks.flatMap((check, index) =>
+    isStagingIndependentCommand(check.command)
+      ? []
+      : [
+          outputConstraint(
+            `requiredChecks[${index}].command`,
+            "staging-independent-validation-command",
+          ),
+        ],
+  );
+  if (diagnostics.length !== 0) {
+    throw new PlanExecutionWorkflowError(
+      "Required checks must be staging-independent.",
+      {
         code,
-        outputConstraint(
-          `requiredChecks[${index}].command`,
-          "staging-independent-validation-command",
-        ),
-      );
-    }
+        diagnostic: diagnostics[0],
+        ...(collectDiagnostics ? { diagnostics } : {}),
+      },
+    );
   }
   return checks;
 }
@@ -1651,7 +1671,10 @@ export function normalizeFinalizationResult(
     const requiredChecks = normalizePhaseSafeRequiredChecks(
       payload.requiredChecks,
       INVALID_OUTPUT_CODE,
-      { allowEmpty: payload.status !== "BLOCKED" },
+      {
+        allowEmpty: payload.status !== "BLOCKED",
+        collectDiagnostics: true,
+      },
     );
     const validationInfrastructure = normalizeValidationInfrastructure(
       payload.validationInfrastructure,
@@ -1721,6 +1744,7 @@ export function normalizeFinalizationResult(
   const requiredChecks = normalizePhaseSafeRequiredChecks(
     payload.requiredChecks,
     INVALID_OUTPUT_CODE,
+    { collectDiagnostics: true },
   );
   const validationInfrastructure = normalizeValidationInfrastructure(
     payload.validationInfrastructure,
@@ -2216,31 +2240,74 @@ function normalizeBootstrapCorrections(value) {
 }
 
 function normalizeFinalizationCorrection(value, planSteps) {
-  if (value === null) {
-    return null;
-  }
   if (
     !isRecord(value) ||
     !hasExactFields(value, FINALIZATION_CORRECTION_FIELDS) ||
-    value.attempt !== 1 ||
+    !Number.isSafeInteger(value.attempt) ||
+    value.attempt < 1 ||
+    value.attempt > MAX_FINALIZATION_CORRECTION_ATTEMPTS ||
     !Number.isSafeInteger(value.step) ||
     value.step < 1 ||
     value.step > (planSteps?.length ?? 0) ||
     !["resolved", "fallback"].includes(value.guidance) ||
-    !HASH_PATTERN.test(value.contentFingerprint)
+    !HASH_PATTERN.test(value.contentFingerprint) ||
+    !Array.isArray(value.diagnostics) ||
+    value.diagnostics.length === 0 ||
+    value.diagnostics.length > MAX_VALIDATION_ITEMS
   ) {
     throw workflowError("Plan-execution finalization correction is invalid.");
   }
-  const diagnostic = Object.fromEntries(
-    OUTPUT_DIAGNOSTIC_FIELDS.map((field) => [field, value[field]]),
-  );
+  const identities = new Set();
+  for (const diagnostic of value.diagnostics) {
+    if (
+      !isOutputDiagnostic(diagnostic) ||
+      diagnostic.role !== "worker" ||
+      diagnostic.phase !== "finalization" ||
+      diagnostic.contract !== "finalization"
+    ) {
+      throw workflowError("Plan-execution finalization correction is invalid.");
+    }
+    const identity = `${diagnostic.field}\0${diagnostic.constraint}`;
+    if (identities.has(identity)) {
+      throw workflowError(
+        "Plan-execution finalization correction diagnostics must be unique.",
+      );
+    }
+    identities.add(identity);
+  }
+  return value;
+}
+
+function normalizeFinalizationCorrections(value, planSteps) {
   if (
-    !isOutputDiagnostic(diagnostic) ||
-    value.role !== "worker" ||
-    value.phase !== "finalization" ||
-    value.contract !== "finalization"
+    !Array.isArray(value) ||
+    value.length > MAX_FINALIZATION_CORRECTION_ATTEMPTS
   ) {
-    throw workflowError("Plan-execution finalization correction is invalid.");
+    throw workflowError("Plan-execution finalization corrections are invalid.");
+  }
+  const previousDiagnostics = new Set();
+  let scope = null;
+  for (const [index, correction] of value.entries()) {
+    normalizeFinalizationCorrection(correction, planSteps);
+    const currentScope = `${correction.step}\0${correction.contentFingerprint}`;
+    if (
+      correction.attempt !== index + 1 ||
+      (scope !== null && scope !== currentScope)
+    ) {
+      throw workflowError(
+        "Plan-execution finalization corrections are inconsistent.",
+      );
+    }
+    scope = currentScope;
+    for (const diagnostic of correction.diagnostics) {
+      const identity = `${diagnostic.field}\0${diagnostic.constraint}`;
+      if (previousDiagnostics.has(identity)) {
+        throw workflowError(
+          "Plan-execution finalization correction diagnostics must be fresh.",
+        );
+      }
+      previousDiagnostics.add(identity);
+    }
   }
   return value;
 }
@@ -2857,19 +2924,22 @@ export function normalizePipelineState(value) {
       "Plan-execution pending bootstrap correction is inconsistent.",
     );
   }
-  const finalizationCorrection = normalizeFinalizationCorrection(
-    value.finalizationCorrection,
+  const finalizationCorrections = normalizeFinalizationCorrections(
+    value.finalizationCorrections,
     planSteps,
   );
-  const pendingFinalizationCorrection = normalizeFinalizationCorrection(
-    value.pendingFinalizationCorrection,
-    planSteps,
-  );
+  const pendingFinalizationCorrection =
+    value.pendingFinalizationCorrection === null
+      ? null
+      : normalizeFinalizationCorrection(
+          value.pendingFinalizationCorrection,
+          planSteps,
+        );
   if (
     pendingFinalizationCorrection !== null &&
     !isDeepStrictEqual(
       pendingFinalizationCorrection,
-      finalizationCorrection,
+      finalizationCorrections.at(-1),
     )
   ) {
     throw workflowError(
@@ -2928,9 +2998,10 @@ export function normalizePipelineState(value) {
   ) {
     throw workflowError("Plan-execution current step is invalid.");
   }
+  const finalizationCorrectionScope = finalizationCorrections[0] ?? null;
   if (
-    finalizationCorrection !== null &&
-    (value.currentStep !== finalizationCorrection.step ||
+    finalizationCorrectionScope !== null &&
+    (value.currentStep !== finalizationCorrectionScope.step ||
       (pendingFinalizationCorrection !== null &&
         !["FINALIZE", "WAITING_FOR_USER", "FAILED"].includes(
           value.workflowState,
@@ -3268,7 +3339,7 @@ export function normalizePipelineState(value) {
       value.bootstrapArbitrationUsed ||
       bootstrapCorrections.length !== 0 ||
       pendingBootstrapCorrection !== null ||
-      finalizationCorrection !== null ||
+      finalizationCorrections.length !== 0 ||
       pendingFinalizationCorrection !== null ||
       value.compatibilityCheckRequired ||
       value.currentStep !== null ||
@@ -3462,7 +3533,7 @@ export function createPlanExecutionState({
     bootstrapArbitrationUsed: false,
     bootstrapCorrections: Object.freeze([]),
     pendingBootstrapCorrection: null,
-    finalizationCorrection: null,
+    finalizationCorrections: Object.freeze([]),
     pendingFinalizationCorrection: null,
     compatibilityCheckRequired: false,
     currentStep: null,
@@ -3542,7 +3613,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 7 ||
+    run.pipelineStateVersion !== 8 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||

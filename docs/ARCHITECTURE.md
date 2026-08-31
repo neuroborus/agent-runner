@@ -480,6 +480,21 @@ closed. Rejected values, commands, paths, provider text, and transcripts never
 enter state or public activity. Interrupted correction recovery remains
 read-only and does not require a native session.
 
+Plan execution state version 8 replaces that single record with a two-entry
+finalization-correction ledger and one pending attempt. Its version-7 migration
+preserves a consumed or pending attempt as the first one-entry diagnostic batch
+without changing workflow position, evidence, or correction scope.
+Deterministic finalization validation batches independently detectable
+violations where practical and always includes every staging-dependent required
+command. The first batch may authorize attempt `1`; one wholly new batch may
+authorize attempt `2`. Any repeated diagnostic, mixed repeated/new batch, or
+invalid result after attempt `2` fails closed. Guidance identifies how to
+reconstruct a pending request and never creates another budget. The ledger is
+scoped to the current step and request content fingerprint and is cleared when
+that content scope changes. Rejected commands, paths, values, provider text,
+and transcripts remain outside state and public activity, while interruption
+preserves the pending attempt without replaying or recounting it.
+
 Polishing state version 3 adopts the same resolved trusted-validation snapshot,
 per-check executor provenance, and fingerprint-bound evidence tuple. Its
 version-2 migration selects empty legacy trust, preserves safe workspace

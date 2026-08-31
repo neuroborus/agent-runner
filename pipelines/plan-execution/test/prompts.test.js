@@ -57,7 +57,7 @@ test("bootstrap instructions preserve independent evidence and arbitration", () 
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /repeated invalid result fails closed/u);
   assert.match(
     FINALIZATION_CORRECTION_INSTRUCTIONS,
-    /one read-only correction/u,
+    /bounded read-only correction/u,
   );
   assert.match(
     FINALIZATION_CORRECTION_INSTRUCTIONS,
@@ -69,7 +69,7 @@ test("bootstrap instructions preserve independent evidence and arbitration", () 
   );
   assert.match(
     FINALIZATION_CORRECTION_INSTRUCTIONS,
-    /Do not execute the rejected command/u,
+    /Do not execute a rejected command/u,
   );
   assert.match(
     FINALIZATION_CORRECTION_INSTRUCTIONS,
@@ -77,7 +77,11 @@ test("bootstrap instructions preserve independent evidence and arbitration", () 
   );
   assert.match(
     FINALIZATION_CORRECTION_INSTRUCTIONS,
-    /repeated invalid result fails closed/u,
+    /wholly new diagnostic batch/u,
+  );
+  assert.match(
+    FINALIZATION_CORRECTION_INSTRUCTIONS,
+    /repeated diagnostic or another invalid result after that finite allowance fails closed/u,
   );
 });
 

@@ -381,9 +381,10 @@ Persist at least:
   runner-computed infrastructure fingerprint;
 - bounded bootstrap-correction attempts containing only role, phase, contract,
   field, constraint, and attempt number;
-- the current step's optional consumed and pending finalization-correction
-  records, containing only attempt number, step, bounded guidance and content-
-  fingerprint scope, role, phase, contract, field, and constraint;
+- the current step's bounded finalization-correction ledger and optional
+  pending attempt, containing only attempt number, step, bounded guidance and
+  content-fingerprint scope, and bounded role, phase, contract, field, and
+  constraint diagnostic batches;
 - exact per-check finalization evidence and the fingerprint-bound Reviewer
   validation-change decision;
 - the resolved runner-trusted command snapshot, command/configuration
@@ -472,6 +473,23 @@ provider text, or raw structured output. The pending marker is cleared after a
 valid replacement; the consumed record remains until the step commits so a
 later invalid finalization result in the same step fails closed. Starting the
 next step clears both records.
+
+Pipeline state version 8 replaces the consumed record with a ledger of at most
+two correction attempts. The version-7 migration losslessly wraps a consumed
+or pending field diagnostic in the first batch without changing safe content,
+workflow position, gate evidence, guidance, fingerprint scope, or commit
+authority. Deterministic validation reports all independently detectable
+violations from one finalization candidate together where practical, including
+every staging-dependent required command. Attempt `1` is authorized by the
+first batch. Attempt `2` is authorized only when every diagnostic in the next
+batch is new; a repeated diagnostic, a mixed repeated/new batch, or any invalid
+result after attempt `2` fails closed. Guidance is reconstruction metadata, not
+a separate retry budget. The ledger remains scoped to the current step and
+request content fingerprint and clears when that content scope changes.
+Rejected values, commands, paths, provider text, and raw structured output
+remain outside state and public activity. The pending copy is always the latest
+ledger entry, so interruption reconstructs the same read-only attempt without
+replaying or recounting consumed work.
 
 Common run-envelope version 3 independently adds nullable bounded active
 provider role and phase. Version-1 and version-2 envelopes project it as `null`
@@ -1536,22 +1554,33 @@ If finalization fails, enter `RESOLVE_FINDINGS` with the reported validation fai
 
 Any later content change invalidates the previous finalization result.
 
-If deterministic normalization rejects the first Worker finalization result,
-persist the version-7 bounded diagnostic and publish one
-`finalization-correction` activity without rejected content. Reconstruct the
-complete request from durable inputs and ask the Worker for one complete
-replacement with the same finalization schema in a fresh-session, read-only
-turn. The correction may re-execute corrected staging-independent checks needed
-for complete direct evidence, but it does not execute the rejected command or
-staging-dependent validation and cannot modify repository content, staging,
-history, refs, remotes, or Git identity. Interruption before or during that turn
-preserves the pending attempt, reconciles it as read-only, and resumes without
-another attempt or a required native session. A valid corrected `BLOCKED`
-result uses `environment_blocked`; corrected `PASS` and `FAIL` results rejoin
-the existing fingerprint, trusted-validation, review, and commit paths. A
-repeated invalid result fails closed without retaining either rejected result.
-This per-step attempt is independent of bootstrap and validation-migration
-correction ledgers.
+If deterministic normalization rejects a Worker finalization result, collect
+all independently detectable violations from that candidate where practical,
+including every staging-dependent required command. Persist the version-8
+bounded diagnostic batch and publish one redacted `finalization-correction`
+activity without rejected content. Reconstruct the complete request from
+durable inputs and ask the Worker for a complete replacement with the same
+finalization schema in a fresh-session, read-only turn. The correction may
+re-execute corrected staging-independent checks needed for complete direct
+evidence, but it does not execute a rejected command or staging-dependent
+validation and cannot modify repository content, staging, history, refs,
+remotes, or Git identity.
+
+Allow at most two such attempts for the current step and request content
+fingerprint. The first diagnostic batch authorizes attempt `1`; a correction
+that produces a wholly new batch may authorize attempt `2`. Any repeated
+diagnostic, any batch mixing repeated and new diagnostics, or another invalid
+result after attempt `2` fails closed. Resolved versus fallback guidance is
+durable request-reconstruction metadata and does not create a separate budget.
+A later content change starts a new fingerprint scope. Interruption before or
+during an attempt preserves its pending ledger entry, reconciles it as
+read-only, and resumes that same attempt without replay, recounting, or a
+required native session. A valid corrected `BLOCKED` result uses
+`environment_blocked`; corrected `PASS` and `FAIL` results rejoin the existing
+fingerprint, trusted-validation, review, and commit paths unchanged. Rejected
+values, commands, paths, provider output, and transcripts are never persisted
+or published. This bounded ledger is independent of bootstrap and validation-
+migration correction ledgers.
 
 ### 13.3 Review
 
@@ -2211,11 +2240,14 @@ At minimum cover:
     inventories obey the same deterministic policy, and a paused version-5
     implementation run re-establishes phase-safe context before finalization,
     review, and one authorized commit.
-61. a transport-compatible finalization inventory containing `git status`
-    receives one durable, redacted, read-only correction; corrected BLOCKED,
-    PASS, and FAIL outcomes rejoin their existing routes, interruption resumes
-    the same attempt, a second invalid result fails closed, and version-6 state
-    migrates losslessly to the version-7 shape.
+61. finalization validation batches every independently detectable staging-
+    dependent command; permits only one wholly new second diagnostic batch;
+    fails closed on repetition, mixed novelty, or exhausted allowance; and
+    keeps corrected BLOCKED, PASS, and FAIL outcomes on their existing routes.
+62. pending first and second finalization corrections survive interruption
+    without replay or recounting, prompts and public activity retain no rejected
+    content, and version-7 consumed and pending state migrates losslessly to the
+    version-8 ledger.
 
 Real Codex/Claude smoke tests should be opt-in integration tests.
 
@@ -2333,10 +2365,12 @@ Do not build:
     bootstrap, migration, and finalization inventories are staging-independent,
     and the constrained `COMMIT` executor alone stages, applies fixed staged
     hygiene, and creates the exact validated subject-only commit.
-36. An invalid Worker finalization result receives at most one read-only
-    correction for the current commit step and finalization contract; only its
-    bounded diagnostic is durable or public, and corrected evidence must still
-    pass every existing trusted-validation, Git, and fingerprint gate.
+36. An invalid Worker finalization result receives at most two read-only
+    corrections for the current step and content-fingerprint scope, with the
+    second available only for a wholly new field-diagnostic batch. Repeated,
+    mixed, and exhausted invalid results fail closed; only bounded diagnostics
+    are durable or public, and corrected evidence must still pass every existing
+    trusted-validation, Git, and fingerprint gate.
 
 ---
 
