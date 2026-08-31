@@ -320,6 +320,136 @@ test("distinguishes isolation setup denial from command failure", async (t) => {
   ]);
 });
 
+test("accepts successful trusted commands without descendants", async (t) => {
+  const projectPath = await repository(t);
+
+  const result = await runExactCommand(
+    {
+      executable: process.execPath,
+      arguments: ["--eval", "process.exit(0)"],
+    },
+    {
+      cwd: projectPath,
+      environment: process.env,
+      terminationGraceMs: 100,
+      timeoutMs: 1_000,
+    },
+  );
+
+  assert.deepEqual(result, {
+    status: "PASS",
+    exitCode: 0,
+    signal: null,
+    timedOut: false,
+    reason: "exit",
+  });
+});
+
+test("allows a successful trusted command's descendants to retire", async (t) => {
+  const projectPath = await repository(t);
+  const processPath = await mkdtemp(
+    join(tmpdir(), "agent-runner-retiring-tree-"),
+  );
+  t.after(() => rm(processPath, { recursive: true, force: true }));
+  const pidPath = join(processPath, "child.pid");
+  const childSource = `
+    const { writeFileSync } = require("node:fs");
+    writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+    process.send("ready");
+    setTimeout(() => process.exit(0), 100);
+  `;
+  const parentSource = `
+    const { spawn } = require("node:child_process");
+    const child = spawn(process.execPath, ["--eval", ${JSON.stringify(childSource)}], {
+      stdio: ["ignore", "ignore", "ignore", "ipc"],
+    });
+    child.once("message", () => process.exit(0));
+    child.once("error", () => process.exit(1));
+  `;
+
+  const result = await runExactCommand(
+    {
+      executable: process.execPath,
+      arguments: ["--eval", parentSource],
+    },
+    {
+      cwd: projectPath,
+      environment: process.env,
+      terminationGraceMs: 500,
+      timeoutMs: 1_000,
+    },
+  );
+
+  assert.equal(result.status, "PASS");
+  assert.equal(result.exitCode, 0);
+  const childPid = Number.parseInt(await readFile(pidPath, "utf8"), 10);
+  assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
+});
+
+test("terminates persistent descendants after successful trusted commands", async (t) => {
+  const projectPath = await repository(t);
+  const processPath = await mkdtemp(
+    join(tmpdir(), "agent-runner-leaked-tree-"),
+  );
+  const pidPath = join(processPath, "child.pid");
+  t.after(async () => {
+    try {
+      const childPid = Number.parseInt(await readFile(pidPath, "utf8"), 10);
+      try {
+        process.kill(childPid, "SIGKILL");
+      } catch (cause) {
+        if (cause?.code !== "ESRCH") {
+          throw cause;
+        }
+      }
+    } catch (cause) {
+      if (cause?.code !== "ENOENT") {
+        throw cause;
+      }
+    } finally {
+      await rm(processPath, { recursive: true, force: true });
+    }
+  });
+  const childSource = `
+    const { writeFileSync } = require("node:fs");
+    writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+    process.on("SIGTERM", () => {});
+    process.send("ready");
+    setInterval(() => {}, 1_000);
+  `;
+  const parentSource = `
+    const { spawn } = require("node:child_process");
+    const child = spawn(process.execPath, ["--eval", ${JSON.stringify(childSource)}], {
+      stdio: ["ignore", "ignore", "ignore", "ipc"],
+    });
+    child.once("message", () => process.exit(0));
+    child.once("error", () => process.exit(1));
+  `;
+
+  const result = await runExactCommand(
+    {
+      executable: process.execPath,
+      arguments: ["--eval", parentSource],
+    },
+    {
+      cwd: projectPath,
+      environment: process.env,
+      terminationGraceMs: 100,
+      timeoutMs: 1_000,
+    },
+  );
+
+  assert.deepEqual(result, {
+    status: "BLOCKED",
+    exitCode: null,
+    signal: null,
+    timedOut: false,
+    reason: "process-tree",
+  });
+  const childPid = Number.parseInt(await readFile(pidPath, "utf8"), 10);
+  assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
+});
+
 test("terminates a timed-out trusted command's complete process tree", async (t) => {
   const projectPath = await repository(t);
   const processPath = await mkdtemp(join(tmpdir(), "agent-runner-tree-"));

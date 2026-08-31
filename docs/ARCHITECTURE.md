@@ -685,7 +685,9 @@ the same mount, network, and PID namespaces, so it cannot gain host mounts or
 networking and is retired with the complete process tree. Remote network and
 filesystem writes, hosting credentials, Git credential helpers, and ambient
 authentication variables are unavailable. A private PID namespace and an outer
-process group provide bounded TERM/KILL retirement before reconciliation. A
+process group give a successfully completed command one bounded grace period
+for remaining descendants to retire naturally, then provide bounded TERM/KILL
+retirement when the group remains active. Timeout cleanup begins immediately. A
 one-byte readiness signal emitted inside the completed isolation profile
 distinguishes setup denial from an executed check failure without exposing
 native output. The runner retains no stdout or stderr and records only bounded
