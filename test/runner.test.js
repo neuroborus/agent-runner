@@ -18,8 +18,8 @@ import {
   createGitService,
   createRunner,
   createRunStore,
+  DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
   parseRunnerConfiguration,
-  RUNTIME_COMPATIBILITY_TOKEN,
   RUN_STATE_SCHEMA_VERSION,
   RunnerError,
 } from "../src/index.js";
@@ -772,7 +772,8 @@ test("rejects a detached runtime mismatch before touching a durable run", async 
     runner.resume({
       runId: prepared.run.runId,
       action: null,
-      expectedRuntimeCompatibility: `${RUNTIME_COMPATIBILITY_TOKEN}-other`,
+      expectedRuntimeCompatibility:
+        `${DETACHED_RUNTIME_COMPATIBILITY_TOKEN}-other`,
     }),
     (error) =>
       error instanceof RunnerError &&

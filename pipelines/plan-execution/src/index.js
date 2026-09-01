@@ -33,6 +33,7 @@ export {
   NO_DELEGATION_INSTRUCTIONS,
   PLAN_COMPATIBILITY_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
+  REVIEW_CORRECTION_INSTRUCTIONS,
   REVIEW_INSTRUCTIONS,
   STAGNATION_INSTRUCTIONS,
 } from "./prompts.js";
@@ -101,6 +102,7 @@ const RETRYABLE_PAUSE_REASONS = new Set([
   "finalization_skill_invalid",
   "finalization_skill_missing",
   "local_artifacts_not_ignored",
+  "review_output_invalid",
   "unsafe_git_state",
 ]);
 const RESUMABLE_WORKFLOW_STATES = new Set([
@@ -150,6 +152,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "A material product decision is required before execution can continue.",
   read_only_agent_mutated_repository:
     "A read-only turn contaminated the repository; abandon this run and restart from an uncontaminated worktree.",
+  review_output_invalid:
+    "The final Reviewer result remains invalid and requires an explicit read-only retry.",
   task_input_changed: "A task or plan input changed after the run began.",
   unexpected_git_identity_change:
     "The effective Git identity changed during execution.",
@@ -167,6 +171,7 @@ const PUBLIC_DETAIL_REASONS = new Set([
   "finalization_skill_invalid",
   "finalization_skill_missing",
   "plan_revision_required",
+  "review_output_invalid",
 ]);
 
 function publicCode(value) {
@@ -338,6 +343,16 @@ function validateResumeAction(run, action) {
     }
     return;
   }
+  if (
+    action === null &&
+    state.validationMigrationPending &&
+    state.preflightComplete &&
+    ["fix_limit_reached", "no_progress", "dispute_limit_reached"].includes(
+      run.pause?.reason,
+    )
+  ) {
+    return;
+  }
   if (action?.type === "extra-fix-rounds") {
     const additionalFixRounds = state.additionalFixRounds + action.amount;
     if (
@@ -359,7 +374,12 @@ function validateResumeAction(run, action) {
       ) ||
       state.finalizationResult?.status !== "PASS" ||
       state.reviewedFingerprint === null ||
-      !state.findings?.some(({ id }) => id === action.findingId)
+      !state.findings?.some(({ id }) => id === action.findingId) ||
+      state.findingOverrides.some(
+        ({ findingId, fingerprint }) =>
+          findingId === action.findingId &&
+          fingerprint === state.reviewedFingerprint,
+      )
     ) {
       throw new Error("Finding override is not applicable.");
     }
@@ -379,6 +399,7 @@ function validateResumeAction(run, action) {
             "finalization_cannot_pass",
             "finalization_skill_invalid",
             "finalization_skill_missing",
+            "review_output_invalid",
           ].includes(run.pause?.reason) &&
             RESUMABLE_WORKFLOW_STATES.has(run.pause?.resumeState)))))
   ) {
@@ -714,9 +735,141 @@ export function migratePlanExecutionStateV6(run) {
   });
 }
 
+function upgradeFinalizationCorrection(correction) {
+  if (correction === null) {
+    return null;
+  }
+  const { role, phase, contract, field, constraint, ...scope } = correction;
+  return Object.freeze({
+    ...scope,
+    diagnostics: Object.freeze([
+      Object.freeze({ role, phase, contract, field, constraint }),
+    ]),
+  });
+}
+
+export function migratePlanExecutionStateV7(run) {
+  const {
+    finalizationCorrection,
+    pendingFinalizationCorrection,
+    ...current
+  } = run.pipelineState;
+  const correction = upgradeFinalizationCorrection(finalizationCorrection);
+  return Object.freeze({
+    ...current,
+    finalizationCorrections: Object.freeze(
+      correction === null ? [] : [correction],
+    ),
+    pendingFinalizationCorrection: upgradeFinalizationCorrection(
+      pendingFinalizationCorrection,
+    ),
+  });
+}
+
+function uniqueFindingOverrides(overrides) {
+  const identities = new Set();
+  return Object.freeze(
+    overrides.filter(({ findingId, fingerprint }) => {
+      const identity = `${findingId}\0${fingerprint}`;
+      if (identities.has(identity)) {
+        return false;
+      }
+      identities.add(identity);
+      return true;
+    }),
+  );
+}
+
+export function migratePlanExecutionStateV8(run) {
+  const current = run.pipelineState;
+  const findingOverrides = uniqueFindingOverrides(current.findingOverrides);
+  const immutableTerminal = ["DONE", "FAILED"].includes(
+    current.workflowState,
+  );
+  if (
+    immutableTerminal ||
+    !current.preflightComplete ||
+    current.resolvedSummary === null
+  ) {
+    return Object.freeze({ ...current, findingOverrides });
+  }
+  const commitVerificationPending =
+    current.pendingCommit?.status === "consumed";
+  if (commitVerificationPending) {
+    return Object.freeze({
+      ...current,
+      findingOverrides,
+      validationMigrationPending: true,
+    });
+  }
+  const paused = current.workflowState === "WAITING_FOR_USER";
+  const rerunFinalization =
+    !paused &&
+    ["FINALIZE", "REVIEW", "RESOLVE_FINDINGS", "COMMIT"].includes(
+      current.workflowState,
+    );
+  return Object.freeze({
+    ...current,
+    workflowState: rerunFinalization ? "FINALIZE" : current.workflowState,
+    workerValidation: null,
+    reviewerValidation: null,
+    validationMigrationPending: true,
+    finalizationResult: paused ? current.finalizationResult : null,
+    finalizedFingerprint: paused ? current.finalizedFingerprint : null,
+    reviewResult: paused ? current.reviewResult : null,
+    reviewedFingerprint: paused ? current.reviewedFingerprint : null,
+    previousFindings: paused
+      ? current.previousFindings
+      : current.findings.length === 0
+        ? current.previousFindings
+        : current.findings,
+    findings: paused ? current.findings : Object.freeze([]),
+    pendingDisputes: paused
+      ? current.pendingDisputes
+      : Object.freeze([]),
+    reviewReconsideration: paused
+      ? current.reviewReconsideration
+      : Object.freeze([]),
+    findingOverrides,
+    pendingCommit: null,
+  });
+}
+
+function upgradeBootstrapCorrection(correction) {
+  if (correction === null) {
+    return null;
+  }
+  const { attempt, ...diagnostic } = correction;
+  return Object.freeze({
+    attempt,
+    diagnostics: Object.freeze([Object.freeze(diagnostic)]),
+  });
+}
+
+export function migratePlanExecutionStateV9(run) {
+  const current = run.pipelineState;
+  return Object.freeze({
+    ...current,
+    bootstrapCorrections: Object.freeze(
+      current.bootstrapCorrections.map(upgradeBootstrapCorrection),
+    ),
+    pendingBootstrapCorrection: upgradeBootstrapCorrection(
+      current.pendingBootstrapCorrection,
+    ),
+  });
+}
+
+export function migratePlanExecutionStateV10(run) {
+  return Object.freeze({
+    ...run.pipelineState,
+    reviewCorrection: null,
+    pendingReviewCorrection: null,
+  });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
-  stateVersion: 7,
+  stateVersion: 11,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -724,6 +877,10 @@ export const planExecutionPipeline = Object.freeze({
     4: migratePlanExecutionStateV4,
     5: migratePlanExecutionStateV5,
     6: migratePlanExecutionStateV6,
+    7: migratePlanExecutionStateV7,
+    8: migratePlanExecutionStateV8,
+    9: migratePlanExecutionStateV9,
+    10: migratePlanExecutionStateV10,
   }),
   roles: ROLES,
   settings: SETTINGS,

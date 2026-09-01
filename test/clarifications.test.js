@@ -662,6 +662,126 @@ test("writes identified MCP answers atomically and retries the exact content", a
   );
 });
 
+test("round-trips generated product-decision MCP answers", async (t) => {
+  const { artifactRoot, transcriptPath } = await createFixture(t);
+  const service = createClarificationService({
+    env: {},
+    interactive: false,
+    authorizationIdFactory: () => "mcp-product-decision",
+  });
+  const initial = await service.ensureTranscript({
+    artifactRoot,
+    transcriptPath,
+  });
+  const markerLikeText = `Decision:\n\n<!-- Write the decision here. -->\n\nUnrelated <!-- Write the decision here. --> text.\n`;
+  await writeFile(transcriptPath, `${initial.content}\n${markerLikeText}`);
+  const seeded = await service.inspectTranscript({
+    artifactRoot,
+    transcriptPath,
+  });
+  const decision = await service.appendProductDecision({
+    artifactRoot,
+    transcriptPath,
+    expectedHash: seeded.hash,
+    number: 1,
+    question: "Should unrelated decision markers remain unchanged?",
+    options: ["Preserve them", "Remove them"],
+    whyBlocked: "The behavior changes the transcript.",
+    evidence: ["The existing content contains marker-like text."],
+  });
+  const authorization = await service.prepareEdit({
+    artifactRoot,
+    transcriptPath,
+    expectedHash: decision.hash,
+    suspendedState: "REVIEW",
+    action: "product-decision",
+    persistPendingEdit: async () => {},
+  });
+  const answer =
+    "Preserve them exactly.\n\nThe text <!-- Write the decision here. --> is intentional.";
+  const expectedContent = decision.content.replace(
+    "### Decision\n\n<!-- Write the decision here. -->",
+    `### Decision\n\n${answer}`,
+  );
+  const preview = await service.previewEditAnswers(authorization, [answer]);
+
+  assert.equal(preview.hash, sha256(expectedContent));
+  await assert.rejects(
+    service.writeEditAnswers(authorization, [answer], {
+      expectedHash: "f".repeat(64),
+    }),
+    isClarificationError("ERR_INVALID_CLARIFICATION_HASH"),
+  );
+  assert.equal(
+    (await service.inspectTranscript({ artifactRoot, transcriptPath })).content,
+    decision.content,
+  );
+
+  const written = await service.writeEditAnswers(authorization, [answer], {
+    expectedHash: preview.hash,
+  });
+  assert.equal(written.content, expectedContent);
+  assert.ok(written.content.includes(markerLikeText));
+  assert.equal(
+    (
+      await service.writeEditAnswers(authorization, [answer], {
+        expectedHash: preview.hash,
+      })
+    ).content,
+    expectedContent,
+  );
+});
+
+test("rejects stale generated product-decision MCP responses", async (t) => {
+  const { artifactRoot } = await createFixture(t);
+  const service = createClarificationService({ env: {}, interactive: false });
+
+  for (const phase of ["preview", "write"]) {
+    const transcriptPath = join(
+      artifactRoot,
+      "nested",
+      `${phase}-stale-decision.md`,
+    );
+    const initial = await service.ensureTranscript({
+      artifactRoot,
+      transcriptPath,
+    });
+    const decision = await service.appendProductDecision({
+      artifactRoot,
+      transcriptPath,
+      expectedHash: initial.hash,
+      number: 1,
+      question: "Which option is required?",
+      options: [],
+      whyBlocked: "The task does not choose one.",
+      evidence: ["Both options are viable."],
+    });
+    const authorization = await service.prepareEdit({
+      artifactRoot,
+      transcriptPath,
+      expectedHash: decision.hash,
+      suspendedState: "REVIEW",
+      action: "product-decision",
+      persistPendingEdit: async () => {},
+    });
+    const answer = "Use option A.";
+    const preview = await service.previewEditAnswers(authorization, [answer]);
+    const staleContent = `${decision.content}\nExternal transcript change.\n`;
+    await writeFile(transcriptPath, staleContent);
+
+    await assert.rejects(
+      phase === "preview"
+        ? service.previewEditAnswers(authorization, [answer])
+        : service.writeEditAnswers(authorization, [answer], {
+            expectedHash: preview.hash,
+          }),
+      isClarificationError("ERR_CLARIFICATIONS_CHANGED"),
+      phase,
+    );
+    assert.equal(await readFile(transcriptPath, "utf8"), staleContent);
+  }
+});
+
 test("accepts an empty proactive MCP response", async (t) => {
   const { artifactRoot, transcriptPath } = await createFixture(t);
   const service = createClarificationService({

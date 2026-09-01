@@ -15,7 +15,10 @@ import {
   resolvePipelineConfiguration,
 } from "./config.js";
 import { createGitService } from "./git.js";
-import { getPipeline } from "./pipeline-registry.js";
+import {
+  DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
+  getPipeline,
+} from "./pipeline-registry.js";
 import { deepFreeze } from "./state-validation.js";
 import {
   createRunStore,
@@ -407,7 +410,8 @@ function normalizeResumeInput(input) {
   rejectUnknownFields(input, RESUME_FIELDS, "resume");
   if (
     input.expectedRuntimeCompatibility !== undefined &&
-    input.expectedRuntimeCompatibility !== RUNTIME_COMPATIBILITY_TOKEN
+    input.expectedRuntimeCompatibility !==
+      DETACHED_RUNTIME_COMPATIBILITY_TOKEN
   ) {
     throw new RunnerError(
       "Detached continuation runtime is incompatible with the process that " +

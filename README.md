@@ -536,9 +536,11 @@ withholds its receipt after launch until the run advances or the child owns the
 worktree. Losing a concurrent ownership race keeps the durable idempotency
 intent available for an exact retry, including when the competing lease is
 released before the next MCP poll because child exit is acknowledged directly.
-The child also verifies the dispatching MCP process's runtime tuple before
-acquiring the run lease. Version skew leaves the durable run and incomplete
-intent unchanged and returns an actionable restart-and-retry error.
+The MCP process freezes a detached-compatibility token over the root
+run-envelope tuple and every sorted loaded pipeline ID/state version. The child
+independently recomputes it before acquiring the run lease, recovering state,
+or migrating a run. Version skew leaves the durable run, journal, leases, and
+incomplete intent unchanged and returns an actionable restart-and-retry error.
 The existing execution leases, Git safety checks, local-only policy, and
 one-shot commit authorization remain authoritative.
 

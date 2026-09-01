@@ -11,14 +11,17 @@ import { createClarificationService } from "./clarifications.js";
 import { loadRunnerConfiguration } from "./config.js";
 import { createGitService } from "./git.js";
 import { createUnexpectedIssueReporter } from "./mcp-reporting.js";
-import { getPipeline, listPipelines } from "./pipeline-registry.js";
+import {
+  DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
+  getPipeline,
+  listPipelines,
+} from "./pipeline-registry.js";
 import {
   createRunner,
   pipelineRequiresWorktreeLease,
 } from "./runner.js";
 import {
   createRunStore,
-  RUNTIME_COMPATIBILITY_TOKEN,
   RUNTIME_VERSION_SKEW_EXIT_CODE,
   RunStoreError,
 } from "./state.js";
@@ -315,6 +318,7 @@ function detachedArguments(executablePath, runIdValue, action) {
 }
 
 export function createDetachedLauncher({
+  detachedCompatibilityToken = DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
   spawnProcess = spawn,
   executablePath = EXECUTABLE_PATH,
   environment = process.env,
@@ -323,12 +327,12 @@ export function createDetachedLauncher({
     runIdValue,
     action = null,
     {
-      expectedRuntimeCompatibility = RUNTIME_COMPATIBILITY_TOKEN,
+      expectedRuntimeCompatibility = detachedCompatibilityToken,
       onExit,
     } = {},
   ) =>
     new Promise((resolvePromise, rejectPromise) => {
-      if (expectedRuntimeCompatibility !== RUNTIME_COMPATIBILITY_TOKEN) {
+      if (expectedRuntimeCompatibility !== detachedCompatibilityToken) {
         rejectPromise(
           new RunStoreError(
             "Detached continuation runtime does not match this launcher; " +
@@ -363,6 +367,9 @@ export function createDetachedLauncher({
 }
 
 export function createMcpControlPlane(options = {}) {
+  const detachedCompatibilityToken =
+    options.detachedCompatibilityToken ??
+    DETACHED_RUNTIME_COMPATIBILITY_TOKEN;
   const runStore = options.runStore ?? createRunStore();
   const runner =
     options.runner ??
@@ -468,7 +475,7 @@ export function createMcpControlPlane(options = {}) {
         }
         if (!runIsLeased && !dispatchStarted) {
           await launchRun(runIdValue, action, {
-            expectedRuntimeCompatibility: RUNTIME_COMPATIBILITY_TOKEN,
+            expectedRuntimeCompatibility: detachedCompatibilityToken,
             onExit(code) {
               dispatchedChildExited = true;
               dispatchedChildExitCode = code;
@@ -484,7 +491,7 @@ export function createMcpControlPlane(options = {}) {
       }
       if (!runIsLeased && !dispatchStarted) {
         await launchRun(runIdValue, action, {
-          expectedRuntimeCompatibility: RUNTIME_COMPATIBILITY_TOKEN,
+          expectedRuntimeCompatibility: detachedCompatibilityToken,
           onExit(code) {
             dispatchedChildExited = true;
             dispatchedChildExitCode = code;

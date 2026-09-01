@@ -212,7 +212,7 @@ function answeredContent(source, action, answers) {
     return replaceLastMarkers(
       source,
       "<!-- Write the decision here. -->",
-      /^Decision:\n\n<!-- Write the decision here\. -->$/gmu,
+      /^### Decision\n\n<!-- Write the decision here\. -->$/gmu,
       answers,
     );
   }
