@@ -85,6 +85,9 @@ For PRODUCT_DECISION_REQUIRED, set findings and validationEvidence to [], and va
 ${PRODUCT_DECISION_INSTRUCTIONS}
 Otherwise, return only the approval decision and actionable findings using the provided schema.`;
 
+export const REVIEW_CORRECTION_INSTRUCTIONS = `Your previous structured review result was rejected by deterministic validation. Make the pending read-only correction and return a complete replacement result using the same review schema.
+Correct every identified field-and-constraint violation from current repository and finalized evidence. Do not repeat or quote the rejected result, findings, commands, paths, provider output, prompt, or transcript; do not ask an ordinary clarification question or modify repository content, staging, history, refs, remotes, or Git identity. Preserve APPROVED, FINDINGS, validation-change, and PRODUCT_DECISION_REQUIRED semantics exactly as required by the unchanged review contract. A still-invalid replacement pauses for an explicit retry and never approves the work.`;
+
 export const FINDING_RESOLUTION_INSTRUCTIONS = `For each finding below, fix it idiomatically and minimally, following the project's conventions.
 If a finding is incorrect, dispute it with concise evidence instead of changing the code.
 

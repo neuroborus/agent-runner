@@ -25,6 +25,7 @@ import {
   NO_DELEGATION_INSTRUCTIONS,
   PLAN_COMPATIBILITY_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
+  REVIEW_CORRECTION_INSTRUCTIONS,
   REVIEW_INSTRUCTIONS,
   STAGNATION_INSTRUCTIONS,
 } from "./prompts.js";
@@ -101,6 +102,7 @@ const RETRYABLE_PAUSE_REASONS = new Set([
   "finalization_skill_invalid",
   "finalization_skill_missing",
   "local_artifacts_not_ignored",
+  "review_output_invalid",
   "unsafe_git_state",
 ]);
 const GIT_PREFLIGHT_CODES = new Set([
@@ -315,6 +317,14 @@ function finalizationOutputContext() {
   });
 }
 
+function reviewOutputContext() {
+  return Object.freeze({
+    role: "reviewer",
+    phase: "review",
+    contract: "review",
+  });
+}
+
 function roleOutputContextFor(role, schema, checkpoint) {
   const phase =
     checkpoint === "validation-migration" ? checkpoint : "bootstrap";
@@ -329,6 +339,9 @@ function roleOutputContextFor(role, schema, checkpoint) {
   }
   if (schema === FINALIZATION_SCHEMA && role === "worker") {
     return finalizationOutputContext();
+  }
+  if (schema === REVIEW_SCHEMA && role === "reviewer") {
+    return reviewOutputContext();
   }
   return undefined;
 }
@@ -491,6 +504,69 @@ function normalizeFinalizationRoleOutput(output, trustedCommands) {
       },
     );
   }
+}
+
+function normalizeReviewRoleOutput(
+  output,
+  previousFindings,
+  validationChanged,
+) {
+  const context = reviewOutputContext();
+  let result;
+  try {
+    result = normalizeReviewResult(output, previousFindings);
+  } catch (cause) {
+    if (cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT") {
+      throw cause;
+    }
+    const diagnostics = outputDiagnostics(cause, context);
+    throw new PlanExecutionWorkflowError(
+      "Structured review result violates its contract.",
+      {
+        code: cause.code,
+        diagnostic: diagnostics[0],
+        diagnostics,
+      },
+    );
+  }
+  if (result.status === "PRODUCT_DECISION_REQUIRED") {
+    return result;
+  }
+  const diagnostics = [
+    ...(validationChanged && result.validationChange === "UNCHANGED"
+      ? [
+          {
+            field: "validationChange",
+            constraint: "matches-finalization-change",
+          },
+        ]
+      : []),
+    ...(!validationChanged && result.validationChange !== "UNCHANGED"
+      ? [
+          {
+            field: "validationChange",
+            constraint: "matches-finalization-change",
+          },
+        ]
+      : []),
+    ...(result.validationChange === "REJECTED" &&
+    result.status !== "FINDINGS"
+      ? [
+          {
+            field: "status",
+            constraint: "findings-when-validation-rejected",
+          },
+        ]
+      : []),
+  ];
+  if (diagnostics.length !== 0) {
+    throw invalidRoleOutputBatch(
+      "Reviewer returned an inconsistent validation-change decision.",
+      context,
+      diagnostics,
+    );
+  }
+  return result;
 }
 
 export async function runPlanExecution({ action, run, runtime, settings }) {
@@ -674,6 +750,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         pendingBootstrapCorrection: null,
         finalizationCorrections: [],
         pendingFinalizationCorrection: null,
+        reviewCorrection: null,
+        pendingReviewCorrection: null,
         compatibilityCheckRequired: false,
         currentStep: null,
         reviewerStep: null,
@@ -974,6 +1052,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
               ? {
                   finalizationResult: null,
                   finalizedFingerprint: null,
+                  reviewCorrection: null,
+                  pendingReviewCorrection: null,
                   reviewResult: null,
                   reviewedFingerprint: null,
                   previousFindings:
@@ -1147,6 +1227,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
                   repositoryBaseline: nextRepositoryBaseline,
                   finalizationResult: null,
                   finalizedFingerprint: null,
+                  reviewCorrection: null,
+                  pendingReviewCorrection: null,
                   reviewResult: null,
                   reviewedFingerprint: null,
                   previousFindings:
@@ -1164,6 +1246,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
                     ? {
                         finalizationResult: null,
                         finalizedFingerprint: null,
+                        reviewCorrection: null,
+                        pendingReviewCorrection: null,
                         reviewResult: null,
                         reviewedFingerprint: null,
                         previousFindings:
@@ -1200,6 +1284,12 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         throw invalidRoleOutput(
           `${role} returned invalid structured output.`,
           outputContext,
+          outputContext.contract === "review"
+            ? {
+                field: "result",
+                constraint: "provider-structured-output",
+              }
+            : undefined,
         );
       }
       throw agentError;
@@ -1422,6 +1512,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           implementationDirection: null,
           finalizationResult: null,
           finalizedFingerprint: null,
+          reviewCorrection: null,
+          pendingReviewCorrection: null,
           requiredChecks: bootstrapDecision ? null : current.requiredChecks,
           validationInfrastructure: bootstrapDecision
             ? null
@@ -1558,6 +1650,27 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       )
       ? correction
       : undefined;
+  }
+
+  function reviewCorrectionScope(current = state()) {
+    return Object.freeze({
+      attempt: 1,
+      step: current.currentStep,
+      contentFingerprint: current.finalizedFingerprint,
+      validationInfrastructureFingerprint:
+        current.finalizationResult.validationInfrastructureFingerprint,
+    });
+  }
+
+  function reviewCorrectionMatchesScope(correction, scope) {
+    return (
+      correction !== null &&
+      correction.attempt === scope.attempt &&
+      correction.step === scope.step &&
+      correction.contentFingerprint === scope.contentFingerprint &&
+      correction.validationInfrastructureFingerprint ===
+        scope.validationInfrastructureFingerprint
+    );
   }
 
   async function validationInfrastructureDiagnostics(result, context) {
@@ -1780,6 +1893,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       ...current,
       finalizationCorrections: [],
       pendingFinalizationCorrection: null,
+      reviewCorrection: null,
+      pendingReviewCorrection: null,
       finalizationResult: null,
       finalizedFingerprint: null,
       reviewResult: null,
@@ -2635,6 +2750,8 @@ ${step.body}${
         implementationDirection: null,
         finalizationResult: null,
         finalizedFingerprint: null,
+        reviewCorrection: null,
+        pendingReviewCorrection: null,
         reviewResult: null,
         reviewedFingerprint: null,
         findings: [],
@@ -3048,6 +3165,8 @@ ${
           workflowState: "RESOLVE_FINDINGS",
           finalizationResult,
           finalizedFingerprint: null,
+          reviewCorrection: null,
+          pendingReviewCorrection: null,
           reviewResult: null,
           reviewedFingerprint: null,
           findings: [],
@@ -3095,16 +3214,78 @@ ${
   }
 
   async function runReviewTurn() {
-    const current = state();
-    const fingerprint = await contentFingerprint();
-    if (fingerprint !== current.finalizedFingerprint) {
-      throw workflowError("Finalized content changed before review.");
-    }
     const step = planStep();
-    const output = await runRole(
-      "reviewer",
-      REVIEW_SCHEMA,
-      (evidence) => `${REVIEW_INSTRUCTIONS}
+    const context = reviewOutputContext();
+
+    async function pauseForReviewScopeDrift(code) {
+      await transition(
+        {
+          ...state(),
+          workflowState: "WAITING_FOR_USER",
+          reviewCorrection: null,
+          pendingReviewCorrection: null,
+        },
+        {
+          pause: { reason: "unsafe_git_state", code },
+          publicActivity: activity(
+            "runner",
+            "review",
+            "paused",
+            "Plan execution paused: unsafe_git_state.",
+          ),
+        },
+      );
+      return null;
+    }
+
+    async function verifiedReviewScope() {
+      const current = state();
+      try {
+        await runtime.git.assertUnchanged(current.repositoryBaseline);
+      } catch (cause) {
+        if (cause?.code !== "ERR_READ_ONLY_REPOSITORY_CHANGED") {
+          throw cause;
+        }
+        return pauseForReviewScopeDrift(cause.code);
+      }
+      const fingerprint = await contentFingerprint();
+      if (fingerprint !== current.finalizedFingerprint) {
+        return pauseForReviewScopeDrift(
+          "ERR_REVIEW_CONTENT_FINGERPRINT_CHANGED",
+        );
+      }
+      const infrastructureFingerprint =
+        await validationInfrastructureFingerprint(
+          current.finalizationResult.validationInfrastructure,
+        );
+      if (
+        infrastructureFingerprint !==
+        current.finalizationResult.validationInfrastructureFingerprint
+      ) {
+        return pauseForReviewScopeDrift(
+          "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED",
+        );
+      }
+      const correctionScope = reviewCorrectionScope(current);
+      if (
+        current.reviewCorrection !== null &&
+        !reviewCorrectionMatchesScope(
+          current.reviewCorrection,
+          correctionScope,
+        )
+      ) {
+        await transition({
+          ...current,
+          reviewCorrection: null,
+          pendingReviewCorrection: null,
+        });
+      }
+      return Object.freeze({ correctionScope, fingerprint });
+    }
+
+    function reviewPrompt(evidence, correction) {
+      const current = state();
+      return `${REVIEW_INSTRUCTIONS}
 
 Reuse an existing ID for an unchanged finding. Use FINDINGS with every actionable blocker.
 
@@ -3146,35 +3327,123 @@ ${JSON.stringify(current.previousFindings, null, 2)}${
 Prior decisions for this step:
 ${JSON.stringify(priorFindingDecisions(), null, 2)}
 
-User overrides are runner-owned audit decisions. Do not describe an override as Reviewer acceptance.`,
-      {
-        checkpoint: `commit:${current.currentStep}`,
-        recoveryContext: resolvedContext(),
-      },
-    );
-    if (output === null) {
-      return false;
+User overrides are runner-owned audit decisions. Do not describe an override as Reviewer acceptance.${
+        correction === null
+          ? ""
+          : `\n\n${REVIEW_CORRECTION_INSTRUCTIONS}\n\nPending correction diagnostic batch:\n${JSON.stringify(correction, null, 2)}`
+      }`;
     }
-    const result = normalizeReviewResult(output, current.previousFindings);
+
+    let scope;
+    let result;
+    while (true) {
+      scope = await verifiedReviewScope();
+      if (scope === null) {
+        return false;
+      }
+      const current = state();
+      const correction = current.pendingReviewCorrection;
+      try {
+        const output = await runRole(
+          "reviewer",
+          REVIEW_SCHEMA,
+          (evidence) => reviewPrompt(evidence, correction),
+          {
+            checkpoint:
+              correction === null
+                ? `commit:${current.currentStep}`
+                : `review-correction:${current.currentStep}`,
+            freshSession: correction !== null,
+            recoveryContext: resolvedContext(),
+          },
+        );
+        if (output === null) {
+          return false;
+        }
+        result = normalizeReviewRoleOutput(
+          output,
+          current.previousFindings,
+          current.finalizationResult.validationChanged,
+        );
+        scope = await verifiedReviewScope();
+        if (scope === null) {
+          return false;
+        }
+        break;
+      } catch (cause) {
+        if (
+          cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT" ||
+          !isOutputDiagnostic(cause.diagnostic)
+        ) {
+          throw cause;
+        }
+        const diagnostics = outputDiagnostics(cause, context).slice(
+          0,
+          MAX_DIAGNOSTIC_ITEMS,
+        );
+        const pendingCorrection = {
+          ...scope.correctionScope,
+          diagnostics,
+        };
+        if (state().reviewCorrection === null) {
+          const violationLabel =
+            diagnostics.length === 1 ? "violation" : "violations";
+          await transition(
+            {
+              ...state(),
+              reviewCorrection: pendingCorrection,
+              pendingReviewCorrection: pendingCorrection,
+            },
+            {
+              publicActivity: activity(
+                "reviewer",
+                "review",
+                "review-correction",
+                `reviewer must correct ${diagnostics.length} review contract ${violationLabel}.`,
+              ),
+            },
+          );
+          continue;
+        }
+        await transition(
+          {
+            ...state(),
+            workflowState: "WAITING_FOR_USER",
+            pendingReviewCorrection: pendingCorrection,
+          },
+          {
+            pause: {
+              reason: "review_output_invalid",
+              code: "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+              explanation:
+                "The bounded automatic final Reviewer correction remains invalid. Retry the same read-only correction after the backend can satisfy the unchanged contract.",
+              evidence: diagnostics.map(
+                ({ field, constraint }) =>
+                  `Reviewer field ${field} violated ${constraint}.`,
+              ),
+              resumeState: "REVIEW",
+            },
+            publicActivity: activity(
+              "runner",
+              "review",
+              "paused",
+              "Plan execution paused: review_output_invalid.",
+            ),
+          },
+        );
+        return false;
+      }
+    }
+    const current = state();
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "IMPLEMENT");
     }
     const reviewedFingerprint = await contentFingerprint();
-    if (reviewedFingerprint !== fingerprint) {
-      throw workflowError("Reviewed content fingerprint changed unexpectedly.");
-    }
-    if (
-      (current.finalizationResult.validationChanged &&
-        result.validationChange === "UNCHANGED") ||
-      (!current.finalizationResult.validationChanged &&
-        result.validationChange !== "UNCHANGED") ||
-      (result.validationChange === "REJECTED" &&
-        result.status !== "FINDINGS")
-    ) {
-      throw workflowError(
-        "Reviewer returned an inconsistent validation-change decision.",
-        "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+    if (reviewedFingerprint !== scope.fingerprint) {
+      await pauseForReviewScopeDrift(
+        "ERR_REVIEW_CONTENT_FINGERPRINT_CHANGED",
       );
+      return false;
     }
     const reviewResult = {
       status: result.status,
@@ -3190,7 +3459,7 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
         : [];
     if (findings.length > 0) {
       const correction = correctionUpdate({
-        fingerprint,
+        fingerprint: reviewedFingerprint,
         finalizationIssueIds: [],
         findingIds: findings.map(({ id }) => id),
       });
@@ -3236,6 +3505,7 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
           blockedSinceStagnation: correction.blockedSinceStagnation,
           reviewerStep: current.currentStep,
           reviewReconsideration: [],
+          pendingReviewCorrection: null,
         },
         {
           nextCounters: correction.counters,
@@ -3272,6 +3542,7 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
         pendingCorrection: false,
         reviewerStep: current.currentStep,
         reviewReconsideration: [],
+        pendingReviewCorrection: null,
       },
       {
         publicActivity: activity(
@@ -3508,6 +3779,8 @@ ${JSON.stringify(
         implementationDirection: direction,
         finalizationResult: null,
         finalizedFingerprint: null,
+        reviewCorrection: null,
+        pendingReviewCorrection: null,
         reviewResult: null,
         reviewedFingerprint: null,
         previousFindings:
@@ -3788,6 +4061,8 @@ ${JSON.stringify(
           workflowState: "FINALIZE",
           finalizationResult: null,
           finalizedFingerprint: null,
+          reviewCorrection: null,
+          pendingReviewCorrection: null,
           reviewResult: null,
           reviewedFingerprint: null,
           previousFindings:
@@ -4106,6 +4381,8 @@ ${step.subject}`),
           implementationDirection: null,
           finalizationResult: null,
           finalizedFingerprint: null,
+          reviewCorrection: null,
+          pendingReviewCorrection: null,
           reviewResult: null,
           reviewedFingerprint: null,
           findings: [],
@@ -4136,6 +4413,8 @@ ${step.subject}`),
         reviewerStep: null,
         finalizationCorrections: [],
         pendingFinalizationCorrection: null,
+        reviewCorrection: null,
+        pendingReviewCorrection: null,
         pendingCommit: null,
         completedCommits,
       },
@@ -4193,6 +4472,7 @@ ${step.subject}`),
             "finalization_cannot_pass",
             "finalization_skill_invalid",
             "finalization_skill_missing",
+            "review_output_invalid",
           ].includes(currentRun.pause.reason) &&
             [
               "CLARIFY",

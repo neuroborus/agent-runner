@@ -523,6 +523,23 @@ closed. Durable state and public activity contain only bounded diagnostic
 identities, never rejected values, commands, paths, provider output, or
 transcripts.
 
+Plan execution state version 11 adds one final-Reviewer correction record and
+a pending marker scoped to the current step, finalized content fingerprint,
+and validation-infrastructure fingerprint. Its version-10 migration initializes
+both to `null` without moving the workflow, altering accepted finalization or
+review evidence, reviving terminal runs, or inferring rejected output that was
+never retained. The first provider structured-output, normalization, or
+validation-change consistency failure records attempt `1` and only bounded
+Reviewer/review field-and-constraint diagnostics, then reconstructs the full
+unchanged review request for a fresh-session, read-only correction with the
+same schema. Interruption and backend unavailability preserve that pending
+attempt without replay or recounting. A still-invalid replacement pauses at
+the deliberately retryable `review_output_invalid` REVIEW checkpoint; an
+explicit retry reruns the pending correction without approving content or
+bypassing finalization, findings, fingerprints, Git guards, or commit
+authorization. Rejected values, findings, commands, paths, provider output,
+prompts, and transcripts never enter durable state or public activity.
+
 Polishing state version 3 adopts the same resolved trusted-validation snapshot,
 per-check executor provenance, and fingerprint-bound evidence tuple. Its
 version-2 migration selects empty legacy trust, preserves safe workspace

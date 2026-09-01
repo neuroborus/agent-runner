@@ -29,6 +29,7 @@ import {
   migratePlanExecutionStateV7,
   migratePlanExecutionStateV8,
   migratePlanExecutionStateV9,
+  migratePlanExecutionStateV10,
   planExecutionPipeline,
   runPlanExecution,
 } from "../src/index.js";
@@ -116,6 +117,8 @@ function versionOneState(state) {
     "pendingBootstrapCorrection",
     "finalizationCorrections",
     "pendingFinalizationCorrection",
+    "reviewCorrection",
+    "pendingReviewCorrection",
     "trustedValidation",
   ]) {
     delete legacy[field];
@@ -186,7 +189,10 @@ function migrateVersionOneState(state) {
   const versionNine = migratePlanExecutionStateV8({
     pipelineState: versionEight,
   });
-  return migratePlanExecutionStateV9({ pipelineState: versionNine });
+  const versionTen = migratePlanExecutionStateV9({
+    pipelineState: versionNine,
+  });
+  return migratePlanExecutionStateV10({ pipelineState: versionTen });
 }
 
 async function prepareValidationMigration(t, fixtureOptions) {
@@ -795,7 +801,7 @@ test("migrates version-3 execution state with no consumed bootstrap corrections"
   assert.deepEqual(migrated.bootstrapCorrections, []);
   assert.equal(migrated.pendingBootstrapCorrection, null);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(planExecutionPipeline.stateVersion, 10);
+  assert.equal(planExecutionPipeline.stateVersion, 11);
 });
 
 test("migrates a consumed version-9 bootstrap diagnostic losslessly", async (t) => {
@@ -828,6 +834,45 @@ test("migrates a consumed version-9 bootstrap diagnostic losslessly", async (t) 
 
   assert.deepEqual(migrated, completed.pipelineState);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
+});
+
+test("migrates version-10 review state without reconstructing rejected output", async (t) => {
+  const fixture = await createFixture(t);
+  const completed = await fixture.run();
+  const active = fixture.transitions.findLast(
+    ({ patch }) => patch?.pipelineState?.workflowState === "COMMIT",
+  ).patch.pipelineState;
+  const activeLegacy = { ...active };
+  delete activeLegacy.reviewCorrection;
+  delete activeLegacy.pendingReviewCorrection;
+  const activeMigrated = migratePlanExecutionStateV10({
+    pipelineState: activeLegacy,
+  });
+  const legacy = { ...completed.pipelineState };
+  delete legacy.reviewCorrection;
+  delete legacy.pendingReviewCorrection;
+
+  const migrated = migratePlanExecutionStateV10({ pipelineState: legacy });
+  const failedMigrated = migratePlanExecutionStateV10({
+    pipelineState: { ...legacy, workflowState: "FAILED" },
+  });
+
+  assert.equal(activeMigrated.workflowState, "COMMIT");
+  assert.deepEqual(activeMigrated.finalizationResult, active.finalizationResult);
+  assert.deepEqual(activeMigrated.reviewResult, active.reviewResult);
+  assert.equal(activeMigrated.reviewCorrection, null);
+  assert.equal(activeMigrated.pendingReviewCorrection, null);
+  assert.doesNotThrow(() => normalizePipelineState(activeMigrated));
+  assert.equal(migrated.workflowState, "DONE");
+  assert.equal(migrated.reviewCorrection, null);
+  assert.equal(migrated.pendingReviewCorrection, null);
+  assert.deepEqual(migrated.finalizationResult, completed.pipelineState.finalizationResult);
+  assert.deepEqual(migrated.reviewResult, completed.pipelineState.reviewResult);
+  assert.doesNotThrow(() => normalizePipelineState(migrated));
+  assert.equal(failedMigrated.workflowState, "FAILED");
+  assert.equal(failedMigrated.reviewCorrection, null);
+  assert.equal(failedMigrated.pendingReviewCorrection, null);
+  assert.doesNotThrow(() => normalizePipelineState(failedMigrated));
 });
 
 test("migrates version-6 execution state with no finalization correction", () => {
@@ -2068,6 +2113,32 @@ function persistedFinalizationCorrection(attempt, field, overrides = {}) {
   };
 }
 
+function persistedReviewCorrection(field, overrides = {}) {
+  return {
+    attempt: 1,
+    step: 1,
+    contentFingerprint: "a".repeat(64),
+    validationInfrastructureFingerprint: "b".repeat(64),
+    diagnostics: [
+      {
+        role: "reviewer",
+        phase: "review",
+        contract: "review",
+        field,
+        constraint: "review-contract",
+      },
+    ],
+    ...overrides,
+  };
+}
+
+function invalidReviewStatus() {
+  return {
+    ...reviewApproved(),
+    status: "FINDINGS",
+  };
+}
+
 function reviewFindings(...ids) {
   return {
     status: "FINDINGS",
@@ -2660,7 +2731,7 @@ async function createFixture(
     revision: 1,
     runId,
     pipelineId: "plan-execution",
-    pipelineStateVersion: 10,
+    pipelineStateVersion: 11,
     projectPath,
     taskPath,
     roles: {
@@ -3002,7 +3073,7 @@ async function createFixture(
   ) {
     currentRun = {
       ...currentRun,
-      pipelineStateVersion: 10,
+      pipelineStateVersion: 11,
       pipelineState,
       pause,
       revision: currentRun.revision + 1,
@@ -4765,6 +4836,477 @@ test("scopes finalization correction attempts to the current commit step", async
   assert.deepEqual(corrections, [1, 2]);
 });
 
+test("corrects invalid final review normalization without retaining rejected values", async (t) => {
+  const sensitiveMarker = "DO_NOT_PERSIST_REJECTED_REVIEW_VALUE";
+  const fixture = await createFixture(t, {
+    workReviewer: [
+      {
+        ...invalidReviewStatus(),
+        evidence: [sensitiveMarker],
+      },
+      reviewApproved(),
+    ],
+  });
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  const correctionTransition = fixture.transitions.find(
+    ({ options }) => options.activity?.kind === "review-correction",
+  );
+  const correction = correctionTransition.patch.pipelineState.reviewCorrection;
+  assert.equal(correction.attempt, 1);
+  assert.equal(correction.step, 1);
+  assert.equal(
+    correction.contentFingerprint,
+    correctionTransition.patch.pipelineState.finalizedFingerprint,
+  );
+  assert.equal(
+    correction.validationInfrastructureFingerprint,
+    correctionTransition.patch.pipelineState.finalizationResult
+      .validationInfrastructureFingerprint,
+  );
+  assert.deepEqual(
+    correctionTransition.patch.pipelineState.finalizationResult,
+    completed.pipelineState.finalizationResult,
+  );
+  assert.deepEqual(correction.diagnostics, [
+    {
+      role: "reviewer",
+      phase: "review",
+      contract: "review",
+      field: "evidence",
+      constraint: "empty-for-review",
+    },
+  ]);
+  const reviewCalls = fixture.calls.reviewer.filter(
+    ({ schema }) =>
+      schema.type === "object" && schema.properties?.validationChange,
+  );
+  assert.equal(reviewCalls.length, 2);
+  assert.equal(reviewCalls[0].access, "read-only");
+  assert.equal(reviewCalls[1].access, "read-only");
+  assert.equal(reviewCalls[0].schema, reviewCalls[1].schema);
+  assert.equal(reviewCalls[1].session, undefined);
+  assert.match(reviewCalls[1].prompt, /pending read-only correction/u);
+  assert.match(reviewCalls[1].recoveryPrompt, /Candidate validation tuple/u);
+  assert.doesNotMatch(reviewCalls[1].prompt, new RegExp(sensitiveMarker, "u"));
+  assert.doesNotMatch(
+    JSON.stringify(fixture.currentRun),
+    new RegExp(sensitiveMarker, "u"),
+  );
+  assert.doesNotMatch(
+    JSON.stringify(fixture.transitions),
+    new RegExp(sensitiveMarker, "u"),
+  );
+});
+
+test("corrects a classified final Reviewer structured-output failure", async (t) => {
+  const sensitiveMarker = "DO_NOT_PERSIST_REVIEW_PROVIDER_OUTPUT";
+  let rejected = false;
+  const fixture = await createFixture(t, {
+    onRoleRun(role, request) {
+      if (
+        role === "reviewer" &&
+        request.prompt.includes("Review the changes") &&
+        !rejected
+      ) {
+        rejected = true;
+        const error = new Error(sensitiveMarker);
+        error.code = "ERR_TEST_REVIEW_OUTPUT";
+        error.failureClass = "structured-output";
+        error.providerOutput = sensitiveMarker;
+        throw error;
+      }
+    },
+    workReviewer: [reviewApproved()],
+  });
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  const correction = fixture.transitions.find(
+    ({ options }) => options.activity?.kind === "review-correction",
+  ).patch.pipelineState.reviewCorrection;
+  assert.deepEqual(correction.diagnostics, [
+    {
+      role: "reviewer",
+      phase: "review",
+      contract: "review",
+      field: "result",
+      constraint: "provider-structured-output",
+    },
+  ]);
+  assert.doesNotMatch(
+    JSON.stringify(fixture.currentRun),
+    new RegExp(sensitiveMarker, "u"),
+  );
+  assert.doesNotMatch(
+    JSON.stringify(fixture.transitions),
+    new RegExp(sensitiveMarker, "u"),
+  );
+});
+
+test("routes corrected final review findings, validation changes, and product decisions", async (t) => {
+  await t.test("findings", async (t) => {
+    const fixture = await createFixture(t, {
+      workReviewer: [
+        invalidReviewStatus(),
+        reviewFindings("R1"),
+        reviewApproved(),
+      ],
+      workWorker: [
+        implementationCompleted(),
+        finalizationPassed(),
+        resolution({ id: "R1", decision: "FIX" }),
+        finalizationPassed(),
+      ],
+    });
+
+    const completed = await fixture.run();
+
+    assert.equal(completed.pipelineState.workflowState, "DONE");
+    assert.ok(
+      fixture.transitions.some(
+        ({ patch }) =>
+          patch?.pipelineState?.workflowState === "RESOLVE_FINDINGS" &&
+          patch.pipelineState.findings?.[0]?.id === "R1",
+      ),
+    );
+  });
+
+  await t.test("validation change", async (t) => {
+    const fixture = await createFixture(t, {
+      async onRoleRun(role, request) {
+        if (
+          role === "worker" &&
+          request.prompt.includes("Implement the changes")
+        ) {
+          await writeFile(
+            join(request.cwd, "package.json"),
+            '{"scripts":{"test":"node --test --test-reporter=spec"}}\n',
+          );
+        }
+      },
+      workReviewer: [reviewApproved(), reviewApproved("ACCEPTED")],
+    });
+
+    const completed = await fixture.run();
+
+    assert.equal(completed.pipelineState.workflowState, "DONE");
+    assert.equal(
+      completed.pipelineState.reviewResult.validationChange,
+      "ACCEPTED",
+    );
+    const correction = fixture.transitions.find(
+      ({ options }) => options.activity?.kind === "review-correction",
+    ).patch.pipelineState.reviewCorrection;
+    assert.deepEqual(correction.diagnostics, [
+      {
+        role: "reviewer",
+        phase: "review",
+        contract: "review",
+        field: "validationChange",
+        constraint: "matches-finalization-change",
+      },
+    ]);
+  });
+
+  await t.test("product decision", async (t) => {
+    const processLoss = new Error(
+      "Process stopped between correction and product-decision persistence.",
+    );
+    const fixture = await createFixture(t, {
+      workReviewer: [invalidReviewStatus(), reviewProductDecision()],
+    });
+    const transition = fixture.runtime.transition;
+    fixture.runtime.transition = (patch, options) => {
+      const next = patch.pipelineState;
+      if (
+        next.workflowState === "REVIEW" &&
+        next.reviewCorrection !== null &&
+        next.pendingReviewCorrection === null
+      ) {
+        throw processLoss;
+      }
+      return transition(patch, options);
+    };
+
+    const paused = await fixture.run();
+
+    assert.equal(paused.pause.reason, "product_decision_required");
+    assert.equal(paused.pipelineState.pendingReviewCorrection, null);
+    assert.equal(paused.pipelineState.reviewCorrection, null);
+    const correctionState = fixture.transitions.find(
+      ({ options }) => options.activity?.kind === "review-correction",
+    ).patch.pipelineState;
+    assert.throws(
+      () =>
+        normalizePipelineState({
+          ...correctionState,
+          pendingReviewCorrection: null,
+        }),
+      /missing its pending marker/u,
+    );
+  });
+
+  await t.test("withdrawn rejected validation finding", async (t) => {
+    const fixture = await createFixture(t, {
+      async onRoleRun(role, request) {
+        if (
+          role === "worker" &&
+          request.prompt.includes("Implement the changes")
+        ) {
+          await writeFile(
+            join(request.cwd, "package.json"),
+            '{"scripts":{"test":"node --test --test-reporter=spec"}}\n',
+          );
+        }
+      },
+      workReviewer: [
+        invalidReviewStatus(),
+        reviewRejected("R1"),
+        reconsideration("WITHDRAW", "R1"),
+        reviewApproved("ACCEPTED"),
+      ],
+      workWorker: [
+        implementationCompleted(),
+        finalizationPassed(),
+        resolution({ id: "R1", decision: "DISPUTE" }),
+      ],
+    });
+
+    const completed = await fixture.run();
+
+    assert.equal(completed.pipelineState.workflowState, "DONE");
+    const reReview = fixture.transitions.find(
+      ({ patch, options }) =>
+        options.activity?.kind === "disputes-reconsidered" &&
+        patch.pipelineState.workflowState === "REVIEW",
+    ).patch.pipelineState;
+    assert.notEqual(reReview.reviewCorrection, null);
+    assert.equal(reReview.pendingReviewCorrection, null);
+    assert.equal(reReview.reviewResult.validationChange, "REJECTED");
+    assert.equal(reReview.reviewedFingerprint, reReview.finalizedFingerprint);
+    assert.equal(
+      fixture.transitions.filter(
+        ({ options }) => options.activity?.kind === "review-correction",
+      ).length,
+      1,
+    );
+  });
+});
+
+test("pauses repeated invalid final review output and deliberately retries it", async (t) => {
+  const fixture = await createFixture(t, {
+    workReviewer: [
+      invalidReviewStatus(),
+      invalidReviewStatus(),
+      reviewApproved(),
+    ],
+  });
+
+  const paused = await fixture.run();
+
+  assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(paused.pause.reason, "review_output_invalid");
+  assert.equal(paused.pause.resumeState, "REVIEW");
+  assert.equal(paused.pipelineState.reviewCorrection.attempt, 1);
+  assert.equal(paused.pipelineState.pendingReviewCorrection.attempt, 1);
+  assert.equal(
+    fixture.transitions.filter(
+      ({ options }) => options.activity?.kind === "review-correction",
+    ).length,
+    1,
+  );
+  const projection = planExecutionPipeline.projections.pause(paused);
+  assert.deepEqual(projection.nextActions, [
+    { type: "resume", action: null },
+  ]);
+  assert.match(projection.evidence[0], /findings/u);
+  assert.doesNotMatch(JSON.stringify(projection), /invalidReviewStatus/u);
+
+  const completed = await fixture.run({}, null);
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.pipelineState.reviewCorrection, null);
+  assert.equal(completed.pipelineState.pendingReviewCorrection, null);
+  const correctionCalls = fixture.calls.reviewer.filter(({ prompt }) =>
+    prompt.includes("pending read-only correction"),
+  );
+  assert.equal(correctionCalls.length, 2);
+  assert.ok(correctionCalls.every(({ session }) => session === undefined));
+});
+
+test("resumes a pending final review correction across backend unavailability", async (t) => {
+  let unavailable = false;
+  const fixture = await createFixture(t, {
+    onRoleRun(role, request) {
+      if (
+        role === "reviewer" &&
+        request.prompt.includes("pending read-only correction") &&
+        !unavailable
+      ) {
+        unavailable = true;
+        const error = new Error("DO_NOT_PERSIST_BACKEND_OUTPUT");
+        error.code = "ERR_TEST_BACKEND_UNAVAILABLE";
+        error.recoverable = true;
+        throw error;
+      }
+    },
+    workReviewer: [invalidReviewStatus(), reviewApproved()],
+  });
+
+  const paused = await fixture.run();
+
+  assert.equal(paused.pause.reason, "backend_unavailable");
+  assert.equal(paused.pause.resumeState, "REVIEW");
+  assert.equal(paused.pipelineState.reviewCorrection.attempt, 1);
+  assert.equal(paused.pipelineState.pendingReviewCorrection.attempt, 1);
+  assert.doesNotMatch(JSON.stringify(fixture.currentRun), /DO_NOT_PERSIST/u);
+
+  const completed = await fixture.run({}, null);
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.pipelineState.reviewCorrection, null);
+  assert.equal(completed.pipelineState.pendingReviewCorrection, null);
+});
+
+test("reconstructs an interrupted pending final review correction read-only", async (t) => {
+  const processLoss = new Error("Process stopped during review correction.");
+  let interrupted = false;
+  let processStopped = false;
+  const fixture = await createFixture(t, {
+    onRoleRun(role, request) {
+      if (
+        role === "reviewer" &&
+        request.prompt.includes("pending read-only correction") &&
+        !interrupted
+      ) {
+        interrupted = true;
+        processStopped = true;
+        throw processLoss;
+      }
+    },
+    workReviewer: [invalidReviewStatus(), reviewApproved()],
+  });
+  const finishAgentTurn = fixture.runtime.finishAgentTurn;
+  const transition = fixture.runtime.transition;
+  fixture.runtime.finishAgentTurn = async (turn) => {
+    if (processStopped) {
+      throw processLoss;
+    }
+    return finishAgentTurn(turn);
+  };
+  fixture.runtime.transition = async (patch, options) => {
+    if (processStopped) {
+      throw processLoss;
+    }
+    return transition(patch, options);
+  };
+
+  await assert.rejects(fixture.run(), (cause) => cause === processLoss);
+  assert.deepEqual(fixture.currentRun.activeTurn, {
+    role: "reviewer",
+    phase: "review",
+  });
+  assert.equal(fixture.currentRun.pipelineState.reviewCorrection.attempt, 1);
+  assert.equal(
+    fixture.currentRun.pipelineState.pendingReviewCorrection.attempt,
+    1,
+  );
+
+  processStopped = false;
+  fixture.runtime.finishAgentTurn = finishAgentTurn;
+  fixture.runtime.transition = transition;
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  const correctionCalls = fixture.calls.reviewer.filter(({ prompt }) =>
+    prompt.includes("pending read-only correction"),
+  );
+  assert.equal(correctionCalls.length, 2);
+  assert.ok(correctionCalls.every(({ access }) => access === "read-only"));
+  assert.ok(correctionCalls.every(({ session }) => session === undefined));
+});
+
+test("rejects repository mutation and fingerprint drift during final review correction", async (t) => {
+  await t.test("read-only mutation", async (t) => {
+    const fixture = await createFixture(t, {
+      async onRoleRun(role, request) {
+        if (
+          role === "reviewer" &&
+          request.prompt.includes("pending read-only correction")
+        ) {
+          await writeFile(join(request.cwd, "source.js"), "review mutation\n");
+        }
+      },
+      workReviewer: [invalidReviewStatus(), reviewApproved()],
+    });
+
+    const paused = await fixture.run();
+
+    assert.equal(paused.pause.reason, "read_only_agent_mutated_repository");
+    assert.equal(paused.pipelineState.currentStep, null);
+    assert.equal(paused.pipelineState.reviewCorrection, null);
+    assert.equal(paused.pipelineState.pendingReviewCorrection, null);
+  });
+
+  await t.test("fingerprint drift", async (t) => {
+    let drifted = false;
+    const fixture = await createFixture(t, {
+      async onTransition(run, _patch, options) {
+        if (!drifted && options.activity?.kind === "review-correction") {
+          drifted = true;
+          await writeFile(join(run.projectPath, "source.js"), "external drift\n");
+        }
+      },
+      workReviewer: [invalidReviewStatus()],
+    });
+
+    const paused = await fixture.run();
+
+    assert.equal(paused.pause.reason, "unsafe_git_state");
+    assert.equal(paused.pause.code, "ERR_READ_ONLY_REPOSITORY_CHANGED");
+    assert.equal(paused.pipelineState.reviewCorrection, null);
+    assert.equal(paused.pipelineState.pendingReviewCorrection, null);
+    assert.equal(
+      fixture.calls.reviewer.filter(({ prompt }) =>
+        prompt.includes("Review the changes"),
+      ).length,
+      1,
+    );
+  });
+
+  await t.test("validation-infrastructure fingerprint drift", async (t) => {
+    let drifted = false;
+    const fixture = await createFixture(t, {
+      onTransition(_run, _patch, options) {
+        if (options.activity?.kind === "review-correction") {
+          drifted = true;
+        }
+      },
+      workReviewer: [invalidReviewStatus()],
+    });
+    const validationInfrastructureFingerprint =
+      fixture.runtime.git.validationInfrastructureFingerprint;
+    fixture.runtime.git.validationInfrastructureFingerprint = (options) =>
+      drifted
+        ? "c".repeat(64)
+        : validationInfrastructureFingerprint(options);
+
+    const paused = await fixture.run();
+
+    assert.equal(paused.pause.reason, "unsafe_git_state");
+    assert.equal(
+      paused.pause.code,
+      "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED",
+    );
+    assert.equal(paused.pipelineState.reviewCorrection, null);
+    assert.equal(paused.pipelineState.pendingReviewCorrection, null);
+  });
+});
+
 test("corrects, blocks, and completes runner-trusted validation", async (t) => {
   const trustedValidation = trustedValidationSnapshot();
   const requiredChecks = [
@@ -6321,6 +6863,42 @@ test("rejects inconsistent persisted workflow state", async (t) => {
     );
     run.pipelineState.finalizationCorrections = [first, second];
     run.pipelineState.pendingFinalizationCorrection = first;
+  });
+
+  await rejectsState("pending review correction without history", (run) => {
+    const correction = persistedReviewCorrection("result", {
+      contentFingerprint: run.pipelineState.finalizedFingerprint,
+      validationInfrastructureFingerprint:
+        run.pipelineState.finalizationResult
+          .validationInfrastructureFingerprint,
+    });
+    run.pipelineState.pendingReviewCorrection = correction;
+  });
+
+  await rejectsState("review correction with retained rejected output", (run) => {
+    run.pipelineState.reviewCorrection = {
+      ...persistedReviewCorrection("result", {
+        contentFingerprint: run.pipelineState.finalizedFingerprint,
+        validationInfrastructureFingerprint:
+          run.pipelineState.finalizationResult
+            .validationInfrastructureFingerprint,
+      }),
+      rejectedOutput: "DO_NOT_PERSIST_REJECTED_REVIEW_OUTPUT",
+    };
+  });
+
+  await rejectsState("pending review correction with another scope", (run) => {
+    const correction = persistedReviewCorrection("result", {
+      contentFingerprint: run.pipelineState.finalizedFingerprint,
+      validationInfrastructureFingerprint:
+        run.pipelineState.finalizationResult
+          .validationInfrastructureFingerprint,
+    });
+    run.pipelineState.reviewCorrection = correction;
+    run.pipelineState.pendingReviewCorrection = {
+      ...correction,
+      validationInfrastructureFingerprint: "c".repeat(64),
+    };
   });
 
   await rejectsState("frozen compatibility re-entry", (run) => {
@@ -8566,9 +9144,12 @@ test("requires Reviewer acceptance for planned validation-infrastructure changes
         );
       }
     },
+    workReviewer: [reviewApproved(), reviewApproved()],
   });
-  await assert.rejects(
-    rejected.run(),
-    /inconsistent validation-change decision/u,
-  );
+  const paused = await rejected.run();
+  assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(paused.pause.reason, "review_output_invalid");
+  assert.deepEqual(paused.pause.evidence, [
+    "Reviewer field validationChange violated matches-finalization-change.",
+  ]);
 });

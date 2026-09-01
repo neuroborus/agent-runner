@@ -33,6 +33,7 @@ export {
   NO_DELEGATION_INSTRUCTIONS,
   PLAN_COMPATIBILITY_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
+  REVIEW_CORRECTION_INSTRUCTIONS,
   REVIEW_INSTRUCTIONS,
   STAGNATION_INSTRUCTIONS,
 } from "./prompts.js";
@@ -101,6 +102,7 @@ const RETRYABLE_PAUSE_REASONS = new Set([
   "finalization_skill_invalid",
   "finalization_skill_missing",
   "local_artifacts_not_ignored",
+  "review_output_invalid",
   "unsafe_git_state",
 ]);
 const RESUMABLE_WORKFLOW_STATES = new Set([
@@ -150,6 +152,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "A material product decision is required before execution can continue.",
   read_only_agent_mutated_repository:
     "A read-only turn contaminated the repository; abandon this run and restart from an uncontaminated worktree.",
+  review_output_invalid:
+    "The final Reviewer result remains invalid and requires an explicit read-only retry.",
   task_input_changed: "A task or plan input changed after the run began.",
   unexpected_git_identity_change:
     "The effective Git identity changed during execution.",
@@ -167,6 +171,7 @@ const PUBLIC_DETAIL_REASONS = new Set([
   "finalization_skill_invalid",
   "finalization_skill_missing",
   "plan_revision_required",
+  "review_output_invalid",
 ]);
 
 function publicCode(value) {
@@ -394,6 +399,7 @@ function validateResumeAction(run, action) {
             "finalization_cannot_pass",
             "finalization_skill_invalid",
             "finalization_skill_missing",
+            "review_output_invalid",
           ].includes(run.pause?.reason) &&
             RESUMABLE_WORKFLOW_STATES.has(run.pause?.resumeState)))))
   ) {
@@ -853,9 +859,17 @@ export function migratePlanExecutionStateV9(run) {
   });
 }
 
+export function migratePlanExecutionStateV10(run) {
+  return Object.freeze({
+    ...run.pipelineState,
+    reviewCorrection: null,
+    pendingReviewCorrection: null,
+  });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
-  stateVersion: 10,
+  stateVersion: 11,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -866,6 +880,7 @@ export const planExecutionPipeline = Object.freeze({
     7: migratePlanExecutionStateV7,
     8: migratePlanExecutionStateV8,
     9: migratePlanExecutionStateV9,
+    10: migratePlanExecutionStateV10,
   }),
   roles: ROLES,
   settings: SETTINGS,

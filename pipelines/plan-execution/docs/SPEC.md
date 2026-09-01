@@ -387,6 +387,10 @@ Persist at least:
   pending attempt, containing only attempt number, step, bounded guidance and
   content-fingerprint scope, and bounded role, phase, contract, field, and
   constraint diagnostic batches;
+- the current step's bounded final-Reviewer correction record and optional
+  pending attempt, scoped to the finalized content and validation-
+  infrastructure fingerprints and containing only attempt number, step, and
+  bounded Reviewer/review field-and-constraint diagnostics;
 - exact per-check finalization evidence and the fingerprint-bound Reviewer
   validation-change decision;
 - the resolved runner-trusted command snapshot, command/configuration
@@ -517,6 +521,19 @@ per phase and contract. A pending batch survives interruption and is cleared
 only after a valid complete replacement is accepted; repeated or still-invalid
 output fails closed. Rejected values, commands, paths, provider output, and
 transcripts remain outside durable state and public activity.
+
+Pipeline state version 11 adds a nullable final-Reviewer correction record and
+a matching nullable pending marker. The version-10 migration initializes both
+to `null` without moving workflow position, changing accepted finalization or
+review evidence, reviving terminal runs, or inferring rejected output that was
+never persisted. A record contains only attempt `1`, the current step, the
+finalized content fingerprint, the validation-infrastructure fingerprint, and
+bounded Reviewer/review field-and-constraint diagnostics. It contains no
+rejected values, findings, commands, paths, provider output, prompts, or
+transcripts. The pending marker survives interruption and backend
+unavailability and is cleared only after a valid replacement is routed. A
+still-invalid replacement retains the latest bounded pending diagnostic for an
+explicit read-only retry without creating another automatic attempt.
 
 Common run-envelope version 3 independently adds nullable bounded active
 provider role and phase. Version-1 and version-2 envelopes project it as `null`
@@ -1696,6 +1713,36 @@ The runner must not implement fuzzy semantic matching of findings in V1.
 
 When review finishes successfully, persist the reviewed content fingerprint.
 
+If the final `REVIEW_SCHEMA` provider reports the shared structured-output
+failure class, deterministic normalization rejects the result, or the
+validation-change decision conflicts with accepted finalization evidence, map
+the failure to bounded Reviewer/review field-and-constraint diagnostics. After
+the first invalid result, durably record automatic attempt `1` and publish only
+one redacted `review-correction` activity. Reconstruct the complete review
+request from durable task, plan, context, prior-decision, finalization, and
+fingerprint state, then invoke a fresh read-only Reviewer session with the
+unchanged schema. Never rely on or continue the rejected native session.
+
+Before accepting the replacement, reapply input, repository, read-only, Git-
+control, content-fingerprint, validation-infrastructure-fingerprint, and
+finalization-evidence guards. Preserve accepted finalization evidence while
+that complete scope is unchanged. Content or control drift invalidates the
+correction scope and follows the existing safe reconciliation path. A valid
+replacement rejoins the ordinary approval, findings, validation-change, and
+product-decision routes.
+
+If the corrected result remains invalid, pause at `review_output_invalid` with
+resume state `REVIEW`, bounded public field-and-constraint evidence, and one
+explicit null retry action. That retry reconstructs and reruns the pending
+fresh-session, read-only correction without incrementing attempt `1`; another
+invalid result pauses again. It cannot approve work, accept findings, alter
+finalization evidence, or bypass fingerprint, Git, finding-resolution, or
+commit-authorization gates. Interruption or backend unavailability before or
+during correction retains the pending attempt for the same reconstruction and
+does not replay accepted progress or require a native session. Rejected values,
+findings, commands, paths, provider output, prompts, and transcripts are never
+persisted or published.
+
 ### 13.4 Resolve findings
 
 The Worker receives all currently open findings together.
@@ -1998,6 +2045,7 @@ no_progress
 finalization_skill_missing
 finalization_skill_invalid
 finalization_cannot_pass
+review_output_invalid
 read_only_agent_mutated_repository
 unexpected_git_ref_change
 unexpected_remote_configuration_change
@@ -2315,6 +2363,15 @@ At minimum cover:
     one-entry batches, adjacent staging-dependent commands share one correction,
     and a pending multi-diagnostic batch resumes without replay or rejected
     content retention.
+66. final Reviewer provider, normalization, and validation-change consistency
+    failures receive one durable fresh-session read-only correction; valid
+    approval, findings, validation-change, and product-decision replacements
+    rejoin their existing routes; and repeated invalid output pauses for an
+    explicit retry with no rejected-content retention.
+67. pending final Reviewer correction survives interruption and backend
+    unavailability without recounting, rejects read-only mutation and content
+    or validation-infrastructure fingerprint drift, and version-10 active and
+    terminal runs migrate without reconstructing unavailable output.
 
 Real Codex/Claude smoke tests should be opt-in integration tests.
 
@@ -2448,6 +2505,11 @@ Do not build:
     loaded pipeline ID/state version, is frozen at server startup, and fails
     before lease acquisition, recovery, or migration without changing durable
     run or idempotency state.
+40. An invalid final Reviewer contract consumes only one automatic read-only
+    correction for its exact finalized scope. A still-invalid result pauses for
+    explicit retry, only bounded field-and-constraint diagnostics are durable
+    or public, and no correction path weakens finalization, independent review,
+    findings, fingerprints, Git safety, or commit authorization.
 
 ---
 

@@ -18,6 +18,7 @@ import {
   IMPLEMENTATION_INSTRUCTIONS,
   PLAN_COMPATIBILITY_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
+  REVIEW_CORRECTION_INSTRUCTIONS,
   REVIEW_INSTRUCTIONS,
   STAGNATION_INSTRUCTIONS,
 } from "../src/index.js";
@@ -87,6 +88,16 @@ test("bootstrap instructions preserve independent evidence and arbitration", () 
   assert.match(
     FINALIZATION_CORRECTION_INSTRUCTIONS,
     /repeated diagnostic or another invalid result after that finite allowance fails closed/u,
+  );
+  assert.match(REVIEW_CORRECTION_INSTRUCTIONS, /pending read-only correction/u);
+  assert.match(REVIEW_CORRECTION_INSTRUCTIONS, /same review schema/u);
+  assert.match(
+    REVIEW_CORRECTION_INSTRUCTIONS,
+    /Do not repeat or quote the rejected result, findings, commands, paths, provider output, prompt, or transcript/u,
+  );
+  assert.match(
+    REVIEW_CORRECTION_INSTRUCTIONS,
+    /still-invalid replacement pauses for an explicit retry/u,
   );
 });
 
