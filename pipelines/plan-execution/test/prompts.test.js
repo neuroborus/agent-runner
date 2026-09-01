@@ -52,9 +52,14 @@ test("bootstrap instructions preserve independent evidence and arbitration", () 
   }
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /one read-only correction/u);
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /complete replacement/u);
+  assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /every violation/u);
+  assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /diagnostic batch/u);
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /ordinary clarification question/u);
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /PRODUCT_DECISION_REQUIRED/u);
-  assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /repeated invalid result fails closed/u);
+  assert.match(
+    BOOTSTRAP_CORRECTION_INSTRUCTIONS,
+    /repeated or still-invalid result fails closed/u,
+  );
   assert.match(
     FINALIZATION_CORRECTION_INSTRUCTIONS,
     /bounded read-only correction/u,

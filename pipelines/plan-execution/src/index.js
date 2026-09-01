@@ -829,9 +829,33 @@ export function migratePlanExecutionStateV8(run) {
   });
 }
 
+function upgradeBootstrapCorrection(correction) {
+  if (correction === null) {
+    return null;
+  }
+  const { attempt, ...diagnostic } = correction;
+  return Object.freeze({
+    attempt,
+    diagnostics: Object.freeze([Object.freeze(diagnostic)]),
+  });
+}
+
+export function migratePlanExecutionStateV9(run) {
+  const current = run.pipelineState;
+  return Object.freeze({
+    ...current,
+    bootstrapCorrections: Object.freeze(
+      current.bootstrapCorrections.map(upgradeBootstrapCorrection),
+    ),
+    pendingBootstrapCorrection: upgradeBootstrapCorrection(
+      current.pendingBootstrapCorrection,
+    ),
+  });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
-  stateVersion: 9,
+  stateVersion: 10,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -841,6 +865,7 @@ export const planExecutionPipeline = Object.freeze({
     6: migratePlanExecutionStateV6,
     7: migratePlanExecutionStateV7,
     8: migratePlanExecutionStateV8,
+    9: migratePlanExecutionStateV9,
   }),
   roles: ROLES,
   settings: SETTINGS,

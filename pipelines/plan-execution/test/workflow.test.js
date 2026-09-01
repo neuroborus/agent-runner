@@ -28,6 +28,7 @@ import {
   migratePlanExecutionStateV6,
   migratePlanExecutionStateV7,
   migratePlanExecutionStateV8,
+  migratePlanExecutionStateV9,
   planExecutionPipeline,
   runPlanExecution,
 } from "../src/index.js";
@@ -84,6 +85,13 @@ const WRAPPED_BOOTSTRAP_SCHEMAS = new Set([
   BOOTSTRAP_RECONCILIATION_SCHEMA,
   BOOTSTRAP_ARBITRATION_SCHEMA,
 ]);
+
+function bootstrapCorrection(diagnostic) {
+  return {
+    attempt: 1,
+    diagnostics: [diagnostic],
+  };
+}
 
 function checkResults(status, evidence = "The fixture check completed.") {
   return REQUIRED_CHECKS.map(({ id, command }) => ({
@@ -175,7 +183,10 @@ function migrateVersionOneState(state) {
   const versionEight = migratePlanExecutionStateV7({
     pipelineState: versionSeven,
   });
-  return migratePlanExecutionStateV8({ pipelineState: versionEight });
+  const versionNine = migratePlanExecutionStateV8({
+    pipelineState: versionEight,
+  });
+  return migratePlanExecutionStateV9({ pipelineState: versionNine });
 }
 
 async function prepareValidationMigration(t, fixtureOptions) {
@@ -784,7 +795,39 @@ test("migrates version-3 execution state with no consumed bootstrap corrections"
   assert.deepEqual(migrated.bootstrapCorrections, []);
   assert.equal(migrated.pendingBootstrapCorrection, null);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(planExecutionPipeline.stateVersion, 9);
+  assert.equal(planExecutionPipeline.stateVersion, 10);
+});
+
+test("migrates a consumed version-9 bootstrap diagnostic losslessly", async (t) => {
+  const fixture = await createFixture(t, {
+    worker: [
+      clarificationReady(),
+      {
+        ...bootstrapReady("Worker"),
+        requiredChecks: [
+          { ...REQUIRED_CHECKS[0], unexpected: "rejected" },
+        ],
+      },
+      bootstrapReady("Corrected Worker"),
+      reconciliationResolved(),
+    ],
+  });
+  const completed = await fixture.run();
+  const [currentCorrection] = completed.pipelineState.bootstrapCorrections;
+  const [diagnostic] = currentCorrection.diagnostics;
+  const legacyCorrection = {
+    attempt: currentCorrection.attempt,
+    ...diagnostic,
+  };
+  const legacy = {
+    ...completed.pipelineState,
+    bootstrapCorrections: [legacyCorrection],
+  };
+
+  const migrated = migratePlanExecutionStateV9({ pipelineState: legacy });
+
+  assert.deepEqual(migrated, completed.pipelineState);
+  assert.doesNotThrow(() => normalizePipelineState(migrated));
 });
 
 test("migrates version-6 execution state with no finalization correction", () => {
@@ -1166,8 +1209,11 @@ test("pauses on capacity exhaustion during validation migration", async (t) => {
   });
 });
 
-test("corrects staging-dependent validation-migration checks", async (t) => {
-  const unsafeCommand = "git diff --cached --check";
+test("batches staging-dependent validation-migration checks", async (t) => {
+  const unsafeCommands = [
+    "git diff --cached --check",
+    "git status --short",
+  ];
   const fixture = await prepareValidationMigration(t, {
     workReviewer: [bootstrapReady("Migrating Reviewer"), reviewApproved()],
     workWorker: [
@@ -1175,7 +1221,10 @@ test("corrects staging-dependent validation-migration checks", async (t) => {
       finalizationPassed(),
       {
         ...bootstrapReady("Migrating Worker"),
-        requiredChecks: [{ id: "C1", command: unsafeCommand }],
+        requiredChecks: unsafeCommands.map((command, index) => ({
+          id: `C${index + 1}`,
+          command,
+        })),
       },
       bootstrapReady("Corrected Migrating Worker"),
       reconciliationResolved(),
@@ -1189,11 +1238,13 @@ test("corrects staging-dependent validation-migration checks", async (t) => {
   assert.deepEqual(completed.pipelineState.bootstrapCorrections, [
     {
       attempt: 1,
-      role: "worker",
-      phase: "validation-migration",
-      contract: "bootstrap",
-      field: "requiredChecks[0].command",
-      constraint: "staging-independent-validation-command",
+      diagnostics: unsafeCommands.map((_, index) => ({
+        role: "worker",
+        phase: "validation-migration",
+        contract: "bootstrap",
+        field: `requiredChecks[${index}].command`,
+        constraint: "staging-independent-validation-command",
+      })),
     },
   ]);
   assert.doesNotMatch(
@@ -1290,7 +1341,7 @@ test("redacts precise diagnostics across validation-migration contracts", async 
 
       assert.equal(completed.pipelineState.workflowState, "DONE");
       assert.deepEqual(completed.pipelineState.bootstrapCorrections, [
-        { attempt: 1, ...testCase.diagnostic },
+        bootstrapCorrection(testCase.diagnostic),
       ]);
       assert.doesNotMatch(
         JSON.stringify(fixture.transitions),
@@ -2609,7 +2660,7 @@ async function createFixture(
     revision: 1,
     runId,
     pipelineId: "plan-execution",
-    pipelineStateVersion: 9,
+    pipelineStateVersion: 10,
     projectPath,
     taskPath,
     roles: {
@@ -2951,7 +3002,7 @@ async function createFixture(
   ) {
     currentRun = {
       ...currentRun,
-      pipelineStateVersion: 9,
+      pipelineStateVersion: 10,
       pipelineState,
       pause,
       revision: currentRun.revision + 1,
@@ -3360,12 +3411,21 @@ test("derives one stable complete inventory from independent role evidence", asy
   ]);
 });
 
-test("corrects staging-dependent bootstrap checks before implementation", async (t) => {
-  const unsafeCommand = "git add -A && git diff --cached --check";
+test("batches adjacent staging-dependent bootstrap checks", async (t) => {
+  const unsafeCommands = [
+    "git add -A && git diff --cached --check",
+    "git status --short",
+  ];
   const unsafeBootstrap = {
     ...bootstrapReady("Worker"),
     summary: "Worker incorrectly requires a staged handoff.",
-    requiredChecks: [{ id: "C1", command: unsafeCommand }],
+    requiredChecks: Array.from({ length: 17 }, (_, index) => ({
+      id: `C${index + 1}`,
+      command:
+        index < 15
+          ? `node --test test/focused-${index + 1}.test.js`
+          : unsafeCommands[index - 15],
+    })),
   };
   const fixture = await createFixture(t, {
     worker: [
@@ -3377,7 +3437,9 @@ test("corrects staging-dependent bootstrap checks before implementation", async 
     onRoleRun(role, request) {
       if (role === "worker" && request.prompt.includes("Implement the changes")) {
         assert.doesNotMatch(request.prompt, /Established required-check inventory/u);
-        assert.doesNotMatch(request.prompt, new RegExp(unsafeCommand, "u"));
+        for (const command of unsafeCommands) {
+          assert.doesNotMatch(request.prompt, new RegExp(command, "u"));
+        }
       }
     },
   });
@@ -3388,18 +3450,29 @@ test("corrects staging-dependent bootstrap checks before implementation", async 
   assert.deepEqual(completed.pipelineState.bootstrapCorrections, [
     {
       attempt: 1,
-      role: "worker",
-      phase: "bootstrap",
-      contract: "bootstrap",
-      field: "requiredChecks[0].command",
-      constraint: "staging-independent-validation-command",
+      diagnostics: unsafeCommands.map((_, index) => ({
+        role: "worker",
+        phase: "bootstrap",
+        contract: "bootstrap",
+        field: `requiredChecks[${index + 15}].command`,
+        constraint: "staging-independent-validation-command",
+      })),
     },
   ]);
+  const correctionActivity = fixture.transitions.find(
+    ({ options }) => options.activity?.kind === "bootstrap-correction",
+  )?.options.activity;
+  assert.equal(
+    correctionActivity.message,
+    "worker must correct 2 bootstrap contract violations.",
+  );
   const correctionCall = fixture.calls.worker.find(({ prompt }) =>
-    prompt.includes("Correction diagnostic"),
+    prompt.includes("Correction diagnostic batch"),
   );
   assert.ok(correctionCall);
-  assert.doesNotMatch(correctionCall.prompt, new RegExp(unsafeCommand, "u"));
+  for (const command of unsafeCommands) {
+    assert.doesNotMatch(correctionCall.prompt, new RegExp(command, "u"));
+  }
 });
 
 test("fails closed when corrected bootstrap checks still depend on staging", async (t) => {
@@ -3488,14 +3561,13 @@ test(
 
     assert.equal(completed.pipelineState.workflowState, "DONE");
     assert.deepEqual(completed.pipelineState.bootstrapCorrections, [
-      {
-        attempt: 1,
+      bootstrapCorrection({
         role: "worker",
         phase: "bootstrap",
         contract: "bootstrap",
         field: "result",
         constraint: "semantic-contract",
-      },
+      }),
     ]);
     assert.equal(completed.pipelineState.pendingBootstrapCorrection, null);
     assert.match(fixture.calls.worker[2].prompt, /Correction diagnostic/u);
@@ -3575,21 +3647,20 @@ test("corrects one invalid Worker bootstrap result without retaining raw values"
 
   assert.equal(completed.pipelineState.workflowState, "DONE");
   assert.deepEqual(completed.pipelineState.bootstrapCorrections, [
-    {
-      attempt: 1,
+    bootstrapCorrection({
       role: "worker",
       phase: "bootstrap",
       contract: "bootstrap",
       field: "requiredChecks[0]",
       constraint: "exact-field-set",
-    },
+    }),
   ]);
   const correctionActivity = fixture.transitions.find(
     ({ options }) => options.activity?.kind === "bootstrap-correction",
   )?.options.activity;
   assert.match(
     correctionActivity.message,
-    /bootstrap field requiredChecks\[0\]/u,
+    /correct 1 bootstrap contract violation/u,
   );
   assert.match(
     fixture.calls.worker[2].prompt,
@@ -3613,14 +3684,13 @@ test("gives the independent Reviewer one bounded bootstrap correction", async (t
 
   assert.equal(completed.pipelineState.workflowState, "DONE");
   assert.deepEqual(completed.pipelineState.bootstrapCorrections, [
-    {
-      attempt: 1,
+    bootstrapCorrection({
       role: "reviewer",
       phase: "bootstrap",
       contract: "bootstrap",
       field: "summary",
       constraint: "concise-markdown-up-to-20000-characters",
-    },
+    }),
   ]);
   assert.match(fixture.calls.reviewer[1].prompt, /Correction diagnostic/u);
   assert.doesNotMatch(JSON.stringify(fixture.transitions), /DO_NOT_PERSIST/u);
@@ -3657,14 +3727,13 @@ test("corrects a symlink alias and preserves the canonical role-only path", asyn
 
   assert.equal(completed.pipelineState.workflowState, "DONE");
   assert.deepEqual(completed.pipelineState.bootstrapCorrections, [
-    {
-      attempt: 1,
+    bootstrapCorrection({
       role: "worker",
       phase: "bootstrap",
       contract: "bootstrap",
       field: "validationInfrastructure[0]",
       constraint: "existing-canonical-repository-file",
-    },
+    }),
   ]);
   assert.match(fixture.calls.worker[2].prompt, /validationInfrastructure\[0\]/u);
   assert.deepEqual(
@@ -3702,17 +3771,76 @@ test("corrects missing and directory validation-infrastructure paths", async (t)
 
       assert.equal(completed.pipelineState.workflowState, "DONE");
       assert.deepEqual(completed.pipelineState.bootstrapCorrections, [
-        {
-          attempt: 1,
+        bootstrapCorrection({
           role: "worker",
           phase: "bootstrap",
           contract: "bootstrap",
           field: "validationInfrastructure[0]",
           constraint: "existing-canonical-repository-file",
-        },
+        }),
       ]);
     });
   }
+});
+
+test("batches staging and inspectable bootstrap path violations without rejected values", async (t) => {
+  const sensitiveMarker = "DO_NOT_PERSIST_BOOTSTRAP_BATCH_VALUES";
+  const rejectedCommands = [
+    `git status --short ${sensitiveMarker}`,
+    `git diff --cached --check ${sensitiveMarker}`,
+  ];
+  const rejectedPaths = [
+    `validation/${sensitiveMarker}-one.js`,
+    `validation/${sensitiveMarker}-two.js`,
+  ];
+  const fixture = await createFixture(t, {
+    worker: [
+      clarificationReady(),
+      {
+        ...bootstrapReady("Worker"),
+        requiredChecks: rejectedCommands.map((command, index) => ({
+          id: `C${index + 1}`,
+          command,
+        })),
+        validationInfrastructure: rejectedPaths,
+      },
+      bootstrapReady("Corrected Worker"),
+      reconciliationResolved(),
+    ],
+  });
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.deepEqual(completed.pipelineState.bootstrapCorrections, [
+    {
+      attempt: 1,
+      diagnostics: [
+        ...rejectedCommands.map((_, index) => ({
+          role: "worker",
+          phase: "bootstrap",
+          contract: "bootstrap",
+          field: `requiredChecks[${index}].command`,
+          constraint: "staging-independent-validation-command",
+        })),
+        ...rejectedPaths.map((_, index) => ({
+          role: "worker",
+          phase: "bootstrap",
+          contract: "bootstrap",
+          field: `validationInfrastructure[${index}]`,
+          constraint: "existing-canonical-repository-file",
+        })),
+      ],
+    },
+  ]);
+  const correctionCall = fixture.calls.worker.find(({ prompt }) =>
+    prompt.includes("Correction diagnostic batch"),
+  );
+  assert.doesNotMatch(correctionCall.prompt, new RegExp(sensitiveMarker, "u"));
+  assert.doesNotMatch(
+    JSON.stringify(fixture.transitions),
+    new RegExp(sensitiveMarker, "u"),
+  );
 });
 
 test("reconstructs a persisted correction after a harmless provider interruption", async (t) => {
@@ -3754,12 +3882,93 @@ test("reconstructs a persisted correction after a harmless provider interruption
     paused.pipelineState.bootstrapCorrections[0],
   );
 
+  const [currentCorrection] = paused.pipelineState.bootstrapCorrections;
+  const [diagnostic] = currentCorrection.diagnostics;
+  const legacyCorrection = {
+    attempt: currentCorrection.attempt,
+    ...diagnostic,
+  };
+  const migrated = migratePlanExecutionStateV9({
+    pipelineState: {
+      ...paused.pipelineState,
+      bootstrapCorrections: [legacyCorrection],
+      pendingBootstrapCorrection: legacyCorrection,
+    },
+  });
+  assert.deepEqual(migrated.bootstrapCorrections, [currentCorrection]);
+  assert.deepEqual(migrated.pendingBootstrapCorrection, currentCorrection);
+  assert.doesNotThrow(() => normalizePipelineState(migrated));
+  fixture.persistPipelineState(migrated, { pause: paused.pause });
+
   const completed = await fixture.run();
   assert.equal(completed.pipelineState.workflowState, "DONE");
   assert.equal(completed.pipelineState.bootstrapCorrections.length, 1);
   assert.equal(completed.pipelineState.pendingBootstrapCorrection, null);
   assert.match(fixture.calls.worker[3].prompt, /Correction diagnostic/u);
   assert.doesNotMatch(JSON.stringify(fixture.transitions), /DO_NOT_PERSIST/u);
+});
+
+test("resumes one pending multi-diagnostic bootstrap batch without recounting", async (t) => {
+  const sensitiveMarker = "DO_NOT_PERSIST_PENDING_BOOTSTRAP_BATCH";
+  let interrupted = false;
+  const rejectedCommands = [
+    `git status --short ${sensitiveMarker}`,
+    `git diff --cached --check ${sensitiveMarker}`,
+  ];
+  const fixture = await createFixture(t, {
+    onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        request.prompt.includes("Correction diagnostic batch") &&
+        !interrupted
+      ) {
+        interrupted = true;
+        const error = new Error("Transient provider interruption.");
+        error.code = "ERR_TEST_PROVIDER_INTERRUPTED";
+        error.recoverable = true;
+        throw error;
+      }
+    },
+    worker: [
+      clarificationReady(),
+      {
+        ...bootstrapReady("Worker"),
+        requiredChecks: rejectedCommands.map((command, index) => ({
+          id: `C${index + 1}`,
+          command,
+        })),
+      },
+      bootstrapReady("Corrected Worker"),
+      reconciliationResolved(),
+    ],
+  });
+
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "backend_unavailable");
+  assert.equal(paused.pipelineState.bootstrapCorrections.length, 1);
+  assert.equal(
+    paused.pipelineState.pendingBootstrapCorrection.diagnostics.length,
+    2,
+  );
+  assert.deepEqual(
+    paused.pipelineState.pendingBootstrapCorrection,
+    paused.pipelineState.bootstrapCorrections[0],
+  );
+
+  const completed = await fixture.run();
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.pipelineState.bootstrapCorrections.length, 1);
+  assert.equal(completed.pipelineState.pendingBootstrapCorrection, null);
+  assert.equal(
+    fixture.calls.worker.filter(({ prompt }) =>
+      prompt.includes("Correction diagnostic batch"),
+    ).length,
+    2,
+  );
+  assert.doesNotMatch(
+    JSON.stringify(fixture.transitions),
+    new RegExp(sensitiveMarker, "u"),
+  );
 });
 
 test("fails closed after a repeated invalid bootstrap result", async (t) => {
@@ -3784,10 +3993,7 @@ test("fails closed after a repeated invalid bootstrap result", async (t) => {
     constraint: "single-object-wrapper",
   });
   assert.deepEqual(fixture.currentRun.pipelineState.bootstrapCorrections, [
-    {
-      attempt: 1,
-      ...fixture.currentRun.pause.diagnostic,
-    },
+    bootstrapCorrection(fixture.currentRun.pause.diagnostic),
   ]);
   assert.doesNotMatch(JSON.stringify(fixture.transitions), /DO_NOT_PERSIST/u);
 });
@@ -3806,14 +4012,13 @@ test("corrects a missing structured bootstrap response once", async (t) => {
 
   assert.equal(completed.pipelineState.workflowState, "DONE");
   assert.deepEqual(completed.pipelineState.bootstrapCorrections, [
-    {
-      attempt: 1,
+    bootstrapCorrection({
       role: "worker",
       phase: "bootstrap",
       contract: "bootstrap",
       field: "result",
       constraint: "semantic-contract",
-    },
+    }),
   ]);
 });
 
@@ -3902,7 +4107,7 @@ test("redacts precise reconciliation and arbitration diagnostics", async (t) => 
 
       assert.equal(completed.pipelineState.workflowState, "DONE");
       assert.deepEqual(completed.pipelineState.bootstrapCorrections, [
-        { attempt: 1, ...testCase.diagnostic },
+        bootstrapCorrection(testCase.diagnostic),
       ]);
       assert.doesNotMatch(
         JSON.stringify(fixture.transitions),
@@ -4620,14 +4825,13 @@ test("corrects, blocks, and completes runner-trusted validation", async (t) => {
   assert.equal(paused.pause.resumeState, "FINALIZE");
   assert.equal(paused.pipelineState.finalizationResult, null);
   assert.deepEqual(paused.pipelineState.bootstrapCorrections, [
-    {
-      attempt: 1,
+    bootstrapCorrection({
       role: "worker",
       phase: "bootstrap",
       contract: "bootstrap",
       field: "requiredChecks",
       constraint: "includes-runner-trusted-commands",
-    },
+    }),
   ]);
 
   const result = await fixture.run();
@@ -5526,14 +5730,13 @@ test(
 
     assert.equal(paused.pause.reason, "product_decision_required");
     assert.deepEqual(paused.pipelineState.bootstrapCorrections, [
-      {
-        attempt: 1,
+      bootstrapCorrection({
         role: "worker",
         phase: "bootstrap",
         contract: "bootstrap",
         field: "question",
         constraint: "nonempty-plain-text-up-to-4000-characters",
-      },
+      }),
     ]);
     assert.equal(paused.pipelineState.pendingBootstrapCorrection, null);
     assert.match(
@@ -6001,14 +6204,44 @@ test("rejects inconsistent persisted workflow state", async (t) => {
   });
 
   await rejectsState("pending bootstrap correction without history", (run) => {
-    run.pipelineState.pendingBootstrapCorrection = {
-      attempt: 1,
+    run.pipelineState.pendingBootstrapCorrection = bootstrapCorrection({
+      role: "worker",
+      phase: "bootstrap",
+      contract: "bootstrap",
+      field: "result",
+      constraint: "semantic-contract",
+    });
+  });
+
+  await rejectsState("duplicate bootstrap correction diagnostic", (run) => {
+    const diagnostic = {
       role: "worker",
       phase: "bootstrap",
       contract: "bootstrap",
       field: "result",
       constraint: "semantic-contract",
     };
+    run.pipelineState.bootstrapCorrections = [
+      { attempt: 1, diagnostics: [diagnostic, diagnostic] },
+    ];
+  });
+
+  await rejectsState("bootstrap correction with retained raw output", (run) => {
+    run.pipelineState.bootstrapCorrections = [
+      {
+        attempt: 1,
+        diagnostics: [
+          {
+            role: "worker",
+            phase: "bootstrap",
+            contract: "bootstrap",
+            field: "result",
+            constraint: "semantic-contract",
+            rejectedValue: "DO_NOT_PERSIST_REJECTED_BOOTSTRAP_OUTPUT",
+          },
+        ],
+      },
+    ];
   });
 
   await rejectsState("pending finalization correction without history", (run) => {

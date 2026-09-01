@@ -507,6 +507,22 @@ rediscovers the complete stable inventory and invalidates provisional
 finalization and review evidence. Immutable terminal history is shape-upgraded
 without replaying work.
 
+Plan execution state version 10 replaces each consumed or pending bootstrap
+correction's single field diagnostic with one bounded, deduplicated diagnostic
+batch. Its version-9 migration losslessly wraps every existing diagnostic in a
+one-entry batch without changing workflow position, accepted context, safe
+content, gates, counters, or commit authority. Deterministic bootstrap and
+validation-migration validation collects all independently detectable
+violations from one candidate where practical, including every
+staging-dependent required command and every lexically valid
+validation-infrastructure path that canonical-file inspection rejects. The
+producing role still receives exactly one correction attempt for its phase and
+contract; a pending batch survives interruption and is cleared only after a
+valid complete replacement is accepted. Repeated or still-invalid output fails
+closed. Durable state and public activity contain only bounded diagnostic
+identities, never rejected values, commands, paths, provider output, or
+transcripts.
+
 Polishing state version 3 adopts the same resolved trusted-validation snapshot,
 per-check executor provenance, and fingerprint-bound evidence tuple. Its
 version-2 migration selects empty legacy trust, preserves safe workspace
@@ -519,8 +535,8 @@ evidence is shape-upgraded without replaying work.
 Polishing state version 4 adds its bounded bootstrap-correction ledger and
 pending one-shot diagnostic. Its version-3 migration initializes both without
 changing accepted bootstrap context, validation evidence, workspace content,
-or workflow position. As in plan execution, each producing role, bootstrap or
-validation-migration phase, and contract may consume one read-only correction;
+or workflow position. Each producing role, bootstrap or validation-migration
+phase, and contract may consume one read-only correction;
 only attempt `1` and the bounded role, phase, contract, field, and constraint
 are durable. A valid replacement clears the pending copy, an interrupted turn
 reconstructs it from state, and a second invalid result fails closed without
@@ -735,13 +751,15 @@ or reviews a finalization candidate, the root Git boundary verifies every
 validation-infrastructure entry is an existing regular file whose canonical
 repository-relative path exactly matches the proposed path. Missing files,
 directories, symlinks, and paths traversing a symlink are field-specific
-violations; the runner does not follow or silently canonicalize them. The
-producing role receives the bounded diagnostic through the owning correction
-path, and a repeated invalid result fails closed. The deterministic aggregate
-is therefore derived only from independently accepted canonical role evidence.
+violations; the runner does not follow or silently canonicalize them. Plan
+execution collects every inspectable violation from the candidate into the
+owning bounded bootstrap or finalization diagnostic batch, and a repeated
+invalid result fails closed. The deterministic aggregate is therefore derived
+only from independently accepted canonical role evidence.
 Plan execution and polishing additionally reject each staging-dependent
-required command with a bounded field-specific diagnostic before accepting that
-producing result; the same policy rejects a finalization candidate inventory
+required command with bounded field-specific diagnostics before accepting that
+producing result; plan execution batches all such independently detectable
+violations, and the same policy rejects a finalization candidate inventory
 without delegating index ownership to an ordinary Worker turn.
 
 An explicitly supplied source session is different: the first eligible turn of

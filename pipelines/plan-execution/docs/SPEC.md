@@ -381,8 +381,8 @@ Persist at least:
 - latest finalized content fingerprint;
 - complete required-check inventory, validation-infrastructure file list, and
   runner-computed infrastructure fingerprint;
-- bounded bootstrap-correction attempts containing only role, phase, contract,
-  field, constraint, and attempt number;
+- bounded bootstrap-correction attempts containing only attempt number and
+  deduplicated role, phase, contract, field, and constraint diagnostic batches;
 - the current step's bounded finalization-correction ledger and optional
   pending attempt, containing only attempt number, step, bounded guidance and
   content-fingerprint scope, and bounded role, phase, contract, field, and
@@ -503,6 +503,20 @@ review evidence, and routes every prepared active run through fresh independent
 validation discovery before advancement. A consumed commit authorization stays
 on its verification-only path. Immutable terminal history is shape-upgraded
 without replaying work.
+
+Pipeline state version 10 replaces each consumed or pending bootstrap
+correction's single field diagnostic with one bounded, deduplicated diagnostic
+batch. The version-9 migration losslessly wraps every existing diagnostic in a
+one-entry batch without changing workflow position, accepted context, safe
+content, gates, counters, or commit authority. Bootstrap and validation-
+migration validation collects all independently detectable violations from one
+candidate where practical, including every staging-dependent command and every
+lexically valid validation-infrastructure path rejected by canonical-file
+inspection. The producing role still receives exactly one correction attempt
+per phase and contract. A pending batch survives interruption and is cleared
+only after a valid complete replacement is accepted; repeated or still-invalid
+output fails closed. Rejected values, commands, paths, provider output, and
+transcripts remain outside durable state and public activity.
 
 Common run-envelope version 3 independently adds nullable bounded active
 provider role and phase. Version-1 and version-2 envelopes project it as `null`
@@ -1308,11 +1322,13 @@ Each summary and inventory covers every substantive validation requirement but
 must not require staging, staged handoff, index mutation or inspection, an
 implicit worktree-versus-index assertion, an alternate index, or commit-message
 drafting. Generic commit preparation belongs only to `COMMIT`; an applicable
-content check uses `HEAD` or explicit trees. Deterministic validation reports an
-unsafe command as a field-specific bootstrap violation, consumes the producing
-role's one bounded read-only correction, and fails closed if the replacement
-remains unsafe. Validation-migration discovery uses the same policy, and
-finalization candidate inventories are rejected by that policy as well.
+content check uses `HEAD` or explicit trees. Deterministic validation collects
+every unsafe command and every inspectable invalid validation-infrastructure
+path from one candidate into a bounded, deduplicated field-diagnostic batch,
+consumes the producing role's one bounded read-only correction, and fails
+closed if the replacement remains invalid. Validation-migration discovery uses
+the same policy, and finalization candidate inventories are rejected by their
+owning batched correction policy as well.
 Each role may return at most 64 `requiredChecks` and 64
 `validationInfrastructure` entries. The independently derived, persisted,
 finalization, and fingerprint-input inventories each allow at most 128 entries,
@@ -1340,30 +1356,31 @@ status-specific variants. Deterministic pipeline normalization remains
 authoritative for exact nonempty text, commands, uniqueness, and safe
 repository-relative paths. Each bootstrap schema keeps a strict object root
 and places its discriminated variants in a nested `result` union. A rejected
-bootstrap result persists and publishes only its role, phase, contract field,
-and violated constraint; it never retains the rejected value or raw role
-output.
+bootstrap result persists and publishes only its bounded, deduplicated role,
+phase, contract, field, and violated-constraint diagnostic batch; it never
+retains a rejected value, command, path, or raw role output.
 
 The producing Worker or Reviewer and each summary-producing reconciliation
 Worker or Arbiter receives one read-only correction turn for an invalid
-bootstrap contract. The runner first
-persists attempt `1` and the bounded diagnostic, then reconstructs the complete
-request from durable state and asks for a complete replacement result. A
+bootstrap contract. The runner first persists attempt `1` and the bounded
+diagnostic batch, then reconstructs the complete request from durable state and
+asks for a complete replacement result. A
 provider interruption does not consume another correction or require the
 native session. Each adapter maps its native structured-output failure to the
 shared bounded `structured-output` failure class. The pipeline maps only that
 class to the bounded `result` semantic diagnostic after the read-only mutation
 guard completes; provider text is discarded. A valid replacement retires the
-pending correction before any product-decision pause, while its history remains
-consumed. A repeated invalid result fails closed.
+pending batch before any product-decision pause, while its history remains
+consumed. Repeated or still-invalid output fails closed.
 
 Before any inventory is accepted or fingerprinted, the runner asks the root
 Git boundary to inspect each validation-infrastructure path. The path must
 exist as a regular file and the returned canonical repository-relative path
-must exactly equal the proposed value. Missing files, directories, symlinks,
-and symlink traversal return to the producing role as a field-specific
-`existing-canonical-repository-file` correction; they do not surface later as
-a generic unsafe-path failure and are never followed or silently rewritten.
+must exactly equal the proposed value. Every inspectable missing file,
+directory, symlink, and symlink-traversing path returns to the producing role in
+the same bounded `existing-canonical-repository-file` diagnostic batch; these
+violations do not surface later as generic unsafe-path failures and are never
+followed or silently rewritten.
 
 The Reviewer summary additionally states what it intends to verify.
 
@@ -2235,11 +2252,13 @@ At minimum cover:
     owner loss, timed-out MCP wait, ordinary resume, and interrupted one-shot
     verification preserve the lease-aware activity contract.
 50. invalid Worker, Reviewer, reconciliation, arbitration, and validation-
-    migration bootstrap results receive one durable read-only correction and a
-    repeated invalid result fails closed without persisted rejected values.
-51. missing, directory, symlink, and symlink-traversing validation-
-    infrastructure paths are rejected before inventory acceptance with the
-    producing field identified, while canonical existing files are accepted.
+    migration bootstrap results receive one durable read-only diagnostic-batch
+    correction and repeated or still-invalid output fails closed without
+    persisted rejected values.
+51. all inspectable missing, directory, symlink, and symlink-traversing
+    validation-infrastructure paths are batched before inventory acceptance
+    with every producing field identified, while canonical existing files are
+    accepted.
 52. Claude structured status and permission classification is finite and
     redacted; allowlisted read-only failures reconstruct from durable state,
     classified writable usage/provider failures preserve reconciled changes,
@@ -2270,11 +2289,12 @@ At minimum cover:
     prompts preserve phase ownership: all substantive finalization work runs,
     commit preparation is deferred without blocking validation, and only the
     constrained commit executor stages the finalized and reviewed content.
-60. staging-dependent bootstrap and validation-migration inventories receive
-    one field-specific correction and then fail closed, finalization candidate
-    inventories obey the same deterministic policy, and a paused version-5
-    implementation run re-establishes phase-safe context before finalization,
-    review, and one authorized commit.
+60. staging-dependent bootstrap and validation-migration inventories batch
+    every independently detectable unsafe command and inspectable invalid path
+    into their one field-specific correction and then fail closed;
+    finalization candidate inventories obey the same deterministic policy, and
+    a paused version-5 implementation run re-establishes phase-safe context
+    before finalization, review, and one authorized commit.
 61. finalization validation batches every independently detectable staging-
     dependent command; permits only one wholly new second diagnostic batch;
     fails closed on repetition, mixed novelty, or exhausted allowance; and
@@ -2291,6 +2311,10 @@ At minimum cover:
     regular validation files before fingerprinting or review, and version-8
     active runs migrate through fresh independent discovery without losing
     completed commits or safe current-step content.
+65. version-9 consumed and pending bootstrap diagnostics migrate losslessly to
+    one-entry batches, adjacent staging-dependent commands share one correction,
+    and a pending multi-diagnostic batch resumes without replay or rejected
+    content retention.
 
 Real Codex/Claude smoke tests should be opt-in integration tests.
 
@@ -2390,8 +2414,8 @@ Do not build:
 31. Bootstrap role inventories use unique check IDs, unique normalized exact
     commands, and unique existing canonical repository-relative validation
     files; the runner derives the final stable union and assigns contiguous IDs,
-    while invalid output receives at most one read-only correction per producing
-    role, phase, and contract.
+    while invalid output receives at most one read-only diagnostic-batch
+    correction per producing role, phase, and contract.
 32. Claude recovery persists no denied input or native provider text, retries
     only finite allowlisted failures, and reconstructs the request from durable
     runner state without making a native session authoritative.

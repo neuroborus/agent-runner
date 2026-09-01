@@ -135,7 +135,7 @@ const ADAPTER_DIAGNOSTIC_CLASS_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
 const OUTPUT_DIAGNOSTIC_VALUE_PATTERN = /^[a-zA-Z0-9_.[\]-]{1,128}$/u;
 const BOOTSTRAP_CORRECTION_FIELDS = Object.freeze([
   "attempt",
-  ...OUTPUT_DIAGNOSTIC_FIELDS,
+  "diagnostics",
 ]);
 const FINALIZATION_CORRECTION_FIELDS = Object.freeze([
   "attempt",
@@ -826,7 +826,7 @@ export function normalizeCompatibilityResult(payload) {
   return Object.freeze({ status: payload.status });
 }
 
-export function normalizeBootstrapResult(payload, role) {
+export function normalizeBootstrapResultCandidate(payload, role) {
   const statuses = [
     "READY",
     "CAPACITY_EXHAUSTED",
@@ -862,9 +862,12 @@ export function normalizeBootstrapResult(payload, role) {
       );
     }
     return Object.freeze({
-      status: payload.status,
-      capacityField: payload.capacityField,
-      capacityLimit: payload.capacityLimit,
+      result: Object.freeze({
+        status: payload.status,
+        capacityField: payload.capacityField,
+        capacityLimit: payload.capacityLimit,
+      }),
+      diagnostics: Object.freeze([]),
     });
   }
   if (payload.capacityField !== "" || payload.capacityLimit !== 0) {
@@ -886,8 +889,11 @@ export function normalizeBootstrapResult(payload, role) {
       );
     }
     return Object.freeze({
-      status: payload.status,
-      decision: normalizeProductDecision(payload),
+      result: Object.freeze({
+        status: payload.status,
+        decision: normalizeProductDecision(payload),
+      }),
+      diagnostics: Object.freeze([]),
     });
   }
   if (payload.status === "PLAN_REVISION_REQUIRED") {
@@ -901,7 +907,10 @@ export function normalizeBootstrapResult(payload, role) {
         outputConstraint("status", "status-field-consistency"),
       );
     }
-    return normalizePlanRevision(payload);
+    return Object.freeze({
+      result: normalizePlanRevision(payload),
+      diagnostics: Object.freeze([]),
+    });
   }
   if (payload.reason !== "" || !emptyDecision(payload)) {
     throw outputError(
@@ -909,25 +918,45 @@ export function normalizeBootstrapResult(payload, role) {
       outputConstraint("status", "status-field-consistency"),
     );
   }
+  const requiredChecks = normalizeRequiredChecks(
+    payload.requiredChecks,
+    INVALID_OUTPUT_CODE,
+    { maxItems: MAX_BOOTSTRAP_ITEMS },
+  );
+  const diagnostics = stagingDependentCheckDiagnostics(requiredChecks);
   return Object.freeze({
-    status: payload.status,
-    summary: normalizeSummary(
-      payload.summary,
-      `${role} bootstrap summary`,
-      INVALID_OUTPUT_CODE,
-      outputConstraint("summary", "concise-markdown-up-to-20000-characters"),
-    ),
-    requiredChecks: normalizePhaseSafeRequiredChecks(
-      payload.requiredChecks,
-      INVALID_OUTPUT_CODE,
-      { maxItems: MAX_BOOTSTRAP_ITEMS },
-    ),
-    validationInfrastructure: normalizeValidationInfrastructure(
-      payload.validationInfrastructure,
-      INVALID_OUTPUT_CODE,
-      { maxItems: MAX_BOOTSTRAP_ITEMS },
-    ),
+    result: Object.freeze({
+      status: payload.status,
+      summary: normalizeSummary(
+        payload.summary,
+        `${role} bootstrap summary`,
+        INVALID_OUTPUT_CODE,
+        outputConstraint("summary", "concise-markdown-up-to-20000-characters"),
+      ),
+      requiredChecks,
+      validationInfrastructure: normalizeValidationInfrastructure(
+        payload.validationInfrastructure,
+        INVALID_OUTPUT_CODE,
+        { maxItems: MAX_BOOTSTRAP_ITEMS },
+      ),
+    }),
+    diagnostics,
   });
+}
+
+export function normalizeBootstrapResult(payload, role) {
+  const candidate = normalizeBootstrapResultCandidate(payload, role);
+  if (candidate.diagnostics.length !== 0) {
+    throw new PlanExecutionWorkflowError(
+      "Required checks must be staging-independent.",
+      {
+        code: INVALID_OUTPUT_CODE,
+        diagnostic: candidate.diagnostics[0],
+        diagnostics: candidate.diagnostics,
+      },
+    );
+  }
+  return candidate.result;
 }
 
 export function normalizeReconciliationResult(payload) {
@@ -1282,19 +1311,25 @@ function isStagingIndependentCommand(command) {
   return true;
 }
 
+function stagingDependentCheckDiagnostics(checks) {
+  return Object.freeze(
+    checks.flatMap((check, index) =>
+      isStagingIndependentCommand(check.command)
+        ? []
+        : [
+            outputConstraint(
+              `requiredChecks[${index}].command`,
+              "staging-independent-validation-command",
+            ),
+          ],
+    ),
+  );
+}
+
 function normalizePhaseSafeRequiredChecks(value, code, options) {
   const { collectDiagnostics = false, ...normalizationOptions } = options ?? {};
   const checks = normalizeRequiredChecks(value, code, normalizationOptions);
-  const diagnostics = checks.flatMap((check, index) =>
-    isStagingIndependentCommand(check.command)
-      ? []
-      : [
-          outputConstraint(
-            `requiredChecks[${index}].command`,
-            "staging-independent-validation-command",
-          ),
-        ],
-  );
+  const diagnostics = stagingDependentCheckDiagnostics(checks);
   if (diagnostics.length !== 0) {
     throw new PlanExecutionWorkflowError(
       "Required checks must be staging-independent.",
@@ -2199,26 +2234,39 @@ function normalizeBootstrapCorrection(correction) {
   if (
     !isRecord(correction) ||
     !hasExactFields(correction, BOOTSTRAP_CORRECTION_FIELDS) ||
-    correction.attempt !== 1
+    correction.attempt !== 1 ||
+    !Array.isArray(correction.diagnostics) ||
+    correction.diagnostics.length === 0 ||
+    correction.diagnostics.length > MAX_VALIDATION_ITEMS
   ) {
     throw workflowError("Plan-execution bootstrap correction is invalid.");
   }
-  const diagnostic = Object.fromEntries(
-    OUTPUT_DIAGNOSTIC_FIELDS.map((field) => [field, correction[field]]),
-  );
-  const validContext =
-    (correction.contract === "bootstrap" &&
-      ["worker", "reviewer"].includes(correction.role)) ||
-    (correction.contract === "bootstrap-reconciliation" &&
-      correction.role === "worker") ||
-    (correction.contract === "bootstrap-arbitration" &&
-      correction.role === "arbiter");
-  if (
-    !isOutputDiagnostic(diagnostic) ||
-    !["bootstrap", "validation-migration"].includes(correction.phase) ||
-    !validContext
-  ) {
-    throw workflowError("Plan-execution bootstrap correction is invalid.");
+  const identities = new Set();
+  let context;
+  for (const diagnostic of correction.diagnostics) {
+    if (!isOutputDiagnostic(diagnostic)) {
+      throw workflowError("Plan-execution bootstrap correction is invalid.");
+    }
+    const validContext =
+      (diagnostic.contract === "bootstrap" &&
+        ["worker", "reviewer"].includes(diagnostic.role)) ||
+      (diagnostic.contract === "bootstrap-reconciliation" &&
+        diagnostic.role === "worker") ||
+      (diagnostic.contract === "bootstrap-arbitration" &&
+        diagnostic.role === "arbiter");
+    const currentContext =
+      `${diagnostic.role}\0${diagnostic.phase}\0${diagnostic.contract}`;
+    const identity = `${diagnostic.field}\0${diagnostic.constraint}`;
+    if (
+      !["bootstrap", "validation-migration"].includes(diagnostic.phase) ||
+      !validContext ||
+      (context !== undefined && context !== currentContext) ||
+      identities.has(identity)
+    ) {
+      throw workflowError("Plan-execution bootstrap correction is invalid.");
+    }
+    context = currentContext;
+    identities.add(identity);
   }
   return correction;
 }
@@ -2230,7 +2278,8 @@ function normalizeBootstrapCorrections(value) {
   const contexts = new Set();
   for (const correction of value) {
     normalizeBootstrapCorrection(correction);
-    const context = `${correction.role}\0${correction.phase}\0${correction.contract}`;
+    const diagnostic = correction.diagnostics[0];
+    const context = `${diagnostic.role}\0${diagnostic.phase}\0${diagnostic.contract}`;
     if (contexts.has(context)) {
       throw workflowError("Plan-execution bootstrap corrections must be unique.");
     }
@@ -3654,7 +3703,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 9 ||
+    run.pipelineStateVersion !== 10 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||

@@ -49,6 +49,7 @@ import {
   MAX_DIAGNOSTIC_ITEMS,
   MAX_FINALIZATION_CORRECTION_ATTEMPTS,
   MAX_PLAN_LENGTH,
+  MAX_VALIDATION_ITEMS,
   PlanExecutionWorkflowError,
   WORKFLOW_STATES,
   assertRun,
@@ -59,7 +60,7 @@ import {
   isOutputDiagnostic,
   normalizeAdapterCapabilities,
   normalizeBootstrapArbitration,
-  normalizeBootstrapResult,
+  normalizeBootstrapResultCandidate,
   normalizeClarificationResult,
   normalizeCompatibilityResult,
   normalizeFinalizationResult,
@@ -268,8 +269,10 @@ function outputDiagnostic(cause, context) {
 
 function outputDiagnostics(cause, context) {
   const candidates =
-    Array.isArray(cause?.diagnostics) && cause.diagnostics.length !== 0
-      ? cause.diagnostics
+    Array.isArray(cause?.diagnostics)
+      ? cause.diagnostics.length !== 0 || cause?.diagnostic === undefined
+        ? cause.diagnostics
+        : [cause.diagnostic]
       : [cause?.diagnostic];
   const diagnostics = candidates.map((diagnostic) =>
     outputDiagnostic({ diagnostic }, context),
@@ -337,6 +340,18 @@ function invalidRoleOutput(message, context, diagnostic) {
   });
 }
 
+function invalidRoleOutputBatch(message, context, diagnostics) {
+  const normalized = outputDiagnostics({ diagnostics }, context).slice(
+    0,
+    MAX_VALIDATION_ITEMS,
+  );
+  return new PlanExecutionWorkflowError(message, {
+    code: "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+    diagnostic: normalized[0],
+    diagnostics: normalized,
+  });
+}
+
 function persistedOutputDiagnostic(value) {
   return isOutputDiagnostic(value)
     ? Object.freeze({ ...value })
@@ -361,19 +376,25 @@ function normalizeRoleOutput(normalize, output, context) {
     if (cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT") {
       throw cause;
     }
+    const diagnostics = outputDiagnostics(cause, context);
     throw new PlanExecutionWorkflowError(
       "Structured bootstrap role result violates its contract.",
       {
         code: cause.code,
-        diagnostic: outputDiagnostic(cause, context),
+        diagnostic: diagnostics[0],
+        diagnostics,
       },
     );
   }
 }
 
-function normalizeBootstrapRoleOutput(output, role, phase = "bootstrap") {
+function normalizeBootstrapRoleOutputCandidate(
+  output,
+  role,
+  phase = "bootstrap",
+) {
   return normalizeRoleOutput(
-    (value) => normalizeBootstrapResult(value, role),
+    (value) => normalizeBootstrapResultCandidate(value, role),
     output,
     bootstrapOutputContext(role, phase),
   );
@@ -399,11 +420,12 @@ function normalizeBootstrapArbitrationOutput(output, phase = "bootstrap") {
 }
 
 function normalizeValidationMigrationRoleOutput(output, role) {
-  const result = normalizeBootstrapRoleOutput(
+  const candidate = normalizeBootstrapRoleOutputCandidate(
     output,
     role,
     "validation-migration",
   );
+  const { result } = candidate;
   if (!["READY", "CAPACITY_EXHAUSTED"].includes(result.status)) {
     throw invalidRoleOutput(
       "Validation migration requires a ready inventory.",
@@ -411,7 +433,7 @@ function normalizeValidationMigrationRoleOutput(output, role) {
       { field: "status", constraint: "validation-migration-status" },
     );
   }
-  return result;
+  return candidate;
 }
 
 function normalizeValidationMigrationReconciliationOutput(output) {
@@ -1489,11 +1511,17 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     });
   }
 
-  function correctionMatchesContext(correction, context) {
+  function diagnosticMatchesContext(diagnostic, context) {
     return (
-      correction.role === context.role &&
-      correction.phase === context.phase &&
-      correction.contract === context.contract
+      diagnostic.role === context.role &&
+      diagnostic.phase === context.phase &&
+      diagnostic.contract === context.contract
+    );
+  }
+
+  function correctionMatchesContext(correction, context) {
+    return correction.diagnostics.every((diagnostic) =>
+      diagnosticMatchesContext(diagnostic, context),
     );
   }
 
@@ -1515,7 +1543,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       (correction) =>
         correction.step === state().currentStep &&
         correction.diagnostics.every((diagnostic) =>
-          correctionMatchesContext(diagnostic, context),
+          diagnosticMatchesContext(diagnostic, context),
         ),
     );
   }
@@ -1526,16 +1554,17 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       correction.step === state().currentStep &&
       correction.guidance === guidance &&
       correction.diagnostics.every((diagnostic) =>
-        correctionMatchesContext(diagnostic, context),
+        diagnosticMatchesContext(diagnostic, context),
       )
       ? correction
       : undefined;
   }
 
-  async function inspectValidationInfrastructure(result, context, phase) {
+  async function validationInfrastructureDiagnostics(result, context) {
     if (!Array.isArray(result.validationInfrastructure)) {
-      return result;
+      return Object.freeze([]);
     }
+    const diagnostics = [];
     for (const [index, path] of result.validationInfrastructure.entries()) {
       let inspection;
       try {
@@ -1547,14 +1576,18 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         if (!INVALID_VALIDATION_PATH_CODES.has(cause?.code)) {
           throw cause;
         }
-        throw invalidRoleOutput(
-          `${phase} validation infrastructure path is unsafe.`,
-          context,
-          {
-            field: `validationInfrastructure[${index}]`,
-            constraint: "existing-canonical-repository-file",
-          },
+        diagnostics.push(
+          outputDiagnostic(
+            {
+              diagnostic: {
+                field: `validationInfrastructure[${index}]`,
+                constraint: "existing-canonical-repository-file",
+              },
+            },
+            context,
+          ),
         );
+        continue;
       }
       if (
         !isRecord(inspection) ||
@@ -1562,45 +1595,85 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         inspection.kind !== "file" ||
         inspection.relativePath !== path
       ) {
-        throw invalidRoleOutput(
-          `${phase} validation infrastructure path is not a canonical repository file.`,
-          context,
-          {
-            field: `validationInfrastructure[${index}]`,
-            constraint: "existing-canonical-repository-file",
-          },
+        diagnostics.push(
+          outputDiagnostic(
+            {
+              diagnostic: {
+                field: `validationInfrastructure[${index}]`,
+                constraint: "existing-canonical-repository-file",
+              },
+            },
+            context,
+          ),
         );
       }
+    }
+    return outputDiagnostics({ diagnostics }, context);
+  }
+
+  async function inspectValidationInfrastructure(result, context, phase) {
+    const diagnostics = await validationInfrastructureDiagnostics(
+      result,
+      context,
+    );
+    if (diagnostics.length !== 0) {
+      throw invalidRoleOutputBatch(
+        `${phase} validation infrastructure contains invalid paths.`,
+        context,
+        diagnostics,
+      );
     }
     return result;
   }
 
-  async function validateBootstrapInventory(result, context) {
+  async function validateBootstrapInventory(
+    result,
+    context,
+    candidateDiagnostics = [],
+  ) {
     if (!Array.isArray(result.validationInfrastructure)) {
       return result;
     }
-    await inspectValidationInfrastructure(result, context, "Bootstrap");
     const resolvedInventory =
       ["READY", "RESOLVED"].includes(result.status) ||
       ["USE_WORKER", "USE_REVIEWER", "SYNTHESIZE"].includes(
         result.direction,
       );
-    if (
+    const omitsTrustedCommand =
       resolvedInventory &&
       state().trustedValidation.commands.some(
         ({ command }) =>
           !result.requiredChecks.some(
             (required) => required.command === command,
           ),
-      )
-    ) {
-      throw invalidRoleOutput(
-        "Bootstrap validation inventory omits a runner-trusted command.",
+      );
+    const diagnostics = outputDiagnostics(
+      {
+        diagnostics: [
+          ...candidateDiagnostics,
+          ...(await validationInfrastructureDiagnostics(result, context)),
+          ...(omitsTrustedCommand
+            ? [
+                outputDiagnostic(
+                  {
+                    diagnostic: {
+                      field: "requiredChecks",
+                      constraint: "includes-runner-trusted-commands",
+                    },
+                  },
+                  context,
+                ),
+              ]
+            : []),
+        ],
+      },
+      context,
+    ).slice(0, MAX_VALIDATION_ITEMS);
+    if (diagnostics.length !== 0) {
+      throw invalidRoleOutputBatch(
+        "Bootstrap result violates its validation-inventory contract.",
         context,
-        {
-          field: "requiredChecks",
-          constraint: "includes-runner-trusted-commands",
-        },
+        diagnostics,
       );
     }
     return result;
@@ -1613,6 +1686,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     recoveryContext = "",
     buildPrompt,
     normalize,
+    deferredDiagnostics = false,
   }) {
     const context = roleOutputContextFor(role, schema, checkpoint);
     while (true) {
@@ -1625,16 +1699,18 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
             const prompt = buildPrompt(evidence);
             return correction === undefined
               ? prompt
-              : `${prompt}\n\n${BOOTSTRAP_CORRECTION_INSTRUCTIONS}\n\nCorrection diagnostic:\n${JSON.stringify(correction, null, 2)}`;
+              : `${prompt}\n\n${BOOTSTRAP_CORRECTION_INSTRUCTIONS}\n\nCorrection diagnostic batch:\n${JSON.stringify(correction, null, 2)}`;
           },
           { checkpoint, recoveryContext },
         );
         if (output === null) {
           return null;
         }
+        const normalized = normalize(output);
         const result = await validateBootstrapInventory(
-          normalize(output),
+          deferredDiagnostics ? normalized.result : normalized,
           context,
+          deferredDiagnostics ? normalized.diagnostics : [],
         );
         if (correction !== undefined) {
           await transition({
@@ -1653,8 +1729,13 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         if (bootstrapCorrectionAttempt(context) !== undefined) {
           throw cause;
         }
-        const diagnostic = outputDiagnostic(cause, context);
-        const correction = { attempt: 1, ...diagnostic };
+        const diagnostics = outputDiagnostics(cause, context).slice(
+          0,
+          MAX_VALIDATION_ITEMS,
+        );
+        const correction = { attempt: 1, diagnostics };
+        const violationLabel =
+          diagnostics.length === 1 ? "violation" : "violations";
         await transition(
           {
             ...state(),
@@ -1669,7 +1750,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
               context.role,
               context.phase,
               "bootstrap-correction",
-              `${context.role} must correct ${context.contract} field ${diagnostic.field}.`,
+              `${context.role} must correct ${diagnostics.length} ` +
+                `${context.contract} contract ${violationLabel}.`,
             ),
           },
         );
@@ -1762,6 +1844,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       role,
       schema: BOOTSTRAP_SCHEMA,
       checkpoint: "validation-migration",
+      deferredDiagnostics: true,
       buildPrompt: (evidence) => `${BOOTSTRAP_INSTRUCTIONS}
 
 This is a versioned-state migration checkpoint. Treat every persisted legacy summary, resolved context, check, path, fingerprint, and aggregate validation result as provisional. Independently re-establish the complete phase-safe summary and current validation inventory from repository evidence before work can advance.
@@ -2186,6 +2269,7 @@ ${JSON.stringify(
       role,
       schema: BOOTSTRAP_SCHEMA,
       checkpoint: "bootstrap",
+      deferredDiagnostics: true,
       buildPrompt: (evidence) => `${BOOTSTRAP_INSTRUCTIONS}${
         role === "reviewer"
           ? "\nAs Reviewer, also state what you intend to verify."
@@ -2199,7 +2283,8 @@ ${trustedValidationInstructions()}
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
 ${evidence}`,
-      normalize: (output) => normalizeBootstrapRoleOutput(output, role),
+      normalize: (output) =>
+        normalizeBootstrapRoleOutputCandidate(output, role),
     });
     if (result === null) {
       return false;
