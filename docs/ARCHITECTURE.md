@@ -840,13 +840,17 @@ atomically replaced beneath the run directory, with absolute paths, traversal,
 reserved state files, and symlink escapes rejected. Managed state and lease
 paths must be isolated regular files rather than symbolic or hard links.
 
-Detached MCP launch also carries the dispatching process's runtime tuple in a
-bounded internal environment field. The child compares it with its loaded code
-before acquiring a run lease or recovering the run. A mismatch uses a distinct
-exit status that the parent converts to an actionable version-skew error; the
-run and incomplete idempotency intent remain durable for retry after the MCP
-process is restarted. Client disconnect and wait cancellation still affect
-only the client-side operation.
+At MCP startup, the root freezes one bounded detached-compatibility token
+derived canonically from the root run-envelope compatibility tuple and the
+sorted ID/state-version pairs of every loaded pipeline descriptor. Detached
+launch passes that token in an internal environment field. After loading its
+own registry, the child independently recomputes and compares the token before
+acquiring a run lease, recovering state, or evaluating a migration. A mismatch
+uses a distinct exit status that the parent converts to an actionable
+version-skew error; `state.json`, the journal, leases, the durable run, and the
+incomplete idempotency intent remain exactly at their pre-dispatch state for an
+exact-key retry after the MCP process is restarted. Client disconnect and wait
+cancellation still affect only the client-side operation.
 
 ## Clarification Lifecycle
 

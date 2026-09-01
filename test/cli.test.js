@@ -4,9 +4,9 @@ import test from "node:test";
 import packageMetadata from "../package.json" with { type: "json" };
 import {
   DETACHED_RUNTIME_COMPATIBILITY_ENV,
+  DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
   main,
   parseSourceSession,
-  RUNTIME_COMPATIBILITY_TOKEN,
   RUNTIME_VERSION_SKEW_EXIT_CODE,
   RunnerError,
 } from "../src/index.js";
@@ -641,7 +641,7 @@ test("detached resume rejects runtime skew with a distinct exit code", async () 
   const exitCode = await main(["resume", "--run", RUN_ID], {
     environment: {
       [DETACHED_RUNTIME_COMPATIBILITY_ENV]:
-        `${RUNTIME_COMPATIBILITY_TOKEN}-old`,
+        `${DETACHED_RUNTIME_COMPATIBILITY_TOKEN}-old`,
     },
     stdout: createSink().stream,
     stderr: stderr.stream,
@@ -658,7 +658,7 @@ test("detached resume rejects runtime skew with a distinct exit code", async () 
   assert.equal(exitCode, RUNTIME_VERSION_SKEW_EXIT_CODE);
   assert.equal(
     request.expectedRuntimeCompatibility,
-    `${RUNTIME_COMPATIBILITY_TOKEN}-old`,
+    `${DETACHED_RUNTIME_COMPATIBILITY_TOKEN}-old`,
   );
   assert.match(stderr.read(), /Runtime mismatch/u);
 });

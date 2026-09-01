@@ -1196,10 +1196,14 @@ of launching a conflicting child. After a mutating child is spawned, MCP does
 not complete the intent until the run advances or that child owns the worktree;
 a child that loses a concurrent acquisition race leaves the intent retryable.
 The launcher's correlated exit acknowledgement preserves that result when the
-winning lease is released between MCP polls. The dispatcher also passes its
-runtime tuple to the child. A mismatch is rejected before the child takes the
-run lease, and its distinct exit leaves the run and incomplete intent unchanged
-for an exact retry after the MCP process is restarted.
+winning lease is released between MCP polls. At MCP startup, the dispatcher
+freezes one canonical detached-compatibility token over the root run-envelope
+tuple and every loaded pipeline descriptor's ID and state version, sorted by
+ID. The child loads its registry and independently recomputes that token before
+run-lease acquisition, recovery, or migration. A mismatch takes the distinct
+version-skew exit path and leaves the durable run, journal, leases, and
+incomplete intent exactly unchanged for an exact-key retry after the MCP
+process is restarted.
 The additive MCP start fields leave `sourceSession` unset by default and pass it
 only after the user deliberately selects a fork; native IDs remain opaque and
 an unknown source profile offers only `current` inheritance.
@@ -2213,9 +2217,11 @@ At minimum cover:
 44. independently identified plan-execution or polishing runs cannot own the
     same canonical Git worktree concurrently, including through detached MCP
     dispatch, and a demonstrably stale same-host owner is recoverable.
-45. compatible legacy state migrates under the execution lease, incompatible
-    readers and detached children fail with a specific version-skew error, and
-    disconnects leave the durable run and retryable intent intact.
+45. compatible legacy state migrates under the execution lease; the real
+    canonical root-and-sorted-pipeline compatibility calculation rejects an
+    old-parent/new-child descriptor skew before lease acquisition or migration;
+    and a fresh MCP process can retry the unchanged durable run and incomplete
+    intent with the exact idempotency key.
 46. sandbox, IPC, loopback, process-isolation, missing-service, and permission
     validation blockers pause as `environment_blocked`, preserve safe content,
     and resume from the correct fingerprint-aware checkpoint.
@@ -2414,6 +2420,10 @@ Do not build:
 38. Every finalization validation-infrastructure candidate is an ordered set of
     existing canonical repository-relative regular files before it can be
     fingerprinted, trusted, or reviewed.
+39. Detached MCP compatibility binds the root run-envelope tuple and every
+    loaded pipeline ID/state version, is frozen at server startup, and fails
+    before lease acquisition, recovery, or migration without changing durable
+    run or idempotency state.
 
 ---
 
@@ -2448,6 +2458,8 @@ V1 is complete when:
 - unexpected agent Git history/ref changes are detected;
 - no workflow path can push commits, change remote configuration, or mutate a
   remote repository;
+- detached MCP launches reject root or loaded-pipeline version skew before
+  recovery and remain exactly retryable after a fresh control-plane start;
 - interruption and resume are safe;
 - tests cover workflow behavior using fake agents and temporary Git repositories;
 - the implementation remains a small local CLI rather than growing into a framework.
