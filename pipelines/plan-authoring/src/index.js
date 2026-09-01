@@ -7,7 +7,10 @@ import {
   runPlanAuthoring,
   WORKFLOW_STATES,
 } from "./workflow.js";
-import { assertRun as validateRun } from "./workflow-contract.js";
+import {
+  assertRun as validateRun,
+  resolveActiveRoles,
+} from "./workflow-contract.js";
 
 export {
   CLARIFICATION_INSTRUCTIONS,
@@ -36,7 +39,7 @@ function positiveIntegerSetting(defaultValue) {
   });
 }
 
-const ROLES = Object.freeze(["planner", "reviewer", "arbiter"]);
+const ROLES = resolveActiveRoles();
 const SETTINGS = Object.freeze({
   maxRevisionRounds: positiveIntegerSetting(15),
   stagnationWindowRounds: positiveIntegerSetting(3),
@@ -176,6 +179,7 @@ export const planAuthoringPipeline = Object.freeze({
   stateVersion: 1,
   migrations: Object.freeze({}),
   roles: ROLES,
+  resolveActiveRoles,
   settings: SETTINGS,
   taskInputs: TASK_INPUTS,
   runOptions: Object.freeze(["project", "task", ...ROLES]),

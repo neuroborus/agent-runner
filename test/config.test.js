@@ -876,6 +876,35 @@ test("trusted profiles pin backends and resolve execution precedence", () => {
   });
 });
 
+test("configuration resolves only descriptor-selected roles after settings", () => {
+  const configuration = parseRunnerConfiguration(
+    JSON.stringify({ schemaVersion: 1, defaultBackend: "codex" }),
+  );
+
+  for (const pipelineId of [
+    "plan-authoring",
+    "plan-execution",
+    "polishing",
+  ]) {
+    const pipeline = getPipeline(pipelineId);
+    const resolved = resolvePipelineConfiguration(
+      pipelineId,
+      configuration,
+      Object.fromEntries(
+        pipeline.roles.map((role) => [role, { model: `${role}-model` }]),
+      ),
+    );
+
+    assert.deepEqual(
+      Object.keys(resolved.roles),
+      pipeline.resolveActiveRoles(resolved.settings),
+    );
+    for (const role of Object.keys(resolved.roles)) {
+      assert.equal(resolved.roles[role].model, `${role}-model`);
+    }
+  }
+});
+
 test("source profiles inherit safely while unknown source profiles stay current", () => {
   const configuration = parseRunnerConfiguration(
     JSON.stringify({

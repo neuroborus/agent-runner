@@ -11,6 +11,7 @@ import {
   EMPTY_TRUSTED_VALIDATION,
   isFinalizationPolicy,
   MAX_DISPUTES_PER_FINDING,
+  resolveActiveRoles,
   sha256,
 } from "./workflow-contract.js";
 
@@ -69,7 +70,7 @@ function trustedCheckSelection(value) {
   );
 }
 
-const ROLES = Object.freeze(["worker", "reviewer", "arbiter"]);
+const ROLES = resolveActiveRoles();
 const SETTINGS = Object.freeze({
   finalization: Object.freeze({
     defaultValue: DEFAULT_FINALIZATION_POLICY,
@@ -769,6 +770,7 @@ export const polishingPipeline = Object.freeze({
     6: migratePolishingStateV6,
   }),
   roles: ROLES,
+  resolveActiveRoles,
   settings: SETTINGS,
   taskInputs: TASK_INPUTS,
   runOptions: Object.freeze(["project", "task", ...ROLES]),

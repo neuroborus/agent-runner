@@ -9,6 +9,7 @@ import {
 
 export const MAX_CLARIFICATION_ROUNDS = 3;
 export const DEFAULT_FINALIZATION_POLICY = "auto";
+const ROLES = Object.freeze(["worker", "reviewer", "arbiter"]);
 export const CONVENTIONAL_FINALIZATION_SKILL_PATHS = Object.freeze([
   ".agents/skills/finalization/SKILL.md",
   ".claude/skills/finalization/SKILL.md",
@@ -114,6 +115,11 @@ export const MAX_BOOTSTRAP_ITEMS = MAX_ITEMS * 2;
 export const MAX_VALIDATION_ITEMS = MAX_BOOTSTRAP_ITEMS * 2;
 export const MAX_OPTIONS = 16;
 export const MAX_DIAGNOSTIC_ITEMS = 32;
+
+export function resolveActiveRoles() {
+  return ROLES;
+}
+
 const MAX_STRUCTURED_RESULT_BYTES = 256 * 1024;
 const INVALID_OUTPUT_CODE = "ERR_INVALID_PLAN_EXECUTION_OUTPUT";
 export const INVALID_EXECUTION_INPUT_CODE = "ERR_INVALID_EXECUTION_INPUT";
@@ -3913,14 +3919,21 @@ export function assertRun(run) {
     !isAbsolute(run.taskPath) ||
     resolve(run.taskPath) !== run.taskPath ||
     !isRecord(run.roles) ||
-    Object.keys(run.roles).length !== 3 ||
     !isRecord(run.hashes) ||
     !isRecord(run.sessionLineage) ||
     !Array.isArray(run.sessionLineage.children)
   ) {
     throw workflowError("Plan-execution run envelope is invalid.");
   }
-  for (const role of ["worker", "reviewer", "arbiter"]) {
+  const state = normalizePipelineState(run.pipelineState);
+  const activeRoles = resolveActiveRoles(state.settings);
+  if (
+    Object.keys(run.roles).length !== activeRoles.length ||
+    activeRoles.some((role) => !Object.hasOwn(run.roles, role))
+  ) {
+    throw workflowError("Plan-execution roles are invalid.");
+  }
+  for (const role of activeRoles) {
     if (
       !isRecord(run.roles[role]) ||
       Object.keys(run.roles[role]).some(
@@ -3962,7 +3975,7 @@ export function assertRun(run) {
   for (const child of run.sessionLineage.children) {
     if (
       !isRecord(child) ||
-      !["worker", "reviewer", "arbiter"].includes(child.role) ||
+      !activeRoles.includes(child.role) ||
       typeof child.sessionId !== "string" ||
       child.sessionId.length === 0 ||
       child.sessionId === run.sessionLineage.source ||
@@ -3979,7 +3992,6 @@ export function assertRun(run) {
   if (new Set(childSessionIds).size !== childSessionIds.length) {
     throw workflowError("Plan-execution child sessions must be unique.");
   }
-  const state = normalizePipelineState(run.pipelineState);
   if (state.repositoryBaseline !== null) {
     const repositoryPath = state.repositoryBaseline.projectPath;
     if (
@@ -4307,7 +4319,7 @@ function normalizeSettings(settings) {
   return normalized;
 }
 
-export function assertRuntime(runtime) {
+export function assertRuntime(runtime, activeRoles = ROLES) {
   if (
     !isRecord(runtime) ||
     !isRecord(runtime.adapters) ||
@@ -4318,7 +4330,7 @@ export function assertRuntime(runtime) {
   ) {
     throw workflowError("Plan-execution runtime is invalid.");
   }
-  for (const role of ["worker", "reviewer", "arbiter"]) {
+  for (const role of activeRoles) {
     if (
       typeof runtime.adapters[role]?.probe !== "function" ||
       typeof runtime.adapters[role]?.run !== "function"

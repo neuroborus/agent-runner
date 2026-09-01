@@ -145,7 +145,7 @@ ${JSON.stringify(
 
 export async function runPlanAuthoring({ run, runtime, settings }) {
   assertRun(run);
-  assertRuntime(runtime);
+  assertRuntime(runtime, Object.keys(run.roles));
   if (!run.pipelineState.preflightComplete) {
     assertSettings(settings);
   }

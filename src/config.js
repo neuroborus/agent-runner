@@ -783,10 +783,34 @@ export function resolvePipelineConfiguration(
       `roleOverrides.${unknownRole} is not a supported role for ${pipelineId}.`,
     );
   }
+  const normalizedRoleOverrides = Object.freeze(
+    Object.fromEntries(
+      Object.entries(roleOverrides).map(([role, value]) => [
+        role,
+        normalizeRole(value, `roleOverrides.${role}`),
+      ]),
+    ),
+  );
 
   const pipelineConfiguration = normalizedConfiguration.pipelines[pipelineId];
   const projectPipelineConfiguration =
     normalizedProjectConfiguration?.pipelines[pipelineId] ?? {};
+  const { roles: _roles, ...runnerSettings } = pipelineConfiguration;
+  const { roles: _projectRoles, ...projectSettings } =
+    projectPipelineConfiguration;
+  const settings = Object.freeze({ ...runnerSettings, ...projectSettings });
+  const selectedRoles = pipeline.resolveActiveRoles(settings);
+  if (
+    !Array.isArray(selectedRoles) ||
+    selectedRoles.length === 0 ||
+    new Set(selectedRoles).size !== selectedRoles.length ||
+    selectedRoles.some((role) => !pipeline.roles.includes(role))
+  ) {
+    throw new ConfigurationError(
+      `${pipelineId} resolved an invalid active role selection.`,
+    );
+  }
+  const activeRoles = Object.freeze([...selectedRoles]);
 
   let sourceProfile = null;
   if (
@@ -807,11 +831,8 @@ export function resolvePipelineConfiguration(
   }
 
   const resolvedRoles = Object.fromEntries(
-    pipeline.roles.map((role) => {
-      const override = normalizeRole(
-        roleOverrides[role] === undefined ? {} : roleOverrides[role],
-        `roleOverrides.${role}`,
-      );
+    activeRoles.map((role) => {
+      const override = normalizedRoleOverrides[role] ?? {};
       const configuredRole = pipelineConfiguration.roles[role] ?? {};
       const projectRole = projectPipelineConfiguration.roles?.[role] ?? {};
       const explicitRoleBackend =
@@ -902,10 +923,6 @@ export function resolvePipelineConfiguration(
     }),
   );
 
-  const { roles: _roles, ...runnerSettings } = pipelineConfiguration;
-  const { roles: _projectRoles, ...projectSettings } =
-    projectPipelineConfiguration;
-  const settings = Object.freeze({ ...runnerSettings, ...projectSettings });
   let trustedValidation;
   if (Object.hasOwn(settings, "trustedChecks")) {
     try {

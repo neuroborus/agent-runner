@@ -349,7 +349,7 @@ function validateSourceRoles(pipeline, roles, sourceSession) {
   if (sourceSession === null) {
     return;
   }
-  const incompatibleRole = pipeline.roles
+  const incompatibleRole = Object.keys(roles)
     .filter((role) => role !== "arbiter")
     .find((role) => roles[role].backend !== sourceSession.backend);
   if (incompatibleRole !== undefined) {
@@ -361,7 +361,9 @@ function validateSourceRoles(pipeline, roles, sourceSession) {
 }
 
 async function probeRequiredRoles(pipeline, roles, adapters, sourceSession) {
-  const requiredRoles = pipeline.roles.filter((role) => role !== "arbiter");
+  const requiredRoles = Object.keys(roles).filter(
+    (role) => role !== "arbiter",
+  );
   const capabilitiesByConfiguration = new Map();
   for (const role of requiredRoles) {
     const configuration = roles[role];

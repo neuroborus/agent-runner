@@ -67,6 +67,7 @@ test("registry exposes explicit immutable pipeline descriptors", () => {
     );
     assert.ok(Object.isFrozen(pipeline));
     assert.ok(Object.isFrozen(pipeline.roles));
+    assert.equal(typeof pipeline.resolveActiveRoles, "function");
     assert.ok(Object.isFrozen(pipeline.settings));
     assert.ok(Object.isFrozen(pipeline.taskInputs));
     assert.ok(Object.isFrozen(pipeline.projections));
@@ -84,6 +85,17 @@ test("registry exposes explicit immutable pipeline descriptors", () => {
     for (const role of pipeline.roles) {
       assert.ok(pipeline.runOptions.includes(role));
     }
+    const defaultSettings = Object.freeze(
+      Object.fromEntries(
+        Object.entries(pipeline.settings).map(([name, definition]) => [
+          name,
+          definition.defaultValue,
+        ]),
+      ),
+    );
+    const activeRoles = pipeline.resolveActiveRoles(defaultSettings);
+    assert.equal(activeRoles, pipeline.roles);
+    assert.ok(Object.isFrozen(activeRoles));
     for (const setting of Object.values(pipeline.settings)) {
       assert.ok(Object.isFrozen(setting));
       assert.equal(typeof setting.errorMessage, "string");

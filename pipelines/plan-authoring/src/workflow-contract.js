@@ -79,8 +79,13 @@ const BACKEND_RESUME_STATES = Object.freeze([
   "REVIEW",
   "REVISE",
 ]);
+const ROLES = Object.freeze(["planner", "reviewer", "arbiter"]);
 
 export const MAX_DIAGNOSTIC_ITEMS = MAX_ITEMS;
+
+export function resolveActiveRoles() {
+  return ROLES;
+}
 
 export class PlanAuthoringWorkflowError extends Error {
   constructor(message, { cause, code = "ERR_PLAN_AUTHORING_WORKFLOW" } = {}) {
@@ -881,14 +886,21 @@ export function assertRun(run) {
     !isAbsolute(run.taskPath) ||
     resolve(run.taskPath) !== run.taskPath ||
     !isRecord(run.roles) ||
-    Object.keys(run.roles).length !== 3 ||
     !isRecord(run.hashes) ||
     !isRecord(run.sessionLineage) ||
     !Array.isArray(run.sessionLineage.children)
   ) {
     throw workflowError("Plan-authoring run envelope is invalid.");
   }
-  for (const role of ["planner", "reviewer", "arbiter"]) {
+  const pipelineState = normalizePipelineState(run.pipelineState);
+  const activeRoles = resolveActiveRoles(pipelineState.settings);
+  if (
+    Object.keys(run.roles).length !== activeRoles.length ||
+    activeRoles.some((role) => !Object.hasOwn(run.roles, role))
+  ) {
+    throw workflowError("Plan-authoring roles are invalid.");
+  }
+  for (const role of activeRoles) {
     if (
       !isRecord(run.roles[role]) ||
       Object.keys(run.roles[role]).some(
@@ -930,7 +942,7 @@ export function assertRun(run) {
   for (const child of run.sessionLineage.children) {
     if (
       !isRecord(child) ||
-      !["planner", "reviewer", "arbiter"].includes(child.role) ||
+      !activeRoles.includes(child.role) ||
       typeof child.sessionId !== "string" ||
       child.sessionId.length === 0 ||
       child.sessionId === run.sessionLineage.source ||
@@ -947,7 +959,6 @@ export function assertRun(run) {
   if (new Set(childSessionIds).size !== childSessionIds.length) {
     throw workflowError("Plan-authoring child sessions must be unique.");
   }
-  const pipelineState = normalizePipelineState(run.pipelineState);
   if (pipelineState.repositoryBaseline !== null) {
     const baselineProjectPath = pipelineState.repositoryBaseline.projectPath;
     if (
@@ -1107,7 +1118,7 @@ export function assertSettings(settings) {
   }
 }
 
-export function assertRuntime(runtime) {
+export function assertRuntime(runtime, activeRoles = ROLES) {
   if (
     !isRecord(runtime) ||
     !isRecord(runtime.adapters) ||
@@ -1116,7 +1127,7 @@ export function assertRuntime(runtime) {
   ) {
     throw workflowError("Plan-authoring runtime is invalid.");
   }
-  for (const role of ["planner", "reviewer", "arbiter"]) {
+  for (const role of activeRoles) {
     if (typeof runtime.adapters[role]?.run !== "function") {
       throw workflowError(`Plan-authoring ${role} adapter is invalid.`);
     }

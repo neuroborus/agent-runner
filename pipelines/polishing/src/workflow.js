@@ -381,7 +381,7 @@ function normalizeFinalizationRoleOutput(output, trustedCommands) {
 
 export async function runPolishing({ action, run, runtime, settings }) {
   assertRun(run);
-  assertRuntime(runtime);
+  assertRuntime(runtime, Object.keys(run.roles));
   const resumeAction = normalizeResumeAction(action);
   if (run.pipelineState.settings === null) {
     assertSettings(settings);

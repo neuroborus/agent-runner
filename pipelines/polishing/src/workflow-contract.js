@@ -195,6 +195,11 @@ export const MAX_DURABLE_RUN_BYTES = 960 * 1024;
 export const MAX_DIAGNOSTIC_ITEMS = 32;
 export const MAX_DISPUTE_HISTORY_BYTES = 64 * 1024;
 export const MAX_DISPUTES_PER_FINDING = 2;
+
+export function resolveActiveRoles() {
+  return ROLES;
+}
+
 const INVALID_OUTPUT_CODE = "ERR_INVALID_POLISHING_OUTPUT";
 export const INVALID_POLISHING_INPUT_CODE = "ERR_INVALID_POLISHING_INPUT";
 const OUTPUT_DIAGNOSTIC_FIELDS = Object.freeze([
@@ -3336,8 +3341,10 @@ export function assertRun(run) {
   ) {
     throw workflowError("Polishing run envelope is invalid.");
   }
-  assertExactFields(run.roles, ROLES, "Polishing roles");
-  for (const role of ROLES) {
+  const state = normalizePipelineState(run.pipelineState);
+  const activeRoles = resolveActiveRoles(state.settings);
+  assertExactFields(run.roles, activeRoles, "Polishing roles");
+  for (const role of activeRoles) {
     const roleFields = Object.keys(run.roles[role]);
     if (
       roleFields.some(
@@ -3385,7 +3392,7 @@ export function assertRun(run) {
   for (const child of run.sessionLineage.children) {
     if (
       !isRecord(child) ||
-      !ROLES.includes(child.role) ||
+      !activeRoles.includes(child.role) ||
       typeof child.sessionId !== "string" ||
       child.sessionId.length === 0 ||
       child.sessionId === run.sessionLineage.source ||
@@ -3400,7 +3407,6 @@ export function assertRun(run) {
   if (new Set(sessionIds).size !== sessionIds.length) {
     throw workflowError("Polishing child sessions must be unique.");
   }
-  const state = normalizePipelineState(run.pipelineState);
   if (state.repositoryBaseline !== null) {
     const repositoryPath = state.repositoryBaseline.projectPath;
     const expectedClarificationPath = join(
@@ -3664,7 +3670,7 @@ export function assertRun(run) {
   }
 }
 
-export function assertRuntime(runtime) {
+export function assertRuntime(runtime, activeRoles = ROLES) {
   if (
     !isRecord(runtime) ||
     !isRecord(runtime.adapters) ||
@@ -3675,7 +3681,7 @@ export function assertRuntime(runtime) {
   ) {
     throw workflowError("Polishing runtime is invalid.");
   }
-  for (const role of ROLES) {
+  for (const role of activeRoles) {
     if (
       typeof runtime.adapters[role]?.probe !== "function" ||
       typeof runtime.adapters[role]?.run !== "function"

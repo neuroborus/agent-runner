@@ -19,6 +19,7 @@ import {
   createRunner,
   createRunStore,
   DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
+  getPipeline,
   parseRunnerConfiguration,
   RUN_STATE_SCHEMA_VERSION,
   RunnerError,
@@ -1233,6 +1234,43 @@ test("does not require an unused Arbiter backend", async (t) => {
     model: "current",
     contextSize: "current",
   });
+});
+
+test("persists descriptor-selected roles and probes only required roles", async (t) => {
+  const fixture = await createFixture(t);
+  const adapter = createAdapter();
+  const runner = runnerFor(fixture, { codex: adapter });
+
+  const prepared = await runner.create({
+    pipelineId: "plan-authoring",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+    roleOverrides: {
+      planner: { model: "planner-model" },
+      reviewer: { model: "reviewer-model" },
+      arbiter: { backend: "claude" },
+    },
+    sourceSession: null,
+  });
+  const pipeline = getPipeline("plan-authoring");
+
+  assert.deepEqual(
+    Object.keys(prepared.run.roles),
+    pipeline.resolveActiveRoles(prepared.run.pipelineState.settings),
+  );
+  assert.deepEqual(adapter.probes, [
+    {
+      profile: "current",
+      model: "planner-model",
+      contextSize: "current",
+    },
+    {
+      profile: "current",
+      model: "reviewer-model",
+      contextSize: "current",
+    },
+  ]);
+  assert.equal(prepared.run.roles.arbiter.backend, "claude");
 });
 
 test("persists project overrides and ignores later configuration changes", async (t) => {
