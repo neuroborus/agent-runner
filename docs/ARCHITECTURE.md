@@ -495,6 +495,18 @@ that content scope changes. Rejected commands, paths, values, provider text,
 and transcripts remain outside state and public activity, while interruption
 preserves the pending attempt without replaying or recounting it.
 
+Plan execution state version 9 makes user finding overrides unique by exact
+finding ID and reviewed content fingerprint and requires every finalization
+validation-infrastructure candidate to pass the same existing canonical-file
+inspection as bootstrap evidence before fingerprinting or review. Its version-8
+migration deduplicates legacy override audit entries, preserves completed
+commits, safe current-step content, counters, Git controls, and one-shot commit
+effect safety, and marks active validation evidence provisional. Before
+advancement, the existing validation-migration checkpoint independently
+rediscovers the complete stable inventory and invalidates provisional
+finalization and review evidence. Immutable terminal history is shape-upgraded
+without replaying work.
+
 Polishing state version 3 adopts the same resolved trusted-validation snapshot,
 per-check executor provenance, and fingerprint-bound evidence tuple. Its
 version-2 migration selects empty legacy trust, preserves safe workspace
@@ -718,14 +730,15 @@ fingerprints. This service does not broaden any agent turn's sandbox and
 introduces no daemon or shell DSL.
 
 Before plan execution or polishing accepts a producing role's bootstrap or
-legacy validation-migration inventory, the root Git boundary verifies every
+legacy validation-migration inventory, and before plan execution fingerprints
+or reviews a finalization candidate, the root Git boundary verifies every
 validation-infrastructure entry is an existing regular file whose canonical
 repository-relative path exactly matches the proposed path. Missing files,
 directories, symlinks, and paths traversing a symlink are field-specific
-bootstrap violations; the runner does not follow or silently canonicalize
-them. The producing role receives the bounded diagnostic on its one correction
-turn, and a second invalid result fails closed. The deterministic aggregate is
-therefore derived only from independently accepted canonical role evidence.
+violations; the runner does not follow or silently canonicalize them. The
+producing role receives the bounded diagnostic through the owning correction
+path, and a repeated invalid result fails closed. The deterministic aggregate
+is therefore derived only from independently accepted canonical role evidence.
 Plan execution and polishing additionally reject each staging-dependent
 required command with a bounded field-specific diagnostic before accepting that
 producing result; the same policy rejects a finalization candidate inventory

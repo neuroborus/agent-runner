@@ -338,6 +338,16 @@ function validateResumeAction(run, action) {
     }
     return;
   }
+  if (
+    action === null &&
+    state.validationMigrationPending &&
+    state.preflightComplete &&
+    ["fix_limit_reached", "no_progress", "dispute_limit_reached"].includes(
+      run.pause?.reason,
+    )
+  ) {
+    return;
+  }
   if (action?.type === "extra-fix-rounds") {
     const additionalFixRounds = state.additionalFixRounds + action.amount;
     if (
@@ -359,7 +369,12 @@ function validateResumeAction(run, action) {
       ) ||
       state.finalizationResult?.status !== "PASS" ||
       state.reviewedFingerprint === null ||
-      !state.findings?.some(({ id }) => id === action.findingId)
+      !state.findings?.some(({ id }) => id === action.findingId) ||
+      state.findingOverrides.some(
+        ({ findingId, fingerprint }) =>
+          findingId === action.findingId &&
+          fingerprint === state.reviewedFingerprint,
+      )
     ) {
       throw new Error("Finding override is not applicable.");
     }
@@ -745,9 +760,78 @@ export function migratePlanExecutionStateV7(run) {
   });
 }
 
+function uniqueFindingOverrides(overrides) {
+  const identities = new Set();
+  return Object.freeze(
+    overrides.filter(({ findingId, fingerprint }) => {
+      const identity = `${findingId}\0${fingerprint}`;
+      if (identities.has(identity)) {
+        return false;
+      }
+      identities.add(identity);
+      return true;
+    }),
+  );
+}
+
+export function migratePlanExecutionStateV8(run) {
+  const current = run.pipelineState;
+  const findingOverrides = uniqueFindingOverrides(current.findingOverrides);
+  const immutableTerminal = ["DONE", "FAILED"].includes(
+    current.workflowState,
+  );
+  if (
+    immutableTerminal ||
+    !current.preflightComplete ||
+    current.resolvedSummary === null
+  ) {
+    return Object.freeze({ ...current, findingOverrides });
+  }
+  const commitVerificationPending =
+    current.pendingCommit?.status === "consumed";
+  if (commitVerificationPending) {
+    return Object.freeze({
+      ...current,
+      findingOverrides,
+      validationMigrationPending: true,
+    });
+  }
+  const paused = current.workflowState === "WAITING_FOR_USER";
+  const rerunFinalization =
+    !paused &&
+    ["FINALIZE", "REVIEW", "RESOLVE_FINDINGS", "COMMIT"].includes(
+      current.workflowState,
+    );
+  return Object.freeze({
+    ...current,
+    workflowState: rerunFinalization ? "FINALIZE" : current.workflowState,
+    workerValidation: null,
+    reviewerValidation: null,
+    validationMigrationPending: true,
+    finalizationResult: paused ? current.finalizationResult : null,
+    finalizedFingerprint: paused ? current.finalizedFingerprint : null,
+    reviewResult: paused ? current.reviewResult : null,
+    reviewedFingerprint: paused ? current.reviewedFingerprint : null,
+    previousFindings: paused
+      ? current.previousFindings
+      : current.findings.length === 0
+        ? current.previousFindings
+        : current.findings,
+    findings: paused ? current.findings : Object.freeze([]),
+    pendingDisputes: paused
+      ? current.pendingDisputes
+      : Object.freeze([]),
+    reviewReconsideration: paused
+      ? current.reviewReconsideration
+      : Object.freeze([]),
+    findingOverrides,
+    pendingCommit: null,
+  });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
-  stateVersion: 8,
+  stateVersion: 9,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -756,6 +840,7 @@ export const planExecutionPipeline = Object.freeze({
     5: migratePlanExecutionStateV5,
     6: migratePlanExecutionStateV6,
     7: migratePlanExecutionStateV7,
+    8: migratePlanExecutionStateV8,
   }),
   roles: ROLES,
   settings: SETTINGS,

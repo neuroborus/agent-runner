@@ -2651,6 +2651,7 @@ function normalizeFindingOverrides(value) {
   if (!Array.isArray(value) || value.length > MAX_DIAGNOSTIC_ITEMS) {
     throw workflowError("Plan-execution finding overrides are invalid.");
   }
+  const identities = new Set();
   for (const entry of value) {
     assertExactFields(
       entry,
@@ -2663,8 +2664,41 @@ function normalizeFindingOverrides(value) {
     ) {
       throw workflowError("Plan-execution finding override is invalid.");
     }
+    const identity = `${entry.findingId}\0${entry.fingerprint}`;
+    if (identities.has(identity)) {
+      throw workflowError("Plan-execution finding overrides must be unique.");
+    }
+    identities.add(identity);
   }
   return value;
+}
+
+function findingIsOverridden(findingOverrides, findingId, fingerprint) {
+  return findingOverrides.some(
+    (entry) =>
+      entry.findingId === findingId && entry.fingerprint === fingerprint,
+  );
+}
+
+function reviewGatePassed({
+  findingOverrides,
+  findings,
+  previousFindings,
+  reviewedFingerprint,
+  reviewResult,
+}) {
+  if (["UNCHANGED", "ACCEPTED"].includes(reviewResult?.validationChange)) {
+    return true;
+  }
+  return (
+    reviewResult?.validationChange === "REJECTED" &&
+    reviewedFingerprint !== null &&
+    findings.length === 0 &&
+    previousFindings.length > 0 &&
+    previousFindings.every(({ id }) =>
+      findingIsOverridden(findingOverrides, id, reviewedFingerprint),
+    )
+  );
 }
 
 function normalizePendingCommit(value) {
@@ -3174,7 +3208,14 @@ export function normalizePipelineState(value) {
   ) {
     throw workflowError("Plan-execution review reconsideration is invalid.");
   }
-  normalizeFindingOverrides(value.findingOverrides);
+  const findingOverrides = normalizeFindingOverrides(value.findingOverrides);
+  const acceptedReviewGate = reviewGatePassed({
+    findingOverrides,
+    findings,
+    previousFindings,
+    reviewedFingerprint: value.reviewedFingerprint,
+    reviewResult,
+  });
   const pendingCommit = normalizePendingCommit(value.pendingCommit);
   const completedCommits = normalizeCompletedCommits(value.completedCommits);
   if (
@@ -3461,7 +3502,7 @@ export function normalizePipelineState(value) {
     (finalizationResult?.status !== "PASS" ||
       value.finalizedFingerprint === null ||
       value.reviewedFingerprint !== value.finalizedFingerprint ||
-      !["UNCHANGED", "ACCEPTED"].includes(reviewResult.validationChange) ||
+      !acceptedReviewGate ||
       findings.length !== 0 ||
       pendingDisputes.length !== 0 ||
       value.reviewReconsideration.length !== 0)
@@ -3475,7 +3516,7 @@ export function normalizePipelineState(value) {
       finalizationResult?.status !== "PASS" ||
       value.finalizedFingerprint === null ||
       value.reviewedFingerprint !== value.finalizedFingerprint ||
-      !["UNCHANGED", "ACCEPTED"].includes(reviewResult.validationChange) ||
+      !acceptedReviewGate ||
       findings.length !== 0 ||
       pendingDisputes.length !== 0 ||
       value.reviewReconsideration.length !== 0)
@@ -3613,7 +3654,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 8 ||
+    run.pipelineStateVersion !== 9 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||

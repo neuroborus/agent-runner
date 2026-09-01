@@ -110,7 +110,7 @@ const GIT_PREFLIGHT_CODES = new Set([
   "ERR_UNSAFE_REPOSITORY_PATH",
   "ERR_UNSUPPORTED_GIT_CONFIGURATION",
 ]);
-const INVALID_BOOTSTRAP_PATH_CODES = new Set([
+const INVALID_VALIDATION_PATH_CODES = new Set([
   "ERR_UNSAFE_REPOSITORY_PATH",
   "ERR_UNSUPPORTED_GIT_PATH",
 ]);
@@ -1532,7 +1532,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       : undefined;
   }
 
-  async function validateBootstrapInventory(result, context) {
+  async function inspectValidationInfrastructure(result, context, phase) {
     if (!Array.isArray(result.validationInfrastructure)) {
       return result;
     }
@@ -1544,11 +1544,11 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           projectPath: state().repositoryBaseline.projectPath,
         });
       } catch (cause) {
-        if (!INVALID_BOOTSTRAP_PATH_CODES.has(cause?.code)) {
+        if (!INVALID_VALIDATION_PATH_CODES.has(cause?.code)) {
           throw cause;
         }
         throw invalidRoleOutput(
-          "Bootstrap validation infrastructure path is unsafe.",
+          `${phase} validation infrastructure path is unsafe.`,
           context,
           {
             field: `validationInfrastructure[${index}]`,
@@ -1563,7 +1563,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         inspection.relativePath !== path
       ) {
         throw invalidRoleOutput(
-          "Bootstrap validation infrastructure path is not a canonical repository file.",
+          `${phase} validation infrastructure path is not a canonical repository file.`,
           context,
           {
             field: `validationInfrastructure[${index}]`,
@@ -1572,6 +1572,14 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         );
       }
     }
+    return result;
+  }
+
+  async function validateBootstrapInventory(result, context) {
+    if (!Array.isArray(result.validationInfrastructure)) {
+      return result;
+    }
+    await inspectValidationInfrastructure(result, context, "Bootstrap");
     const resolvedInventory =
       ["READY", "RESOLVED"].includes(result.status) ||
       ["USE_WORKER", "USE_REVIEWER", "SYNTHESIZE"].includes(
@@ -1688,6 +1696,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
   function invalidatedLegacyValidation(current) {
     return {
       ...current,
+      finalizationCorrections: [],
+      pendingFinalizationCorrection: null,
       finalizationResult: null,
       finalizedFingerprint: null,
       reviewResult: null,
@@ -1805,6 +1815,8 @@ ${evidence}`,
       {
         ...state(),
         ...validation,
+        finalizationCorrections: [],
+        pendingFinalizationCorrection: null,
         resolvedSummary: summary,
         bootstrapDisagreement: null,
         bootstrapArbitrationUsed,
@@ -2005,7 +2017,34 @@ ${JSON.stringify(
       arbitrations: state().findingArbitrations.filter(({ findingId }) =>
         relevantIds === null || relevantIds.has(findingId),
       ),
+      overrides: state().findingOverrides.filter(({ findingId }) =>
+        relevantIds === null || relevantIds.has(findingId),
+      ),
     };
+  }
+
+  function findingOverrideApplies(
+    findingId,
+    fingerprint,
+    overrides = state().findingOverrides,
+  ) {
+    return overrides.some(
+      (entry) =>
+        entry.findingId === findingId && entry.fingerprint === fingerprint,
+    );
+  }
+
+  function validationRejectionIsOverridden(
+    findings,
+    fingerprint,
+    overrides = state().findingOverrides,
+  ) {
+    return (
+      findings.length > 0 &&
+      findings.every(({ id }) =>
+        findingOverrideApplies(id, fingerprint, overrides),
+      )
+    );
   }
 
   function disputeNeedsArbitration(dispute) {
@@ -2387,7 +2426,11 @@ The runner will derive validation inventories from the independently accepted ro
     );
     if (
       finding === undefined ||
-      (await contentFingerprint()) !== state().reviewedFingerprint
+      (await contentFingerprint()) !== state().reviewedFingerprint ||
+      findingOverrideApplies(
+        resumeAction.findingId,
+        state().reviewedFingerprint,
+      )
     ) {
       throw workflowError("Finding override is stale or inapplicable.");
     }
@@ -2397,12 +2440,27 @@ The runner will derive validation inventories from the independently accepted ro
     const pendingDisputes = state().pendingDisputes.filter(
       ({ findingId }) => findingId !== resumeAction.findingId,
     );
+    const findingOverrides = [
+      ...state().findingOverrides,
+      {
+        findingId: resumeAction.findingId,
+        fingerprint: state().reviewedFingerprint,
+      },
+    ].slice(-MAX_DIAGNOSTIC_ITEMS);
+    const rejectedValidationResolved =
+      state().reviewResult?.validationChange === "REJECTED" &&
+      validationRejectionIsOverridden(
+        state().previousFindings,
+        state().reviewedFingerprint,
+        findingOverrides,
+      );
     await transition(
       {
         ...state(),
         workflowState:
           findings.length === 0 && pendingDisputes.length === 0
-            ? state().reviewResult?.validationChange === "REJECTED"
+            ? state().reviewResult?.validationChange === "REJECTED" &&
+              !rejectedValidationResolved
               ? "REVIEW"
               : "COMMIT"
             : "RESOLVE_FINDINGS",
@@ -2411,13 +2469,7 @@ The runner will derive validation inventories from the independently accepted ro
         reviewReconsideration: state().reviewReconsideration.filter(
           (id) => id !== resumeAction.findingId,
         ),
-        findingOverrides: [
-          ...state().findingOverrides,
-          {
-            findingId: resumeAction.findingId,
-            fingerprint: state().reviewedFingerprint,
-          },
-        ].slice(-MAX_DIAGNOSTIC_ITEMS),
+        findingOverrides,
       },
       {
         pause: null,
@@ -2594,6 +2646,11 @@ ${
           const result = normalizeFinalizationRoleOutput(
             output,
             state().trustedValidation.commands.map(({ command }) => command),
+          );
+          await inspectValidationInfrastructure(
+            result,
+            context,
+            "Finalization",
           );
           if (
             selectedGuidance.skillPath === null &&
@@ -3002,7 +3059,9 @@ ${JSON.stringify(current.previousFindings, null, 2)}${
       }
 
 Prior decisions for this step:
-${JSON.stringify(priorFindingDecisions(), null, 2)}`,
+${JSON.stringify(priorFindingDecisions(), null, 2)}
+
+User overrides are runner-owned audit decisions. Do not describe an override as Reviewer acceptance.`,
       {
         checkpoint: `commit:${current.currentStep}`,
         recoveryContext: resolvedContext(),
@@ -3038,13 +3097,19 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}`,
       validationEvidence: result.validationEvidence,
       fingerprint: reviewedFingerprint,
     };
-    if (result.status === "FINDINGS") {
+    const findings =
+      result.status === "FINDINGS"
+        ? result.findings.filter(
+            ({ id }) => !findingOverrideApplies(id, reviewedFingerprint),
+          )
+        : [];
+    if (findings.length > 0) {
       const correction = correctionUpdate({
         fingerprint,
         finalizationIssueIds: [],
-        findingIds: result.findings.map(({ id }) => id),
+        findingIds: findings.map(({ id }) => id),
       });
-      const pendingDisputes = result.findings.flatMap(({ id }) => {
+      const pendingDisputes = findings.flatMap(({ id }) => {
         const latest = latestDispute(id);
         return latest?.direction === "UPHOLD" &&
           latest.attempt === current.disputeCounts[id] &&
@@ -3077,7 +3142,7 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}`,
           workflowState: "RESOLVE_FINDINGS",
           reviewedFingerprint,
           reviewResult,
-          findings: result.findings,
+          findings,
           previousFindings: result.findings,
           pendingDisputes,
           correctionHistory: correction.history,
@@ -3093,7 +3158,7 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}`,
             "reviewer",
             "review",
             "findings",
-            `Review reported ${result.findings.length} blocking findings.`,
+            `Review left ${findings.length} non-overridden blocking findings.`,
           ),
         },
       );
@@ -3116,7 +3181,8 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}`,
         reviewResult,
         reviewedFingerprint,
         findings: [],
-        previousFindings: [],
+        previousFindings:
+          result.status === "FINDINGS" ? result.findings : [],
         pendingDisputes: [],
         pendingCorrection: false,
         reviewerStep: current.currentStep,
@@ -3126,8 +3192,10 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}`,
         publicActivity: activity(
           "reviewer",
           "review",
-          "approved",
-          "Review approved the finalized content.",
+          result.status === "APPROVED" ? "approved" : "overrides-applied",
+          result.status === "APPROVED"
+            ? "Review approved the finalized content."
+            : "Review completed with only fingerprint-bound overridden findings.",
         ),
       },
     );

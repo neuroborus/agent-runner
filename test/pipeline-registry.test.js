@@ -237,6 +237,7 @@ test("pipeline pause projections expose only applicable response and resume acti
     finalizationResult: { status: "PASS" },
     reviewedFingerprint: "a".repeat(64),
     findings: [{ id: "R1" }, { id: "R2" }],
+    findingOverrides: [],
   };
   assert.deepEqual(
     executionPause(

@@ -57,6 +57,7 @@ function commandResult({
           state === "WAITING_FOR_USER"
             ? [{ id: "R1", problem: "Review is incomplete." }]
             : [],
+        findingOverrides: [],
         finalizedFingerprint: "a".repeat(64),
         reviewedFingerprint: "a".repeat(64),
         completedCommits: ["b".repeat(40)],

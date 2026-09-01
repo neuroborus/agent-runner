@@ -375,6 +375,8 @@ Persist at least:
 - prepared or consumed one-shot commit authorization while `COMMIT` is pending;
 - completed commit SHAs;
 - current findings;
+- unique user finding-override audit decisions bound to exact reviewed content
+  fingerprints;
 - fix/dispute counters;
 - latest finalized content fingerprint;
 - complete required-check inventory, validation-infrastructure file list, and
@@ -490,6 +492,17 @@ Rejected values, commands, paths, provider text, and raw structured output
 remain outside state and public activity. The pending copy is always the latest
 ledger entry, so interruption reconstructs the same read-only attempt without
 replaying or recounting consumed work.
+
+Pipeline state version 9 makes finding overrides unique by exact finding ID and
+reviewed content fingerprint and requires finalization validation
+infrastructure to contain only existing canonical repository-relative regular
+files. Its version-8 migration deduplicates legacy override audit entries,
+preserves completed commits, safe current-step content, counters, Git controls,
+and consumed one-shot effect safety, invalidates provisional finalization and
+review evidence, and routes every prepared active run through fresh independent
+validation discovery before advancement. A consumed commit authorization stays
+on its verification-only path. Immutable terminal history is shape-upgraded
+without replaying work.
 
 Common run-envelope version 3 independently adds nullable bounded active
 provider role and phase. Version-1 and version-2 envelopes project it as `null`
@@ -1582,6 +1595,14 @@ values, commands, paths, provider output, and transcripts are never persisted
 or published. This bounded ledger is independent of bootstrap and validation-
 migration correction ledgers.
 
+Before any finalization candidate, including `BLOCKED`, is fingerprinted,
+trusted, or reviewed, inspect every validation-infrastructure entry through the
+root Git boundary. Each entry must exist as a regular file and its canonical
+repository-relative path must exactly equal the proposed value. Missing files,
+directories, symlinks, symlink traversal, and narrative per-turn values enter
+the same bounded redacted finalization-correction path; they never become a
+candidate fingerprint or Reviewer finding.
+
 ### 13.3 Review
 
 After finalization passes, use an independent Reviewer context for the current commit.
@@ -2039,6 +2060,14 @@ Both resume actions are valid only for an applicable paused run. The override
 removes only the named finding, does not approve any other finding, and becomes
 stale as soon as the reviewed content fingerprint changes.
 
+Override audit entries are unique by finding ID and reviewed fingerprint. A
+complete re-review deterministically suppresses only an exact applicable
+override; unrelated findings remain blocking. When a rejected validation
+change is represented only by overridden findings for that same fingerprint,
+the override resolves that blocker without changing the persisted Reviewer
+decision to `ACCEPTED`. The same applicable override is neither offered nor
+stored again.
+
 A user override must be explicitly recorded in `events.jsonl` and `progress.md`.
 
 ---
@@ -2248,6 +2277,14 @@ At minimum cover:
     without replay or recounting, prompts and public activity retain no rejected
     content, and version-7 consumed and pending state migrates losslessly to the
     version-8 ledger.
+63. exact finding overrides remain unique and fingerprint-bound, suppress only
+    the named same-content finding, resolve a solely represented validation
+    rejection without claiming Reviewer acceptance, and become inapplicable
+    after content drift.
+64. finalization candidates accept only existing canonical repository-relative
+    regular validation files before fingerprinting or review, and version-8
+    active runs migrate through fresh independent discovery without losing
+    completed commits or safe current-step content.
 
 Real Codex/Claude smoke tests should be opt-in integration tests.
 
@@ -2371,6 +2408,12 @@ Do not build:
     mixed, and exhausted invalid results fail closed; only bounded diagnostics
     are durable or public, and corrected evidence must still pass every existing
     trusted-validation, Git, and fingerprint gate.
+37. User finding overrides are unique durable audit decisions and suppress only
+    the exact finding on the exact reviewed content; they never record Reviewer
+    acceptance or weaken another finding or validation gate.
+38. Every finalization validation-infrastructure candidate is an ordered set of
+    existing canonical repository-relative regular files before it can be
+    fingerprinted, trusted, or reviewed.
 
 ---
 

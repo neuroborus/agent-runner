@@ -27,6 +27,7 @@ import {
   migratePlanExecutionStateV5,
   migratePlanExecutionStateV6,
   migratePlanExecutionStateV7,
+  migratePlanExecutionStateV8,
   planExecutionPipeline,
   runPlanExecution,
 } from "../src/index.js";
@@ -171,7 +172,10 @@ function migrateVersionOneState(state) {
   const versionSeven = migratePlanExecutionStateV6({
     pipelineState: versionSix,
   });
-  return migratePlanExecutionStateV7({ pipelineState: versionSeven });
+  const versionEight = migratePlanExecutionStateV7({
+    pipelineState: versionSeven,
+  });
+  return migratePlanExecutionStateV8({ pipelineState: versionEight });
 }
 
 async function prepareValidationMigration(t, fixtureOptions) {
@@ -780,7 +784,7 @@ test("migrates version-3 execution state with no consumed bootstrap corrections"
   assert.deepEqual(migrated.bootstrapCorrections, []);
   assert.equal(migrated.pendingBootstrapCorrection, null);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(planExecutionPipeline.stateVersion, 8);
+  assert.equal(planExecutionPipeline.stateVersion, 9);
 });
 
 test("migrates version-6 execution state with no finalization correction", () => {
@@ -1442,6 +1446,218 @@ test("invalidates migrated findings before applying an override", async (t) => {
   assert.equal(completed.pipelineState.validationMigrationPending, false);
 });
 
+test("migrates duplicate overrides into fresh validation discovery", async (t) => {
+  const fixture = await createFixture(t, {
+    workReviewer: [
+      reviewFindings("R1"),
+      reviewFindings("R1"),
+      bootstrapReady("Migrating Reviewer"),
+      reviewApproved(),
+    ],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      resolution({ id: "R1", decision: "FIX" }),
+      finalizationPassed(),
+      resolution({ id: "R1", decision: "FIX" }),
+      bootstrapReady("Migrating Worker"),
+      reconciliationResolved(),
+      finalizationPassed(),
+    ],
+  });
+  const paused = await fixture.run({
+    maxFixRoundsPerStep: 1,
+    maxSameFindingRounds: 10,
+    stagnationWindowRounds: 10,
+  });
+  const override = {
+    findingId: "R1",
+    fingerprint: paused.pipelineState.reviewedFingerprint,
+  };
+  const legacy = {
+    ...paused.pipelineState,
+    findingOverrides: [override, override, override],
+  };
+  assert.throws(
+    () => normalizePipelineState(legacy),
+    /overrides must be unique/u,
+  );
+
+  const migrated = migratePlanExecutionStateV8({
+    pipelineState: legacy,
+    pause: paused.pause,
+  });
+  assert.doesNotThrow(() => normalizePipelineState(migrated));
+  assert.deepEqual(migrated.findingOverrides, [override]);
+  assert.equal(migrated.validationMigrationPending, true);
+  fixture.persistPipelineState(migrated, { pause: paused.pause });
+  const projection = planExecutionPipeline.projections.pause(
+    fixture.currentRun,
+  );
+  assert.ok(
+    projection.nextActions.some(
+      ({ action }) => action === null,
+    ),
+  );
+  assert.equal(
+    projection.nextActions.some(
+      ({ action }) => action?.type === "override-finding",
+    ),
+    false,
+  );
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.pipelineState.validationMigrationPending, false);
+  assert.deepEqual(completed.pipelineState.findingOverrides, [override]);
+  assert.ok(
+    fixture.calls.worker.some(({ prompt }) =>
+      prompt.includes("versioned-state migration checkpoint"),
+    ),
+  );
+});
+
+test("migrates invalid narrative infrastructure without losing completed work", async (t) => {
+  const plan = `## Commit 1: feat(test): add first behavior
+
+Implement the first behavior.
+
+## Commit 2: fix(test): add second behavior
+
+Implement the second behavior.`;
+  let implementationTurns = 0;
+  const safePath = "safe-current-step-content.txt";
+  const fixture = await createFixture(t, {
+    plan,
+    workReviewer: [
+      reviewApproved(),
+      reviewFindings("R1"),
+      reviewFindings("R1"),
+      bootstrapReady("Migrating Reviewer"),
+      reviewApproved(),
+    ],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      implementationCompleted(),
+      finalizationPassed(),
+      resolution({ id: "R1", decision: "FIX" }),
+      finalizationPassed(),
+      resolution({ id: "R1", decision: "FIX" }),
+      bootstrapReady("Migrating Worker"),
+      reconciliationResolved(),
+      finalizationPassed(),
+    ],
+    async onRoleRun(role, request) {
+      if (role === "worker" && request.prompt.includes("Implement the changes")) {
+        implementationTurns += 1;
+        if (implementationTurns === 2) {
+          await writeFile(join(request.cwd, safePath), "safe partial work\n");
+        }
+      }
+    },
+  });
+  const paused = await fixture.run({
+    maxFixRoundsPerStep: 1,
+    maxSameFindingRounds: 10,
+    stagnationWindowRounds: 10,
+  });
+  assert.equal(paused.pause.reason, "fix_limit_reached");
+  assert.equal(paused.pause.resumeState, "RESOLVE_FINDINGS");
+  assert.equal(paused.pipelineState.completedCommits.length, 1);
+  assert.equal(paused.pipelineState.finalizationResult.status, "PASS");
+  assert.equal(paused.pipelineState.reviewResult.status, "FINDINGS");
+  const completedHead = paused.pipelineState.completedCommits[0];
+  const narrativePath =
+    "TMPDIR, bound HEAD, and worktree fingerprint from a prior turn";
+  const invalidInfrastructure = [narrativePath];
+  const invalidInfrastructureFingerprint = hash(
+    JSON.stringify([[narrativePath, null]]),
+  );
+  const legacy = {
+    ...paused.pipelineState,
+    workerValidation: {
+      ...paused.pipelineState.workerValidation,
+      validationInfrastructure: invalidInfrastructure,
+    },
+    reviewerValidation: {
+      ...paused.pipelineState.reviewerValidation,
+      validationInfrastructure: invalidInfrastructure,
+    },
+    validationInfrastructure: invalidInfrastructure,
+    validationInfrastructureFingerprint: invalidInfrastructureFingerprint,
+    finalizationResult: {
+      ...paused.pipelineState.finalizationResult,
+      validationInfrastructure: invalidInfrastructure,
+      validationInfrastructureFingerprint: invalidInfrastructureFingerprint,
+    },
+  };
+  assert.doesNotThrow(() => normalizePipelineState(legacy));
+
+  const migrated = migratePlanExecutionStateV8({
+    pipelineState: legacy,
+    pause: paused.pause,
+  });
+  assert.equal(migrated.validationMigrationPending, true);
+  assert.deepEqual(migrated.completedCommits, [completedHead]);
+  assert.equal(migrated.finalizationResult.status, "PASS");
+  assert.equal(migrated.reviewResult.status, "FINDINGS");
+  fixture.persistPipelineState(migrated, { pause: paused.pause });
+  const resumedCallOffsets = Object.fromEntries(
+    Object.entries(fixture.calls).map(([role, calls]) => [role, calls.length]),
+  );
+  const resumedTransitionOffset = fixture.transitions.length;
+
+  const completed = await fixture.run();
+
+  const invalidation = fixture.transitions
+    .slice(resumedTransitionOffset)
+    .find(
+      ({ options }) => options.activity?.kind === "validation-invalidated",
+    ).patch.pipelineState;
+  assert.equal(invalidation.finalizationResult, null);
+  assert.equal(invalidation.reviewResult, null);
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.pipelineState.validationMigrationPending, false);
+  assert.equal(completed.pipelineState.completedCommits.length, 2);
+  assert.equal(completed.pipelineState.completedCommits[0], completedHead);
+  assert.deepEqual(
+    completed.pipelineState.validationInfrastructure,
+    VALIDATION_INFRASTRUCTURE,
+  );
+  assert.deepEqual(
+    completed.pipelineState.finalizationResult.validationInfrastructure,
+    VALIDATION_INFRASTRUCTURE,
+  );
+  assert.deepEqual(
+    completed.pipelineState.workerValidation.validationInfrastructure,
+    VALIDATION_INFRASTRUCTURE,
+  );
+  assert.deepEqual(
+    completed.pipelineState.reviewerValidation.validationInfrastructure,
+    VALIDATION_INFRASTRUCTURE,
+  );
+  assert.equal(
+    await readFile(join(fixture.projectPath, safePath), "utf8"),
+    "safe partial work\n",
+  );
+  assert.equal(implementationTurns, 2);
+  for (const [role, calls] of Object.entries(fixture.calls)) {
+    for (const request of calls.slice(resumedCallOffsets[role])) {
+      assert.equal(request.prompt.includes(narrativePath), false);
+      assert.equal(
+        (request.recoveryPrompt ?? "").includes(narrativePath),
+        false,
+      );
+    }
+  }
+  assert.equal(
+    JSON.stringify(completed.pipelineState).includes(narrativePath),
+    false,
+  );
+});
+
 function hash(value) {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -1814,6 +2030,16 @@ function reviewFindings(...ids) {
     validationChange: "UNCHANGED",
     validationEvidence: [],
     ...emptyDecision(),
+  };
+}
+
+function reviewRejected(...ids) {
+  return {
+    ...reviewFindings(...ids),
+    validationChange: "REJECTED",
+    validationEvidence: [
+      "The candidate validation infrastructure change is not authorized.",
+    ],
   };
 }
 
@@ -2383,7 +2609,7 @@ async function createFixture(
     revision: 1,
     runId,
     pipelineId: "plan-execution",
-    pipelineStateVersion: 8,
+    pipelineStateVersion: 9,
     projectPath,
     taskPath,
     roles: {
@@ -2725,7 +2951,7 @@ async function createFixture(
   ) {
     currentRun = {
       ...currentRun,
-      pipelineStateVersion: 8,
+      pipelineStateVersion: 9,
       pipelineState,
       pause,
       revision: currentRun.revision + 1,
@@ -3726,6 +3952,83 @@ test("runs the dedicated finalization gate without skill guidance", async (t) =>
     ).prompt,
     /No finalization skill guidance is available/u,
   );
+});
+
+test("corrects noncanonical finalization infrastructure before review", async (t) => {
+  const aliasPath = ".claude/skills/finalization/SKILL.md";
+  const fixture = await createFixture(t, {
+    async prepareProject(projectPath) {
+      await symlink(".agents", join(projectPath, ".claude"));
+    },
+    workWorker: [
+      implementationCompleted(),
+      {
+        ...finalizationPassed(),
+        validationInfrastructure: [aliasPath],
+      },
+      finalizationPassed(),
+    ],
+  });
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  const correction = fixture.transitions.find(
+    ({ options }) => options.activity?.kind === "finalization-correction",
+  ).patch.pipelineState.finalizationCorrections[0];
+  assert.deepEqual(correction.diagnostics, [
+    {
+      role: "worker",
+      phase: "finalization",
+      contract: "finalization",
+      field: "validationInfrastructure[0]",
+      constraint: "existing-canonical-repository-file",
+    },
+  ]);
+  const reviewPrompt = fixture.calls.reviewer.find(({ prompt }) =>
+    prompt.includes("Review the changes"),
+  ).prompt;
+  assert.doesNotMatch(reviewPrompt, /\.claude\/skills/u);
+});
+
+test("corrects narrative infrastructure in blocked finalization output", async (t) => {
+  const narrativePath =
+    "TMPDIR and bound HEAD values from this finalization turn";
+  const fixture = await createFixture(t, {
+    workReviewer: [],
+    workWorker: [
+      implementationCompleted(),
+      {
+        ...finalizationBlocked(
+          "The required local service is unavailable.",
+          "The validation process could not connect to its service.",
+        ),
+        validationInfrastructure: [narrativePath],
+      },
+      finalizationBlocked(
+        "The required local service is unavailable.",
+        "The validation process could not connect to its service.",
+      ),
+    ],
+  });
+
+  const paused = await fixture.run();
+
+  assert.equal(paused.pause.reason, "environment_blocked");
+  assert.deepEqual(
+    paused.pipelineState.finalizationCorrections[0].diagnostics,
+    [
+      {
+        role: "worker",
+        phase: "finalization",
+        contract: "finalization",
+        field: "validationInfrastructure[0]",
+        constraint: "existing-canonical-repository-file",
+      },
+    ],
+  );
+  assert.doesNotMatch(JSON.stringify(fixture.currentRun), /TMPDIR and bound/u);
+  assert.doesNotMatch(JSON.stringify(fixture.transitions), /TMPDIR and bound/u);
 });
 
 test("corrects the production git status finalization inventory into an environment pause", async (t) => {
@@ -7327,6 +7630,221 @@ test("overrides one current finding only for its reviewed fingerprint", async (t
       findingId: "R1",
       fingerprint: result.pipelineState.reviewedFingerprint,
     },
+  ]);
+});
+
+test("resolves a sole rejected validation change through its exact override", async (t) => {
+  const changedInfrastructure = ["package.json", "source.js"];
+  const changedFinalization = {
+    ...finalizationPassed(),
+    validationInfrastructure: changedInfrastructure,
+  };
+  const fixture = await createFixture(t, {
+    workReviewer: [reviewRejected("R1"), reviewRejected("R1")],
+    workWorker: [
+      implementationCompleted(),
+      changedFinalization,
+      resolution({ id: "R1", decision: "FIX" }),
+      changedFinalization,
+      resolution({ id: "R1", decision: "FIX" }),
+    ],
+  });
+
+  const paused = await fixture.run({
+    maxFixRoundsPerStep: 1,
+    maxSameFindingRounds: 10,
+    stagnationWindowRounds: 10,
+  });
+  assert.equal(paused.pause.reason, "fix_limit_reached");
+
+  const completed = await fixture.run(
+    {},
+    { type: "override-finding", findingId: "R1" },
+  );
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.pipelineState.reviewResult.status, "FINDINGS");
+  assert.equal(
+    completed.pipelineState.reviewResult.validationChange,
+    "REJECTED",
+  );
+  assert.deepEqual(completed.pipelineState.findings, []);
+  assert.deepEqual(completed.pipelineState.validationInfrastructure, [
+    "package.json",
+  ]);
+  assert.deepEqual(completed.pipelineState.findingOverrides, [
+    {
+      findingId: "R1",
+      fingerprint: completed.pipelineState.reviewedFingerprint,
+    },
+  ]);
+  assert.equal(
+    fixture.calls.reviewer.filter(({ prompt }) =>
+      prompt.includes("Review the changes"),
+    ).length,
+    2,
+  );
+});
+
+test("does not store or offer an applicable override twice", async (t) => {
+  const fixture = await createFixture(t, {
+    workReviewer: [reviewFindings("R1"), reviewFindings("R1")],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      resolution({ id: "R1", decision: "FIX" }),
+      finalizationPassed(),
+      resolution({ id: "R1", decision: "FIX" }),
+    ],
+  });
+  const paused = await fixture.run({
+    maxFixRoundsPerStep: 1,
+    maxSameFindingRounds: 10,
+    stagnationWindowRounds: 10,
+  });
+  const override = {
+    findingId: "R1",
+    fingerprint: paused.pipelineState.reviewedFingerprint,
+  };
+  fixture.persistPipelineState({
+    ...paused.pipelineState,
+    findingOverrides: [override],
+  });
+
+  const projection = planExecutionPipeline.projections.pause(
+    fixture.currentRun,
+  );
+  assert.equal(
+    projection.nextActions.some(
+      ({ action }) => action?.type === "override-finding",
+    ),
+    false,
+  );
+  await assert.rejects(
+    fixture.run({}, { type: "override-finding", findingId: "R1" }),
+    /stale or inapplicable/u,
+  );
+  assert.deepEqual(fixture.currentRun.pipelineState.findingOverrides, [
+    override,
+  ]);
+});
+
+test("suppresses a regenerated exact finding without recording approval", async (t) => {
+  const fixture = await createFixture(t, {
+    workReviewer: [
+      reviewFindings("R1"),
+      reviewFindings("R1"),
+      reviewFindings("R1"),
+    ],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      resolution({ id: "R1", decision: "FIX" }),
+      finalizationPassed(),
+      resolution({ id: "R1", decision: "FIX" }),
+    ],
+  });
+  const paused = await fixture.run({
+    maxFixRoundsPerStep: 1,
+    maxSameFindingRounds: 10,
+    stagnationWindowRounds: 10,
+  });
+  const override = {
+    findingId: "R1",
+    fingerprint: paused.pipelineState.reviewedFingerprint,
+  };
+  fixture.persistPipelineState(
+    {
+      ...paused.pipelineState,
+      workflowState: "REVIEW",
+      findings: [],
+      pendingDisputes: [],
+      findingOverrides: [override],
+    },
+    { pause: null },
+  );
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.pipelineState.reviewResult.status, "FINDINGS");
+  assert.deepEqual(completed.pipelineState.findings, []);
+  const lastReviewPrompt = fixture.calls.reviewer.findLast(({ prompt }) =>
+    prompt.includes("Review the changes"),
+  ).prompt;
+  assert.match(lastReviewPrompt, /"overrides"/u);
+  assert.match(lastReviewPrompt, /User overrides are runner-owned/u);
+  assert.ok(
+    fixture.transitions.some(
+      ({ options }) => options.activity?.kind === "overrides-applied",
+    ),
+  );
+});
+
+test("does not carry an override across a content fingerprint change", async (t) => {
+  let resolutionTurns = 0;
+  const fixture = await createFixture(t, {
+    workReviewer: [
+      reviewFindings("R1", "R2"),
+      reviewFindings("R1", "R2"),
+      reviewFindings("R1"),
+    ],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      resolution(
+        { id: "R1", decision: "FIX" },
+        { id: "R2", decision: "FIX" },
+      ),
+      finalizationPassed(),
+      resolution(
+        { id: "R1", decision: "FIX" },
+        { id: "R2", decision: "FIX" },
+      ),
+      resolution({ id: "R2", decision: "FIX" }),
+      resolution({ id: "R2", decision: "FIX" }),
+      finalizationPassed(),
+      resolution({ id: "R1", decision: "FIX" }),
+    ],
+    async onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        request.prompt.includes("For each finding below")
+      ) {
+        resolutionTurns += 1;
+        if (resolutionTurns === 4) {
+          await writeFile(
+            join(request.cwd, "changed-after-override.txt"),
+            "new fingerprint\n",
+          );
+        }
+      }
+    },
+  });
+  const settings = {
+    maxFixRoundsPerStep: 1,
+    maxSameFindingRounds: 10,
+    stagnationWindowRounds: 10,
+  };
+  const paused = await fixture.run(settings);
+  const overriddenFingerprint = paused.pipelineState.reviewedFingerprint;
+
+  const overridePaused = await fixture.run(
+    settings,
+    { type: "override-finding", findingId: "R1" },
+  );
+  assert.equal(overridePaused.pause.reason, "fix_limit_reached");
+
+  const changed = await fixture.run(
+    settings,
+    { type: "extra-fix-rounds", amount: 1 },
+  );
+
+  assert.equal(changed.pause.reason, "fix_limit_reached");
+  assert.deepEqual(changed.pipelineState.findings.map(({ id }) => id), ["R1"]);
+  assert.notEqual(changed.pipelineState.reviewedFingerprint, overriddenFingerprint);
+  assert.deepEqual(changed.pipelineState.findingOverrides, [
+    { findingId: "R1", fingerprint: overriddenFingerprint },
   ]);
 });
 
