@@ -480,6 +480,66 @@ closed. Rejected values, commands, paths, provider text, and transcripts never
 enter state or public activity. Interrupted correction recovery remains
 read-only and does not require a native session.
 
+Plan execution state version 8 replaces that single record with a two-entry
+finalization-correction ledger and one pending attempt. Its version-7 migration
+preserves a consumed or pending attempt as the first one-entry diagnostic batch
+without changing workflow position, evidence, or correction scope.
+Deterministic finalization validation batches independently detectable
+violations where practical and always includes every staging-dependent required
+command. The first batch may authorize attempt `1`; one wholly new batch may
+authorize attempt `2`. Any repeated diagnostic, mixed repeated/new batch, or
+invalid result after attempt `2` fails closed. Guidance identifies how to
+reconstruct a pending request and never creates another budget. The ledger is
+scoped to the current step and request content fingerprint and is cleared when
+that content scope changes. Rejected commands, paths, values, provider text,
+and transcripts remain outside state and public activity, while interruption
+preserves the pending attempt without replaying or recounting it.
+
+Plan execution state version 9 makes user finding overrides unique by exact
+finding ID and reviewed content fingerprint and requires every finalization
+validation-infrastructure candidate to pass the same existing canonical-file
+inspection as bootstrap evidence before fingerprinting or review. Its version-8
+migration deduplicates legacy override audit entries, preserves completed
+commits, safe current-step content, counters, Git controls, and one-shot commit
+effect safety, and marks active validation evidence provisional. Before
+advancement, the existing validation-migration checkpoint independently
+rediscovers the complete stable inventory and invalidates provisional
+finalization and review evidence. Immutable terminal history is shape-upgraded
+without replaying work.
+
+Plan execution state version 10 replaces each consumed or pending bootstrap
+correction's single field diagnostic with one bounded, deduplicated diagnostic
+batch. Its version-9 migration losslessly wraps every existing diagnostic in a
+one-entry batch without changing workflow position, accepted context, safe
+content, gates, counters, or commit authority. Deterministic bootstrap and
+validation-migration validation collects all independently detectable
+violations from one candidate where practical, including every
+staging-dependent required command and every lexically valid
+validation-infrastructure path that canonical-file inspection rejects. The
+producing role still receives exactly one correction attempt for its phase and
+contract; a pending batch survives interruption and is cleared only after a
+valid complete replacement is accepted. Repeated or still-invalid output fails
+closed. Durable state and public activity contain only bounded diagnostic
+identities, never rejected values, commands, paths, provider output, or
+transcripts.
+
+Plan execution state version 11 adds one final-Reviewer correction record and
+a pending marker scoped to the current step, finalized content fingerprint,
+and validation-infrastructure fingerprint. Its version-10 migration initializes
+both to `null` without moving the workflow, altering accepted finalization or
+review evidence, reviving terminal runs, or inferring rejected output that was
+never retained. The first provider structured-output, normalization, or
+validation-change consistency failure records attempt `1` and only bounded
+Reviewer/review field-and-constraint diagnostics, then reconstructs the full
+unchanged review request for a fresh-session, read-only correction with the
+same schema. Interruption and backend unavailability preserve that pending
+attempt without replay or recounting. A still-invalid replacement pauses at
+the deliberately retryable `review_output_invalid` REVIEW checkpoint; an
+explicit retry reruns the pending correction without approving content or
+bypassing finalization, findings, fingerprints, Git guards, or commit
+authorization. Rejected values, findings, commands, paths, provider output,
+prompts, and transcripts never enter durable state or public activity.
+
 Polishing state version 3 adopts the same resolved trusted-validation snapshot,
 per-check executor provenance, and fingerprint-bound evidence tuple. Its
 version-2 migration selects empty legacy trust, preserves safe workspace
@@ -492,8 +552,8 @@ evidence is shape-upgraded without replaying work.
 Polishing state version 4 adds its bounded bootstrap-correction ledger and
 pending one-shot diagnostic. Its version-3 migration initializes both without
 changing accepted bootstrap context, validation evidence, workspace content,
-or workflow position. As in plan execution, each producing role, bootstrap or
-validation-migration phase, and contract may consume one read-only correction;
+or workflow position. Each producing role, bootstrap or validation-migration
+phase, and contract may consume one read-only correction;
 only attempt `1` and the bounded role, phase, contract, field, and constraint
 are durable. A valid replacement clears the pending copy, an interrupted turn
 reconstructs it from state, and a second invalid result fails closed without
@@ -685,7 +745,9 @@ the same mount, network, and PID namespaces, so it cannot gain host mounts or
 networking and is retired with the complete process tree. Remote network and
 filesystem writes, hosting credentials, Git credential helpers, and ambient
 authentication variables are unavailable. A private PID namespace and an outer
-process group provide bounded TERM/KILL retirement before reconciliation. A
+process group give a successfully completed command one bounded grace period
+for remaining descendants to retire naturally, then provide bounded TERM/KILL
+retirement when the group remains active. Timeout cleanup begins immediately. A
 one-byte readiness signal emitted inside the completed isolation profile
 distinguishes setup denial from an executed check failure without exposing
 native output. The runner retains no stdout or stderr and records only bounded
@@ -701,17 +763,20 @@ fingerprints. This service does not broaden any agent turn's sandbox and
 introduces no daemon or shell DSL.
 
 Before plan execution or polishing accepts a producing role's bootstrap or
-legacy validation-migration inventory, the root Git boundary verifies every
+legacy validation-migration inventory, and before plan execution fingerprints
+or reviews a finalization candidate, the root Git boundary verifies every
 validation-infrastructure entry is an existing regular file whose canonical
 repository-relative path exactly matches the proposed path. Missing files,
 directories, symlinks, and paths traversing a symlink are field-specific
-bootstrap violations; the runner does not follow or silently canonicalize
-them. The producing role receives the bounded diagnostic on its one correction
-turn, and a second invalid result fails closed. The deterministic aggregate is
-therefore derived only from independently accepted canonical role evidence.
+violations; the runner does not follow or silently canonicalize them. Plan
+execution collects every inspectable violation from the candidate into the
+owning bounded bootstrap or finalization diagnostic batch, and a repeated
+invalid result fails closed. The deterministic aggregate is therefore derived
+only from independently accepted canonical role evidence.
 Plan execution and polishing additionally reject each staging-dependent
-required command with a bounded field-specific diagnostic before accepting that
-producing result; the same policy rejects a finalization candidate inventory
+required command with bounded field-specific diagnostics before accepting that
+producing result; plan execution batches all such independently detectable
+violations, and the same policy rejects a finalization candidate inventory
 without delegating index ownership to an ordinary Worker turn.
 
 An explicitly supplied source session is different: the first eligible turn of
@@ -810,13 +875,17 @@ atomically replaced beneath the run directory, with absolute paths, traversal,
 reserved state files, and symlink escapes rejected. Managed state and lease
 paths must be isolated regular files rather than symbolic or hard links.
 
-Detached MCP launch also carries the dispatching process's runtime tuple in a
-bounded internal environment field. The child compares it with its loaded code
-before acquiring a run lease or recovering the run. A mismatch uses a distinct
-exit status that the parent converts to an actionable version-skew error; the
-run and incomplete idempotency intent remain durable for retry after the MCP
-process is restarted. Client disconnect and wait cancellation still affect
-only the client-side operation.
+At MCP startup, the root freezes one bounded detached-compatibility token
+derived canonically from the root run-envelope compatibility tuple and the
+sorted ID/state-version pairs of every loaded pipeline descriptor. Detached
+launch passes that token in an internal environment field. After loading its
+own registry, the child independently recomputes and compares the token before
+acquiring a run lease, recovering state, or evaluating a migration. A mismatch
+uses a distinct exit status that the parent converts to an actionable
+version-skew error; `state.json`, the journal, leases, the durable run, and the
+incomplete idempotency intent remain exactly at their pre-dispatch state for an
+exact-key retry after the MCP process is restarted. Client disconnect and wait
+cancellation still affect only the client-side operation.
 
 ## Clarification Lifecycle
 

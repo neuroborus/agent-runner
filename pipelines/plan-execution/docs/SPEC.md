@@ -375,15 +375,22 @@ Persist at least:
 - prepared or consumed one-shot commit authorization while `COMMIT` is pending;
 - completed commit SHAs;
 - current findings;
+- unique user finding-override audit decisions bound to exact reviewed content
+  fingerprints;
 - fix/dispute counters;
 - latest finalized content fingerprint;
 - complete required-check inventory, validation-infrastructure file list, and
   runner-computed infrastructure fingerprint;
-- bounded bootstrap-correction attempts containing only role, phase, contract,
-  field, constraint, and attempt number;
-- the current step's optional consumed and pending finalization-correction
-  records, containing only attempt number, step, bounded guidance and content-
-  fingerprint scope, role, phase, contract, field, and constraint;
+- bounded bootstrap-correction attempts containing only attempt number and
+  deduplicated role, phase, contract, field, and constraint diagnostic batches;
+- the current step's bounded finalization-correction ledger and optional
+  pending attempt, containing only attempt number, step, bounded guidance and
+  content-fingerprint scope, and bounded role, phase, contract, field, and
+  constraint diagnostic batches;
+- the current step's bounded final-Reviewer correction record and optional
+  pending attempt, scoped to the finalized content and validation-
+  infrastructure fingerprints and containing only attempt number, step, and
+  bounded Reviewer/review field-and-constraint diagnostics;
 - exact per-check finalization evidence and the fingerprint-bound Reviewer
   validation-change decision;
 - the resolved runner-trusted command snapshot, command/configuration
@@ -472,6 +479,61 @@ provider text, or raw structured output. The pending marker is cleared after a
 valid replacement; the consumed record remains until the step commits so a
 later invalid finalization result in the same step fails closed. Starting the
 next step clears both records.
+
+Pipeline state version 8 replaces the consumed record with a ledger of at most
+two correction attempts. The version-7 migration losslessly wraps a consumed
+or pending field diagnostic in the first batch without changing safe content,
+workflow position, gate evidence, guidance, fingerprint scope, or commit
+authority. Deterministic validation reports all independently detectable
+violations from one finalization candidate together where practical, including
+every staging-dependent required command. Attempt `1` is authorized by the
+first batch. Attempt `2` is authorized only when every diagnostic in the next
+batch is new; a repeated diagnostic, a mixed repeated/new batch, or any invalid
+result after attempt `2` fails closed. Guidance is reconstruction metadata, not
+a separate retry budget. The ledger remains scoped to the current step and
+request content fingerprint and clears when that content scope changes.
+Rejected values, commands, paths, provider text, and raw structured output
+remain outside state and public activity. The pending copy is always the latest
+ledger entry, so interruption reconstructs the same read-only attempt without
+replaying or recounting consumed work.
+
+Pipeline state version 9 makes finding overrides unique by exact finding ID and
+reviewed content fingerprint and requires finalization validation
+infrastructure to contain only existing canonical repository-relative regular
+files. Its version-8 migration deduplicates legacy override audit entries,
+preserves completed commits, safe current-step content, counters, Git controls,
+and consumed one-shot effect safety, invalidates provisional finalization and
+review evidence, and routes every prepared active run through fresh independent
+validation discovery before advancement. A consumed commit authorization stays
+on its verification-only path. Immutable terminal history is shape-upgraded
+without replaying work.
+
+Pipeline state version 10 replaces each consumed or pending bootstrap
+correction's single field diagnostic with one bounded, deduplicated diagnostic
+batch. The version-9 migration losslessly wraps every existing diagnostic in a
+one-entry batch without changing workflow position, accepted context, safe
+content, gates, counters, or commit authority. Bootstrap and validation-
+migration validation collects all independently detectable violations from one
+candidate where practical, including every staging-dependent command and every
+lexically valid validation-infrastructure path rejected by canonical-file
+inspection. The producing role still receives exactly one correction attempt
+per phase and contract. A pending batch survives interruption and is cleared
+only after a valid complete replacement is accepted; repeated or still-invalid
+output fails closed. Rejected values, commands, paths, provider output, and
+transcripts remain outside durable state and public activity.
+
+Pipeline state version 11 adds a nullable final-Reviewer correction record and
+a matching nullable pending marker. The version-10 migration initializes both
+to `null` without moving workflow position, changing accepted finalization or
+review evidence, reviving terminal runs, or inferring rejected output that was
+never persisted. A record contains only attempt `1`, the current step, the
+finalized content fingerprint, the validation-infrastructure fingerprint, and
+bounded Reviewer/review field-and-constraint diagnostics. It contains no
+rejected values, findings, commands, paths, provider output, prompts, or
+transcripts. The pending marker survives interruption and backend
+unavailability and is cleared only after a valid replacement is routed. A
+still-invalid replacement retains the latest bounded pending diagnostic for an
+explicit read-only retry without creating another automatic attempt.
 
 Common run-envelope version 3 independently adds nullable bounded active
 provider role and phase. Version-1 and version-2 envelopes project it as `null`
@@ -1165,10 +1227,14 @@ of launching a conflicting child. After a mutating child is spawned, MCP does
 not complete the intent until the run advances or that child owns the worktree;
 a child that loses a concurrent acquisition race leaves the intent retryable.
 The launcher's correlated exit acknowledgement preserves that result when the
-winning lease is released between MCP polls. The dispatcher also passes its
-runtime tuple to the child. A mismatch is rejected before the child takes the
-run lease, and its distinct exit leaves the run and incomplete intent unchanged
-for an exact retry after the MCP process is restarted.
+winning lease is released between MCP polls. At MCP startup, the dispatcher
+freezes one canonical detached-compatibility token over the root run-envelope
+tuple and every loaded pipeline descriptor's ID and state version, sorted by
+ID. The child loads its registry and independently recomputes that token before
+run-lease acquisition, recovery, or migration. A mismatch takes the distinct
+version-skew exit path and leaves the durable run, journal, leases, and
+incomplete intent exactly unchanged for an exact-key retry after the MCP
+process is restarted.
 The additive MCP start fields leave `sourceSession` unset by default and pass it
 only after the user deliberately selects a fork; native IDs remain opaque and
 an unknown source profile offers only `current` inheritance.
@@ -1273,11 +1339,13 @@ Each summary and inventory covers every substantive validation requirement but
 must not require staging, staged handoff, index mutation or inspection, an
 implicit worktree-versus-index assertion, an alternate index, or commit-message
 drafting. Generic commit preparation belongs only to `COMMIT`; an applicable
-content check uses `HEAD` or explicit trees. Deterministic validation reports an
-unsafe command as a field-specific bootstrap violation, consumes the producing
-role's one bounded read-only correction, and fails closed if the replacement
-remains unsafe. Validation-migration discovery uses the same policy, and
-finalization candidate inventories are rejected by that policy as well.
+content check uses `HEAD` or explicit trees. Deterministic validation collects
+every unsafe command and every inspectable invalid validation-infrastructure
+path from one candidate into a bounded, deduplicated field-diagnostic batch,
+consumes the producing role's one bounded read-only correction, and fails
+closed if the replacement remains invalid. Validation-migration discovery uses
+the same policy, and finalization candidate inventories are rejected by their
+owning batched correction policy as well.
 Each role may return at most 64 `requiredChecks` and 64
 `validationInfrastructure` entries. The independently derived, persisted,
 finalization, and fingerprint-input inventories each allow at most 128 entries,
@@ -1305,30 +1373,31 @@ status-specific variants. Deterministic pipeline normalization remains
 authoritative for exact nonempty text, commands, uniqueness, and safe
 repository-relative paths. Each bootstrap schema keeps a strict object root
 and places its discriminated variants in a nested `result` union. A rejected
-bootstrap result persists and publishes only its role, phase, contract field,
-and violated constraint; it never retains the rejected value or raw role
-output.
+bootstrap result persists and publishes only its bounded, deduplicated role,
+phase, contract, field, and violated-constraint diagnostic batch; it never
+retains a rejected value, command, path, or raw role output.
 
 The producing Worker or Reviewer and each summary-producing reconciliation
 Worker or Arbiter receives one read-only correction turn for an invalid
-bootstrap contract. The runner first
-persists attempt `1` and the bounded diagnostic, then reconstructs the complete
-request from durable state and asks for a complete replacement result. A
+bootstrap contract. The runner first persists attempt `1` and the bounded
+diagnostic batch, then reconstructs the complete request from durable state and
+asks for a complete replacement result. A
 provider interruption does not consume another correction or require the
 native session. Each adapter maps its native structured-output failure to the
 shared bounded `structured-output` failure class. The pipeline maps only that
 class to the bounded `result` semantic diagnostic after the read-only mutation
 guard completes; provider text is discarded. A valid replacement retires the
-pending correction before any product-decision pause, while its history remains
-consumed. A repeated invalid result fails closed.
+pending batch before any product-decision pause, while its history remains
+consumed. Repeated or still-invalid output fails closed.
 
 Before any inventory is accepted or fingerprinted, the runner asks the root
 Git boundary to inspect each validation-infrastructure path. The path must
 exist as a regular file and the returned canonical repository-relative path
-must exactly equal the proposed value. Missing files, directories, symlinks,
-and symlink traversal return to the producing role as a field-specific
-`existing-canonical-repository-file` correction; they do not surface later as
-a generic unsafe-path failure and are never followed or silently rewritten.
+must exactly equal the proposed value. Every inspectable missing file,
+directory, symlink, and symlink-traversing path returns to the producing role in
+the same bounded `existing-canonical-repository-file` diagnostic batch; these
+violations do not surface later as generic unsafe-path failures and are never
+followed or silently rewritten.
 
 The Reviewer summary additionally states what it intends to verify.
 
@@ -1482,10 +1551,12 @@ same mount, network, and PID namespaces; it cannot acquire host mounts or
 networking and is retired with the complete process tree. Remote network and
 filesystem writes, hosting credentials, Git credential helpers, and ambient
 authentication variables remain unavailable. The runner supervises the
-complete process tree with a private PID namespace and bounded outer
-process-group TERM/KILL retirement. A one-byte signal from inside the completed
-isolation profile distinguishes setup denial from a nonzero validation-command
-exit without retaining stderr or other native output. A repository snapshot
+complete process tree with a private PID namespace and outer process group. A
+successfully completed command gives remaining descendants one bounded grace
+period to retire naturally before bounded TERM/KILL cleanup; timeout cleanup
+starts immediately. A one-byte signal from inside the completed isolation
+profile distinguishes setup denial from a nonzero validation-command exit
+without retaining stderr or other native output. A repository snapshot
 before and after every trusted command
 rejects workspace, index, history/ref, remote-configuration, or Git-identity
 mutation, and the complete validation-infrastructure fingerprint is recomputed
@@ -1534,22 +1605,41 @@ If finalization fails, enter `RESOLVE_FINDINGS` with the reported validation fai
 
 Any later content change invalidates the previous finalization result.
 
-If deterministic normalization rejects the first Worker finalization result,
-persist the version-7 bounded diagnostic and publish one
-`finalization-correction` activity without rejected content. Reconstruct the
-complete request from durable inputs and ask the Worker for one complete
-replacement with the same finalization schema in a fresh-session, read-only
-turn. The correction may re-execute corrected staging-independent checks needed
-for complete direct evidence, but it does not execute the rejected command or
-staging-dependent validation and cannot modify repository content, staging,
-history, refs, remotes, or Git identity. Interruption before or during that turn
-preserves the pending attempt, reconciles it as read-only, and resumes without
-another attempt or a required native session. A valid corrected `BLOCKED`
-result uses `environment_blocked`; corrected `PASS` and `FAIL` results rejoin
-the existing fingerprint, trusted-validation, review, and commit paths. A
-repeated invalid result fails closed without retaining either rejected result.
-This per-step attempt is independent of bootstrap and validation-migration
-correction ledgers.
+If deterministic normalization rejects a Worker finalization result, collect
+all independently detectable violations from that candidate where practical,
+including every staging-dependent required command. Persist the version-8
+bounded diagnostic batch and publish one redacted `finalization-correction`
+activity without rejected content. Reconstruct the complete request from
+durable inputs and ask the Worker for a complete replacement with the same
+finalization schema in a fresh-session, read-only turn. The correction may
+re-execute corrected staging-independent checks needed for complete direct
+evidence, but it does not execute a rejected command or staging-dependent
+validation and cannot modify repository content, staging, history, refs,
+remotes, or Git identity.
+
+Allow at most two such attempts for the current step and request content
+fingerprint. The first diagnostic batch authorizes attempt `1`; a correction
+that produces a wholly new batch may authorize attempt `2`. Any repeated
+diagnostic, any batch mixing repeated and new diagnostics, or another invalid
+result after attempt `2` fails closed. Resolved versus fallback guidance is
+durable request-reconstruction metadata and does not create a separate budget.
+A later content change starts a new fingerprint scope. Interruption before or
+during an attempt preserves its pending ledger entry, reconciles it as
+read-only, and resumes that same attempt without replay, recounting, or a
+required native session. A valid corrected `BLOCKED` result uses
+`environment_blocked`; corrected `PASS` and `FAIL` results rejoin the existing
+fingerprint, trusted-validation, review, and commit paths unchanged. Rejected
+values, commands, paths, provider output, and transcripts are never persisted
+or published. This bounded ledger is independent of bootstrap and validation-
+migration correction ledgers.
+
+Before any finalization candidate, including `BLOCKED`, is fingerprinted,
+trusted, or reviewed, inspect every validation-infrastructure entry through the
+root Git boundary. Each entry must exist as a regular file and its canonical
+repository-relative path must exactly equal the proposed value. Missing files,
+directories, symlinks, symlink traversal, and narrative per-turn values enter
+the same bounded redacted finalization-correction path; they never become a
+candidate fingerprint or Reviewer finding.
 
 ### 13.3 Review
 
@@ -1622,6 +1712,36 @@ Finding IDs must remain stable across re-review:
 The runner must not implement fuzzy semantic matching of findings in V1.
 
 When review finishes successfully, persist the reviewed content fingerprint.
+
+If the final `REVIEW_SCHEMA` provider reports the shared structured-output
+failure class, deterministic normalization rejects the result, or the
+validation-change decision conflicts with accepted finalization evidence, map
+the failure to bounded Reviewer/review field-and-constraint diagnostics. After
+the first invalid result, durably record automatic attempt `1` and publish only
+one redacted `review-correction` activity. Reconstruct the complete review
+request from durable task, plan, context, prior-decision, finalization, and
+fingerprint state, then invoke a fresh read-only Reviewer session with the
+unchanged schema. Never rely on or continue the rejected native session.
+
+Before accepting the replacement, reapply input, repository, read-only, Git-
+control, content-fingerprint, validation-infrastructure-fingerprint, and
+finalization-evidence guards. Preserve accepted finalization evidence while
+that complete scope is unchanged. Content or control drift invalidates the
+correction scope and follows the existing safe reconciliation path. A valid
+replacement rejoins the ordinary approval, findings, validation-change, and
+product-decision routes.
+
+If the corrected result remains invalid, pause at `review_output_invalid` with
+resume state `REVIEW`, bounded public field-and-constraint evidence, and one
+explicit null retry action. That retry reconstructs and reruns the pending
+fresh-session, read-only correction without incrementing attempt `1`; another
+invalid result pauses again. It cannot approve work, accept findings, alter
+finalization evidence, or bypass fingerprint, Git, finding-resolution, or
+commit-authorization gates. Interruption or backend unavailability before or
+during correction retains the pending attempt for the same reconstruction and
+does not replay accepted progress or require a native session. Rejected values,
+findings, commands, paths, provider output, prompts, and transcripts are never
+persisted or published.
 
 ### 13.4 Resolve findings
 
@@ -1925,6 +2045,7 @@ no_progress
 finalization_skill_missing
 finalization_skill_invalid
 finalization_cannot_pass
+review_output_invalid
 read_only_agent_mutated_repository
 unexpected_git_ref_change
 unexpected_remote_configuration_change
@@ -2007,6 +2128,14 @@ agent-run resume \
 Both resume actions are valid only for an applicable paused run. The override
 removes only the named finding, does not approve any other finding, and becomes
 stale as soon as the reviewed content fingerprint changes.
+
+Override audit entries are unique by finding ID and reviewed fingerprint. A
+complete re-review deterministically suppresses only an exact applicable
+override; unrelated findings remain blocking. When a rejected validation
+change is represented only by overridden findings for that same fingerprint,
+the override resolves that blocker without changing the persisted Reviewer
+decision to `ACCEPTED`. The same applicable override is neither offered nor
+stored again.
 
 A user override must be explicitly recorded in `events.jsonl` and `progress.md`.
 
@@ -2153,9 +2282,11 @@ At minimum cover:
 44. independently identified plan-execution or polishing runs cannot own the
     same canonical Git worktree concurrently, including through detached MCP
     dispatch, and a demonstrably stale same-host owner is recoverable.
-45. compatible legacy state migrates under the execution lease, incompatible
-    readers and detached children fail with a specific version-skew error, and
-    disconnects leave the durable run and retryable intent intact.
+45. compatible legacy state migrates under the execution lease; the real
+    canonical root-and-sorted-pipeline compatibility calculation rejects an
+    old-parent/new-child descriptor skew before lease acquisition or migration;
+    and a fresh MCP process can retry the unchanged durable run and incomplete
+    intent with the exact idempotency key.
 46. sandbox, IPC, loopback, process-isolation, missing-service, and permission
     validation blockers pause as `environment_blocked`, preserve safe content,
     and resume from the correct fingerprint-aware checkpoint.
@@ -2169,11 +2300,13 @@ At minimum cover:
     owner loss, timed-out MCP wait, ordinary resume, and interrupted one-shot
     verification preserve the lease-aware activity contract.
 50. invalid Worker, Reviewer, reconciliation, arbitration, and validation-
-    migration bootstrap results receive one durable read-only correction and a
-    repeated invalid result fails closed without persisted rejected values.
-51. missing, directory, symlink, and symlink-traversing validation-
-    infrastructure paths are rejected before inventory acceptance with the
-    producing field identified, while canonical existing files are accepted.
+    migration bootstrap results receive one durable read-only diagnostic-batch
+    correction and repeated or still-invalid output fails closed without
+    persisted rejected values.
+51. all inspectable missing, directory, symlink, and symlink-traversing
+    validation-infrastructure paths are batched before inventory acceptance
+    with every producing field identified, while canonical existing files are
+    accepted.
 52. Claude structured status and permission classification is finite and
     redacted; allowlisted read-only failures reconstruct from durable state,
     classified writable usage/provider failures preserve reconciled changes,
@@ -2204,16 +2337,41 @@ At minimum cover:
     prompts preserve phase ownership: all substantive finalization work runs,
     commit preparation is deferred without blocking validation, and only the
     constrained commit executor stages the finalized and reviewed content.
-60. staging-dependent bootstrap and validation-migration inventories receive
-    one field-specific correction and then fail closed, finalization candidate
-    inventories obey the same deterministic policy, and a paused version-5
-    implementation run re-establishes phase-safe context before finalization,
-    review, and one authorized commit.
-61. a transport-compatible finalization inventory containing `git status`
-    receives one durable, redacted, read-only correction; corrected BLOCKED,
-    PASS, and FAIL outcomes rejoin their existing routes, interruption resumes
-    the same attempt, a second invalid result fails closed, and version-6 state
-    migrates losslessly to the version-7 shape.
+60. staging-dependent bootstrap and validation-migration inventories batch
+    every independently detectable unsafe command and inspectable invalid path
+    into their one field-specific correction and then fail closed;
+    finalization candidate inventories obey the same deterministic policy, and
+    a paused version-5 implementation run re-establishes phase-safe context
+    before finalization, review, and one authorized commit.
+61. finalization validation batches every independently detectable staging-
+    dependent command; permits only one wholly new second diagnostic batch;
+    fails closed on repetition, mixed novelty, or exhausted allowance; and
+    keeps corrected BLOCKED, PASS, and FAIL outcomes on their existing routes.
+62. pending first and second finalization corrections survive interruption
+    without replay or recounting, prompts and public activity retain no rejected
+    content, and version-7 consumed and pending state migrates losslessly to the
+    version-8 ledger.
+63. exact finding overrides remain unique and fingerprint-bound, suppress only
+    the named same-content finding, resolve a solely represented validation
+    rejection without claiming Reviewer acceptance, and become inapplicable
+    after content drift.
+64. finalization candidates accept only existing canonical repository-relative
+    regular validation files before fingerprinting or review, and version-8
+    active runs migrate through fresh independent discovery without losing
+    completed commits or safe current-step content.
+65. version-9 consumed and pending bootstrap diagnostics migrate losslessly to
+    one-entry batches, adjacent staging-dependent commands share one correction,
+    and a pending multi-diagnostic batch resumes without replay or rejected
+    content retention.
+66. final Reviewer provider, normalization, and validation-change consistency
+    failures receive one durable fresh-session read-only correction; valid
+    approval, findings, validation-change, and product-decision replacements
+    rejoin their existing routes; and repeated invalid output pauses for an
+    explicit retry with no rejected-content retention.
+67. pending final Reviewer correction survives interruption and backend
+    unavailability without recounting, rejects read-only mutation and content
+    or validation-infrastructure fingerprint drift, and version-10 active and
+    terminal runs migrate without reconstructing unavailable output.
 
 Real Codex/Claude smoke tests should be opt-in integration tests.
 
@@ -2313,8 +2471,8 @@ Do not build:
 31. Bootstrap role inventories use unique check IDs, unique normalized exact
     commands, and unique existing canonical repository-relative validation
     files; the runner derives the final stable union and assigns contiguous IDs,
-    while invalid output receives at most one read-only correction per producing
-    role, phase, and contract.
+    while invalid output receives at most one read-only diagnostic-batch
+    correction per producing role, phase, and contract.
 32. Claude recovery persists no denied input or native provider text, retries
     only finite allowlisted failures, and reconstructs the request from durable
     runner state without making a native session authoritative.
@@ -2331,10 +2489,27 @@ Do not build:
     bootstrap, migration, and finalization inventories are staging-independent,
     and the constrained `COMMIT` executor alone stages, applies fixed staged
     hygiene, and creates the exact validated subject-only commit.
-36. An invalid Worker finalization result receives at most one read-only
-    correction for the current commit step and finalization contract; only its
-    bounded diagnostic is durable or public, and corrected evidence must still
-    pass every existing trusted-validation, Git, and fingerprint gate.
+36. An invalid Worker finalization result receives at most two read-only
+    corrections for the current step and content-fingerprint scope, with the
+    second available only for a wholly new field-diagnostic batch. Repeated,
+    mixed, and exhausted invalid results fail closed; only bounded diagnostics
+    are durable or public, and corrected evidence must still pass every existing
+    trusted-validation, Git, and fingerprint gate.
+37. User finding overrides are unique durable audit decisions and suppress only
+    the exact finding on the exact reviewed content; they never record Reviewer
+    acceptance or weaken another finding or validation gate.
+38. Every finalization validation-infrastructure candidate is an ordered set of
+    existing canonical repository-relative regular files before it can be
+    fingerprinted, trusted, or reviewed.
+39. Detached MCP compatibility binds the root run-envelope tuple and every
+    loaded pipeline ID/state version, is frozen at server startup, and fails
+    before lease acquisition, recovery, or migration without changing durable
+    run or idempotency state.
+40. An invalid final Reviewer contract consumes only one automatic read-only
+    correction for its exact finalized scope. A still-invalid result pauses for
+    explicit retry, only bounded field-and-constraint diagnostics are durable
+    or public, and no correction path weakens finalization, independent review,
+    findings, fingerprints, Git safety, or commit authorization.
 
 ---
 
@@ -2369,6 +2544,8 @@ V1 is complete when:
 - unexpected agent Git history/ref changes are detected;
 - no workflow path can push commits, change remote configuration, or mutate a
   remote repository;
+- detached MCP launches reject root or loaded-pipeline version skew before
+  recovery and remain exactly retryable after a fresh control-plane start;
 - interruption and resume are safe;
 - tests cover workflow behavior using fake agents and temporary Git repositories;
 - the implementation remains a small local CLI rather than growing into a framework.

@@ -26,7 +26,12 @@ export {
   MCP_INSTRUCTIONS,
   serveMcp,
 } from "./mcp.js";
-export { getPipeline, listPipelines } from "./pipeline-registry.js";
+export {
+  createDetachedRuntimeCompatibilityToken,
+  DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
+  getPipeline,
+  listPipelines,
+} from "./pipeline-registry.js";
 export {
   createRunner,
   parseSourceSession,

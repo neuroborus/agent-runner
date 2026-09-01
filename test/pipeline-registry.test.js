@@ -5,7 +5,44 @@ import * as planAuthoringApi from "@agent-runner/plan-authoring";
 import * as planExecutionApi from "@agent-runner/plan-execution";
 import * as polishingApi from "@agent-runner/polishing";
 
-import { getPipeline, listPipelines } from "../src/index.js";
+import {
+  createDetachedRuntimeCompatibilityToken,
+  DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
+  getPipeline,
+  listPipelines,
+  RUNTIME_COMPATIBILITY,
+} from "../src/index.js";
+
+test("detached compatibility canonically binds every pipeline state version", () => {
+  const pipelines = listPipelines();
+  assert.equal(
+    createDetachedRuntimeCompatibilityToken({
+      pipelines: [...pipelines].reverse(),
+    }),
+    DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
+  );
+
+  const previousExecutionVersion = pipelines.map((pipeline) =>
+    pipeline.id === "plan-execution"
+      ? { ...pipeline, stateVersion: pipeline.stateVersion - 1 }
+      : pipeline,
+  );
+  assert.notEqual(
+    createDetachedRuntimeCompatibilityToken({
+      pipelines: previousExecutionVersion,
+    }),
+    DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
+  );
+  assert.notEqual(
+    createDetachedRuntimeCompatibilityToken({
+      runtimeCompatibility: {
+        ...RUNTIME_COMPATIBILITY,
+        runStateVersion: RUNTIME_COMPATIBILITY.runStateVersion + 1,
+      },
+    }),
+    DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
+  );
+});
 
 test("registry exposes explicit immutable pipeline descriptors", () => {
   const pipelines = listPipelines();
@@ -237,6 +274,7 @@ test("pipeline pause projections expose only applicable response and resume acti
     finalizationResult: { status: "PASS" },
     reviewedFingerprint: "a".repeat(64),
     findings: [{ id: "R1" }, { id: "R2" }],
+    findingOverrides: [],
   };
   assert.deepEqual(
     executionPause(

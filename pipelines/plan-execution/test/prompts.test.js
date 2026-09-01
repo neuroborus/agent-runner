@@ -18,6 +18,7 @@ import {
   IMPLEMENTATION_INSTRUCTIONS,
   PLAN_COMPATIBILITY_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
+  REVIEW_CORRECTION_INSTRUCTIONS,
   REVIEW_INSTRUCTIONS,
   STAGNATION_INSTRUCTIONS,
 } from "../src/index.js";
@@ -52,12 +53,17 @@ test("bootstrap instructions preserve independent evidence and arbitration", () 
   }
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /one read-only correction/u);
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /complete replacement/u);
+  assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /every violation/u);
+  assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /diagnostic batch/u);
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /ordinary clarification question/u);
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /PRODUCT_DECISION_REQUIRED/u);
-  assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /repeated invalid result fails closed/u);
+  assert.match(
+    BOOTSTRAP_CORRECTION_INSTRUCTIONS,
+    /repeated or still-invalid result fails closed/u,
+  );
   assert.match(
     FINALIZATION_CORRECTION_INSTRUCTIONS,
-    /one read-only correction/u,
+    /bounded read-only correction/u,
   );
   assert.match(
     FINALIZATION_CORRECTION_INSTRUCTIONS,
@@ -69,7 +75,7 @@ test("bootstrap instructions preserve independent evidence and arbitration", () 
   );
   assert.match(
     FINALIZATION_CORRECTION_INSTRUCTIONS,
-    /Do not execute the rejected command/u,
+    /Do not execute a rejected command/u,
   );
   assert.match(
     FINALIZATION_CORRECTION_INSTRUCTIONS,
@@ -77,7 +83,21 @@ test("bootstrap instructions preserve independent evidence and arbitration", () 
   );
   assert.match(
     FINALIZATION_CORRECTION_INSTRUCTIONS,
-    /repeated invalid result fails closed/u,
+    /wholly new diagnostic batch/u,
+  );
+  assert.match(
+    FINALIZATION_CORRECTION_INSTRUCTIONS,
+    /repeated diagnostic or another invalid result after that finite allowance fails closed/u,
+  );
+  assert.match(REVIEW_CORRECTION_INSTRUCTIONS, /pending read-only correction/u);
+  assert.match(REVIEW_CORRECTION_INSTRUCTIONS, /same review schema/u);
+  assert.match(
+    REVIEW_CORRECTION_INSTRUCTIONS,
+    /Do not repeat or quote the rejected result, findings, commands, paths, provider output, prompt, or transcript/u,
+  );
+  assert.match(
+    REVIEW_CORRECTION_INSTRUCTIONS,
+    /still-invalid replacement pauses for an explicit retry/u,
   );
 });
 

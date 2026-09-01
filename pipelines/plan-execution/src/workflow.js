@@ -25,6 +25,7 @@ import {
   NO_DELEGATION_INSTRUCTIONS,
   PLAN_COMPATIBILITY_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
+  REVIEW_CORRECTION_INSTRUCTIONS,
   REVIEW_INSTRUCTIONS,
   STAGNATION_INSTRUCTIONS,
 } from "./prompts.js";
@@ -47,7 +48,9 @@ import {
   INVALID_EXECUTION_INPUT_CODE,
   MAX_CLARIFICATION_ROUNDS,
   MAX_DIAGNOSTIC_ITEMS,
+  MAX_FINALIZATION_CORRECTION_ATTEMPTS,
   MAX_PLAN_LENGTH,
+  MAX_VALIDATION_ITEMS,
   PlanExecutionWorkflowError,
   WORKFLOW_STATES,
   assertRun,
@@ -58,7 +61,7 @@ import {
   isOutputDiagnostic,
   normalizeAdapterCapabilities,
   normalizeBootstrapArbitration,
-  normalizeBootstrapResult,
+  normalizeBootstrapResultCandidate,
   normalizeClarificationResult,
   normalizeCompatibilityResult,
   normalizeFinalizationResult,
@@ -99,6 +102,7 @@ const RETRYABLE_PAUSE_REASONS = new Set([
   "finalization_skill_invalid",
   "finalization_skill_missing",
   "local_artifacts_not_ignored",
+  "review_output_invalid",
   "unsafe_git_state",
 ]);
 const GIT_PREFLIGHT_CODES = new Set([
@@ -109,7 +113,7 @@ const GIT_PREFLIGHT_CODES = new Set([
   "ERR_UNSAFE_REPOSITORY_PATH",
   "ERR_UNSUPPORTED_GIT_CONFIGURATION",
 ]);
-const INVALID_BOOTSTRAP_PATH_CODES = new Set([
+const INVALID_VALIDATION_PATH_CODES = new Set([
   "ERR_UNSAFE_REPOSITORY_PATH",
   "ERR_UNSUPPORTED_GIT_PATH",
 ]);
@@ -265,6 +269,26 @@ function outputDiagnostic(cause, context) {
       });
 }
 
+function outputDiagnostics(cause, context) {
+  const candidates =
+    Array.isArray(cause?.diagnostics)
+      ? cause.diagnostics.length !== 0 || cause?.diagnostic === undefined
+        ? cause.diagnostics
+        : [cause.diagnostic]
+      : [cause?.diagnostic];
+  const diagnostics = candidates.map((diagnostic) =>
+    outputDiagnostic({ diagnostic }, context),
+  );
+  return Object.freeze(
+    diagnostics.filter(
+      (diagnostic, index) =>
+        diagnostics.findIndex((candidate) =>
+          isDeepStrictEqual(candidate, diagnostic),
+        ) === index,
+    ),
+  );
+}
+
 function bootstrapOutputContext(role, phase = "bootstrap") {
   return Object.freeze({ role, phase, contract: "bootstrap" });
 }
@@ -293,6 +317,14 @@ function finalizationOutputContext() {
   });
 }
 
+function reviewOutputContext() {
+  return Object.freeze({
+    role: "reviewer",
+    phase: "review",
+    contract: "review",
+  });
+}
+
 function roleOutputContextFor(role, schema, checkpoint) {
   const phase =
     checkpoint === "validation-migration" ? checkpoint : "bootstrap";
@@ -308,6 +340,9 @@ function roleOutputContextFor(role, schema, checkpoint) {
   if (schema === FINALIZATION_SCHEMA && role === "worker") {
     return finalizationOutputContext();
   }
+  if (schema === REVIEW_SCHEMA && role === "reviewer") {
+    return reviewOutputContext();
+  }
   return undefined;
 }
 
@@ -315,6 +350,18 @@ function invalidRoleOutput(message, context, diagnostic) {
   return new PlanExecutionWorkflowError(message, {
     code: "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
     diagnostic: outputDiagnostic({ diagnostic }, context),
+  });
+}
+
+function invalidRoleOutputBatch(message, context, diagnostics) {
+  const normalized = outputDiagnostics({ diagnostics }, context).slice(
+    0,
+    MAX_VALIDATION_ITEMS,
+  );
+  return new PlanExecutionWorkflowError(message, {
+    code: "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+    diagnostic: normalized[0],
+    diagnostics: normalized,
   });
 }
 
@@ -342,19 +389,25 @@ function normalizeRoleOutput(normalize, output, context) {
     if (cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT") {
       throw cause;
     }
+    const diagnostics = outputDiagnostics(cause, context);
     throw new PlanExecutionWorkflowError(
       "Structured bootstrap role result violates its contract.",
       {
         code: cause.code,
-        diagnostic: outputDiagnostic(cause, context),
+        diagnostic: diagnostics[0],
+        diagnostics,
       },
     );
   }
 }
 
-function normalizeBootstrapRoleOutput(output, role, phase = "bootstrap") {
+function normalizeBootstrapRoleOutputCandidate(
+  output,
+  role,
+  phase = "bootstrap",
+) {
   return normalizeRoleOutput(
-    (value) => normalizeBootstrapResult(value, role),
+    (value) => normalizeBootstrapResultCandidate(value, role),
     output,
     bootstrapOutputContext(role, phase),
   );
@@ -380,11 +433,12 @@ function normalizeBootstrapArbitrationOutput(output, phase = "bootstrap") {
 }
 
 function normalizeValidationMigrationRoleOutput(output, role) {
-  const result = normalizeBootstrapRoleOutput(
+  const candidate = normalizeBootstrapRoleOutputCandidate(
     output,
     role,
     "validation-migration",
   );
+  const { result } = candidate;
   if (!["READY", "CAPACITY_EXHAUSTED"].includes(result.status)) {
     throw invalidRoleOutput(
       "Validation migration requires a ready inventory.",
@@ -392,7 +446,7 @@ function normalizeValidationMigrationRoleOutput(output, role) {
       { field: "status", constraint: "validation-migration-status" },
     );
   }
-  return result;
+  return candidate;
 }
 
 function normalizeValidationMigrationReconciliationOutput(output) {
@@ -440,14 +494,79 @@ function normalizeFinalizationRoleOutput(output, trustedCommands) {
     if (cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT") {
       throw cause;
     }
+    const diagnostics = outputDiagnostics(cause, context);
     throw new PlanExecutionWorkflowError(
       "Structured finalization result violates its contract.",
       {
         code: cause.code,
-        diagnostic: outputDiagnostic(cause, context),
+        diagnostic: diagnostics[0],
+        diagnostics,
       },
     );
   }
+}
+
+function normalizeReviewRoleOutput(
+  output,
+  previousFindings,
+  validationChanged,
+) {
+  const context = reviewOutputContext();
+  let result;
+  try {
+    result = normalizeReviewResult(output, previousFindings);
+  } catch (cause) {
+    if (cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT") {
+      throw cause;
+    }
+    const diagnostics = outputDiagnostics(cause, context);
+    throw new PlanExecutionWorkflowError(
+      "Structured review result violates its contract.",
+      {
+        code: cause.code,
+        diagnostic: diagnostics[0],
+        diagnostics,
+      },
+    );
+  }
+  if (result.status === "PRODUCT_DECISION_REQUIRED") {
+    return result;
+  }
+  const diagnostics = [
+    ...(validationChanged && result.validationChange === "UNCHANGED"
+      ? [
+          {
+            field: "validationChange",
+            constraint: "matches-finalization-change",
+          },
+        ]
+      : []),
+    ...(!validationChanged && result.validationChange !== "UNCHANGED"
+      ? [
+          {
+            field: "validationChange",
+            constraint: "matches-finalization-change",
+          },
+        ]
+      : []),
+    ...(result.validationChange === "REJECTED" &&
+    result.status !== "FINDINGS"
+      ? [
+          {
+            field: "status",
+            constraint: "findings-when-validation-rejected",
+          },
+        ]
+      : []),
+  ];
+  if (diagnostics.length !== 0) {
+    throw invalidRoleOutputBatch(
+      "Reviewer returned an inconsistent validation-change decision.",
+      context,
+      diagnostics,
+    );
+  }
+  return result;
 }
 
 export async function runPlanExecution({ action, run, runtime, settings }) {
@@ -629,8 +748,10 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         bootstrapDisagreement: null,
         bootstrapArbitrationUsed: false,
         pendingBootstrapCorrection: null,
-        finalizationCorrection: null,
+        finalizationCorrections: [],
         pendingFinalizationCorrection: null,
+        reviewCorrection: null,
+        pendingReviewCorrection: null,
         compatibilityCheckRequired: false,
         currentStep: null,
         reviewerStep: null,
@@ -931,6 +1052,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
               ? {
                   finalizationResult: null,
                   finalizedFingerprint: null,
+                  reviewCorrection: null,
+                  pendingReviewCorrection: null,
                   reviewResult: null,
                   reviewedFingerprint: null,
                   previousFindings:
@@ -1104,6 +1227,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
                   repositoryBaseline: nextRepositoryBaseline,
                   finalizationResult: null,
                   finalizedFingerprint: null,
+                  reviewCorrection: null,
+                  pendingReviewCorrection: null,
                   reviewResult: null,
                   reviewedFingerprint: null,
                   previousFindings:
@@ -1121,6 +1246,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
                     ? {
                         finalizationResult: null,
                         finalizedFingerprint: null,
+                        reviewCorrection: null,
+                        pendingReviewCorrection: null,
                         reviewResult: null,
                         reviewedFingerprint: null,
                         previousFindings:
@@ -1157,6 +1284,12 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         throw invalidRoleOutput(
           `${role} returned invalid structured output.`,
           outputContext,
+          outputContext.contract === "review"
+            ? {
+                field: "result",
+                constraint: "provider-structured-output",
+              }
+            : undefined,
         );
       }
       throw agentError;
@@ -1379,6 +1512,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           implementationDirection: null,
           finalizationResult: null,
           finalizedFingerprint: null,
+          reviewCorrection: null,
+          pendingReviewCorrection: null,
           requiredChecks: bootstrapDecision ? null : current.requiredChecks,
           validationInfrastructure: bootstrapDecision
             ? null
@@ -1468,11 +1603,17 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     });
   }
 
-  function correctionMatchesContext(correction, context) {
+  function diagnosticMatchesContext(diagnostic, context) {
     return (
-      correction.role === context.role &&
-      correction.phase === context.phase &&
-      correction.contract === context.contract
+      diagnostic.role === context.role &&
+      diagnostic.phase === context.phase &&
+      diagnostic.contract === context.contract
+    );
+  }
+
+  function correctionMatchesContext(correction, context) {
+    return correction.diagnostics.every((diagnostic) =>
+      diagnosticMatchesContext(diagnostic, context),
     );
   }
 
@@ -1489,13 +1630,14 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       : undefined;
   }
 
-  function finalizationCorrectionAttempt(context) {
-    const correction = state().finalizationCorrection;
-    return correction !== null &&
-      correction.step === state().currentStep &&
-      correctionMatchesContext(correction, context)
-      ? correction
-      : undefined;
+  function finalizationCorrectionAttempts(context) {
+    return state().finalizationCorrections.filter(
+      (correction) =>
+        correction.step === state().currentStep &&
+        correction.diagnostics.every((diagnostic) =>
+          diagnosticMatchesContext(diagnostic, context),
+        ),
+    );
   }
 
   function pendingFinalizationCorrection(context, guidance) {
@@ -1503,15 +1645,39 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     return correction !== null &&
       correction.step === state().currentStep &&
       correction.guidance === guidance &&
-      correctionMatchesContext(correction, context)
+      correction.diagnostics.every((diagnostic) =>
+        diagnosticMatchesContext(diagnostic, context),
+      )
       ? correction
       : undefined;
   }
 
-  async function validateBootstrapInventory(result, context) {
+  function reviewCorrectionScope(current = state()) {
+    return Object.freeze({
+      attempt: 1,
+      step: current.currentStep,
+      contentFingerprint: current.finalizedFingerprint,
+      validationInfrastructureFingerprint:
+        current.finalizationResult.validationInfrastructureFingerprint,
+    });
+  }
+
+  function reviewCorrectionMatchesScope(correction, scope) {
+    return (
+      correction !== null &&
+      correction.attempt === scope.attempt &&
+      correction.step === scope.step &&
+      correction.contentFingerprint === scope.contentFingerprint &&
+      correction.validationInfrastructureFingerprint ===
+        scope.validationInfrastructureFingerprint
+    );
+  }
+
+  async function validationInfrastructureDiagnostics(result, context) {
     if (!Array.isArray(result.validationInfrastructure)) {
-      return result;
+      return Object.freeze([]);
     }
+    const diagnostics = [];
     for (const [index, path] of result.validationInfrastructure.entries()) {
       let inspection;
       try {
@@ -1520,17 +1686,21 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           projectPath: state().repositoryBaseline.projectPath,
         });
       } catch (cause) {
-        if (!INVALID_BOOTSTRAP_PATH_CODES.has(cause?.code)) {
+        if (!INVALID_VALIDATION_PATH_CODES.has(cause?.code)) {
           throw cause;
         }
-        throw invalidRoleOutput(
-          "Bootstrap validation infrastructure path is unsafe.",
-          context,
-          {
-            field: `validationInfrastructure[${index}]`,
-            constraint: "existing-canonical-repository-file",
-          },
+        diagnostics.push(
+          outputDiagnostic(
+            {
+              diagnostic: {
+                field: `validationInfrastructure[${index}]`,
+                constraint: "existing-canonical-repository-file",
+              },
+            },
+            context,
+          ),
         );
+        continue;
       }
       if (
         !isRecord(inspection) ||
@@ -1538,37 +1708,85 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         inspection.kind !== "file" ||
         inspection.relativePath !== path
       ) {
-        throw invalidRoleOutput(
-          "Bootstrap validation infrastructure path is not a canonical repository file.",
-          context,
-          {
-            field: `validationInfrastructure[${index}]`,
-            constraint: "existing-canonical-repository-file",
-          },
+        diagnostics.push(
+          outputDiagnostic(
+            {
+              diagnostic: {
+                field: `validationInfrastructure[${index}]`,
+                constraint: "existing-canonical-repository-file",
+              },
+            },
+            context,
+          ),
         );
       }
+    }
+    return outputDiagnostics({ diagnostics }, context);
+  }
+
+  async function inspectValidationInfrastructure(result, context, phase) {
+    const diagnostics = await validationInfrastructureDiagnostics(
+      result,
+      context,
+    );
+    if (diagnostics.length !== 0) {
+      throw invalidRoleOutputBatch(
+        `${phase} validation infrastructure contains invalid paths.`,
+        context,
+        diagnostics,
+      );
+    }
+    return result;
+  }
+
+  async function validateBootstrapInventory(
+    result,
+    context,
+    candidateDiagnostics = [],
+  ) {
+    if (!Array.isArray(result.validationInfrastructure)) {
+      return result;
     }
     const resolvedInventory =
       ["READY", "RESOLVED"].includes(result.status) ||
       ["USE_WORKER", "USE_REVIEWER", "SYNTHESIZE"].includes(
         result.direction,
       );
-    if (
+    const omitsTrustedCommand =
       resolvedInventory &&
       state().trustedValidation.commands.some(
         ({ command }) =>
           !result.requiredChecks.some(
             (required) => required.command === command,
           ),
-      )
-    ) {
-      throw invalidRoleOutput(
-        "Bootstrap validation inventory omits a runner-trusted command.",
+      );
+    const diagnostics = outputDiagnostics(
+      {
+        diagnostics: [
+          ...candidateDiagnostics,
+          ...(await validationInfrastructureDiagnostics(result, context)),
+          ...(omitsTrustedCommand
+            ? [
+                outputDiagnostic(
+                  {
+                    diagnostic: {
+                      field: "requiredChecks",
+                      constraint: "includes-runner-trusted-commands",
+                    },
+                  },
+                  context,
+                ),
+              ]
+            : []),
+        ],
+      },
+      context,
+    ).slice(0, MAX_VALIDATION_ITEMS);
+    if (diagnostics.length !== 0) {
+      throw invalidRoleOutputBatch(
+        "Bootstrap result violates its validation-inventory contract.",
         context,
-        {
-          field: "requiredChecks",
-          constraint: "includes-runner-trusted-commands",
-        },
+        diagnostics,
       );
     }
     return result;
@@ -1581,6 +1799,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     recoveryContext = "",
     buildPrompt,
     normalize,
+    deferredDiagnostics = false,
   }) {
     const context = roleOutputContextFor(role, schema, checkpoint);
     while (true) {
@@ -1593,16 +1812,18 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
             const prompt = buildPrompt(evidence);
             return correction === undefined
               ? prompt
-              : `${prompt}\n\n${BOOTSTRAP_CORRECTION_INSTRUCTIONS}\n\nCorrection diagnostic:\n${JSON.stringify(correction, null, 2)}`;
+              : `${prompt}\n\n${BOOTSTRAP_CORRECTION_INSTRUCTIONS}\n\nCorrection diagnostic batch:\n${JSON.stringify(correction, null, 2)}`;
           },
           { checkpoint, recoveryContext },
         );
         if (output === null) {
           return null;
         }
+        const normalized = normalize(output);
         const result = await validateBootstrapInventory(
-          normalize(output),
+          deferredDiagnostics ? normalized.result : normalized,
           context,
+          deferredDiagnostics ? normalized.diagnostics : [],
         );
         if (correction !== undefined) {
           await transition({
@@ -1621,8 +1842,13 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         if (bootstrapCorrectionAttempt(context) !== undefined) {
           throw cause;
         }
-        const diagnostic = outputDiagnostic(cause, context);
-        const correction = { attempt: 1, ...diagnostic };
+        const diagnostics = outputDiagnostics(cause, context).slice(
+          0,
+          MAX_VALIDATION_ITEMS,
+        );
+        const correction = { attempt: 1, diagnostics };
+        const violationLabel =
+          diagnostics.length === 1 ? "violation" : "violations";
         await transition(
           {
             ...state(),
@@ -1637,7 +1863,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
               context.role,
               context.phase,
               "bootstrap-correction",
-              `${context.role} must correct ${context.contract} field ${diagnostic.field}.`,
+              `${context.role} must correct ${diagnostics.length} ` +
+                `${context.contract} contract ${violationLabel}.`,
             ),
           },
         );
@@ -1664,6 +1891,10 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
   function invalidatedLegacyValidation(current) {
     return {
       ...current,
+      finalizationCorrections: [],
+      pendingFinalizationCorrection: null,
+      reviewCorrection: null,
+      pendingReviewCorrection: null,
       finalizationResult: null,
       finalizedFingerprint: null,
       reviewResult: null,
@@ -1728,6 +1959,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       role,
       schema: BOOTSTRAP_SCHEMA,
       checkpoint: "validation-migration",
+      deferredDiagnostics: true,
       buildPrompt: (evidence) => `${BOOTSTRAP_INSTRUCTIONS}
 
 This is a versioned-state migration checkpoint. Treat every persisted legacy summary, resolved context, check, path, fingerprint, and aggregate validation result as provisional. Independently re-establish the complete phase-safe summary and current validation inventory from repository evidence before work can advance.
@@ -1781,6 +2013,8 @@ ${evidence}`,
       {
         ...state(),
         ...validation,
+        finalizationCorrections: [],
+        pendingFinalizationCorrection: null,
         resolvedSummary: summary,
         bootstrapDisagreement: null,
         bootstrapArbitrationUsed,
@@ -1981,7 +2215,34 @@ ${JSON.stringify(
       arbitrations: state().findingArbitrations.filter(({ findingId }) =>
         relevantIds === null || relevantIds.has(findingId),
       ),
+      overrides: state().findingOverrides.filter(({ findingId }) =>
+        relevantIds === null || relevantIds.has(findingId),
+      ),
     };
+  }
+
+  function findingOverrideApplies(
+    findingId,
+    fingerprint,
+    overrides = state().findingOverrides,
+  ) {
+    return overrides.some(
+      (entry) =>
+        entry.findingId === findingId && entry.fingerprint === fingerprint,
+    );
+  }
+
+  function validationRejectionIsOverridden(
+    findings,
+    fingerprint,
+    overrides = state().findingOverrides,
+  ) {
+    return (
+      findings.length > 0 &&
+      findings.every(({ id }) =>
+        findingOverrideApplies(id, fingerprint, overrides),
+      )
+    );
   }
 
   function disputeNeedsArbitration(dispute) {
@@ -2123,6 +2384,7 @@ ${JSON.stringify(
       role,
       schema: BOOTSTRAP_SCHEMA,
       checkpoint: "bootstrap",
+      deferredDiagnostics: true,
       buildPrompt: (evidence) => `${BOOTSTRAP_INSTRUCTIONS}${
         role === "reviewer"
           ? "\nAs Reviewer, also state what you intend to verify."
@@ -2136,7 +2398,8 @@ ${trustedValidationInstructions()}
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
 ${evidence}`,
-      normalize: (output) => normalizeBootstrapRoleOutput(output, role),
+      normalize: (output) =>
+        normalizeBootstrapRoleOutputCandidate(output, role),
     });
     if (result === null) {
       return false;
@@ -2363,7 +2626,11 @@ The runner will derive validation inventories from the independently accepted ro
     );
     if (
       finding === undefined ||
-      (await contentFingerprint()) !== state().reviewedFingerprint
+      (await contentFingerprint()) !== state().reviewedFingerprint ||
+      findingOverrideApplies(
+        resumeAction.findingId,
+        state().reviewedFingerprint,
+      )
     ) {
       throw workflowError("Finding override is stale or inapplicable.");
     }
@@ -2373,12 +2640,27 @@ The runner will derive validation inventories from the independently accepted ro
     const pendingDisputes = state().pendingDisputes.filter(
       ({ findingId }) => findingId !== resumeAction.findingId,
     );
+    const findingOverrides = [
+      ...state().findingOverrides,
+      {
+        findingId: resumeAction.findingId,
+        fingerprint: state().reviewedFingerprint,
+      },
+    ].slice(-MAX_DIAGNOSTIC_ITEMS);
+    const rejectedValidationResolved =
+      state().reviewResult?.validationChange === "REJECTED" &&
+      validationRejectionIsOverridden(
+        state().previousFindings,
+        state().reviewedFingerprint,
+        findingOverrides,
+      );
     await transition(
       {
         ...state(),
         workflowState:
           findings.length === 0 && pendingDisputes.length === 0
-            ? state().reviewResult?.validationChange === "REJECTED"
+            ? state().reviewResult?.validationChange === "REJECTED" &&
+              !rejectedValidationResolved
               ? "REVIEW"
               : "COMMIT"
             : "RESOLVE_FINDINGS",
@@ -2387,13 +2669,7 @@ The runner will derive validation inventories from the independently accepted ro
         reviewReconsideration: state().reviewReconsideration.filter(
           (id) => id !== resumeAction.findingId,
         ),
-        findingOverrides: [
-          ...state().findingOverrides,
-          {
-            findingId: resumeAction.findingId,
-            fingerprint: state().reviewedFingerprint,
-          },
-        ].slice(-MAX_DIAGNOSTIC_ITEMS),
+        findingOverrides,
       },
       {
         pause: null,
@@ -2474,6 +2750,8 @@ ${step.body}${
         implementationDirection: null,
         finalizationResult: null,
         finalizedFingerprint: null,
+        reviewCorrection: null,
+        pendingReviewCorrection: null,
         reviewResult: null,
         reviewedFingerprint: null,
         findings: [],
@@ -2498,9 +2776,21 @@ ${step.body}${
 
   async function runFinalizationTurn() {
     const step = planStep();
-    const persistedCorrection = state().pendingFinalizationCorrection;
+    let persistedCorrection = state().pendingFinalizationCorrection;
     const beforeFingerprint =
       persistedCorrection?.contentFingerprint ?? (await contentFingerprint());
+    if (
+      persistedCorrection === null &&
+      state().finalizationCorrections.length !== 0 &&
+      state().finalizationCorrections[0].contentFingerprint !==
+        beforeFingerprint
+    ) {
+      await transition({
+        ...state(),
+        finalizationCorrections: [],
+      });
+      persistedCorrection = null;
+    }
     const fallbackGuidance = Object.freeze({
       required: false,
       skillPath: null,
@@ -2538,7 +2828,8 @@ ${step.body}
 ${
               correction === undefined
                 ? ""
-                : `\n${FINALIZATION_CORRECTION_INSTRUCTIONS}\n\nCorrection diagnostic:\n${JSON.stringify(correction, null, 2)}`
+                : `\n${FINALIZATION_CORRECTION_INSTRUCTIONS}\n\n` +
+                  `Correction diagnostic batch:\n${JSON.stringify(correction, null, 2)}`
             }`,
             {
               access:
@@ -2557,6 +2848,11 @@ ${
           const result = normalizeFinalizationRoleOutput(
             output,
             state().trustedValidation.commands.map(({ command }) => command),
+          );
+          await inspectValidationInfrastructure(
+            result,
+            context,
+            "Finalization",
           );
           if (
             selectedGuidance.skillPath === null &&
@@ -2616,21 +2912,40 @@ ${
           ) {
             throw cause;
           }
-          if (finalizationCorrectionAttempt(context) !== undefined) {
+          const diagnostics = outputDiagnostics(cause, context);
+          const attempts = finalizationCorrectionAttempts(context);
+          const previousDiagnostics = attempts.flatMap(
+            (attempt) => attempt.diagnostics,
+          );
+          if (
+            attempts.length >= MAX_FINALIZATION_CORRECTION_ATTEMPTS ||
+            diagnostics.some((diagnostic) =>
+              previousDiagnostics.some((previous) =>
+                isDeepStrictEqual(previous, diagnostic),
+              ),
+            )
+          ) {
             throw cause;
           }
-          const diagnostic = outputDiagnostic(cause, context);
           const correction = {
-            attempt: 1,
+            attempt: attempts.length + 1,
             step: state().currentStep,
             guidance: guidanceScope,
             contentFingerprint: beforeFingerprint,
-            ...diagnostic,
+            diagnostics,
           };
+          const violationLabel =
+            diagnostics.length === 1 ? "violation" : "violations";
+          const correctionMessage =
+            `${context.role} must correct ${diagnostics.length} ` +
+            `${context.contract} contract ${violationLabel}.`;
           await transition(
             {
               ...state(),
-              finalizationCorrection: correction,
+              finalizationCorrections: [
+                ...state().finalizationCorrections,
+                correction,
+              ],
               pendingFinalizationCorrection: correction,
             },
             {
@@ -2638,7 +2953,7 @@ ${
                 context.role,
                 context.phase,
                 "finalization-correction",
-                `${context.role} must correct ${context.contract} field ${diagnostic.field} (${diagnostic.constraint}).`,
+                correctionMessage,
               ),
             },
           );
@@ -2850,6 +3165,8 @@ ${
           workflowState: "RESOLVE_FINDINGS",
           finalizationResult,
           finalizedFingerprint: null,
+          reviewCorrection: null,
+          pendingReviewCorrection: null,
           reviewResult: null,
           reviewedFingerprint: null,
           findings: [],
@@ -2897,16 +3214,78 @@ ${
   }
 
   async function runReviewTurn() {
-    const current = state();
-    const fingerprint = await contentFingerprint();
-    if (fingerprint !== current.finalizedFingerprint) {
-      throw workflowError("Finalized content changed before review.");
-    }
     const step = planStep();
-    const output = await runRole(
-      "reviewer",
-      REVIEW_SCHEMA,
-      (evidence) => `${REVIEW_INSTRUCTIONS}
+    const context = reviewOutputContext();
+
+    async function pauseForReviewScopeDrift(code) {
+      await transition(
+        {
+          ...state(),
+          workflowState: "WAITING_FOR_USER",
+          reviewCorrection: null,
+          pendingReviewCorrection: null,
+        },
+        {
+          pause: { reason: "unsafe_git_state", code },
+          publicActivity: activity(
+            "runner",
+            "review",
+            "paused",
+            "Plan execution paused: unsafe_git_state.",
+          ),
+        },
+      );
+      return null;
+    }
+
+    async function verifiedReviewScope() {
+      const current = state();
+      try {
+        await runtime.git.assertUnchanged(current.repositoryBaseline);
+      } catch (cause) {
+        if (cause?.code !== "ERR_READ_ONLY_REPOSITORY_CHANGED") {
+          throw cause;
+        }
+        return pauseForReviewScopeDrift(cause.code);
+      }
+      const fingerprint = await contentFingerprint();
+      if (fingerprint !== current.finalizedFingerprint) {
+        return pauseForReviewScopeDrift(
+          "ERR_REVIEW_CONTENT_FINGERPRINT_CHANGED",
+        );
+      }
+      const infrastructureFingerprint =
+        await validationInfrastructureFingerprint(
+          current.finalizationResult.validationInfrastructure,
+        );
+      if (
+        infrastructureFingerprint !==
+        current.finalizationResult.validationInfrastructureFingerprint
+      ) {
+        return pauseForReviewScopeDrift(
+          "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED",
+        );
+      }
+      const correctionScope = reviewCorrectionScope(current);
+      if (
+        current.reviewCorrection !== null &&
+        !reviewCorrectionMatchesScope(
+          current.reviewCorrection,
+          correctionScope,
+        )
+      ) {
+        await transition({
+          ...current,
+          reviewCorrection: null,
+          pendingReviewCorrection: null,
+        });
+      }
+      return Object.freeze({ correctionScope, fingerprint });
+    }
+
+    function reviewPrompt(evidence, correction) {
+      const current = state();
+      return `${REVIEW_INSTRUCTIONS}
 
 Reuse an existing ID for an unchanged finding. Use FINDINGS with every actionable blocker.
 
@@ -2946,35 +3325,125 @@ ${JSON.stringify(current.previousFindings, null, 2)}${
       }
 
 Prior decisions for this step:
-${JSON.stringify(priorFindingDecisions(), null, 2)}`,
-      {
-        checkpoint: `commit:${current.currentStep}`,
-        recoveryContext: resolvedContext(),
-      },
-    );
-    if (output === null) {
-      return false;
+${JSON.stringify(priorFindingDecisions(), null, 2)}
+
+User overrides are runner-owned audit decisions. Do not describe an override as Reviewer acceptance.${
+        correction === null
+          ? ""
+          : `\n\n${REVIEW_CORRECTION_INSTRUCTIONS}\n\nPending correction diagnostic batch:\n${JSON.stringify(correction, null, 2)}`
+      }`;
     }
-    const result = normalizeReviewResult(output, current.previousFindings);
+
+    let scope;
+    let result;
+    while (true) {
+      scope = await verifiedReviewScope();
+      if (scope === null) {
+        return false;
+      }
+      const current = state();
+      const correction = current.pendingReviewCorrection;
+      try {
+        const output = await runRole(
+          "reviewer",
+          REVIEW_SCHEMA,
+          (evidence) => reviewPrompt(evidence, correction),
+          {
+            checkpoint:
+              correction === null
+                ? `commit:${current.currentStep}`
+                : `review-correction:${current.currentStep}`,
+            freshSession: correction !== null,
+            recoveryContext: resolvedContext(),
+          },
+        );
+        if (output === null) {
+          return false;
+        }
+        result = normalizeReviewRoleOutput(
+          output,
+          current.previousFindings,
+          current.finalizationResult.validationChanged,
+        );
+        scope = await verifiedReviewScope();
+        if (scope === null) {
+          return false;
+        }
+        break;
+      } catch (cause) {
+        if (
+          cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT" ||
+          !isOutputDiagnostic(cause.diagnostic)
+        ) {
+          throw cause;
+        }
+        const diagnostics = outputDiagnostics(cause, context).slice(
+          0,
+          MAX_DIAGNOSTIC_ITEMS,
+        );
+        const pendingCorrection = {
+          ...scope.correctionScope,
+          diagnostics,
+        };
+        if (state().reviewCorrection === null) {
+          const violationLabel =
+            diagnostics.length === 1 ? "violation" : "violations";
+          await transition(
+            {
+              ...state(),
+              reviewCorrection: pendingCorrection,
+              pendingReviewCorrection: pendingCorrection,
+            },
+            {
+              publicActivity: activity(
+                "reviewer",
+                "review",
+                "review-correction",
+                `reviewer must correct ${diagnostics.length} review contract ${violationLabel}.`,
+              ),
+            },
+          );
+          continue;
+        }
+        await transition(
+          {
+            ...state(),
+            workflowState: "WAITING_FOR_USER",
+            pendingReviewCorrection: pendingCorrection,
+          },
+          {
+            pause: {
+              reason: "review_output_invalid",
+              code: "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+              explanation:
+                "The bounded automatic final Reviewer correction remains invalid. Retry the same read-only correction after the backend can satisfy the unchanged contract.",
+              evidence: diagnostics.map(
+                ({ field, constraint }) =>
+                  `Reviewer field ${field} violated ${constraint}.`,
+              ),
+              resumeState: "REVIEW",
+            },
+            publicActivity: activity(
+              "runner",
+              "review",
+              "paused",
+              "Plan execution paused: review_output_invalid.",
+            ),
+          },
+        );
+        return false;
+      }
+    }
+    const current = state();
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "IMPLEMENT");
     }
     const reviewedFingerprint = await contentFingerprint();
-    if (reviewedFingerprint !== fingerprint) {
-      throw workflowError("Reviewed content fingerprint changed unexpectedly.");
-    }
-    if (
-      (current.finalizationResult.validationChanged &&
-        result.validationChange === "UNCHANGED") ||
-      (!current.finalizationResult.validationChanged &&
-        result.validationChange !== "UNCHANGED") ||
-      (result.validationChange === "REJECTED" &&
-        result.status !== "FINDINGS")
-    ) {
-      throw workflowError(
-        "Reviewer returned an inconsistent validation-change decision.",
-        "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+    if (reviewedFingerprint !== scope.fingerprint) {
+      await pauseForReviewScopeDrift(
+        "ERR_REVIEW_CONTENT_FINGERPRINT_CHANGED",
       );
+      return false;
     }
     const reviewResult = {
       status: result.status,
@@ -2982,13 +3451,19 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}`,
       validationEvidence: result.validationEvidence,
       fingerprint: reviewedFingerprint,
     };
-    if (result.status === "FINDINGS") {
+    const findings =
+      result.status === "FINDINGS"
+        ? result.findings.filter(
+            ({ id }) => !findingOverrideApplies(id, reviewedFingerprint),
+          )
+        : [];
+    if (findings.length > 0) {
       const correction = correctionUpdate({
-        fingerprint,
+        fingerprint: reviewedFingerprint,
         finalizationIssueIds: [],
-        findingIds: result.findings.map(({ id }) => id),
+        findingIds: findings.map(({ id }) => id),
       });
-      const pendingDisputes = result.findings.flatMap(({ id }) => {
+      const pendingDisputes = findings.flatMap(({ id }) => {
         const latest = latestDispute(id);
         return latest?.direction === "UPHOLD" &&
           latest.attempt === current.disputeCounts[id] &&
@@ -3021,7 +3496,7 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}`,
           workflowState: "RESOLVE_FINDINGS",
           reviewedFingerprint,
           reviewResult,
-          findings: result.findings,
+          findings,
           previousFindings: result.findings,
           pendingDisputes,
           correctionHistory: correction.history,
@@ -3030,6 +3505,7 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}`,
           blockedSinceStagnation: correction.blockedSinceStagnation,
           reviewerStep: current.currentStep,
           reviewReconsideration: [],
+          pendingReviewCorrection: null,
         },
         {
           nextCounters: correction.counters,
@@ -3037,7 +3513,7 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}`,
             "reviewer",
             "review",
             "findings",
-            `Review reported ${result.findings.length} blocking findings.`,
+            `Review left ${findings.length} non-overridden blocking findings.`,
           ),
         },
       );
@@ -3060,18 +3536,22 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}`,
         reviewResult,
         reviewedFingerprint,
         findings: [],
-        previousFindings: [],
+        previousFindings:
+          result.status === "FINDINGS" ? result.findings : [],
         pendingDisputes: [],
         pendingCorrection: false,
         reviewerStep: current.currentStep,
         reviewReconsideration: [],
+        pendingReviewCorrection: null,
       },
       {
         publicActivity: activity(
           "reviewer",
           "review",
-          "approved",
-          "Review approved the finalized content.",
+          result.status === "APPROVED" ? "approved" : "overrides-applied",
+          result.status === "APPROVED"
+            ? "Review approved the finalized content."
+            : "Review completed with only fingerprint-bound overridden findings.",
         ),
       },
     );
@@ -3299,6 +3779,8 @@ ${JSON.stringify(
         implementationDirection: direction,
         finalizationResult: null,
         finalizedFingerprint: null,
+        reviewCorrection: null,
+        pendingReviewCorrection: null,
         reviewResult: null,
         reviewedFingerprint: null,
         previousFindings:
@@ -3579,6 +4061,8 @@ ${JSON.stringify(
           workflowState: "FINALIZE",
           finalizationResult: null,
           finalizedFingerprint: null,
+          reviewCorrection: null,
+          pendingReviewCorrection: null,
           reviewResult: null,
           reviewedFingerprint: null,
           previousFindings:
@@ -3897,6 +4381,8 @@ ${step.subject}`),
           implementationDirection: null,
           finalizationResult: null,
           finalizedFingerprint: null,
+          reviewCorrection: null,
+          pendingReviewCorrection: null,
           reviewResult: null,
           reviewedFingerprint: null,
           findings: [],
@@ -3925,8 +4411,10 @@ ${step.subject}`),
         repositoryBaseline: nextRepositoryBaseline,
         currentStep: done ? null : current.currentStep + 1,
         reviewerStep: null,
-        finalizationCorrection: null,
+        finalizationCorrections: [],
         pendingFinalizationCorrection: null,
+        reviewCorrection: null,
+        pendingReviewCorrection: null,
         pendingCommit: null,
         completedCommits,
       },
@@ -3984,6 +4472,7 @@ ${step.subject}`),
             "finalization_cannot_pass",
             "finalization_skill_invalid",
             "finalization_skill_missing",
+            "review_output_invalid",
           ].includes(currentRun.pause.reason) &&
             [
               "CLARIFY",

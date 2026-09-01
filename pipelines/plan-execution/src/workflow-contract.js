@@ -49,8 +49,10 @@ const PIPELINE_STATE_FIELDS = new Set([
   "bootstrapArbitrationUsed",
   "bootstrapCorrections",
   "pendingBootstrapCorrection",
-  "finalizationCorrection",
+  "finalizationCorrections",
   "pendingFinalizationCorrection",
+  "reviewCorrection",
+  "pendingReviewCorrection",
   "compatibilityCheckRequired",
   "currentStep",
   "reviewerStep",
@@ -135,14 +137,32 @@ const ADAPTER_DIAGNOSTIC_CLASS_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
 const OUTPUT_DIAGNOSTIC_VALUE_PATTERN = /^[a-zA-Z0-9_.[\]-]{1,128}$/u;
 const BOOTSTRAP_CORRECTION_FIELDS = Object.freeze([
   "attempt",
-  ...OUTPUT_DIAGNOSTIC_FIELDS,
+  "diagnostics",
 ]);
 const FINALIZATION_CORRECTION_FIELDS = Object.freeze([
   "attempt",
   "step",
   "guidance",
   "contentFingerprint",
-  ...OUTPUT_DIAGNOSTIC_FIELDS,
+  "diagnostics",
+]);
+export const MAX_FINALIZATION_CORRECTION_ATTEMPTS = 2;
+const REVIEW_CORRECTION_FIELDS = Object.freeze([
+  "attempt",
+  "step",
+  "contentFingerprint",
+  "validationInfrastructureFingerprint",
+  "diagnostics",
+]);
+const REVIEW_RESULT_FIELDS = Object.freeze([
+  "status",
+  "findings",
+  "validationChange",
+  "validationEvidence",
+  "question",
+  "options",
+  "whyBlocked",
+  "evidence",
 ]);
 const BOOTSTRAP_RESULT_FIELDS = Object.freeze([
   "status",
@@ -271,6 +291,7 @@ const PAUSE_RESUME_STATES = Object.freeze({
   finalization_skill_missing: Object.freeze(["FINALIZE"]),
   fix_limit_reached: Object.freeze(["IMPLEMENT", "RESOLVE_FINDINGS"]),
   no_progress: Object.freeze(["RESOLVE_FINDINGS"]),
+  review_output_invalid: Object.freeze(["REVIEW"]),
 });
 const COMMIT_AUTHORIZATION_FIELDS = Object.freeze([
   "schemaVersion",
@@ -292,13 +313,23 @@ const COMMIT_AUTHORIZATION_FIELDS = Object.freeze([
 export class PlanExecutionWorkflowError extends Error {
   constructor(
     message,
-    { cause, code = "ERR_PLAN_EXECUTION_WORKFLOW", diagnostic } = {},
+    {
+      cause,
+      code = "ERR_PLAN_EXECUTION_WORKFLOW",
+      diagnostic,
+      diagnostics,
+    } = {},
   ) {
     super(message, cause === undefined ? undefined : { cause });
     this.name = "PlanExecutionWorkflowError";
     this.code = code;
     if (diagnostic !== undefined) {
       this.diagnostic = Object.freeze({ ...diagnostic });
+    }
+    if (diagnostics !== undefined) {
+      this.diagnostics = Object.freeze(
+        diagnostics.map((entry) => Object.freeze({ ...entry })),
+      );
     }
   }
 }
@@ -462,6 +493,14 @@ function outputConstraint(field, constraint) {
 
 function outputError(message, diagnostic) {
   return workflowError(message, INVALID_OUTPUT_CODE, diagnostic);
+}
+
+function outputErrorBatch(message, diagnostics) {
+  return new PlanExecutionWorkflowError(message, {
+    code: INVALID_OUTPUT_CODE,
+    diagnostic: diagnostics[0],
+    diagnostics,
+  });
 }
 
 export function isOutputDiagnostic(value) {
@@ -815,7 +854,7 @@ export function normalizeCompatibilityResult(payload) {
   return Object.freeze({ status: payload.status });
 }
 
-export function normalizeBootstrapResult(payload, role) {
+export function normalizeBootstrapResultCandidate(payload, role) {
   const statuses = [
     "READY",
     "CAPACITY_EXHAUSTED",
@@ -851,9 +890,12 @@ export function normalizeBootstrapResult(payload, role) {
       );
     }
     return Object.freeze({
-      status: payload.status,
-      capacityField: payload.capacityField,
-      capacityLimit: payload.capacityLimit,
+      result: Object.freeze({
+        status: payload.status,
+        capacityField: payload.capacityField,
+        capacityLimit: payload.capacityLimit,
+      }),
+      diagnostics: Object.freeze([]),
     });
   }
   if (payload.capacityField !== "" || payload.capacityLimit !== 0) {
@@ -875,8 +917,11 @@ export function normalizeBootstrapResult(payload, role) {
       );
     }
     return Object.freeze({
-      status: payload.status,
-      decision: normalizeProductDecision(payload),
+      result: Object.freeze({
+        status: payload.status,
+        decision: normalizeProductDecision(payload),
+      }),
+      diagnostics: Object.freeze([]),
     });
   }
   if (payload.status === "PLAN_REVISION_REQUIRED") {
@@ -890,7 +935,10 @@ export function normalizeBootstrapResult(payload, role) {
         outputConstraint("status", "status-field-consistency"),
       );
     }
-    return normalizePlanRevision(payload);
+    return Object.freeze({
+      result: normalizePlanRevision(payload),
+      diagnostics: Object.freeze([]),
+    });
   }
   if (payload.reason !== "" || !emptyDecision(payload)) {
     throw outputError(
@@ -898,25 +946,45 @@ export function normalizeBootstrapResult(payload, role) {
       outputConstraint("status", "status-field-consistency"),
     );
   }
+  const requiredChecks = normalizeRequiredChecks(
+    payload.requiredChecks,
+    INVALID_OUTPUT_CODE,
+    { maxItems: MAX_BOOTSTRAP_ITEMS },
+  );
+  const diagnostics = stagingDependentCheckDiagnostics(requiredChecks);
   return Object.freeze({
-    status: payload.status,
-    summary: normalizeSummary(
-      payload.summary,
-      `${role} bootstrap summary`,
-      INVALID_OUTPUT_CODE,
-      outputConstraint("summary", "concise-markdown-up-to-20000-characters"),
-    ),
-    requiredChecks: normalizePhaseSafeRequiredChecks(
-      payload.requiredChecks,
-      INVALID_OUTPUT_CODE,
-      { maxItems: MAX_BOOTSTRAP_ITEMS },
-    ),
-    validationInfrastructure: normalizeValidationInfrastructure(
-      payload.validationInfrastructure,
-      INVALID_OUTPUT_CODE,
-      { maxItems: MAX_BOOTSTRAP_ITEMS },
-    ),
+    result: Object.freeze({
+      status: payload.status,
+      summary: normalizeSummary(
+        payload.summary,
+        `${role} bootstrap summary`,
+        INVALID_OUTPUT_CODE,
+        outputConstraint("summary", "concise-markdown-up-to-20000-characters"),
+      ),
+      requiredChecks,
+      validationInfrastructure: normalizeValidationInfrastructure(
+        payload.validationInfrastructure,
+        INVALID_OUTPUT_CODE,
+        { maxItems: MAX_BOOTSTRAP_ITEMS },
+      ),
+    }),
+    diagnostics,
   });
+}
+
+export function normalizeBootstrapResult(payload, role) {
+  const candidate = normalizeBootstrapResultCandidate(payload, role);
+  if (candidate.diagnostics.length !== 0) {
+    throw new PlanExecutionWorkflowError(
+      "Required checks must be staging-independent.",
+      {
+        code: INVALID_OUTPUT_CODE,
+        diagnostic: candidate.diagnostics[0],
+        diagnostics: candidate.diagnostics,
+      },
+    );
+  }
+  return candidate.result;
 }
 
 export function normalizeReconciliationResult(payload) {
@@ -1271,19 +1339,34 @@ function isStagingIndependentCommand(command) {
   return true;
 }
 
+function stagingDependentCheckDiagnostics(checks) {
+  return Object.freeze(
+    checks.flatMap((check, index) =>
+      isStagingIndependentCommand(check.command)
+        ? []
+        : [
+            outputConstraint(
+              `requiredChecks[${index}].command`,
+              "staging-independent-validation-command",
+            ),
+          ],
+    ),
+  );
+}
+
 function normalizePhaseSafeRequiredChecks(value, code, options) {
-  const checks = normalizeRequiredChecks(value, code, options);
-  for (const [index, check] of checks.entries()) {
-    if (!isStagingIndependentCommand(check.command)) {
-      throw workflowError(
-        "Required check must be staging-independent.",
+  const { collectDiagnostics = false, ...normalizationOptions } = options ?? {};
+  const checks = normalizeRequiredChecks(value, code, normalizationOptions);
+  const diagnostics = stagingDependentCheckDiagnostics(checks);
+  if (diagnostics.length !== 0) {
+    throw new PlanExecutionWorkflowError(
+      "Required checks must be staging-independent.",
+      {
         code,
-        outputConstraint(
-          `requiredChecks[${index}].command`,
-          "staging-independent-validation-command",
-        ),
-      );
-    }
+        diagnostic: diagnostics[0],
+        ...(collectDiagnostics ? { diagnostics } : {}),
+      },
+    );
   }
   return checks;
 }
@@ -1651,7 +1734,10 @@ export function normalizeFinalizationResult(
     const requiredChecks = normalizePhaseSafeRequiredChecks(
       payload.requiredChecks,
       INVALID_OUTPUT_CODE,
-      { allowEmpty: payload.status !== "BLOCKED" },
+      {
+        allowEmpty: payload.status !== "BLOCKED",
+        collectDiagnostics: true,
+      },
     );
     const validationInfrastructure = normalizeValidationInfrastructure(
       payload.validationInfrastructure,
@@ -1721,6 +1807,7 @@ export function normalizeFinalizationResult(
   const requiredChecks = normalizePhaseSafeRequiredChecks(
     payload.requiredChecks,
     INVALID_OUTPUT_CODE,
+    { collectDiagnostics: true },
   );
   const validationInfrastructure = normalizeValidationInfrastructure(
     payload.validationInfrastructure,
@@ -1769,22 +1856,54 @@ export function normalizeFinalizationResult(
 }
 
 export function normalizeReviewResult(payload, previousFindings = []) {
+  if (!isRecord(payload)) {
+    throw outputError(
+      "Reviewer returned an invalid review result.",
+      outputConstraint("result", "object"),
+    );
+  }
+  assertExactOutputFields(payload, REVIEW_RESULT_FIELDS);
   if (
-    !isRecord(payload) ||
     !["APPROVED", "FINDINGS", "PRODUCT_DECISION_REQUIRED"].includes(
       payload.status,
     )
   ) {
-    throw outputError("Reviewer returned an invalid review result.");
+    throw outputError(
+      "Reviewer returned an invalid review result.",
+      outputConstraint("status", "review-status"),
+    );
   }
-  assertStructuredResultSize(payload);
+  assertStructuredResultSize(
+    payload,
+    outputConstraint("result", "bounded-structured-result"),
+  );
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
-    if (
-      !emptyArray(payload.findings) ||
-      payload.validationChange !== "UNCHANGED" ||
-      !emptyArray(payload.validationEvidence)
-    ) {
-      throw outputError("Product decision must not include findings.");
+    const diagnostics = [
+      ...(!emptyArray(payload.findings)
+        ? [outputConstraint("findings", "empty-for-product-decision")]
+        : []),
+      ...(payload.validationChange !== "UNCHANGED"
+        ? [
+            outputConstraint(
+              "validationChange",
+              "unchanged-for-product-decision",
+            ),
+          ]
+        : []),
+      ...(!emptyArray(payload.validationEvidence)
+        ? [
+            outputConstraint(
+              "validationEvidence",
+              "empty-for-product-decision",
+            ),
+          ]
+        : []),
+    ];
+    if (diagnostics.length !== 0) {
+      throw outputErrorBatch(
+        "Product decision must not include findings.",
+        diagnostics,
+      );
     }
     return Object.freeze({
       status: payload.status,
@@ -1792,15 +1911,48 @@ export function normalizeReviewResult(payload, previousFindings = []) {
     });
   }
   if (!emptyDecision(payload)) {
-    throw outputError("Review result contains inapplicable fields.");
+    const diagnostics = [
+      ...(payload.question !== ""
+        ? [outputConstraint("question", "empty-for-review")]
+        : []),
+      ...(payload.whyBlocked !== ""
+        ? [outputConstraint("whyBlocked", "empty-for-review")]
+        : []),
+      ...(!emptyArray(payload.options)
+        ? [outputConstraint("options", "empty-for-review")]
+        : []),
+      ...(!emptyArray(payload.evidence)
+        ? [outputConstraint("evidence", "empty-for-review")]
+        : []),
+    ];
+    throw outputErrorBatch(
+      "Review result contains inapplicable fields.",
+      diagnostics.length === 0
+        ? [outputConstraint("result", "review-field-consistency")]
+        : diagnostics,
+    );
   }
-  const findings = normalizeReviewFindings(payload.findings);
+  let findings;
+  try {
+    findings = normalizeReviewFindings(payload.findings);
+  } catch (cause) {
+    if (cause?.code !== INVALID_OUTPUT_CODE || cause?.diagnostic !== undefined) {
+      throw cause;
+    }
+    throw outputError(
+      "Reviewer findings are invalid.",
+      outputConstraint("findings", "valid-unique-findings"),
+    );
+  }
   if (
     !["UNCHANGED", "ACCEPTED", "REJECTED"].includes(
       payload.validationChange,
     )
   ) {
-    throw outputError("Review validation-change decision is invalid.");
+    throw outputError(
+      "Review validation-change decision is invalid.",
+      outputConstraint("validationChange", "validation-change-decision"),
+    );
   }
   const validationEvidence = normalizeTextList(
     payload.validationEvidence,
@@ -1808,22 +1960,37 @@ export function normalizeReviewResult(payload, previousFindings = []) {
     {
       allowEmpty: payload.validationChange === "UNCHANGED",
       code: INVALID_OUTPUT_CODE,
+      diagnosticField: "validationEvidence",
     },
   );
-  if (
-    (payload.status === "APPROVED" && findings.length !== 0) ||
-    (payload.status === "FINDINGS" && findings.length === 0) ||
-    (payload.status === "APPROVED" && payload.validationChange === "REJECTED")
-  ) {
-    throw outputError("Review status does not match its findings.");
+  const diagnostics = [
+    ...(payload.status === "APPROVED" && findings.length !== 0
+      ? [outputConstraint("findings", "empty-when-approved")]
+      : []),
+    ...(payload.status === "FINDINGS" && findings.length === 0
+      ? [outputConstraint("findings", "nonempty-when-findings")]
+      : []),
+    ...(payload.status === "APPROVED" &&
+    payload.validationChange === "REJECTED"
+      ? [outputConstraint("validationChange", "not-rejected-when-approved")]
+      : []),
+  ];
+  if (diagnostics.length !== 0) {
+    throw outputErrorBatch(
+      "Review status does not match its findings.",
+      diagnostics,
+    );
   }
-  for (const finding of findings) {
+  for (const [index, finding] of findings.entries()) {
     const previous = previousFindings.find(
       (candidate) =>
         candidate.file === finding.file && candidate.problem === finding.problem,
     );
     if (previous !== undefined && previous.id !== finding.id) {
-      throw outputError("Reviewer changed the ID of an unchanged finding.");
+      throw outputError(
+        "Reviewer changed the ID of an unchanged finding.",
+        outputConstraint(`findings[${index}].id`, "stable-finding-id"),
+      );
     }
   }
   return Object.freeze({
@@ -2175,26 +2342,39 @@ function normalizeBootstrapCorrection(correction) {
   if (
     !isRecord(correction) ||
     !hasExactFields(correction, BOOTSTRAP_CORRECTION_FIELDS) ||
-    correction.attempt !== 1
+    correction.attempt !== 1 ||
+    !Array.isArray(correction.diagnostics) ||
+    correction.diagnostics.length === 0 ||
+    correction.diagnostics.length > MAX_VALIDATION_ITEMS
   ) {
     throw workflowError("Plan-execution bootstrap correction is invalid.");
   }
-  const diagnostic = Object.fromEntries(
-    OUTPUT_DIAGNOSTIC_FIELDS.map((field) => [field, correction[field]]),
-  );
-  const validContext =
-    (correction.contract === "bootstrap" &&
-      ["worker", "reviewer"].includes(correction.role)) ||
-    (correction.contract === "bootstrap-reconciliation" &&
-      correction.role === "worker") ||
-    (correction.contract === "bootstrap-arbitration" &&
-      correction.role === "arbiter");
-  if (
-    !isOutputDiagnostic(diagnostic) ||
-    !["bootstrap", "validation-migration"].includes(correction.phase) ||
-    !validContext
-  ) {
-    throw workflowError("Plan-execution bootstrap correction is invalid.");
+  const identities = new Set();
+  let context;
+  for (const diagnostic of correction.diagnostics) {
+    if (!isOutputDiagnostic(diagnostic)) {
+      throw workflowError("Plan-execution bootstrap correction is invalid.");
+    }
+    const validContext =
+      (diagnostic.contract === "bootstrap" &&
+        ["worker", "reviewer"].includes(diagnostic.role)) ||
+      (diagnostic.contract === "bootstrap-reconciliation" &&
+        diagnostic.role === "worker") ||
+      (diagnostic.contract === "bootstrap-arbitration" &&
+        diagnostic.role === "arbiter");
+    const currentContext =
+      `${diagnostic.role}\0${diagnostic.phase}\0${diagnostic.contract}`;
+    const identity = `${diagnostic.field}\0${diagnostic.constraint}`;
+    if (
+      !["bootstrap", "validation-migration"].includes(diagnostic.phase) ||
+      !validContext ||
+      (context !== undefined && context !== currentContext) ||
+      identities.has(identity)
+    ) {
+      throw workflowError("Plan-execution bootstrap correction is invalid.");
+    }
+    context = currentContext;
+    identities.add(identity);
   }
   return correction;
 }
@@ -2206,7 +2386,8 @@ function normalizeBootstrapCorrections(value) {
   const contexts = new Set();
   for (const correction of value) {
     normalizeBootstrapCorrection(correction);
-    const context = `${correction.role}\0${correction.phase}\0${correction.contract}`;
+    const diagnostic = correction.diagnostics[0];
+    const context = `${diagnostic.role}\0${diagnostic.phase}\0${diagnostic.contract}`;
     if (contexts.has(context)) {
       throw workflowError("Plan-execution bootstrap corrections must be unique.");
     }
@@ -2216,33 +2397,123 @@ function normalizeBootstrapCorrections(value) {
 }
 
 function normalizeFinalizationCorrection(value, planSteps) {
-  if (value === null) {
-    return null;
-  }
   if (
     !isRecord(value) ||
     !hasExactFields(value, FINALIZATION_CORRECTION_FIELDS) ||
-    value.attempt !== 1 ||
+    !Number.isSafeInteger(value.attempt) ||
+    value.attempt < 1 ||
+    value.attempt > MAX_FINALIZATION_CORRECTION_ATTEMPTS ||
     !Number.isSafeInteger(value.step) ||
     value.step < 1 ||
     value.step > (planSteps?.length ?? 0) ||
     !["resolved", "fallback"].includes(value.guidance) ||
-    !HASH_PATTERN.test(value.contentFingerprint)
+    !HASH_PATTERN.test(value.contentFingerprint) ||
+    !Array.isArray(value.diagnostics) ||
+    value.diagnostics.length === 0 ||
+    value.diagnostics.length > MAX_VALIDATION_ITEMS
   ) {
     throw workflowError("Plan-execution finalization correction is invalid.");
   }
-  const diagnostic = Object.fromEntries(
-    OUTPUT_DIAGNOSTIC_FIELDS.map((field) => [field, value[field]]),
-  );
-  if (
-    !isOutputDiagnostic(diagnostic) ||
-    value.role !== "worker" ||
-    value.phase !== "finalization" ||
-    value.contract !== "finalization"
-  ) {
-    throw workflowError("Plan-execution finalization correction is invalid.");
+  const identities = new Set();
+  for (const diagnostic of value.diagnostics) {
+    if (
+      !isOutputDiagnostic(diagnostic) ||
+      diagnostic.role !== "worker" ||
+      diagnostic.phase !== "finalization" ||
+      diagnostic.contract !== "finalization"
+    ) {
+      throw workflowError("Plan-execution finalization correction is invalid.");
+    }
+    const identity = `${diagnostic.field}\0${diagnostic.constraint}`;
+    if (identities.has(identity)) {
+      throw workflowError(
+        "Plan-execution finalization correction diagnostics must be unique.",
+      );
+    }
+    identities.add(identity);
   }
   return value;
+}
+
+function normalizeFinalizationCorrections(value, planSteps) {
+  if (
+    !Array.isArray(value) ||
+    value.length > MAX_FINALIZATION_CORRECTION_ATTEMPTS
+  ) {
+    throw workflowError("Plan-execution finalization corrections are invalid.");
+  }
+  const previousDiagnostics = new Set();
+  let scope = null;
+  for (const [index, correction] of value.entries()) {
+    normalizeFinalizationCorrection(correction, planSteps);
+    const currentScope = `${correction.step}\0${correction.contentFingerprint}`;
+    if (
+      correction.attempt !== index + 1 ||
+      (scope !== null && scope !== currentScope)
+    ) {
+      throw workflowError(
+        "Plan-execution finalization corrections are inconsistent.",
+      );
+    }
+    scope = currentScope;
+    for (const diagnostic of correction.diagnostics) {
+      const identity = `${diagnostic.field}\0${diagnostic.constraint}`;
+      if (previousDiagnostics.has(identity)) {
+        throw workflowError(
+          "Plan-execution finalization correction diagnostics must be fresh.",
+        );
+      }
+      previousDiagnostics.add(identity);
+    }
+  }
+  return value;
+}
+
+function normalizeReviewCorrection(value, planSteps) {
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, REVIEW_CORRECTION_FIELDS) ||
+    value.attempt !== 1 ||
+    !Number.isSafeInteger(value.step) ||
+    value.step < 1 ||
+    value.step > (planSteps?.length ?? 0) ||
+    !HASH_PATTERN.test(value.contentFingerprint) ||
+    !HASH_PATTERN.test(value.validationInfrastructureFingerprint) ||
+    !Array.isArray(value.diagnostics) ||
+    value.diagnostics.length === 0 ||
+    value.diagnostics.length > MAX_DIAGNOSTIC_ITEMS
+  ) {
+    throw workflowError("Plan-execution review correction is invalid.");
+  }
+  const identities = new Set();
+  for (const diagnostic of value.diagnostics) {
+    if (
+      !isOutputDiagnostic(diagnostic) ||
+      diagnostic.role !== "reviewer" ||
+      diagnostic.phase !== "review" ||
+      diagnostic.contract !== "review"
+    ) {
+      throw workflowError("Plan-execution review correction is invalid.");
+    }
+    const identity = `${diagnostic.field}\0${diagnostic.constraint}`;
+    if (identities.has(identity)) {
+      throw workflowError(
+        "Plan-execution review correction diagnostics must be unique.",
+      );
+    }
+    identities.add(identity);
+  }
+  return value;
+}
+
+function sameReviewCorrectionScope(left, right) {
+  return (
+    left.attempt === right.attempt &&
+    left.step === right.step &&
+    left.contentFingerprint === right.contentFingerprint &&
+    left.validationInfrastructureFingerprint ===
+      right.validationInfrastructureFingerprint
+  );
 }
 
 function normalizedSummary(value, name) {
@@ -2584,6 +2855,7 @@ function normalizeFindingOverrides(value) {
   if (!Array.isArray(value) || value.length > MAX_DIAGNOSTIC_ITEMS) {
     throw workflowError("Plan-execution finding overrides are invalid.");
   }
+  const identities = new Set();
   for (const entry of value) {
     assertExactFields(
       entry,
@@ -2596,8 +2868,41 @@ function normalizeFindingOverrides(value) {
     ) {
       throw workflowError("Plan-execution finding override is invalid.");
     }
+    const identity = `${entry.findingId}\0${entry.fingerprint}`;
+    if (identities.has(identity)) {
+      throw workflowError("Plan-execution finding overrides must be unique.");
+    }
+    identities.add(identity);
   }
   return value;
+}
+
+function findingIsOverridden(findingOverrides, findingId, fingerprint) {
+  return findingOverrides.some(
+    (entry) =>
+      entry.findingId === findingId && entry.fingerprint === fingerprint,
+  );
+}
+
+function reviewGatePassed({
+  findingOverrides,
+  findings,
+  previousFindings,
+  reviewedFingerprint,
+  reviewResult,
+}) {
+  if (["UNCHANGED", "ACCEPTED"].includes(reviewResult?.validationChange)) {
+    return true;
+  }
+  return (
+    reviewResult?.validationChange === "REJECTED" &&
+    reviewedFingerprint !== null &&
+    findings.length === 0 &&
+    previousFindings.length > 0 &&
+    previousFindings.every(({ id }) =>
+      findingIsOverridden(findingOverrides, id, reviewedFingerprint),
+    )
+  );
 }
 
 function normalizePendingCommit(value) {
@@ -2857,23 +3162,43 @@ export function normalizePipelineState(value) {
       "Plan-execution pending bootstrap correction is inconsistent.",
     );
   }
-  const finalizationCorrection = normalizeFinalizationCorrection(
-    value.finalizationCorrection,
+  const finalizationCorrections = normalizeFinalizationCorrections(
+    value.finalizationCorrections,
     planSteps,
   );
-  const pendingFinalizationCorrection = normalizeFinalizationCorrection(
-    value.pendingFinalizationCorrection,
-    planSteps,
-  );
+  const pendingFinalizationCorrection =
+    value.pendingFinalizationCorrection === null
+      ? null
+      : normalizeFinalizationCorrection(
+          value.pendingFinalizationCorrection,
+          planSteps,
+        );
   if (
     pendingFinalizationCorrection !== null &&
     !isDeepStrictEqual(
       pendingFinalizationCorrection,
-      finalizationCorrection,
+      finalizationCorrections.at(-1),
     )
   ) {
     throw workflowError(
       "Plan-execution pending finalization correction is inconsistent.",
+    );
+  }
+  const reviewCorrection =
+    value.reviewCorrection === null
+      ? null
+      : normalizeReviewCorrection(value.reviewCorrection, planSteps);
+  const pendingReviewCorrection =
+    value.pendingReviewCorrection === null
+      ? null
+      : normalizeReviewCorrection(value.pendingReviewCorrection, planSteps);
+  if (
+    pendingReviewCorrection !== null &&
+    (reviewCorrection === null ||
+      !sameReviewCorrectionScope(pendingReviewCorrection, reviewCorrection))
+  ) {
+    throw workflowError(
+      "Plan-execution pending review correction is inconsistent.",
     );
   }
   if (
@@ -2928,9 +3253,10 @@ export function normalizePipelineState(value) {
   ) {
     throw workflowError("Plan-execution current step is invalid.");
   }
+  const finalizationCorrectionScope = finalizationCorrections[0] ?? null;
   if (
-    finalizationCorrection !== null &&
-    (value.currentStep !== finalizationCorrection.step ||
+    finalizationCorrectionScope !== null &&
+    (value.currentStep !== finalizationCorrectionScope.step ||
       (pendingFinalizationCorrection !== null &&
         !["FINALIZE", "WAITING_FOR_USER", "FAILED"].includes(
           value.workflowState,
@@ -3041,6 +3367,30 @@ export function normalizePipelineState(value) {
       );
     }
   }
+  if (
+    reviewCorrection !== null &&
+    (value.currentStep !== reviewCorrection.step ||
+      finalizationResult?.status !== "PASS" ||
+      value.finalizedFingerprint !== reviewCorrection.contentFingerprint ||
+      finalizationResult.validationInfrastructureFingerprint !==
+        reviewCorrection.validationInfrastructureFingerprint ||
+      (pendingReviewCorrection !== null &&
+        !["REVIEW", "WAITING_FOR_USER", "FAILED"].includes(
+          value.workflowState,
+        )))
+  ) {
+    throw workflowError("Plan-execution review correction is inapplicable.");
+  }
+  if (
+    reviewCorrection !== null &&
+    value.workflowState === "REVIEW" &&
+    pendingReviewCorrection === null &&
+    (reviewResult === null || value.reviewedFingerprint === null)
+  ) {
+    throw workflowError(
+      "Plan-execution review correction is missing its pending marker.",
+    );
+  }
   const findings = normalizePersistedFindings(value.findings);
   const previousFindings = normalizePersistedFindings(
     value.previousFindings,
@@ -3103,7 +3453,14 @@ export function normalizePipelineState(value) {
   ) {
     throw workflowError("Plan-execution review reconsideration is invalid.");
   }
-  normalizeFindingOverrides(value.findingOverrides);
+  const findingOverrides = normalizeFindingOverrides(value.findingOverrides);
+  const acceptedReviewGate = reviewGatePassed({
+    findingOverrides,
+    findings,
+    previousFindings,
+    reviewedFingerprint: value.reviewedFingerprint,
+    reviewResult,
+  });
   const pendingCommit = normalizePendingCommit(value.pendingCommit);
   const completedCommits = normalizeCompletedCommits(value.completedCommits);
   if (
@@ -3268,8 +3625,10 @@ export function normalizePipelineState(value) {
       value.bootstrapArbitrationUsed ||
       bootstrapCorrections.length !== 0 ||
       pendingBootstrapCorrection !== null ||
-      finalizationCorrection !== null ||
+      finalizationCorrections.length !== 0 ||
       pendingFinalizationCorrection !== null ||
+      reviewCorrection !== null ||
+      pendingReviewCorrection !== null ||
       value.compatibilityCheckRequired ||
       value.currentStep !== null ||
       value.reviewerStep !== null ||
@@ -3312,6 +3671,8 @@ export function normalizePipelineState(value) {
       value.reviewReconsideration.length !== 0 ||
       value.additionalFixRounds !== 0 ||
       value.findingOverrides.length !== 0 ||
+      reviewCorrection !== null ||
+      pendingReviewCorrection !== null ||
       pendingCommit !== null ||
       completedCommits.length !== 0)
   ) {
@@ -3390,7 +3751,7 @@ export function normalizePipelineState(value) {
     (finalizationResult?.status !== "PASS" ||
       value.finalizedFingerprint === null ||
       value.reviewedFingerprint !== value.finalizedFingerprint ||
-      !["UNCHANGED", "ACCEPTED"].includes(reviewResult.validationChange) ||
+      !acceptedReviewGate ||
       findings.length !== 0 ||
       pendingDisputes.length !== 0 ||
       value.reviewReconsideration.length !== 0)
@@ -3404,7 +3765,7 @@ export function normalizePipelineState(value) {
       finalizationResult?.status !== "PASS" ||
       value.finalizedFingerprint === null ||
       value.reviewedFingerprint !== value.finalizedFingerprint ||
-      !["UNCHANGED", "ACCEPTED"].includes(reviewResult.validationChange) ||
+      !acceptedReviewGate ||
       findings.length !== 0 ||
       pendingDisputes.length !== 0 ||
       value.reviewReconsideration.length !== 0)
@@ -3462,8 +3823,10 @@ export function createPlanExecutionState({
     bootstrapArbitrationUsed: false,
     bootstrapCorrections: Object.freeze([]),
     pendingBootstrapCorrection: null,
-    finalizationCorrection: null,
+    finalizationCorrections: Object.freeze([]),
     pendingFinalizationCorrection: null,
+    reviewCorrection: null,
+    pendingReviewCorrection: null,
     compatibilityCheckRequired: false,
     currentStep: null,
     reviewerStep: null,
@@ -3542,7 +3905,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 7 ||
+    run.pipelineStateVersion !== 11 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -3743,6 +4106,7 @@ export function assertRun(run) {
           "environment_blocked",
           "finalization_skill_invalid",
           "finalization_skill_missing",
+          "review_output_invalid",
         ].includes(run.pause.reason)) ||
       (run.pause.reason === "finalization_cannot_pass" &&
         run.pause.code !== "ERR_FINALIZATION_MODIFIED_BEFORE_VALIDATION");

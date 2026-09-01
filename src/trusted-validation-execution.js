@@ -305,7 +305,13 @@ export async function runExactCommand(
       reason: ready ? "timeout" : "isolation",
     };
   }
-  const descendantsActive = processGroupExists(child.pid);
+  let descendantsActive = processGroupExists(child.pid);
+  if (descendantsActive && ready && outcome.exitCode === 0) {
+    descendantsActive = !(await waitForProcessGroupExit(
+      child.pid,
+      terminationGraceMs,
+    ));
+  }
   if (descendantsActive) {
     const terminated = await terminateProcessGroup(
       child.pid,

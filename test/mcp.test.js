@@ -19,14 +19,17 @@ import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import {
   createClarificationService,
   createDetachedLauncher,
+  createDetachedRuntimeCompatibilityToken,
   createGitService,
   createMcpControlPlane,
   createRunner,
   createRunStore,
   DETACHED_RUNTIME_COMPATIBILITY_ENV,
+  DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
+  listPipelines,
+  main,
   MCP_INSTRUCTIONS,
   parseRunnerConfiguration,
-  RUNTIME_COMPATIBILITY_TOKEN,
   RUNTIME_VERSION_SKEW_EXIT_CODE,
   RUN_STATE_SCHEMA_VERSION,
 } from "../src/index.js";
@@ -593,7 +596,7 @@ test("reconciles an incomplete start intent after run creation", async (t) => {
   assert.equal(launches[0].id, RUN_ID);
   assert.equal(
     launches[0].options.expectedRuntimeCompatibility,
-    RUNTIME_COMPATIBILITY_TOKEN,
+    DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
   );
   await assert.rejects(
     control.runStart({ ...input, pipelineId: "plan-execution" }),
@@ -643,34 +646,111 @@ test("keeps a conflicted detached start durable for idempotent retry", async (t)
   assert.deepEqual(launches, [RUN_ID]);
 });
 
-test("surfaces detached child runtime skew without changing the durable run", async (t) => {
+test("rejects detached pipeline skew and retries the exact start after restart", async (t) => {
   const paths = await workspace(t, "agent-runner-mcp-runtime-skew-");
   const store = createRunStore({ stateRoot: paths.stateRoot });
   const runner = storedRunner(store, paths);
-  const control = createMcpControlPlane({
-    launchRun(_id, _action, { onExit }) {
-      queueMicrotask(() => onExit(RUNTIME_VERSION_SKEW_EXIT_CODE));
+  const oldParentToken = createDetachedRuntimeCompatibilityToken({
+    pipelines: listPipelines().map((pipeline) =>
+      pipeline.id === "plan-execution"
+        ? { ...pipeline, stateVersion: pipeline.stateVersion - 1 }
+        : pipeline,
+    ),
+  });
+  assert.notEqual(
+    oldParentToken,
+    DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
+  );
+  let childTouchedRunStore = false;
+  let childExitCode = null;
+  let launchedToken = null;
+  const childRunner = createRunner({
+    runStore: {
+      async acquireRunLease() {
+        childTouchedRunStore = true;
+        throw new Error("The incompatible child acquired a run lease.");
+      },
+    },
+  });
+  const staleControl = createMcpControlPlane({
+    detachedCompatibilityToken: oldParentToken,
+    launchRun(id, _action, { expectedRuntimeCompatibility, onExit }) {
+      launchedToken = expectedRuntimeCompatibility;
+      queueMicrotask(async () => {
+        childExitCode = await main(["resume", "--run", id], {
+          environment: {
+            [DETACHED_RUNTIME_COMPATIBILITY_ENV]:
+              expectedRuntimeCompatibility,
+          },
+          runner: childRunner,
+          stderr: { write() {} },
+          stdout: { write() {} },
+        });
+        onExit(childExitCode);
+      });
     },
     runIdFactory: () => RUN_ID,
     runner,
     runStore: store,
   });
+  const input = {
+    idempotencyKey: "runtime-skew-start",
+    pipelineId: "plan-execution",
+    projectPath: paths.projectPath,
+    taskPath: paths.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    sourceSession: null,
+  };
 
   await assert.rejects(
-    control.runStart({
-      idempotencyKey: "runtime-skew-start",
-      pipelineId: "plan-execution",
-      projectPath: paths.projectPath,
-      taskPath: paths.taskPath,
-      proactiveClarification: false,
-      roleOverrides: {},
-      sourceSession: null,
-    }),
+    staleControl.runStart(input),
     (error) =>
       error.code === "ERR_RUNTIME_VERSION_SKEW" &&
       /restart the Agent Runner MCP server/u.test(error.message),
   );
+  assert.equal(launchedToken, oldParentToken);
+  assert.equal(childExitCode, RUNTIME_VERSION_SKEW_EXIT_CODE);
+  assert.equal(childTouchedRunStore, false);
   assert.equal((await store.loadRun(RUN_ID)).revision, 1);
+  assert.equal(await store.runIsLeased(RUN_ID), false);
+  assert.equal(
+    await store.worktreeIsLeased(paths.projectPath, RUN_ID),
+    false,
+  );
+  const identity = {
+    key: input.idempotencyKey,
+    tool: "run_start",
+    arguments: Object.fromEntries(
+      Object.entries(input).filter(([key]) => key !== "idempotencyKey"),
+    ),
+  };
+  const pending = await store.readAction(identity);
+  assert.equal(pending.status, "intent");
+  assert.equal(pending.result, null);
+  assert.equal(JSON.stringify(pending).includes(oldParentToken), false);
+  const runDirectory = await store.getRunDirectory(RUN_ID);
+  assert.equal(
+    (await readFile(join(runDirectory, "events.jsonl"), "utf8"))
+      .trimEnd()
+      .split("\n").length,
+    1,
+  );
+
+  const launches = [];
+  const freshControl = createMcpControlPlane({
+    async launchRun(id, _action, options) {
+      launches.push({ id, token: options.expectedRuntimeCompatibility });
+      await advanceMutatingStoredRun(store, id);
+    },
+    runner,
+    runStore: store,
+  });
+  assert.deepEqual(await freshControl.runStart(input), { runId: RUN_ID });
+  assert.deepEqual(launches, [
+    { id: RUN_ID, token: DETACHED_RUNTIME_COMPATIBILITY_TOKEN },
+  ]);
+  assert.equal((await store.readAction(identity)).status, "completed");
 });
 
 test("keeps one detached owner after the MCP caller disconnects", async (t) => {
@@ -1980,7 +2060,8 @@ test("launches continuation independently from the MCP process streams", async (
   assert.equal(calls[0].options.stdio, "ignore");
   assert.deepEqual(calls[0].options.env, {
     XDG_STATE_HOME: "/state",
-    [DETACHED_RUNTIME_COMPATIBILITY_ENV]: RUNTIME_COMPATIBILITY_TOKEN,
+    [DETACHED_RUNTIME_COMPATIBILITY_ENV]:
+      DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
   });
   await assert.rejects(
     launch(RUN_ID, null, { expectedRuntimeCompatibility: "other" }),
