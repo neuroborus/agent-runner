@@ -17,6 +17,8 @@ import test from "node:test";
 
 import {
   createPlanAuthoringState,
+  migratePlanAuthoringStateV1,
+  planAuthoringPipeline,
   runPlanAuthoring,
 } from "../src/index.js";
 
@@ -79,6 +81,39 @@ function productDecision(resultField = { plan: "" }) {
 function approved() {
   return {
     status: "APPROVED",
+    findings: [],
+    question: "",
+    options: [],
+    whyBlocked: "",
+    evidence: [],
+  };
+}
+
+function checkChanged(plan = REVISED_PLAN) {
+  return {
+    status: "CHANGED",
+    plan,
+    question: "",
+    options: [],
+    whyBlocked: "",
+    evidence: [],
+  };
+}
+
+function checkUnchanged() {
+  return {
+    status: "UNCHANGED",
+    plan: "",
+    question: "",
+    options: [],
+    whyBlocked: "",
+    evidence: [],
+  };
+}
+
+function clean() {
+  return {
+    status: "CLEAN",
     findings: [],
     question: "",
     options: [],
@@ -317,6 +352,7 @@ async function createFixture(
     clarificationIgnored = true,
     emptyClarification = false,
     interactive = false,
+    mode = "independent",
     models = {},
     onEdit,
     onInspectTranscript,
@@ -395,20 +431,30 @@ async function createFixture(
   let currentRun = {
     revision: 1,
     pipelineId: "plan-authoring",
-    pipelineStateVersion: 1,
+    pipelineStateVersion: 2,
     projectPath,
     taskPath,
-    roles: {
-      planner: { backend: "codex", model: models.planner ?? null },
-      reviewer: { backend: "codex", model: models.reviewer ?? null },
-      arbiter: { backend: "codex", model: models.arbiter ?? null },
-    },
+    roles: Object.fromEntries(
+      (mode === "lazy" ? ["planner"] : ["planner", "reviewer", "arbiter"]).map(
+        (role) => [
+          role,
+          { backend: "codex", model: models[role] ?? null },
+        ],
+      ),
+    ),
     counters: {},
     hashes: {},
     pause: null,
     activeTurn: null,
     sessionLineage: { source: sourceSession, children: [] },
-    pipelineState: createPlanAuthoringState({ proactiveClarification }),
+    pipelineState: createPlanAuthoringState({
+      proactiveClarification,
+      settings: {
+        maxRevisionRounds: 15,
+        mode,
+        stagnationWindowRounds: 3,
+      },
+    }),
   };
   const transitions = [];
   const runtime = {
@@ -472,9 +518,10 @@ async function createFixture(
       transitions.push({ patch, options });
       return currentRun;
     },
-    async startAgentTurn(activeTurn) {
+    async startAgentTurn(activeTurn, { pipelineState } = {}) {
       currentRun = {
         ...currentRun,
+        ...(pipelineState === undefined ? {} : { pipelineState }),
         activeTurn,
         revision: currentRun.revision + 1,
       };
@@ -519,6 +566,7 @@ async function createFixture(
       runtime,
       settings: {
         maxRevisionRounds: 15,
+        mode,
         stagnationWindowRounds: 3,
         ...settings,
       },
@@ -601,6 +649,295 @@ test("writes one validated plan through independent source-session forks", async
   await assert.rejects(
     executeFile("git", ["-C", fixture.projectPath, "rev-parse", "HEAD"]),
   );
+});
+
+test("selects lazy Planner-only mode and migrates legacy runs to independent", async (t) => {
+  assert.equal(planAuthoringPipeline.stateVersion, 2);
+  assert.equal(
+    planAuthoringPipeline.resolveActiveRoles(),
+    planAuthoringPipeline.roles,
+  );
+  assert.deepEqual(
+    planAuthoringPipeline.resolveActiveRoles({ mode: "independent" }),
+    ["planner", "reviewer", "arbiter"],
+  );
+  assert.deepEqual(planAuthoringPipeline.resolveActiveRoles({ mode: "lazy" }), [
+    "planner",
+  ]);
+  assert.equal(
+    planAuthoringPipeline.settings.mode.defaultValue,
+    "independent",
+  );
+
+  const initial = createPlanAuthoringState({
+    settings: {
+      maxRevisionRounds: 15,
+      mode: "independent",
+      stagnationWindowRounds: 3,
+    },
+  });
+  const {
+    cleanConfirmationFingerprint: _activeConfirmation,
+    lazySourceForkConsumed: _activeSourceFork,
+    ...activeState
+  } = initial;
+  const { mode: _activeMode, ...activeSettings } = activeState.settings;
+  const migratedActive = migratePlanAuthoringStateV1({
+    pipelineState: { ...activeState, settings: activeSettings },
+  });
+  assert.equal(migratedActive.workflowState, "CLARIFY");
+  assert.equal(migratedActive.settings.mode, "independent");
+
+  const fixture = await createFixture(t);
+  const completed = await fixture.run();
+  const {
+    cleanConfirmationFingerprint: _confirmation,
+    lazySourceForkConsumed: _sourceFork,
+    ...legacyState
+  } = completed.pipelineState;
+  const { mode: _mode, ...legacySettings } = legacyState.settings;
+  const migrated = migratePlanAuthoringStateV1({
+    pipelineState: { ...legacyState, settings: legacySettings },
+  });
+
+  assert.equal(migrated.workflowState, "DONE");
+  assert.equal(migrated.planPath, completed.pipelineState.planPath);
+  assert.equal(migrated.settings.mode, "independent");
+  assert.equal(migrated.cleanConfirmationFingerprint, null);
+});
+
+test("converges a lazy plan with one source fork and no review roles", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    planner: [
+      ready(),
+      draft(),
+      checkChanged(),
+      checkUnchanged(),
+      clean(),
+    ],
+    reviewer: [],
+    arbiter: [],
+    sourceSession: SOURCE_SESSION,
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(await readFile(fixture.planPath, "utf8"), REVISED_PLAN);
+  assert.deepEqual(Object.keys(result.roles), ["planner"]);
+  assert.equal(fixture.calls.reviewer.length, 0);
+  assert.equal(fixture.calls.arbiter.length, 0);
+  assert.equal(
+    fixture.calls.planner.filter(({ session }) => session?.mode === "fork")
+      .length,
+    1,
+  );
+  assert.deepEqual(fixture.calls.planner[0].session, {
+    id: SOURCE_SESSION,
+    mode: "fork",
+  });
+  assert.ok(
+    fixture.calls.planner.slice(1).every(({ session }) =>
+      ["continue", undefined].includes(session?.mode),
+    ),
+  );
+  assert.match(
+    fixture.calls.planner[2].prompt,
+    /If you find any problems, fix the plan idiomatically and minimally/u,
+  );
+  assert.match(fixture.calls.planner[3].prompt, /Plan to check and fix/u);
+  assert.match(fixture.calls.planner[4].prompt, /Return CLEAN only/u);
+  assert.equal(result.counters.revisionRounds, 2);
+  assert.equal(result.counters.correctionRounds, 0);
+  assert.equal(
+    result.pipelineState.cleanConfirmationFingerprint,
+    result.pipelineState.draftFingerprint,
+  );
+  assert.equal(result.pipelineState.lazySourceForkConsumed, true);
+});
+
+test("routes lazy confirmation findings back through fixing", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    planner: [
+      ready(),
+      draft(),
+      checkUnchanged(),
+      findings("missing-detail"),
+      checkChanged(),
+      checkUnchanged(),
+      clean(),
+    ],
+    reviewer: [],
+    arbiter: [],
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(await readFile(fixture.planPath, "utf8"), REVISED_PLAN);
+  assert.equal(result.counters.revisionRounds, 3);
+  assert.equal(result.counters.correctionRounds, 1);
+  assert.equal(fixture.calls.reviewer.length, 0);
+  assert.equal(fixture.calls.arbiter.length, 0);
+  assert.match(
+    fixture.calls.planner[4].prompt,
+    /missing-detail/u,
+  );
+});
+
+test("does not refork a lazy source after an interrupted first turn", async (t) => {
+  let interrupt = true;
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    planner: [ready(), draft(), checkUnchanged(), clean()],
+    reviewer: [],
+    arbiter: [],
+    sourceSession: SOURCE_SESSION,
+    onRoleRun(role) {
+      if (role === "planner" && interrupt) {
+        interrupt = false;
+        const error = new Error("Provider interrupted.");
+        error.code = "ERR_TEST_INTERRUPTED";
+        error.recoverable = true;
+        throw error;
+      }
+    },
+  });
+
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "backend_unavailable");
+  assert.equal(paused.pipelineState.lazySourceForkConsumed, true);
+  assert.deepEqual(paused.sessionLineage.children, []);
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(
+    fixture.calls.planner.filter(({ session }) => session?.mode === "fork")
+      .length,
+    1,
+  );
+  assert.equal(fixture.calls.planner[1].session, undefined);
+  assert.deepEqual(
+    completed.sessionLineage.children.map(({ role }) => role),
+    ["planner"],
+  );
+});
+
+for (const checkpoint of ["check-and-fix", "clean-confirm"]) {
+  test(`reconstructs an interrupted lazy ${checkpoint} without recounting`, async (t) => {
+    let interrupted = false;
+    const targetCall = checkpoint === "check-and-fix" ? 3 : 4;
+    const fixture = await createFixture(t, {
+      mode: "lazy",
+      planner: [ready(), draft(), checkUnchanged(), clean()],
+      reviewer: [],
+      arbiter: [],
+      sourceSession: SOURCE_SESSION,
+      onRoleRun(role, _request, callNumber) {
+        if (role === "planner" && callNumber === targetCall && !interrupted) {
+          interrupted = true;
+          const error = new Error("Provider interrupted.");
+          error.code = "ERR_TEST_INTERRUPTED";
+          error.recoverable = true;
+          throw error;
+        }
+      },
+    });
+
+    const paused = await fixture.run();
+    const workflowState =
+      checkpoint === "check-and-fix" ? "CHECK_AND_FIX" : "CLEAN_CONFIRM";
+    assert.equal(paused.pause.reason, "backend_unavailable");
+    assert.equal(paused.pause.resumeState, workflowState);
+    Object.assign(fixture.currentRun, {
+      activeTurn: { role: "planner", phase: checkpoint },
+      pause: null,
+      pipelineState: { ...paused.pipelineState, workflowState },
+    });
+
+    const completed = await fixture.run();
+
+    assert.equal(completed.pipelineState.workflowState, "DONE");
+    assert.equal(completed.counters.revisionRounds, 1);
+    assert.equal(
+      fixture.calls.planner.filter(({ session }) => session?.mode === "fork")
+        .length,
+      1,
+    );
+    assert.equal(fixture.calls.planner[targetCall].session, undefined);
+  });
+}
+
+test("rejects repository mutation during lazy clean confirmation", async (t) => {
+  let mutated = false;
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    planner: [ready(), draft(), checkUnchanged(), clean()],
+    reviewer: [],
+    arbiter: [],
+    async onRoleRun(role, request) {
+      if (
+        role === "planner" &&
+        request.prompt.includes("Return CLEAN only") &&
+        !mutated
+      ) {
+        mutated = true;
+        await writeFile(join(fixture.projectPath, "contamination.txt"), "bad\n");
+      }
+    },
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(result.pause.reason, "read_only_mutation");
+  assert.equal(result.pipelineState.cleanConfirmationFingerprint, null);
+  await assert.rejects(readFile(fixture.planPath, "utf8"), /ENOENT/u);
+});
+
+test("rejects lazy clean evidence for a different draft fingerprint", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    planner: [ready(), draft(), checkUnchanged(), clean()],
+    reviewer: [],
+    arbiter: [],
+  });
+  const completed = await fixture.run();
+  fixture.currentRun.pipelineState = {
+    ...completed.pipelineState,
+    cleanConfirmationFingerprint: "0".repeat(64),
+  };
+
+  await assert.rejects(
+    fixture.run(),
+    /clean confirmation fingerprint is not applicable/u,
+  );
+});
+
+test("bounds lazy confirmation findings without invoking an Arbiter", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    planner: [
+      ready(),
+      draft(),
+      checkUnchanged(),
+      findings("still-blocked"),
+    ],
+    reviewer: [],
+    arbiter: [],
+  });
+
+  const result = await fixture.run({ stagnationWindowRounds: 1 });
+
+  assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(result.pause.reason, "plan_revision_not_converging");
+  assert.equal(result.counters.revisionRounds, 1);
+  assert.equal(result.counters.correctionRounds, 1);
+  assert.equal(fixture.calls.reviewer.length, 0);
+  assert.equal(fixture.calls.arbiter.length, 0);
 });
 
 test("reconstructs an interrupted read-only turn in a fresh session", async (t) => {
@@ -1029,6 +1366,35 @@ test("invalid deterministic plans return to the Planner", async (t) => {
   }
 });
 
+test("lazy validation failures require another fix and clean confirmation", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    planner: [
+      ready(),
+      draft("not a plan"),
+      checkUnchanged(),
+      clean(),
+      checkChanged(),
+      checkUnchanged(),
+      clean(),
+    ],
+    reviewer: [],
+    arbiter: [],
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.match(fixture.calls.planner[4].prompt, /must contain at least one/u);
+  assert.equal(result.counters.correctionRounds, 1);
+  assert.equal(
+    fixture.calls.planner.filter(({ prompt }) =>
+      prompt.includes("Return CLEAN only"),
+    ).length,
+    2,
+  );
+});
+
 test("rejects reviewer finding IDs that are not kebab-case", async (t) => {
   const fixture = await createFixture(t, {
     planner: [ready(), draft()],
@@ -1330,6 +1696,7 @@ test("keeps resolved settings stable across resume", async (t) => {
   assert.equal(resumed.counters.revisionRounds, 1);
   assert.deepEqual(resumed.pipelineState.settings, {
     maxRevisionRounds: 1,
+    mode: "independent",
     stagnationWindowRounds: 10,
   });
 });

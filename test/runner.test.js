@@ -77,6 +77,28 @@ function approved() {
   };
 }
 
+function unchangedPlan() {
+  return {
+    status: "UNCHANGED",
+    plan: "",
+    question: "",
+    options: [],
+    whyBlocked: "",
+    evidence: [],
+  };
+}
+
+function cleanPlan() {
+  return {
+    status: "CLEAN",
+    findings: [],
+    question: "",
+    options: [],
+    whyBlocked: "",
+    evidence: [],
+  };
+}
+
 function createAdapter({ fork = true, questionFirst = false } = {}) {
   const calls = [];
   const probes = [];
@@ -122,6 +144,16 @@ function createAdapter({ fork = true, questionFirst = false } = {}) {
         request.prompt.includes("Write a concise commit-by-commit plan")
       ) {
         structured = draft();
+        sessionId ??= plannerSession();
+      } else if (request.prompt.includes("Return CLEAN only")) {
+        structured = cleanPlan();
+        sessionId ??= plannerSession();
+      } else if (
+        request.prompt.includes(
+          "If you find any problems, fix the plan idiomatically and minimally",
+        )
+      ) {
+        structured = unchangedPlan();
         sessionId ??= plannerSession();
       } else if (
         request.prompt.includes("Review the plan and verify that it is correct")
@@ -647,6 +679,7 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
   });
   assert.deepEqual(paused.run.pipelineState.settings, {
     maxRevisionRounds: 15,
+    mode: "independent",
     stagnationWindowRounds: 3,
   });
   assert.deepEqual(adapter.calls[0].session, {
@@ -679,6 +712,7 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
   assert.deepEqual(completed.run.roles, paused.run.roles);
   assert.deepEqual(completed.run.pipelineState.settings, {
     maxRevisionRounds: 15,
+    mode: "independent",
     stagnationWindowRounds: 3,
   });
   assert.deepEqual(
@@ -1273,6 +1307,50 @@ test("persists descriptor-selected roles and probes only required roles", async 
   assert.equal(prepared.run.roles.arbiter.backend, "claude");
 });
 
+test("runs lazy plan authoring with only one Planner fork", async (t) => {
+  const fixture = await createFixture(t);
+  const adapter = createAdapter();
+  const runner = runnerFor(
+    fixture,
+    { codex: adapter },
+    {
+      configuration: {
+        ...RUNNER_CONFIGURATION,
+        pipelines: {
+          "plan-authoring": {
+            mode: "lazy",
+            roles: {
+              reviewer: { backend: "claude", model: "reviewer-model" },
+              arbiter: { backend: "claude", model: "arbiter-model" },
+            },
+          },
+        },
+      },
+    },
+  );
+
+  const result = await runner.run({
+    pipelineId: "plan-authoring",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+    roleOverrides: {},
+    sourceSession: { backend: "codex", id: SOURCE_SESSION },
+  });
+
+  assert.equal(result.run.pipelineState.workflowState, "DONE");
+  assert.deepEqual(Object.keys(result.run.roles), ["planner"]);
+  assert.equal(result.run.pipelineState.settings.mode, "lazy");
+  assert.equal(adapter.probes.length, 1);
+  assert.equal(
+    adapter.calls.filter(({ session }) => session?.mode === "fork").length,
+    1,
+  );
+  assert.deepEqual(
+    result.run.sessionLineage.children.map(({ role }) => role),
+    ["planner"],
+  );
+});
+
 test("persists project overrides and ignores later configuration changes", async (t) => {
   const fixture = await createFixture(t);
   const adapter = createAdapter({ questionFirst: true });
@@ -1335,6 +1413,7 @@ test("persists project overrides and ignores later configuration changes", async
   assert.equal(paused.run.pipelineState.workflowState, "WAITING_FOR_USER");
   assert.deepEqual(paused.run.pipelineState.settings, {
     maxRevisionRounds: 4,
+    mode: "independent",
     stagnationWindowRounds: 3,
   });
   assert.equal(

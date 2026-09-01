@@ -8,7 +8,9 @@ import {
 } from "@agent-runner/commit-plan";
 
 import {
+  CHECK_AND_FIX_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
+  CLEAN_CONFIRM_INSTRUCTIONS,
   DRAFT_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
   NO_DELEGATION_INSTRUCTIONS,
@@ -17,7 +19,9 @@ import {
   STAGNATION_INSTRUCTIONS,
 } from "./prompts.js";
 import {
+  CHECK_AND_FIX_SCHEMA,
   CLARIFICATION_SCHEMA,
+  CLEAN_CONFIRM_SCHEMA,
   PLANNER_SCHEMA,
   REVIEW_SCHEMA,
   STAGNATION_SCHEMA,
@@ -33,6 +37,8 @@ import {
   createPlanAuthoringState,
   isRecord,
   normalizeArbiterResult,
+  normalizeCheckAndFixResult,
+  normalizeCleanConfirmationResult,
   normalizeInputSnapshot,
   normalizePipelineState,
   normalizePlannerResult,
@@ -252,6 +258,7 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
         validationIssues: [],
         blockerKind: null,
         reviewApproved: false,
+        cleanConfirmationFingerprint: null,
         lastCountedRevision: counters().revisionRounds,
         blockedSinceArbitration: 0,
         arbiterDirection: null,
@@ -383,17 +390,23 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
     const latestSession = [...currentRun.sessionLineage.children]
       .reverse()
       .find((child) => child.role === role);
+    const lazyPrimary =
+      pipelineState().settings?.mode === "lazy" && role === "planner";
     const previousSession =
       !recovering &&
       role !== "arbiter" &&
-      latestSession?.contextKey === contextKey
+      (lazyPrimary || latestSession?.contextKey === contextKey) &&
+      latestSession !== undefined
         ? latestSession.sessionId
         : undefined;
     const sourceSession = currentRun.sessionLineage.source;
     const session =
       previousSession !== undefined
         ? { id: previousSession, mode: "continue" }
-        : !recovering && sourceSession !== null && role !== "arbiter"
+        : !recovering &&
+            sourceSession !== null &&
+            role !== "arbiter" &&
+            (!lazyPrimary || !pipelineState().lazySourceForkConsumed)
           ? { id: sourceSession, mode: "fork" }
           : undefined;
     const roleConfiguration = currentRun.roles[role];
@@ -410,7 +423,7 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
       access: "read-only",
       cwd: currentRun.projectPath,
       prompt:
-        session?.mode === "continue"
+        session?.mode === "continue" && latestSession?.contextKey === contextKey
           ? rolePrompt(buildPrompt(""))
           : recoveryPrompt,
       recoveryPrompt,
@@ -420,7 +433,17 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
     };
     let response;
     let agentError;
-    currentRun = await runtime.startAgentTurn(turn);
+    currentRun = await runtime.startAgentTurn(
+      turn,
+      lazyPrimary && session?.mode === "fork"
+        ? {
+            pipelineState: {
+              ...pipelineState(),
+              lazySourceForkConsumed: true,
+            },
+          }
+        : undefined,
+    );
     assertRun(currentRun);
     interruptedTurn = null;
     interruptedRepositoryReconciled = false;
@@ -625,6 +648,7 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
           validationIssues: [],
           blockerKind: null,
           reviewApproved: false,
+          cleanConfirmationFingerprint: null,
           lastCountedRevision: counters().revisionRounds,
           blockedSinceArbitration: 0,
           arbiterDirection: null,
@@ -729,6 +753,7 @@ ${JSON.stringify(
 
   async function registerBlock(blockerKind, values) {
     const state = pipelineState();
+    const lazy = state.settings.mode === "lazy";
     const currentCounters = counters();
     const isCorrection =
       currentCounters.revisionRounds > state.lastCountedRevision;
@@ -754,11 +779,12 @@ ${JSON.stringify(
     await transition(
       {
         ...state,
-        workflowState: "REVISE",
+        workflowState: lazy ? "CHECK_AND_FIX" : "REVISE",
         findings: values.findings ?? [],
         validationIssues: values.validationIssues ?? [],
         blockerKind,
         reviewApproved: false,
+        cleanConfirmationFingerprint: null,
         lastCountedRevision: isCorrection
           ? currentCounters.revisionRounds
           : state.lastCountedRevision,
@@ -773,7 +799,11 @@ ${JSON.stringify(
           correctionRounds: nextCorrectionRounds,
         },
         publicActivity: activity(
-          blockerKind === "validation" ? "runner" : "reviewer",
+          blockerKind === "validation"
+            ? "runner"
+            : lazy
+              ? "planner"
+              : "reviewer",
           "revision",
           "blocked",
           `Plan blocked by ${blockerKind}.`,
@@ -1055,13 +1085,17 @@ ${evidence}`,
         await transition(
           {
             ...pipelineState(),
-            workflowState: "REVIEW",
+            workflowState:
+              pipelineState().settings.mode === "lazy"
+                ? "CHECK_AND_FIX"
+                : "REVIEW",
             draft: result.plan,
             draftFingerprint: sha256(result.plan),
             findings: [],
             validationIssues: [],
             blockerKind: null,
             reviewApproved: false,
+            cleanConfirmationFingerprint: null,
             arbiterDirection: null,
             canonicalPlan: null,
           },
@@ -1071,6 +1105,157 @@ ${evidence}`,
               "draft",
               "created",
               "Initial commit plan drafted.",
+            ),
+          },
+        );
+        continue;
+      }
+
+      if (state.workflowState === "CHECK_AND_FIX") {
+        if (counters().revisionRounds >= state.settings.maxRevisionRounds) {
+          return pause("plan_revision_limit_reached", {
+            revisionRounds: counters().revisionRounds,
+          });
+        }
+        if (
+          state.blockedSinceArbitration >=
+          state.settings.stagnationWindowRounds
+        ) {
+          return pause("plan_revision_not_converging", {
+            correctionRounds: counters().correctionRounds,
+          });
+        }
+        const output = await runRole(
+          "planner",
+          CHECK_AND_FIX_SCHEMA,
+          (evidence) => `${CHECK_AND_FIX_INSTRUCTIONS}
+
+${evidence}
+
+Plan to check and fix:
+${pipelineState().draft}
+
+Current blocking evidence:
+${findingPrompt(pipelineState())}`,
+          { checkpoint: "planning" },
+        );
+        if (output === null) {
+          return currentRun;
+        }
+        const result = normalizeCheckAndFixResult(
+          output,
+          pipelineState().draft,
+        );
+        if (result.status === "PRODUCT_DECISION_REQUIRED") {
+          if (!(await productDecision(result.decision))) {
+            return currentRun;
+          }
+          continue;
+        }
+        const revisionRounds = counters().revisionRounds + 1;
+        if (result.status === "CHANGED") {
+          await transition(
+            {
+              ...pipelineState(),
+              workflowState: "CHECK_AND_FIX",
+              draft: result.plan,
+              draftFingerprint: sha256(result.plan),
+              findings: [],
+              validationIssues: [],
+              blockerKind: null,
+              reviewApproved: false,
+              cleanConfirmationFingerprint: null,
+              arbiterDirection: null,
+              canonicalPlan: null,
+            },
+            {
+              nextCounters: { ...counters(), revisionRounds },
+              publicActivity: activity(
+                "planner",
+                "check-and-fix",
+                "changed",
+                `Plan check/fix round ${revisionRounds} changed the draft.`,
+              ),
+            },
+          );
+          continue;
+        }
+        await transition(
+          {
+            ...pipelineState(),
+            workflowState: "CLEAN_CONFIRM",
+            findings: [],
+            validationIssues: [],
+            blockerKind: null,
+            reviewApproved: false,
+            cleanConfirmationFingerprint: null,
+            arbiterDirection: null,
+            canonicalPlan: null,
+          },
+          {
+            nextCounters: { ...counters(), revisionRounds },
+            publicActivity: activity(
+              "planner",
+              "check-and-fix",
+              "unchanged",
+              `Plan check/fix round ${revisionRounds} found no change.`,
+            ),
+          },
+        );
+        continue;
+      }
+
+      if (state.workflowState === "CLEAN_CONFIRM") {
+        const inspectedFingerprint = state.draftFingerprint;
+        const output = await runRole(
+          "planner",
+          CLEAN_CONFIRM_SCHEMA,
+          (evidence) => `${CLEAN_CONFIRM_INSTRUCTIONS}
+
+${evidence}
+
+Draft fingerprint: ${inspectedFingerprint}
+Exact plan to confirm:
+${pipelineState().draft}`,
+          { checkpoint: "planning" },
+        );
+        if (output === null) {
+          return currentRun;
+        }
+        const result = normalizeCleanConfirmationResult(output);
+        if (result.status === "PRODUCT_DECISION_REQUIRED") {
+          if (!(await productDecision(result.decision))) {
+            return currentRun;
+          }
+          continue;
+        }
+        if (result.status === "FINDINGS") {
+          await registerBlock("findings", { findings: result.findings });
+          continue;
+        }
+        if (pipelineState().draftFingerprint !== inspectedFingerprint) {
+          throw workflowError(
+            "Plan changed during clean confirmation.",
+            "ERR_INVALID_PLAN_AUTHORING_STATE",
+          );
+        }
+        await transition(
+          {
+            ...pipelineState(),
+            workflowState: "VALIDATE",
+            findings: [],
+            validationIssues: [],
+            blockerKind: null,
+            reviewApproved: true,
+            cleanConfirmationFingerprint: inspectedFingerprint,
+            arbiterDirection: null,
+          },
+          {
+            publicActivity: activity(
+              "planner",
+              "clean-confirm",
+              "clean",
+              "Planner clean confirmation accepted for the unchanged draft.",
             ),
           },
         );
@@ -1111,6 +1296,7 @@ ${pipelineState().draft}${reviewDirectionPrompt(pipelineState())}`,
             validationIssues: [],
             blockerKind: null,
             reviewApproved: true,
+            cleanConfirmationFingerprint: null,
             arbiterDirection: null,
           },
           {
@@ -1182,6 +1368,7 @@ ${findingPrompt(pipelineState())}`,
             validationIssues: [],
             blockerKind: null,
             reviewApproved: false,
+            cleanConfirmationFingerprint: null,
             arbiterDirection: null,
             canonicalPlan: null,
           },

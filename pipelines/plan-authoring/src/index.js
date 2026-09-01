@@ -13,7 +13,9 @@ import {
 } from "./workflow-contract.js";
 
 export {
+  CHECK_AND_FIX_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
+  CLEAN_CONFIRM_INSTRUCTIONS,
   DRAFT_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
   NO_DELEGATION_INSTRUCTIONS,
@@ -39,9 +41,18 @@ function positiveIntegerSetting(defaultValue) {
   });
 }
 
+function pipelineMode(value) {
+  return ["independent", "lazy"].includes(value);
+}
+
 const ROLES = resolveActiveRoles();
 const SETTINGS = Object.freeze({
   maxRevisionRounds: positiveIntegerSetting(15),
+  mode: Object.freeze({
+    defaultValue: "independent",
+    errorMessage: "must be independent or lazy",
+    validate: pipelineMode,
+  }),
   stagnationWindowRounds: positiveIntegerSetting(3),
 });
 const TASK_INPUTS = Object.freeze({
@@ -174,10 +185,23 @@ function validateResumeAction(run, action) {
   }
 }
 
+export function migratePlanAuthoringStateV1(run) {
+  const current = run.pipelineState;
+  return Object.freeze({
+    ...current,
+    settings:
+      current.settings === null
+        ? null
+        : Object.freeze({ ...current.settings, mode: "independent" }),
+    cleanConfirmationFingerprint: null,
+    lazySourceForkConsumed: false,
+  });
+}
+
 export const planAuthoringPipeline = Object.freeze({
   id: PLAN_AUTHORING_PIPELINE_ID,
-  stateVersion: 1,
-  migrations: Object.freeze({}),
+  stateVersion: 2,
+  migrations: Object.freeze({ 1: migratePlanAuthoringStateV1 }),
   roles: ROLES,
   resolveActiveRoles,
   settings: SETTINGS,

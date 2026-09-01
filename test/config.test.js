@@ -101,6 +101,7 @@ test("minimal configuration uses pipeline-owned setting defaults", () => {
   assert.deepEqual(configuration.trustedCommands, {});
   assert.deepEqual(configuration.pipelines["plan-authoring"], {
     maxRevisionRounds: 15,
+    mode: "independent",
     stagnationWindowRounds: 3,
     roles: {},
   });
@@ -189,6 +190,10 @@ test("configuration rejects unsupported shapes and values", () => {
     [
       '{"schemaVersion":1,"pipelines":{"plan-authoring":{"maxRevisionRounds":null}}}',
       /maxRevisionRounds must be a positive integer/u,
+    ],
+    [
+      '{"schemaVersion":1,"pipelines":{"plan-authoring":{"mode":"automatic"}}}',
+      /mode must be independent or lazy/u,
     ],
     [
       '{"schemaVersion":1,"pipelines":{"plan-authoring":{"stagnationWindowRounds":0}}}',
@@ -419,6 +424,7 @@ test("role resolution normalizes configuration objects", () => {
     },
     settings: {
       maxRevisionRounds: 4,
+      mode: "independent",
       stagnationWindowRounds: 3,
     },
     sourceProfile: null,
@@ -431,6 +437,25 @@ test("role resolution normalizes configuration objects", () => {
       }),
     /defaultBackend/u,
   );
+});
+
+test("lazy plan authoring resolves only the Planner role", () => {
+  const resolved = resolvePipelineConfiguration("plan-authoring", {
+    schemaVersion: 1,
+    defaultBackend: "codex",
+    pipelines: {
+      "plan-authoring": {
+        mode: "lazy",
+        roles: {
+          reviewer: { model: "preserved-reviewer-model" },
+          arbiter: { model: "preserved-arbiter-model" },
+        },
+      },
+    },
+  });
+
+  assert.deepEqual(Object.keys(resolved.roles), ["planner"]);
+  assert.equal(resolved.settings.mode, "lazy");
 });
 
 test("project configuration is a strict partial overlay", () => {

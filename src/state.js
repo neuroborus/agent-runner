@@ -790,8 +790,15 @@ export function createRunStore({
     });
   }
 
-  async function startAgentTurn(lease, activeTurn, { activity } = {}) {
-    const normalizedPatch = normalizeTransitionPatch({ activeTurn });
+  async function startAgentTurn(
+    lease,
+    activeTurn,
+    { activity, pipelineState } = {},
+  ) {
+    const normalizedPatch = normalizeTransitionPatch({
+      activeTurn,
+      ...(pipelineState === undefined ? {} : { pipelineState }),
+    });
     const normalizedActivity = normalizePublicActivity(activity);
     if (
       normalizedPatch.activeTurn === null ||

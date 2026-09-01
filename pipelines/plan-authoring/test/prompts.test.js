@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  CHECK_AND_FIX_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
+  CLEAN_CONFIRM_INSTRUCTIONS,
   DRAFT_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
@@ -57,6 +59,20 @@ For FINDINGS, provide one or more findings with unique stable lowercase kebab-ca
 For PRODUCT_DECISION_REQUIRED, set findings to []; use the product-decision fields.
 Otherwise, return only the approval decision and actionable findings using the provided schema.`,
   );
+});
+
+test("lazy convergence preserves the plan review core", () => {
+  assert.match(
+    CHECK_AND_FIX_INSTRUCTIONS,
+    /^Review the plan and verify that it is correct, idiomatic, minimal, consistent with the project's conventions, and free of contradictions\. If you find any problems, fix the plan idiomatically and minimally, following the project's conventions\./u,
+  );
+  assert.match(CHECK_AND_FIX_INSTRUCTIONS, /For CHANGED, provide/u);
+  assert.match(
+    CLEAN_CONFIRM_INSTRUCTIONS,
+    /^Review the plan and verify that it is correct, idiomatic, minimal, consistent with the project's conventions, and free of contradictions\./u,
+  );
+  assert.match(CLEAN_CONFIRM_INSTRUCTIONS, /Do not modify/u);
+  assert.match(CLEAN_CONFIRM_INSTRUCTIONS, /Return CLEAN only/u);
 });
 
 test("finding resolution instructions preserve the required core", () => {

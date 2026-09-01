@@ -659,11 +659,12 @@ export function createRunner(options = {}) {
       git,
       trustedValidation,
       readInputs: ({ taskPath }) => readInputs(pipeline, taskPath),
-      async startAgentTurn(activeTurn) {
+      async startAgentTurn(activeTurn, { pipelineState } = {}) {
         const current = await runStore.loadRun(run.runId);
         pipeline.workflow.validateRun(
           deepFreeze({
             ...current,
+            ...(pipelineState === undefined ? {} : { pipelineState }),
             activeTurn,
             revision: current.revision + 1,
           }),
@@ -677,7 +678,10 @@ export function createRunner(options = {}) {
         const next = await runStore.startAgentTurn(
           lease,
           activeTurn,
-          { activity },
+          {
+            activity,
+            ...(pipelineState === undefined ? {} : { pipelineState }),
+          },
         );
         await publish(activity, next);
         return next;
