@@ -13,6 +13,7 @@ import {
   CLEAN_CONFIRM_INSTRUCTIONS,
   DRAFT_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
+  LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
   NO_DELEGATION_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
   REVIEW_INSTRUCTIONS,
@@ -29,12 +30,14 @@ import {
 import {
   MAX_CLARIFICATION_ROUNDS,
   MAX_DIAGNOSTIC_ITEMS,
+  LAZY_OUTPUT_RETRY_EXPLANATION,
   PlanAuthoringWorkflowError,
   WORKFLOW_STATES,
   assertRun,
   assertRuntime,
   assertSettings,
   createPlanAuthoringState,
+  isOutputDiagnostic,
   isRecord,
   normalizeArbiterResult,
   normalizeCheckAndFixResult,
@@ -65,6 +68,7 @@ const INPUT_DRIFT_ERROR_CODES = new Set([
   "EPERM",
 ]);
 const ADAPTER_DIAGNOSTIC_CLASS_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
+const STRUCTURED_OUTPUT_FAILURE_CLASS = "structured-output";
 
 function activity(actor, phase, kind, message) {
   return Object.freeze({ actor, phase, kind, message });
@@ -78,6 +82,90 @@ function adapterDiagnosticClass(cause) {
   return ADAPTER_DIAGNOSTIC_CLASS_PATTERN.test(cause?.diagnosticClass)
     ? cause.diagnosticClass
     : undefined;
+}
+
+function outputDiagnostic(cause, context) {
+  const candidate = Object.freeze({
+    ...context,
+    field: cause?.diagnostic?.field,
+    constraint: cause?.diagnostic?.constraint,
+  });
+  return isOutputDiagnostic(candidate)
+    ? candidate
+    : Object.freeze({
+        ...context,
+        field: "result",
+        constraint: "semantic-contract",
+      });
+}
+
+function outputDiagnostics(cause, context) {
+  const candidates = Array.isArray(cause?.diagnostics)
+    ? cause.diagnostics.length !== 0 || cause?.diagnostic === undefined
+      ? cause.diagnostics
+      : [cause.diagnostic]
+    : [cause?.diagnostic];
+  const diagnostics = candidates.map((diagnostic) =>
+    outputDiagnostic({ diagnostic }, context),
+  );
+  return Object.freeze(
+    diagnostics.filter(
+      (diagnostic, index) =>
+        diagnostics.findIndex((candidate) =>
+          isDeepStrictEqual(candidate, diagnostic),
+        ) === index,
+    ),
+  );
+}
+
+function lazyOutputContext(phase) {
+  return Object.freeze({
+    role: "planner",
+    phase: phase === "CHECK_AND_FIX" ? "check-and-fix" : "clean-confirm",
+    contract:
+      phase === "CHECK_AND_FIX"
+        ? "lazy-check-and-fix"
+        : "lazy-clean-confirm",
+  });
+}
+
+function roleOutputContextFor(role, schema) {
+  if (role !== "planner") {
+    return undefined;
+  }
+  if (schema === CHECK_AND_FIX_SCHEMA) {
+    return lazyOutputContext("CHECK_AND_FIX");
+  }
+  if (schema === CLEAN_CONFIRM_SCHEMA) {
+    return lazyOutputContext("CLEAN_CONFIRM");
+  }
+  return undefined;
+}
+
+function invalidRoleOutput(message, context, diagnostic) {
+  return new PlanAuthoringWorkflowError(message, {
+    code: "ERR_INVALID_PLAN_AUTHORING_OUTPUT",
+    diagnostic: outputDiagnostic({ diagnostic }, context),
+  });
+}
+
+function normalizeLazyOutput(normalize, output, context) {
+  try {
+    return normalize(output);
+  } catch (cause) {
+    if (cause?.code !== "ERR_INVALID_PLAN_AUTHORING_OUTPUT") {
+      throw cause;
+    }
+    const diagnostics = outputDiagnostics(cause, context);
+    throw new PlanAuthoringWorkflowError(
+      "Structured lazy checkpoint result violates its contract.",
+      {
+        code: cause.code,
+        diagnostic: diagnostics[0],
+        diagnostics,
+      },
+    );
+  }
 }
 
 function activeTurn(role, workflowState) {
@@ -259,6 +347,8 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
         blockerKind: null,
         reviewApproved: false,
         cleanConfirmationFingerprint: null,
+        lazyCorrections: [],
+        pendingLazyCorrection: null,
         lastCountedRevision: counters().revisionRounds,
         blockedSinceArbitration: 0,
         arbiterDirection: null,
@@ -362,7 +452,12 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
     assertRun(currentRun);
   }
 
-  async function runRole(role, schema, buildPrompt, { checkpoint }) {
+  async function runRole(
+    role,
+    schema,
+    buildPrompt,
+    { checkpoint, freshSession = false },
+  ) {
     const turn = activeTurn(role, pipelineState().workflowState);
     const recovering = interruptedTurn !== null;
     if (recovering && !isDeepStrictEqual(interruptedTurn, turn)) {
@@ -371,6 +466,7 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
         "ERR_INVALID_PLAN_AUTHORING_STATE",
       );
     }
+    const outputContext = roleOutputContextFor(role, schema);
     const evidence = await readCurrentInputs();
     if (evidence === null) {
       return null;
@@ -401,14 +497,16 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
         : undefined;
     const sourceSession = currentRun.sessionLineage.source;
     const session =
-      previousSession !== undefined
-        ? { id: previousSession, mode: "continue" }
-        : !recovering &&
-            sourceSession !== null &&
-            role !== "arbiter" &&
-            (!lazyPrimary || !pipelineState().lazySourceForkConsumed)
-          ? { id: sourceSession, mode: "fork" }
-          : undefined;
+      freshSession
+        ? undefined
+        : previousSession !== undefined
+          ? { id: previousSession, mode: "continue" }
+          : !recovering &&
+              sourceSession !== null &&
+              role !== "arbiter" &&
+              (!lazyPrimary || !pipelineState().lazySourceForkConsumed)
+            ? { id: sourceSession, mode: "fork" }
+            : undefined;
     const roleConfiguration = currentRun.roles[role];
     const recoveryPrompt = rolePrompt(buildPrompt(evidenceContext));
     const executionPreferences = Object.fromEntries(
@@ -460,25 +558,46 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
       assertRun(currentRun);
     }
     if (agentError !== undefined) {
+      if (
+        outputContext !== undefined &&
+        agentError?.failureClass === STRUCTURED_OUTPUT_FAILURE_CLASS
+      ) {
+        throw invalidRoleOutput(
+          `${role} returned invalid structured output.`,
+          outputContext,
+          { field: "result", constraint: "provider-structured-output" },
+        );
+      }
       throw agentError;
     }
     if (!isRecord(response)) {
-      throw workflowError(
-        `${role} returned no response.`,
-        "ERR_INVALID_PLAN_AUTHORING_OUTPUT",
-      );
+      throw outputContext === undefined
+        ? workflowError(
+            `${role} returned no response.`,
+            "ERR_INVALID_PLAN_AUTHORING_OUTPUT",
+          )
+        : invalidRoleOutput(`${role} returned no response.`, outputContext, {
+            field: "result",
+            constraint: "response-object",
+          });
     }
     await recordSession(
       role,
       response.sessionId,
-      previousSession,
+      freshSession ? undefined : previousSession,
       contextKey,
     );
     if (!isRecord(response.structured)) {
-      throw workflowError(
-        `${role} returned no structured result.`,
-        "ERR_INVALID_PLAN_AUTHORING_OUTPUT",
-      );
+      throw outputContext === undefined
+        ? workflowError(
+            `${role} returned no structured result.`,
+            "ERR_INVALID_PLAN_AUTHORING_OUTPUT",
+          )
+        : invalidRoleOutput(
+            `${role} returned no structured result.`,
+            outputContext,
+            { field: "result", constraint: "structured-object" },
+          );
     }
     return response.structured;
   }
@@ -649,6 +768,8 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
           blockerKind: null,
           reviewApproved: false,
           cleanConfirmationFingerprint: null,
+          lazyCorrections: [],
+          pendingLazyCorrection: null,
           lastCountedRevision: counters().revisionRounds,
           blockedSinceArbitration: 0,
           arbiterDirection: null,
@@ -668,6 +789,101 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
         ),
       },
     );
+  }
+
+  function lazyCorrectionScope(phase, state = pipelineState()) {
+    return Object.freeze({
+      attempt: 1,
+      phase,
+      draftFingerprint: state.draftFingerprint,
+    });
+  }
+
+  function lazyCorrectionMatchesScope(correction, scope) {
+    return (
+      correction !== null &&
+      correction.attempt === scope.attempt &&
+      correction.phase === scope.phase &&
+      correction.draftFingerprint === scope.draftFingerprint
+    );
+  }
+
+  function lazyCorrectionAttempt(scope) {
+    return pipelineState().lazyCorrections.find((correction) =>
+      lazyCorrectionMatchesScope(correction, scope),
+    );
+  }
+
+  function lazyCorrectionPrompt(correction) {
+    return correction === null
+      ? ""
+      : `\n\n${LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS}\n\nPending correction diagnostic batch:\n${JSON.stringify(
+          correction.diagnostics,
+          null,
+          2,
+        )}`;
+  }
+
+  async function handleInvalidLazyOutput(cause, context, scope) {
+    if (cause?.code !== "ERR_INVALID_PLAN_AUTHORING_OUTPUT") {
+      throw cause;
+    }
+    const diagnostics = outputDiagnostics(cause, context).slice(
+      0,
+      MAX_DIAGNOSTIC_ITEMS,
+    );
+    const state = pipelineState();
+    const existing =
+      state.pendingLazyCorrection ?? lazyCorrectionAttempt(scope) ?? null;
+    const correction = { ...scope, diagnostics };
+    if (existing === null) {
+      await transition(
+        {
+          ...state,
+          lazyCorrections: [...state.lazyCorrections, correction].slice(
+            -MAX_DIAGNOSTIC_ITEMS,
+          ),
+          pendingLazyCorrection: correction,
+        },
+        {
+          publicActivity: activity(
+            "planner",
+            context.phase,
+            "lazy-correction",
+            `Planner must correct ${diagnostics.length} ${context.contract} contract ${
+              diagnostics.length === 1 ? "violation" : "violations"
+            }.`,
+          ),
+        },
+      );
+      return "retry";
+    }
+    await transition(
+      {
+        ...state,
+        workflowState: "WAITING_FOR_USER",
+        pendingLazyCorrection: correction,
+      },
+      {
+        pause: {
+          reason: "lazy_output_invalid",
+          code: "ERR_INVALID_PLAN_AUTHORING_OUTPUT",
+          explanation: LAZY_OUTPUT_RETRY_EXPLANATION,
+          evidence: diagnostics.map(
+            ({ field, constraint }) =>
+              `Planner field ${field} violated ${constraint}.`,
+          ),
+          resumeState: scope.phase,
+        },
+        publicActivity: activity(
+          "runner",
+          context.phase,
+          "paused",
+          "Plan authoring paused: lazy_output_invalid.",
+        ),
+      },
+    );
+    return "pause";
   }
 
   async function arbitrateStagnation() {
@@ -785,6 +1001,7 @@ ${JSON.stringify(
         blockerKind,
         reviewApproved: false,
         cleanConfirmationFingerprint: null,
+        pendingLazyCorrection: null,
         lastCountedRevision: isCorrection
           ? currentCounters.revisionRounds
           : state.lastCountedRevision,
@@ -904,7 +1121,11 @@ ${JSON.stringify(
         if (!(await resumeEdit())) {
           return currentRun;
         }
-      } else if (currentRun.pause.reason === "backend_unavailable") {
+      } else if (
+        ["backend_unavailable", "lazy_output_invalid"].includes(
+          currentRun.pause.reason,
+        )
+      ) {
         await transition(
           {
             ...pipelineState(),
@@ -1112,12 +1333,16 @@ ${evidence}`,
       }
 
       if (state.workflowState === "CHECK_AND_FIX") {
-        if (counters().revisionRounds >= state.settings.maxRevisionRounds) {
+        if (
+          state.pendingLazyCorrection === null &&
+          counters().revisionRounds >= state.settings.maxRevisionRounds
+        ) {
           return pause("plan_revision_limit_reached", {
             revisionRounds: counters().revisionRounds,
           });
         }
         if (
+          state.pendingLazyCorrection === null &&
           state.blockedSinceArbitration >=
           state.settings.stagnationWindowRounds
         ) {
@@ -1125,140 +1350,209 @@ ${evidence}`,
             correctionRounds: counters().correctionRounds,
           });
         }
-        const output = await runRole(
-          "planner",
-          CHECK_AND_FIX_SCHEMA,
-          (evidence) => `${CHECK_AND_FIX_INSTRUCTIONS}
+        const context = lazyOutputContext("CHECK_AND_FIX");
+        while (true) {
+          const current = pipelineState();
+          const correction = current.pendingLazyCorrection;
+          const scope =
+            correction ?? lazyCorrectionScope("CHECK_AND_FIX", current);
+          const inspectedFingerprint = current.draftFingerprint;
+          try {
+            const output = await runRole(
+              "planner",
+              CHECK_AND_FIX_SCHEMA,
+              (evidence) => `${CHECK_AND_FIX_INSTRUCTIONS}
 
 ${evidence}
 
+Draft fingerprint: ${inspectedFingerprint}
 Plan to check and fix:
 ${pipelineState().draft}
 
 Current blocking evidence:
-${findingPrompt(pipelineState())}`,
-          { checkpoint: "planning" },
-        );
-        if (output === null) {
-          return currentRun;
-        }
-        const result = normalizeCheckAndFixResult(
-          output,
-          pipelineState().draft,
-        );
-        if (result.status === "PRODUCT_DECISION_REQUIRED") {
-          if (!(await productDecision(result.decision))) {
+${findingPrompt(pipelineState())}${lazyCorrectionPrompt(correction)}`,
+              {
+                checkpoint:
+                  correction === null
+                    ? "planning"
+                    : "lazy-correction:check-and-fix",
+                freshSession: correction !== null,
+              },
+            );
+            if (output === null) {
+              return currentRun;
+            }
+            if (pipelineState().draftFingerprint !== inspectedFingerprint) {
+              throw workflowError(
+                "Plan changed during lazy check/fix.",
+                "ERR_INVALID_PLAN_AUTHORING_STATE",
+              );
+            }
+            const result = normalizeLazyOutput(
+              (candidate) =>
+                normalizeCheckAndFixResult(candidate, current.draft),
+              output,
+              context,
+            );
+            if (result.status === "PRODUCT_DECISION_REQUIRED") {
+              if (!(await productDecision(result.decision))) {
+                return currentRun;
+              }
+              break;
+            }
+            const revisionRounds = counters().revisionRounds + 1;
+            if (result.status === "CHANGED") {
+              await transition(
+                {
+                  ...pipelineState(),
+                  workflowState: "CHECK_AND_FIX",
+                  draft: result.plan,
+                  draftFingerprint: sha256(result.plan),
+                  findings: [],
+                  validationIssues: [],
+                  blockerKind: null,
+                  reviewApproved: false,
+                  cleanConfirmationFingerprint: null,
+                  pendingLazyCorrection: null,
+                  arbiterDirection: null,
+                  canonicalPlan: null,
+                },
+                {
+                  nextCounters: { ...counters(), revisionRounds },
+                  publicActivity: activity(
+                    "planner",
+                    "check-and-fix",
+                    "changed",
+                    `Plan check/fix round ${revisionRounds} changed the draft.`,
+                  ),
+                },
+              );
+              break;
+            }
+            await transition(
+              {
+                ...pipelineState(),
+                workflowState: "CLEAN_CONFIRM",
+                findings: [],
+                validationIssues: [],
+                blockerKind: null,
+                reviewApproved: false,
+                cleanConfirmationFingerprint: null,
+                pendingLazyCorrection: null,
+                arbiterDirection: null,
+                canonicalPlan: null,
+              },
+              {
+                nextCounters: { ...counters(), revisionRounds },
+                publicActivity: activity(
+                  "planner",
+                  "check-and-fix",
+                  "unchanged",
+                  `Plan check/fix round ${revisionRounds} found no change.`,
+                ),
+              },
+            );
+            break;
+          } catch (cause) {
+            const resolution = await handleInvalidLazyOutput(
+              cause,
+              context,
+              scope,
+            );
+            if (resolution === "retry") {
+              continue;
+            }
             return currentRun;
           }
-          continue;
         }
-        const revisionRounds = counters().revisionRounds + 1;
-        if (result.status === "CHANGED") {
-          await transition(
-            {
-              ...pipelineState(),
-              workflowState: "CHECK_AND_FIX",
-              draft: result.plan,
-              draftFingerprint: sha256(result.plan),
-              findings: [],
-              validationIssues: [],
-              blockerKind: null,
-              reviewApproved: false,
-              cleanConfirmationFingerprint: null,
-              arbiterDirection: null,
-              canonicalPlan: null,
-            },
-            {
-              nextCounters: { ...counters(), revisionRounds },
-              publicActivity: activity(
-                "planner",
-                "check-and-fix",
-                "changed",
-                `Plan check/fix round ${revisionRounds} changed the draft.`,
-              ),
-            },
-          );
-          continue;
-        }
-        await transition(
-          {
-            ...pipelineState(),
-            workflowState: "CLEAN_CONFIRM",
-            findings: [],
-            validationIssues: [],
-            blockerKind: null,
-            reviewApproved: false,
-            cleanConfirmationFingerprint: null,
-            arbiterDirection: null,
-            canonicalPlan: null,
-          },
-          {
-            nextCounters: { ...counters(), revisionRounds },
-            publicActivity: activity(
-              "planner",
-              "check-and-fix",
-              "unchanged",
-              `Plan check/fix round ${revisionRounds} found no change.`,
-            ),
-          },
-        );
         continue;
       }
 
       if (state.workflowState === "CLEAN_CONFIRM") {
-        const inspectedFingerprint = state.draftFingerprint;
-        const output = await runRole(
-          "planner",
-          CLEAN_CONFIRM_SCHEMA,
-          (evidence) => `${CLEAN_CONFIRM_INSTRUCTIONS}
+        const context = lazyOutputContext("CLEAN_CONFIRM");
+        while (true) {
+          const current = pipelineState();
+          const correction = current.pendingLazyCorrection;
+          const scope =
+            correction ?? lazyCorrectionScope("CLEAN_CONFIRM", current);
+          const inspectedFingerprint = current.draftFingerprint;
+          try {
+            const output = await runRole(
+              "planner",
+              CLEAN_CONFIRM_SCHEMA,
+              (evidence) => `${CLEAN_CONFIRM_INSTRUCTIONS}
 
 ${evidence}
 
 Draft fingerprint: ${inspectedFingerprint}
 Exact plan to confirm:
-${pipelineState().draft}`,
-          { checkpoint: "planning" },
-        );
-        if (output === null) {
-          return currentRun;
-        }
-        const result = normalizeCleanConfirmationResult(output);
-        if (result.status === "PRODUCT_DECISION_REQUIRED") {
-          if (!(await productDecision(result.decision))) {
+${pipelineState().draft}${lazyCorrectionPrompt(correction)}`,
+              {
+                checkpoint:
+                  correction === null
+                    ? "planning"
+                    : "lazy-correction:clean-confirm",
+                freshSession: correction !== null,
+              },
+            );
+            if (output === null) {
+              return currentRun;
+            }
+            const result = normalizeLazyOutput(
+              normalizeCleanConfirmationResult,
+              output,
+              context,
+            );
+            if (pipelineState().draftFingerprint !== inspectedFingerprint) {
+              throw workflowError(
+                "Plan changed during clean confirmation.",
+                "ERR_INVALID_PLAN_AUTHORING_STATE",
+              );
+            }
+            if (result.status === "PRODUCT_DECISION_REQUIRED") {
+              if (!(await productDecision(result.decision))) {
+                return currentRun;
+              }
+              break;
+            }
+            if (result.status === "FINDINGS") {
+              await registerBlock("findings", { findings: result.findings });
+              break;
+            }
+            await transition(
+              {
+                ...pipelineState(),
+                workflowState: "VALIDATE",
+                findings: [],
+                validationIssues: [],
+                blockerKind: null,
+                reviewApproved: true,
+                cleanConfirmationFingerprint: inspectedFingerprint,
+                pendingLazyCorrection: null,
+                arbiterDirection: null,
+              },
+              {
+                publicActivity: activity(
+                  "planner",
+                  "clean-confirm",
+                  "clean",
+                  "Planner clean confirmation accepted for the unchanged draft.",
+                ),
+              },
+            );
+            break;
+          } catch (cause) {
+            const resolution = await handleInvalidLazyOutput(
+              cause,
+              context,
+              scope,
+            );
+            if (resolution === "retry") {
+              continue;
+            }
             return currentRun;
           }
-          continue;
         }
-        if (result.status === "FINDINGS") {
-          await registerBlock("findings", { findings: result.findings });
-          continue;
-        }
-        if (pipelineState().draftFingerprint !== inspectedFingerprint) {
-          throw workflowError(
-            "Plan changed during clean confirmation.",
-            "ERR_INVALID_PLAN_AUTHORING_STATE",
-          );
-        }
-        await transition(
-          {
-            ...pipelineState(),
-            workflowState: "VALIDATE",
-            findings: [],
-            validationIssues: [],
-            blockerKind: null,
-            reviewApproved: true,
-            cleanConfirmationFingerprint: inspectedFingerprint,
-            arbiterDirection: null,
-          },
-          {
-            publicActivity: activity(
-              "planner",
-              "clean-confirm",
-              "clean",
-              "Planner clean confirmation accepted for the unchanged draft.",
-            ),
-          },
-        );
         continue;
       }
 

@@ -379,7 +379,7 @@ ID, pipeline state-schema version, and an explicit runtime compatibility tuple
 independent from the package version. Compatible legacy state is migrated by
 the owning pipeline under the per-run lease; incompatible readers return a
 specific version-skew error while preserving the run. The mode-aware pipeline
-versions are plan-authoring version 2, plan-execution version 13, and polishing
+versions are plan-authoring version 3, plan-execution version 13, and polishing
 version 8. Their ordered migrations resolve every supported legacy run to
 `independent` without moving terminal workflows or replaying role turns,
 commits, or handoffs. Complete write-ahead events precede atomic state
@@ -427,7 +427,9 @@ Plan authoring keeps its independent Planner/Reviewer/Arbiter flow by default.
 In lazy mode, the Planner drafts and performs state-held `CHECK_AND_FIX` rounds,
 then separately confirms the exact draft read-only. Only an unchanged
 structured `CLEAN` result can reach deterministic shared plan validation and
-atomic `plan.md` writing; drafts never become repository writes or commits.
+atomic `plan.md` writing; drafts never become repository writes or commits. An
+invalid lazy checkpoint receives one fresh read-only correction with the same
+schema and exact draft scope before an explicit retry is required.
 
 For every execution step, the Worker implements the change and runs a dedicated
 finalization gate using the configured guidance policy. Independent mode then

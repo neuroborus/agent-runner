@@ -111,9 +111,12 @@ and clarification counters, pause state, optional source-session reference and
 resolved profile, direct child role/session IDs with accepted-input and
 pipeline-checkpoint context keys, and opaque plan-authoring state.
 Drafts, findings, correction-round snapshots, stagnation evidence, the lazy
-clean-confirmation fingerprint, and the one-time lazy source-fork marker remain
-pipeline-owned structured data in the external run state rather than task
-artifacts.
+clean-confirmation fingerprint, one-time lazy source-fork marker, and bounded
+lazy-checkpoint correction ledger and pending marker remain pipeline-owned
+structured data in the external run state rather than task artifacts. A lazy
+correction record contains only attempt `1`, its `CHECK_AND_FIX` or
+`CLEAN_CONFIRM` phase, the exact draft fingerprint, and bounded Planner
+field-and-constraint diagnostics; rejected output is never persisted.
 For a terminal role failure, the pause may also retain the finite adapter
 diagnostic class normalized by the root agent boundary. It retains no native
 message, provider response, prompt, command, transcript, credential, or process
@@ -156,15 +159,19 @@ prompt labels. A turn-start event is persisted before invocation; its accepted
 result, revised draft or findings, fingerprint, and round accounting are
 committed in one transition. Resume either reconstructs an unfinished request
 exactly once or continues from an already advanced checkpoint without replaying
-the effect or counting the round twice. A claimed clean confirmation that
-mutates the repository is rejected by the read-only guard, and a confirmation
-whose draft fingerprint no longer matches its inspected candidate cannot
-advance.
+the effect or counting the round twice. Provider structured-output failures and
+deterministic checkpoint-contract failures first persist one pending correction
+attempt, then reconstruct the complete draft-bound request in a fresh read-only
+Planner session with the original schema. Interruption preserves that marker.
+A claimed clean confirmation that mutates the repository is rejected by the
+read-only guard, and a correction or confirmation whose draft fingerprint no
+longer matches its inspected candidate cannot advance.
 
 The descriptor projects each pause as bounded public data for both CLI and MCP:
 its finite reason, optional validated bounded error code, a deterministic
-explanation, empty evidence for this pipeline, a validated backend retry state
-when present, and only the applicable input-response or null-resume action. It
+explanation, empty evidence except for redacted lazy-correction
+field-and-constraint violations, a validated retry state when present, and only
+the applicable input-response or null-resume action. It
 never projects the stored input request itself, authorization metadata,
 question snapshots, revision counters, prompts, transcripts, native output, or
 raw standard error; the root's separate pending-input projection owns the
@@ -181,6 +188,12 @@ fields without moving any active or terminal workflow position, replaying a
 role turn, rewriting a draft, or writing `plan.md`. Lock-free status may project
 the migration in memory; only a mutating continuation persists it under the
 per-run lease.
+
+Pipeline state version 3 adds the lazy-correction ledger and nullable pending
+marker. Its ordered version-2 migration initializes both fields empty without
+moving active or terminal workflow positions, reviving a terminal run,
+rewriting the draft, replaying an accepted checkpoint, consuming a revision or
+correction round, or writing `plan.md`.
 
 ## Clarification
 
@@ -287,6 +300,8 @@ CHECK_AND_FIX ── changed ──▶ CHECK_AND_FIX
 CHECK_AND_FIX ── unchanged ──▶ CLEAN_CONFIRM
 CLEAN_CONFIRM ── findings ──▶ CHECK_AND_FIX
 CLEAN_CONFIRM ── CLEAN ──▶ VALIDATE → WRITE_PLAN → DONE
+invalid lazy result ── first failure ──▶ fresh correction at same checkpoint
+invalid correction ──▶ WAITING_FOR_USER ── null retry ──▶ same checkpoint
 
 Questions before work remain in CLARIFY.
 Blocking product decisions after work starts → WAITING_FOR_USER → ANALYZE
@@ -386,6 +401,18 @@ findings, or the narrowly allowed product-decision outcome. Findings return to
 shared plan validation and atomic writing. Deterministic validation issues also
 return to `CHECK_AND_FIX`, and any draft change clears confirmation evidence.
 
+An invalid provider or deterministic `CHECK_AND_FIX` or `CLEAN_CONFIRM` result
+does not consume revision or correction budgets, retain the rejected result, or
+advance accepted progress. The pipeline reduces the failure to bounded
+field-and-constraint diagnostics and permits one automatic fresh-session,
+repository-read-only replacement using the same schema and the complete durable
+draft context. Only a replacement that passes the original contract and exact
+draft-fingerprint guard rejoins the ordinary route. A repeated invalid result
+pauses with the pending phase and draft scope intact, redacted diagnostics, and
+an explicit null retry. Resume reconstructs the same correction without
+recounting its automatic attempt, replaying accepted progress, or writing
+`plan.md` early.
+
 The pipeline owns strict schemas for clarification readiness, Planner drafts or
 blocking product decisions, Reviewer approval or stable-ID findings, and
 stagnation directions. Fields that do not apply to the selected status remain
@@ -400,9 +427,11 @@ pipeline generates or rewrites a subject.
 The initial draft does not consume the revision budget. In independent mode,
 each completed Planner revision followed by review, and when approved
 deterministic validation, that returns to revision is one blocked correction
-round. In lazy mode, each completed `CHECK_AND_FIX` turn consumes one revision
-round, while a confirmation finding or deterministic validation rejection after
-that turn records one blocked correction round. Persist exact finding IDs,
+round. In lazy mode, each valid completed `CHECK_AND_FIX` turn consumes one
+revision round, while a valid confirmation finding or deterministic validation
+rejection after that turn records one blocked correction round. Invalid
+checkpoint output and its one automatic correction consume neither counter.
+Persist exact finding IDs,
 validation issues, and the draft fingerprint as bounded diagnostic evidence.
 Finding-ID changes are evidence rather than a reason to reset the counter; do
 not use fuzzy matching or heuristic progress scores.
@@ -460,8 +489,12 @@ path is ignored and untracked.
 - Cover mode validation and precedence, active-role probes, exactly one lazy
   source fork across checkpoints and resume, a changed pass followed by a
   genuinely clean confirmation, confirmation findings, mutation and fingerprint
-  rejection, deterministic-validation return, budget exhaustion, and version-1
-  migration to `independent` without reviving terminal runs.
+  rejection, deterministic-validation return, budget exhaustion, version-1
+  migration to `independent`, and version-2 lazy-correction initialization
+  without reviving terminal runs.
+- Cover provider and deterministic lazy-checkpoint correction, exhaustion,
+  interruption and explicit retry, repository mutation, draft-fingerprint
+  drift, counter accounting, artifact gating, and public redaction.
 - Cover blocked provider activity, interrupted-owner projection, and resumed
   request reconstruction with fake adapters and external temporary state,
   including input drift, read-only mutation rejection, fresh recovery context,

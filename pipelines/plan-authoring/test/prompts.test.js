@@ -7,6 +7,7 @@ import {
   CLEAN_CONFIRM_INSTRUCTIONS,
   DRAFT_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
+  LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
   REVIEW_INSTRUCTIONS,
   STAGNATION_INSTRUCTIONS,
@@ -73,6 +74,25 @@ test("lazy convergence preserves the plan review core", () => {
   );
   assert.match(CLEAN_CONFIRM_INSTRUCTIONS, /Do not modify/u);
   assert.match(CLEAN_CONFIRM_INSTRUCTIONS, /Return CLEAN only/u);
+});
+
+test("lazy correction instructions preserve schema and read-only boundaries", () => {
+  assert.match(
+    LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
+    /complete replacement result using the same checkpoint schema/u,
+  );
+  assert.match(
+    LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
+    /complete durable draft/u,
+  );
+  assert.match(
+    LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
+    /do not ask an ordinary clarification question or modify repository content or artifact files/u,
+  );
+  assert.match(
+    LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
+    /still-invalid replacement pauses for an explicit retry/u,
+  );
 });
 
 test("finding resolution instructions preserve the required core", () => {

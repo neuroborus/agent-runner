@@ -54,6 +54,9 @@ For CLEAN, set findings, options, and evidence to [], and question and whyBlocke
 For FINDINGS, provide one or more findings with unique stable lowercase kebab-case IDs, descriptions, and evidence; set question and whyBlocked to "", and options and evidence to [].
 For PRODUCT_DECISION_REQUIRED, set findings to []; use the product-decision fields.`;
 
+export const LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS = `Your previous structured lazy checkpoint result was rejected by provider or deterministic validation. Return a complete replacement result using the same checkpoint schema.
+Correct every identified field-and-constraint violation from the complete durable draft and current repository evidence. Do not repeat or quote the rejected result, findings, provider output, prompt, or transcript; do not ask an ordinary clarification question or modify repository content or artifact files. Preserve the original CHECK_AND_FIX or CLEAN_CONFIRM semantics exactly. A still-invalid replacement pauses for an explicit retry and never writes plan.md or supplies accepted progress early.`;
+
 export const FINDING_RESOLUTION_INSTRUCTIONS = `For each finding below, fix the plan idiomatically and minimally, following the project's conventions.
 
 ${PLAN_FORMAT_INSTRUCTIONS}

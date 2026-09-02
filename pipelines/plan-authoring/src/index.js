@@ -9,6 +9,7 @@ import {
 } from "./workflow.js";
 import {
   assertRun as validateRun,
+  isOutputDiagnostic,
   resolveActiveRoles,
 } from "./workflow-contract.js";
 
@@ -18,6 +19,7 @@ export {
   CLEAN_CONFIRM_INSTRUCTIONS,
   DRAFT_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
+  LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
   NO_DELEGATION_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
   REVIEW_INSTRUCTIONS,
@@ -73,6 +75,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "The clarification artifact changed outside an authorized editor window.",
   input_changed: "A task input changed after the run began.",
   internal_failure: "Plan authoring failed.",
+  lazy_output_invalid:
+    "The lazy checkpoint result remains invalid and requires an explicit retry.",
   plan_revision_limit_reached:
     "Plan revision reached its configured correction limit.",
   plan_revision_not_converging:
@@ -99,9 +103,34 @@ function publicExplanation(pause, fallback) {
     : fallback;
 }
 
+function publicEvidence(run) {
+  const diagnostics = run.pipelineState.pendingLazyCorrection?.diagnostics;
+  return Object.freeze(
+    run.pause.reason === "lazy_output_invalid" && Array.isArray(diagnostics)
+      ? diagnostics
+          .filter(
+            (diagnostic) =>
+              isOutputDiagnostic(diagnostic) &&
+              diagnostic.role === "planner" &&
+              ["check-and-fix", "clean-confirm"].includes(diagnostic.phase) &&
+              ["lazy-check-and-fix", "lazy-clean-confirm"].includes(
+                diagnostic.contract,
+              ),
+          )
+          .slice(0, 32)
+          .map(
+            ({ field, constraint }) =>
+              `Planner field ${field} violated ${constraint}.`,
+          )
+      : [],
+  );
+}
+
 function publicResumeState(run) {
   return run.pipelineState.workflowState === "WAITING_FOR_USER" &&
-    run.pause.reason === "backend_unavailable" &&
+    ["backend_unavailable", "lazy_output_invalid"].includes(
+      run.pause.reason,
+    ) &&
     WORKFLOW_STATES.includes(run.pause.resumeState)
     ? run.pause.resumeState
     : null;
@@ -146,7 +175,7 @@ function projectPause(run) {
     reason,
     code: knownReason ? publicCode(run.pause.code) : null,
     explanation: publicExplanation(run.pause, explanation),
-    evidence: Object.freeze([]),
+    evidence: publicEvidence(run),
     resumeState: publicResumeState(run),
     nextActions: Object.freeze(nextActions),
   });
@@ -183,7 +212,11 @@ function validateResumeAction(run, action) {
     run.pipelineState.workflowState !== "WAITING_FOR_USER" ||
     action !== null ||
     (run.pipelineState.pendingEdit === null &&
-      run.pause?.reason !== "backend_unavailable")
+      !["backend_unavailable", "lazy_output_invalid"].includes(
+        run.pause?.reason,
+      )) ||
+    (run.pause?.reason === "lazy_output_invalid" &&
+      run.pipelineState.pendingLazyCorrection === null)
   ) {
     throw new Error("Resume action is not valid for this paused run.");
   }
@@ -202,10 +235,21 @@ export function migratePlanAuthoringStateV1(run) {
   });
 }
 
+export function migratePlanAuthoringStateV2(run) {
+  return Object.freeze({
+    ...run.pipelineState,
+    lazyCorrections: Object.freeze([]),
+    pendingLazyCorrection: null,
+  });
+}
+
 export const planAuthoringPipeline = Object.freeze({
   id: PLAN_AUTHORING_PIPELINE_ID,
-  stateVersion: 2,
-  migrations: Object.freeze({ 1: migratePlanAuthoringStateV1 }),
+  stateVersion: 3,
+  migrations: Object.freeze({
+    1: migratePlanAuthoringStateV1,
+    2: migratePlanAuthoringStateV2,
+  }),
   roles: ROLES,
   resolveActiveRoles,
   settings: SETTINGS,

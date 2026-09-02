@@ -18,6 +18,7 @@ import test from "node:test";
 import {
   createPlanAuthoringState,
   migratePlanAuthoringStateV1,
+  migratePlanAuthoringStateV2,
   planAuthoringPipeline,
   runPlanAuthoring,
 } from "../src/index.js";
@@ -109,6 +110,10 @@ function checkUnchanged() {
     whyBlocked: "",
     evidence: [],
   };
+}
+
+function invalidUnchanged(plan = "provider-native rejected output") {
+  return { ...checkUnchanged(), plan };
 }
 
 function clean() {
@@ -431,7 +436,7 @@ async function createFixture(
   let currentRun = {
     revision: 1,
     pipelineId: "plan-authoring",
-    pipelineStateVersion: 2,
+    pipelineStateVersion: 3,
     projectPath,
     taskPath,
     roles: Object.fromEntries(
@@ -652,7 +657,7 @@ test("writes one validated plan through independent source-session forks", async
 });
 
 test("selects lazy Planner-only mode and migrates legacy runs to independent", async (t) => {
-  assert.equal(planAuthoringPipeline.stateVersion, 2);
+  assert.equal(planAuthoringPipeline.stateVersion, 3);
   assert.equal(
     planAuthoringPipeline.resolveActiveRoles(),
     planAuthoringPipeline.roles,
@@ -704,6 +709,19 @@ test("selects lazy Planner-only mode and migrates legacy runs to independent", a
   assert.equal(migrated.planPath, completed.pipelineState.planPath);
   assert.equal(migrated.settings.mode, "independent");
   assert.equal(migrated.cleanConfirmationFingerprint, null);
+
+  const {
+    lazyCorrections: _lazyCorrections,
+    pendingLazyCorrection: _pendingLazyCorrection,
+    ...versionTwoState
+  } = completed.pipelineState;
+  const migratedVersionTwo = migratePlanAuthoringStateV2({
+    pipelineState: versionTwoState,
+  });
+  assert.equal(migratedVersionTwo.workflowState, "DONE");
+  assert.equal(migratedVersionTwo.planPath, completed.pipelineState.planPath);
+  assert.deepEqual(migratedVersionTwo.lazyCorrections, []);
+  assert.equal(migratedVersionTwo.pendingLazyCorrection, null);
 });
 
 test("converges a lazy plan with one source fork and no review roles", async (t) => {
@@ -785,6 +803,255 @@ test("routes lazy confirmation findings back through fixing", async (t) => {
     fixture.calls.planner[4].prompt,
     /missing-detail/u,
   );
+});
+
+test("corrects a provider-rejected lazy checkpoint in one fresh read-only session", async (t) => {
+  let rejected = false;
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    planner: [ready(), draft(), checkChanged(), checkUnchanged(), clean()],
+    reviewer: [],
+    arbiter: [],
+    sourceSession: SOURCE_SESSION,
+    onRoleRun(role, _request, callNumber) {
+      if (role === "planner" && callNumber === 3 && !rejected) {
+        rejected = true;
+        const error = new Error("provider-native structured-output secret");
+        error.code = "ERR_PROVIDER_STRUCTURED_OUTPUT";
+        error.failureClass = "structured-output";
+        throw error;
+      }
+    },
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.counters.revisionRounds, 2);
+  assert.equal(result.pipelineState.lazyCorrections.length, 1);
+  assert.equal(result.pipelineState.pendingLazyCorrection, null);
+  assert.deepEqual(result.pipelineState.lazyCorrections[0].diagnostics, [
+    {
+      role: "planner",
+      phase: "check-and-fix",
+      contract: "lazy-check-and-fix",
+      field: "result",
+      constraint: "provider-structured-output",
+    },
+  ]);
+  const correctionRequest = fixture.calls.planner[3];
+  assert.equal(correctionRequest.access, "read-only");
+  assert.equal(correctionRequest.session, undefined);
+  assert.equal(correctionRequest.schema, fixture.calls.planner[2].schema);
+  assert.match(correctionRequest.prompt, /Pending correction diagnostic batch/u);
+  assert.match(correctionRequest.prompt, /Plan to check and fix:\n## Commit 1/u);
+  assert.equal(await readFile(fixture.planPath, "utf8"), REVISED_PLAN);
+  assert.doesNotMatch(
+    JSON.stringify({
+      state: result.pipelineState,
+      transitions: fixture.transitions,
+    }),
+    /provider-native structured-output secret/u,
+  );
+});
+
+test("pauses after one invalid lazy correction and resumes the exact checkpoint", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    planner: [
+      ready(),
+      draft(),
+      invalidUnchanged("provider-native first rejected output"),
+      invalidUnchanged("provider-native second rejected output"),
+      checkUnchanged(),
+      clean(),
+    ],
+    reviewer: [],
+    arbiter: [],
+  });
+
+  const paused = await fixture.run();
+
+  assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(paused.pause.reason, "lazy_output_invalid");
+  assert.equal(paused.pause.resumeState, "CHECK_AND_FIX");
+  assert.equal(paused.counters.revisionRounds, 0);
+  assert.equal(paused.counters.correctionRounds, 0);
+  assert.equal(paused.pipelineState.lazyCorrections.length, 1);
+  assert.notEqual(paused.pipelineState.pendingLazyCorrection, null);
+  await assert.rejects(readFile(fixture.planPath, "utf8"), /ENOENT/u);
+  const projected = planAuthoringPipeline.projections.pause(paused);
+  assert.deepEqual(projected.nextActions, [{ type: "resume", action: null }]);
+  assert.equal(projected.resumeState, "CHECK_AND_FIX");
+  assert.deepEqual(projected.evidence, [
+    "Planner field plan violated empty-for-unchanged.",
+  ]);
+  assert.doesNotMatch(JSON.stringify(paused), /provider-native/u);
+  const {
+    lazyCorrections: _lazyCorrections,
+    pendingLazyCorrection: _pendingLazyCorrection,
+    ...versionTwoState
+  } = paused.pipelineState;
+  const migrated = migratePlanAuthoringStateV2({
+    pipelineState: versionTwoState,
+  });
+  assert.equal(migrated.workflowState, "WAITING_FOR_USER");
+  assert.equal(migrated.draft, PLAN);
+
+  const acceptedPause = fixture.currentRun.pause;
+  fixture.currentRun.pause = {
+    ...acceptedPause,
+    evidence: ["provider-native secret"],
+  };
+  assert.doesNotMatch(
+    JSON.stringify(planAuthoringPipeline.projections.pause(fixture.currentRun)),
+    /provider-native/u,
+  );
+  await assert.rejects(fixture.run(), /lazy output pause is invalid/u);
+  fixture.currentRun.pause = acceptedPause;
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.counters.revisionRounds, 1);
+  assert.equal(completed.counters.correctionRounds, 0);
+  assert.equal(completed.pipelineState.lazyCorrections.length, 1);
+  assert.equal(fixture.calls.planner[4].session, undefined);
+});
+
+test("rejects pending lazy correction scope after draft fingerprint drift", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    planner: [ready(), draft(), invalidUnchanged(), invalidUnchanged()],
+    reviewer: [],
+    arbiter: [],
+  });
+  await fixture.run();
+  fixture.currentRun.pipelineState = {
+    ...fixture.currentRun.pipelineState,
+    draft: REVISED_PLAN,
+    draftFingerprint: hash(REVISED_PLAN),
+  };
+
+  await assert.rejects(fixture.run(), /pending lazy correction is inconsistent/u);
+  await assert.rejects(readFile(fixture.planPath, "utf8"), /ENOENT/u);
+});
+
+test("preserves a pending lazy correction across backend interruption", async (t) => {
+  let interrupted = false;
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    planner: [ready(), draft(), invalidUnchanged(), checkUnchanged(), clean()],
+    reviewer: [],
+    arbiter: [],
+    onRoleRun(role, request) {
+      if (
+        role === "planner" &&
+        request.prompt.includes("Pending correction diagnostic batch") &&
+        !interrupted
+      ) {
+        interrupted = true;
+        const error = new Error("provider-native interruption secret");
+        error.code = "ERR_TEST_INTERRUPTED";
+        error.recoverable = true;
+        throw error;
+      }
+    },
+  });
+
+  const paused = await fixture.run();
+
+  assert.equal(paused.pause.reason, "backend_unavailable");
+  assert.equal(paused.pause.resumeState, "CHECK_AND_FIX");
+  assert.notEqual(paused.pipelineState.pendingLazyCorrection, null);
+  assert.equal(paused.counters.revisionRounds, 0);
+  assert.doesNotMatch(JSON.stringify(paused), /interruption secret/u);
+  Object.assign(fixture.currentRun, {
+    activeTurn: { role: "planner", phase: "check-and-fix" },
+    pause: null,
+    pipelineState: {
+      ...paused.pipelineState,
+      workflowState: "CHECK_AND_FIX",
+    },
+  });
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.counters.revisionRounds, 1);
+  assert.equal(completed.pipelineState.pendingLazyCorrection, null);
+  assert.equal(fixture.calls.planner[4].session, undefined);
+});
+
+test("accepts findings only after invalid clean confirmation is corrected", async (t) => {
+  const rejected = {
+    ...clean(),
+    findings: [
+      {
+        id: "provider-native-secret",
+        description: "provider-native rejected finding",
+        evidence: ["provider-native rejected evidence"],
+      },
+    ],
+  };
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    planner: [
+      ready(),
+      draft(),
+      checkUnchanged(),
+      rejected,
+      findings("after-correction"),
+      checkChanged(),
+      checkUnchanged(),
+      clean(),
+    ],
+    reviewer: [],
+    arbiter: [],
+  });
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.pipelineState.lazyCorrections.length, 1);
+  assert.equal(completed.pipelineState.lazyCorrections[0].phase, "CLEAN_CONFIRM");
+  assert.equal(completed.counters.revisionRounds, 3);
+  assert.equal(completed.counters.correctionRounds, 1);
+  assert.equal(fixture.calls.planner[4].session, undefined);
+  assert.match(fixture.calls.planner[5].prompt, /after-correction/u);
+  assert.doesNotMatch(
+    JSON.stringify(completed.pipelineState),
+    /provider-native/u,
+  );
+});
+
+test("invalidates a pending correction after read-only repository mutation", async (t) => {
+  let mutated = false;
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    planner: [ready(), draft(), invalidUnchanged(), checkUnchanged()],
+    reviewer: [],
+    arbiter: [],
+    async onRoleRun(role, request) {
+      if (
+        role === "planner" &&
+        request.prompt.includes("Pending correction diagnostic batch") &&
+        !mutated
+      ) {
+        mutated = true;
+        await writeFile(join(fixture.projectPath, "contamination.txt"), "bad\n");
+      }
+    },
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pause.reason, "read_only_mutation");
+  assert.equal(result.pipelineState.draft, null);
+  assert.deepEqual(result.pipelineState.lazyCorrections, []);
+  assert.equal(result.pipelineState.pendingLazyCorrection, null);
+  assert.equal(result.counters.revisionRounds, 0);
+  await assert.rejects(readFile(fixture.planPath, "utf8"), /ENOENT/u);
 });
 
 test("does not refork a lazy source after an interrupted first turn", async (t) => {
