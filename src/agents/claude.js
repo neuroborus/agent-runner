@@ -15,6 +15,7 @@ import {
   executeClaudeLocalCommit,
   probeClaudeLocalCommit,
 } from "./claude-local-commit.js";
+import { probeClaudeNativeSandbox } from "./claude-native-sandbox.js";
 
 export const CLAUDE_BACKEND_ID = "claude";
 
@@ -1051,27 +1052,31 @@ export function createClaudeAdapter(options = {}) {
     const cliSupported =
       versionAtLeast(version, MINIMUM_CLAUDE_VERSION) &&
       REQUIRED_HELP_FLAGS.every((flag) => help.includes(flag));
-    const isolated =
-      cliSupported &&
-      platform === "linux" &&
-      socatAvailable &&
-      (await probeClaudeLocalCommit({
+    let nativeSandboxAvailable = false;
+    let localCommitExecutorAvailable = false;
+    if (cliSupported && platform === "linux" && socatAvailable) {
+      nativeSandboxAvailable = await probeClaudeNativeSandbox({
+        env: commandEnvironment,
+        execute,
+      });
+      localCommitExecutorAvailable = await probeClaudeLocalCommit({
         bubblewrapBinary: BUBBLEWRAP_BINARY,
         env: commandEnvironment,
         execute,
-      }));
+      });
+    }
     return Object.freeze({
       version: version.text,
       structuredOutput: cliSupported,
       readOnly:
-        cliSupported &&
+        nativeSandboxAvailable &&
         READ_ONLY_ACCESS.permissionMode === "plan" &&
         READ_ONLY_ACCESS.autoAllowBashIfSandboxed,
-      autonomousWrite: isolated,
-      gitMetadataWriteBlocked: isolated,
-      workspaceWrite: isolated,
-      localCommit: isolated,
-      remoteWriteBlocked: isolated,
+      autonomousWrite: nativeSandboxAvailable,
+      gitMetadataWriteBlocked: nativeSandboxAvailable,
+      workspaceWrite: nativeSandboxAvailable,
+      localCommit: nativeSandboxAvailable && localCommitExecutorAvailable,
+      remoteWriteBlocked: nativeSandboxAvailable,
       nativeSessionContinuation: cliSupported,
       nativeSessionFork: cliSupported,
     });

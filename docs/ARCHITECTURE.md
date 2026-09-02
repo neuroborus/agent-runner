@@ -661,6 +661,14 @@ Adapter capability probes inspect the installed CLI and enforceable local
 isolation only. They do not apply a selected native profile and do not claim
 that its authentication or provider is usable; that is established by the
 first real turn under the effective profile.
+On Linux, Claude proves native-turn sandbox support with a fixed, model-free
+`/usr/bin/unshare --user --map-root-user -- /usr/bin/true` capability check
+under the credential-filtered command environment. The bounded boolean result
+is distinct from the Runner-owned bubblewrap local-commit executor probe and
+retains no host diagnostic. Read-only and workspace-write capabilities require
+the native-turn proof; `localCommit` requires both proofs. Structured-output
+and native-session capabilities remain properties of the supported CLI and the
+probe never applies a profile, authenticates, or invokes a model.
 Claude derives its advertised read-only capability and turn arguments from one
 plan-mode access envelope. It exposes only repository-inspection tools, allows
 Bash without prompting only when the required native sandbox is active, denies

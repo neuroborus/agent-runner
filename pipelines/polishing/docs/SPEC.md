@@ -84,7 +84,14 @@ Worker capability preflight requires structured output, read-only inspection,
 autonomous safe content writes, remote-write blocking, and the explicit
 `gitMetadataWriteBlocked` guarantee. Codex satisfies it through workspace-write
 isolation; Claude satisfies it through its Git-directory write and `git add`
-denials. Neither backend receives broader `.git` access for polishing.
+denials. On Linux, Claude advertises those turn capabilities only when a fixed,
+model-free nested-user-namespace and UID/GID-mapping probe succeeds under the
+credential-filtered command environment. It uses bounded output, retains no
+host diagnostic, and does not apply a profile, authenticate, or invoke a model.
+This native-turn proof remains independent from the Runner-owned local-commit
+executor proof, which polishing never requires; structured-output and native
+session capabilities remain CLI-derived. Neither backend receives broader
+`.git` access for polishing.
 Each Codex workspace-write app-server attempt receives one canonical owner-only
 runner-created root beneath the fixed platform temporary location. Exactly the
 repository and that private root are writable; host `/tmp`, ambient temporary

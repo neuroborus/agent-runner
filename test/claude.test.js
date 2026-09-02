@@ -88,6 +88,7 @@ function createFixture({
   env,
   handle,
   help = HELP,
+  nativeSandbox = true,
   probeOutput = "agent-runner-claude-commit-ok",
   platform = "linux",
   version = "2.1.233",
@@ -112,6 +113,12 @@ function createFixture({
     }
     if (file === "socat") {
       return { stdout: "socat version 1.8", stderr: "" };
+    }
+    if (file === "/usr/bin/unshare") {
+      if (!nativeSandbox) {
+        throw new Error("/proc/self/setgroups host-secret-value");
+      }
+      return { stdout: "", stderr: "" };
     }
     if (file === "bwrap") {
       return { stdout: probeOutput, stderr: "" };
@@ -200,7 +207,7 @@ test("constructs and probes enforceable Claude capabilities", async () => {
   const fixture = createFixture();
 
   assert.equal(fixture.adapter.id, CLAUDE_BACKEND_ID);
-  assert.deepEqual(await fixture.adapter.probe(), {
+  assert.deepEqual(await fixture.adapter.probe({ model: "claude-test" }), {
     version: "2.1.233",
     structuredOutput: true,
     readOnly: true,
@@ -213,7 +220,7 @@ test("constructs and probes enforceable Claude capabilities", async () => {
     nativeSessionFork: true,
   });
   assert.deepEqual(
-    fixture.calls.slice(0, 3).map(({ file, argumentsList }) => [
+    fixture.calls.slice(0, 5).map(({ file, argumentsList }) => [
       file,
       argumentsList[0],
     ]),
@@ -221,9 +228,26 @@ test("constructs and probes enforceable Claude capabilities", async () => {
       ["claude", "--version"],
       ["claude", "--help"],
       ["socat", "-V"],
+      ["/usr/bin/unshare", "--user"],
+      ["bwrap", "--die-with-parent"],
     ],
   );
-  assert.equal(fixture.calls[3].file, "bwrap");
+  const nativeSandboxCall = fixture.calls[3];
+  assert.deepEqual(nativeSandboxCall.argumentsList, [
+    "--user",
+    "--map-root-user",
+    "--",
+    "/usr/bin/true",
+  ]);
+  assert.equal(nativeSandboxCall.options.timeout, 10_000);
+  assert.equal(nativeSandboxCall.options.maxBuffer, 64 * 1024);
+  assert.equal(nativeSandboxCall.options.shell, undefined);
+  assert.equal(turnCalls(fixture).length, 0);
+  assert.ok(
+    fixture.calls
+      .filter(({ file }) => file === "claude")
+      .every(({ argumentsList }) => !argumentsList.includes("--model")),
+  );
   assert.strictEqual(
     await fixture.adapter.probe(),
     await fixture.adapter.probe(),
@@ -241,7 +265,7 @@ test("fails preflight when the CLI or isolation is unsupported", async () => {
     createFixture({ version: "2.1.232" }),
     createFixture({ version: "2.1.234-beta.1" }),
     createFixture({ platform: "darwin" }),
-    createFixture({ probeOutput: "" }),
+    createFixture({ nativeSandbox: false }),
     createFixture({
       handle({ call }) {
         if (call.file === "socat") {
@@ -257,6 +281,104 @@ test("fails preflight when the CLI or isolation is unsupported", async () => {
     );
     assert.equal(turnCalls(fixture).length, 0);
   }
+});
+
+test("keeps native-turn and local-commit isolation proofs independent", async () => {
+  const unsupportedLocalCommit = createFixture({ probeOutput: "" });
+
+  assert.deepEqual(await unsupportedLocalCommit.adapter.probe(), {
+    version: "2.1.233",
+    structuredOutput: true,
+    readOnly: true,
+    autonomousWrite: true,
+    gitMetadataWriteBlocked: true,
+    workspaceWrite: true,
+    localCommit: false,
+    remoteWriteBlocked: true,
+    nativeSessionContinuation: true,
+    nativeSessionFork: true,
+  });
+  await unsupportedLocalCommit.adapter.run(
+    request({ access: "workspace-write" }),
+  );
+  await assert.rejects(
+    unsupportedLocalCommit.adapter.run(
+      request({
+        access: "local-commit",
+        authorizationId: "authorization-1",
+        commit: {
+          expectedHead: EXPECTED_HEAD,
+          message: "test(scope): keep probes independent",
+        },
+      }),
+    ),
+    hasCode("ERR_UNSUPPORTED_CLAUDE_CAPABILITY"),
+  );
+  assert.equal(turnCalls(unsupportedLocalCommit).length, 1);
+
+  const incompatibleNativeSandbox = createFixture({
+    env: {
+      ...process.env,
+      ANTHROPIC_API_KEY: "provider-token",
+      CLAUDE_CONFIG_DIR: "/profiles/current",
+      HTTPS_PROXY: "http://credential.invalid",
+      NODE_OPTIONS: "--require=/tmp/agent.cjs",
+    },
+    nativeSandbox: false,
+  });
+  assert.deepEqual(
+    await incompatibleNativeSandbox.adapter.probe({
+      profile: "/profiles/work",
+      model: "claude-test",
+    }),
+    {
+      version: "2.1.233",
+      structuredOutput: true,
+      readOnly: false,
+      autonomousWrite: false,
+      gitMetadataWriteBlocked: false,
+      workspaceWrite: false,
+      localCommit: false,
+      remoteWriteBlocked: false,
+      nativeSessionContinuation: true,
+      nativeSessionFork: true,
+    },
+  );
+  await assert.rejects(
+    incompatibleNativeSandbox.adapter.run(request()),
+    (error) => {
+      assert.ok(hasCode("ERR_UNSUPPORTED_CLAUDE_CAPABILITY")(error));
+      assert.equal(
+        error.message,
+        "Installed Claude CLI cannot enforce the requested capability.",
+      );
+      assert.equal(error.cause, undefined);
+      assert.doesNotMatch(error.message, /host-secret|setgroups/u);
+      return true;
+    },
+  );
+  const nativeSandboxCall = incompatibleNativeSandbox.calls.find(
+    ({ file }) => file === "/usr/bin/unshare",
+  );
+  assert.equal(nativeSandboxCall.options.env.ANTHROPIC_API_KEY, undefined);
+  assert.equal(nativeSandboxCall.options.env.HTTPS_PROXY, undefined);
+  assert.equal(nativeSandboxCall.options.env.NODE_OPTIONS, undefined);
+  assert.equal(
+    nativeSandboxCall.options.env.CLAUDE_CONFIG_DIR,
+    "/profiles/current",
+  );
+  assert.equal(
+    incompatibleNativeSandbox.calls.filter(({ file }) => file === "bwrap")
+      .length,
+    1,
+  );
+  assert.deepEqual(
+    incompatibleNativeSandbox.calls
+      .filter(({ file }) => file === "claude")
+      .map(({ argumentsList }) => argumentsList),
+    [["--version"], ["--help"]],
+  );
+  assert.equal(turnCalls(incompatibleNativeSandbox).length, 0);
 });
 
 test("runs strict read-only turns with isolated tools and an explicit model", async () => {

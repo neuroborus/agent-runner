@@ -944,7 +944,13 @@ from the same access envelope. They do not expose editing tools, deny command
 writes to the workspace and Git metadata, and set
 `sandbox.autoAllowBashIfSandboxed: true` so repository inspection proceeds
 without a prompt only inside the required native sandbox. Unsandboxed fallback
-and command network access remain disabled. The opt-in real Claude smoke test
+and command network access remain disabled. On Linux, advertise read-only,
+workspace-write, Git-metadata-blocking, and remote-write-blocking capabilities
+only after a fixed, model-free `unshare`/inert-executable probe proves the
+nested user namespace and UID/GID mapping operation required by that native
+sandbox. Use the credential-filtered command environment, bounded output, and
+no shell, selected profile, authentication, or model call; reduce failures to a
+boolean without retaining host diagnostics. The opt-in real Claude smoke test
 must exercise a representative repository-inspection command through this
 exact envelope.
 
@@ -1014,14 +1020,17 @@ full. Never replay an interrupted `local-commit` turn.
 On Linux, the isolated local-commit executor uses a probed `bubblewrap` profile
 with a read-only host filesystem, writable workspace and resolved Git
 directories, private temporary and runtime directories, and no network. The
-agent confirmation turn remains in `plan` mode; after confirmation the executor
-checks the expected HEAD, runs `git add -A`, rechecks HEAD, applies fixed
+Runner-owned executor proof is independent from the native Claude turn proof,
+and `localCommit` requires both while native session and structured-output
+capabilities remain CLI-derived. The agent confirmation turn remains in `plan`
+mode; after confirmation the executor checks the expected HEAD, runs
+`git add -A`, rechecks HEAD, applies fixed
 unstaged-clean, staged-diff whitespace, and nonempty-diff hygiene, and creates
 one subject-only commit with the exact supplied message. It preserves Git hooks and configured
 identity, strips ambient Git redirection and sensitive command environment
 values, and never adds Claude attribution. Report
-`localCommit: false` when this profile or Claude's required Linux sandbox
-dependencies cannot be probed. Policy, capability, provider, or confirmation-
+`localCommit: false` when either applicable proof or Claude's required Linux
+sandbox dependencies fail. Policy, capability, provider, or confirmation-
 turn rejection before executor invocation carries `effectStarted: false`,
 including `ERR_CLAUDE_LOCAL_COMMIT_POLICY`, while preserving the classified
 profile, authentication, provider, continuation, or process error and its
