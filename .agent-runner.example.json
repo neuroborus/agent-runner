@@ -23,6 +23,7 @@
   },
   "pipelines": {
     "plan-authoring": {
+      "mode": "independent",
       "maxRevisionRounds": 15,
       "stagnationWindowRounds": 3,
       "roles": {
@@ -36,6 +37,7 @@
       }
     },
     "plan-execution": {
+      "mode": "independent",
       "finalization": "auto",
       "maxFixRoundsPerStep": 5,
       "maxDisputesPerFinding": 2,
@@ -54,6 +56,7 @@
       }
     },
     "polishing": {
+      "mode": "independent",
       "finalization": "auto",
       "maxFixRounds": 5,
       "maxDisputesPerFinding": 2,

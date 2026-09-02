@@ -101,6 +101,11 @@ test("registry exposes explicit immutable pipeline descriptors", () => {
       assert.equal(typeof setting.errorMessage, "string");
       assert.ok(setting.validate(setting.defaultValue));
     }
+    assert.deepEqual(pipeline.settings.mode.values, ["independent", "lazy"]);
+    assert.equal(pipeline.settings.mode.defaultValue, "independent");
+    assert.equal(pipeline.settings.mode.recommendedValue, "independent");
+    assert.ok(Object.isFrozen(pipeline.settings.mode.values));
+    assert.ok(pipeline.runOptions.includes("mode"));
     for (const option of pipeline.requiredRunOptions) {
       assert.ok(pipeline.runOptions.includes(option));
     }
@@ -355,6 +360,7 @@ test("pipelines own their pipeline-specific run options", () => {
   assert.deepEqual(getPipeline("plan-authoring").runOptions, [
     "project",
     "task",
+    "mode",
     "planner",
     "reviewer",
     "arbiter",
@@ -362,6 +368,7 @@ test("pipelines own their pipeline-specific run options", () => {
   assert.deepEqual(getPipeline("plan-execution").runOptions, [
     "project",
     "task",
+    "mode",
     "worker",
     "reviewer",
     "arbiter",
@@ -369,6 +376,7 @@ test("pipelines own their pipeline-specific run options", () => {
   assert.deepEqual(getPipeline("polishing").runOptions, [
     "project",
     "task",
+    "mode",
     "worker",
     "reviewer",
     "arbiter",

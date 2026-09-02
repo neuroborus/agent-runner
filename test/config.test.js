@@ -62,6 +62,9 @@ test("tracked example is valid and local configuration is ignored", async () => 
   assert.equal(configuration.defaultModel, "current");
   assert.equal(configuration.defaultContextSize, "current");
   assert.deepEqual(configuration.trustedCommands, {});
+  assert.equal(configuration.pipelines["plan-authoring"].mode, "independent");
+  assert.equal(configuration.pipelines["plan-execution"].mode, "independent");
+  assert.equal(configuration.pipelines.polishing.mode, "independent");
   assert.deepEqual(configuration.pipelines["plan-authoring"].roles.reviewer, {
     backend: "claude",
     profile: "claude-primary",
@@ -505,6 +508,64 @@ test("lazy polishing resolves only the Worker role", () => {
 
   assert.deepEqual(Object.keys(resolved.roles), ["worker"]);
   assert.equal(resolved.settings.mode, "lazy");
+});
+
+test("setting overrides take precedence over project and runner settings", () => {
+  const runnerConfiguration = {
+    schemaVersion: 1,
+    defaultBackend: "codex",
+    pipelines: { "plan-authoring": { mode: "independent" } },
+  };
+  const projectConfiguration = {
+    schemaVersion: 1,
+    pipelines: { "plan-authoring": { mode: "lazy" } },
+  };
+
+  const projectResolved = resolvePipelineConfiguration(
+    "plan-authoring",
+    runnerConfiguration,
+    {},
+    {},
+    null,
+    projectConfiguration,
+  );
+  assert.equal(projectResolved.settings.mode, "lazy");
+  assert.deepEqual(Object.keys(projectResolved.roles), ["planner"]);
+
+  const overridden = resolvePipelineConfiguration(
+    "plan-authoring",
+    runnerConfiguration,
+    {},
+    {},
+    null,
+    projectConfiguration,
+    { mode: "independent" },
+  );
+  assert.equal(overridden.settings.mode, "independent");
+  assert.deepEqual(Object.keys(overridden.roles), [
+    "planner",
+    "reviewer",
+    "arbiter",
+  ]);
+
+  for (const settingOverrides of [
+    { mode: "automatic" },
+    { unsupported: "value" },
+  ]) {
+    assert.throws(
+      () =>
+        resolvePipelineConfiguration(
+          "plan-authoring",
+          runnerConfiguration,
+          {},
+          {},
+          null,
+          projectConfiguration,
+          settingOverrides,
+        ),
+      /settingOverrides/u,
+    );
+  }
 });
 
 test("project configuration is a strict partial overlay", () => {

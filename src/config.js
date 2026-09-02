@@ -260,6 +260,32 @@ function normalizePipeline(
   return Object.freeze(normalized);
 }
 
+function normalizeSettingOverrides(pipeline, input) {
+  const path = "settingOverrides";
+  const acceptedSettings = Object.keys(pipeline.settings).filter((name) =>
+    pipeline.runOptions.includes(name),
+  );
+  assertRecord(input, path);
+  rejectUnknownFields(input, new Set(acceptedSettings), path);
+
+  return Object.freeze(
+    Object.fromEntries(
+      Object.entries(input).map(([settingName, value]) => {
+        const definition = pipeline.settings[settingName];
+        if (!definition.validate(value)) {
+          throw new ConfigurationError(
+            `${path}.${settingName} ${definition.errorMessage}.`,
+          );
+        }
+        return [
+          settingName,
+          Array.isArray(value) ? Object.freeze([...value]) : value,
+        ];
+      }),
+    ),
+  );
+}
+
 function normalizeConfiguration(input) {
   assertRecord(input, "configuration");
   rejectUnknownFields(input, TOP_LEVEL_FIELDS, "configuration");
@@ -753,6 +779,7 @@ export function resolvePipelineConfiguration(
   executionOverrides = {},
   sourceSession = null,
   projectConfiguration = null,
+  settingOverrides = {},
 ) {
   const pipeline = getPipeline(pipelineId);
   if (pipeline === undefined) {
@@ -774,6 +801,10 @@ export function resolvePipelineConfiguration(
     "executionOverrides",
   );
   const normalizedSourceSession = normalizeSourceSession(sourceSession);
+  const normalizedSettingOverrides = normalizeSettingOverrides(
+    pipeline,
+    settingOverrides,
+  );
 
   const unknownRole = Object.keys(roleOverrides).find(
     (role) => !pipeline.roles.includes(role),
@@ -798,7 +829,11 @@ export function resolvePipelineConfiguration(
   const { roles: _roles, ...runnerSettings } = pipelineConfiguration;
   const { roles: _projectRoles, ...projectSettings } =
     projectPipelineConfiguration;
-  const settings = Object.freeze({ ...runnerSettings, ...projectSettings });
+  const settings = Object.freeze({
+    ...runnerSettings,
+    ...projectSettings,
+    ...normalizedSettingOverrides,
+  });
   const selectedRoles = pipeline.resolveActiveRoles(settings);
   if (
     !Array.isArray(selectedRoles) ||

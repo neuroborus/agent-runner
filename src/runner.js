@@ -40,6 +40,7 @@ const RUN_FIELDS = new Set([
   "proactiveClarification",
   "roleOverrides",
   "executionOverrides",
+  "settingOverrides",
   "projectConfigurationPath",
   "sourceSession",
 ]);
@@ -397,6 +398,7 @@ function normalizeRunInput(input) {
         : input.proactiveClarification,
     roleOverrides: input.roleOverrides ?? {},
     executionOverrides: input.executionOverrides ?? {},
+    settingOverrides: input.settingOverrides ?? {},
     projectConfigurationPath:
       input.projectConfigurationPath === undefined
         ? undefined
@@ -862,6 +864,11 @@ export function createRunner(options = {}) {
         code: "ERR_INVALID_RUNNER_INPUT",
       });
     }
+    if (!isRecord(normalized.settingOverrides)) {
+      throw new RunnerError("run.settingOverrides must be an object.", {
+        code: "ERR_INVALID_RUNNER_INPUT",
+      });
+    }
     const pipeline = getPipeline(normalized.pipelineId);
     if (pipeline === undefined) {
       throw new RunnerError(`Unknown pipeline: ${normalized.pipelineId}.`, {
@@ -885,6 +892,7 @@ export function createRunner(options = {}) {
         normalized.executionOverrides,
         normalized.sourceSession,
         projectConfiguration?.configuration ?? null,
+        normalized.settingOverrides,
       );
     } catch (cause) {
       if (cause?.code !== "ERR_SOURCE_BACKEND_MISMATCH") {

@@ -35,7 +35,7 @@ const EXECUTABLE_PATH = fileURLToPath(
 export const DETACHED_RUNTIME_COMPATIBILITY_ENV =
   "AGENT_RUNNER_PARENT_RUNTIME_COMPATIBILITY";
 
-const RUN_INSTRUCTIONS = `Use run_start to start a durable pipeline, then use one run_wait call for the desired waiting interval. Use run_activity only for explicit or historical reads; do not poll status, activity, or wait at a fixed cadence. Leave sourceSession unset unless the user deliberately chooses to fork a compatible current native session after being offered a fresh start. Offer its known trusted profile with the fork choice; when the profile is unknown, offer only current profile inheritance and never guess an alias. Primary and review roles fork the complete source context independently, which can spend provider context and quota twice. Recommend a fresh start for a long, multi-topic, or uncertain source session. Keep native session IDs opaque; never inspect provider-private storage or infer or fabricate an ID. Answer pending input from explicit user context when sufficient; otherwise ask the user. Never invent a material product decision.`;
+const RUN_INSTRUCTIONS = `Use run_start to start a durable pipeline, then use one run_wait call for the desired waiting interval. Use run_activity only for explicit or historical reads; do not poll status, activity, or wait at a fixed cadence. independent is the default and recommended mode because it provides genuinely independent semantic review, but it uses more provider context and tokens. lazy is opt-in, reduces consumption, and does not provide independent review; never select it automatically to save tokens. Leave sourceSession unset unless the user deliberately chooses to fork a compatible current native session after being offered a fresh start. Offer its known trusted profile with the fork choice; when the profile is unknown, offer only current profile inheritance and never guess an alias. In independent mode the primary and review roles fork the complete source context independently; in lazy mode the primary role forks it once. Recommend a fresh start for a long, multi-topic, or uncertain source session. Keep native session IDs opaque; never inspect provider-private storage or infer or fabricate an ID. Answer pending input from explicit user context when sufficient; otherwise ask the user. Never invent a material product decision.`;
 const ISSUE_REPORTING_INSTRUCTIONS = `Use unexpected_issue_report only when you, as the supervising client agent, explicitly conclude that Agent Runner behaved genuinely unexpectedly or contrary to its documented contract. Expected completion, exhausted configured budgets, usage limits, expected user pauses, documented environment blockers, and invalid user or configuration input are not reportable issues. Supply concise English Markdown deliberately; the server never collects or attaches logs, transcripts, prompts, environment values, credentials, secrets, or other diagnostics automatically.`;
 export const MCP_INSTRUCTIONS =
   `${RUN_INSTRUCTIONS} ${ISSUE_REPORTING_INSTRUCTIONS}`;
@@ -55,6 +55,16 @@ function boundedSingleLine(maximumLength) {
 const identifier = boundedSingleLine(256);
 const sessionReference = boundedSingleLine(1_024);
 const runId = z.uuid();
+const pipelineModeValues = Object.freeze([
+  ...new Set(
+    listPipelines().flatMap((pipeline) => pipeline.settings.mode.values),
+  ),
+]);
+const pipelineMode = z
+  .enum(pipelineModeValues)
+  .describe(
+    "independent is the default and recommended mode with genuinely independent review and higher context/token use. lazy is an explicit lower-consumption choice without independent review; never select it automatically.",
+  );
 const idempotencyKey = boundedSingleLine(1_024)
   .describe("Opaque key unique to this logical mutation.");
 const roleOverride = z
@@ -85,7 +95,7 @@ const sourceSession = z
   })
   .strict()
   .describe(
-    "Compatible current session deliberately selected for independent primary and review forks of its complete context. Leave unset for a fresh start.",
+    "Compatible current session deliberately selected for complete-context forks: independently by primary and review roles in independent mode, or once by the primary role in lazy mode. Leave unset for a fresh start.",
   );
 const resumeAction = z.discriminatedUnion("type", [
   z
@@ -109,6 +119,7 @@ const runStartSchema = z
     projectConfigurationPath: z.string().min(1).optional(),
     taskPath: z.string().min(1),
     proactiveClarification: z.boolean().default(false),
+    mode: pipelineMode.optional(),
     profile: z.string().min(1).max(4_096).optional(),
     model: z.string().min(1).max(256).optional(),
     contextSize: z.string().min(1).max(64).optional(),
@@ -192,6 +203,7 @@ function runnerStartInput(input) {
     profile,
     model,
     contextSize,
+    mode,
     ...runInput
   } = input;
   return {
@@ -201,7 +213,34 @@ function runnerStartInput(input) {
       ...(model === undefined ? {} : { model }),
       ...(contextSize === undefined ? {} : { contextSize }),
     },
+    settingOverrides: mode === undefined ? {} : { mode },
   };
+}
+
+function resolvedMode(run) {
+  const definition = getPipeline(run.pipelineId).settings.mode;
+  const mode = run.pipelineState.settings?.mode ?? definition.defaultValue;
+  if (!definition.validate(mode)) {
+    throw new Error(`Run ${run.runId} has an invalid resolved mode.`);
+  }
+  return mode;
+}
+
+function publicSettings(pipeline) {
+  return Object.fromEntries(
+    Object.entries(pipeline.settings).map(([name, definition]) => [
+      name,
+      {
+        defaultValue: definition.defaultValue,
+        ...(definition.recommendedValue === undefined
+          ? {}
+          : { recommendedValue: definition.recommendedValue }),
+        ...(definition.values === undefined
+          ? {}
+          : { values: definition.values }),
+      },
+    ]),
+  );
 }
 
 function pendingInput(run) {
@@ -249,6 +288,7 @@ function statusProjection({ directoryPath, run }, leaseOwnerIsLive) {
   return {
     runId: run.runId,
     pipelineId: run.pipelineId,
+    mode: resolvedMode(run),
     revision: run.revision,
     activityCursor: run.revision,
     status: run.pipelineState.workflowState,
@@ -509,6 +549,7 @@ export function createMcpControlPlane(options = {}) {
         id: pipeline.id,
         description: pipeline.description,
         roles: pipeline.roles,
+        settings: publicSettings(pipeline),
         taskInputs: pipeline.taskInputs,
         runOptions: pipeline.runOptions,
         requiredRunOptions: pipeline.requiredRunOptions,
@@ -565,7 +606,8 @@ export function createMcpControlPlane(options = {}) {
             ? null
             : input.sourceSession.profile) ||
         run.pipelineState.proactiveClarification !==
-          input.proactiveClarification
+          input.proactiveClarification ||
+        (input.mode !== undefined && resolvedMode(run) !== input.mode)
       ) {
         throw new Error("Reserved run does not match its MCP action intent.");
       }
@@ -583,11 +625,12 @@ export function createMcpControlPlane(options = {}) {
   }
 
   async function runActivity(input) {
+    const { run } = await runner.status(input.runId);
     const page = await runStore.readPublicActivity(input.runId, {
       afterRevision: input.cursor,
       limit: input.limit,
     });
-    return { runId: input.runId, ...page };
+    return { runId: input.runId, mode: resolvedMode(run), ...page };
   }
 
   async function runWait(input, context = {}) {
@@ -913,7 +956,7 @@ export function createMcpServer(options = {}) {
     "run_start",
     {
       description:
-        "Start a durable pipeline. Leave sourceSession unset unless the user deliberately selects a compatible current session after being offered a fresh start. Primary and review roles fork its complete context independently and can spend provider quota twice, so recommend fresh for a long, multi-topic, or uncertain session. Include its known trusted profile, use only current inheritance when unknown, keep native IDs opaque, and never inspect private storage or infer an ID or alias.",
+        "Start a durable pipeline. independent is default and recommended for genuinely independent semantic review but uses more provider context and tokens; lazy is opt-in for lower consumption and has no independent review, so never select it automatically. Leave sourceSession unset unless the user deliberately selects a compatible current session after being offered a fresh start. independent forks its complete context into primary and review roles; lazy forks it once into the primary role. Recommend fresh for a long, multi-topic, or uncertain session. Include its known trusted profile, use only current inheritance when unknown, keep native IDs opaque, and never inspect private storage or infer an ID or alias.",
       inputSchema: runStartSchema,
       annotations: mutating,
     },

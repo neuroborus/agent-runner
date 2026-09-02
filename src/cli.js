@@ -68,7 +68,7 @@ const PIPELINE_USAGE = PIPELINES.map(
 const USAGE = `Agent Runner
 
 Usage:
-  agent-run run <pipeline> --project <repo> --task <task-dir> [--clarify] [--profile <alias>] [--fork-from <backend>:<session-id>]
+  agent-run run <pipeline> --project <repo> --task <task-dir> [--mode <independent|lazy>] [--clarify] [--profile <alias>] [--fork-from <backend>:<session-id>]
   agent-run resume --run <run-id> [--extra-fix-rounds <count> | --override-finding <finding-id>]
   agent-run status --run <run-id>
   agent-run pipelines
@@ -79,7 +79,13 @@ ${PIPELINE_USAGE}
 
 Options:
       --clarify            Open the clarification editor before agent questions
-      --fork-from          Fork primary and review roles from a backend session
+      --mode               Select independent or lazy pipeline execution
+                           independent is default and recommended for genuinely
+                           independent review, but uses more context and tokens;
+                           lazy is opt-in, uses less, and has no independent review
+      --fork-from          Fork a compatible backend session into active roles
+                           independent forks primary and review roles separately;
+                           lazy forks once into the primary role
       --fork-profile       Trusted profile alias used by the source session
       --profile            Set the run-wide trusted profile alias
       --project-config     Load an explicit ignored project configuration
@@ -138,6 +144,7 @@ function runSummary({ directoryPath, run }) {
   const lines = [
     `Run: ${run.runId}`,
     `Pipeline: ${run.pipelineId}`,
+    `Mode: ${state.settings?.mode ?? pipeline.settings.mode.defaultValue}`,
     `State: ${state.workflowState}`,
   ];
   if (status.currentStep !== null) {
@@ -244,6 +251,22 @@ function executionOverrides(values) {
       ? {}
       : { contextSize: values["context-size"] }),
   });
+}
+
+function settingOverrides(pipeline, values) {
+  return Object.freeze(
+    Object.fromEntries(
+      Object.entries(pipeline.settings).flatMap(([name, definition]) => {
+        if (!pipeline.runOptions.includes(name) || values[name] === undefined) {
+          return [];
+        }
+        if (!definition.validate(values[name])) {
+          throw new Error(`--${name} ${definition.errorMessage}.`);
+        }
+        return [[name, values[name]]];
+      }),
+    ),
+  );
 }
 
 function resumeAction(values) {
@@ -426,6 +449,7 @@ export async function main(
         projectConfigurationPath: values["project-config"],
         roleOverrides: roleOverrides(pipeline, values),
         executionOverrides: executionOverrides(values),
+        settingOverrides: settingOverrides(pipeline, values),
         sourceSession:
           parsedSource === null
             ? null

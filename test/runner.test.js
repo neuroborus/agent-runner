@@ -1318,7 +1318,7 @@ test("runs lazy plan authoring with only one Planner fork", async (t) => {
         ...RUNNER_CONFIGURATION,
         pipelines: {
           "plan-authoring": {
-            mode: "lazy",
+            mode: "independent",
             roles: {
               reviewer: { backend: "claude", model: "reviewer-model" },
               arbiter: { backend: "claude", model: "arbiter-model" },
@@ -1334,6 +1334,7 @@ test("runs lazy plan authoring with only one Planner fork", async (t) => {
     projectPath: fixture.projectPath,
     taskPath: fixture.taskPath,
     roleOverrides: {},
+    settingOverrides: { mode: "lazy" },
     sourceSession: { backend: "codex", id: SOURCE_SESSION },
   });
 
@@ -1375,6 +1376,7 @@ test("persists project overrides and ignores later configuration changes", async
       defaultModel: "project-model",
       pipelines: {
         "plan-authoring": {
+          mode: "lazy",
           maxRevisionRounds: 4,
           roles: { reviewer: { contextSize: "200000" } },
         },
@@ -1407,6 +1409,7 @@ test("persists project overrides and ignores later configuration changes", async
     taskPath: fixture.taskPath,
     proactiveClarification: false,
     roleOverrides: { planner: { model: "cli-planner" } },
+    settingOverrides: { mode: "independent" },
     sourceSession: null,
   });
 

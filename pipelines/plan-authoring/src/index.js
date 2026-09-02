@@ -41,8 +41,10 @@ function positiveIntegerSetting(defaultValue) {
   });
 }
 
+const PIPELINE_MODES = Object.freeze(["independent", "lazy"]);
+
 function pipelineMode(value) {
-  return ["independent", "lazy"].includes(value);
+  return PIPELINE_MODES.includes(value);
 }
 
 const ROLES = resolveActiveRoles();
@@ -51,7 +53,9 @@ const SETTINGS = Object.freeze({
   mode: Object.freeze({
     defaultValue: "independent",
     errorMessage: "must be independent or lazy",
+    recommendedValue: "independent",
     validate: pipelineMode,
+    values: PIPELINE_MODES,
   }),
   stagnationWindowRounds: positiveIntegerSetting(3),
 });
@@ -206,7 +210,7 @@ export const planAuthoringPipeline = Object.freeze({
   resolveActiveRoles,
   settings: SETTINGS,
   taskInputs: TASK_INPUTS,
-  runOptions: Object.freeze(["project", "task", ...ROLES]),
+  runOptions: Object.freeze(["project", "task", "mode", ...ROLES]),
   requiredRunOptions: Object.freeze(["project", "task"]),
   description: "Analyze a task, draft a commit plan, review it, and write plan.md.",
   projections: Object.freeze({

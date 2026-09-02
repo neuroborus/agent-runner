@@ -202,6 +202,7 @@ async function createStoredRun(
       workflowState,
       pendingEdit,
       proactiveClarification: false,
+      settings: { mode: "independent" },
       ...state,
     },
   });
@@ -227,6 +228,11 @@ function storedRunner(store, paths) {
             input.sourceSession.profile === "current"
               ? null
               : input.sourceSession.profile,
+          state: {
+            settings: {
+              mode: input.settingOverrides?.mode ?? "independent",
+            },
+          },
         },
       );
       return { directoryPath: await store.getRunDirectory(run.runId), run };
@@ -283,6 +289,28 @@ function storedRunner(store, paths) {
   };
 }
 
+test("projects descriptor-owned pipeline mode guidance", async () => {
+  assert.match(
+    MCP_INSTRUCTIONS,
+    /independent is the default and recommended mode/u,
+  );
+  assert.match(MCP_INSTRUCTIONS, /more provider context and tokens/u);
+  assert.match(MCP_INSTRUCTIONS, /lazy is opt-in/u);
+  assert.match(MCP_INSTRUCTIONS, /does not provide independent review/u);
+  assert.match(MCP_INSTRUCTIONS, /never select it automatically/u);
+
+  const control = createMcpControlPlane({ runner: {}, runStore: {} });
+  const { pipelines } = await control.pipelinesList();
+  for (const pipeline of pipelines) {
+    assert.deepEqual(pipeline.settings.mode, {
+      defaultValue: "independent",
+      recommendedValue: "independent",
+      values: ["independent", "lazy"],
+    });
+    assert.ok(pipeline.runOptions.includes("mode"));
+  }
+});
+
 test("serves protocol-clean STDIO discovery through the official SDK", async (t) => {
   if (!(await childNodeStdoutIsAvailable())) {
     t.skip("Nested Node stdout is unavailable in this environment.");
@@ -311,7 +339,15 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
   );
   assert.match(
     MCP_INSTRUCTIONS,
-    /Primary and review roles fork the complete source context independently/u,
+    /independent is the default and recommended mode/u,
+  );
+  assert.match(MCP_INSTRUCTIONS, /more provider context and tokens/u);
+  assert.match(MCP_INSTRUCTIONS, /lazy is opt-in/u);
+  assert.match(MCP_INSTRUCTIONS, /does not provide independent review/u);
+  assert.match(MCP_INSTRUCTIONS, /never select it automatically/u);
+  assert.match(
+    MCP_INSTRUCTIONS,
+    /In independent mode the primary and review roles fork/u,
   );
   assert.match(
     MCP_INSTRUCTIONS,
@@ -343,9 +379,14 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
   assert.match(startTool.description, /user deliberately selects/u);
   assert.match(
     startTool.description,
-    /recommend fresh for a long, multi-topic, or uncertain session/u,
+    /Recommend fresh for a long, multi-topic, or uncertain session/u,
   );
   assert.doesNotMatch(startTool.description, /by default/u);
+  const modeSchema = startTool.inputSchema.properties.mode;
+  assert.deepEqual(modeSchema.enum, ["independent", "lazy"]);
+  assert.match(modeSchema.description, /default and recommended/u);
+  assert.match(modeSchema.description, /higher context\/token use/u);
+  assert.match(modeSchema.description, /without independent review/u);
   const sourceSessionSchema = startTool.inputSchema.properties.sourceSession;
   const sourceSessionMetadata = JSON.stringify(sourceSessionSchema);
   assert.equal(sourceSessionSchema.default, null);
@@ -383,6 +424,14 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
     pipelines.structuredContent.pipelines.map(({ id }) => id),
     ["plan-authoring", "plan-execution", "polishing"],
   );
+  for (const pipeline of pipelines.structuredContent.pipelines) {
+    assert.deepEqual(pipeline.settings.mode, {
+      defaultValue: "independent",
+      recommendedValue: "independent",
+      values: ["independent", "lazy"],
+    });
+    assert.ok(pipeline.runOptions.includes("mode"));
+  }
   assert.deepEqual(
     pipelines.structuredContent.pipelines.find(({ id }) => id === "polishing")
       .taskInputs,
@@ -600,6 +649,10 @@ test("reconciles an incomplete start intent after run creation", async (t) => {
   );
   await assert.rejects(
     control.runStart({ ...input, pipelineId: "plan-execution" }),
+    (error) => error.code === "ERR_MCP_IDEMPOTENCY_CONFLICT",
+  );
+  await assert.rejects(
+    control.runStart({ ...input, mode: "lazy" }),
     (error) => error.code === "ERR_MCP_IDEMPOTENCY_CONFLICT",
   );
 });
@@ -1047,6 +1100,7 @@ test("forwards additive run-wide, role, and source profile selections", async (t
     projectConfigurationPath: join(paths.projectPath, "ignored", "runner.json"),
     taskPath: paths.taskPath,
     proactiveClarification: false,
+    mode: "lazy",
     profile: "claude-primary",
     model: "sonnet",
     contextSize: "200000",
@@ -1078,7 +1132,20 @@ test("forwards additive run-wide, role, and source profile selections", async (t
       model: "sonnet",
       contextSize: "200000",
     },
+    settingOverrides: { mode: "lazy" },
   });
+  const status = await control.runStatus({ runId: RUN_ID });
+  assert.equal(status.mode, "lazy");
+  assert.doesNotMatch(
+    JSON.stringify(status),
+    /roleOverrides|settingOverrides|claude-primary|sonnet|opus|200000|300000/u,
+  );
+  const activity = await control.runActivity({
+    runId: RUN_ID,
+    cursor: 0,
+    limit: 50,
+  });
+  assert.equal(activity.mode, "lazy");
 });
 
 test("records complete pending answers before detached continuation", async (t) => {
@@ -1372,6 +1439,7 @@ test("resumes only an action valid for the persisted pause", async (t) => {
     {
       runId: FIFTH_RUN_ID,
       pipelineId: "polishing",
+      mode: "independent",
       revision: 1,
       activityCursor: 1,
       status: "WAITING_FOR_USER",
@@ -1784,6 +1852,7 @@ test("waits by revision, emits public progress, and leaves timeouts read-only", 
   );
   await transition;
   assert.equal(waited.status, "WAITING_FOR_USER");
+  assert.equal(waited.mode, "independent");
   assert.equal(waited.timedOut, false);
   assert.match(notifications.at(-1).params.message, /^\[planner\/clarification\]/u);
   assert.equal(notifications.at(-1).params.progress, waited.revision);
@@ -1793,6 +1862,7 @@ test("waits by revision, emits public progress, and leaves timeouts read-only", 
     limit: 50,
   });
   assert.equal(activity.cursor, 2);
+  assert.equal(activity.mode, "independent");
   assert.equal(activity.activities.length, 2);
   assert.equal("pipelineState" in activity.activities[1], false);
 
