@@ -380,7 +380,7 @@ independent from the package version. Compatible legacy state is migrated by
 the owning pipeline under the per-run lease; incompatible readers return a
 specific version-skew error while preserving the run. The mode-aware pipeline
 versions are plan-authoring version 3, plan-execution version 13, and polishing
-version 8. Their ordered migrations resolve every supported legacy run to
+version 9. Their ordered migrations resolve every supported legacy run to
 `independent` without moving terminal workflows or replaying role turns,
 commits, or handoffs. Complete write-ahead events precede atomic state
 replacement; recovery repairs a lagging state file and derived progress.
@@ -447,6 +447,12 @@ Worker changes after finalization require the complete finalization gate again,
 and only an unchanged clean confirmation can reach `HANDOFF`. Agent turns
 change content only; the runner then stages the complete confirmed change set
 and leaves it uncommitted for a separate commit workflow.
+Invalid lazy polishing checkpoints receive one fresh correction with the same
+schema and exact content and validation-infrastructure scope. Check/fix
+corrections remain content-writable and are reconciled and charged once;
+clean-confirmation corrections remain read-only. A repeated invalid result
+pauses at the persisted checkpoint for an explicit null retry without allowing
+early handoff evidence.
 Its dedicated `FINALIZE` turn runs the target project's complete validation
 procedure, including required formatting or generated output, with configured
 skill guidance when available. Its scope ends with fingerprint-bound validation

@@ -546,6 +546,28 @@ stagnation, and additional-round budgets bound the loop. Lazy mode has no
 review dispute or arbitration path, and exhaustion never accepts a non-clean
 result.
 
+Provider structured-output failure and deterministic check/fix or
+clean-confirmation contract failure are reduced to a bounded batch of Worker,
+phase, contract, field, and constraint diagnostics. The first invalid result
+for the exact phase, finalized content fingerprint, and
+validation-infrastructure fingerprint persists attempt `1` and a pending
+marker, then reconstructs the complete durable request with the original
+schema in one fresh Worker session. Rejected output, provider text, prompts,
+commands, paths, transcripts, and credentials are not retained.
+
+A check/fix correction remains workspace-writable and index-read-only. Safe
+content from an invalid or interrupted turn is reconciled once, stale gate
+evidence is invalidated, actual fix work is charged once, and complete
+`FINALIZE` must pass before the pending checkpoint resumes. A
+clean-confirmation correction remains repository-read-only and requires the
+unchanged content and validation-infrastructure fingerprints. A valid
+replacement rejoins only its original route and cannot provide finalization,
+confirmation, review, approval, or handoff evidence early. A repeated invalid
+result pauses as `lazy_output_invalid` with bounded redacted diagnostics, the
+exact resume checkpoint, and one explicit null retry. Resume reconstructs the
+pending correction without adding another automatic attempt, replaying an
+effect, recounting work, staging, or advancing to `HANDOFF`.
+
 ### Handoff And Completion Gate
 
 Completion requires:
@@ -610,7 +632,8 @@ common external run store. Pipeline state includes resolved settings, baseline,
 input hashes, clarification status, backend versions, bootstrap summaries,
 findings, disputes, arbitration, budgets, fingerprints, overrides, and pause
 details, including the resolved mode, lazy clean-confirmation fingerprint, and
-one-time lazy source-fork marker. The common versioned envelope also records an
+one-time lazy source-fork marker, plus the lazy-correction ledger and pending
+marker. The common versioned envelope also records an
 explicit runtime
 compatibility tuple maintained independently from the package version and, in
 version 3, nullable bounded active provider role and phase. Version-1 and
@@ -790,6 +813,15 @@ content, or replaying a pending or completed `HANDOFF`. Every earlier supported
 version reaches the same independent default through the ordered chain; no
 migration replays role turns or repository effects.
 
+Pipeline state version 9 adds the bounded lazy-correction ledger and nullable
+pending marker scoped to phase, finalized content fingerprint, and
+validation-infrastructure fingerprint. Its version-8 migration initializes the
+ledger empty and the marker to `null` without moving active, paused, `HANDOFF`,
+`DONE`, or `FAILED` workflows, changing safe workspace content, or replaying
+role, finalization, or handoff effects. Pending writable reconciliation remains
+subject to the ordinary Git controls and exact-once fix accounting; a migrated
+`HANDOFF` is never routed back through a role checkpoint.
+
 MCP uses the common STDIO tools, persists idempotency intents before mutation
 and receipts before returning, and launches detached continuation under the
 same lease rules. A worktree conflict leaves the durable run and incomplete
@@ -869,6 +901,10 @@ Pipeline tests use fake adapters and temporary repositories. Cover at least:
   genuinely empty read-only clean confirmation, confirmation findings routed
   to fixing, mutation and fingerprint rejection, bounded no-progress, and
   additional fix rounds;
+- provider and deterministic lazy-checkpoint correction, repeated-invalid
+  exhaustion and null retry, public redaction, fresh sessions, writable content
+  and index reconciliation, exact-once budgets, fingerprint drift, gate and
+  handoff preservation;
 - interruption at both lazy checkpoints without replay, double counting, or a
   second source fork;
 - automatic discovery, explicit skill selection, skill-less fallback, invalid
@@ -877,7 +913,7 @@ Pipeline tests use fake adapters and temporary repositories. Cover at least:
   plan-execution runs, detached MCP retry, and same-host stale recovery;
 - compatible legacy migration, incompatible reader and detached-child
   rejection, and disconnects that leave durable state unchanged;
-- every supported legacy version migrating through state version 8 to
+- every supported legacy version migrating through state version 9 to
   `independent` without reviving terminal runs or replaying `HANDOFF`;
 - sandbox, IPC, loopback, process-isolation, missing-service, and permission
   validation blockers across polishing, finalization, and finding resolution,

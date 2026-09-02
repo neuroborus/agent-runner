@@ -667,6 +667,13 @@ version-7 migration selects `independent` without moving active or terminal
 workflow positions, changing safe workspace content, or replaying a pending or
 completed `HANDOFF` effect.
 
+Polishing state version 9 adds a pipeline-owned lazy-checkpoint correction
+ledger and pending marker scoped to the checkpoint phase, finalized content
+fingerprint, and validation-infrastructure fingerprint. Its version-8
+migration initializes both fields empty without moving active or terminal
+workflow positions, changing safe workspace content, or replaying a pending or
+completed `HANDOFF` effect.
+
 Common run-envelope version 3 adds `activeTurn`, either `null` or the current
 bounded `{ role, phase }`. Version-1 and version-2 runs project it as `null`
 without rewriting state or history; the next mutating continuation persists the
@@ -776,6 +783,15 @@ exact checkpoint with a redacted explicit null retry; retry reconstructs the
 pending attempt without recounting its automatic attempt or fix budget. No
 correction result can act as early finalization, confirmation, review, or
 commit evidence.
+
+Polishing owns the corresponding lazy structured-output recovery before its
+runner-owned handoff. A writable check/fix correction reconciles safe content
+and charges actual fix work once, invalidates stale gate evidence, and passes
+through complete finalization before the pending checkpoint resumes. A
+clean-confirmation correction remains read-only and retains the index,
+finalized content, and validation-infrastructure guards. Repeated invalid output
+pauses with bounded redacted diagnostics and an explicit null retry; neither a
+correction nor its recovery can stage, approve, or enter `HANDOFF` early.
 
 When a native context is full, an adapter may compact it and retry the complete
 recovery prompt once. If continuation still fails, writable and read-only work

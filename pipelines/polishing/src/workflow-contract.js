@@ -67,6 +67,8 @@ const PIPELINE_STATE_FIELDS = new Set([
   "pendingBootstrapCorrection",
   "finalizationCorrection",
   "pendingFinalizationCorrection",
+  "lazyCorrections",
+  "pendingLazyCorrection",
   "cleanConfirmationFingerprint",
   "lazySourceForkConsumed",
   "polishSummary",
@@ -231,6 +233,16 @@ const FINALIZATION_CORRECTION_FIELDS = Object.freeze([
   "contentFingerprint",
   ...OUTPUT_DIAGNOSTIC_FIELDS,
 ]);
+const LAZY_CORRECTION_FIELDS = Object.freeze([
+  "attempt",
+  "fixRoundCharged",
+  "phase",
+  "contentFingerprint",
+  "validationInfrastructureFingerprint",
+  "diagnostics",
+]);
+export const LAZY_OUTPUT_RETRY_EXPLANATION =
+  "The bounded automatic lazy checkpoint correction remains invalid. Retry the same correction after the backend can satisfy the unchanged contract.";
 const EDIT_PAUSE_REASONS = Object.freeze({
   "clarification-answers": "clarification_answers_required",
   "product-decision": "product_decision_required",
@@ -256,6 +268,11 @@ const PAUSE_RESUME_STATES = Object.freeze({
   finalization_cannot_pass: Object.freeze(["FINALIZE"]),
   finalization_skill_invalid: Object.freeze(["FINALIZE"]),
   finalization_skill_missing: Object.freeze(["FINALIZE"]),
+  lazy_output_invalid: Object.freeze([
+    "FINALIZE",
+    "CHECK_AND_FIX",
+    "CLEAN_CONFIRM",
+  ]),
   fix_limit_reached: Object.freeze([
     "POLISH",
     "CHECK_AND_FIX",
@@ -267,13 +284,18 @@ const PAUSE_RESUME_STATES = Object.freeze({
 export class PolishingWorkflowError extends Error {
   constructor(
     message,
-    { cause, code = "ERR_POLISHING_WORKFLOW", diagnostic } = {},
+    { cause, code = "ERR_POLISHING_WORKFLOW", diagnostic, diagnostics } = {},
   ) {
     super(message, cause === undefined ? undefined : { cause });
     this.name = "PolishingWorkflowError";
     this.code = code;
     if (diagnostic !== undefined) {
       this.diagnostic = Object.freeze({ ...diagnostic });
+    }
+    if (diagnostics !== undefined) {
+      this.diagnostics = Object.freeze(
+        diagnostics.map((entry) => Object.freeze({ ...entry })),
+      );
     }
   }
 }
@@ -2292,6 +2314,77 @@ function normalizeFinalizationCorrection(value) {
   return value;
 }
 
+function normalizeLazyCorrection(value) {
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, LAZY_CORRECTION_FIELDS) ||
+    value.attempt !== 1 ||
+    typeof value.fixRoundCharged !== "boolean" ||
+    !["CHECK_AND_FIX", "CLEAN_CONFIRM"].includes(value.phase) ||
+    (value.phase === "CLEAN_CONFIRM" && value.fixRoundCharged) ||
+    !HASH_PATTERN.test(value.contentFingerprint) ||
+    !HASH_PATTERN.test(value.validationInfrastructureFingerprint) ||
+    !Array.isArray(value.diagnostics) ||
+    value.diagnostics.length === 0 ||
+    value.diagnostics.length > MAX_DIAGNOSTIC_ITEMS
+  ) {
+    throw workflowError("Polishing lazy correction is invalid.");
+  }
+  const expectedPhase =
+    value.phase === "CHECK_AND_FIX" ? "check-and-fix" : "clean-confirm";
+  const expectedContract =
+    value.phase === "CHECK_AND_FIX"
+      ? "lazy-check-and-fix"
+      : "lazy-clean-confirm";
+  const identities = new Set();
+  for (const diagnostic of value.diagnostics) {
+    if (
+      !isOutputDiagnostic(diagnostic) ||
+      diagnostic.role !== "worker" ||
+      diagnostic.phase !== expectedPhase ||
+      diagnostic.contract !== expectedContract
+    ) {
+      throw workflowError("Polishing lazy correction is invalid.");
+    }
+    const identity = `${diagnostic.field}\0${diagnostic.constraint}`;
+    if (identities.has(identity)) {
+      throw workflowError("Polishing lazy correction is invalid.");
+    }
+    identities.add(identity);
+  }
+  return value;
+}
+
+function sameLazyCorrectionScope(left, right) {
+  return (
+    left.attempt === right.attempt &&
+    left.phase === right.phase &&
+    left.contentFingerprint === right.contentFingerprint &&
+    left.validationInfrastructureFingerprint ===
+      right.validationInfrastructureFingerprint
+  );
+}
+
+function normalizeLazyCorrections(value) {
+  if (!Array.isArray(value) || value.length > MAX_ITEMS) {
+    throw workflowError("Polishing lazy corrections are invalid.");
+  }
+  const scopes = new Set();
+  for (const correction of value) {
+    normalizeLazyCorrection(correction);
+    const scope = [
+      correction.phase,
+      correction.contentFingerprint,
+      correction.validationInfrastructureFingerprint,
+    ].join("\0");
+    if (scopes.has(scope)) {
+      throw workflowError("Polishing lazy corrections must be unique.");
+    }
+    scopes.add(scope);
+  }
+  return value;
+}
+
 function normalizePersistedFindings(value, name = "Polishing findings") {
   try {
     return normalizeReviewFindings(value, "ERR_INVALID_POLISHING_STATE");
@@ -2867,6 +2960,24 @@ export function normalizePipelineState(value) {
       "Polishing pending finalization correction is inconsistent.",
     );
   }
+  const lazyCorrections = normalizeLazyCorrections(value.lazyCorrections);
+  const pendingLazyCorrection =
+    value.pendingLazyCorrection === null
+      ? null
+      : normalizeLazyCorrection(value.pendingLazyCorrection);
+  if (
+    pendingLazyCorrection !== null &&
+    !lazyCorrections.some(
+      (correction) =>
+        sameLazyCorrectionScope(correction, pendingLazyCorrection) &&
+        correction.fixRoundCharged ===
+          pendingLazyCorrection.fixRoundCharged,
+    )
+  ) {
+    throw workflowError(
+      "Polishing pending lazy correction is inconsistent.",
+    );
+  }
   const polishSummary = normalizeOptionalSummary(
     value.polishSummary,
     "polishing summary",
@@ -3071,6 +3182,9 @@ export function normalizePipelineState(value) {
   ) {
     throw workflowError("Lazy polishing bootstrap state is inconsistent.");
   }
+  if (!lazy && lazyCorrections.length !== 0) {
+    throw workflowError("Polishing lazy correction state is inapplicable.");
+  }
   if (
     value.validationMigrationPending &&
     (!value.preflightComplete ||
@@ -3091,6 +3205,18 @@ export function normalizePipelineState(value) {
         )))
   ) {
     throw workflowError("Polishing finalization correction is inapplicable.");
+  }
+  if (
+    pendingLazyCorrection !== null &&
+    ![
+      "FINALIZE",
+      "RESOLVE_FINDINGS",
+      pendingLazyCorrection.phase,
+      "WAITING_FOR_USER",
+      "FAILED",
+    ].includes(value.workflowState)
+  ) {
+    throw workflowError("Polishing lazy correction is inapplicable.");
   }
   if (
     (validationMigrationDisagreement !== null &&
@@ -3245,6 +3371,7 @@ export function normalizePipelineState(value) {
     findings.length !== 0 ||
     previousFindings.length !== 0 ||
     pendingDisputes.length !== 0 ||
+    lazyCorrections.length !== 0 ||
     hasCorrectionProgress;
   if (
     !value.preflightComplete &&
@@ -3262,6 +3389,8 @@ export function normalizePipelineState(value) {
       pendingBootstrapCorrection !== null ||
       finalizationCorrection !== null ||
       pendingFinalizationCorrection !== null ||
+      lazyCorrections.length !== 0 ||
+      pendingLazyCorrection !== null ||
       value.lazySourceForkConsumed ||
       validationMigrationDisagreement !== null ||
       hasWorkProgress)
@@ -3443,6 +3572,8 @@ export function createPolishingState({
     pendingBootstrapCorrection: null,
     finalizationCorrection: null,
     pendingFinalizationCorrection: null,
+    lazyCorrections: Object.freeze([]),
+    pendingLazyCorrection: null,
     cleanConfirmationFingerprint: null,
     lazySourceForkConsumed: false,
     polishSummary: null,
@@ -3534,7 +3665,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "polishing" ||
-    run.pipelineStateVersion !== 8 ||
+    run.pipelineStateVersion !== 9 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -3712,6 +3843,31 @@ export function assertRun(run) {
     throw workflowError("Polishing adapter diagnostic is invalid.");
   }
   if (state.workflowState === "WAITING_FOR_USER") {
+    if (run.pause.reason === "lazy_output_invalid") {
+      const expectedEvidence = state.pendingLazyCorrection?.diagnostics.map(
+        ({ field, constraint }) =>
+          `Worker field ${field} violated ${constraint}.`,
+      );
+      if (
+        state.pendingLazyCorrection === null ||
+        !hasExactFields(run.pause, [
+          "reason",
+          "code",
+          "explanation",
+          "evidence",
+          "resumeState",
+        ]) ||
+        run.pause.code !== INVALID_OUTPUT_CODE ||
+        run.pause.explanation !== LAZY_OUTPUT_RETRY_EXPLANATION ||
+        !isDeepStrictEqual(run.pause.evidence, expectedEvidence) ||
+        ![
+          "FINALIZE",
+          state.pendingLazyCorrection.phase,
+        ].includes(run.pause.resumeState)
+      ) {
+        throw workflowError("Polishing lazy output pause is invalid.");
+      }
+    }
     const expectedReason = EDIT_PAUSE_REASONS[state.pendingEdit?.action];
     const hasAuthorizationId = Object.hasOwn(run.pause, "authorizationId");
     if (
@@ -3732,7 +3888,9 @@ export function assertRun(run) {
       ? PAUSE_RESUME_STATES[run.pause.reason]
       : undefined;
     const requiresResumeState =
-      ["fix_limit_reached", "no_progress"].includes(run.pause.reason) ||
+      ["fix_limit_reached", "lazy_output_invalid", "no_progress"].includes(
+        run.pause.reason,
+      ) ||
       (state.preflightComplete &&
         [
           "backend_unavailable",

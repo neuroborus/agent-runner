@@ -30,6 +30,7 @@ export {
   finalizationGuidanceInstructions,
   FINDING_ARBITRATION_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
+  LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
   NO_DELEGATION_INSTRUCTIONS,
   POLISH_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
@@ -120,6 +121,7 @@ const RETRYABLE_PAUSE_REASONS = new Set([
   "finalization_cannot_pass",
   "finalization_skill_invalid",
   "finalization_skill_missing",
+  "lazy_output_invalid",
 ]);
 const RETRYABLE_PREFLIGHT_PAUSE_REASONS = new Set([
   "local_artifacts_not_ignored",
@@ -153,6 +155,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "The explicitly configured finalization skill is invalid.",
   finalization_skill_missing:
     "The explicitly configured finalization skill is missing.",
+  lazy_output_invalid:
+    "The bounded automatic lazy checkpoint correction remains invalid.",
   fix_limit_reached: "Polishing reached its configured fix limit.",
   internal_failure: "Polishing failed.",
   local_artifacts_not_ignored:
@@ -216,7 +220,18 @@ function publicExplanation(pause, fallback) {
     : fallback;
 }
 
-function publicEvidence(pause) {
+function publicEvidence(run) {
+  if (run.pause.reason === "lazy_output_invalid") {
+    return Object.freeze(
+      (run.pipelineState.pendingLazyCorrection?.diagnostics ?? [])
+        .map(
+          ({ field, constraint }) =>
+            `Worker field ${field} violated ${constraint}.`,
+        )
+        .slice(0, 32),
+    );
+  }
+  const pause = run.pause;
   return Object.freeze(
     PUBLIC_DETAIL_REASONS.has(pause.reason) && Array.isArray(pause.evidence)
       ? pause.evidence
@@ -307,7 +322,7 @@ function projectPause(run) {
     reason,
     code: knownReason ? publicCode(run.pause.code) : null,
     explanation: publicExplanation(run.pause, explanation),
-    evidence: publicEvidence(run.pause),
+    evidence: publicEvidence(run),
     resumeState: publicResumeState(run),
     nextActions: Object.freeze(nextActions),
   });
@@ -791,9 +806,17 @@ export function migratePolishingStateV7(run) {
   });
 }
 
+export function migratePolishingStateV8(run) {
+  return Object.freeze({
+    ...run.pipelineState,
+    lazyCorrections: Object.freeze([]),
+    pendingLazyCorrection: null,
+  });
+}
+
 export const polishingPipeline = Object.freeze({
   id: POLISHING_PIPELINE_ID,
-  stateVersion: 8,
+  stateVersion: 9,
   migrations: Object.freeze({
     1: migratePolishingStateV1,
     2: migratePolishingStateV2,
@@ -802,6 +825,7 @@ export const polishingPipeline = Object.freeze({
     5: migratePolishingStateV5,
     6: migratePolishingStateV6,
     7: migratePolishingStateV7,
+    8: migratePolishingStateV8,
   }),
   roles: ROLES,
   resolveActiveRoles,

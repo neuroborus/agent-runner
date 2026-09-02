@@ -16,6 +16,7 @@ import {
   finalizationGuidanceInstructions,
   FINDING_ARBITRATION_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
+  LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
   POLISH_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
   REVIEW_INSTRUCTIONS,
@@ -179,6 +180,26 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
     /correct, idiomatic, minimal, and consistent/u,
   );
   assert.match(CLEAN_CONFIRM_INSTRUCTIONS, /Do not modify the repository/u);
+  assert.match(
+    LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
+    /same checkpoint schema/u,
+  );
+  assert.match(
+    LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
+    /CHECK_AND_FIX correction remains workspace-writable/u,
+  );
+  assert.match(
+    LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
+    /CLEAN_CONFIRM correction remains repository-read-only/u,
+  );
+  assert.match(
+    LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
+    /must not change the index/u,
+  );
+  assert.match(
+    LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
+    /handoff evidence early/u,
+  );
   assert.match(CLEAN_CONFIRM_INSTRUCTIONS, /Return CLEAN only/u);
   assert.match(FINDING_RESOLUTION_INSTRUCTIONS, /one batch/u);
   assert.match(FINDING_RESOLUTION_INSTRUCTIONS, /runner owns final staging/u);

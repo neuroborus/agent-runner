@@ -116,6 +116,9 @@ For FINDINGS, provide one or more findings with unique stable R-prefixed numeric
 For PRODUCT_DECISION_REQUIRED, set findings and validationEvidence to [], and validationChange to UNCHANGED; use the product-decision fields.
 ${PRODUCT_DECISION_INSTRUCTIONS}`;
 
+export const LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS = `Your previous structured lazy checkpoint result was rejected by provider or deterministic validation. Return one complete replacement result using the same checkpoint schema.
+Correct every identified field-and-constraint violation from current repository evidence and the complete durable checkpoint context. Do not quote or retain the rejected result, disclose provider diagnostics, ask an ordinary clarification question, or provide finalization, confirmation, review, approval, staging, or handoff evidence early. A CHECK_AND_FIX correction remains workspace-writable but must not change the index; report actual safe content mutation exactly. A CLEAN_CONFIRM correction remains repository-read-only. A repeated invalid result pauses the pipeline.`;
+
 export const FINDING_RESOLUTION_INSTRUCTIONS = `Resolve every current blocker in one batch. Fix each valid blocker idiomatically and minimally. Dispute an incorrect Reviewer finding only with concise evidence. Modify safe workspace content only; do not stage or unstage changes or alter the Git index. The runner owns final staging after finalization and review.
 
 Do not run the project finalization procedure, execute the established required-check inventory, perform generic commit preparation, or create a commit. Those actions remain owned by FINALIZE or HANDOFF as applicable. Finalization failures must be fixed and cannot be disputed. A finding already upheld by the Arbiter must be fixed.
