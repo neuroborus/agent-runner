@@ -110,6 +110,7 @@ test("minimal configuration uses pipeline-owned setting defaults", () => {
     maxFixRoundsPerStep: 5,
     maxDisputesPerFinding: 2,
     maxSameFindingRounds: 3,
+    mode: "independent",
     stagnationWindowRounds: 3,
     trustedChecks: [],
     roles: {},
@@ -210,6 +211,10 @@ test("configuration rejects unsupported shapes and values", () => {
     [
       '{"schemaVersion":1,"pipelines":{"plan-execution":{"finalization":"../SKILL.md"}}}',
       /finalization must be auto, none/u,
+    ],
+    [
+      '{"schemaVersion":1,"pipelines":{"plan-execution":{"mode":"automatic"}}}',
+      /mode must be independent or lazy/u,
     ],
     [
       '{"schemaVersion":1,"pipelines":{"polishing":{"finalization":"checks/finalize.md"}}}',
@@ -379,6 +384,7 @@ test("role resolution applies CLI, role, runner, and native defaults", () => {
     maxFixRoundsPerStep: 8,
     maxDisputesPerFinding: 2,
     maxSameFindingRounds: 3,
+    mode: "independent",
     stagnationWindowRounds: 3,
     trustedChecks: [],
   });
@@ -455,6 +461,25 @@ test("lazy plan authoring resolves only the Planner role", () => {
   });
 
   assert.deepEqual(Object.keys(resolved.roles), ["planner"]);
+  assert.equal(resolved.settings.mode, "lazy");
+});
+
+test("lazy plan execution resolves only the Worker role", () => {
+  const resolved = resolvePipelineConfiguration("plan-execution", {
+    schemaVersion: 1,
+    defaultBackend: "codex",
+    pipelines: {
+      "plan-execution": {
+        mode: "lazy",
+        roles: {
+          reviewer: { model: "preserved-reviewer-model" },
+          arbiter: { model: "preserved-arbiter-model" },
+        },
+      },
+    },
+  });
+
+  assert.deepEqual(Object.keys(resolved.roles), ["worker"]);
   assert.equal(resolved.settings.mode, "lazy");
 });
 

@@ -30,6 +30,7 @@ import {
   migratePlanExecutionStateV8,
   migratePlanExecutionStateV9,
   migratePlanExecutionStateV10,
+  migratePlanExecutionStateV11,
   planExecutionPipeline,
   runPlanExecution,
 } from "../src/index.js";
@@ -37,6 +38,8 @@ import {
   BOOTSTRAP_ARBITRATION_SCHEMA,
   BOOTSTRAP_RECONCILIATION_SCHEMA,
   BOOTSTRAP_SCHEMA,
+  CHECK_AND_FIX_SCHEMA,
+  CLEAN_CONFIRM_SCHEMA,
   FINALIZATION_SCHEMA,
 } from "../src/schemas.js";
 import {
@@ -45,6 +48,8 @@ import {
   MAX_VALIDATION_ITEMS,
   normalizeBootstrapArbitration,
   normalizeBootstrapResult,
+  normalizeCheckAndFixResult,
+  normalizeCleanConfirmationResult,
   normalizeFinalizationResult,
   normalizePipelineState,
   normalizeReconciliationResult,
@@ -72,6 +77,7 @@ const SETTINGS = Object.freeze({
   maxFixRoundsPerStep: 5,
   maxDisputesPerFinding: 2,
   maxSameFindingRounds: 3,
+  mode: "independent",
   stagnationWindowRounds: 3,
   trustedChecks: Object.freeze([]),
 });
@@ -120,11 +126,17 @@ function versionOneState(state) {
     "reviewCorrection",
     "pendingReviewCorrection",
     "trustedValidation",
+    "cleanConfirmationFingerprint",
+    "lazySourceForkConsumed",
   ]) {
     delete legacy[field];
   }
   if (legacy.settings !== null) {
-    const { trustedChecks: _trustedChecks, ...settings } = legacy.settings;
+    const {
+      mode: _mode,
+      trustedChecks: _trustedChecks,
+      ...settings
+    } = legacy.settings;
     legacy.settings = settings;
   }
   if (legacy.pendingCommit !== null) {
@@ -192,7 +204,10 @@ function migrateVersionOneState(state) {
   const versionTen = migratePlanExecutionStateV9({
     pipelineState: versionNine,
   });
-  return migratePlanExecutionStateV10({ pipelineState: versionTen });
+  const versionEleven = migratePlanExecutionStateV10({
+    pipelineState: versionTen,
+  });
+  return migratePlanExecutionStateV11({ pipelineState: versionEleven });
 }
 
 async function prepareValidationMigration(t, fixtureOptions) {
@@ -801,7 +816,89 @@ test("migrates version-3 execution state with no consumed bootstrap corrections"
   assert.deepEqual(migrated.bootstrapCorrections, []);
   assert.equal(migrated.pendingBootstrapCorrection, null);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(planExecutionPipeline.stateVersion, 11);
+  assert.equal(planExecutionPipeline.stateVersion, 12);
+});
+
+test("selects Worker-only lazy mode and migrates version 11 to independent", () => {
+  assert.deepEqual(planExecutionPipeline.resolveActiveRoles(), [
+    "worker",
+    "reviewer",
+    "arbiter",
+  ]);
+  assert.deepEqual(
+    planExecutionPipeline.resolveActiveRoles({ mode: "independent" }),
+    ["worker", "reviewer", "arbiter"],
+  );
+  assert.deepEqual(planExecutionPipeline.resolveActiveRoles({ mode: "lazy" }), [
+    "worker",
+  ]);
+  assert.equal(planExecutionPipeline.settings.mode.defaultValue, "independent");
+  assert.equal(planExecutionPipeline.settings.mode.validate("lazy"), true);
+  assert.equal(planExecutionPipeline.settings.mode.validate("automatic"), false);
+
+  const current = createPlanExecutionState({ settings: SETTINGS });
+  const {
+    cleanConfirmationFingerprint: _confirmation,
+    lazySourceForkConsumed: _sourceFork,
+    ...legacy
+  } = current;
+  const { mode: _mode, ...legacySettings } = legacy.settings;
+  const migrated = migratePlanExecutionStateV11({
+    pipelineState: { ...legacy, settings: legacySettings },
+  });
+
+  assert.equal(migrated.workflowState, current.workflowState);
+  assert.equal(migrated.settings.mode, "independent");
+  assert.equal(migrated.cleanConfirmationFingerprint, null);
+  assert.equal(migrated.lazySourceForkConsumed, false);
+  assert.doesNotThrow(() => normalizePipelineState(migrated));
+});
+
+test("normalizes strict lazy convergence results", () => {
+  assert.deepEqual(normalizeCheckAndFixResult(checkAndFix("UNCHANGED")), {
+    status: "UNCHANGED",
+    summary: "The complete check found no problem.",
+  });
+  assert.deepEqual(normalizeCheckAndFixResult(checkAndFix("REFINALIZE")), {
+    status: "REFINALIZE",
+    summary: "The finalization evidence must be regenerated.",
+  });
+  assert.deepEqual(normalizeCleanConfirmationResult(cleanConfirmation()), {
+    status: "CLEAN",
+    findings: [],
+    validationChange: "UNCHANGED",
+    validationEvidence: [],
+  });
+  assert.equal(CHECK_AND_FIX_SCHEMA.additionalProperties, false);
+  assert.equal(CLEAN_CONFIRM_SCHEMA.additionalProperties, false);
+  assert.throws(() =>
+    normalizeCheckAndFixResult({
+      ...checkAndFix("UNCHANGED"),
+      unexpected: "rejected",
+    }),
+  );
+});
+
+test("version 11 migration preserves terminal commits and effects", async (t) => {
+  const fixture = await createFixture(t);
+  const completed = await fixture.run();
+  const {
+    cleanConfirmationFingerprint: _confirmation,
+    lazySourceForkConsumed: _sourceFork,
+    ...legacy
+  } = completed.pipelineState;
+  const { mode: _mode, ...legacySettings } = legacy.settings;
+
+  const migrated = migratePlanExecutionStateV11({
+    pipelineState: { ...legacy, settings: legacySettings },
+  });
+
+  assert.equal(migrated.workflowState, "DONE");
+  assert.deepEqual(migrated.completedCommits, completed.pipelineState.completedCommits);
+  assert.equal(migrated.pendingCommit, null);
+  assert.deepEqual(migrated.finalizationResult, completed.pipelineState.finalizationResult);
+  assert.deepEqual(migrated.reviewResult, completed.pipelineState.reviewResult);
+  assert.doesNotThrow(() => normalizePipelineState(migrated));
 });
 
 test("migrates a consumed version-9 bootstrap diagnostic losslessly", async (t) => {
@@ -1953,6 +2050,40 @@ function implementationBlocked() {
   };
 }
 
+function checkAndFix(status = "UNCHANGED") {
+  return {
+    status,
+    summary:
+      status === "CHANGED"
+        ? "Fixed the problem found during the complete check."
+        : status === "REFINALIZE"
+          ? "The finalization evidence must be regenerated."
+        : "The complete check found no problem.",
+    reason: "",
+    ...emptyDecision(),
+  };
+}
+
+function cleanConfirmation(validationChange = "UNCHANGED") {
+  return {
+    status: "CLEAN",
+    findings: [],
+    validationChange,
+    validationEvidence:
+      validationChange === "UNCHANGED"
+        ? []
+        : ["The planned commit authorizes the complete validation change."],
+    ...emptyDecision(),
+  };
+}
+
+function cleanConfirmationFindings(...ids) {
+  return {
+    ...reviewFindings(...ids),
+    status: "FINDINGS",
+  };
+}
+
 function environmentBlocked(reason, evidence) {
   return {
     status: "BLOCKED",
@@ -2507,6 +2638,8 @@ async function createFixture(
     dirty = false,
     finalizationSkill = true,
     interactive = false,
+    mode = "independent",
+    modeSettings = {},
     models = {},
     onEdit,
     onFreeze,
@@ -2731,14 +2864,17 @@ async function createFixture(
     revision: 1,
     runId,
     pipelineId: "plan-execution",
-    pipelineStateVersion: 11,
+    pipelineStateVersion: 12,
     projectPath,
     taskPath,
-    roles: {
-      worker: { backend: "codex", model: models.worker ?? null },
-      reviewer: { backend: "codex", model: models.reviewer ?? null },
-      arbiter: { backend: "codex", model: models.arbiter ?? null },
-    },
+    roles: Object.fromEntries(
+      (mode === "lazy" ? ["worker"] : ["worker", "reviewer", "arbiter"]).map(
+        (role) => [
+          role,
+          { backend: "codex", model: models[role] ?? null },
+        ],
+      ),
+    ),
     counters: {},
     hashes: {},
     pause: null,
@@ -2747,6 +2883,9 @@ async function createFixture(
     pipelineState: createPlanExecutionState({
       artifactRoot,
       proactiveClarification,
+      ...(mode === "lazy"
+        ? { settings: { ...SETTINGS, ...modeSettings, mode } }
+        : {}),
       ...(trustedValidation === undefined ? {} : { trustedValidation }),
     }),
   };
@@ -3017,9 +3156,10 @@ async function createFixture(
       await onTransition?.(currentRun, patch, options);
       return currentRun;
     },
-    async startAgentTurn(activeTurn) {
+    async startAgentTurn(activeTurn, { pipelineState } = {}) {
       currentRun = {
         ...currentRun,
+        ...(pipelineState === undefined ? {} : { pipelineState }),
         activeTurn,
         revision: currentRun.revision + 1,
       };
@@ -3073,7 +3213,7 @@ async function createFixture(
   ) {
     currentRun = {
       ...currentRun,
-      pipelineStateVersion: 11,
+      pipelineStateVersion: 12,
       pipelineState,
       pause,
       revision: currentRun.revision + 1,
@@ -7181,6 +7321,631 @@ test("implements, finalizes, reviews, and commits one step", async (t) => {
   assert.equal(fixture.calls.worker.at(-2).access, "workspace-write");
   assert.equal(fixture.calls.worker.at(-1).access, "local-commit");
   assert.equal(fixture.calls.reviewer.at(-1).access, "read-only");
+});
+
+test("runs lazy execution with one Worker source fork and no review roles", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    sourceSession: SOURCE_SESSION,
+    worker: [clarificationReady(), bootstrapReady("Worker")],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmation(),
+    ],
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.pipelineState.settings.mode, "lazy");
+  assert.deepEqual(result.pipelineState.backendVersions, {
+    worker: "fake-1.0.0",
+  });
+  assert.equal(result.pipelineState.lazySourceForkConsumed, true);
+  assert.equal(
+    result.pipelineState.cleanConfirmationFingerprint,
+    result.pipelineState.finalizedFingerprint,
+  );
+  assert.equal(
+    result.pipelineState.reviewedFingerprint,
+    result.pipelineState.finalizedFingerprint,
+  );
+  assert.equal(fixture.probeCalls.worker, 1);
+  assert.equal(fixture.probeCalls.reviewer, 0);
+  assert.equal(fixture.probeCalls.arbiter, 0);
+  assert.equal(fixture.calls.reviewer.length, 0);
+  assert.equal(fixture.calls.arbiter.length, 0);
+  assert.equal(
+    fixture.calls.worker.filter(({ session }) => session?.mode === "fork")
+      .length,
+    1,
+  );
+  assert.deepEqual(fixture.calls.worker[0].session, {
+    mode: "fork",
+    id: SOURCE_SESSION,
+  });
+  assert.ok(
+    fixture.calls.worker
+      .slice(1)
+      .every(({ session }) => session?.mode === "continue"),
+  );
+  assert.deepEqual(
+    result.sessionLineage.children.map(({ role }) => role),
+    ["worker"],
+  );
+});
+
+test("keeps one lazy Worker source fork across multiple commits", async (t) => {
+  const plan = `## Commit 1: feat(test): add first lazy behavior
+
+Implement the first behavior.
+
+## Commit 2: fix(test): add second lazy behavior
+
+Implement the second behavior.`;
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    plan,
+    sourceSession: SOURCE_SESSION,
+    worker: [clarificationReady(), bootstrapReady("Worker")],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmation(),
+      implementationCompleted(),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmation(),
+    ],
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.pipelineState.completedCommits.length, 2);
+  assert.equal(
+    fixture.calls.worker.filter(({ session }) => session?.mode === "fork")
+      .length,
+    1,
+  );
+  assert.deepEqual(
+    result.sessionLineage.children.map(({ role }) => role),
+    ["worker"],
+  );
+  assert.equal(fixture.calls.reviewer.length, 0);
+  assert.equal(fixture.calls.arbiter.length, 0);
+});
+
+test("re-finalizes a content-changing lazy check before clean confirmation", async (t) => {
+  let changed = false;
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    worker: [clarificationReady(), bootstrapReady("Worker")],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      checkAndFix("CHANGED"),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmation(),
+    ],
+    async onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        request.prompt.includes("If you find any problems, fix them") &&
+        !changed
+      ) {
+        changed = true;
+        await writeFile(join(request.cwd, "lazy-fix.txt"), "fixed\n");
+      }
+    },
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.counters.fixRounds, 2);
+  assert.equal(
+    fixture.calls.worker.filter(({ prompt }) =>
+      prompt.includes("Run the complete project finalization procedure"),
+    ).length,
+    2,
+  );
+  const phases = fixture.transitions
+    .map(({ patch }) => patch?.pipelineState?.workflowState)
+    .filter(Boolean);
+  const changedCheck = phases.indexOf("FINALIZE", phases.indexOf("CHECK_AND_FIX"));
+  const confirmation = phases.indexOf("CLEAN_CONFIRM", changedCheck);
+  assert.ok(changedCheck >= 0);
+  assert.ok(confirmation > changedCheck);
+  assert.equal(fixture.calls.reviewer.length, 0);
+  assert.equal(fixture.calls.arbiter.length, 0);
+});
+
+test("routes lazy confirmation findings directly back to Worker fixing", async (t) => {
+  let checkRound = 0;
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    worker: [clarificationReady(), bootstrapReady("Worker")],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmationFindings("R1"),
+      checkAndFix("CHANGED"),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmation(),
+    ],
+    async onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        request.prompt.includes("If you find any problems, fix them")
+      ) {
+        checkRound += 1;
+        if (checkRound === 2) {
+          await writeFile(join(request.cwd, "confirmation-fix.txt"), "fixed\n");
+        }
+      }
+    },
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.counters.fixRounds, 3);
+  assert.equal(fixture.calls.reviewer.length, 0);
+  assert.equal(fixture.calls.arbiter.length, 0);
+  assert.ok(
+    fixture.transitions.some(
+      ({ patch }) =>
+        patch?.pipelineState?.workflowState === "CHECK_AND_FIX" &&
+        patch.pipelineState.findings.some(({ id }) => id === "R1"),
+    ),
+  );
+});
+
+test("re-finalizes corrected evidence without requiring a content change", async (t) => {
+  const omittedInventoryFinding = {
+    ...cleanConfirmationFindings("R1"),
+    findings: [
+      {
+        id: "R1",
+        file: "package.json",
+        problem: "The finalization inventory omitted an established test file.",
+        reason: "The reported validation fingerprint does not cover the complete inventory.",
+        suggestedAction: "Rerun finalization with the complete inventory.",
+      },
+    ],
+  };
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    worker: [clarificationReady(), bootstrapReady("Worker")],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      checkAndFix(),
+      omittedInventoryFinding,
+      checkAndFix("REFINALIZE"),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmation(),
+    ],
+  });
+
+  const result = await fixture.run();
+  const finalizationCalls = fixture.calls.worker.filter(({ prompt }) =>
+    prompt.includes("Run the complete project finalization procedure"),
+  );
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.counters.fixRounds, 3);
+  assert.equal(finalizationCalls.length, 2);
+  assert.match(
+    finalizationCalls[1].prompt,
+    /finalization inventory omitted an established test file/u,
+  );
+  assert.equal(fixture.calls.reviewer.length, 0);
+  assert.equal(fixture.calls.arbiter.length, 0);
+});
+
+test("rejects re-finalization without a confirmation finding", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    worker: [clarificationReady(), bootstrapReady("Worker")],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      checkAndFix("REFINALIZE"),
+    ],
+  });
+
+  await assert.rejects(
+    fixture.run(),
+    /requested re-finalization without a clean-confirmation finding/u,
+  );
+  assert.equal(fixture.currentRun.pipelineState.workflowState, "FAILED");
+});
+
+test("rejects repository mutation during lazy clean confirmation", async (t) => {
+  let mutated = false;
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    worker: [clarificationReady(), bootstrapReady("Worker")],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmation(),
+    ],
+    async onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        request.prompt.includes("Return CLEAN only") &&
+        !mutated
+      ) {
+        mutated = true;
+        await writeFile(join(request.cwd, "invalid-confirmation.txt"), "changed\n");
+      }
+    },
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(result.pause.reason, "read_only_agent_mutated_repository");
+  assert.equal(result.pipelineState.cleanConfirmationFingerprint, null);
+  assert.equal(fixture.calls.reviewer.length, 0);
+  assert.equal(fixture.calls.arbiter.length, 0);
+});
+
+test("resumes a reconciled lazy check/fix without replay or recounting", async (t) => {
+  const processLoss = new Error("Process stopped after lazy fix reconciliation.");
+  let changed = false;
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    sourceSession: SOURCE_SESSION,
+    worker: [clarificationReady(), bootstrapReady("Worker")],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      checkAndFix("CHANGED"),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmation(),
+    ],
+    async onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        request.prompt.includes("If you find any problems, fix them") &&
+        !changed
+      ) {
+        changed = true;
+        await writeFile(join(request.cwd, "reconciled-lazy-fix.txt"), "fixed\n");
+      }
+    },
+  });
+  const snapshot = fixture.runtime.git.snapshot;
+  const transition = fixture.runtime.transition;
+  const finishAgentTurn = fixture.runtime.finishAgentTurn;
+  let processStopped = false;
+  fixture.runtime.git.snapshot = async (options) => {
+    if (
+      changed &&
+      !processStopped &&
+      fixture.currentRun.activeTurn?.phase === "check-and-fix"
+    ) {
+      processStopped = true;
+      throw processLoss;
+    }
+    return snapshot(options);
+  };
+  fixture.runtime.transition = async (patch, options) => {
+    if (processStopped) {
+      throw processLoss;
+    }
+    return transition(patch, options);
+  };
+  fixture.runtime.finishAgentTurn = async (turn) => {
+    if (processStopped) {
+      throw processLoss;
+    }
+    return finishAgentTurn(turn);
+  };
+
+  await assert.rejects(fixture.run(), (error) => error === processLoss);
+  assert.deepEqual(fixture.currentRun.activeTurn, {
+    role: "worker",
+    phase: "check-and-fix",
+  });
+  assert.equal(fixture.currentRun.pipelineState.workflowState, "CHECK_AND_FIX");
+  assert.equal(fixture.currentRun.counters.fixRounds, 0);
+  const callsBeforeResume = fixture.calls.worker.length;
+
+  processStopped = false;
+  fixture.runtime.git.snapshot = snapshot;
+  fixture.runtime.transition = transition;
+  fixture.runtime.finishAgentTurn = finishAgentTurn;
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.activeTurn, null);
+  assert.equal(result.counters.fixRounds, 2);
+  assert.equal(
+    fixture.calls.worker.filter(({ prompt }) =>
+      prompt.includes("If you find any problems, fix them"),
+    ).length,
+    2,
+  );
+  assert.ok(fixture.calls.worker.length > callsBeforeResume);
+  assert.equal(
+    fixture.calls.worker.filter(({ session }) => session?.mode === "fork")
+      .length,
+    1,
+  );
+});
+
+test("resumes a checkpointed unchanged lazy check without replay", async (t) => {
+  const processLoss = new Error("Process stopped after lazy check checkpoint.");
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    worker: [clarificationReady(), bootstrapReady("Worker")],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmation(),
+    ],
+  });
+  const transition = fixture.runtime.transition;
+  const finishAgentTurn = fixture.runtime.finishAgentTurn;
+  let processStopped = false;
+  fixture.runtime.transition = async (patch, options) => {
+    if (processStopped) {
+      throw processLoss;
+    }
+    const next = await transition(patch, options);
+    if (next.pipelineState.workflowState === "CLEAN_CONFIRM") {
+      processStopped = true;
+      throw processLoss;
+    }
+    return next;
+  };
+  fixture.runtime.finishAgentTurn = async (turn) => {
+    if (processStopped) {
+      throw processLoss;
+    }
+    return finishAgentTurn(turn);
+  };
+
+  await assert.rejects(fixture.run(), (error) => error === processLoss);
+  assert.equal(fixture.currentRun.activeTurn, null);
+  assert.equal(fixture.currentRun.pipelineState.workflowState, "CLEAN_CONFIRM");
+  assert.equal(fixture.currentRun.counters.fixRounds, 1);
+
+  processStopped = false;
+  fixture.runtime.transition = transition;
+  fixture.runtime.finishAgentTurn = finishAgentTurn;
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.counters.fixRounds, 1);
+  assert.equal(
+    fixture.calls.worker.filter(({ prompt }) =>
+      prompt.includes("If you find any problems, fix them"),
+    ).length,
+    1,
+  );
+});
+
+test("reconstructs an ownerless lazy clean confirmation without recounting", async (t) => {
+  let interrupted = false;
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    sourceSession: SOURCE_SESSION,
+    worker: [clarificationReady(), bootstrapReady("Worker")],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmation(),
+    ],
+    onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        request.prompt.includes("Return CLEAN only") &&
+        !interrupted
+      ) {
+        interrupted = true;
+        const error = new Error("Provider interrupted during confirmation.");
+        error.recoverable = true;
+        throw error;
+      }
+    },
+  });
+
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "backend_unavailable");
+  assert.equal(paused.pause.resumeState, "CLEAN_CONFIRM");
+  Object.assign(fixture.currentRun, {
+    activeTurn: { role: "worker", phase: "clean-confirm" },
+    pause: null,
+    pipelineState: {
+      ...paused.pipelineState,
+      workflowState: "CLEAN_CONFIRM",
+    },
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.counters.fixRounds, 1);
+  assert.equal(result.counters.correctionRounds, 0);
+  const confirmationCalls = fixture.calls.worker.filter(({ prompt }) =>
+    prompt.includes("Return CLEAN only"),
+  );
+  assert.equal(confirmationCalls.length, 2);
+  assert.equal(confirmationCalls[1].session, undefined);
+  assert.equal(
+    fixture.calls.worker.filter(({ session }) => session?.mode === "fork")
+      .length,
+    1,
+  );
+  assert.equal(fixture.calls.reviewer.length, 0);
+  assert.equal(fixture.calls.arbiter.length, 0);
+});
+
+test("bounds repeated lazy confirmation findings without arbitration", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    modeSettings: {
+      maxFixRoundsPerStep: 5,
+      maxSameFindingRounds: 1,
+      stagnationWindowRounds: 10,
+    },
+    worker: [clarificationReady(), bootstrapReady("Worker")],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmationFindings("R1"),
+      checkAndFix(),
+      cleanConfirmationFindings("R1"),
+    ],
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(result.pause.reason, "no_progress");
+  assert.equal(result.pause.resumeState, "CHECK_AND_FIX");
+  assert.equal(result.counters.fixRounds, 2);
+  assert.equal(result.counters.correctionRounds, 1);
+  assert.deepEqual(result.pipelineState.sameFindingRounds, { R1: 1 });
+  assert.equal(fixture.calls.reviewer.length, 0);
+  assert.equal(fixture.calls.arbiter.length, 0);
+  assert.equal(
+    planExecutionPipeline
+      .projections.pause(fixture.currentRun)
+      .nextActions.some(
+        ({ action }) => action?.type === "override-finding",
+      ),
+    false,
+  );
+  await assert.rejects(
+    fixture.run({}, { type: "override-finding", findingId: "R1" }),
+    /Finding override is not applicable/u,
+  );
+});
+
+test("applies additional lazy fix rounds without resetting prior progress", async (t) => {
+  let checkRound = 0;
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    modeSettings: {
+      maxFixRoundsPerStep: 1,
+      maxSameFindingRounds: 10,
+      stagnationWindowRounds: 10,
+    },
+    worker: [clarificationReady(), bootstrapReady("Worker")],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmationFindings("R1"),
+      checkAndFix(),
+      cleanConfirmationFindings("R1"),
+      checkAndFix("CHANGED"),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmation(),
+    ],
+    async onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        request.prompt.includes("If you find any problems, fix them")
+      ) {
+        checkRound += 1;
+        if (checkRound === 3) {
+          await writeFile(join(request.cwd, "extra-lazy-fix.txt"), "fixed\n");
+        }
+      }
+    },
+  });
+
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "fix_limit_reached");
+  assert.equal(paused.pause.resumeState, "CHECK_AND_FIX");
+  assert.equal(paused.counters.fixRounds, 1);
+  assert.equal(paused.counters.correctionRounds, 0);
+
+  const result = await fixture.run(
+    {},
+    { type: "extra-fix-rounds", amount: 3 },
+  );
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.pipelineState.additionalFixRounds, 3);
+  assert.equal(result.counters.fixRounds, 4);
+  assert.equal(result.counters.correctionRounds, 1);
+  assert.equal(fixture.calls.reviewer.length, 0);
+  assert.equal(fixture.calls.arbiter.length, 0);
+});
+
+test("bounds repeated content-changing lazy checks", async (t) => {
+  let checkRound = 0;
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    modeSettings: {
+      maxFixRoundsPerStep: 1,
+      maxSameFindingRounds: 10,
+      stagnationWindowRounds: 10,
+    },
+    worker: [clarificationReady(), bootstrapReady("Worker")],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      checkAndFix("CHANGED"),
+      finalizationPassed(),
+      checkAndFix("CHANGED"),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmation(),
+    ],
+    async onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        request.prompt.includes("If you find any problems, fix them")
+      ) {
+        checkRound += 1;
+        if (checkRound <= 2) {
+          await writeFile(
+            join(request.cwd, `bounded-lazy-fix-${checkRound}.txt`),
+            "fixed\n",
+          );
+        }
+      }
+    },
+  });
+
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "fix_limit_reached");
+  assert.equal(paused.pause.resumeState, "CHECK_AND_FIX");
+  assert.equal(paused.counters.fixRounds, 1);
+
+  const result = await fixture.run(
+    {},
+    { type: "extra-fix-rounds", amount: 2 },
+  );
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.pipelineState.additionalFixRounds, 2);
+  assert.equal(result.counters.fixRounds, 3);
+  assert.equal(fixture.calls.reviewer.length, 0);
+  assert.equal(fixture.calls.arbiter.length, 0);
 });
 
 test("creates one verified local commit for every plan step", async (t) => {

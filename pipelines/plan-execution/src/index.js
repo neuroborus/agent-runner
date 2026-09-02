@@ -21,7 +21,9 @@ export {
   BOOTSTRAP_CORRECTION_INSTRUCTIONS,
   BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
+  CHECK_AND_FIX_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
+  CLEAN_CONFIRM_INSTRUCTIONS,
   COMMIT_INSTRUCTIONS,
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
   FINALIZATION_CORRECTION_INSTRUCTIONS,
@@ -56,6 +58,10 @@ function positiveIntegerSetting(defaultValue) {
   });
 }
 
+function pipelineMode(value) {
+  return ["independent", "lazy"].includes(value);
+}
+
 function trustedCheckSelection(value) {
   return (
     Array.isArray(value) &&
@@ -79,6 +85,11 @@ const SETTINGS = Object.freeze({
   maxFixRoundsPerStep: positiveIntegerSetting(5),
   maxDisputesPerFinding: positiveIntegerSetting(2),
   maxSameFindingRounds: positiveIntegerSetting(3),
+  mode: Object.freeze({
+    defaultValue: "independent",
+    errorMessage: "must be independent or lazy",
+    validate: pipelineMode,
+  }),
   stagnationWindowRounds: positiveIntegerSetting(3),
   trustedChecks: Object.freeze({
     defaultValue: Object.freeze([]),
@@ -111,6 +122,8 @@ const RESUMABLE_WORKFLOW_STATES = new Set([
   "BOOTSTRAP",
   "IMPLEMENT",
   "FINALIZE",
+  "CHECK_AND_FIX",
+  "CLEAN_CONFIRM",
   "REVIEW",
   "RESOLVE_FINDINGS",
   "COMMIT",
@@ -358,7 +371,9 @@ function validateResumeAction(run, action) {
     const additionalFixRounds = state.additionalFixRounds + action.amount;
     if (
       run.pause?.reason !== "fix_limit_reached" ||
-      !["IMPLEMENT", "RESOLVE_FINDINGS"].includes(run.pause.resumeState) ||
+      !["IMPLEMENT", "CHECK_AND_FIX", "RESOLVE_FINDINGS"].includes(
+        run.pause.resumeState,
+      ) ||
       !Number.isSafeInteger(additionalFixRounds) ||
       !Number.isSafeInteger(
         state.settings.maxFixRoundsPerStep + additionalFixRounds,
@@ -370,6 +385,7 @@ function validateResumeAction(run, action) {
   }
   if (action?.type === "override-finding") {
     if (
+      state.settings?.mode === "lazy" ||
       !["fix_limit_reached", "no_progress", "dispute_limit_reached"].includes(
         run.pause?.reason,
       ) ||
@@ -868,9 +884,22 @@ export function migratePlanExecutionStateV10(run) {
   });
 }
 
+export function migratePlanExecutionStateV11(run) {
+  const current = run.pipelineState;
+  return Object.freeze({
+    ...current,
+    settings:
+      current.settings === null
+        ? null
+        : Object.freeze({ ...current.settings, mode: "independent" }),
+    cleanConfirmationFingerprint: null,
+    lazySourceForkConsumed: false,
+  });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
-  stateVersion: 11,
+  stateVersion: 12,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -882,6 +911,7 @@ export const planExecutionPipeline = Object.freeze({
     8: migratePlanExecutionStateV8,
     9: migratePlanExecutionStateV9,
     10: migratePlanExecutionStateV10,
+    11: migratePlanExecutionStateV11,
   }),
   roles: ROLES,
   resolveActiveRoles,

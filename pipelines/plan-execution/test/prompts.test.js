@@ -6,7 +6,9 @@ import {
   BOOTSTRAP_CORRECTION_INSTRUCTIONS,
   BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
+  CHECK_AND_FIX_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
+  CLEAN_CONFIRM_INSTRUCTIONS,
   COMMIT_INSTRUCTIONS,
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
   FINALIZATION_CORRECTION_INSTRUCTIONS,
@@ -161,6 +163,18 @@ For that outcome, provide question, whyBlocked, and evidence; options may be [].
   assert.match(REVIEW_INSTRUCTIONS, /reject omissions, skips, substitutions/u);
   assert.match(REVIEW_INSTRUCTIONS, /validationChange UNCHANGED/u);
   assert.match(REVIEW_INSTRUCTIONS, /ACCEPTED with validationEvidence/u);
+  assert.match(
+    CHECK_AND_FIX_INSTRUCTIONS,
+    /^Review the changes and verify that they are correct, idiomatic, minimal, and consistent with the project's conventions\. If you find any problems, fix them idiomatically and minimally, following the project's conventions\./u,
+  );
+  assert.match(CHECK_AND_FIX_INSTRUCTIONS, /For CHANGED, use only/u);
+  assert.match(CHECK_AND_FIX_INSTRUCTIONS, /For REFINALIZE, use only/u);
+  assert.match(
+    CLEAN_CONFIRM_INSTRUCTIONS,
+    /^Review the changes and verify that they are correct, idiomatic, minimal, and consistent with the project's conventions\./u,
+  );
+  assert.match(CLEAN_CONFIRM_INSTRUCTIONS, /Do not modify the repository/u);
+  assert.match(CLEAN_CONFIRM_INSTRUCTIONS, /Return CLEAN only/u);
   assert.equal(
     FINDING_RESOLUTION_INSTRUCTIONS,
     `For each finding below, fix it idiomatically and minimally, following the project's conventions.

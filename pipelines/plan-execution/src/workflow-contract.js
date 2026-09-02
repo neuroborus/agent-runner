@@ -10,6 +10,7 @@ import {
 export const MAX_CLARIFICATION_ROUNDS = 3;
 export const DEFAULT_FINALIZATION_POLICY = "auto";
 const ROLES = Object.freeze(["worker", "reviewer", "arbiter"]);
+const LAZY_ROLES = Object.freeze(["worker"]);
 export const CONVENTIONAL_FINALIZATION_SKILL_PATHS = Object.freeze([
   ".agents/skills/finalization/SKILL.md",
   ".claude/skills/finalization/SKILL.md",
@@ -20,6 +21,8 @@ export const WORKFLOW_STATES = Object.freeze([
   "BOOTSTRAP",
   "IMPLEMENT",
   "FINALIZE",
+  "CHECK_AND_FIX",
+  "CLEAN_CONFIRM",
   "REVIEW",
   "RESOLVE_FINDINGS",
   "COMMIT",
@@ -54,6 +57,8 @@ const PIPELINE_STATE_FIELDS = new Set([
   "pendingFinalizationCorrection",
   "reviewCorrection",
   "pendingReviewCorrection",
+  "cleanConfirmationFingerprint",
+  "lazySourceForkConsumed",
   "compatibilityCheckRequired",
   "currentStep",
   "reviewerStep",
@@ -116,8 +121,8 @@ export const MAX_VALIDATION_ITEMS = MAX_BOOTSTRAP_ITEMS * 2;
 export const MAX_OPTIONS = 16;
 export const MAX_DIAGNOSTIC_ITEMS = 32;
 
-export function resolveActiveRoles() {
-  return ROLES;
+export function resolveActiveRoles(settings) {
+  return settings?.mode === "lazy" ? LAZY_ROLES : ROLES;
 }
 
 const MAX_STRUCTURED_RESULT_BYTES = 256 * 1024;
@@ -265,11 +270,12 @@ const SETTINGS_FIELDS = Object.freeze([
   "maxFixRoundsPerStep",
   "maxDisputesPerFinding",
   "maxSameFindingRounds",
+  "mode",
   "stagnationWindowRounds",
   "trustedChecks",
 ]);
 const NUMERIC_SETTINGS_FIELDS = SETTINGS_FIELDS.filter(
-  (field) => !["finalization", "trustedChecks"].includes(field),
+  (field) => !["finalization", "mode", "trustedChecks"].includes(field),
 );
 const EDIT_PAUSE_REASONS = Object.freeze({
   "clarification-answers": "clarification_answers_required",
@@ -282,6 +288,8 @@ const PAUSE_RESUME_STATES = Object.freeze({
     "BOOTSTRAP",
     "IMPLEMENT",
     "FINALIZE",
+    "CHECK_AND_FIX",
+    "CLEAN_CONFIRM",
     "REVIEW",
     "RESOLVE_FINDINGS",
     "COMMIT",
@@ -290,13 +298,18 @@ const PAUSE_RESUME_STATES = Object.freeze({
   environment_blocked: Object.freeze([
     "IMPLEMENT",
     "FINALIZE",
+    "CHECK_AND_FIX",
     "RESOLVE_FINDINGS",
   ]),
   finalization_cannot_pass: Object.freeze(["FINALIZE"]),
   finalization_skill_invalid: Object.freeze(["FINALIZE"]),
   finalization_skill_missing: Object.freeze(["FINALIZE"]),
-  fix_limit_reached: Object.freeze(["IMPLEMENT", "RESOLVE_FINDINGS"]),
-  no_progress: Object.freeze(["RESOLVE_FINDINGS"]),
+  fix_limit_reached: Object.freeze([
+    "IMPLEMENT",
+    "CHECK_AND_FIX",
+    "RESOLVE_FINDINGS",
+  ]),
+  no_progress: Object.freeze(["CHECK_AND_FIX", "RESOLVE_FINDINGS"]),
   review_output_invalid: Object.freeze(["REVIEW"]),
 });
 const COMMIT_AUTHORIZATION_FIELDS = Object.freeze([
@@ -1684,6 +1697,74 @@ export function normalizeImplementationResult(payload) {
   });
 }
 
+export function normalizeCheckAndFixResult(payload) {
+  const fields = [
+    "status",
+    "summary",
+    "reason",
+    "question",
+    "options",
+    "whyBlocked",
+    "evidence",
+  ];
+  if (
+    !isRecord(payload) ||
+    ![
+      "CHANGED",
+      "REFINALIZE",
+      "UNCHANGED",
+      "BLOCKED",
+      "PRODUCT_DECISION_REQUIRED",
+    ].includes(payload.status)
+  ) {
+    throw outputError("Worker returned an invalid check/fix result.");
+  }
+  assertExactOutputFields(payload, fields);
+  assertStructuredResultSize(payload);
+  if (payload.status === "PRODUCT_DECISION_REQUIRED") {
+    if (payload.summary !== "" || payload.reason !== "") {
+      throw outputError("Product decision contains inapplicable fields.");
+    }
+    return Object.freeze({
+      status: payload.status,
+      decision: normalizeProductDecision(payload),
+    });
+  }
+  if (payload.status === "BLOCKED") {
+    if (
+      payload.summary !== "" ||
+      payload.question !== "" ||
+      payload.whyBlocked !== "" ||
+      !emptyArray(payload.options)
+    ) {
+      throw outputError("Blocked check/fix result contains inapplicable fields.");
+    }
+    return Object.freeze({
+      status: payload.status,
+      reason: normalizeText(
+        payload.reason,
+        "check/fix blocker",
+        MAX_TEXT_LENGTH,
+        INVALID_OUTPUT_CODE,
+      ),
+      evidence: normalizeTextList(payload.evidence, "check/fix evidence", {
+        code: INVALID_OUTPUT_CODE,
+      }),
+    });
+  }
+  if (payload.reason !== "" || !emptyDecision(payload)) {
+    throw outputError("Check/fix result contains inapplicable fields.");
+  }
+  return Object.freeze({
+    status: payload.status,
+    summary: normalizeSummary(
+      payload.summary,
+      "check/fix summary",
+      INVALID_OUTPUT_CODE,
+    ),
+  });
+}
+
 export function normalizeFinalizationResult(
   payload,
   { trustedCommands = [] } = {},
@@ -2005,6 +2086,30 @@ export function normalizeReviewResult(payload, previousFindings = []) {
     validationChange: payload.validationChange,
     validationEvidence,
   });
+}
+
+export function normalizeCleanConfirmationResult(
+  payload,
+  previousFindings = [],
+) {
+  if (
+    !isRecord(payload) ||
+    !["CLEAN", "FINDINGS", "PRODUCT_DECISION_REQUIRED"].includes(
+      payload.status,
+    )
+  ) {
+    throw outputError("Worker returned an invalid clean confirmation result.");
+  }
+  const result = normalizeReviewResult(
+    {
+      ...payload,
+      status: payload.status === "CLEAN" ? "APPROVED" : payload.status,
+    },
+    previousFindings,
+  );
+  return result.status === "APPROVED"
+    ? Object.freeze({ ...result, status: "CLEAN" })
+    : result;
 }
 
 export function normalizeResolutionResult(payload, blockers, arbitratedIds) {
@@ -3037,6 +3142,19 @@ export function normalizePipelineState(value) {
       value = { ...value, settings };
     }
   }
+  const lazy = value.settings?.mode === "lazy";
+  if (
+    value.cleanConfirmationFingerprint !== null &&
+    (typeof value.cleanConfirmationFingerprint !== "string" ||
+      !HASH_PATTERN.test(value.cleanConfirmationFingerprint))
+  ) {
+    throw workflowError(
+      "Plan-execution clean confirmation fingerprint is invalid.",
+    );
+  }
+  if (typeof value.lazySourceForkConsumed !== "boolean") {
+    throw workflowError("Plan-execution source-fork state is invalid.");
+  }
   const trustedValidation = normalizeTrustedValidation(value.trustedValidation);
   if (trustedValidation !== value.trustedValidation) {
     value = { ...value, trustedValidation };
@@ -3065,10 +3183,11 @@ export function normalizePipelineState(value) {
     throw workflowError("Plan-execution repository baseline is invalid.");
   }
   if (value.backendVersions !== null) {
+    const activeRoles = resolveActiveRoles(value.settings);
     if (
       !isRecord(value.backendVersions) ||
-      Object.keys(value.backendVersions).length !== 3 ||
-      !["worker", "reviewer", "arbiter"].every((role) =>
+      Object.keys(value.backendVersions).length !== activeRoles.length ||
+      !activeRoles.every((role) =>
         Object.hasOwn(value.backendVersions, role),
       )
     ) {
@@ -3217,7 +3336,7 @@ export function normalizePipelineState(value) {
       reviewerValidation !== null &&
       workerValidation === null) ||
     ((resolvedSummary !== null || disagreement !== null) &&
-      (workerSummary === null || reviewerSummary === null)) ||
+      (workerSummary === null || (!lazy && reviewerSummary === null))) ||
     (resolvedSummary !== null && disagreement !== null)
   ) {
     throw workflowError("Plan-execution bootstrap context is inconsistent.");
@@ -3229,6 +3348,15 @@ export function normalizePipelineState(value) {
       typeof value.backendVersions?.arbiter !== "string")
   ) {
     throw workflowError("Plan-execution bootstrap arbitration is inconsistent.");
+  }
+  if (
+    lazy &&
+    (reviewerSummary !== null ||
+      reviewerValidation !== null ||
+      disagreement !== null ||
+      value.bootstrapArbitrationUsed)
+  ) {
+    throw workflowError("Lazy plan-execution bootstrap state is inconsistent.");
   }
   if (
     value.validationMigrationPending &&
@@ -3470,6 +3598,40 @@ export function normalizePipelineState(value) {
   const pendingCommit = normalizePendingCommit(value.pendingCommit);
   const completedCommits = normalizeCompletedCommits(value.completedCommits);
   if (
+    (!lazy &&
+      (value.cleanConfirmationFingerprint !== null ||
+        value.lazySourceForkConsumed ||
+        ["CHECK_AND_FIX", "CLEAN_CONFIRM"].includes(value.workflowState))) ||
+    (lazy && value.workflowState === "REVIEW")
+  ) {
+    throw workflowError("Plan-execution mode state is inconsistent.");
+  }
+  if (
+    lazy &&
+    (value.reviewerStep !== null ||
+      value.reviewCorrection !== null ||
+      value.pendingReviewCorrection !== null ||
+      value.pendingDisputes.length !== 0 ||
+      Object.keys(value.disputeCounts).length !== 0 ||
+      value.disputeHistory.length !== 0 ||
+      value.findingArbitrations.length !== 0 ||
+      value.stagnationArbitrationUsed ||
+      value.stagnationDirection !== null ||
+      value.reviewReconsideration.length !== 0 ||
+      value.findingOverrides.length !== 0)
+  ) {
+    throw workflowError("Lazy plan-execution review state is inconsistent.");
+  }
+  if (
+    value.cleanConfirmationFingerprint !== null &&
+    (!lazy ||
+      value.cleanConfirmationFingerprint !== value.finalizedFingerprint ||
+      value.cleanConfirmationFingerprint !== value.reviewedFingerprint ||
+      value.reviewResult?.status !== "APPROVED")
+  ) {
+    throw workflowError("Plan-execution clean confirmation is inconsistent.");
+  }
+  if (
     completedCommits.length > (planSteps?.length ?? 0) ||
     (value.currentStep !== null &&
       completedCommits.length !== value.currentStep - 1) ||
@@ -3591,9 +3753,14 @@ export function normalizePipelineState(value) {
   }
   if (
     value.pendingCorrection &&
-    !["FINALIZE", "REVIEW", "WAITING_FOR_USER", "FAILED"].includes(
-      value.workflowState,
-    )
+    ![
+      "FINALIZE",
+      "CHECK_AND_FIX",
+      "CLEAN_CONFIRM",
+      "REVIEW",
+      "WAITING_FOR_USER",
+      "FAILED",
+    ].includes(value.workflowState)
   ) {
     throw workflowError("Plan-execution pending correction is inapplicable.");
   }
@@ -3635,6 +3802,8 @@ export function normalizePipelineState(value) {
       pendingFinalizationCorrection !== null ||
       reviewCorrection !== null ||
       pendingReviewCorrection !== null ||
+      value.cleanConfirmationFingerprint !== null ||
+      value.lazySourceForkConsumed ||
       value.compatibilityCheckRequired ||
       value.currentStep !== null ||
       value.reviewerStep !== null ||
@@ -3679,6 +3848,7 @@ export function normalizePipelineState(value) {
       value.findingOverrides.length !== 0 ||
       reviewCorrection !== null ||
       pendingReviewCorrection !== null ||
+      value.cleanConfirmationFingerprint !== null ||
       pendingCommit !== null ||
       completedCommits.length !== 0)
   ) {
@@ -3716,9 +3886,14 @@ export function normalizePipelineState(value) {
     throw workflowError("Plan-execution implementation state is inconsistent.");
   }
   if (
-    ["FINALIZE", "REVIEW", "RESOLVE_FINDINGS", "COMMIT"].includes(
-      value.workflowState,
-    ) &&
+    [
+      "FINALIZE",
+      "CHECK_AND_FIX",
+      "CLEAN_CONFIRM",
+      "REVIEW",
+      "RESOLVE_FINDINGS",
+      "COMMIT",
+    ].includes(value.workflowState) &&
     (!value.clarificationFrozen ||
       resolvedSummary === null ||
       value.currentStep === null ||
@@ -3730,6 +3905,7 @@ export function normalizePipelineState(value) {
     value.workflowState === "FINALIZE" &&
     (finalizationResult !== null ||
       findings.length !== 0 ||
+      value.cleanConfirmationFingerprint !== null ||
       value.reviewReconsideration.length !== 0)
   ) {
     throw workflowError("Plan-execution finalization state is inconsistent.");
@@ -3740,6 +3916,27 @@ export function normalizePipelineState(value) {
       value.finalizedFingerprint === null)
   ) {
     throw workflowError("Plan-execution review state is inconsistent.");
+  }
+  if (
+    value.workflowState === "CHECK_AND_FIX" &&
+    (finalizationResult?.status !== "PASS" ||
+      value.finalizedFingerprint === null ||
+      value.cleanConfirmationFingerprint !== null)
+  ) {
+    throw workflowError("Plan-execution check/fix state is inconsistent.");
+  }
+  if (
+    value.workflowState === "CLEAN_CONFIRM" &&
+    (finalizationResult?.status !== "PASS" ||
+      value.finalizedFingerprint === null ||
+      reviewResult !== null ||
+      value.reviewedFingerprint !== null ||
+      findings.length !== 0 ||
+      value.cleanConfirmationFingerprint !== null)
+  ) {
+    throw workflowError(
+      "Plan-execution clean confirmation state is inconsistent.",
+    );
   }
   const finalizationBlocked =
     finalizationResult?.status === "FAIL" &&
@@ -3758,6 +3955,8 @@ export function normalizePipelineState(value) {
       value.finalizedFingerprint === null ||
       value.reviewedFingerprint !== value.finalizedFingerprint ||
       !acceptedReviewGate ||
+      (lazy &&
+        value.cleanConfirmationFingerprint !== value.finalizedFingerprint) ||
       findings.length !== 0 ||
       pendingDisputes.length !== 0 ||
       value.reviewReconsideration.length !== 0)
@@ -3772,6 +3971,8 @@ export function normalizePipelineState(value) {
       value.finalizedFingerprint === null ||
       value.reviewedFingerprint !== value.finalizedFingerprint ||
       !acceptedReviewGate ||
+      (lazy &&
+        value.cleanConfirmationFingerprint !== value.finalizedFingerprint) ||
       findings.length !== 0 ||
       pendingDisputes.length !== 0 ||
       value.reviewReconsideration.length !== 0)
@@ -3833,6 +4034,8 @@ export function createPlanExecutionState({
     pendingFinalizationCorrection: null,
     reviewCorrection: null,
     pendingReviewCorrection: null,
+    cleanConfirmationFingerprint: null,
+    lazySourceForkConsumed: false,
     compatibilityCheckRequired: false,
     currentStep: null,
     reviewerStep: null,
@@ -3911,7 +4114,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 11 ||
+    run.pipelineStateVersion !== 12 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -3991,6 +4194,16 @@ export function assertRun(run) {
   );
   if (new Set(childSessionIds).size !== childSessionIds.length) {
     throw workflowError("Plan-execution child sessions must be unique.");
+  }
+  if (
+    (state.lazySourceForkConsumed && run.sessionLineage.source === null) ||
+    (state.settings?.mode === "lazy" &&
+      run.sessionLineage.source !== null &&
+      (run.sessionLineage.children.length > 0 ||
+        (run.activeTurn !== null && run.activeTurn !== undefined)) &&
+      !state.lazySourceForkConsumed)
+  ) {
+    throw workflowError("Plan-execution source-fork lineage is invalid.");
   }
   if (state.repositoryBaseline !== null) {
     const repositoryPath = state.repositoryBaseline.projectPath;
@@ -4243,6 +4456,9 @@ export function assertSettings(settings) {
   }
   if (!isTrustedCheckSelection(settings.trustedChecks)) {
     throw workflowError("Plan-execution setting trustedChecks is invalid.");
+  }
+  if (!["independent", "lazy"].includes(settings.mode)) {
+    throw workflowError("Plan-execution setting mode is invalid.");
   }
   for (const field of NUMERIC_SETTINGS_FIELDS) {
     if (!Number.isSafeInteger(settings[field]) || settings[field] < 1) {

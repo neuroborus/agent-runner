@@ -85,6 +85,28 @@ For PRODUCT_DECISION_REQUIRED, set findings and validationEvidence to [], and va
 ${PRODUCT_DECISION_INSTRUCTIONS}
 Otherwise, return only the approval decision and actionable findings using the provided schema.`;
 
+export const CHECK_AND_FIX_INSTRUCTIONS = `Review the changes and verify that they are correct, idiomatic, minimal, and consistent with the project's conventions. If you find any problems, fix them idiomatically and minimally, following the project's conventions.
+
+Review the complete current result. Do not run the project finalization procedure or perform generic commit preparation; those remain owned by FINALIZE and COMMIT. Do not create a commit.
+Verify the exact required-check evidence and fix any omission, substitution, weakening, fingerprint mismatch, or unauthorized validation-infrastructure change that can be fixed within this planned commit.
+For CHANGED, use only when you changed repository content; provide summary and set reason, question, and whyBlocked to "", and options and evidence to [].
+For REFINALIZE, use only when repository content is unchanged but a clean-confirmation finding requires corrected finalization or validation evidence; provide summary and set reason, question, and whyBlocked to "", and options and evidence to [].
+For UNCHANGED, use only when you found no problem and changed no repository content; provide summary and set reason, question, and whyBlocked to "", and options and evidence to [].
+For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or a comparable external constraint. Set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
+For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-decision fields.
+Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
+${PRODUCT_DECISION_INSTRUCTIONS}`;
+
+export const CLEAN_CONFIRM_INSTRUCTIONS = `Review the changes and verify that they are correct, idiomatic, minimal, and consistent with the project's conventions.
+
+Do not modify the repository. Return CLEAN only when there are no problems; otherwise return concrete findings without editing the content.
+Verify the exact required-check evidence and reject omissions, skips, substitutions, weakening, fingerprint mismatch, or validation-infrastructure changes that this planned commit does not authorize.
+Use validationChange UNCHANGED when no change occurred, ACCEPTED with validationEvidence when an authorized change remains complete, or REJECTED with validationEvidence and a finding when it is evasive or unauthorized.
+For CLEAN, set question and whyBlocked to "", and findings, options, and evidence to [].
+For FINDINGS, provide one or more findings with unique stable R-prefixed numeric IDs, a repository-relative file, and populated problem, reason, and suggestedAction fields; set question and whyBlocked to "", and options and evidence to [].
+For PRODUCT_DECISION_REQUIRED, set findings and validationEvidence to [], and validationChange to UNCHANGED; use the product-decision fields.
+${PRODUCT_DECISION_INSTRUCTIONS}`;
+
 export const REVIEW_CORRECTION_INSTRUCTIONS = `Your previous structured review result was rejected by deterministic validation. Make the pending read-only correction and return a complete replacement result using the same review schema.
 Correct every identified field-and-constraint violation from current repository and finalized evidence. Do not repeat or quote the rejected result, findings, commands, paths, provider output, prompt, or transcript; do not ask an ordinary clarification question or modify repository content, staging, history, refs, remotes, or Git identity. Preserve APPROVED, FINDINGS, validation-change, and PRODUCT_DECISION_REQUIRED semantics exactly as required by the unchanged review contract. A still-invalid replacement pauses for an explicit retry and never approves the work.`;
 
