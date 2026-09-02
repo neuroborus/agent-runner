@@ -57,6 +57,8 @@ const PIPELINE_STATE_FIELDS = new Set([
   "pendingFinalizationCorrection",
   "reviewCorrection",
   "pendingReviewCorrection",
+  "lazyCorrections",
+  "pendingLazyCorrection",
   "cleanConfirmationFingerprint",
   "lazySourceForkConsumed",
   "compatibilityCheckRequired",
@@ -161,6 +163,15 @@ export const MAX_FINALIZATION_CORRECTION_ATTEMPTS = 2;
 const REVIEW_CORRECTION_FIELDS = Object.freeze([
   "attempt",
   "step",
+  "contentFingerprint",
+  "validationInfrastructureFingerprint",
+  "diagnostics",
+]);
+const LAZY_CORRECTION_FIELDS = Object.freeze([
+  "attempt",
+  "fixRoundCharged",
+  "step",
+  "phase",
   "contentFingerprint",
   "validationInfrastructureFingerprint",
   "diagnostics",
@@ -310,6 +321,11 @@ const PAUSE_RESUME_STATES = Object.freeze({
     "RESOLVE_FINDINGS",
   ]),
   no_progress: Object.freeze(["CHECK_AND_FIX", "RESOLVE_FINDINGS"]),
+  lazy_output_invalid: Object.freeze([
+    "FINALIZE",
+    "CHECK_AND_FIX",
+    "CLEAN_CONFIRM",
+  ]),
   review_output_invalid: Object.freeze(["REVIEW"]),
 });
 const COMMIT_AUTHORIZATION_FIELDS = Object.freeze([
@@ -2627,6 +2643,82 @@ function sameReviewCorrectionScope(left, right) {
   );
 }
 
+function normalizeLazyCorrection(value, planSteps) {
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, LAZY_CORRECTION_FIELDS) ||
+    value.attempt !== 1 ||
+    typeof value.fixRoundCharged !== "boolean" ||
+    !Number.isSafeInteger(value.step) ||
+    value.step < 1 ||
+    value.step > (planSteps?.length ?? 0) ||
+    !["CHECK_AND_FIX", "CLEAN_CONFIRM"].includes(value.phase) ||
+    (value.phase === "CLEAN_CONFIRM" && value.fixRoundCharged) ||
+    !HASH_PATTERN.test(value.contentFingerprint) ||
+    !HASH_PATTERN.test(value.validationInfrastructureFingerprint) ||
+    !Array.isArray(value.diagnostics) ||
+    value.diagnostics.length === 0 ||
+    value.diagnostics.length > MAX_DIAGNOSTIC_ITEMS
+  ) {
+    throw workflowError("Plan-execution lazy correction is invalid.");
+  }
+  const expectedPhase =
+    value.phase === "CHECK_AND_FIX" ? "check-and-fix" : "clean-confirm";
+  const expectedContract =
+    value.phase === "CHECK_AND_FIX"
+      ? "lazy-check-and-fix"
+      : "lazy-clean-confirm";
+  const identities = new Set();
+  for (const diagnostic of value.diagnostics) {
+    if (
+      !isOutputDiagnostic(diagnostic) ||
+      diagnostic.role !== "worker" ||
+      diagnostic.phase !== expectedPhase ||
+      diagnostic.contract !== expectedContract
+    ) {
+      throw workflowError("Plan-execution lazy correction is invalid.");
+    }
+    const identity = `${diagnostic.field}\0${diagnostic.constraint}`;
+    if (identities.has(identity)) {
+      throw workflowError("Plan-execution lazy correction is invalid.");
+    }
+    identities.add(identity);
+  }
+  return value;
+}
+
+function sameLazyCorrectionScope(left, right) {
+  return (
+    left.attempt === right.attempt &&
+    left.step === right.step &&
+    left.phase === right.phase &&
+    left.contentFingerprint === right.contentFingerprint &&
+    left.validationInfrastructureFingerprint ===
+      right.validationInfrastructureFingerprint
+  );
+}
+
+function normalizeLazyCorrections(value, planSteps) {
+  if (!Array.isArray(value) || value.length > MAX_ITEMS) {
+    throw workflowError("Plan-execution lazy corrections are invalid.");
+  }
+  const scopes = new Set();
+  for (const correction of value) {
+    normalizeLazyCorrection(correction, planSteps);
+    const scope = [
+      correction.step,
+      correction.phase,
+      correction.contentFingerprint,
+      correction.validationInfrastructureFingerprint,
+    ].join("\0");
+    if (scopes.has(scope)) {
+      throw workflowError("Plan-execution lazy corrections must be unique.");
+    }
+    scopes.add(scope);
+  }
+  return value;
+}
+
 function normalizedSummary(value, name) {
   return value === null ? null : normalizeSummary(value, name);
 }
@@ -3326,6 +3418,26 @@ export function normalizePipelineState(value) {
       "Plan-execution pending review correction is inconsistent.",
     );
   }
+  const lazyCorrections = normalizeLazyCorrections(
+    value.lazyCorrections,
+    planSteps,
+  );
+  const pendingLazyCorrection =
+    value.pendingLazyCorrection === null
+      ? null
+      : normalizeLazyCorrection(value.pendingLazyCorrection, planSteps);
+  if (
+    pendingLazyCorrection !== null &&
+    !lazyCorrections.some(
+      (correction) =>
+        sameLazyCorrectionScope(correction, pendingLazyCorrection) &&
+        correction.fixRoundCharged === pendingLazyCorrection.fixRoundCharged,
+    )
+  ) {
+    throw workflowError(
+      "Plan-execution pending lazy correction is inconsistent.",
+    );
+  }
   if (
     (reviewerSummary !== null && workerSummary === null) ||
     (!value.validationMigrationPending &&
@@ -3525,6 +3637,19 @@ export function normalizePipelineState(value) {
       "Plan-execution review correction is missing its pending marker.",
     );
   }
+  if (
+    lazyCorrections.some(({ step }) => step !== value.currentStep) ||
+    (pendingLazyCorrection !== null &&
+      ![
+        "FINALIZE",
+        "RESOLVE_FINDINGS",
+        pendingLazyCorrection.phase,
+        "WAITING_FOR_USER",
+        "FAILED",
+      ].includes(value.workflowState))
+  ) {
+    throw workflowError("Plan-execution lazy correction is inapplicable.");
+  }
   const findings = normalizePersistedFindings(value.findings);
   const previousFindings = normalizePersistedFindings(
     value.previousFindings,
@@ -3601,6 +3726,8 @@ export function normalizePipelineState(value) {
     (!lazy &&
       (value.cleanConfirmationFingerprint !== null ||
         value.lazySourceForkConsumed ||
+        lazyCorrections.length !== 0 ||
+        pendingLazyCorrection !== null ||
         ["CHECK_AND_FIX", "CLEAN_CONFIRM"].includes(value.workflowState))) ||
     (lazy && value.workflowState === "REVIEW")
   ) {
@@ -3802,6 +3929,8 @@ export function normalizePipelineState(value) {
       pendingFinalizationCorrection !== null ||
       reviewCorrection !== null ||
       pendingReviewCorrection !== null ||
+      lazyCorrections.length !== 0 ||
+      pendingLazyCorrection !== null ||
       value.cleanConfirmationFingerprint !== null ||
       value.lazySourceForkConsumed ||
       value.compatibilityCheckRequired ||
@@ -3848,6 +3977,8 @@ export function normalizePipelineState(value) {
       value.findingOverrides.length !== 0 ||
       reviewCorrection !== null ||
       pendingReviewCorrection !== null ||
+      lazyCorrections.length !== 0 ||
+      pendingLazyCorrection !== null ||
       value.cleanConfirmationFingerprint !== null ||
       pendingCommit !== null ||
       completedCommits.length !== 0)
@@ -4034,6 +4165,8 @@ export function createPlanExecutionState({
     pendingFinalizationCorrection: null,
     reviewCorrection: null,
     pendingReviewCorrection: null,
+    lazyCorrections: Object.freeze([]),
+    pendingLazyCorrection: null,
     cleanConfirmationFingerprint: null,
     lazySourceForkConsumed: false,
     compatibilityCheckRequired: false,
@@ -4114,7 +4247,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 12 ||
+    run.pipelineStateVersion !== 13 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -4331,6 +4464,7 @@ export function assertRun(run) {
           "environment_blocked",
           "finalization_skill_invalid",
           "finalization_skill_missing",
+          "lazy_output_invalid",
           "review_output_invalid",
         ].includes(run.pause.reason)) ||
       (run.pause.reason === "finalization_cannot_pass" &&

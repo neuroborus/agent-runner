@@ -590,6 +590,16 @@ Its version-11 migration selects `independent` without moving active or terminal
 workflow positions, changing completed commits, or replaying a pending or
 consumed one-shot commit effect.
 
+Plan execution state version 13 adds a pipeline-owned lazy-checkpoint
+correction ledger and pending marker. Each record is scoped to the current
+step, `CHECK_AND_FIX` or `CLEAN_CONFIRM` phase, finalized content fingerprint,
+and validation-infrastructure fingerprint and retains only attempt `1`, whether
+actual fix work was already charged, and bounded Worker field-and-constraint
+diagnostics. The version-12 migration
+initializes both fields empty without moving active or terminal workflow
+positions, changing accepted gates or completed commits, reviving terminal
+runs, or replaying agent or commit effects.
+
 Polishing state version 3 adopts the same resolved trusted-validation snapshot,
 per-check executor provenance, and fingerprint-bound evidence tuple. Its
 version-2 migration selects empty legacy trust, preserves safe workspace
@@ -732,6 +742,19 @@ execution and polishing return through their complete `FINALIZE` gate after a
 change before another confirmation. Existing fix/revision, stable-finding,
 stagnation, and additional-round budgets bound the loop and never silently
 accept an unconfirmed result.
+
+Plan execution also owns lazy structured-output recovery. Provider and
+deterministic checkpoint failures are reduced to bounded diagnostics, then one
+fresh Worker session receives the complete durable checkpoint request with its
+original schema. A writable check/fix correction may reconcile safe content
+exactly once, invalidates dependent evidence, charges actual fix work once,
+and must pass complete finalization before the pending checkpoint resumes. A
+clean-confirmation correction is read-only and requires unchanged content and
+validation-infrastructure fingerprints. Repeated invalid output pauses at the
+exact checkpoint with a redacted explicit null retry; retry reconstructs the
+pending attempt without recounting its automatic attempt or fix budget. No
+correction result can act as early finalization, confirmation, review, or
+commit evidence.
 
 When a native context is full, an adapter may compact it and retry the complete
 recovery prompt once. If continuation still fails, writable and read-only work

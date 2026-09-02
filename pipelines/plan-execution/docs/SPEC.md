@@ -419,6 +419,11 @@ Persist at least:
   pending attempt, scoped to the finalized content and validation-
   infrastructure fingerprints and containing only attempt number, step, and
   bounded Reviewer/review field-and-constraint diagnostics;
+- the current step's lazy-checkpoint correction ledger and optional pending
+  attempt, scoped to `CHECK_AND_FIX` or `CLEAN_CONFIRM`, finalized content,
+  and validation-infrastructure fingerprints and containing only attempt `1`,
+  whether actual fix work was already charged, and bounded Worker
+  field-and-constraint diagnostics;
 - exact per-check finalization evidence and the fingerprint-bound
   mode-specific validation-change decision;
 - the resolved runner-trusted command snapshot, command/configuration
@@ -573,6 +578,13 @@ commit effect. Every earlier supported version migrates through this ordered
 chain and therefore also resolves to `independent`; no migration replays role
 turns or repository effects.
 
+Pipeline state version 13 adds the lazy-checkpoint correction ledger and
+pending marker. Its version-12 migration initializes them empty without moving
+active or terminal workflow positions, changing completed commits or accepted
+gate evidence, reviving terminal runs, or replaying role or commit effects.
+Every earlier supported version migrates through version 12 before this
+ordered initialization.
+
 Common run-envelope version 3 independently adds nullable bounded active
 provider role and phase. Version-1 and version-2 envelopes project it as `null`
 without rewriting; the next mutating continuation persists the explicit runtime
@@ -643,6 +655,21 @@ from read-only confirmation, and continues from an already advanced checkpoint
 without replaying or double-counting it. The one-time source-fork marker is
 persisted before the first lazy forked turn starts, so reconstruction can never
 fork the source again.
+
+Provider structured-output failure and deterministic lazy-result contract
+failure are normalized to bounded Worker, phase, contract, field, and
+constraint diagnostics. The first failure for an exact step, phase, finalized
+content fingerprint, and validation-infrastructure fingerprint records
+automatic attempt `1` and reconstructs the complete checkpoint with its
+original schema in a fresh Worker session. Rejected values and provider text
+are never durable or public. A pending `CHECK_AND_FIX` correction remains
+workspace-writable; safe content mutation is reconciled and marked as charged
+once, invalidates the gate, and returns through complete `FINALIZE` before the
+correction resumes. A pending `CLEAN_CONFIRM` correction remains read-only and
+requires both fingerprints to stay unchanged. A still-invalid correction
+pauses at `lazy_output_invalid` with its exact resume checkpoint and an
+explicit null retry. Retry reconstructs the pending attempt without allocating
+another automatic attempt or charging fix work before actual work occurs.
 
 ### `progress.md`
 
@@ -1866,6 +1893,14 @@ with the same validation-change decision required from an independent review.
 A status/content mismatch is invalid output, actual read-only mutation is
 rejected, and fingerprint drift pauses without advancing.
 
+Invalid provider or deterministic checkpoint output follows the durable lazy
+correction policy above. A valid replacement rejoins the ordinary checkpoint
+route and cannot itself accept finalization, confirmation, review, or commit
+evidence. Content-changing invalid or interrupted check/fix work is reconciled
+exactly once, retains the pending marker through full finalization, and resumes
+only at the original check/fix checkpoint. Clean-confirmation correction never
+receives workspace-write authority.
+
 Concrete confirmation findings return directly to `CHECK_AND_FIX`; they are
 not disputes and cannot invoke Reviewer or Arbiter. Only a mutation-free
 `CLEAN` result with unchanged fingerprints and `UNCHANGED` or task-authorized
@@ -2186,6 +2221,7 @@ no_progress
 finalization_skill_missing
 finalization_skill_invalid
 finalization_cannot_pass
+lazy_output_invalid
 review_output_invalid
 read_only_agent_mutated_repository
 unexpected_git_ref_change
@@ -2534,9 +2570,14 @@ At minimum cover:
 73. lazy no-progress, stable-finding, fix, and additional-round behavior remains
     bounded without weakening exact commits, trusted checks, fingerprints, Git
     controls, product decisions, or no-coauthor/no-push rules.
-74. every supported legacy version migrates through state version 12 to
+74. every supported legacy version migrates through state version 13 to
     `independent` without reviving terminal runs or replaying completed or
     pending commit effects.
+75. lazy provider and deterministic contract failures receive one scoped
+    fresh-session correction; writable mutation re-finalizes and is counted
+    once, clean correction remains read-only and fingerprint-bound, pending
+    work survives interruption, and repeated invalid output resumes only by an
+    explicit null retry with redacted diagnostics.
 
 Real Codex/Claude smoke tests should be opt-in integration tests.
 
@@ -2688,7 +2729,12 @@ Do not build:
     a separate mutation-free `CLEAN` confirmation over unchanged content and
     validation fingerprints. Every change returns through full finalization,
     and bounded-loop exhaustion pauses.
-43. A deliberately supplied source forks independently by checkpoint in
+43. Each exact lazy checkpoint scope receives one automatic fresh-session
+    structured-output correction. Repeated invalid output pauses for explicit
+    null retry with only redacted field-and-constraint diagnostics; mutation,
+    interruption, resume, budget, fingerprint, finalization, confirmation,
+    review, Git, and commit gates remain unchanged.
+44. A deliberately supplied source forks independently by checkpoint in
     independent mode and exactly once into the logical Worker in lazy mode;
     native-session reconstruction never changes that lineage.
 

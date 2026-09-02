@@ -379,7 +379,7 @@ ID, pipeline state-schema version, and an explicit runtime compatibility tuple
 independent from the package version. Compatible legacy state is migrated by
 the owning pipeline under the per-run lease; incompatible readers return a
 specific version-skew error while preserving the run. The mode-aware pipeline
-versions are plan-authoring version 2, plan-execution version 12, and polishing
+versions are plan-authoring version 2, plan-execution version 13, and polishing
 version 8. Their ordered migrations resolve every supported legacy run to
 `independent` without moving terminal workflows or replaying role turns,
 commits, or handoffs. Complete write-ahead events precede atomic state

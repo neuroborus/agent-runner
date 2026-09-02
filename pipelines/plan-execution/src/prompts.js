@@ -107,6 +107,9 @@ For FINDINGS, provide one or more findings with unique stable R-prefixed numeric
 For PRODUCT_DECISION_REQUIRED, set findings and validationEvidence to [], and validationChange to UNCHANGED; use the product-decision fields.
 ${PRODUCT_DECISION_INSTRUCTIONS}`;
 
+export const LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS = `Your previous structured lazy checkpoint result was rejected by provider or deterministic validation. Return a complete replacement result using the same checkpoint schema.
+Correct every identified field-and-constraint violation from the current repository and durable checkpoint evidence. Do not repeat or quote the rejected result, findings, commands, paths, provider output, prompt, or transcript; do not ask an ordinary clarification question. During CHECK_AND_FIX, reconcile only safe workspace content and report its actual mutation status. During CLEAN_CONFIRM, keep the repository read-only. Preserve the original checkpoint semantics exactly. A still-invalid replacement pauses for an explicit retry and never supplies finalization, confirmation, review, or commit evidence early.`;
+
 export const REVIEW_CORRECTION_INSTRUCTIONS = `Your previous structured review result was rejected by deterministic validation. Make the pending read-only correction and return a complete replacement result using the same review schema.
 Correct every identified field-and-constraint violation from current repository and finalized evidence. Do not repeat or quote the rejected result, findings, commands, paths, provider output, prompt, or transcript; do not ask an ordinary clarification question or modify repository content, staging, history, refs, remotes, or Git identity. Preserve APPROVED, FINDINGS, validation-change, and PRODUCT_DECISION_REQUIRED semantics exactly as required by the unchanged review contract. A still-invalid replacement pauses for an explicit retry and never approves the work.`;
 

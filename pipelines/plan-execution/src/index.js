@@ -33,6 +33,7 @@ export {
   FINDING_ARBITRATION_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
   IMPLEMENTATION_INSTRUCTIONS,
+  LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
   NO_DELEGATION_INSTRUCTIONS,
   PLAN_COMPATIBILITY_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
@@ -118,6 +119,7 @@ const RETRYABLE_PAUSE_REASONS = new Set([
   "finalization_skill_invalid",
   "finalization_skill_missing",
   "local_artifacts_not_ignored",
+  "lazy_output_invalid",
   "review_output_invalid",
   "unsafe_git_state",
 ]);
@@ -161,6 +163,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   internal_failure: "Plan execution failed.",
   local_artifacts_not_ignored:
     "The configured repository-local artifact path is not ignored.",
+  lazy_output_invalid:
+    "The lazy checkpoint result remains invalid and requires an explicit retry.",
   no_progress: "The correction loop reached a bounded no-progress condition.",
   plan_revision_required:
     "The validated plan must be revised and execution must restart in a fresh run.",
@@ -189,6 +193,7 @@ const PUBLIC_DETAIL_REASONS = new Set([
   "finalization_skill_invalid",
   "finalization_skill_missing",
   "plan_revision_required",
+  "lazy_output_invalid",
   "review_output_invalid",
 ]);
 
@@ -420,6 +425,7 @@ function validateResumeAction(run, action) {
             "finalization_cannot_pass",
             "finalization_skill_invalid",
             "finalization_skill_missing",
+            "lazy_output_invalid",
             "review_output_invalid",
           ].includes(run.pause?.reason) &&
             RESUMABLE_WORKFLOW_STATES.has(run.pause?.resumeState)))))
@@ -901,9 +907,17 @@ export function migratePlanExecutionStateV11(run) {
   });
 }
 
+export function migratePlanExecutionStateV12(run) {
+  return Object.freeze({
+    ...run.pipelineState,
+    lazyCorrections: Object.freeze([]),
+    pendingLazyCorrection: null,
+  });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
-  stateVersion: 12,
+  stateVersion: 13,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -916,6 +930,7 @@ export const planExecutionPipeline = Object.freeze({
     9: migratePlanExecutionStateV9,
     10: migratePlanExecutionStateV10,
     11: migratePlanExecutionStateV11,
+    12: migratePlanExecutionStateV12,
   }),
   roles: ROLES,
   resolveActiveRoles,

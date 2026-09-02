@@ -18,6 +18,7 @@ import {
   FINDING_ARBITRATION_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
   IMPLEMENTATION_INSTRUCTIONS,
+  LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
   PLAN_COMPATIBILITY_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
   REVIEW_CORRECTION_INSTRUCTIONS,
@@ -175,6 +176,14 @@ For that outcome, provide question, whyBlocked, and evidence; options may be [].
   );
   assert.match(CLEAN_CONFIRM_INSTRUCTIONS, /Do not modify the repository/u);
   assert.match(CLEAN_CONFIRM_INSTRUCTIONS, /Return CLEAN only/u);
+  assert.match(
+    LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
+    /complete replacement result using the same checkpoint schema/u,
+  );
+  assert.match(
+    LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
+    /During CLEAN_CONFIRM, keep the repository read-only/u,
+  );
   assert.equal(
     FINDING_RESOLUTION_INSTRUCTIONS,
     `For each finding below, fix it idiomatically and minimally, following the project's conventions.

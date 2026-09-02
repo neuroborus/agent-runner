@@ -31,6 +31,7 @@ import {
   migratePlanExecutionStateV9,
   migratePlanExecutionStateV10,
   migratePlanExecutionStateV11,
+  migratePlanExecutionStateV12,
   planExecutionPipeline,
   runPlanExecution,
 } from "../src/index.js";
@@ -128,6 +129,8 @@ function versionOneState(state) {
     "trustedValidation",
     "cleanConfirmationFingerprint",
     "lazySourceForkConsumed",
+    "lazyCorrections",
+    "pendingLazyCorrection",
   ]) {
     delete legacy[field];
   }
@@ -207,7 +210,10 @@ function migrateVersionOneState(state) {
   const versionEleven = migratePlanExecutionStateV10({
     pipelineState: versionTen,
   });
-  return migratePlanExecutionStateV11({ pipelineState: versionEleven });
+  const versionTwelve = migratePlanExecutionStateV11({
+    pipelineState: versionEleven,
+  });
+  return migratePlanExecutionStateV12({ pipelineState: versionTwelve });
 }
 
 async function prepareValidationMigration(t, fixtureOptions) {
@@ -816,7 +822,7 @@ test("migrates version-3 execution state with no consumed bootstrap corrections"
   assert.deepEqual(migrated.bootstrapCorrections, []);
   assert.equal(migrated.pendingBootstrapCorrection, null);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(planExecutionPipeline.stateVersion, 12);
+  assert.equal(planExecutionPipeline.stateVersion, 13);
 });
 
 test("selects Worker-only lazy mode and migrates version 11 to independent", () => {
@@ -851,6 +857,22 @@ test("selects Worker-only lazy mode and migrates version 11 to independent", () 
   assert.equal(migrated.settings.mode, "independent");
   assert.equal(migrated.cleanConfirmationFingerprint, null);
   assert.equal(migrated.lazySourceForkConsumed, false);
+  assert.doesNotThrow(() => normalizePipelineState(migrated));
+});
+
+test("version 12 migration initializes lazy correction state in place", () => {
+  const current = createPlanExecutionState({
+    settings: { ...SETTINGS, mode: "lazy" },
+  });
+  const legacy = { ...current };
+  delete legacy.lazyCorrections;
+  delete legacy.pendingLazyCorrection;
+
+  const migrated = migratePlanExecutionStateV12({ pipelineState: legacy });
+
+  assert.equal(migrated.workflowState, current.workflowState);
+  assert.deepEqual(migrated.lazyCorrections, []);
+  assert.equal(migrated.pendingLazyCorrection, null);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
 });
 
@@ -899,6 +921,18 @@ test("version 11 migration preserves terminal commits and effects", async (t) =>
   assert.deepEqual(migrated.finalizationResult, completed.pipelineState.finalizationResult);
   assert.deepEqual(migrated.reviewResult, completed.pipelineState.reviewResult);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
+
+  const versionTwelve = { ...completed.pipelineState };
+  delete versionTwelve.lazyCorrections;
+  delete versionTwelve.pendingLazyCorrection;
+  const current = migratePlanExecutionStateV12({
+    pipelineState: versionTwelve,
+  });
+  assert.equal(current.workflowState, "DONE");
+  assert.deepEqual(current.completedCommits, completed.pipelineState.completedCommits);
+  assert.deepEqual(current.finalizationResult, completed.pipelineState.finalizationResult);
+  assert.deepEqual(current.reviewResult, completed.pipelineState.reviewResult);
+  assert.doesNotThrow(() => normalizePipelineState(current));
 });
 
 test("migrates a consumed version-9 bootstrap diagnostic losslessly", async (t) => {
@@ -2864,7 +2898,7 @@ async function createFixture(
     revision: 1,
     runId,
     pipelineId: "plan-execution",
-    pipelineStateVersion: 12,
+    pipelineStateVersion: 13,
     projectPath,
     taskPath,
     roles: Object.fromEntries(
@@ -3213,7 +3247,7 @@ async function createFixture(
   ) {
     currentRun = {
       ...currentRun,
-      pipelineStateVersion: 12,
+      pipelineStateVersion: 13,
       pipelineState,
       pause,
       revision: currentRun.revision + 1,
@@ -7041,6 +7075,22 @@ test("rejects inconsistent persisted workflow state", async (t) => {
     };
   });
 
+  await rejectsState("lazy correction with an invalid diagnostic", (run) => {
+    run.pipelineState.lazyCorrections = [
+      {
+        attempt: 1,
+        fixRoundCharged: false,
+        step: 1,
+        phase: "CHECK_AND_FIX",
+        contentFingerprint: run.pipelineState.finalizedFingerprint,
+        validationInfrastructureFingerprint:
+          run.pipelineState.finalizationResult
+            .validationInfrastructureFingerprint,
+        diagnostics: [null],
+      },
+    ];
+  });
+
   await rejectsState("frozen compatibility re-entry", (run) => {
     Object.assign(run.pipelineState, {
       workflowState: "BOOTSTRAP",
@@ -7377,6 +7427,295 @@ test("runs lazy execution with one Worker source fork and no review roles", asyn
   );
 });
 
+test("automatically corrects invalid lazy check output in a fresh session", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    worker: [clarificationReady(), bootstrapReady("Worker")],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      { ...checkAndFix(), rejected: "not retained" },
+      checkAndFix(),
+      cleanConfirmation(),
+    ],
+  });
+
+  const completed = await fixture.run();
+  const correctionCall = fixture.calls.worker.find(({ prompt }) =>
+    prompt.includes("previous structured lazy checkpoint result was rejected"),
+  );
+  const correctionState = fixture.transitions.find(
+    ({ patch }) => patch?.pipelineState?.pendingLazyCorrection !== null &&
+      patch?.pipelineState?.pendingLazyCorrection !== undefined,
+  ).patch.pipelineState;
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(correctionCall.session, undefined);
+  assert.equal(correctionState.pendingLazyCorrection.phase, "CHECK_AND_FIX");
+  assert.equal(correctionState.pendingLazyCorrection.attempt, 1);
+  assert.equal(correctionState.pendingLazyCorrection.fixRoundCharged, false);
+  assert.equal(correctionState.lazyCorrections.length, 1);
+  assert.equal(completed.counters.fixRounds, 1);
+});
+
+test("corrects a classified lazy provider failure without retaining diagnostics", async (t) => {
+  let rejected = false;
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    worker: [clarificationReady(), bootstrapReady("Worker")],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmation(),
+    ],
+    onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        request.prompt.includes("If you find any problems, fix them") &&
+        !request.prompt.includes("Pending correction diagnostic batch") &&
+        !rejected
+      ) {
+        rejected = true;
+        const error = new Error("DO_NOT_PERSIST provider details");
+        error.failureClass = "structured-output";
+        throw error;
+      }
+    },
+  });
+
+  const completed = await fixture.run();
+  const correctionState = fixture.transitions.find(
+    ({ patch }) =>
+      patch?.pipelineState?.pendingLazyCorrection?.diagnostics?.[0]
+        ?.constraint === "provider-structured-output",
+  ).patch.pipelineState;
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(
+    correctionState.pendingLazyCorrection.diagnostics[0].constraint,
+    "provider-structured-output",
+  );
+  assert.doesNotMatch(JSON.stringify(fixture.transitions), /DO_NOT_PERSIST/u);
+});
+
+test("re-finalizes an invalid content-changing lazy check before correction", async (t) => {
+  let changed = false;
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    worker: [clarificationReady(), bootstrapReady("Worker")],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      { ...checkAndFix("CHANGED"), unexpected: "rejected" },
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmation(),
+    ],
+    async onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        request.prompt.includes("If you find any problems, fix them") &&
+        !changed
+      ) {
+        changed = true;
+        await writeFile(join(request.cwd, "invalid-lazy-fix.txt"), "fixed\n");
+      }
+    },
+  });
+
+  const completed = await fixture.run({ maxFixRoundsPerStep: 1 });
+  const finalizations = fixture.calls.worker.filter(({ prompt }) =>
+    prompt.includes("Run the complete project finalization procedure"),
+  );
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(finalizations.length, 2);
+  assert.equal(completed.counters.fixRounds, 1);
+  assert.ok(
+    fixture.transitions.some(
+      ({ patch }) =>
+        patch?.pipelineState?.workflowState === "FINALIZE" &&
+        patch.pipelineState.pendingLazyCorrection?.phase === "CHECK_AND_FIX",
+    ),
+  );
+  assert.ok(
+    fixture.transitions.some(
+      ({ patch }) =>
+        patch?.pipelineState?.pendingLazyCorrection?.fixRoundCharged === true,
+    ),
+  );
+});
+
+test("does not recount an invalid lazy mutation after finalization restores its fingerprint", async (t) => {
+  let changed = false;
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    worker: [clarificationReady(), bootstrapReady("Worker")],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      { ...checkAndFix("CHANGED"), unexpected: "rejected" },
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmation(),
+    ],
+    async onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        request.prompt.includes("If you find any problems, fix them") &&
+        !changed
+      ) {
+        changed = true;
+        await writeFile(join(request.cwd, "restored-lazy-fix.txt"), "fixed\n");
+      } else if (
+        role === "worker" &&
+        changed &&
+        request.prompt.includes("Run the complete project finalization procedure")
+      ) {
+        await rm(join(request.cwd, "restored-lazy-fix.txt"));
+      }
+    },
+  });
+
+  const completed = await fixture.run({ maxFixRoundsPerStep: 1 });
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.counters.fixRounds, 1);
+});
+
+test("corrects invalid lazy clean confirmation without changing its scope", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    worker: [clarificationReady(), bootstrapReady("Worker")],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      checkAndFix(),
+      { ...cleanConfirmation(), unexpected: "rejected" },
+      cleanConfirmation(),
+    ],
+  });
+
+  const completed = await fixture.run();
+  const correctionCall = fixture.calls.worker.find(({ prompt }) =>
+    prompt.includes("Pending correction diagnostic batch"),
+  );
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(correctionCall.access, "read-only");
+  assert.equal(correctionCall.session, undefined);
+  assert.equal(
+    completed.pipelineState.cleanConfirmationFingerprint,
+    completed.pipelineState.finalizedFingerprint,
+  );
+});
+
+test("pauses and explicitly resumes an exhausted lazy correction without recounting", async (t) => {
+  const invalid = { ...checkAndFix(), DO_NOT_PERSIST: "private output" };
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    worker: [clarificationReady(), bootstrapReady("Worker")],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      invalid,
+      invalid,
+      checkAndFix(),
+      cleanConfirmation(),
+    ],
+  });
+
+  const paused = await fixture.run();
+  const projected = planExecutionPipeline.projections.pause(paused);
+
+  assert.equal(paused.pause.reason, "lazy_output_invalid");
+  assert.equal(paused.pause.resumeState, "CHECK_AND_FIX");
+  assert.equal(paused.pipelineState.pendingLazyCorrection.attempt, 1);
+  assert.equal(paused.pipelineState.lazyCorrections.length, 1);
+  assert.equal(paused.counters.fixRounds, 0);
+  assert.doesNotMatch(JSON.stringify(paused), /private output/u);
+  assert.doesNotMatch(JSON.stringify(projected), /DO_NOT_PERSIST|private output/u);
+  assert.deepEqual(projected.nextActions, [
+    { type: "resume", action: null },
+  ]);
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.counters.fixRounds, 1);
+  assert.equal(
+    fixture.calls.worker.filter(({ prompt }) =>
+      prompt.includes("Pending correction diagnostic batch"),
+    ).length,
+    2,
+  );
+});
+
+test("reconstructs an interrupted pending lazy correction without recounting", async (t) => {
+  const processLoss = new Error("Process stopped during lazy correction.");
+  let interrupted = false;
+  let processStopped = false;
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    worker: [clarificationReady(), bootstrapReady("Worker")],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      { ...checkAndFix(), unexpected: "rejected" },
+      checkAndFix(),
+      cleanConfirmation(),
+    ],
+    onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        request.prompt.includes("Pending correction diagnostic batch") &&
+        !interrupted
+      ) {
+        interrupted = true;
+        processStopped = true;
+        throw processLoss;
+      }
+    },
+  });
+  const finishAgentTurn = fixture.runtime.finishAgentTurn;
+  const transition = fixture.runtime.transition;
+  fixture.runtime.finishAgentTurn = async (turn) => {
+    if (processStopped) {
+      throw processLoss;
+    }
+    return finishAgentTurn(turn);
+  };
+  fixture.runtime.transition = async (patch, options) => {
+    if (processStopped) {
+      throw processLoss;
+    }
+    return transition(patch, options);
+  };
+
+  await assert.rejects(fixture.run(), (cause) => cause === processLoss);
+  assert.deepEqual(fixture.currentRun.activeTurn, {
+    role: "worker",
+    phase: "check-and-fix",
+  });
+  assert.equal(fixture.currentRun.pipelineState.lazyCorrections.length, 1);
+  assert.equal(fixture.currentRun.pipelineState.pendingLazyCorrection.attempt, 1);
+  assert.equal(fixture.currentRun.counters.fixRounds ?? 0, 0);
+
+  processStopped = false;
+  fixture.runtime.finishAgentTurn = finishAgentTurn;
+  fixture.runtime.transition = transition;
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.counters.fixRounds, 1);
+  const correctionCalls = fixture.calls.worker.filter(({ prompt }) =>
+    prompt.includes("Pending correction diagnostic batch"),
+  );
+  assert.equal(correctionCalls.length, 2);
+  assert.ok(correctionCalls.every(({ session }) => session === undefined));
+});
+
 test("keeps one lazy Worker source fork across multiple commits", async (t) => {
   const plan = `## Commit 1: feat(test): add first lazy behavior
 
@@ -7552,7 +7891,7 @@ test("re-finalizes corrected evidence without requiring a content change", async
   assert.equal(fixture.calls.arbiter.length, 0);
 });
 
-test("rejects re-finalization without a confirmation finding", async (t) => {
+test("pauses repeated invalid re-finalization without a confirmation finding", async (t) => {
   const fixture = await createFixture(t, {
     mode: "lazy",
     worker: [clarificationReady(), bootstrapReady("Worker")],
@@ -7560,14 +7899,27 @@ test("rejects re-finalization without a confirmation finding", async (t) => {
       implementationCompleted(),
       finalizationPassed(),
       checkAndFix("REFINALIZE"),
+      checkAndFix("REFINALIZE"),
     ],
   });
 
-  await assert.rejects(
-    fixture.run(),
-    /requested re-finalization without a clean-confirmation finding/u,
+  const paused = await fixture.run();
+
+  assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(paused.pause.reason, "lazy_output_invalid");
+  assert.equal(paused.pause.resumeState, "CHECK_AND_FIX");
+  assert.deepEqual(
+    paused.pipelineState.pendingLazyCorrection.diagnostics,
+    [
+      {
+        role: "worker",
+        phase: "check-and-fix",
+        contract: "lazy-check-and-fix",
+        field: "status",
+        constraint: "requires-confirmation-finding",
+      },
+    ],
   );
-  assert.equal(fixture.currentRun.pipelineState.workflowState, "FAILED");
 });
 
 test("rejects repository mutation during lazy clean confirmation", async (t) => {

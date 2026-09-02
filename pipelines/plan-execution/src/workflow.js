@@ -24,6 +24,7 @@ import {
   FINDING_ARBITRATION_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
   IMPLEMENTATION_INSTRUCTIONS,
+  LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
   NO_DELEGATION_INSTRUCTIONS,
   PLAN_COMPATIBILITY_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
@@ -108,6 +109,7 @@ const RETRYABLE_PAUSE_REASONS = new Set([
   "finalization_skill_invalid",
   "finalization_skill_missing",
   "local_artifacts_not_ignored",
+  "lazy_output_invalid",
   "review_output_invalid",
   "unsafe_git_state",
 ]);
@@ -331,6 +333,17 @@ function reviewOutputContext() {
   });
 }
 
+function lazyOutputContext(phase) {
+  return Object.freeze({
+    role: "worker",
+    phase: phase === "CHECK_AND_FIX" ? "check-and-fix" : "clean-confirm",
+    contract:
+      phase === "CHECK_AND_FIX"
+        ? "lazy-check-and-fix"
+        : "lazy-clean-confirm",
+  });
+}
+
 function roleOutputContextFor(role, schema, checkpoint) {
   const phase =
     checkpoint === "validation-migration" ? checkpoint : "bootstrap";
@@ -348,6 +361,12 @@ function roleOutputContextFor(role, schema, checkpoint) {
   }
   if (schema === REVIEW_SCHEMA && role === "reviewer") {
     return reviewOutputContext();
+  }
+  if (schema === CHECK_AND_FIX_SCHEMA && role === "worker") {
+    return lazyOutputContext("CHECK_AND_FIX");
+  }
+  if (schema === CLEAN_CONFIRM_SCHEMA && role === "worker") {
+    return lazyOutputContext("CLEAN_CONFIRM");
   }
   return undefined;
 }
@@ -758,6 +777,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         pendingFinalizationCorrection: null,
         reviewCorrection: null,
         pendingReviewCorrection: null,
+        lazyCorrections: [],
+        pendingLazyCorrection: null,
         cleanConfirmationFingerprint: null,
         compatibilityCheckRequired: false,
         currentStep: null,
@@ -1121,6 +1142,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           findings: [],
           pendingCorrection: true,
           reviewReconsideration: [],
+          ...markPendingLazyCorrectionCharged(current),
         },
         {
           nextCounters: {
@@ -1308,6 +1330,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
                   findings: [],
                   pendingCorrection: true,
                   reviewReconsideration: [],
+                  ...(changedLazyCheck
+                    ? markPendingLazyCorrectionCharged(current)
+                    : {}),
                 }
               : {
                   ...current,
@@ -1362,7 +1387,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         throw invalidRoleOutput(
           `${role} returned invalid structured output.`,
           outputContext,
-          outputContext.contract === "review"
+          outputContext.contract === "review" ||
+            outputContext.contract.startsWith("lazy-")
             ? {
                 field: "result",
                 constraint: "provider-structured-output",
@@ -1592,6 +1618,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           finalizedFingerprint: null,
           reviewCorrection: null,
           pendingReviewCorrection: null,
+          lazyCorrections: [],
+          pendingLazyCorrection: null,
           cleanConfirmationFingerprint: null,
           requiredChecks: bootstrapDecision ? null : current.requiredChecks,
           validationInfrastructure: bootstrapDecision
@@ -1750,6 +1778,55 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       correction.validationInfrastructureFingerprint ===
         scope.validationInfrastructureFingerprint
     );
+  }
+
+  function lazyCorrectionScope(phase, current = state()) {
+    return Object.freeze({
+      attempt: 1,
+      fixRoundCharged: false,
+      step: current.currentStep,
+      phase,
+      contentFingerprint: current.finalizedFingerprint,
+      validationInfrastructureFingerprint:
+        current.finalizationResult.validationInfrastructureFingerprint,
+    });
+  }
+
+  function lazyCorrectionMatchesScope(correction, scope) {
+    return (
+      correction !== null &&
+      correction.attempt === scope.attempt &&
+      correction.step === scope.step &&
+      correction.phase === scope.phase &&
+      correction.contentFingerprint === scope.contentFingerprint &&
+      correction.validationInfrastructureFingerprint ===
+        scope.validationInfrastructureFingerprint
+    );
+  }
+
+  function lazyCorrectionAttempt(scope) {
+    return state().lazyCorrections.find((correction) =>
+      lazyCorrectionMatchesScope(correction, scope),
+    );
+  }
+
+  function markPendingLazyCorrectionCharged(current) {
+    const pending = current.pendingLazyCorrection;
+    if (
+      pending === null ||
+      pending.phase !== "CHECK_AND_FIX" ||
+      pending.fixRoundCharged
+    ) {
+      return {};
+    }
+    return {
+      lazyCorrections: current.lazyCorrections.map((correction) =>
+        lazyCorrectionMatchesScope(correction, pending)
+          ? { ...correction, fixRoundCharged: true }
+          : correction,
+      ),
+      pendingLazyCorrection: { ...pending, fixRoundCharged: true },
+    };
   }
 
   async function validationInfrastructureDiagnostics(result, context) {
@@ -2852,6 +2929,8 @@ ${step.body}${
         finalizedFingerprint: null,
         reviewCorrection: null,
         pendingReviewCorrection: null,
+        lazyCorrections: [],
+        pendingLazyCorrection: null,
         cleanConfirmationFingerprint: null,
         reviewResult: null,
         reviewedFingerprint: null,
@@ -3300,7 +3379,9 @@ ${
       {
         ...state(),
         workflowState:
-          state().settings.mode === "lazy" ? "CHECK_AND_FIX" : "REVIEW",
+          state().settings.mode === "lazy"
+            ? (state().pendingLazyCorrection?.phase ?? "CHECK_AND_FIX")
+            : "REVIEW",
         finalizationResult,
         finalizedFingerprint: fingerprint,
         cleanConfirmationFingerprint: null,
@@ -3343,9 +3424,91 @@ Candidate validation tuple and finalization evidence:
 ${JSON.stringify(current.finalizationResult, null, 2)}`;
   }
 
-  async function runCheckAndFixTurn() {
+  function lazyCorrectionPrompt(correction) {
+    return correction === null
+      ? ""
+      : `\n\n${LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS}\n\nPending correction diagnostic batch:\n${JSON.stringify(
+          correction.diagnostics,
+          null,
+          2,
+        )}`;
+  }
+
+  async function handleInvalidLazyOutput(cause, context, scope) {
+    if (cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT") {
+      throw cause;
+    }
+    const diagnostics = outputDiagnostics(cause, context).slice(
+      0,
+      MAX_DIAGNOSTIC_ITEMS,
+    );
     const current = state();
-    if (counters().fixRounds >= fixBudget()) {
+    const existing =
+      current.pendingLazyCorrection ?? lazyCorrectionAttempt(scope) ?? null;
+    const correction = {
+      ...scope,
+      fixRoundCharged:
+        scope.fixRoundCharged ||
+        existing?.fixRoundCharged === true ||
+        current.workflowState === "FINALIZE",
+      diagnostics,
+    };
+    if (existing === null) {
+      await transition(
+        {
+          ...state(),
+          lazyCorrections: [...state().lazyCorrections, correction],
+          pendingLazyCorrection: correction,
+        },
+        {
+          publicActivity: activity(
+            "worker",
+            context.phase,
+            "lazy-correction",
+            `Worker must correct ${diagnostics.length} ${context.contract} contract ${
+              diagnostics.length === 1 ? "violation" : "violations"
+            }.`,
+          ),
+        },
+      );
+      return state().workflowState === "FINALIZE" ? "defer" : "retry";
+    }
+    await transition(
+      {
+        ...state(),
+        workflowState: "WAITING_FOR_USER",
+        pendingLazyCorrection: correction,
+      },
+      {
+        pause: {
+          reason: "lazy_output_invalid",
+          code: "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+          explanation:
+            "The bounded automatic lazy checkpoint correction remains invalid. Retry the same correction after the backend can satisfy the unchanged contract.",
+          evidence: diagnostics.map(
+            ({ field, constraint }) =>
+              `Worker field ${field} violated ${constraint}.`,
+          ),
+          resumeState:
+            state().workflowState === "FINALIZE" ? "FINALIZE" : scope.phase,
+        },
+        publicActivity: activity(
+          "runner",
+          context.phase,
+          "paused",
+          "Plan execution paused: lazy_output_invalid.",
+        ),
+      },
+    );
+    return "pause";
+  }
+
+  async function runCheckAndFixTurn() {
+    let current = state();
+    if (
+      current.pendingLazyCorrection === null &&
+      counters().fixRounds >= fixBudget()
+    ) {
       await pause("fix_limit_reached", {
         fixRounds: counters().fixRounds,
         resumeState: "CHECK_AND_FIX",
@@ -3353,7 +3516,10 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
       return false;
     }
     const stableFindingIds = exhaustedStableFindingIds();
-    if (stableFindingIds.length > 0) {
+    if (
+      current.pendingLazyCorrection === null &&
+      stableFindingIds.length > 0
+    ) {
       await pause("no_progress", {
         findingIds: stableFindingIds,
         reason: "stable_findings",
@@ -3362,6 +3528,7 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
       return false;
     }
     if (
+      current.pendingLazyCorrection === null &&
       current.blockedSinceStagnation >=
       current.settings.stagnationWindowRounds
     ) {
@@ -3373,11 +3540,18 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
       return false;
     }
     const step = planStep();
-    const beforeFingerprint = await contentFingerprint();
-    const output = await runRole(
-      "worker",
-      CHECK_AND_FIX_SCHEMA,
-      (evidence) => `${CHECK_AND_FIX_INSTRUCTIONS}
+    const context = lazyOutputContext("CHECK_AND_FIX");
+    while (true) {
+      current = state();
+      const correction = current.pendingLazyCorrection;
+      const scope = correction ?? lazyCorrectionScope("CHECK_AND_FIX", current);
+      const alreadyCharged = correction?.fixRoundCharged === true;
+      const beforeFingerprint = await contentFingerprint();
+      try {
+        const output = await runRole(
+          "worker",
+          CHECK_AND_FIX_SCHEMA,
+          (evidence) => `${CHECK_AND_FIX_INSTRUCTIONS}
 
 ${evidence}
 
@@ -3389,133 +3563,181 @@ ${step.body}
 ${lazyValidationPrompt(state())}
 
 Concrete findings from the preceding clean confirmation:
-${JSON.stringify(state().findings, null, 2)}`,
-      {
-        access: "workspace-write",
-        checkpoint: `lazy-commit:${current.currentStep}`,
-        recoveryContext: resolvedContext(),
-      },
-    );
-    if (output === null) {
-      return false;
-    }
-    const result = normalizeCheckAndFixResult(output);
-    const changed = (await contentFingerprint()) !== beforeFingerprint;
-    if (
-      (result.status === "CHANGED") !== changed &&
-      !["BLOCKED", "PRODUCT_DECISION_REQUIRED"].includes(result.status)
-    ) {
-      throw workflowError(
-        "Worker check/fix status does not match the repository change.",
-        "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
-      );
-    }
-    if (result.status === "REFINALIZE" && current.findings.length === 0) {
-      throw workflowError(
-        "Worker requested re-finalization without a clean-confirmation finding.",
-        "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
-      );
-    }
-    if (result.status === "PRODUCT_DECISION_REQUIRED") {
-      return productDecision(result.decision, "IMPLEMENT");
-    }
-    if (result.status === "BLOCKED") {
-      await pause("environment_blocked", {
-        explanation: result.reason,
-        evidence: result.evidence,
-        resumeState: changed ? "FINALIZE" : "CHECK_AND_FIX",
-      });
-      return false;
-    }
-    if (changed) {
-      await transition(
-        { ...state() },
-        {
-          publicActivity: activity(
-            "worker",
-            "check-and-fix",
-            "changed",
-            "Worker check/fix changed content; full finalization is required again.",
-          ),
-        },
-      );
-      return true;
-    }
-    if (result.status === "REFINALIZE") {
-      await transition(
-        {
-          ...state(),
-          workflowState: "FINALIZE",
-          finalizationResult: null,
-          finalizedFingerprint: null,
-          reviewCorrection: null,
-          pendingReviewCorrection: null,
-          cleanConfirmationFingerprint: null,
-          reviewResult: null,
-          reviewedFingerprint: null,
-          previousFindings:
-            current.findings.length === 0
-              ? current.previousFindings
-              : current.findings,
-          findings: [],
-          pendingCorrection: true,
-          reviewReconsideration: [],
-        },
-        {
-          nextCounters: {
-            ...counters(),
-            fixRounds: counters().fixRounds + 1,
+${JSON.stringify(state().findings, null, 2)}${lazyCorrectionPrompt(correction)}`,
+          {
+            access: "workspace-write",
+            checkpoint:
+              correction === null
+                ? `lazy-commit:${current.currentStep}`
+                : `lazy-correction:${current.currentStep}:check-and-fix`,
+            freshSession: correction !== null,
+            recoveryContext: resolvedContext(),
           },
-          publicActivity: activity(
-            "worker",
-            "check-and-fix",
-            "refinalize",
-            "Worker requested corrected finalization evidence without a content change.",
-          ),
-        },
-      );
-      return true;
+        );
+        if (output === null) {
+          return false;
+        }
+        const result = normalizeCheckAndFixResult(output);
+        const changed = (await contentFingerprint()) !== beforeFingerprint;
+        if (
+          (result.status === "CHANGED") !== changed &&
+          !["BLOCKED", "PRODUCT_DECISION_REQUIRED"].includes(result.status)
+        ) {
+          throw invalidRoleOutput(
+            "Worker check/fix status does not match the repository change.",
+            context,
+            { field: "status", constraint: "matches-repository-mutation" },
+          );
+        }
+        if (result.status === "REFINALIZE" && current.findings.length === 0) {
+          throw invalidRoleOutput(
+            "Worker requested re-finalization without a clean-confirmation finding.",
+            context,
+            { field: "status", constraint: "requires-confirmation-finding" },
+          );
+        }
+        if (result.status === "PRODUCT_DECISION_REQUIRED") {
+          return productDecision(result.decision, "IMPLEMENT");
+        }
+        if (result.status === "BLOCKED") {
+          if (correction !== null) {
+            await transition({ ...state(), pendingLazyCorrection: null });
+          }
+          await pause("environment_blocked", {
+            explanation: result.reason,
+            evidence: result.evidence,
+            resumeState: changed ? "FINALIZE" : "CHECK_AND_FIX",
+          });
+          return false;
+        }
+        if (changed) {
+          await transition(
+            { ...state(), pendingLazyCorrection: null },
+            {
+              publicActivity: activity(
+                "worker",
+                "check-and-fix",
+                "changed",
+                "Worker check/fix changed content; full finalization is required again.",
+              ),
+            },
+          );
+          return true;
+        }
+        const nextCounters = alreadyCharged
+          ? counters()
+          : { ...counters(), fixRounds: counters().fixRounds + 1 };
+        if (result.status === "REFINALIZE") {
+          await transition(
+            {
+              ...state(),
+              workflowState: "FINALIZE",
+              finalizationResult: null,
+              finalizedFingerprint: null,
+              reviewCorrection: null,
+              pendingReviewCorrection: null,
+              pendingLazyCorrection: null,
+              cleanConfirmationFingerprint: null,
+              reviewResult: null,
+              reviewedFingerprint: null,
+              previousFindings:
+                current.findings.length === 0
+                  ? current.previousFindings
+                  : current.findings,
+              findings: [],
+              pendingCorrection: true,
+              reviewReconsideration: [],
+            },
+            {
+              nextCounters,
+              publicActivity: activity(
+                "worker",
+                "check-and-fix",
+                "refinalize",
+                "Worker requested corrected finalization evidence without a content change.",
+              ),
+            },
+          );
+          return true;
+        }
+        const fixingConfirmationFindings = current.findings.length > 0;
+        await transition(
+          {
+            ...state(),
+            workflowState: "CLEAN_CONFIRM",
+            pendingLazyCorrection: null,
+            reviewResult: null,
+            reviewedFingerprint: null,
+            previousFindings: fixingConfirmationFindings
+              ? current.findings
+              : current.previousFindings,
+            findings: [],
+            pendingCorrection:
+              current.pendingCorrection || fixingConfirmationFindings,
+          },
+          {
+            nextCounters,
+            publicActivity: activity(
+              "worker",
+              "check-and-fix",
+              "unchanged",
+              "Worker check/fix reported unchanged content; clean confirmation is required.",
+            ),
+          },
+        );
+        return true;
+      } catch (cause) {
+        const resolution = await handleInvalidLazyOutput(cause, context, scope);
+        if (resolution === "retry") {
+          continue;
+        }
+        return resolution === "defer";
+      }
     }
-    const fixingConfirmationFindings = current.findings.length > 0;
-    await transition(
-      {
-        ...state(),
-        workflowState: "CLEAN_CONFIRM",
-        reviewResult: null,
-        reviewedFingerprint: null,
-        previousFindings: fixingConfirmationFindings
-          ? current.findings
-          : current.previousFindings,
-        findings: [],
-        pendingCorrection:
-          current.pendingCorrection || fixingConfirmationFindings,
-      },
-      {
-        nextCounters: {
-          ...counters(),
-          fixRounds: counters().fixRounds + 1,
-        },
-        publicActivity: activity(
-          "worker",
-          "check-and-fix",
-          "unchanged",
-          "Worker check/fix reported unchanged content; clean confirmation is required.",
-        ),
-      },
-    );
-    return true;
   }
 
   async function runCleanConfirmTurn() {
-    const current = state();
     const step = planStep();
-    const inspectedFingerprint = current.finalizedFingerprint;
-    const inspectedValidationFingerprint =
-      current.finalizationResult.validationInfrastructureFingerprint;
-    const output = await runRole(
-      "worker",
-      CLEAN_CONFIRM_SCHEMA,
-      (evidence) => `${CLEAN_CONFIRM_INSTRUCTIONS}
+    const context = lazyOutputContext("CLEAN_CONFIRM");
+    while (true) {
+      const current = state();
+      const correction = current.pendingLazyCorrection;
+      const scope = correction ?? lazyCorrectionScope("CLEAN_CONFIRM", current);
+      const inspectedFingerprint = current.finalizedFingerprint;
+      const inspectedValidationFingerprint =
+        current.finalizationResult.validationInfrastructureFingerprint;
+      if (
+        correction !== null &&
+        (correction.contentFingerprint !== inspectedFingerprint ||
+          correction.validationInfrastructureFingerprint !==
+            inspectedValidationFingerprint)
+      ) {
+        await transition(
+          {
+            ...current,
+            workflowState: "WAITING_FOR_USER",
+            pendingLazyCorrection: null,
+          },
+          {
+            pause: {
+              reason: "unsafe_git_state",
+              code: "ERR_LAZY_CORRECTION_SCOPE_CHANGED",
+            },
+            publicActivity: activity(
+              "runner",
+              "clean-confirm",
+              "paused",
+              "Plan execution paused: unsafe_git_state.",
+            ),
+          },
+        );
+        return false;
+      }
+      try {
+        const output = await runRole(
+          "worker",
+          CLEAN_CONFIRM_SCHEMA,
+          (evidence) => `${CLEAN_CONFIRM_INSTRUCTIONS}
 
 ${evidence}
 
@@ -3530,116 +3752,136 @@ Validation-infrastructure fingerprint: ${inspectedValidationFingerprint}
 ${lazyValidationPrompt(state())}
 
 Previous clean-confirmation findings for this step:
-${JSON.stringify(state().previousFindings, null, 2)}`,
-      {
-        checkpoint: `lazy-commit:${current.currentStep}`,
-        recoveryContext: resolvedContext(),
-      },
-    );
-    if (output === null) {
-      return false;
+${JSON.stringify(state().previousFindings, null, 2)}${lazyCorrectionPrompt(correction)}`,
+          {
+            checkpoint:
+              correction === null
+                ? `lazy-commit:${current.currentStep}`
+                : `lazy-correction:${current.currentStep}:clean-confirm`,
+            freshSession: correction !== null,
+            recoveryContext: resolvedContext(),
+          },
+        );
+        if (output === null) {
+          return false;
+        }
+        const result = normalizeCleanConfirmationResult(
+          output,
+          current.previousFindings,
+        );
+        const confirmedFingerprint = await contentFingerprint();
+        const confirmedValidationFingerprint =
+          await validationInfrastructureFingerprint(
+            current.finalizationResult.validationInfrastructure,
+          );
+        if (
+          confirmedFingerprint !== inspectedFingerprint ||
+          confirmedValidationFingerprint !== inspectedValidationFingerprint
+        ) {
+          await transition({ ...state(), pendingLazyCorrection: null });
+          await pause("unsafe_git_state", {
+            code: "ERR_CLEAN_CONFIRMATION_FINGERPRINT_CHANGED",
+          });
+          return false;
+        }
+        if (result.status === "PRODUCT_DECISION_REQUIRED") {
+          return productDecision(result.decision, "IMPLEMENT");
+        }
+        const validationChanged = current.finalizationResult.validationChanged;
+        if (
+          (validationChanged && result.validationChange === "UNCHANGED") ||
+          (!validationChanged && result.validationChange !== "UNCHANGED")
+        ) {
+          throw invalidRoleOutput(
+            "Clean confirmation returned an inconsistent validation-change decision.",
+            context,
+            {
+              field: "validationChange",
+              constraint: "matches-finalization-validation-change",
+            },
+          );
+        }
+        const reviewResult = {
+          status: result.status === "CLEAN" ? "APPROVED" : "FINDINGS",
+          validationChange: result.validationChange,
+          validationEvidence: result.validationEvidence,
+          fingerprint: confirmedFingerprint,
+        };
+        const acceptedValidation =
+          result.validationChange === "ACCEPTED"
+            ? {
+                requiredChecks: current.finalizationResult.requiredChecks,
+                validationInfrastructure:
+                  current.finalizationResult.validationInfrastructure,
+                validationInfrastructureFingerprint:
+                  current.finalizationResult
+                    .validationInfrastructureFingerprint,
+              }
+            : {};
+        if (result.status === "FINDINGS") {
+          const progress = correctionUpdate({
+            fingerprint: confirmedFingerprint,
+            finalizationIssueIds: [],
+            findingIds: result.findings.map(({ id }) => id),
+          });
+          await transition(
+            {
+              ...state(),
+              ...acceptedValidation,
+              workflowState: "CHECK_AND_FIX",
+              pendingLazyCorrection: null,
+              reviewResult,
+              reviewedFingerprint: confirmedFingerprint,
+              findings: result.findings,
+              previousFindings: result.findings,
+              correctionHistory: progress.history,
+              sameFindingRounds: progress.sameFindingRounds,
+              pendingCorrection: false,
+              blockedSinceStagnation: progress.blockedSinceStagnation,
+            },
+            {
+              nextCounters: progress.counters,
+              publicActivity: activity(
+                "worker",
+                "clean-confirm",
+                "findings",
+                `Clean confirmation returned ${result.findings.length} blocking findings.`,
+              ),
+            },
+          );
+          return true;
+        }
+        await transition(
+          {
+            ...state(),
+            ...acceptedValidation,
+            workflowState: "COMMIT",
+            pendingLazyCorrection: null,
+            reviewResult,
+            reviewedFingerprint: confirmedFingerprint,
+            cleanConfirmationFingerprint: confirmedFingerprint,
+            findings: [],
+            previousFindings: [],
+            pendingCorrection: false,
+          },
+          {
+            publicActivity: activity(
+              "worker",
+              "clean-confirm",
+              "clean",
+              "Worker clean confirmation accepted for unchanged finalized content.",
+            ),
+          },
+        );
+        return true;
+      } catch (cause) {
+        const resolution = await handleInvalidLazyOutput(cause, context, scope);
+        if (resolution === "retry") {
+          continue;
+        }
+        return resolution === "defer";
+      }
     }
-    const result = normalizeCleanConfirmationResult(
-      output,
-      current.previousFindings,
-    );
-    const confirmedFingerprint = await contentFingerprint();
-    const confirmedValidationFingerprint =
-      await validationInfrastructureFingerprint(
-        current.finalizationResult.validationInfrastructure,
-      );
-    if (
-      confirmedFingerprint !== inspectedFingerprint ||
-      confirmedValidationFingerprint !== inspectedValidationFingerprint
-    ) {
-      await pause("unsafe_git_state", {
-        code: "ERR_CLEAN_CONFIRMATION_FINGERPRINT_CHANGED",
-      });
-      return false;
-    }
-    if (result.status === "PRODUCT_DECISION_REQUIRED") {
-      return productDecision(result.decision, "IMPLEMENT");
-    }
-    const validationChanged = current.finalizationResult.validationChanged;
-    if (
-      (validationChanged && result.validationChange === "UNCHANGED") ||
-      (!validationChanged && result.validationChange !== "UNCHANGED")
-    ) {
-      throw workflowError(
-        "Clean confirmation returned an inconsistent validation-change decision.",
-        "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
-      );
-    }
-    const reviewResult = {
-      status: result.status === "CLEAN" ? "APPROVED" : "FINDINGS",
-      validationChange: result.validationChange,
-      validationEvidence: result.validationEvidence,
-      fingerprint: confirmedFingerprint,
-    };
-    const acceptedValidation =
-      result.validationChange === "ACCEPTED"
-        ? {
-            requiredChecks: current.finalizationResult.requiredChecks,
-            validationInfrastructure:
-              current.finalizationResult.validationInfrastructure,
-            validationInfrastructureFingerprint:
-              current.finalizationResult.validationInfrastructureFingerprint,
-          }
-        : {};
-    if (result.status === "FINDINGS") {
-      const correction = correctionUpdate({
-        fingerprint: confirmedFingerprint,
-        finalizationIssueIds: [],
-        findingIds: result.findings.map(({ id }) => id),
-      });
-      await transition(
-        {
-          ...state(),
-          ...acceptedValidation,
-          workflowState: "CHECK_AND_FIX",
-          reviewResult,
-          reviewedFingerprint: confirmedFingerprint,
-          findings: result.findings,
-          previousFindings: result.findings,
-          correctionHistory: correction.history,
-          sameFindingRounds: correction.sameFindingRounds,
-          pendingCorrection: false,
-          blockedSinceStagnation: correction.blockedSinceStagnation,
-        },
-        {
-          nextCounters: correction.counters,
-          publicActivity: activity(
-            "worker",
-            "clean-confirm",
-            "findings",
-            `Clean confirmation returned ${result.findings.length} blocking findings.`,
-          ),
-        },
-      );
-      return true;
-    }
-    await transition(
-      {
-        ...state(),
-        ...acceptedValidation,
-        workflowState: "COMMIT",
-        reviewResult,
-        reviewedFingerprint: confirmedFingerprint,
-        cleanConfirmationFingerprint: confirmedFingerprint,
-        findings: [],
-        previousFindings: [],
-        pendingCorrection: false,
-      },
-      {
-        publicActivity: activity(
-          "worker",
-          "clean-confirm",
-          "clean",
-          "Worker clean confirmation accepted for unchanged finalized content.",
-        ),
-      },
-    );
-    return true;
   }
 
   async function runReviewTurn() {
@@ -4850,6 +5092,8 @@ ${step.subject}`),
         pendingFinalizationCorrection: null,
         reviewCorrection: null,
         pendingReviewCorrection: null,
+        lazyCorrections: [],
+        pendingLazyCorrection: null,
         pendingCommit: null,
         completedCommits,
       },
@@ -4907,6 +5151,7 @@ ${step.subject}`),
             "finalization_cannot_pass",
             "finalization_skill_invalid",
             "finalization_skill_missing",
+            "lazy_output_invalid",
             "review_output_invalid",
           ].includes(currentRun.pause.reason) &&
             [
