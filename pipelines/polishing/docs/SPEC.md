@@ -415,9 +415,12 @@ test runners, validation configuration, the inventory, or its file set to
 evade an environment blocker.
 
 Each runner result retains only bounded status, exit/signal/timeout data,
-command identity, and fixed evidence; raw process output is discarded. Before
-and after execution, the shared root service rejects workspace, index, history,
-ref, remote, or identity mutation and recomputes validation-infrastructure
+command identity, and fixed evidence; raw process output is discarded. Every
+completed, readiness-confirmed command gives remaining descendants one bounded
+grace period to retire naturally regardless of exit code before bounded
+TERM/KILL cleanup; timeout cleanup starts immediately. Before and after
+execution, the shared root service rejects workspace, index, history, ref,
+remote, or identity mutation and recomputes validation-infrastructure
 fingerprints. Missing isolation, an unterminated process tree, a changed
 binding, a non-allowlisted command, infrastructure drift, or mutation fails
 closed. A bounded environment failure pauses at `FINALIZE`; resume reuses the

@@ -450,6 +450,126 @@ test("terminates persistent descendants after successful trusted commands", asyn
   assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
 });
 
+test("preserves a failed trusted command after descendants retire", async (t) => {
+  const projectPath = await repository(t);
+  const processPath = await mkdtemp(
+    join(tmpdir(), "agent-runner-failed-retiring-tree-"),
+  );
+  t.after(() => rm(processPath, { recursive: true, force: true }));
+  const pidPath = join(processPath, "child.pid");
+  const childSource = `
+    const { writeFileSync } = require("node:fs");
+    writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+    process.send("ready");
+    setTimeout(() => process.exit(0), 100);
+  `;
+  const parentSource = `
+    const { spawn } = require("node:child_process");
+    const { writeSync } = require("node:fs");
+    const child = spawn(process.execPath, ["--eval", ${JSON.stringify(childSource)}], {
+      stdio: ["ignore", "ignore", "ignore", "ipc"],
+    });
+    child.once("message", () => {
+      writeSync(3, Buffer.from([1]));
+      process.exit(7);
+    });
+    child.once("error", () => process.exit(1));
+  `;
+
+  const result = await runExactCommand(
+    {
+      executable: process.execPath,
+      arguments: ["--eval", parentSource],
+    },
+    {
+      cwd: projectPath,
+      environment: process.env,
+      readinessRequired: true,
+      terminationGraceMs: 500,
+      timeoutMs: 1_000,
+    },
+  );
+
+  assert.deepEqual(result, {
+    status: "FAIL",
+    exitCode: 7,
+    signal: null,
+    timedOut: false,
+    reason: "exit",
+  });
+  const childPid = Number.parseInt(await readFile(pidPath, "utf8"), 10);
+  assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
+});
+
+test("terminates persistent descendants after failed trusted commands", async (t) => {
+  const projectPath = await repository(t);
+  const processPath = await mkdtemp(
+    join(tmpdir(), "agent-runner-failed-leaked-tree-"),
+  );
+  const pidPath = join(processPath, "child.pid");
+  t.after(async () => {
+    try {
+      const childPid = Number.parseInt(await readFile(pidPath, "utf8"), 10);
+      try {
+        process.kill(childPid, "SIGKILL");
+      } catch (cause) {
+        if (cause?.code !== "ESRCH") {
+          throw cause;
+        }
+      }
+    } catch (cause) {
+      if (cause?.code !== "ENOENT") {
+        throw cause;
+      }
+    } finally {
+      await rm(processPath, { recursive: true, force: true });
+    }
+  });
+  const childSource = `
+    const { writeFileSync } = require("node:fs");
+    writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+    process.on("SIGTERM", () => {});
+    process.send("ready");
+    setInterval(() => {}, 1_000);
+  `;
+  const parentSource = `
+    const { spawn } = require("node:child_process");
+    const { writeSync } = require("node:fs");
+    const child = spawn(process.execPath, ["--eval", ${JSON.stringify(childSource)}], {
+      stdio: ["ignore", "ignore", "ignore", "ipc"],
+    });
+    child.once("message", () => {
+      writeSync(3, Buffer.from([1]));
+      process.exit(7);
+    });
+    child.once("error", () => process.exit(1));
+  `;
+
+  const result = await runExactCommand(
+    {
+      executable: process.execPath,
+      arguments: ["--eval", parentSource],
+    },
+    {
+      cwd: projectPath,
+      environment: process.env,
+      readinessRequired: true,
+      terminationGraceMs: 100,
+      timeoutMs: 1_000,
+    },
+  );
+
+  assert.deepEqual(result, {
+    status: "BLOCKED",
+    exitCode: null,
+    signal: null,
+    timedOut: false,
+    reason: "process-tree",
+  });
+  const childPid = Number.parseInt(await readFile(pidPath, "utf8"), 10);
+  assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
+});
+
 test("terminates a timed-out trusted command's complete process tree", async (t) => {
   const projectPath = await repository(t);
   const processPath = await mkdtemp(join(tmpdir(), "agent-runner-tree-"));

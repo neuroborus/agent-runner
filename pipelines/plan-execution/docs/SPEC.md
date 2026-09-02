@@ -1627,11 +1627,12 @@ same mount, network, and PID namespaces; it cannot acquire host mounts or
 networking and is retired with the complete process tree. Remote network and
 filesystem writes, hosting credentials, Git credential helpers, and ambient
 authentication variables remain unavailable. The runner supervises the
-complete process tree with a private PID namespace and outer process group. A
-successfully completed command gives remaining descendants one bounded grace
-period to retire naturally before bounded TERM/KILL cleanup; timeout cleanup
-starts immediately. A one-byte signal from inside the completed isolation
-profile distinguishes setup denial from a nonzero validation-command exit
+complete process tree with a private PID namespace and outer process group.
+Every completed, readiness-confirmed command gives remaining descendants one
+bounded grace period to retire naturally regardless of exit code before bounded
+TERM/KILL cleanup; timeout cleanup starts immediately. A one-byte signal from
+inside the completed isolation profile distinguishes setup denial from a
+nonzero validation-command exit
 without retaining stderr or other native output. A repository snapshot
 before and after every trusted command
 rejects workspace, index, history/ref, remote-configuration, or Git-identity
