@@ -973,13 +973,16 @@ writes to the workspace and Git metadata, and set
 without a prompt only inside the required native sandbox. Unsandboxed fallback
 and command network access remain disabled. On Linux, advertise read-only,
 workspace-write, Git-metadata-blocking, and remote-write-blocking capabilities
-only after a fixed, model-free `unshare`/inert-executable probe proves the
-nested user namespace and UID/GID mapping operation required by that native
-sandbox. Use the credential-filtered command environment, bounded output, and
-no shell, selected profile, authentication, or model call; reduce failures to a
-boolean without retaining host diagnostics. The opt-in real Claude smoke test
-must exercise a representative repository-inspection command through this
-exact envelope.
+only after a fixed, model-free exact-policy probe proves the Unix-socket denial
+required by that native sandbox. Invoke bubblewrap directly with fixed
+arguments for the outer user, PID, mount, and network namespaces, and run
+`/usr/bin/true` through the resolved Claude executable's embedded
+`apply-seccomp` helper. Use the credential-filtered command environment,
+bounded output and time, and no shell, selected profile, authentication, or
+model call; reduce failures to a boolean without retaining host diagnostics. A
+generic user-namespace check is not evidence for this policy. The opt-in real
+Claude smoke test must exercise a representative repository-inspection command
+through this exact envelope.
 
 Worker default:
 

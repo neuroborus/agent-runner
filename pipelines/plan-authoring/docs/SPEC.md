@@ -65,12 +65,16 @@ later independent run and is not exposed through lazy-run state. Resolved roles
 and settings are persisted and not reloaded on resume.
 
 On Linux, every Claude role that performs a read-only turn requires the
-adapter's fixed, model-free nested-user-namespace proof in addition to its CLI
-and native sandbox dependencies. The probe uses no selected profile,
-authentication, or model call and retains no host diagnostic. It remains
-independent from the Runner-owned local-commit executor probe, which this
-read-only pipeline does not require; native session and structured-output
-capabilities retain their existing CLI-based semantics.
+adapter's fixed, model-free exact-policy proof in addition to its CLI and native
+sandbox dependencies. Through fixed no-shell bubblewrap arguments, the probe
+runs an inert command through the resolved Claude executable's embedded
+`apply-seccomp` helper and the outer user-namespace shape required by
+`allowAllUnixSockets: false`. It uses the credential-filtered environment,
+bounded time and output, no selected profile, authentication, or model call,
+and retains no host diagnostic. It remains independent from the Runner-owned
+local-commit executor probe, which this read-only pipeline does not require;
+native session and structured-output capabilities retain their existing
+CLI-based semantics.
 
 A configured runner artifact root does not affect this pipeline. Its task-owned
 `clarifications.md` and `plan.md` remain beside `task.md`.

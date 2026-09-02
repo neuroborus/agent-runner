@@ -85,10 +85,13 @@ autonomous safe content writes, remote-write blocking, and the explicit
 `gitMetadataWriteBlocked` guarantee. Codex satisfies it through workspace-write
 isolation; Claude satisfies it through its Git-directory write and `git add`
 denials. On Linux, Claude advertises those turn capabilities only when a fixed,
-model-free nested-user-namespace and UID/GID-mapping probe succeeds under the
-credential-filtered command environment. It uses bounded output, retains no
-host diagnostic, and does not apply a profile, authenticate, or invoke a model.
-This native-turn proof remains independent from the Runner-owned local-commit
+model-free exact-policy probe succeeds under the credential-filtered command
+environment. Fixed no-shell bubblewrap arguments reproduce the outer user,
+PID, mount, and network namespace shape for `allowAllUnixSockets: false` and
+run an inert command through the resolved Claude executable's embedded
+`apply-seccomp` helper. The probe has bounded output and time, retains no host
+diagnostic, and does not apply a profile, authenticate, or invoke a model. This
+native-turn proof remains independent from the Runner-owned local-commit
 executor proof, which polishing never requires; structured-output and native
 session capabilities remain CLI-derived. Neither backend receives broader
 `.git` access for polishing.

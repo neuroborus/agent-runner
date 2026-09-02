@@ -1056,6 +1056,8 @@ export function createClaudeAdapter(options = {}) {
     let localCommitExecutorAvailable = false;
     if (cliSupported && platform === "linux" && socatAvailable) {
       nativeSandboxAvailable = await probeClaudeNativeSandbox({
+        bubblewrapBinary: BUBBLEWRAP_BINARY,
+        claudeBinary,
         env: commandEnvironment,
         execute,
       });

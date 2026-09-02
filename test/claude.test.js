@@ -84,6 +84,16 @@ function option(argumentsList, name) {
   return index === -1 ? undefined : argumentsList[index + 1];
 }
 
+function isNativeSandboxProbe({ file, argumentsList }) {
+  return file === "bwrap" && argumentsList.includes("apply-seccomp");
+}
+
+function localCommitSandboxCalls(fixture) {
+  return fixture.calls.filter(
+    (call) => call.file === "bwrap" && !isNativeSandboxProbe(call),
+  );
+}
+
 function createFixture({
   env,
   handle,
@@ -114,7 +124,7 @@ function createFixture({
     if (file === "socat") {
       return { stdout: "socat version 1.8", stderr: "" };
     }
-    if (file === "/usr/bin/unshare") {
+    if (isNativeSandboxProbe(call)) {
       if (!nativeSandbox) {
         throw new Error("/proc/self/setgroups host-secret-value");
       }
@@ -228,15 +238,31 @@ test("constructs and probes enforceable Claude capabilities", async () => {
       ["claude", "--version"],
       ["claude", "--help"],
       ["socat", "-V"],
-      ["/usr/bin/unshare", "--user"],
+      ["bwrap", "--new-session"],
       ["bwrap", "--die-with-parent"],
     ],
   );
   const nativeSandboxCall = fixture.calls[3];
   assert.deepEqual(nativeSandboxCall.argumentsList, [
-    "--user",
-    "--map-root-user",
+    "--new-session",
+    "--die-with-parent",
+    "--unshare-net",
+    "--ro-bind",
+    "/",
+    "/",
+    "--dev",
+    "/dev",
+    "--unshare-pid",
+    "--unshare-user",
+    "--cap-drop",
+    "ALL",
+    "--proc",
+    "/proc",
+    "--setenv",
+    "ARGV0",
+    "apply-seccomp",
     "--",
+    "claude",
     "/usr/bin/true",
   ]);
   assert.equal(nativeSandboxCall.options.timeout, 10_000);
@@ -247,6 +273,10 @@ test("constructs and probes enforceable Claude capabilities", async () => {
     fixture.calls
       .filter(({ file }) => file === "claude")
       .every(({ argumentsList }) => !argumentsList.includes("--model")),
+  );
+  assert.equal(
+    fixture.calls.some(({ file }) => file === "/usr/bin/unshare"),
+    false,
   );
   assert.strictEqual(
     await fixture.adapter.probe(),
@@ -358,7 +388,7 @@ test("keeps native-turn and local-commit isolation proofs independent", async ()
     },
   );
   const nativeSandboxCall = incompatibleNativeSandbox.calls.find(
-    ({ file }) => file === "/usr/bin/unshare",
+    isNativeSandboxProbe,
   );
   assert.equal(nativeSandboxCall.options.env.ANTHROPIC_API_KEY, undefined);
   assert.equal(nativeSandboxCall.options.env.HTTPS_PROXY, undefined);
@@ -367,10 +397,21 @@ test("keeps native-turn and local-commit isolation proofs independent", async ()
     nativeSandboxCall.options.env.CLAUDE_CONFIG_DIR,
     "/profiles/current",
   );
+  assert.ok(!nativeSandboxCall.argumentsList.includes("/profiles/work"));
   assert.equal(
     incompatibleNativeSandbox.calls.filter(({ file }) => file === "bwrap")
       .length,
+    2,
+  );
+  assert.equal(
+    incompatibleNativeSandbox.calls.filter(isNativeSandboxProbe).length,
     1,
+  );
+  assert.equal(
+    incompatibleNativeSandbox.calls.some(
+      ({ file }) => file === "/usr/bin/unshare",
+    ),
+    false,
   );
   assert.deepEqual(
     incompatibleNativeSandbox.calls
@@ -1178,10 +1219,7 @@ test("keeps a usage-rejected local commit unambiguous", async () => {
       error.effectStarted === false,
   );
   assert.equal(turnCalls(fixture).length, 1);
-  assert.equal(
-    fixture.calls.filter(({ file }) => file === "bwrap").length,
-    1,
-  );
+  assert.equal(localCommitSandboxCalls(fixture).length, 1);
 });
 
 test("classifies fresh-turn profile, authentication, and provider failures", async (t) => {
@@ -1268,10 +1306,7 @@ test("classifies fresh-turn profile, authentication, and provider failures", asy
         },
       );
       assert.equal(turnCalls(localCommitFixture).length, 1);
-      assert.equal(
-        localCommitFixture.calls.filter(({ file }) => file === "bwrap").length,
-        1,
-      );
+      assert.equal(localCommitSandboxCalls(localCommitFixture).length, 1);
     });
   }
 });
@@ -1529,7 +1564,7 @@ test("creates one exact authorized commit in a networkless sandbox", async () =>
     option(turnCalls(fixture)[0].argumentsList, "--permission-mode"),
     "plan",
   );
-  const bubblewrapCalls = fixture.calls.filter(({ file }) => file === "bwrap");
+  const bubblewrapCalls = localCommitSandboxCalls(fixture);
   assert.equal(bubblewrapCalls.length, 2);
   const commitCall = bubblewrapCalls[1];
   assert.ok(commitCall.argumentsList.includes("--unshare-net"));
@@ -1587,7 +1622,7 @@ test("proves a rejected local-commit policy did not start the effect", async () 
       hasCode("ERR_CLAUDE_LOCAL_COMMIT_POLICY")(error) &&
       error.effectStarted === false,
   );
-  assert.equal(fixture.calls.filter(({ file }) => file === "bwrap").length, 1);
+  assert.equal(localCommitSandboxCalls(fixture).length, 1);
 });
 
 test("never replays an interrupted local-commit turn", async () => {
@@ -1619,14 +1654,14 @@ test("never replays an interrupted local-commit turn", async () => {
       error.effectStarted === false,
   );
   assert.equal(turnCalls(fixture).length, 1);
-  assert.equal(fixture.calls.filter(({ file }) => file === "bwrap").length, 1);
+  assert.equal(localCommitSandboxCalls(fixture).length, 1);
 });
 
 test("keeps commit-executor failures ambiguous", async () => {
   let bubblewrapCalls = 0;
   const fixture = createFixture({
     handle({ call }) {
-      if (call.file === "bwrap") {
+      if (call.file === "bwrap" && !isNativeSandboxProbe(call)) {
         bubblewrapCalls += 1;
         if (bubblewrapCalls === 2) {
           throw new Error("commit executor failed");

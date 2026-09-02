@@ -1,15 +1,39 @@
-const UNSHARE_BINARY = "/usr/bin/unshare";
+const APPLY_SECCOMP_ARGV0 = "apply-seccomp";
 const INERT_BINARY = "/usr/bin/true";
-const NATIVE_SANDBOX_ARGUMENTS = Object.freeze([
-  "--user",
-  "--map-root-user",
-  "--",
-  INERT_BINARY,
-]);
 
-export async function probeClaudeNativeSandbox({ env, execute }) {
+function nativeSandboxArguments(claudeBinary) {
+  return [
+    "--new-session",
+    "--die-with-parent",
+    "--unshare-net",
+    "--ro-bind",
+    "/",
+    "/",
+    "--dev",
+    "/dev",
+    "--unshare-pid",
+    "--unshare-user",
+    "--cap-drop",
+    "ALL",
+    "--proc",
+    "/proc",
+    "--setenv",
+    "ARGV0",
+    APPLY_SECCOMP_ARGV0,
+    "--",
+    claudeBinary,
+    INERT_BINARY,
+  ];
+}
+
+export async function probeClaudeNativeSandbox({
+  bubblewrapBinary,
+  claudeBinary,
+  env,
+  execute,
+}) {
   try {
-    await execute(UNSHARE_BINARY, NATIVE_SANDBOX_ARGUMENTS, {
+    await execute(bubblewrapBinary, nativeSandboxArguments(claudeBinary), {
       encoding: "utf8",
       env,
       maxBuffer: 64 * 1024,
