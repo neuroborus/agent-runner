@@ -122,9 +122,13 @@ function pauseActionLine(runId, action) {
     return `  Respond to pending input ${action.requestId} through MCP, or edit the clarification artifact and resume.`;
   }
   if (action.type === "start-new-run") {
-    return action.requirement === "revised-plan"
-      ? "  Revise the plan and start a fresh plan-execution run."
-      : "  Abandon this run and start a fresh run from an uncontaminated worktree.";
+    if (action.requirement === "revised-plan") {
+      return "  Revise the plan and start a fresh plan-execution run.";
+    }
+    if (action.requirement === "resolved-finalization-blockers") {
+      return "  Resolve the reported finalization blockers, restore a clean baseline, prepare a plan for the remaining work, and start a fresh plan-execution run.";
+    }
+    return "  Abandon this run and start a fresh run from an uncontaminated worktree.";
   }
   if (action.action === null) {
     return `  Retry with: agent-run resume --run ${runId}`;

@@ -196,6 +196,8 @@ const PUBLIC_DETAIL_REASONS = new Set([
   "lazy_output_invalid",
   "review_output_invalid",
 ]);
+const PUBLIC_FINALIZATION_ISSUE_ID_PATTERN = /^F[1-9][0-9]{0,8}$/u;
+const MAX_PUBLIC_EVIDENCE_ITEMS = 32;
 
 function publicCode(value) {
   return typeof value === "string" && /^[A-Z0-9_]{1,64}$/u.test(value)
@@ -226,7 +228,41 @@ function publicExplanation(pause, fallback) {
     : fallback;
 }
 
-function publicEvidence(pause) {
+function publicFinalizationIssueIds(run) {
+  if (
+    run.pause.reason !== "no_progress" ||
+    run.pipelineState.finalizationResult?.status !== "FAIL" ||
+    !Array.isArray(run.pipelineState.finalizationResult.issues)
+  ) {
+    return Object.freeze([]);
+  }
+  const ids = [];
+  const seen = new Set();
+  for (const issue of run.pipelineState.finalizationResult.issues) {
+    const id = issue?.id;
+    if (
+      typeof id === "string" &&
+      PUBLIC_FINALIZATION_ISSUE_ID_PATTERN.test(id) &&
+      !seen.has(id)
+    ) {
+      ids.push(id);
+      seen.add(id);
+      if (ids.length === MAX_PUBLIC_EVIDENCE_ITEMS) {
+        break;
+      }
+    }
+  }
+  return Object.freeze(ids);
+}
+
+function publicEvidence(pause, finalizationIssueIds) {
+  if (finalizationIssueIds.length > 0) {
+    return Object.freeze(
+      finalizationIssueIds.map(
+        (id) => `Finalization blocker ${id} remains unresolved.`,
+      ),
+    );
+  }
   return Object.freeze(
     PUBLIC_DETAIL_REASONS.has(pause.reason) && Array.isArray(pause.evidence)
       ? pause.evidence
@@ -236,7 +272,7 @@ function publicEvidence(pause) {
               entry.length > 0 &&
               [...entry].length <= 4_000,
           )
-          .slice(0, 32)
+          .slice(0, MAX_PUBLIC_EVIDENCE_ITEMS)
       : [],
   );
 }
@@ -254,6 +290,7 @@ function projectPause(run) {
   if (run.pause === null) {
     return null;
   }
+  const finalizationIssueIds = publicFinalizationIssueIds(run);
   const knownReason = Object.hasOwn(
     PUBLIC_PAUSE_EXPLANATIONS,
     run.pause.reason,
@@ -315,13 +352,21 @@ function projectPause(run) {
           );
         }
       }
+      if (finalizationIssueIds.length > 0 && nextActions.length === 0) {
+        nextActions.push(
+          Object.freeze({
+            type: "start-new-run",
+            requirement: "resolved-finalization-blockers",
+          }),
+        );
+      }
     }
   }
   return Object.freeze({
     reason,
     code: knownReason ? publicCode(run.pause.code) : null,
     explanation: publicExplanation(run.pause, explanation),
-    evidence: publicEvidence(run.pause),
+    evidence: publicEvidence(run.pause, finalizationIssueIds),
     resumeState: publicResumeState(run),
     nextActions: Object.freeze(nextActions),
   });

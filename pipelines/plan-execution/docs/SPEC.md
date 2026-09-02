@@ -2262,6 +2262,20 @@ a fresh execution run. `read_only_agent_mutated_repository` explains that the
 run is contaminated and offers only a fresh run from an uncontaminated
 worktree; it never accepts hybrid changes. `environment_blocked` preserves why
 validation is blocked, its bounded evidence, and the exact retry checkpoint.
+For a finalization-backed `no_progress` pause, the descriptor derives immutable
+bounded evidence solely from the active validated `F`-prefixed finalization
+issue IDs. Commands, problems, issue evidence, paths, raw provider output,
+pause internals, and clarification data remain private; Reviewer finding data
+remain outside this finalization-backed projection. Any validator-approved
+recovery, including a pending validation-migration retry, remains the only
+projected action. Otherwise the sole action is
+`{ type: "start-new-run", requirement: "resolved-finalization-blockers" }`,
+which requires resolving the reported blockers, restoring a clean baseline,
+and preparing a plan for the remaining work before starting a fresh execution
+run. It grants no extra correction round, finding override, or stagnation-history
+reset. Reviewer-backed `no_progress` continues to expose only public Reviewer
+findings and exact actions accepted by resume validation, including applicable
+fingerprint-bound overrides in independent mode.
 This read-only projection does not itself change the pipeline state version.
 CLI status and MCP status, wait, and activity also expose the persisted resolved
 mode, while `pipelines_list` exposes descriptor-owned values, default, and

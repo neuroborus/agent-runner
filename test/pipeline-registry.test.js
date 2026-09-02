@@ -190,6 +190,146 @@ test("pipeline pause projections preserve bounded details and redact private fie
   }
 });
 
+test("plan-execution projects bounded finalization no-progress blockers", () => {
+  const pipeline = getPipeline("plan-execution");
+  const issues = [
+    {
+      id: "PRIVATE_ISSUE_ID",
+      command: "private invalid command",
+      problem: "private invalid problem",
+      evidence: ["private invalid evidence"],
+    },
+    ...Array.from({ length: 34 }, (_, index) => ({
+      id: `F${index + 1}`,
+      command: `private command ${index + 1}`,
+      problem: `private problem ${index + 1}`,
+      evidence: [`private issue evidence ${index + 1}`],
+      path: `private/path-${index + 1}`,
+    })),
+  ];
+  const run = pausedRun(
+    {
+      reason: "no_progress",
+      resumeState: "RESOLVE_FINDINGS",
+      evidence: ["private pause evidence"],
+      prompt: "private prompt",
+      transcript: "private transcript",
+    },
+    {
+      finalizationResult: { status: "FAIL", issues },
+      findings: [],
+      findingOverrides: [],
+      reviewedFingerprint: null,
+      settings: { mode: "lazy", maxFixRoundsPerStep: 5 },
+      validationMigrationPending: false,
+    },
+  );
+
+  const projected = pipeline.projections.pause(run);
+
+  assert.deepEqual(
+    projected.evidence,
+    Array.from(
+      { length: 32 },
+      (_, index) => `Finalization blocker F${index + 1} remains unresolved.`,
+    ),
+  );
+  assert.deepEqual(projected.nextActions, [
+    {
+      type: "start-new-run",
+      requirement: "resolved-finalization-blockers",
+    },
+  ]);
+  assert.deepEqual(
+    pipeline.projections.status({ ...run, taskPath: "/task" }).findings,
+    [],
+  );
+  assert.ok(Object.isFrozen(projected.evidence));
+  assert.ok(Object.isFrozen(projected.nextActions));
+  assert.ok(Object.isFrozen(projected.nextActions[0]));
+  assert.throws(
+    () =>
+      pipeline.validateResumeAction(run, {
+        type: "extra-fix-rounds",
+        amount: 1,
+      }),
+    /Additional fix rounds are not applicable/u,
+  );
+  assert.throws(
+    () =>
+      pipeline.validateResumeAction(run, {
+        type: "override-finding",
+        findingId: "R1",
+      }),
+    /Finding override is not applicable/u,
+  );
+  const serialized = JSON.stringify(projected);
+  assert.doesNotMatch(
+    serialized,
+    /PRIVATE_ISSUE_ID|private command|private problem|private issue evidence|private\/path|private pause evidence|private prompt|private transcript/u,
+  );
+});
+
+test("plan-execution preserves valid no-progress recovery and Reviewer actions", () => {
+  const pipeline = getPipeline("plan-execution");
+  const finalizationState = {
+    finalizationResult: {
+      status: "FAIL",
+      issues: [
+        {
+          id: "F1",
+          command: "private command",
+          problem: "private problem",
+          evidence: ["private evidence"],
+        },
+      ],
+    },
+    findings: [],
+    findingOverrides: [],
+    reviewedFingerprint: null,
+    settings: { mode: "lazy", maxFixRoundsPerStep: 5 },
+    validationMigrationPending: true,
+  };
+  assert.deepEqual(
+    pipeline.projections.pause(
+      pausedRun(
+        { reason: "no_progress", resumeState: "RESOLVE_FINDINGS" },
+        finalizationState,
+      ),
+    ).nextActions,
+    [{ type: "resume", action: null }],
+  );
+
+  const reviewerRun = pausedRun(
+    { reason: "no_progress", resumeState: "RESOLVE_FINDINGS" },
+    {
+      finalizationResult: { status: "PASS" },
+      findings: [{ id: "R1", problem: "Review remains incomplete." }],
+      findingOverrides: [],
+      reviewedFingerprint: "a".repeat(64),
+      settings: { mode: "independent", maxFixRoundsPerStep: 5 },
+      validationMigrationPending: false,
+    },
+  );
+  assert.deepEqual(pipeline.projections.pause(reviewerRun), {
+    reason: "no_progress",
+    code: null,
+    explanation: "The correction loop reached a bounded no-progress condition.",
+    evidence: [],
+    resumeState: "RESOLVE_FINDINGS",
+    nextActions: [
+      {
+        type: "resume",
+        action: { type: "override-finding", findingId: "R1" },
+      },
+    ],
+  });
+  assert.deepEqual(
+    pipeline.projections.status({ ...reviewerRun, taskPath: "/task" }).findings,
+    [{ id: "R1", summary: "Review remains incomplete." }],
+  );
+});
+
 test("every pipeline projects bounded adapter diagnostics", () => {
   for (const [pipelineId, explanation] of [
     ["plan-authoring", "Plan authoring failed."],

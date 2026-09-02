@@ -611,7 +611,7 @@ test("status explains a terminal forbidden-delegation diagnostic", async () => {
 });
 
 test("status renders input and fresh-run pause actions", async () => {
-  for (const { pause, state, expected } of [
+  for (const { pause, state, expected, alsoExpected, notExpected } of [
     {
       pause: {
         reason: "clarification_answers_required",
@@ -637,6 +637,35 @@ test("status renders input and fresh-run pause actions", async () => {
       state: {},
       expected: /Abandon this run and start a fresh run/u,
     },
+    {
+      pause: {
+        reason: "no_progress",
+        resumeState: "RESOLVE_FINDINGS",
+        evidence: ["PRIVATE_PAUSE_EVIDENCE"],
+      },
+      state: {
+        settings: { maxFixRoundsPerStep: 5, mode: "lazy" },
+        finalizationResult: {
+          status: "FAIL",
+          issues: [
+            {
+              id: "F4",
+              command: "PRIVATE_FINALIZATION_COMMAND",
+              problem: "PRIVATE_FINALIZATION_PROBLEM",
+              evidence: ["PRIVATE_FINALIZATION_EVIDENCE"],
+            },
+          ],
+        },
+        findings: [],
+        reviewedFingerprint: null,
+        validationMigrationPending: false,
+      },
+      expected:
+        /Resolve the reported finalization blockers, restore a clean baseline, prepare a plan for the remaining work, and start a fresh plan-execution run\./u,
+      alsoExpected: /Finalization blocker F4 remains unresolved\./u,
+      notExpected:
+        /PRIVATE_PAUSE_EVIDENCE|PRIVATE_FINALIZATION_COMMAND|PRIVATE_FINALIZATION_PROBLEM|PRIVATE_FINALIZATION_EVIDENCE/u,
+    },
   ]) {
     const stdout = createSink();
     const result = commandResult({ state: "WAITING_FOR_USER" });
@@ -655,6 +684,12 @@ test("status renders input and fresh-run pause actions", async () => {
       0,
     );
     assert.match(stdout.read(), expected);
+    if (alsoExpected !== undefined) {
+      assert.match(stdout.read(), alsoExpected);
+    }
+    if (notExpected !== undefined) {
+      assert.doesNotMatch(stdout.read(), notExpected);
+    }
   }
 });
 

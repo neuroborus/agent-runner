@@ -258,17 +258,24 @@ exists, and `nextActions`. No other persisted pause field crosses this boundary:
 in particular prompts, transcripts, credentials, native responses, raw
 standard error, rejected values, internal diagnostics, and counters remain private.
 Unknown pause reasons fail closed to `unknown_pause` without their persisted
-text.
+text. A pipeline descriptor may derive bounded evidence from already validated
+pipeline state when the derivation exposes only finite public identifiers;
+plan-execution finalization-backed `no_progress` exposes only the active
+finalization issue IDs and never their commands, problems, evidence, or paths.
 
 Public next actions are concrete descriptor-owned operations. `respond`
 identifies the exact pending request; `resume` carries either the validated
 null retry or one valid extra-round or finding-override payload; and
-`start-new-run` identifies either a revised-plan or uncontaminated-worktree
-requirement. A submitted input awaiting detached continuation exposes no second
-action. Plan revision never projects resume of the stale run, and a read-only
-repository mutation never projects acceptance of contaminated or hybrid
-changes. This is a read-only projection of existing durable state and does not
-change the root or pipeline state versions.
+`start-new-run` identifies a `revised-plan`, `uncontaminated-worktree`, or
+`resolved-finalization-blockers` requirement. The last applies when correction
+has stopped with unresolved finalization failures and no validated retry
+applies; it requires resolving the reported blockers, restoring a clean
+baseline, and preparing a plan for the remaining work before starting a fresh
+execution run. A submitted input awaiting detached continuation exposes no
+second action. Plan revision never projects resume of the stale run, and a
+read-only repository mutation never projects acceptance of contaminated or
+hybrid changes. This is a read-only projection of existing durable state and
+does not change the root or pipeline state versions.
 
 ## MCP Control Plane
 

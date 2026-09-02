@@ -8961,6 +8961,97 @@ test("routes finalization failures through a fix and the complete gate", async (
   assert.equal(fixture.calls.reviewer.length, 2);
 });
 
+test("projects blockers when lazy finalization correction stagnates", async (t) => {
+  const privateFailure = {
+    ...finalizationFailed("F3"),
+    summary: "PRIVATE_FINALIZATION_SUMMARY",
+    issues: [
+      {
+        id: "F3",
+        command: "PRIVATE_FINALIZATION_COMMAND",
+        problem: "PRIVATE_FINALIZATION_PROBLEM",
+        evidence: ["PRIVATE_FINALIZATION_EVIDENCE"],
+      },
+    ],
+  };
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    modeSettings: {
+      maxFixRoundsPerStep: 5,
+      maxSameFindingRounds: 10,
+      stagnationWindowRounds: 2,
+    },
+    worker: [clarificationReady(), bootstrapReady("Worker")],
+    workWorker: [
+      implementationCompleted(),
+      finalizationFailed("F1"),
+      resolution({ id: "F1", decision: "FIX" }),
+      finalizationFailed("F2"),
+      resolution({ id: "F2", decision: "FIX" }),
+      privateFailure,
+    ],
+  });
+
+  const result = await fixture.run();
+  const projection = planExecutionPipeline.projections.pause(result);
+
+  assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(result.pause.reason, "no_progress");
+  assert.equal(result.pause.resumeState, "RESOLVE_FINDINGS");
+  assert.equal(result.counters.fixRounds, 2);
+  assert.equal(result.counters.correctionRounds, 2);
+  assert.equal(result.pipelineState.blockedSinceStagnation, 2);
+  assert.deepEqual(result.pipelineState.sameFindingRounds, {});
+  assert.deepEqual(
+    result.pipelineState.correctionHistory.map(
+      ({ finalizationIssueIds, findingIds }) => ({
+        finalizationIssueIds,
+        findingIds,
+      }),
+    ),
+    [
+      { finalizationIssueIds: ["F2"], findingIds: [] },
+      { finalizationIssueIds: ["F3"], findingIds: [] },
+    ],
+  );
+  assert.equal(
+    result.pipelineState.finalizationResult.issues[0].command,
+    "PRIVATE_FINALIZATION_COMMAND",
+  );
+  assert.deepEqual(result.pipelineState.findings, []);
+  assert.deepEqual(projection, {
+    reason: "no_progress",
+    code: null,
+    explanation: "The correction loop reached a bounded no-progress condition.",
+    evidence: ["Finalization blocker F3 remains unresolved."],
+    resumeState: "RESOLVE_FINDINGS",
+    nextActions: [
+      {
+        type: "start-new-run",
+        requirement: "resolved-finalization-blockers",
+      },
+    ],
+  });
+  assert.doesNotMatch(
+    JSON.stringify(projection),
+    /PRIVATE_FINALIZATION_(?:SUMMARY|COMMAND|PROBLEM|EVIDENCE)/u,
+  );
+  assert.equal(
+    fixture.calls.worker.filter(({ prompt }) =>
+      prompt.includes("Run the complete project finalization procedure"),
+    ).length,
+    3,
+  );
+  assert.equal(
+    fixture.calls.worker.filter(({ prompt }) =>
+      prompt.includes("For each finding below"),
+    ).length,
+    2,
+  );
+  assert.equal(fixture.calls.reviewer.length, 0);
+  assert.equal(fixture.calls.arbiter.length, 0);
+});
+
 test("invalidates finalization and review after fixing a review finding", async (t) => {
   const validationStates = [];
   const fixture = await createFixture(t, {

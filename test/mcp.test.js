@@ -1721,6 +1721,66 @@ test("projects the same bounded pause through MCP status and wait", async (t) =>
   );
 
   await createStoredRun(store, paths, {
+    id: FOURTH_RUN_ID,
+    pipelineId: "plan-execution",
+    pause: {
+      reason: "no_progress",
+      resumeState: "RESOLVE_FINDINGS",
+      evidence: ["PRIVATE_PAUSE_EVIDENCE"],
+      prompt: "PRIVATE_PAUSE_PROMPT",
+    },
+    state: {
+      finalizationResult: {
+        status: "FAIL",
+        issues: [
+          {
+            id: "F2",
+            command: "PRIVATE_FINALIZATION_COMMAND",
+            problem: "PRIVATE_FINALIZATION_PROBLEM",
+            evidence: ["PRIVATE_FINALIZATION_EVIDENCE"],
+          },
+        ],
+      },
+      findings: [],
+      findingOverrides: [],
+      reviewedFingerprint: null,
+      settings: { mode: "lazy", maxFixRoundsPerStep: 5 },
+      validationMigrationPending: false,
+      preflightComplete: true,
+    },
+    workflowState: "WAITING_FOR_USER",
+  });
+  const expectedFinalizationPause = {
+    reason: "no_progress",
+    code: null,
+    explanation: "The correction loop reached a bounded no-progress condition.",
+    evidence: ["Finalization blocker F2 remains unresolved."],
+    resumeState: "RESOLVE_FINDINGS",
+    nextActions: [
+      {
+        type: "start-new-run",
+        requirement: "resolved-finalization-blockers",
+      },
+    ],
+  };
+  const finalizationStatus = await control.runStatus({ runId: FOURTH_RUN_ID });
+  const finalizationWait = await control.runWait({
+    runId: FOURTH_RUN_ID,
+    cursor: 0,
+    timeoutMs: 0,
+    progress: false,
+  });
+  assert.deepEqual(finalizationStatus.pause, expectedFinalizationPause);
+  assert.deepEqual(finalizationWait.pause, expectedFinalizationPause);
+  assert.deepEqual(finalizationStatus.findings, []);
+  assert.deepEqual(finalizationWait.findings, []);
+  assert.equal(finalizationWait.timedOut, false);
+  assert.doesNotMatch(
+    JSON.stringify({ finalizationStatus, finalizationWait }),
+    /PRIVATE_PAUSE_EVIDENCE|PRIVATE_PAUSE_PROMPT|PRIVATE_FINALIZATION_COMMAND|PRIVATE_FINALIZATION_PROBLEM|PRIVATE_FINALIZATION_EVIDENCE/u,
+  );
+
+  await createStoredRun(store, paths, {
     id: SECOND_RUN_ID,
     pipelineId: "plan-execution",
     pause: {
