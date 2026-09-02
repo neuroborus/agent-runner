@@ -842,12 +842,22 @@ cannot be proven. The Codex process retains its own provider connectivity, but
 command tools receive no network access, workspace-write excludes implicit
 temporary-directory roots, Git metadata remains read-only, and reported
 activity is rejected if it uses a disabled or unknown tool or attempts a push,
-hosting-service mutation, or remote reconfiguration. Strip ambient Git
+hosting-service mutation, or remote reconfiguration. Each workspace-write
+app-server attempt receives one runner-created canonical owner-only private
+root beneath the fixed platform temporary location. Add exactly the repository
+and that root to native writable roots, keep host `/tmp` excluded, and project
+only its validated temporary, cache, and runtime children as `TMPDIR`,
+`XDG_CACHE_HOME`, and `XDG_RUNTIME_DIR` through the effective command shell
+policy. Do not change the provider process environment. Retain the root across
+in-session compaction, but validate and remove it after every success, failure,
+or fresh recovery before starting another attempt with a distinct root. Unsafe
+preparation or cleanup fails closed and never reports success. Read-only and
+local-commit storage remain unchanged. Strip ambient Git
 repository redirection and identity overrides from every Codex process
-environment, and expose only Codex's filtered core environment without injected
-values or shell-profile loading to agent commands. Remove key-, secret-, and
-token-named variables from the isolated local-commit executor while retaining
-the ordinary environment needed by Git and hooks.
+environment, and expose only Codex's filtered core environment plus those three
+private paths, without shell-profile loading, to agent commands. Remove key-,
+secret-, and token-named variables from the isolated local-commit executor
+while retaining the ordinary environment needed by Git and hooks.
 Capability, isolation, and prohibited-operation failures expose only one
 bounded allowlisted diagnostic class identifying the rejected capability or
 operation class. Do not retain the reported command, native error response,

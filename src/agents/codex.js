@@ -18,6 +18,10 @@ import {
   executeCodexLocalCommit,
   probeCodexLocalCommit,
 } from "./codex-local-commit.js";
+import {
+  assertCodexWorkspaceStorage,
+  createCodexWorkspaceStorage,
+} from "./codex-workspace-storage.js";
 
 export const CODEX_BACKEND_ID = "codex";
 
@@ -105,6 +109,21 @@ const DISABLED_FEATURES = Object.freeze([
   "shell_snapshot",
   "skill_mcp_dependency_install",
 ]);
+const EMPTY_SHELL_ENVIRONMENT = Object.freeze({});
+
+function shellEnvironmentPolicy(environment) {
+  const values = Object.entries(environment)
+    .map(([name, value]) => `${name}=${JSON.stringify(value)}`)
+    .join(",");
+  return (
+    'shell_environment_policy={inherit="core",ignore_default_excludes=false,' +
+    `experimental_use_profile=false,set={${values}}}`
+  );
+}
+
+const EMPTY_SHELL_ENVIRONMENT_POLICY = shellEnvironmentPolicy(
+  EMPTY_SHELL_ENVIRONMENT,
+);
 const APP_SERVER_BASE_ARGUMENTS = Object.freeze([
   "app-server",
   "--listen",
@@ -116,8 +135,7 @@ const APP_SERVER_BASE_ARGUMENTS = Object.freeze([
   "-c",
   "notify=[]",
   "-c",
-  'shell_environment_policy={inherit="core",ignore_default_excludes=false,' +
-    'experimental_use_profile=false,set={}}',
+  EMPTY_SHELL_ENVIRONMENT_POLICY,
   "-c",
   "memories.generate_memories=false",
   "-c",
@@ -408,7 +426,20 @@ function parseMcpServerNames(value) {
   return names;
 }
 
-function assertIsolatedConfiguration(value, expectedMcpServers) {
+function sameEnvironment(actual, expected) {
+  const names = Object.keys(expected);
+  return (
+    isRecord(actual) &&
+    Object.keys(actual).length === names.length &&
+    names.every((name) => actual[name] === expected[name])
+  );
+}
+
+function assertIsolatedConfiguration(
+  value,
+  expectedMcpServers,
+  expectedShellEnvironment,
+) {
   const config = value?.config;
   const features = config?.features;
   const memories = config?.memories;
@@ -436,8 +467,7 @@ function assertIsolatedConfiguration(value, expectedMcpServers) {
     shellEnvironment.inherit !== "core" ||
     shellEnvironment.ignore_default_excludes !== false ||
     shellEnvironment.experimental_use_profile !== false ||
-    !isRecord(shellEnvironment.set) ||
-    Object.keys(shellEnvironment.set).length !== 0 ||
+    !sameEnvironment(shellEnvironment.set, expectedShellEnvironment) ||
     shellEnvironment.exclude !== null ||
     shellEnvironment.include_only !== null ||
     shellEnvironment.filters !== null
@@ -462,13 +492,13 @@ function assertIsolatedConfiguration(value, expectedMcpServers) {
   }
 }
 
-function sandboxFor(request) {
+function sandboxFor(request, workspaceStorage) {
   if (request.access !== "workspace-write") {
     return Object.freeze({ type: "readOnly", networkAccess: false });
   }
   return Object.freeze({
     type: "workspaceWrite",
-    writableRoots: Object.freeze([request.cwd]),
+    writableRoots: Object.freeze([request.cwd, workspaceStorage.rootPath]),
     networkAccess: false,
     excludeTmpdirEnvVar: true,
     excludeSlashTmp: true,
@@ -522,14 +552,14 @@ function outputSchemaFor(request) {
     : request.schema;
 }
 
-function turnOptions(request, threadId, prompt) {
+function turnOptions(request, threadId, prompt, workspaceStorage) {
   const options = {
     threadId,
     input: Object.freeze([{ type: "text", text: prompt }]),
     cwd: request.cwd,
     approvalPolicy: "never",
     approvalsReviewer: "user",
-    sandboxPolicy: sandboxFor(request),
+    sandboxPolicy: sandboxFor(request, workspaceStorage),
   };
   if (request.model !== undefined) {
     options.model = request.model;
@@ -759,12 +789,18 @@ async function resolveCompletedTurn(client, value, threadId, turnId) {
   );
 }
 
-async function startTurn(client, request, threadId, prompt) {
+async function startTurn(
+  client,
+  request,
+  threadId,
+  prompt,
+  workspaceStorage,
+) {
   let response;
   try {
     response = await client.request(
       "turn/start",
-      turnOptions(request, threadId, prompt),
+      turnOptions(request, threadId, prompt, workspaceStorage),
     );
   } catch (cause) {
     if (
@@ -843,8 +879,21 @@ async function compactThread(client, threadId) {
   }
 }
 
-async function runTurn(client, request, threadId, prompt, recoveryPrompt) {
-  let turn = await startTurn(client, request, threadId, prompt);
+async function runTurn(
+  client,
+  request,
+  threadId,
+  prompt,
+  recoveryPrompt,
+  workspaceStorage,
+) {
+  let turn = await startTurn(
+    client,
+    request,
+    threadId,
+    prompt,
+    workspaceStorage,
+  );
   if (isContextWindowExceeded(turn)) {
     if (request.access === "local-commit") {
       throw new CodexAdapterError(
@@ -856,7 +905,13 @@ async function runTurn(client, request, threadId, prompt, recoveryPrompt) {
       );
     }
     await compactThread(client, threadId);
-    turn = await startTurn(client, request, threadId, recoveryPrompt);
+    turn = await startTurn(
+      client,
+      request,
+      threadId,
+      recoveryPrompt,
+      workspaceStorage,
+    );
     if (isContextWindowExceeded(turn)) {
       throw new CodexAdapterError("Codex context remains full after compaction.", {
         code: "ERR_CODEX_CONTEXT_RECOVERY_FAILED",
@@ -1072,7 +1127,13 @@ function normalizeResult(turn, request, sessionId) {
 export function createCodexAdapter(options = {}) {
   assertFields(
     options,
-    ["codexBinary", "env", "execute", "spawnProcess"],
+    [
+      "codexBinary",
+      "env",
+      "execute",
+      "spawnProcess",
+      "workspaceStorageFactory",
+    ],
     "Codex adapter options",
   );
   const {
@@ -1080,6 +1141,7 @@ export function createCodexAdapter(options = {}) {
     env = process.env,
     execute = executeFile,
     spawnProcess = spawn,
+    workspaceStorageFactory = createCodexWorkspaceStorage,
   } = options;
   if (
     typeof codexBinary !== "string" ||
@@ -1087,7 +1149,8 @@ export function createCodexAdapter(options = {}) {
     /[\0\r\n]/u.test(codexBinary) ||
     !isEnvironment(env) ||
     typeof execute !== "function" ||
-    typeof spawnProcess !== "function"
+    typeof spawnProcess !== "function" ||
+    typeof workspaceStorageFactory !== "function"
   ) {
     throw new CodexAdapterError("Codex adapter options are invalid.", {
       code: "ERR_INVALID_CODEX_OPTIONS",
@@ -1157,7 +1220,36 @@ export function createCodexAdapter(options = {}) {
     return probePromise;
   }
 
-  async function appServerLaunch(request) {
+  function workspaceStorageFailure() {
+    return new CodexAdapterError("Codex workspace storage is unsafe.", {
+      code: "ERR_CODEX_ISOLATION",
+      diagnosticClass: "isolation_shell_environment",
+    });
+  }
+
+  async function prepareWorkspaceStorage(request) {
+    if (request.access !== "workspace-write") {
+      return undefined;
+    }
+    try {
+      return assertCodexWorkspaceStorage(await workspaceStorageFactory());
+    } catch {
+      throw workspaceStorageFailure();
+    }
+  }
+
+  async function cleanupWorkspaceStorage(workspaceStorage) {
+    if (workspaceStorage === undefined) {
+      return;
+    }
+    try {
+      await workspaceStorage.cleanup();
+    } catch {
+      throw workspaceStorageFailure();
+    }
+  }
+
+  async function appServerLaunch(request, workspaceStorage) {
     let result;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
@@ -1193,7 +1285,16 @@ export function createCodexAdapter(options = {}) {
       }
     }
     const mcpServerNames = parseMcpServerNames(processOutput(result.stdout));
-    const argumentsList = nativeArguments(request, APP_SERVER_BASE_ARGUMENTS);
+    const shellEnvironment =
+      workspaceStorage?.shellEnvironment ?? EMPTY_SHELL_ENVIRONMENT;
+    const argumentsList = nativeArguments(
+      request,
+      APP_SERVER_BASE_ARGUMENTS.map((argument) =>
+        argument === EMPTY_SHELL_ENVIRONMENT_POLICY
+          ? shellEnvironmentPolicy(shellEnvironment)
+          : argument,
+      ),
+    );
     for (const name of mcpServerNames) {
       argumentsList.push("-c", `mcp_servers.${name}.enabled=false`);
     }
@@ -1260,66 +1361,73 @@ export function createCodexAdapter(options = {}) {
   }
 
   async function runAttempt(request, { fresh = false, recovery = false } = {}) {
-    const launch = await appServerLaunch(request);
-    let child;
+    const workspaceStorage = await prepareWorkspaceStorage(request);
     try {
-      child = spawnProcess(codexBinary, launch.argumentsList, {
-        cwd: request.cwd,
-        env: processEnvironment,
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-    } catch (cause) {
-      throw processError("Cannot start Codex app-server.", cause);
-    }
-    const client = createCodexAppServerClient(child, CodexAdapterError);
-    let result;
-    let operationFailed = false;
-    try {
-      await client.request("initialize", {
-        clientInfo: {
-          name: "agent_runner",
-          title: "Agent Runner",
-          version: packageMetadata.version,
-        },
-        capabilities: null,
-      });
-      client.notify("initialized", {});
-      assertIsolatedConfiguration(
-        await client.request("config/read", { includeLayers: false }),
-        launch.mcpServerNames,
-      );
-      await validateModel(client, request.model);
-      const threadId = await selectThread(client, request, fresh);
-      const turn = await runTurn(
-        client,
-        request,
-        threadId,
-        turnPrompt(request, recovery),
-        turnPrompt(request, "compact"),
-      );
-      if (
-        request.model !== undefined &&
-        client.receivedNotification("model/rerouted")
-      ) {
-        throw new CodexAdapterError(
-          `Codex substituted the requested model: ${request.model}.`,
-          { code: "ERR_CODEX_MODEL_REROUTED" },
-        );
-      }
-      result = normalizeResult(turn, request, threadId);
-    } catch (cause) {
-      operationFailed = true;
-      throw cause;
-    } finally {
+      const launch = await appServerLaunch(request, workspaceStorage);
+      let child;
       try {
-        await client.close();
+        child = spawnProcess(codexBinary, launch.argumentsList, {
+          cwd: request.cwd,
+          env: processEnvironment,
+          stdio: ["pipe", "pipe", "pipe"],
+        });
       } catch (cause) {
-        if (!operationFailed) {
-          throw cause;
+        throw processError("Cannot start Codex app-server.", cause);
+      }
+      const client = createCodexAppServerClient(child, CodexAdapterError);
+      let result;
+      let operationFailed = false;
+      try {
+        await client.request("initialize", {
+          clientInfo: {
+            name: "agent_runner",
+            title: "Agent Runner",
+            version: packageMetadata.version,
+          },
+          capabilities: null,
+        });
+        client.notify("initialized", {});
+        assertIsolatedConfiguration(
+          await client.request("config/read", { includeLayers: false }),
+          launch.mcpServerNames,
+          workspaceStorage?.shellEnvironment ?? EMPTY_SHELL_ENVIRONMENT,
+        );
+        await validateModel(client, request.model);
+        const threadId = await selectThread(client, request, fresh);
+        const turn = await runTurn(
+          client,
+          request,
+          threadId,
+          turnPrompt(request, recovery),
+          turnPrompt(request, "compact"),
+          workspaceStorage,
+        );
+        if (
+          request.model !== undefined &&
+          client.receivedNotification("model/rerouted")
+        ) {
+          throw new CodexAdapterError(
+            `Codex substituted the requested model: ${request.model}.`,
+            { code: "ERR_CODEX_MODEL_REROUTED" },
+          );
+        }
+        result = normalizeResult(turn, request, threadId);
+      } catch (cause) {
+        operationFailed = true;
+        throw cause;
+      } finally {
+        try {
+          await client.close();
+        } catch (cause) {
+          if (!operationFailed) {
+            throw cause;
+          }
         }
       }
+      return result;
+    } finally {
+      await cleanupWorkspaceStorage(workspaceStorage);
     }
-    return result;
   }
 
   async function run(value) {

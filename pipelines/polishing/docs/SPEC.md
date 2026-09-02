@@ -85,6 +85,15 @@ autonomous safe content writes, remote-write blocking, and the explicit
 `gitMetadataWriteBlocked` guarantee. Codex satisfies it through workspace-write
 isolation; Claude satisfies it through its Git-directory write and `git add`
 denials. Neither backend receives broader `.git` access for polishing.
+Each Codex workspace-write app-server attempt receives one canonical owner-only
+runner-created root beneath the fixed platform temporary location. Exactly the
+repository and that private root are writable; host `/tmp`, ambient temporary
+paths, Git metadata, and command network access remain excluded. The effective
+shell policy projects validated `TMPDIR`, `XDG_CACHE_HOME`, and
+`XDG_RUNTIME_DIR` children without changing the provider process environment.
+In-session compaction retains the root, while every success, failure, or fresh
+recovery validates and removes it before another attempt. Unsafe preparation or
+cleanup fails closed. Read-only and local-commit isolation remain unchanged.
 
 The pipeline owns these settings and defaults:
 

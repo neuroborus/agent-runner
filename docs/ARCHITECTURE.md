@@ -668,9 +668,19 @@ workspace and Git-metadata writes, closes command network access, and forbids
 unsandboxed fallback. Workspace-write turns retain Claude's separate `auto`
 permission policy and background classifier while denying Git-directory writes
 and `git add`. Codex workspace-write isolation likewise exposes safe content
-writes without Git-metadata writes. Both adapters advertise
-`gitMetadataWriteBlocked`; the runner, not an agent turn, owns effects that
-require the index.
+writes without Git-metadata writes. For each Codex app-server attempt, the
+runner creates one canonical owner-only private root beneath the fixed platform
+temporary location without consulting ambient temporary variables. Only the
+repository and that private root are writable. `TMPDIR`, `XDG_CACHE_HOME`, and
+`XDG_RUNTIME_DIR` project validated children of the root into command tooling
+through the effective shell policy; the provider process environment remains
+unchanged, ambient `TMPDIR` and host `/tmp` remain excluded, and command network
+access remains denied. In-session compaction retains the attempt's root. Every
+successful, failed, or freshly recovered attempt validates and removes its root
+before returning or retrying, and unsafe preparation or cleanup fails closed.
+Read-only and local-commit storage remain independently isolated. Both adapters
+advertise `gitMetadataWriteBlocked`; the runner, not an agent turn, owns effects
+that require the index.
 Every retryable request carries a turn prompt and a complete recovery prompt
 reconstructed from validated run state, durable artifacts, and the observed
 workspace. A role session is continued only when its persisted key matches the

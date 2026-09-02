@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { parse } from "node:path";
+import {
+  access,
+  lstat,
+  mkdtemp,
+  rm,
+  symlink,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, parse } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
 
@@ -13,6 +21,10 @@ import {
   createCodexAdapter,
   normalizeAdapterFailure,
 } from "../src/agents/index.js";
+import {
+  CodexWorkspaceStorageError,
+  createCodexWorkspaceStorage,
+} from "../src/agents/codex-workspace-storage.js";
 
 const PROJECT_PATH = process.cwd();
 const EXPECTED_HEAD = "a".repeat(40);
@@ -38,6 +50,10 @@ function hasDiagnostic(code, diagnosticClass) {
 function hasFailureClass(code, failureClass) {
   return (error) =>
     hasCode(code)(error) && error.failureClass === failureClass;
+}
+
+function hasStorageError(error) {
+  return error instanceof CodexWorkspaceStorageError;
 }
 
 test("normalizes finite adapter diagnostics at the root agent boundary", () => {
@@ -153,11 +169,50 @@ function createFixture({
   executeHandle,
   handle,
   help = HELP,
+  spawnError = false,
+  storageCleanupError = false,
+  storagePreparationError = false,
   version = "0.147.0",
 } = {}) {
   const executeCalls = [];
   const processes = [];
+  const workspaceStorages = [];
+  let pendingWorkspaceStorage;
   let nextTurn = 0;
+
+  async function workspaceStorageFactory() {
+    if (storagePreparationError) {
+      throw new Error("test workspace storage preparation failure");
+    }
+    const index = workspaceStorages.length;
+    const rootPath = `/tmp/agent-runner-codex-workspace-test-${index}`;
+    const shellEnvironment = Object.freeze({
+      TMPDIR: join(rootPath, "tmp"),
+      XDG_CACHE_HOME: join(rootPath, "cache"),
+      XDG_RUNTIME_DIR: join(rootPath, "runtime"),
+    });
+    const record = {
+      cleanupCalls: 0,
+      previousCleanupCalls:
+        workspaceStorages.at(-1)?.cleanupCalls ?? null,
+      rootPath,
+      shellEnvironment,
+    };
+    const storage = Object.freeze({
+      rootPath,
+      shellEnvironment,
+      async cleanup() {
+        record.cleanupCalls += 1;
+        if (storageCleanupError) {
+          throw new Error("test workspace storage cleanup failure");
+        }
+      },
+    });
+    record.storage = storage;
+    workspaceStorages.push(record);
+    pendingWorkspaceStorage = record;
+    return storage;
+  }
 
   const execute = async (file, argumentsList, options) => {
     executeCalls.push({ file, argumentsList, options });
@@ -185,6 +240,11 @@ function createFixture({
 
   const spawnProcess = (file, argumentsList, options) => {
     const processIndex = processes.length;
+    const workspaceStorage = pendingWorkspaceStorage;
+    pendingWorkspaceStorage = undefined;
+    if (spawnError) {
+      throw new Error("test app-server spawn failure");
+    }
     const child = new EventEmitter();
     const stdout = new PassThrough();
     const stderr = new PassThrough();
@@ -216,12 +276,16 @@ function createFixture({
           return { result: {} };
         case "model/list":
           return { result: { data: [{ id: "gpt-test" }], nextCursor: null } };
-        case "config/read":
+        case "config/read": {
+          const config = isolatedConfiguration();
+          config.shell_environment_policy.set =
+            workspaceStorage?.shellEnvironment ?? {};
           return {
             result: {
-              config: isolatedConfiguration(),
+              config,
             },
           };
+        }
         case "thread/start":
           return { result: { thread: { id: `thread-${processIndex}` } } };
         case "thread/resume":
@@ -329,14 +393,26 @@ function createFixture({
       close();
       return true;
     };
-    processes.push({ file, argumentsList, messages, options });
+    processes.push({
+      file,
+      argumentsList,
+      messages,
+      options,
+      workspaceStorage,
+    });
     return child;
   };
 
   return {
-    adapter: createCodexAdapter({ env, execute, spawnProcess }),
+    adapter: createCodexAdapter({
+      env,
+      execute,
+      spawnProcess,
+      workspaceStorageFactory,
+    }),
     executeCalls,
     processes,
+    workspaceStorages,
   };
 }
 
@@ -348,6 +424,63 @@ function request(overrides = {}) {
     ...overrides,
   };
 }
+
+test("creates and cleans owner-confined Codex workspace storage", async (t) => {
+  const parentPath = await mkdtemp(
+    join(tmpdir(), "agent-runner-codex-storage-parent-"),
+  );
+  t.after(() => rm(parentPath, { force: true, recursive: true }));
+  const first = await createCodexWorkspaceStorage({ parentPath });
+  const second = await createCodexWorkspaceStorage({ parentPath });
+
+  assert.notEqual(first.rootPath, second.rootPath);
+  assert.deepEqual(first.shellEnvironment, {
+    TMPDIR: join(first.rootPath, "tmp"),
+    XDG_CACHE_HOME: join(first.rootPath, "cache"),
+    XDG_RUNTIME_DIR: join(first.rootPath, "runtime"),
+  });
+  for (const path of [
+    first.rootPath,
+    ...Object.values(first.shellEnvironment),
+  ]) {
+    const metadata = await lstat(path);
+    assert.equal(metadata.isDirectory(), true);
+    assert.equal(metadata.uid, process.geteuid());
+    assert.equal(metadata.mode & 0o777, 0o700);
+  }
+
+  await first.cleanup();
+  await first.cleanup();
+  await second.cleanup();
+  await assert.rejects(access(first.rootPath), { code: "ENOENT" });
+  await assert.rejects(access(second.rootPath), { code: "ENOENT" });
+});
+
+test("rejects escaping preparation and unsafe workspace cleanup", async (t) => {
+  const fixturePath = await mkdtemp(
+    join(tmpdir(), "agent-runner-codex-storage-safety-"),
+  );
+  t.after(() => rm(fixturePath, { force: true, recursive: true }));
+  const parentPath = await mkdtemp(join(fixturePath, "parent-"));
+  const parentAlias = join(fixturePath, "parent-alias");
+  const outsidePath = await mkdtemp(join(fixturePath, "outside-"));
+  await symlink(parentPath, parentAlias);
+
+  await assert.rejects(
+    createCodexWorkspaceStorage({ parentPath: parentAlias }),
+    hasStorageError,
+  );
+  const storage = await createCodexWorkspaceStorage({ parentPath });
+  await rm(storage.shellEnvironment.TMPDIR, {
+    force: true,
+    recursive: true,
+  });
+  await symlink(outsidePath, storage.shellEnvironment.TMPDIR);
+
+  await assert.rejects(storage.cleanup(), hasStorageError);
+  await assert.rejects(access(storage.rootPath), { code: "ENOENT" });
+  await access(outsidePath);
+});
 
 test("constructs with the native environment and probes capabilities", async () => {
   assert.doesNotThrow(() => createCodexAdapter());
@@ -482,10 +615,13 @@ test("removes ambient Git redirection and identity overrides", async () => {
       GIT_DIR: "/tmp/redirected.git",
       Git_Work_Tree: "/tmp/redirected-worktree",
       git_config_count: "1",
+      TMPDIR: "/ambient/tmp",
+      XDG_CACHE_HOME: "/ambient/cache",
+      XDG_RUNTIME_DIR: "/ambient/runtime",
     },
   });
 
-  await fixture.adapter.run(request());
+  await fixture.adapter.run(request({ access: "workspace-write" }));
 
   for (const { options } of fixture.executeCalls) {
     assert.equal(options.env.EMAIL, undefined);
@@ -505,6 +641,16 @@ test("removes ambient Git redirection and identity overrides", async () => {
     "provider-token",
   );
   assert.equal(fixture.processes[0].options.env.GIT_DIR, undefined);
+  assert.equal(fixture.processes[0].options.env.TMPDIR, "/ambient/tmp");
+  assert.equal(
+    fixture.processes[0].options.env.XDG_CACHE_HOME,
+    "/ambient/cache",
+  );
+  assert.equal(
+    fixture.processes[0].options.env.XDG_RUNTIME_DIR,
+    "/ambient/runtime",
+  );
+  assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
 });
 
 test("normalizes app-server stdout failures", async () => {
@@ -553,6 +699,7 @@ test("runs a structured read-only turn with an explicit model", async () => {
   assert.ok(Object.isFrozen(result));
   assert.ok(Object.isFrozen(result.structured));
   assert.equal(fixture.processes.length, 1);
+  assert.equal(fixture.workspaceStorages.length, 0);
   const initializeRequest = fixture.processes[0].messages.find(
     ({ method }) => method === "initialize",
   );
@@ -837,19 +984,96 @@ test("limits workspace writes to the requested repository", async () => {
 
   await fixture.adapter.run(request({ access: "workspace-write" }));
 
+  const storage = fixture.workspaceStorages[0];
   const turnRequest = fixture.processes[0].messages.find(
     ({ method }) => method === "turn/start",
   );
   assert.deepEqual(turnRequest.params.sandboxPolicy, {
     type: "workspaceWrite",
-    writableRoots: [PROJECT_PATH],
+    writableRoots: [PROJECT_PATH, storage.rootPath],
     networkAccess: false,
     excludeTmpdirEnvVar: true,
     excludeSlashTmp: true,
   });
+  assert.equal(storage.cleanupCalls, 1);
+  assert.deepEqual(
+    fixture.processes[0].workspaceStorage.shellEnvironment,
+    storage.shellEnvironment,
+  );
+  assert.ok(
+    fixture.processes[0].argumentsList.includes(
+      'shell_environment_policy={inherit="core",' +
+        "ignore_default_excludes=false," +
+        "experimental_use_profile=false," +
+        `set={TMPDIR=${JSON.stringify(storage.shellEnvironment.TMPDIR)},` +
+        `XDG_CACHE_HOME=${JSON.stringify(storage.shellEnvironment.XDG_CACHE_HOME)},` +
+        `XDG_RUNTIME_DIR=${JSON.stringify(storage.shellEnvironment.XDG_RUNTIME_DIR)}}}`,
+    ),
+  );
   assert.equal(
     (await fixture.adapter.probe()).gitMetadataWriteBlocked,
     true,
+  );
+});
+
+test("fails closed on unsafe workspace storage preparation and cleanup", async () => {
+  const preparationFailure = createFixture({
+    storagePreparationError: true,
+  });
+  await assert.rejects(
+    preparationFailure.adapter.run(request({ access: "workspace-write" })),
+    hasDiagnostic("ERR_CODEX_ISOLATION", "isolation_shell_environment"),
+  );
+  assert.equal(preparationFailure.processes.length, 0);
+  assert.equal(preparationFailure.workspaceStorages.length, 0);
+
+  const spawnFailure = createFixture({ spawnError: true });
+  await assert.rejects(
+    spawnFailure.adapter.run(request({ access: "workspace-write" })),
+    hasCode("ERR_CODEX_UNAVAILABLE"),
+  );
+  assert.equal(spawnFailure.processes.length, 0);
+  assert.equal(spawnFailure.workspaceStorages[0].cleanupCalls, 1);
+
+  const cleanupFailure = createFixture({ storageCleanupError: true });
+  await assert.rejects(
+    cleanupFailure.adapter.run(request({ access: "workspace-write" })),
+    (error) => {
+      assert.ok(
+        hasDiagnostic(
+          "ERR_CODEX_ISOLATION",
+          "isolation_shell_environment",
+        )(error),
+      );
+      assert.equal(error.message, "Codex workspace storage is unsafe.");
+      assert.equal(error.cause, undefined);
+      return true;
+    },
+  );
+  assert.equal(cleanupFailure.processes.length, 1);
+  assert.equal(cleanupFailure.workspaceStorages[0].cleanupCalls, 1);
+});
+
+test("rejects an incorrect workspace shell-environment projection", async () => {
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method !== "config/read") {
+        return undefined;
+      }
+      return { result: { config: isolatedConfiguration() } };
+    },
+  });
+
+  await assert.rejects(
+    fixture.adapter.run(request({ access: "workspace-write" })),
+    hasDiagnostic("ERR_CODEX_ISOLATION", "isolation_shell_environment"),
+  );
+  assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
+  assert.equal(
+    fixture.processes[0].messages.some(
+      ({ method }) => method?.startsWith("thread/"),
+    ),
+    false,
   );
 });
 
@@ -880,9 +1104,12 @@ test("rejects substitution of an explicit model", async () => {
   });
 
   await assert.rejects(
-    fixture.adapter.run(request({ model: "gpt-test" })),
+    fixture.adapter.run(
+      request({ access: "workspace-write", model: "gpt-test" }),
+    ),
     hasCode("ERR_CODEX_MODEL_REROUTED"),
   );
+  assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
 });
 
 test("fails before starting a thread when isolation is incomplete", async () => {
@@ -998,16 +1225,20 @@ test("reports persistent MCP discovery failure as recoverable", async () => {
     },
   });
 
-  await assert.rejects(fixture.adapter.run(request()), (error) => {
-    assert.ok(error instanceof CodexAdapterError);
-    assert.equal(error.code, "ERR_CODEX_UNAVAILABLE");
-    assert.equal(error.diagnosticClass, "isolation_mcp_discovery");
-    assert.equal(error.method, "mcp/list");
-    assert.equal(error.recoverable, true);
-    return true;
-  });
+  await assert.rejects(
+    fixture.adapter.run(request({ access: "workspace-write" })),
+    (error) => {
+      assert.ok(error instanceof CodexAdapterError);
+      assert.equal(error.code, "ERR_CODEX_UNAVAILABLE");
+      assert.equal(error.diagnosticClass, "isolation_mcp_discovery");
+      assert.equal(error.method, "mcp/list");
+      assert.equal(error.recoverable, true);
+      return true;
+    },
+  );
   assert.equal(discoveryCalls, 2);
   assert.equal(fixture.processes.length, 0);
+  assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
 });
 
 test("preserves session recovery after transient MCP discovery", async () => {
@@ -1160,9 +1391,19 @@ test("falls back to a fresh session when continuation is unavailable", async () 
   assert.match(retry.params.input[0].text, /^The previous Codex session/u);
   assert.match(retry.params.input[0].text, /complete durable request/u);
   assert.doesNotMatch(retry.params.input[0].text, /current session/u);
+  assert.equal(fixture.workspaceStorages.length, 2);
+  assert.notEqual(
+    fixture.workspaceStorages[0].rootPath,
+    fixture.workspaceStorages[1].rootPath,
+  );
+  assert.deepEqual(
+    fixture.workspaceStorages.map(({ cleanupCalls }) => cleanupCalls),
+    [1, 1],
+  );
+  assert.equal(fixture.workspaceStorages[1].previousCleanupCalls, 1);
   assert.deepEqual(retry.params.sandboxPolicy, {
     type: "workspaceWrite",
-    writableRoots: [PROJECT_PATH],
+    writableRoots: [PROJECT_PATH, fixture.workspaceStorages[1].rootPath],
     networkAccess: false,
     excludeTmpdirEnvVar: true,
     excludeSlashTmp: true,
@@ -1251,11 +1492,12 @@ test("normalizes cleanup failures after a successful turn", async () => {
   const fixture = createFixture({ closeError: true });
 
   await assert.rejects(
-    fixture.adapter.run(request()),
+    fixture.adapter.run(request({ access: "workspace-write" })),
     (error) =>
       hasCode("ERR_CODEX_PROCESS_EXITED")(error) &&
       error.message === "Cannot close Codex app-server input.",
   );
+  assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
 });
 
 test("ignores output failures after protocol shutdown", async () => {
@@ -1310,6 +1552,7 @@ test("creates an authorized commit through a networkless sandbox", async () => {
   );
 
   assert.deepEqual(result.structured, { ready: true });
+  assert.equal(fixture.workspaceStorages.length, 0);
   const turn = fixture.processes[0].messages.find(
     ({ method }) => method === "turn/start",
   );
@@ -2027,6 +2270,7 @@ test("hydrates summarized compaction and retries a full context once", async () 
 
   const result = await fixture.adapter.run(
     request({
+      access: "workspace-write",
       prompt: "Continue from the current session.",
       recoveryPrompt: "Inspect the complete durable request.",
     }),
@@ -2049,6 +2293,15 @@ test("hydrates summarized compaction and retries a full context once", async () 
   assert.match(turnPrompts[1], /^Compact the existing Codex/u);
   assert.match(turnPrompts[1], /complete durable request/u);
   assert.doesNotMatch(turnPrompts[1], /current session/u);
+  assert.equal(fixture.workspaceStorages.length, 1);
+  assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
+  const roots = fixture.processes[0].messages
+    .filter(({ method }) => method === "turn/start")
+    .map(({ params }) => params.sandboxPolicy.writableRoots);
+  assert.deepEqual(roots, [
+    [PROJECT_PATH, fixture.workspaceStorages[0].rootPath],
+    [PROJECT_PATH, fixture.workspaceStorages[0].rootPath],
+  ]);
 });
 
 test("reconstructs a fresh turn when compaction cannot free the context", async () => {
@@ -2101,6 +2354,16 @@ test("reconstructs a fresh turn when compaction cannot free the context", async 
   assert.match(retry.params.input[0].text, /^The previous Codex session/u);
   assert.match(retry.params.input[0].text, /complete durable request/u);
   assert.doesNotMatch(retry.params.input[0].text, /current session/u);
+  assert.equal(fixture.workspaceStorages.length, 2);
+  assert.notEqual(
+    fixture.workspaceStorages[0].rootPath,
+    fixture.workspaceStorages[1].rootPath,
+  );
+  assert.deepEqual(
+    fixture.workspaceStorages.map(({ cleanupCalls }) => cleanupCalls),
+    [1, 1],
+  );
+  assert.equal(fixture.workspaceStorages[1].previousCleanupCalls, 1);
 });
 
 test(
