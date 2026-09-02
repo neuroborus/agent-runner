@@ -17,6 +17,12 @@ Each pipeline owns its specification under its workspace.
 - Every pipeline starts with a bounded, read-only `CLARIFY` phase.
 - After clarification closes, a blocking material product decision pauses the
   pipeline through `PRODUCT_DECISION_REQUIRED`.
+- Every built-in pipeline supports `independent` and `lazy` execution modes.
+  `independent` is the default and recommended choice because it provides
+  genuinely independent semantic review, at the cost of more provider context
+  and tokens. `lazy` is an explicit lower-consumption choice that uses only the
+  primary agent and does not provide independent review; it is never selected
+  automatically.
 - Codex and Claude can be selected independently for each pipeline role.
 - Read-only agent turns include repository-mutation verification.
 - `plan-authoring` confines writes to its resolved `clarifications.md` and
@@ -24,8 +30,8 @@ Each pipeline owns its specification under its workspace.
   repository.
 - In `plan-execution`, the Worker receives one-shot authorization for the exact
   planned local commit after successful finalization and review gates.
-- `polishing` finalizes and independently reviews existing workspace changes
-  while preserving `HEAD` for a later commit workflow.
+- `polishing` finalizes and applies the selected review gate to existing
+  workspace changes while preserving `HEAD` for a later commit workflow.
 - Commit creation uses the repository's configured Git identity and the exact
   subject-only Conventional Commit message; validation includes
   `Co-authored-by` in its trailer denylist.
@@ -63,7 +69,7 @@ For repository development, run `node bin/agent-run.js` directly.
 | --- | --- | --- |
 | `plan-authoring` | Analyze a task, review a draft, and atomically write `plan.md` | [`pipelines/plan-authoring/docs/SPEC.md`](pipelines/plan-authoring/docs/SPEC.md) |
 | `plan-execution` | Implement, finalize, review, and locally commit every plan step | [`pipelines/plan-execution/docs/SPEC.md`](pipelines/plan-execution/docs/SPEC.md) |
-| `polishing` | Polish, finalize, and independently review existing dirty-worktree changes for a later commit workflow | [`pipelines/polishing/docs/SPEC.md`](pipelines/polishing/docs/SPEC.md) |
+| `polishing` | Polish, finalize, review, and stage existing dirty-worktree changes for a later commit workflow | [`pipelines/polishing/docs/SPEC.md`](pipelines/polishing/docs/SPEC.md) |
 
 Plan authoring and execution share the deterministic
 [`@agent-runner/commit-plan`](packages/commit-plan/README.md) contract. The
@@ -104,8 +110,10 @@ ignored, untracked, confined regular file.
 
 For execution preferences, CLI/MCP role values win over CLI/MCP run-wide
 values, then project-role and project-wide values, runner-role and runner-wide
-values, and finally built-in `current`. Project pipeline settings override
-runner settings. `resume` uses the persisted roles, settings, and artifact root.
+values, and finally built-in `current`. Explicit CLI/MCP pipeline-setting
+overrides win over project pipeline settings, which win over runner settings
+and descriptor defaults. `resume` uses the persisted roles, settings, and
+artifact root and never reloads the mode.
 
 Every role accepts string `profile`, `model`, and `contextSize` selections.
 A selected profile supplies its backend; `defaultBackend` provides the fallback.
@@ -126,14 +134,17 @@ Pipeline settings use these defaults:
 
 | Pipeline | Setting | Default |
 | --- | --- | ---: |
+| `plan-authoring` | `mode` | `independent` |
 | `plan-authoring` | `maxRevisionRounds` | 15 |
 | `plan-authoring` | `stagnationWindowRounds` | 3 |
+| `plan-execution` | `mode` | `independent` |
 | `plan-execution` | `maxFixRoundsPerStep` | 5 |
 | `plan-execution` | `finalization` | `auto` |
 | `plan-execution` | `maxDisputesPerFinding` | 2 |
 | `plan-execution` | `maxSameFindingRounds` | 3 |
 | `plan-execution` | `stagnationWindowRounds` | 3 |
 | `plan-execution` | `trustedChecks` | `[]` |
+| `polishing` | `mode` | `independent` |
 | `polishing` | `maxFixRounds` | 5 |
 | `polishing` | `finalization` | `auto` |
 | `polishing` | `maxDisputesPerFinding` | 2 |
@@ -141,9 +152,20 @@ Pipeline settings use these defaults:
 | `polishing` | `stagnationWindowRounds` | 3 |
 | `polishing` | `trustedChecks` | `[]` |
 
-The stagnation window detects consecutive blocked correction rounds. The first
-full window invokes one fresh Arbiter; a second full window pauses for the user.
-Harder configured limits take precedence.
+`mode` accepts exactly `independent` and `lazy`. A missing value resolves to
+`independent`. The tracked [example](.agent-runner.example.json) selects
+`independent` explicitly for every pipeline. Runner and ignored project
+configuration may select either value, and `--mode` or MCP `run_start.mode`
+has highest precedence. Configuration remains strictly validated for every
+declared role, but a lazy run resolves, probes, persists, and invokes only its
+Planner or Worker. Reviewer and Arbiter configuration stays available in the
+configuration files for a later independent run without being resolved or
+exposed by the lazy run.
+
+The stagnation window detects consecutive blocked correction rounds. In
+independent mode the first full window invokes one fresh Arbiter and a second
+full window pauses for the user. Lazy mode has no Arbiter and pauses at the
+first full window. Harder configured limits take precedence.
 
 For plan execution and polishing, `finalization: "auto"` uses a conventional
 confined repository `finalization` skill when present. The fallback derives the
@@ -281,6 +303,7 @@ respectively:
 agent-run run polishing \
   --project /path/to/repository \
   --task /path/to/task \
+  --mode independent \
   --profile claude-primary \
   --model sonnet \
   --worker-context-size 200000
@@ -290,7 +313,8 @@ Use `--project-config <path>` to select an existing ignored and untracked
 project configuration confined to the canonical project. New runs accept the
 flag; resume uses the resolved durable configuration.
 
-A run may seed its primary and review roles from one existing backend session:
+A run may seed the mode's primary and review roles from one existing backend
+session:
 
 ```bash
 agent-run run plan-execution \
@@ -303,24 +327,22 @@ agent-run run plan-execution \
 ```
 
 `--fork-profile` is separate so the text after the first separator in
-`--fork-from` remains an opaque native ID. The primary and review backends must
-match the source backend. A known source profile supplies `current` for those
-roles and every explicit role profile must match it. An unknown source profile
-selects `current` inheritance. The first
-eligible turn in each pipeline-owned primary or review checkpoint forks the
-source independently. Checkpoints separate clarification, bootstrap, and work;
-plan execution also isolates every commit's Worker and Reviewer contexts. The
-source may intentionally contain context shared before the fork. Its children
-are direct siblings with independent later histories. The source stays
-immutable, and every arbitration uses a fresh Arbiter selected by the run's
-role configuration. The runner
-persists the resolved source reference, resolved source profile, and child
-lineage for recovery and resume. Source availability and backend/profile
-compatibility are strict preflight requirements. Because primary and review
-roles each receive the
-complete source context, a fork can consume that provider context and quota
-independently. Prefer a fresh start for a long, multi-topic, or uncertain source
-session.
+`--fork-from` remains an opaque native ID. Participating primary and review
+roles must match the source backend. A known source profile supplies `current`
+for those roles and every explicit participating-role profile must match it; an
+unknown source profile requires `current` inheritance. In independent mode,
+the first eligible turn in each pipeline-owned primary or review checkpoint
+forks the source independently.
+Those children are direct siblings with independent later histories, and every
+Arbiter starts fresh. In lazy mode, the source is forked exactly once into the
+logical Planner or Worker for the whole run. Later checkpoints continue that
+child when compatible or reconstruct the same logical role without forking the
+source again. The source always stays immutable, and correctness never depends
+on a native session surviving interruption. The runner persists the source,
+resolved profile, lineage, and the one-time lazy-fork marker for recovery and
+resume. Prefer a fresh start for a long, multi-topic, or uncertain source
+session; independent forks can consume its provider context and quota more than
+once.
 
 Add `--clarify` to any `run` command to open `$VISUAL` or `$EDITOR` before
 the primary agent checks whether more information is needed. The default
@@ -340,7 +362,7 @@ Execution pauses for a revised plan and a
 new run if clarification input conflicts with the validated plan. Plan
 authoring's task-owned `clarifications.md` and `plan.md` remain beside `task.md`.
 
-Role backends are configured independently:
+Independent-mode role backends are configured independently:
 
 ```bash
 agent-run run plan-execution \
@@ -356,16 +378,20 @@ Runner state uses `$XDG_STATE_HOME/agent-runner/` with
 ID, pipeline state-schema version, and an explicit runtime compatibility tuple
 independent from the package version. Compatible legacy state is migrated by
 the owning pipeline under the per-run lease; incompatible readers return a
-specific version-skew error while preserving the run. Complete
-write-ahead events precede atomic state replacement; recovery repairs a lagging
-state file and derived progress. Mutating runs require one per-run execution
-lease. Plan execution and polishing also serialize ownership with an external
-lease keyed by the canonical Git worktree, granting mutation ownership to one
-run ID at a time. Both leases support safe same-host stale recovery;
+specific version-skew error while preserving the run. The mode-aware pipeline
+versions are plan-authoring version 2, plan-execution version 12, and polishing
+version 8. Their ordered migrations resolve every supported legacy run to
+`independent` without moving terminal workflows or replaying role turns,
+commits, or handoffs. Complete write-ahead events precede atomic state
+replacement; recovery repairs a lagging state file and derived progress.
+Mutating runs require one per-run execution lease. Plan execution and polishing
+also serialize ownership with an external lease keyed by the canonical Git
+worktree, granting mutation ownership to one run ID at a time. Both leases
+support safe same-host stale recovery;
 status and bounded public activity reads remain lock-free. `run` and `resume`
-print concise labeled activity as it is persisted; `status` prints the current
-state, pause, artifact paths, findings, fingerprints, commit SHAs, and a bounded
-public activity summary.
+print concise labeled activity as it is persisted; `status` prints the resolved
+mode, current state, pause, artifact paths, findings, fingerprints, commit SHAs,
+and a bounded public activity summary.
 
 An action-free resume also recovers a nonterminal, nonpaused persisted active
 turn after its execution owner is lost. Recovery retains the active marker
@@ -374,6 +400,11 @@ request restarts, and clears it only after normal post-turn reconciliation. If
 correction reconciliation advanced the checkpoint before the marker could be
 cleared, resume clears that completed marker after the same safety checks and
 continues from the advanced checkpoint without replaying the correction.
+Lazy check/fix and clean-confirm checkpoints persist their intent, accepted
+fingerprint, and round accounting so resume reconciles partial writable content
+or read-only mutation without replaying an accepted effect or counting a round
+twice. The one-time source-fork marker prevents reconstruction from forking the
+source again.
 
 Plan execution and polishing accept one applicable resume action at a time:
 
@@ -392,16 +423,28 @@ blocking material product decision may ask another question. An answer that
 invalidates the validated plan or completed execution scope requires a revised
 plan and a new execution run, preserving existing history.
 
-For every execution step, the Worker implements the change, runs a dedicated
-finalization gate using the configured guidance policy, and passes an
-independent review of the same content fingerprint before receiving one-shot
-authorization to create the exact planned local commit. Remote state remains
-read-only.
+Plan authoring keeps its independent Planner/Reviewer/Arbiter flow by default.
+In lazy mode, the Planner drafts and performs state-held `CHECK_AND_FIX` rounds,
+then separately confirms the exact draft read-only. Only an unchanged
+structured `CLEAN` result can reach deterministic shared plan validation and
+atomic `plan.md` writing; drafts never become repository writes or commits.
 
-Polishing follows the same fingerprint-bound finalization and independent
-review gate. Agent turns change content only; after the gate passes, the runner
-stages the complete reviewed change set and leaves it uncommitted for a
-separate commit workflow.
+For every execution step, the Worker implements the change and runs a dedicated
+finalization gate using the configured guidance policy. Independent mode then
+requires a separate Reviewer over that fingerprint. Lazy mode instead runs a
+writable Worker `CHECK_AND_FIX` turn with the established review criteria;
+changes return through full finalization, while an unchanged result requires a
+separate read-only `CLEAN_CONFIRM`. Only a structured clean confirmation with
+no repository mutation and unchanged content and validation fingerprints may
+reach the same runner-owned one-shot exact-subject commit boundary.
+Confirmation findings return directly to `CHECK_AND_FIX`; lazy mode has no
+review dispute or Arbiter path. Remote state remains read-only.
+
+Polishing follows the same mode-specific, fingerprint-bound gate. In lazy mode,
+Worker changes after finalization require the complete finalization gate again,
+and only an unchanged clean confirmation can reach `HANDOFF`. Agent turns
+change content only; the runner then stages the complete confirmed change set
+and leaves it uncommitted for a separate commit workflow.
 Its dedicated `FINALIZE` turn runs the target project's complete validation
 procedure, including required formatting or generated output, with configured
 skill guidance when available. Its scope ends with fingerprint-bound validation
@@ -449,9 +492,14 @@ unique opaque idempotency key. It persists the run, returns a durable `runId`,
 and launches detached execution. Its additive `projectConfigurationPath`
 selects the same confined project file as `--project-config`; `profile`,
 `model`, and `contextSize` set run-wide selections; the same fields inside a
-`roleOverrides` entry take precedence. `sourceSession.profile` carries a known
-trusted source alias while its `id` remains opaque. These optional fields are
-additive; the minimal fresh-start request is:
+`roleOverrides` entry take precedence. Optional `mode` accepts only
+`independent` and `lazy` and overrides project and runner configuration.
+`independent` is the default and recommended option for genuinely independent
+semantic review, but it consumes more provider context and tokens. `lazy` is
+opt-in for lower consumption and does not provide independent review; a
+controlling agent must never select it automatically. `sourceSession.profile`
+carries a known trusted source alias while its `id` remains opaque. These
+optional fields are additive; the minimal fresh-start request is:
 
 ```json
 {
@@ -477,11 +525,12 @@ with that choice. An unknown profile offers `current` inheritance. Add
 }
 ```
 
-Primary and review roles then fork the complete source context independently,
-so each child can consume the provider context and quota. Recommend a fresh
-start for a long, multi-topic, or uncertain current session. The configured
-artifact root applies to runner-owned execution, polishing, and issue-report
-artifacts; plan-authoring artifacts remain beside `task.md`.
+Independent mode then forks the complete source context into primary and review
+roles, so each child can consume provider context and quota. Lazy mode forks it
+once into the primary role and never invokes Reviewer or Arbiter. Recommend a
+fresh start for a long, multi-topic, or uncertain current session. The
+configured artifact root applies to runner-owned execution, polishing, and
+issue-report artifacts; plan-authoring artifacts remain beside `task.md`.
 
 `unexpected_issue_report` is deliberately separate from pipeline execution.
 Use it after the supervising client agent explicitly concludes that Agent Runner
@@ -544,23 +593,27 @@ incomplete intent unchanged and returns an actionable restart-and-retry error.
 The existing execution leases, Git safety checks, local-only policy, and
 one-shot commit authorization remain authoritative.
 
-CLI output and MCP progress events label public activity by role. `run_status`
-returns a concise current snapshot; `run_activity` returns bounded history
-after a cursor and a next cursor. Use activity for explicit inspection or
-recovery. `run_wait` can emit the same bounded events as progress notifications
-while the model sleeps; live rendering depends on the MCP host. Public activity
-contains role labels and bounded operational summaries.
+CLI output and MCP progress events label public activity by role. `run_status`,
+`run_wait`, and `run_activity` expose the resolved mode; `pipelines_list`
+projects descriptor-owned setting values, defaults, and recommendations.
+`run_status` returns a concise current snapshot; `run_activity` returns bounded
+history after a cursor and a next cursor. Use activity for explicit inspection
+or recovery. `run_wait` can emit the same bounded events as progress
+notifications while the model sleeps; live rendering depends on the MCP host.
+Public projections contain no inactive role configuration or provider-private
+data.
 
 ## Pipeline Boundary
 
 The registry is static in V1. A pipeline descriptor exports an ID, a state
-version, roles, configuration settings and defaults, ordered migrations from
-supported prior versions, pipeline-specific accepted and required `run`
+version, roles, configuration settings and defaults, setting allowed values and
+recommendations, descriptor-owned active-role selection, ordered migrations
+from supported prior versions, pipeline-specific accepted and required `run`
 options, task-input definitions, clarification and status projections,
-resume-action validation, persisted-run validation, and a
-description; the root CLI owns the common `--clarify` lifecycle option. Each
-workspace owns its explicit JavaScript workflow. The runner provides state,
-events, agents, and Git services; pipeline workspaces own workflow policy.
+resume-action validation, persisted-run validation, and a description; the root
+CLI owns the common `--clarify` lifecycle option. Each workspace owns its
+explicit JavaScript workflow. The runner provides state, events, agents, and
+Git services; pipeline workspaces own mode and workflow policy.
 
 ## Repository Layout
 

@@ -48,8 +48,9 @@ defaults, accepted `run` options, prompts, structured-output schemas, explicit
 JavaScript state machine, retry policy, and completion criteria. Roles, settings,
 accepted and required options, task-input definitions, clarification and status
 projections, resume-action validation, and persisted-run validation are exposed
-through its static descriptor; pipeline states remain workspace-owned rather
-than becoming root runtime policy.
+through its static descriptor. The descriptor also selects the active roles
+from its resolved settings, including all mode semantics; pipeline states remain
+workspace-owned rather than becoming root runtime policy.
 
 The root CLI owns `--clarify` as a common run-lifecycle option. Role and
 pipeline-specific options remain in pipeline descriptors.
@@ -60,8 +61,8 @@ V1 registers:
   history.
 - `plan-execution`: consumes `plan.md` and implements one reviewed local commit
   per step.
-- `polishing`: polishes, finalizes, and independently reviews an existing dirty
-  worktree, then stages the complete result while leaving it uncommitted.
+- `polishing`: polishes, finalizes, and reviews an existing dirty worktree, then
+  stages the complete result while leaving it uncommitted.
 
 The registry is static. V1 has no dynamic plugins, workflow DSL, or generic DAG
 executor.
@@ -116,6 +117,7 @@ The V1 shape is:
   },
   "pipelines": {
     "plan-execution": {
+      "mode": "independent",
       "finalization": "auto",
       "trustedChecks": ["service-tests"],
       "maxFixRoundsPerStep": 5,
@@ -142,8 +144,9 @@ for each fresh report and persisted through its resolved reservation.
 resolve from its role-specific CLI/MCP override, the run-wide override, its
 project-role value, the corresponding project-wide default, its pipeline-role
 runner value, the corresponding runner-wide default, then the built-in string
-`current`; a role-specific CLI override has highest precedence. Project
-pipeline settings override runner settings.
+`current`; a role-specific CLI override has highest precedence. Explicit
+CLI/MCP pipeline-setting overrides take precedence over project pipeline
+settings, which take precedence over runner settings and descriptor defaults.
 A profile alias is trusted runner configuration, pins one backend, and maps
 only to a native Codex profile name or an isolated Claude configuration
 directory. A conflicting explicit backend is invalid; profile configuration
@@ -163,6 +166,25 @@ Pipeline descriptors validate their own settings and supply built-in defaults.
 The root loader owns only the versioned envelope, strict field validation, and
 resolution precedence; it does not duplicate pipeline-specific role or setting
 lists.
+
+Every built-in descriptor owns one string `mode` setting with exactly
+`independent` and `lazy`. A missing value resolves to `independent`, which is
+the default and recommended option because its distinct primary and review
+roles provide genuinely independent semantic review. That independence uses
+more provider context and tokens. `lazy` is an explicit lower-consumption
+choice that uses only the Planner for plan authoring or the Worker for execution
+and polishing and does not provide independent review. Neither the root runner
+nor a pipeline may select it automatically.
+
+Runner and project configuration are deterministically validated for every
+declared role. After settings resolve, the descriptor selects active roles.
+Only those roles are resolved to a backend, profile, model, and context size;
+only they are probed, persisted in the run, checked against a source session,
+and invoked. Public projections may identify an active role for bounded
+activity, but expose neither provider-private values nor inactive role
+configuration. Inactive Reviewer and Arbiter values remain untouched in the
+configuration source for a later independent run. The resolved mode is
+persisted when the run is created and is never reloaded on resume.
 
 Plan execution and polishing own a string `finalization` setting. `auto`, the
 default, discovers a conventional confined repository skill and otherwise
@@ -188,11 +210,12 @@ reloading either configuration source.
 ## Run Lifecycle
 
 The root runner resolves the canonical Git root, safely loads runner and
-project configuration, applies run-wide and role-specific execution overrides,
-and persists the resolved roles, settings, artifact root, and optional
-source-session reference and profile before pipeline work begins. `run` then
-holds the new run's per-run lease while invoking its statically registered
-workflow. Plan execution and polishing additionally hold one external lease
+project configuration, applies run-wide, role-specific, and accepted
+pipeline-setting overrides, asks the descriptor for the active roles, and
+persists those resolved roles, the resolved settings, artifact root, and
+optional source-session reference and profile before pipeline work begins.
+`run` then holds the new run's per-run lease while invoking its statically
+registered workflow. Plan execution and polishing additionally hold one external lease
 keyed by the canonical Git worktree before any workflow-owned mutation. The
 runner always acquires the per-run lease first and releases the worktree lease
 first. `resume` recovers the durable event history and reconstructs the same
@@ -208,15 +231,19 @@ its task-owned `clarifications.md` and `plan.md` beside `task.md`.
 
 `--fork-from <backend>:<session-id>` is accepted only on a new run. The session
 ID remains opaque after the first separator; `--fork-profile <alias>` supplies
-its optional trusted profile without changing that syntax. The pipeline's
-primary and review roles must use the source backend and support native forking.
-When the source profile is known, their `current` profile selections inherit it
-and every explicit selection must match. When it is unknown, they must remain
-`current`, no native profile override is supplied, and unavailable native
-forking fails closed. Each checkpoint's first eligible role turns fork the
-source independently, while the Arbiter remains unconstrained. Resume uses the
-persisted source, resolved source profile, and child lineage and never asks for
-the flags again.
+its optional trusted profile without changing that syntax. Every participating
+primary or review role must use the source backend and support native forking.
+When the source profile is known, its `current` selections inherit that profile
+and every explicit participating-role selection must match. When it is unknown,
+participating roles must remain `current`, no native profile override is
+supplied, and unavailable native forking fails closed. In independent mode,
+each primary and review checkpoint's first eligible turn forks the source
+directly and independently, while the Arbiter remains unconstrained. In lazy
+mode, the source is forked exactly once into the
+logical primary role for the entire run. Later checkpoints continue the
+compatible child or reconstruct the same logical role in a disposable session;
+they never fork the source again. Resume uses the persisted source, profile,
+child lineage, and one-time lazy-fork marker and never asks for the flags again.
 
 The CLI renders only persisted public activity and a concise current-state
 projection. A user-action pause has a distinct exit status from an internal
@@ -303,15 +330,21 @@ remains deterministic when the competing lease is released between MCP polls.
 An MCP disconnect, tool timeout, worktree conflict, or duplicate recovery
 launch cannot create a second workflow owner.
 
-MCP start fields remain additive, and `sourceSession` defaults to unset. When a
-compatible current native session is available, the controlling agent offers a
-fresh start and a deliberate fork choice, including its trusted source profile
-when known. An unknown profile permits only `current` inheritance; the agent
-never guesses an alias, inspects provider-private storage, or interprets the
-opaque native ID. The field is passed only after the user selects the fork.
-Primary and review roles then fork the complete source context independently,
-so a fresh start is recommended for a long, multi-topic, or uncertain source
-session to avoid unnecessary provider context and quota use.
+MCP start fields remain additive. `run_start.mode` accepts only `independent`
+and `lazy` and has the same highest precedence as CLI `--mode`. MCP guidance
+states that `independent` is the default and recommended choice for genuinely
+independent semantic review despite its higher context and token cost, and that
+`lazy` is an opt-in lower-consumption tradeoff without independent review that
+must never be selected automatically. `sourceSession` defaults to unset. When
+a compatible current native session is available, the controlling agent offers
+a fresh start and a deliberate fork choice, including its trusted source
+profile when known. An unknown profile permits only `current` inheritance; the
+agent never guesses an alias, inspects provider-private storage, or interprets
+the opaque native ID. The field is passed only after the user selects the fork.
+Independent mode forks the complete source context into primary and review
+roles; lazy mode forks it once into the primary role. A fresh start is
+recommended for a long, multi-topic, or uncertain source session to avoid
+unnecessary provider context and quota use.
 
 `run_wait` is one revision-driven server-side wait that ends at an unresolved
 `WAITING_FOR_USER`, `DONE`, `FAILED`, or its caller-selected timeout. Optional
@@ -326,9 +359,12 @@ stale threshold used for exclusive acquisition; an owner on another host
 remains live because its process liveness cannot be established locally.
 A timeout therefore distinguishes a live detached continuation from an
 interrupted process without polling or a heartbeat.
-`run_activity` remains an explicit cursor-based history read rather than a
-polling primitive. V1 does not require the MCP Tasks extension, a network
-transport, authentication, or a daemon.
+`pipelines_list` projects descriptor-owned setting values, defaults, and
+recommendations. Status, wait, and activity project the persisted resolved mode
+without inactive role configuration or provider-private data. `run_activity`
+remains an explicit cursor-based history read rather than a polling primitive.
+V1 does not require the MCP Tasks extension, a network transport,
+authentication, or a daemon.
 
 ## External Run State
 
@@ -406,7 +442,13 @@ path, while interrupted verification retains any recorded proof for resume.
 Polishing has no commit authorization and preserves the initial `HEAD`, refs,
 remotes, and Git identity through completion.
 
-Plan execution and polishing state version 2 persist the independently
+Plan authoring state version 2 adds the resolved mode, the fingerprint accepted
+by lazy clean confirmation, and the one-time lazy source-fork marker. Its
+version-1 migration selects `independent` and initializes the new checkpoint
+fields without moving the workflow, replaying a role turn, rewriting a draft or
+artifact, or reviving a terminal run.
+
+Plan execution and polishing state version 2 persist the mode-specific
 bootstrapped required-check inventory, the repository-relative files that own
 validation infrastructure, and a runner-computed fingerprint of those files.
 Each pipeline owns a 64-item limit for each inventory field returned by one
@@ -417,11 +459,13 @@ cannot return a complete field within 64 items reports the strict
 the pipeline pauses with `bootstrap_inventory_capacity_exhausted` and a bounded
 public diagnostic without consuming a structured-output correction or
 accepting truncated evidence.
-The runner establishes that inventory from accepted Worker evidence followed by
-accepted Reviewer evidence. It deduplicates exact commands and paths in stable
-first-seen order and assigns contiguous `C1`-through-`Cn` IDs; reconciliation
-and arbitration resolve only summaries and material disagreements and cannot
-add commands or paths. Validation-migration discovery uses the same derivation.
+In independent mode, the runner establishes that inventory from accepted Worker
+evidence followed by accepted Reviewer evidence; in lazy mode, accepted Worker
+evidence is complete. It deduplicates exact commands and paths in stable
+first-seen order and assigns contiguous `C1`-through-`Cn` IDs; independent-mode
+reconciliation and arbitration resolve only summaries and material
+disagreements and cannot add commands or paths. Validation-migration discovery
+uses the same mode-specific derivation.
 The version-1 migration preserves safe workspace content while invalidating
 active aggregate finalization and review evidence. Paused legacy evidence is
 explicitly provisional: before a retry, override, finalization, or review can
@@ -540,6 +584,12 @@ bypassing finalization, findings, fingerprints, Git guards, or commit
 authorization. Rejected values, findings, commands, paths, provider output,
 prompts, and transcripts never enter durable state or public activity.
 
+Plan execution state version 12 adds the resolved mode, the fingerprint
+accepted by lazy clean confirmation, and the one-time lazy source-fork marker.
+Its version-11 migration selects `independent` without moving active or terminal
+workflow positions, changing completed commits, or replaying a pending or
+consumed one-shot commit effect.
+
 Polishing state version 3 adopts the same resolved trusted-validation snapshot,
 per-check executor provenance, and fingerprint-bound evidence tuple. Its
 version-2 migration selects empty legacy trust, preserves safe workspace
@@ -593,6 +643,12 @@ transcripts never enter state or public activity. Interrupted correction
 recovery remains read-only and does not require a native session. `HANDOFF`
 remains the sole Git-index owner for both Codex and Claude turns.
 
+Polishing state version 8 adds the resolved mode, the fingerprint accepted by
+lazy clean confirmation, and the one-time lazy source-fork marker. Its
+version-7 migration selects `independent` without moving active or terminal
+workflow positions, changing safe workspace content, or replaying a pending or
+completed `HANDOFF` effect.
+
 Common run-envelope version 3 adds `activeTurn`, either `null` or the current
 bounded `{ role, phase }`. Version-1 and version-2 runs project it as `null`
 without rewriting state or history; the next mutating continuation persists the
@@ -619,11 +675,11 @@ Every retryable request carries a turn prompt and a complete recovery prompt
 reconstructed from validated run state, durable artifacts, and the observed
 workspace. A role session is continued only when its persisted key matches the
 accepted inputs, role, and pipeline-owned checkpoint. Clarification and normal
-work use distinct checkpoints; plan execution also isolates Worker and Reviewer
-by planned commit, while polishing isolates bootstrap from Worker and Reviewer
-work. Compatible continuations receive only the current instruction and state
-delta; first, forked, fresh, and context-invalidated turns receive the complete
-prompt. Arbiters remain fresh.
+work use distinct checkpoints. In independent mode, plan execution also
+isolates Worker and Reviewer by planned commit, while polishing isolates
+bootstrap from Worker and Reviewer work. Compatible continuations receive only
+the current instruction and state delta; first, forked, fresh, and
+context-invalidated turns receive the complete prompt. Arbiters remain fresh.
 
 A checkpoint's complete prompt is reconstructed from validated inputs, durable
 resolved summaries, its current plan step or change-set fingerprint, active
@@ -633,6 +689,31 @@ Every pipeline role turn also states that the authorized role must produce the
 result itself without delegation, subagents, or multi-agent collaboration.
 Prompt compliance supplements rather than replaces the adapters' fail-closed
 collaboration audit.
+
+Independent mode retains the original role topology: primary and review roles
+have separate contexts and any required Arbiter starts fresh. Lazy mode has one
+logical primary role and never resolves, probes, forks, invokes, or charges a
+Reviewer or Arbiter. Plan authoring uses the Planner; plan execution and
+polishing use the Worker. A reconstructed native session is still that same
+logical role, and all clarification, no-delegation, provider recovery,
+redaction, product-decision, durable-state, lease, and repository guards remain
+unchanged.
+
+Lazy convergence is a bounded pipeline-owned loop. A writable
+`CHECK_AND_FIX` turn reviews the complete current result with the established
+pipeline review criteria and fixes any problem immediately. An unchanged
+result enters a separate read-only `CLEAN_CONFIRM` turn with the same criteria,
+an explicit edit prohibition, and a strict `CLEAN` or concrete-findings result.
+Advancement requires `CLEAN`, no repository mutation, and the exact inspected
+content fingerprint; execution and polishing also require the unchanged
+validation-infrastructure fingerprint and a valid validation-change decision.
+Findings return directly to `CHECK_AND_FIX`, never to dispute or arbitration.
+Every change invalidates fingerprint-bound evidence. Plan-authoring drafts stay
+in external state and are deterministically validated only after confirmation;
+execution and polishing return through their complete `FINALIZE` gate after a
+change before another confirmation. Existing fix/revision, stable-finding,
+stagnation, and additional-round budgets bound the loop and never silently
+accept an unconfirmed result.
 
 When a native context is full, an adapter may compact it and retry the complete
 recovery prompt once. If continuation still fails, writable and read-only work
@@ -684,24 +765,25 @@ substituted, replaced, or weakened checks are invalid output. The runner hashes
 the identified package scripts, test-discovery and runner files, skill guidance,
 and validation configuration rather than trusting an agent-supplied hash.
 Changing that inventory, its file set, or its fingerprint is provisional until
-the independent read-only Reviewer accepts that the task or current plan step
-authorizes the complete change for the same content fingerprint. Reviewer
-receives both the established and candidate tuples, so its acceptance cannot
-depend on a prior session. Reviewer rejection remains a finding. Commands and
-repository-relative infrastructure paths are validated and compared without
-rewriting interior whitespace. Host-reported results and user attestations are
-outside this trust boundary.
+the independent read-only Reviewer, or the lazy read-only clean confirmation,
+accepts that the task or current plan step authorizes the complete change for
+the same content fingerprint. The confirming turn receives both the established
+and candidate tuples, so acceptance cannot depend on a prior native session.
+Rejection remains a finding. Commands and repository-relative infrastructure
+paths are validated and compared without rewriting interior whitespace.
+Host-reported results and user attestations are outside this trust boundary.
 
-Plan execution gives each preparation phase one owner. Implementation and
-finding-resolution turns do not invoke project finalization or perform generic
-commit preparation. The dedicated finalization turn follows every substantive
-instruction in the selected guidance, including checks, formatting, generation,
-and staging-independent content review. Bootstrap, validation-migration, and
-finalization inventories deterministically reject index mutation, staged or
-index-relative inspection, implicit worktree-versus-index assertions,
-alternate-index workarounds, and commit preparation; applicable content checks
-use `HEAD` or explicit trees. Established checks are input only to `FINALIZE`.
-After finalization and independent review bind the same content and
+Plan execution gives each preparation phase one owner. Implementation,
+finding-resolution, and lazy check/fix turns do not invoke project finalization
+or perform generic commit preparation. The dedicated finalization turn follows
+every substantive instruction in the selected guidance, including checks,
+formatting, generation, and staging-independent content review. Bootstrap,
+validation-migration, and finalization inventories deterministically reject
+index mutation, staged or index-relative inspection, implicit
+worktree-versus-index assertions, alternate-index workarounds, and commit
+preparation; applicable content checks use `HEAD` or explicit trees.
+Established checks are input only to `FINALIZE`.
+After finalization and the mode-specific review gate bind the same content and
 validation-infrastructure fingerprints, the constrained local-commit executor
 alone runs `git add -A`, fixed unstaged-clean, staged-diff whitespace, and
 nonempty-diff hygiene, and the subject-only commit with the validated plan
@@ -710,14 +792,14 @@ identical for Codex and Claude and does not broaden ordinary Worker access to
 Git metadata.
 
 Polishing uses the same ownership rule without requesting `local-commit`.
-Worker polishing, finalization, and finding-resolution turns are content-only,
-including when selected finalization guidance normally requests staging.
-Bootstrap, validation-migration, and finalization inventories use the same
-deterministic staging-independence policy as plan execution; applicable tracked
-content checks use `HEAD` or explicit trees, and established checks are input
-only to `FINALIZE`. Once
-finalization and independent review bind the same staging-independent content
-and validation-infrastructure fingerprints, the pipeline persists `HANDOFF`.
+Worker polishing, finalization, finding-resolution, and lazy check/fix turns
+are content-only, including when selected finalization guidance normally
+requests staging. Bootstrap, validation-migration, and finalization inventories
+use the same deterministic staging-independence policy as plan execution;
+applicable tracked content checks use `HEAD` or explicit trees, and established
+checks are input only to `FINALIZE`. Once finalization and the mode-specific
+review gate bind the same staging-independent content and
+validation-infrastructure fingerprints, the pipeline persists `HANDOFF`.
 The root Git boundary then accepts either an unchanged pre-effect state or an
 already-complete recovered effect, runs `git add -A` only for the former, and
 verifies unchanged content and Git controls, a nonempty complete staged set,
@@ -779,10 +861,13 @@ producing result; plan execution batches all such independently detectable
 violations, and the same policy rejects a finalization candidate inventory
 without delegating index ownership to an ordinary Worker turn.
 
-An explicitly supplied source session is different: the first eligible turn of
-each new primary or review checkpoint creates a direct child and returns its ID
-without resuming or mutating the source. If the source cannot be forked, the
-turn fails before agent work rather than silently losing lineage.
+An explicitly supplied source session is different. In independent mode, the
+first eligible turn of each new primary or review checkpoint creates a direct
+child and returns its ID without resuming or mutating the source. In lazy mode,
+only the first eligible primary turn may create that child, and the durable
+one-time marker forbids later source forks even when a native session must be
+reconstructed. If the source cannot be forked, the turn fails before agent work
+rather than silently losing lineage.
 
 Adapter failures retain only bounded diagnostics. Codex capability, isolation,
 prohibited-operation, and recognized App Server failures carry one allowlisted

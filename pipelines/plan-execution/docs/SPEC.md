@@ -13,9 +13,12 @@ The runner must:
 - complete a bounded clarification phase before implementation begins;
 - let the Worker operate unattended during normal execution;
 - validate each implementation through a dedicated, optionally skill-guided finalization gate;
-- independently review each planned commit;
-- allow the Worker to fix or dispute review findings;
-- advance only when the exact current workspace has passed finalization and review with no unresolved findings;
+- independently review each planned commit by default, or run bounded
+  primary-only convergence when lazy mode is explicitly selected;
+- allow the Worker to fix findings and, in independent mode, dispute Reviewer
+  findings;
+- advance only when the exact current workspace has passed finalization and
+  its mode-specific review gate with no unresolved findings;
 - pause for the user when a material product decision is genuinely blocking, automated resolution reaches its limits, or execution cannot proceed safely;
 - persist enough state to resume after interruption.
 
@@ -200,8 +203,15 @@ agent-run run plan-execution \
   --reviewer-context-size 200000
 ```
 
-A new run may seed Worker and Reviewer from one existing session only when both
-use its backend:
+`--mode` accepts exactly `independent` and `lazy`. `independent` is the default
+and recommended mode because it provides genuinely independent semantic review,
+although its separate roles use more provider context and tokens. `lazy` is an
+explicit lower-consumption choice that uses only the Worker and does not provide
+independent review. The runner never selects it automatically.
+
+An independent run may seed Worker and Reviewer from one existing session only
+when both use its backend. A lazy run applies that requirement only to its
+active Worker:
 
 ```bash
 agent-run run plan-execution \
@@ -215,16 +225,22 @@ agent-run run plan-execution \
 
 The runner splits only the backend prefix, keeps the session ID opaque, probes
 native fork support, and persists the resolved source and known trusted
-profile. A known source profile supplies `current` for Worker and Reviewer and
-requires every explicit backend/profile selection to match. An unknown source
-profile requires both profiles to remain `current` and omits the native profile
-override. Worker and Reviewer fork it independently; the Arbiter remains
-independent and `resume` never requires either flag again. MCP leaves the
+profile. A known source profile supplies `current` for the Worker and, in
+independent mode, Reviewer and requires every explicit participating
+backend/profile selection to match. An unknown source profile requires those
+profiles to remain `current` and omits the native
+profile override. In independent mode, Worker and Reviewer checkpoints fork it
+independently and every Arbiter remains fresh. In lazy mode, it is forked
+exactly once into the logical Worker across clarification, bootstrap, all
+planned commits, and every convergence checkpoint. Later checkpoints continue
+that child when compatible or reconstruct the same Worker without reforking the
+source. `resume` uses the persisted lineage and one-time marker. MCP leaves the
 source unset unless the user deliberately selects a compatible current session
 after being offered a fresh start. It includes a known trusted profile with the
 fork choice, or offers only `current` inheritance when the profile is unknown.
-Because Worker and Reviewer each fork the complete source context, recommend a
-fresh start for a long, multi-topic, or uncertain session.
+Recommend a fresh start for a long, multi-topic, or uncertain session,
+especially when independent mode would fork its complete context more than
+once.
 
 Role backends must be independently configurable:
 
@@ -255,7 +271,9 @@ Claude worker + Codex reviewer
 
 The Arbiter must also support either backend.
 
-The pipeline descriptor declares the `worker`, `reviewer`, and `arbiter` roles.
+The pipeline descriptor declares the `worker`, `reviewer`, and `arbiter` roles
+and owns active-role selection. Independent mode activates all three, with the
+Arbiter still probed on demand; lazy mode activates only the Worker.
 Role objects under `pipelines.plan-execution.roles` in the runner's
 `.agent-runner.json` or its safe project overlay may provide optional string
 `backend`, trusted `profile`, backend-specific `model`, and decimal
@@ -270,8 +288,9 @@ process, profile, or backend default. Do not hard-code model names into
 workflow logic.
 
 The descriptor also owns the positive-integer settings and built-in defaults
-listed under [Retry Limits and No-Progress Detection](#14-retry-limits-and-no-progress-detection).
-It additionally owns the string `finalization` setting. Its default `auto`
+listed under [Retry Limits and No-Progress Detection](#14-retry-limits-and-no-progress-detection),
+plus `mode` with default and recommended value `independent`. It additionally
+owns the string `finalization` setting. Its default `auto`
 discovers a conventional confined repository `finalization` skill and otherwise
 falls back to repository instructions and project-defined checks. `none`
 selects that fallback directly; any other valid value is a normalized
@@ -281,8 +300,13 @@ loader strictly validates both versioned envelopes and delegates these values
 to the descriptor rather than duplicating pipeline policy. It discovers only
 the ignored `LOCAL_ARTIFACTS/agent-runner.json` project file unless CLI/MCP
 explicitly selects another confined ignored path. It never creates the file or
-changes ignore rules. Resolved roles, settings, and `artifactRoot` are persisted
-and never reloaded on resume.
+changes ignore rules. All configured role objects are validated
+deterministically. CLI/MCP pipeline-setting overrides then win over the project
+overlay, runner values, and descriptor defaults. Only active roles are
+resolved, probed, persisted, source-session checked, or invoked. Inactive
+configured values remain in the configuration source for a later independent
+run and are not exposed through lazy state. Resolved roles, settings, and
+`artifactRoot` are persisted and never reloaded on resume.
 
 The descriptor also owns `trustedChecks`, an ordered list of unique lowercase
 aliases that defaults to `[]`. Only runner-root `trustedCommands`
@@ -294,7 +318,10 @@ the root persists every resolved vector and alias, deterministic command
 identities, an ordered command fingerprint, and a trusted-configuration
 fingerprint. Resume uses that durable snapshot without reloading configuration.
 
-Codex and Claude do **not** both need to be installed for every run. Preflight validates the Worker and Reviewer selected for the run. The Arbiter backend may be validated lazily when arbitration is first needed.
+Codex and Claude do **not** both need to be installed for every run. Independent
+mode preflight validates the selected Worker and Reviewer; the Arbiter backend
+may be validated when arbitration is first needed. Lazy mode validates only the
+Worker and never probes Reviewer or Arbiter.
 
 ---
 
@@ -367,6 +394,7 @@ Persist at least:
 - selected backends;
 - detected backend versions;
 - current workflow state;
+- resolved pipeline mode;
 - current plan step;
 - expected Git HEAD;
 - expected branch/ref context and local-ref fingerprint;
@@ -391,11 +419,12 @@ Persist at least:
   pending attempt, scoped to the finalized content and validation-
   infrastructure fingerprints and containing only attempt number, step, and
   bounded Reviewer/review field-and-constraint diagnostics;
-- exact per-check finalization evidence and the fingerprint-bound Reviewer
-  validation-change decision;
+- exact per-check finalization evidence and the fingerprint-bound
+  mode-specific validation-change decision;
 - the resolved runner-trusted command snapshot, command/configuration
   fingerprints, and bounded executor provenance for accepted check evidence;
 - latest reviewed content fingerprint;
+- the lazy clean-confirmation fingerprint and one-time source-fork marker;
 - escalation reason when paused;
 - an optional finite adapter diagnostic class normalized by the root boundary
   for any terminal role turn, without native provider data.
@@ -535,6 +564,15 @@ unavailability and is cleared only after a valid replacement is routed. A
 still-invalid replacement retains the latest bounded pending diagnostic for an
 explicit read-only retry without creating another automatic attempt.
 
+Pipeline state version 12 adds the resolved mode, the fingerprint accepted by
+lazy clean confirmation, and the one-time lazy source-fork marker. Its
+version-11 migration selects `independent` and initializes the new fields
+without moving an active or terminal workflow position, changing completed
+commits, altering accepted gates, or replaying a pending or consumed one-shot
+commit effect. Every earlier supported version migrates through this ordered
+chain and therefore also resolves to `independent`; no migration replays role
+turns or repository effects.
+
 Common run-envelope version 3 independently adds nullable bounded active
 provider role and phase. Version-1 and version-2 envelopes project it as `null`
 without rewriting; the next mutating continuation persists the explicit runtime
@@ -595,6 +633,16 @@ advanced the state to `FINALIZE`, resume clears the retained
 `FINALIZE` without replaying or recounting the correction. A consumed `COMMIT`
 turn is excluded: its marker remains through verification and the Worker effect
 is never replayed.
+
+Lazy `CHECK_AND_FIX` and `CLEAN_CONFIRM` are durable checkpoints. The
+turn-start transition is written before invocation, and accepted content,
+findings, fingerprints, and round accounting are persisted atomically before
+advancement. Resume reconstructs an unfinished turn exactly once, reconciles a
+writable partial change before returning through `FINALIZE`, rejects mutation
+from read-only confirmation, and continues from an already advanced checkpoint
+without replaying or double-counting it. The one-time source-fork marker is
+persisted before the first lazy forked turn starts, so reconstruction can never
+fork the source again.
 
 ### `progress.md`
 
@@ -1066,8 +1114,8 @@ strictly by the mutation guard below.
 
 ### Read-only mutation guard
 
-Worker clarification and plan-compatibility turns, both bootstrap turns, and
-every Reviewer and Arbiter turn are read-only.
+Worker clarification and plan-compatibility turns, every active bootstrap turn,
+lazy `CLEAN_CONFIRM`, and every Reviewer and Arbiter turn are read-only.
 
 For these turns, capture a repository snapshot before and after execution.
 
@@ -1136,6 +1184,8 @@ CLARIFY
 BOOTSTRAP
 IMPLEMENT
 FINALIZE
+CHECK_AND_FIX
+CLEAN_CONFIRM
 REVIEW
 RESOLVE_FINDINGS
 COMMIT
@@ -1144,7 +1194,10 @@ DONE
 FAILED
 ```
 
-`FIX`, `DISPUTE`, `ARBITRATE`, self-review, and per-step context refresh are actions within these states, not separate persisted states.
+`CHECK_AND_FIX` and `CLEAN_CONFIRM` are used only in lazy mode. `FIX`,
+`DISPUTE`, `ARBITRATE`, implementation self-review, and per-step context refresh
+remain actions within the owning independent-mode states rather than separate
+persisted states.
 
 Only the runner controls transitions.
 
@@ -1238,6 +1291,12 @@ process is restarted.
 The additive MCP start fields leave `sourceSession` unset by default and pass it
 only after the user deliberately selects a fork; native IDs remain opaque and
 an unknown source profile offers only `current` inheritance.
+`run_start.mode` has the same precedence as CLI `--mode`. MCP guidance must
+recommend `independent` for genuine semantic independence, disclose its higher
+context/token use, describe `lazy` as an opt-in lower-consumption choice without
+independent review, and prohibit automatic lazy selection. Registry, status,
+wait, and activity projections expose descriptor metadata or the resolved mode
+without inactive roles or provider-private values.
 
 When the Worker returns `READY`, persist and freeze the artifact hash. `READY`
 is valid only when the clarification input is compatible with the validated
@@ -1286,11 +1345,16 @@ context.
 
 No implementation changes may occur before bootstrap completes.
 
-Run Worker bootstrap and Reviewer bootstrap independently and in read-only mode.
-Clarification and bootstrap use distinct role checkpoints. Reconciliation may
-continue the Worker bootstrap session, but implementation and review never do.
+In independent mode, run Worker bootstrap and Reviewer bootstrap independently
+and in read-only mode. Clarification and bootstrap use distinct role
+checkpoints. Reconciliation may continue the Worker bootstrap session, but
+implementation and review never do. In lazy mode, run only Worker bootstrap,
+accept its complete summary and validation inventory as resolved context after
+the same deterministic validation, capacity, correction,
+staging-independence, trusted-check, canonical-path, and infrastructure-
+fingerprint rules, and never invoke Reviewer reconciliation or Arbiter.
 
-Both study:
+Every active bootstrap role studies:
 
 - repository structure;
 - relevant source code and architecture;
@@ -1306,13 +1370,14 @@ Both study:
 - relevant Git history where useful;
 - project conventions related to the task.
 
-They must not receive each other's interpretation until both independent analyses finish.
+In independent mode, the roles must not receive each other's interpretation
+until both analyses finish.
 
 Persist concise summaries:
 
 ```text
 context/worker.md
-context/reviewer.md
+context/reviewer.md  # independent mode only
 ```
 
 Each summary should cover:
@@ -1324,15 +1389,16 @@ Each summary should cover:
 - risks/ambiguities;
 - finalization procedure.
 
-Each role also returns an independently discovered ordered inventory of stable
-`C`-prefixed check IDs and exact commands, plus every repository-relative file
+Each active bootstrap role also returns an independently discovered ordered
+inventory of stable `C`-prefixed check IDs and exact commands, plus every repository-relative file
 that controls package scripts, test discovery, test runners, skill guidance, or
-validation configuration. The runner establishes the complete inventory from
-accepted Worker evidence followed by accepted Reviewer evidence. It deduplicates
-exact commands and paths in stable first-seen order, ignores conflicting role
+validation configuration. In independent mode, the runner establishes the
+complete inventory from accepted Worker evidence followed by accepted Reviewer
+evidence. In lazy mode, the complete inventory is accepted Worker evidence. It
+deduplicates exact commands and paths in stable first-seen order, ignores conflicting role
 IDs, and assigns the final contiguous `C1`-through-`Cn` IDs. Every command and
-path found by either role is preserved. Reconciliation and arbitration return no
-inventory fields and cannot invent, select, or omit commands or repository
+path found by any active role is preserved. Reconciliation and arbitration
+return no inventory fields and cannot invent, select, or omit commands or repository
 paths. The runner fingerprints the derived file list; an agent-supplied digest
 is never trusted.
 Each summary and inventory covers every substantive validation requirement but
@@ -1399,11 +1465,16 @@ the same bounded `existing-canonical-repository-file` diagnostic batch; these
 violations do not surface later as generic unsafe-path failures and are never
 followed or silently rewritten.
 
-The Reviewer summary additionally states what it intends to verify.
+In independent mode, the Reviewer summary additionally states what it intends
+to verify. Lazy mode creates no Reviewer summary.
 
 ### Reconciliation
 
-After both summaries exist, compare material differences.
+The remaining reconciliation requirements apply only in independent mode. After
+both summaries exist, compare material differences. Lazy mode skips
+reconciliation because the accepted Worker summary is already the resolved
+summary and the same logical agent cannot form an independent disagreement with
+itself.
 
 Resolve differences from task/plan/repository evidence.
 
@@ -1434,11 +1505,14 @@ reason: product_decision_required
 
 ## 13. Per-Commit Workflow
 
-Start one fresh Worker checkpoint and one fresh Reviewer checkpoint for every
-planned commit. Reuse those role sessions for implementation, finalization,
-finding resolution, complete re-review, and dispute reconsideration within that
-commit. Never carry either work checkpoint into the next commit, and keep every
-Arbiter turn fresh.
+In independent mode, start one fresh Worker checkpoint and one fresh Reviewer
+checkpoint for every planned commit. Reuse those role sessions for
+implementation, finalization, finding resolution, complete re-review, and
+dispute reconsideration within that commit. Never carry either work checkpoint
+into the next commit, and keep every Arbiter turn fresh. In lazy mode, the one
+logical Worker uses a durable per-commit convergence checkpoint while retaining
+the single source-fork lineage across commits; a reconstructed native session
+does not become a new logical role.
 
 Reconstruct each checkpoint from the validated inputs, resolved bootstrap
 summary, current plan step, active blockers, and bounded prior decisions. A
@@ -1452,6 +1526,8 @@ Keep role prompts short. Their mandatory English cores are:
 ```text
 Worker: Implement the changes described in the following planned commit. Keep the implementation idiomatic and minimal, and follow the project's conventions.
 Reviewer: Review the changes and verify that they are correct, idiomatic, minimal, and consistent with the project's conventions.
+Lazy check/fix: Review the changes and verify that they are correct, idiomatic, minimal, and consistent with the project's conventions. If you find any problems, fix them idiomatically and minimally, following the project's conventions.
+Lazy clean confirmation: Review the changes using the same criteria without editing. Return CLEAN only when there are no problems; otherwise return concrete findings.
 Finding resolution: For each finding below, fix it idiomatically and minimally, following the project's conventions.
 Every role: Produce this turn's result yourself as the authorized role. Do not delegate, spawn subagents, or use multi-agent collaboration.
 ```
@@ -1572,7 +1648,7 @@ The Worker must not change package scripts, test discovery, test runners,
 validation configuration, or the inventory merely to evade an environment
 blocker. A change required by the current planned commit remains possible, but
 the finalization result records the candidate inventory and current
-infrastructure fingerprint for independent review.
+infrastructure fingerprint for the mode-specific review gate.
 
 Before invocation, the Worker reports a missing or invalid resolved skill and
 does not execute it. An explicitly configured unavailable skill pauses. An
@@ -1601,7 +1677,9 @@ Therefore:
 3. compute the content fingerprint afterward;
 4. associate the finalization result with that fingerprint.
 
-If finalization fails, enter `RESOLVE_FINDINGS` with the reported validation failures.
+If finalization fails, enter `RESOLVE_FINDINGS` with the reported validation
+failures. In lazy mode those failures must be fixed rather than disputed, and
+stagnation never invokes an Arbiter.
 
 Any later content change invalidates the previous finalization result.
 
@@ -1641,9 +1719,12 @@ directories, symlinks, symlink traversal, and narrative per-turn values enter
 the same bounded redacted finalization-correction path; they never become a
 candidate fingerprint or Reviewer finding.
 
-### 13.3 Review
+### 13.3 Mode-Specific Review
 
-After finalization passes, use an independent Reviewer context for the current commit.
+#### Independent review
+
+In independent mode, after finalization passes, use an independent Reviewer
+context for the current commit.
 
 Use one Reviewer checkpoint per planned commit, reused for complete re-review
 and dispute handling within that commit.
@@ -1743,9 +1824,42 @@ does not replay accepted progress or require a native session. Rejected values,
 findings, commands, paths, provider output, prompts, and transcripts are never
 persisted or published.
 
+#### Lazy check/fix and clean confirmation
+
+In lazy mode, successful finalization enters `CHECK_AND_FIX`, never `REVIEW`.
+The Worker receives the whole current commit result, the established and
+candidate validation tuples, exact finalization evidence, prior confirmation
+findings, and the mandatory review core. This is a workspace-write turn: every
+problem it identifies must be fixed immediately, idiomatically, minimally, and
+within the current planned commit. Its strict result reports whether content
+changed, remained unchanged, requires corrected finalization evidence, is
+externally blocked, or reaches the narrowly valid product-decision outcome.
+The runner compares that claim with the actual content fingerprint.
+
+Any content change clears finalization and confirmation evidence and returns to
+the complete `FINALIZE` gate before another check/fix pass. An unchanged pass is
+not approval; it enters the separate read-only `CLEAN_CONFIRM` state over the
+exact finalized content and validation-infrastructure fingerprints. That turn
+uses the same review criteria, forbids edits, and returns only structured
+`CLEAN`, concrete findings, or the narrow product-decision outcome together
+with the same validation-change decision required from an independent review.
+A status/content mismatch is invalid output, actual read-only mutation is
+rejected, and fingerprint drift pauses without advancing.
+
+Concrete confirmation findings return directly to `CHECK_AND_FIX`; they are
+not disputes and cannot invoke Reviewer or Arbiter. Only a mutation-free
+`CLEAN` result with unchanged fingerprints and `UNCHANGED` or task-authorized
+`ACCEPTED` validation change records the reviewed and clean-confirmation
+fingerprints and enters `COMMIT`. The loop consumes the existing fix, stable-
+finding, stagnation, and additional-fix-round budgets. Exhaustion pauses at the
+applicable checkpoint and never treats a non-clean result as accepted.
+
 ### 13.4 Resolve findings
 
-The Worker receives all currently open findings together.
+The Worker receives all currently open blockers together. Independent review
+findings may be fixed or disputed. Finalization failures use this path in both
+modes and must be fixed; lazy mode has no review-finding dispute or arbitration
+path.
 
 Finding resolution fixes or disputes the current blockers and then returns
 control. It does not invoke project finalization or perform generic commit
@@ -1832,7 +1946,8 @@ with a concise reason.
 
 ### 13.5 Arbiter
 
-Use the Arbiter only when:
+Lazy mode never invokes the Arbiter. In independent mode, use the Arbiter only
+when:
 
 - a material bootstrap disagreement remains; or
 - a Worker/Reviewer dispute remains unresolved after the configured dispute budget.
@@ -1885,11 +2000,11 @@ The runner may authorize the Worker commit turn only when all are true:
 ```text
 finalization == PASS
 open findings == 0
-unresolved disputes == 0
-pending arbitration == false
 current content fingerprint == finalized fingerprint
 current content fingerprint == reviewed fingerprint
 review validation change == UNCHANGED or ACCEPTED
+independent: unresolved disputes == 0 and pending arbitration == false
+lazy: clean confirmation fingerprint == current content fingerprint
 HEAD == expected HEAD
 current branch/ref context == expected branch/ref context
 ```
@@ -1995,14 +2110,15 @@ maxSameFindingRounds = 3
 stagnationWindowRounds = 3
 ```
 
-A fix round is one Worker fix response followed by the required finalization/review cycle.
+A fix round is one Worker fix or lazy check/fix response followed by the
+required finalization and mode-specific review cycle.
 
 Finalization failures that require code changes consume fix rounds too.
 
 A blocked correction round is recorded after a completed fix when finalization
-fails, or when finalization passes and the subsequent review returns to finding
-resolution. Persist its content fingerprint and exact finalization issue or
-Reviewer finding IDs. This diagnostic history is bounded and uses exact IDs;
+fails, or when finalization passes and the mode-specific review gate returns
+findings to its correction state. Persist its content fingerprint and exact
+finalization issue or review finding IDs. This diagnostic history is bounded and uses exact IDs;
 do not add fuzzy or semantic finding matching. Track consecutive exact-ID
 counts separately so the configured stable-finding limit remains enforceable
 beyond the retained diagnostic-history window.
@@ -2012,10 +2128,15 @@ No-progress detection in V1 is intentionally simple:
 - if the same stable finding ID remains open for `maxSameFindingRounds` consecutive rounds, pause;
 - do not implement fuzzy/semantic similarity detection.
 
-Disputes do not consume fix rounds. After `maxDisputesPerFinding` upheld
+Independent-mode disputes do not consume fix rounds. After `maxDisputesPerFinding` upheld
 disputes, invoke one read-only per-finding arbitration. An Arbiter decision in
 the Reviewer's favor leaves the finding blocking and requires a fix or explicit
 user override; it does not permit another dispute of the same reviewed finding.
+
+Lazy mode never invokes Reviewer or Arbiter and therefore has no dispute
+budget. Confirmation findings return to `CHECK_AND_FIX`; the existing fix,
+stable-finding, and stagnation counters remain bounded, and
+`--extra-fix-rounds` extends only the fix allowance without resetting history.
 
 Reaching any limit **never** means accept-and-continue.
 
@@ -2082,7 +2203,11 @@ a fresh execution run. `read_only_agent_mutated_repository` explains that the
 run is contaminated and offers only a fresh run from an uncontaminated
 worktree; it never accepts hybrid changes. `environment_blocked` preserves why
 validation is blocked, its bounded evidence, and the exact retry checkpoint.
-This read-only projection adds no fields to pipeline state version 4.
+This read-only projection does not itself change the pipeline state version.
+CLI status and MCP status, wait, and activity also expose the persisted resolved
+mode, while `pipelines_list` exposes descriptor-owned values, default, and
+recommendation. None exposes inactive role configuration or provider-private
+data.
 
 Example:
 
@@ -2212,6 +2337,7 @@ A debug mode may expose backend stdout/stderr.
 
 `status` should show:
 
+- resolved mode;
 - current step/state;
 - clarification status, round count, and artifact path;
 - open findings;
@@ -2372,6 +2498,25 @@ At minimum cover:
     unavailability without recounting, rejects read-only mutation and content
     or validation-infrastructure fingerprint drift, and version-10 active and
     terminal runs migrate without reconstructing unavailable output.
+68. omitted mode preserves independent role probes, source forks, bootstrap,
+    review, disputes, arbitration, and completion gates.
+69. lazy mode probes, resolves, forks, and invokes only Worker, including one
+    source fork across multiple commits and resume, and never invokes Reviewer
+    or Arbiter.
+70. a content-changing check/fix pass requires full re-finalization, an
+    unchanged pass requires a genuinely empty read-only clean confirmation, and
+    confirmation findings return to fixing.
+71. claimed-clean mutation, actual read-only mutation, content drift, and
+    validation-infrastructure drift cannot advance.
+72. interruption at check/fix and clean-confirm checkpoints neither replays
+    workspace effects nor double-counts rounds, while provider reconstruction
+    never reforks the source.
+73. lazy no-progress, stable-finding, fix, and additional-round behavior remains
+    bounded without weakening exact commits, trusted checks, fingerprints, Git
+    controls, product decisions, or no-coauthor/no-push rules.
+74. every supported legacy version migrates through state version 12 to
+    `independent` without reviving terminal runs or replaying completed or
+    pending commit effects.
 
 Real Codex/Claude smoke tests should be opt-in integration tests.
 
@@ -2431,8 +2576,11 @@ Do not build:
 
 ## 21. Mandatory Invariants
 
-1. Worker and Reviewer independently study project/task/plan before implementation.
-2. Clarification, plan-compatibility, bootstrap, review, and arbitration turns are read-only.
+1. In independent mode, Worker and Reviewer independently study
+   project/task/plan before implementation; lazy mode uses Worker alone under
+   the same deterministic bootstrap rules.
+2. Clarification, plan-compatibility, bootstrap, independent review, lazy clean-
+   confirmation, and arbitration turns are read-only.
 3. A dedicated finalization turn always defines the project validation gate.
 4. Finalization is backend-neutral and must work through either Worker adapter,
    with an explicit skill, automatic discovery, or no skill guidance.
@@ -2442,16 +2590,19 @@ Do not build:
 7. Only the Worker creates planned commits, one at a time, in a dedicated turn
    authorized by the runner after the commit gate passes.
 8. Git history/refs must not change outside that authorized `COMMIT` turn.
-9. Reviewer and Arbiter never modify repository state.
-10. Worker may dispute Reviewer findings with evidence.
-11. A finding must be fixed, withdrawn, arbitrated, or explicitly overridden by the user.
+9. Reviewer, Arbiter, and lazy clean-confirmation turns never modify repository state.
+10. In independent mode, Worker may dispute Reviewer findings with evidence.
+11. Every independent Reviewer finding must be fixed, withdrawn, arbitrated, or
+    explicitly overridden by the user; every lazy confirmation finding returns
+    directly to fixing.
 12. Any content change invalidates finalization/review for the previous content fingerprint.
 13. Staging alone does not invalidate the content fingerprint.
 14. Only the runner may advance to the next planned commit.
 15. Retry exhaustion always pauses; it never accepts unresolved work.
 16. Runner correctness does not depend on native agent-session resume.
 17. Codex and Claude Code are both first-class V1 backends.
-18. Worker, Reviewer, and Arbiter backend choices are independent.
+18. Independent-mode Worker, Reviewer, and Arbiter backend choices are
+    independent; lazy mode resolves only Worker.
 19. Workflow logic is backend-agnostic.
 20. State survives process termination and never pollutes the target repository.
 21. The runner and all agents are strictly local-only for writes: they must never
@@ -2510,6 +2661,16 @@ Do not build:
     explicit retry, only bounded field-and-constraint diagnostics are durable
     or public, and no correction path weakens finalization, independent review,
     findings, fingerprints, Git safety, or commit authorization.
+41. `independent` is the persisted default and recommended mode; `lazy` is
+    explicit, primary-only, never automatic, and never invokes Reviewer or
+    Arbiter.
+42. Lazy advancement requires full finalization, a writable check/fix pass, and
+    a separate mutation-free `CLEAN` confirmation over unchanged content and
+    validation fingerprints. Every change returns through full finalization,
+    and bounded-loop exhaustion pauses.
+43. A deliberately supplied source forks independently by checkpoint in
+    independent mode and exactly once into the logical Worker in lazy mode;
+    native-session reconstruction never changes that lineage.
 
 ---
 
@@ -2520,8 +2681,12 @@ V1 is complete when:
 - it runs as a plain Node.js 24 LTS ESM CLI with no unnecessary runtime dependencies;
 - `run`, `resume`, and `status` work;
 - Codex and Claude adapters both work;
+- `independent` remains the default and recommended reviewed path, while
+  explicit `lazy` completes with one logical Worker through bounded check/fix
+  and clean-confirm checkpoints;
 - Codex-only, Claude-only, and mixed Worker/Reviewer configurations work;
-- Worker and Reviewer bootstrap independently;
+- independent-mode Worker and Reviewer bootstrap independently, while lazy
+  mode bootstraps with Worker alone;
 - a bounded clarification phase with read-only agent turns completes before bootstrap;
 - `--clarify` and agent-generated questions use the declared Markdown artifact and configured text editor;
 - execution does not start when clarification input conflicts with the validated plan;
@@ -2533,9 +2698,12 @@ V1 is complete when:
 - project finalization is the validation gate;
 - finalization follows all substantive project guidance while commit preparation
   remains owned by the constrained `COMMIT` executor;
-- finalization and review are tied to the same staging-independent content fingerprint;
-- Worker can fix or dispute findings;
-- unresolved disputes can be arbitrated;
+- finalization and the mode-specific review gate are tied to the same
+  staging-independent content fingerprint;
+- in independent mode, Worker can fix or dispute Reviewer findings and
+  unresolved disputes can be arbitrated;
+- in lazy mode, confirmation findings return directly to fixing without dispute
+  or arbitration;
 - retry/no-progress limits pause for the user;
 - only a zero-finding finalized/reviewed workspace can be committed;
 - only the Worker creates one local commit per plan step, after explicit runner

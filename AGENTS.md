@@ -6,8 +6,13 @@
 - Resolve material ambiguity in a bounded clarification phase before work begins.
 - Author reviewed commit-by-commit coding plans with the `plan-authoring` pipeline.
 - Execute predefined coding plans one verified local commit at a time with the `plan-execution` pipeline.
-- Polish and independently review existing workspace changes without committing them with the `polishing` pipeline.
+- Polish, finalize, and apply the selected review gate to existing workspace
+  changes without committing them with the `polishing` pipeline.
 - Support Codex CLI and Claude Code as independent pipeline role backends.
+- Keep `independent` execution the default and recommended mode for genuine
+  semantic review despite its higher provider context and token use; expose
+  `lazy` only as an explicit lower-consumption choice without independent
+  review and never select it automatically.
 - Stay autonomous during normal execution and pause only for explicit escalation conditions.
 - Make workflow correctness, Git safety, and resumable state more important than convenience.
 - Keep the runtime a plain Node.js CLI rather than a general agent framework.
@@ -49,6 +54,22 @@ contracts. `packages/commit-plan/README.md` owns the shared plan contract.
 
 All pipelines additionally require:
 
+- Own one `mode` setting with exactly `independent` and `lazy`; resolve a
+  missing value and every legacy run to `independent`, persist the resolved
+  value at creation, and never reload it on resume.
+- Validate configured role values deterministically, but in lazy mode resolve,
+  probe, persist, source-session-check, invoke, and publicly project only the
+  Planner or Worker. Preserve inactive Reviewer and Arbiter configuration for
+  a future independent run without exposing provider-private values.
+- Fork a deliberately supplied source session independently by primary and
+  review checkpoints in independent mode. In lazy mode fork it exactly once
+  into the logical primary role for the entire run, then continue the child or
+  reconstruct the same role without reforking the source.
+- In lazy mode alternate a writable primary-agent `CHECK_AND_FIX` turn with a
+  separate read-only `CLEAN_CONFIRM`. Advance only for structured `CLEAN`, no
+  read-only mutation, and the unchanged inspected fingerprint; route findings
+  back to fixing and keep the loop bounded without invoking Reviewer or
+  Arbiter.
 - Start with a pipeline-owned `CLARIFY` state whose agent turns are read-only.
 - Let the primary role return `READY`, structured material questions, or a
   pipeline-owned blocking outcome; do not ask questions that repository
@@ -68,14 +89,21 @@ All pipelines additionally require:
 
 `plan-execution` additionally requires:
 
-- Run Worker and Reviewer bootstrap independently and read-only.
+- In independent mode run Worker and Reviewer bootstrap independently and
+  read-only. In lazy mode use the Worker alone to establish the complete
+  validation inventory under the same deterministic rules.
 - Keep plan-compatibility, Reviewer, and Arbiter turns read-only and verify that
   they did not mutate the repository.
 - Allow only the Worker to create the planned local commit, and only in the one-shot `COMMIT` turn explicitly authorized by the runner after the gate passes.
 - Reject all other agent history/ref changes and verify that remote configuration remains unchanged across every agent turn.
 - Require the exact validated plan subject, reject bodies/footers, and reject `Co-authored-by` trailers.
-- Tie finalization and review to the same staging-independent content fingerprint and invalidate both after any content change.
-- Resolve every finding by fix, withdrawal, arbitration, or explicit recorded user override.
+- Tie finalization and independent review or lazy clean confirmation to the
+  same staging-independent content fingerprint and invalidate the evidence
+  after any content change. A lazy check/fix change must pass full finalization
+  again before confirmation.
+- In independent mode resolve every Reviewer finding by fix, withdrawal,
+  arbitration, or explicit recorded user override. Route lazy confirmation
+  findings directly to fixing; they are never disputed or arbitrated.
 - Do not leave `CLARIFY` when clarification input conflicts with the validated plan; require a revised plan and new execution run.
 - If a product decision invalidates completed commits or the validated plan, require a revised plan and a new execution run; never rewrite completed commits automatically.
 - Pause when retry budgets are exhausted or repository reconciliation is unsafe.
@@ -92,19 +120,23 @@ All pipelines additionally require:
 
 `polishing` additionally requires:
 
-- Run Worker and Reviewer bootstrap independently and read-only.
-- Allow only Worker polishing, finalization, and finding-resolution turns to
-  change safe workspace content. No agent turn may change the index; the runner
-  alone stages the finalized and reviewed polishing handoff.
+- In independent mode run Worker and Reviewer bootstrap independently and
+  read-only. In lazy mode use the Worker alone to establish the complete
+  staging-independent inventory under the same deterministic rules.
+- Allow only Worker polishing, finalization, finding-resolution, and lazy
+  check/fix turns to change safe workspace content. No agent turn may change
+  the index; the runner alone stages the finalized and reviewed polishing
+  handoff.
 - Keep bootstrap, validation-migration, and finalization required-check
   inventories staging-independent. Translate applicable tracked-content checks
   to `HEAD` or explicit trees; reserve staged and index-relative inspection for
   `HANDOFF`.
 - Never request `local-commit`, create a commit, or change `HEAD`, refs, remotes,
   or Git identity.
-- Tie successful finalization and independent review to the same
-  staging-independent content fingerprint and invalidate both after content
-  changes.
+- Tie successful finalization and independent review or lazy clean confirmation
+  to the same staging-independent content fingerprint and invalidate the
+  evidence after content changes. A lazy check/fix change must pass full
+  finalization again before confirmation.
 - Leave the finalized and reviewed workspace changes staged and uncommitted.
 
 ## Repository Map
