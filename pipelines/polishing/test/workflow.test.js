@@ -26,10 +26,15 @@ import {
   migratePolishingStateV4,
   migratePolishingStateV5,
   migratePolishingStateV6,
+  migratePolishingStateV7,
   polishingPipeline,
   runPolishing,
 } from "../src/index.js";
-import { FINALIZATION_SCHEMA } from "../src/schemas.js";
+import {
+  CHECK_AND_FIX_SCHEMA,
+  CLEAN_CONFIRM_SCHEMA,
+  FINALIZATION_SCHEMA,
+} from "../src/schemas.js";
 import {
   assertRun,
   assertSettings,
@@ -39,6 +44,8 @@ import {
   MAX_DISPUTES_PER_FINDING,
   MAX_VALIDATION_ITEMS,
   normalizeBootstrapResult,
+  normalizeCheckAndFixResult,
+  normalizeCleanConfirmationResult,
   normalizeFinalizationResult,
   normalizePipelineState,
 } from "../src/workflow-contract.js";
@@ -50,6 +57,7 @@ const SETTINGS = Object.freeze({
   maxFixRounds: 5,
   maxDisputesPerFinding: 2,
   maxSameFindingRounds: 3,
+  mode: "independent",
   stagnationWindowRounds: 3,
   trustedChecks: Object.freeze([]),
 });
@@ -84,11 +92,17 @@ function versionOneState(state) {
     "finalizationCorrection",
     "pendingFinalizationCorrection",
     "trustedValidation",
+    "cleanConfirmationFingerprint",
+    "lazySourceForkConsumed",
   ]) {
     delete legacy[field];
   }
   if (legacy.settings !== null) {
-    const { trustedChecks: _trustedChecks, ...settings } = legacy.settings;
+    const {
+      mode: _mode,
+      trustedChecks: _trustedChecks,
+      ...settings
+    } = legacy.settings;
     legacy.settings = settings;
   }
   return legacy;
@@ -120,6 +134,19 @@ function versionTwoState(state) {
         }) => check,
       ),
     };
+  }
+  return legacy;
+}
+
+function versionSevenState(state) {
+  const {
+    cleanConfirmationFingerprint: _confirmation,
+    lazySourceForkConsumed: _sourceFork,
+    ...legacy
+  } = state;
+  if (legacy.settings !== null) {
+    const { mode: _mode, ...settings } = legacy.settings;
+    legacy.settings = settings;
   }
   return legacy;
 }
@@ -199,7 +226,8 @@ function migrateVersionOneState(state) {
   const versionFour = migratePolishingStateV3({ pipelineState: versionThree });
   const versionFive = migratePolishingStateV4({ pipelineState: versionFour });
   const versionSix = migratePolishingStateV5({ pipelineState: versionFive });
-  return migratePolishingStateV6({ pipelineState: versionSix });
+  const versionSeven = migratePolishingStateV6({ pipelineState: versionSix });
+  return migratePolishingStateV7({ pipelineState: versionSeven });
 }
 
 test("rejects incomplete or substituted finalization PASS evidence", () => {
@@ -867,7 +895,7 @@ test("migrates version-2 state with empty trust and invalidates its active gate"
   assert.deepEqual(migrated.settings.trustedChecks, []);
   assert.deepEqual(migrated.trustedValidation.commands, []);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(polishingPipeline.stateVersion, 7);
+  assert.equal(polishingPipeline.stateVersion, 8);
 });
 
 test("migrates version-3 state with no consumed bootstrap corrections", () => {
@@ -988,6 +1016,101 @@ test("migrates version-6 state without changing workflow evidence", async (t) =>
     pendingFinalizationCorrection: null,
   });
   assert.doesNotThrow(() => normalizePipelineState(migrated));
+});
+
+test("selects Worker-only lazy mode and migrates version 7 to independent", () => {
+  assert.deepEqual(polishingPipeline.resolveActiveRoles({ mode: "independent" }), [
+    "worker",
+    "reviewer",
+    "arbiter",
+  ]);
+  assert.deepEqual(polishingPipeline.resolveActiveRoles({ mode: "lazy" }), [
+    "worker",
+  ]);
+  assert.equal(polishingPipeline.settings.mode.defaultValue, "independent");
+  assert.equal(polishingPipeline.settings.mode.validate("lazy"), true);
+  assert.equal(polishingPipeline.settings.mode.validate("automatic"), false);
+
+  const legacy = versionSevenState(
+    createPolishingState({ settings: SETTINGS }),
+  );
+  const migrated = migratePolishingStateV7({
+    pipelineState: legacy,
+  });
+
+  assert.equal(migrated.settings.mode, "independent");
+  assert.equal(migrated.cleanConfirmationFingerprint, null);
+  assert.equal(migrated.lazySourceForkConsumed, false);
+  assert.doesNotThrow(() => normalizePipelineState(migrated));
+});
+
+test("migrates version-7 handoff and terminal states without replay", async (t) => {
+  const fixture = await createFixture(t);
+  const completed = await fixture.run();
+  await runGit(fixture.projectPath, "reset", "-q");
+  const pendingHandoffBaseline = await fixture.runtime.git.snapshot({
+    allowedPaths: completed.pipelineState.repositoryBaseline.allowedPaths,
+    projectPath: fixture.projectPath,
+  });
+  const cases = [
+    {
+      name: "pending HANDOFF",
+      state: {
+        ...completed.pipelineState,
+        workflowState: "HANDOFF",
+        repositoryBaseline: pendingHandoffBaseline,
+      },
+    },
+    {
+      name: "completed HANDOFF",
+      state: { ...completed.pipelineState, workflowState: "HANDOFF" },
+    },
+    {
+      name: "DONE",
+      state: completed.pipelineState,
+    },
+    {
+      name: "FAILED",
+      state: { ...completed.pipelineState, workflowState: "FAILED" },
+    },
+  ];
+
+  for (const migrationCase of cases) {
+    await t.test(migrationCase.name, () => {
+      const legacy = versionSevenState(migrationCase.state);
+      const migrated = migratePolishingStateV7({ pipelineState: legacy });
+
+      assert.deepEqual(migrated, {
+        ...legacy,
+        settings: { ...legacy.settings, mode: "independent" },
+        cleanConfirmationFingerprint: null,
+        lazySourceForkConsumed: false,
+      });
+      assert.equal(migrated.workflowState, legacy.workflowState);
+      assert.deepEqual(
+        migrated.repositoryBaseline,
+        legacy.repositoryBaseline,
+      );
+      assert.deepEqual(migrated.finalizationResult, legacy.finalizationResult);
+      assert.deepEqual(migrated.reviewResult, legacy.reviewResult);
+      assert.doesNotThrow(() => normalizePipelineState(migrated));
+    });
+  }
+});
+
+test("normalizes strict lazy polishing convergence results", () => {
+  assert.deepEqual(normalizeCheckAndFixResult(checkAndFix()), {
+    status: "UNCHANGED",
+    summary: "The complete change set is clean.",
+  });
+  assert.deepEqual(normalizeCleanConfirmationResult(cleanConfirmation()), {
+    status: "CLEAN",
+    findings: [],
+    validationChange: "UNCHANGED",
+    validationEvidence: [],
+  });
+  assert.equal(CHECK_AND_FIX_SCHEMA.additionalProperties, false);
+  assert.equal(CLEAN_CONFIRM_SCHEMA.additionalProperties, false);
 });
 
 test("clears partial bootstrap evidence across polishing migrations", async (t) => {
@@ -1589,6 +1712,38 @@ function polishingCompleted() {
   };
 }
 
+function checkAndFix(status = "UNCHANGED") {
+  return {
+    status,
+    summary:
+      status === "CHANGED"
+        ? "Fixed the complete change set."
+        : "The complete change set is clean.",
+    reason: "",
+    ...emptyDecision(),
+  };
+}
+
+function cleanConfirmation(validationChange = "UNCHANGED") {
+  return {
+    status: "CLEAN",
+    findings: [],
+    validationChange,
+    validationEvidence:
+      validationChange === "UNCHANGED"
+        ? []
+        : ["The task authorizes the complete validation change."],
+    ...emptyDecision(),
+  };
+}
+
+function cleanConfirmationFindings(...ids) {
+  return {
+    ...reviewFindingBatch(ids),
+    status: "FINDINGS",
+  };
+}
+
 function polishingBlocked() {
   return {
     status: "BLOCKED",
@@ -1888,6 +2043,8 @@ async function createFixture(
     finalizationSkill = true,
     ignoreArtifacts = true,
     interactive = false,
+    mode = "independent",
+    modeSettings = {},
     onEdit,
     onRoleRun,
     onTrustedValidation,
@@ -1914,6 +2071,7 @@ async function createFixture(
     arbiter = [],
   } = {},
 ) {
+  settings = Object.freeze({ ...settings, ...modeSettings, mode });
   const workspace = await mkdtemp(join(tmpdir(), "agent-runner-polishing-"));
   const projectPath = join(workspace, "project");
   const externalTaskPath = join(workspace, "task");
@@ -2029,14 +2187,17 @@ async function createFixture(
   const store = createRunStore({ stateRoot });
   let created = await store.createRun({
     pipelineId: "polishing",
-    pipelineStateVersion: 7,
+    pipelineStateVersion: 8,
     projectPath,
     taskPath,
-    roles: {
-      worker: { backend: roleBackends.worker, model: "worker-model" },
-      reviewer: { backend: roleBackends.reviewer, model: "reviewer-model" },
-      arbiter: { backend: roleBackends.arbiter, model: "arbiter-model" },
-    },
+    roles: Object.fromEntries(
+      (mode === "lazy" ? ["worker"] : ["worker", "reviewer", "arbiter"]).map(
+        (role) => [
+          role,
+          { backend: roleBackends[role], model: `${role}-model` },
+        ],
+      ),
+    ),
     sourceSession,
     pipelineState: createPolishingState({
       artifactRoot,
@@ -2093,7 +2254,7 @@ async function createFixture(
       currentRun = await store.transitionRun(lease, patch, options);
       return currentRun;
     },
-    async startAgentTurn(activeTurn) {
+    async startAgentTurn(activeTurn, { pipelineState } = {}) {
       currentRun = await store.startAgentTurn(lease, activeTurn, {
         activity: {
           actor: activeTurn.role,
@@ -2101,6 +2262,7 @@ async function createFixture(
           kind: "turn-started",
           message: `${activeTurn.role} ${activeTurn.phase} turn started.`,
         },
+        ...(pipelineState === undefined ? {} : { pipelineState }),
       });
       return currentRun;
     },
@@ -2137,7 +2299,7 @@ async function createFixture(
       currentRun = await reopened.transitionRun(lease, patch, options);
       return currentRun;
     };
-    runtime.startAgentTurn = async (activeTurn) => {
+    runtime.startAgentTurn = async (activeTurn, { pipelineState } = {}) => {
       currentRun = await reopened.startAgentTurn(lease, activeTurn, {
         activity: {
           actor: activeTurn.role,
@@ -2145,6 +2307,7 @@ async function createFixture(
           kind: "turn-started",
           message: `${activeTurn.role} ${activeTurn.phase} turn started.`,
         },
+        ...(pipelineState === undefined ? {} : { pipelineState }),
       });
       return currentRun;
     };
@@ -2201,6 +2364,522 @@ async function createFixture(
     transitions,
   };
 }
+
+test("runs lazy polishing with one Worker source fork and no review roles", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    sourceSession: SOURCE_SESSION,
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      polishingCompleted(),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmation(),
+    ],
+  });
+  const beforeHead = (await runGit(fixture.projectPath, "rev-parse", "HEAD"))
+    .stdout;
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.pipelineState.settings.mode, "lazy");
+  assert.equal(result.pipelineState.lazySourceForkConsumed, true);
+  assert.equal(
+    result.pipelineState.cleanConfirmationFingerprint,
+    result.pipelineState.finalizedFingerprint,
+  );
+  assert.equal(fixture.probes.worker, 1);
+  assert.equal(fixture.probes.reviewer, 0);
+  assert.equal(fixture.probes.arbiter, 0);
+  assert.equal(fixture.calls.reviewer.length, 0);
+  assert.equal(fixture.calls.arbiter.length, 0);
+  assert.equal(
+    fixture.calls.worker.filter(({ session }) => session?.mode === "fork")
+      .length,
+    1,
+  );
+  assert.ok(
+    fixture.calls.worker
+      .slice(1)
+      .every(({ session }) => session?.mode === "continue"),
+  );
+  assert.equal(
+    (await runGit(fixture.projectPath, "rev-parse", "HEAD")).stdout,
+    beforeHead,
+  );
+  assert.notEqual(
+    (await runGit(fixture.projectPath, "diff", "--cached", "--name-only"))
+      .stdout,
+    "",
+  );
+  assert.equal(
+    (await runGit(fixture.projectPath, "diff", "--name-only")).stdout,
+    "",
+  );
+});
+
+test("re-finalizes a content-changing lazy polishing check", async (t) => {
+  let checkRound = 0;
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      polishingCompleted(),
+      finalizationPassed(),
+      checkAndFix("CHANGED"),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmation(),
+    ],
+    async onRoleRun(role, request, _turn, { projectPath }) {
+      if (role === "worker" && request.schema === CHECK_AND_FIX_SCHEMA) {
+        checkRound += 1;
+        if (checkRound === 1) {
+          await writeFile(join(projectPath, "lazy-fix.txt"), "fixed\n");
+        }
+      }
+    },
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
+      .length,
+    2,
+  );
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === CHECK_AND_FIX_SCHEMA)
+      .length,
+    2,
+  );
+  assert.equal(result.counters.fixRounds, 2);
+});
+
+test("routes lazy confirmation findings directly back to Worker fixing", async (t) => {
+  let checkRound = 0;
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      polishingCompleted(),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmationFindings("R1"),
+      checkAndFix("CHANGED"),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmation(),
+    ],
+    async onRoleRun(role, request, _turn, { projectPath }) {
+      if (role === "worker" && request.schema === CHECK_AND_FIX_SCHEMA) {
+        checkRound += 1;
+        if (checkRound === 2) {
+          await writeFile(join(projectPath, "confirmation-fix.txt"), "fixed\n");
+        }
+      }
+    },
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(fixture.calls.reviewer.length, 0);
+  assert.equal(fixture.calls.arbiter.length, 0);
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === CHECK_AND_FIX_SCHEMA)
+      .length,
+    3,
+  );
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
+      .length,
+    2,
+  );
+});
+
+test("rejects an unchanged lazy check with confirmation findings", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      polishingCompleted(),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmationFindings("R1"),
+      checkAndFix(),
+    ],
+  });
+
+  await assert.rejects(
+    fixture.run(),
+    (error) =>
+      error.code === "ERR_INVALID_POLISHING_OUTPUT" &&
+      /clean-confirmation findings remain/u.test(error.message),
+  );
+
+  assert.equal(fixture.currentRun.pipelineState.workflowState, "FAILED");
+  assert.equal(fixture.currentRun.pause.reason, "internal_failure");
+  assert.deepEqual(
+    fixture.currentRun.pipelineState.findings.map(({ id }) => id),
+    ["R1"],
+  );
+  assert.equal(
+    fixture.currentRun.pipelineState.cleanConfirmationFingerprint,
+    null,
+  );
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === CLEAN_CONFIRM_SCHEMA)
+      .length,
+    1,
+  );
+  assert.equal(fixture.calls.reviewer.length, 0);
+  assert.equal(fixture.calls.arbiter.length, 0);
+});
+
+test("rejects repository mutation during lazy clean confirmation", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      polishingCompleted(),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmation(),
+    ],
+    async onRoleRun(role, request, _turn, { projectPath }) {
+      if (role === "worker" && request.schema === CLEAN_CONFIRM_SCHEMA) {
+        await writeFile(join(projectPath, "illegal-confirmation.txt"), "changed\n");
+      }
+    },
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(result.pause.reason, "read_only_agent_mutated_repository");
+  assert.equal(result.pipelineState.cleanConfirmationFingerprint, null);
+  assert.equal(fixture.calls.reviewer.length, 0);
+  assert.equal(fixture.calls.arbiter.length, 0);
+});
+
+test("rejects a lazy unchanged claim that modifies content", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      polishingCompleted(),
+      finalizationPassed(),
+      checkAndFix(),
+    ],
+    async onRoleRun(role, request, _turn, { projectPath }) {
+      if (role === "worker" && request.schema === CHECK_AND_FIX_SCHEMA) {
+        await writeFile(join(projectPath, "misreported-lazy-fix.txt"), "changed\n");
+      }
+    },
+  });
+
+  await assert.rejects(
+    fixture.run(),
+    (error) => error.code === "ERR_INVALID_POLISHING_OUTPUT",
+  );
+
+  assert.equal(fixture.currentRun.pipelineState.workflowState, "FAILED");
+  assert.equal(fixture.currentRun.pause.reason, "internal_failure");
+  assert.equal(fixture.currentRun.pause.code, "ERR_INVALID_POLISHING_OUTPUT");
+  assert.equal(fixture.currentRun.pipelineState.finalizationResult, null);
+  assert.equal(
+    fixture.currentRun.pipelineState.cleanConfirmationFingerprint,
+    null,
+  );
+});
+
+test("resumes a reconciled lazy polishing check without replay", async (t) => {
+  const processLoss = new Error("Process stopped during lazy check reconciliation.");
+  let changed = false;
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    sourceSession: SOURCE_SESSION,
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      polishingCompleted(),
+      finalizationPassed(),
+      checkAndFix("CHANGED"),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmation(),
+    ],
+    async onRoleRun(role, request, _turn, { projectPath }) {
+      if (
+        role === "worker" &&
+        request.schema === CHECK_AND_FIX_SCHEMA &&
+        !changed
+      ) {
+        changed = true;
+        await writeFile(join(projectPath, "interrupted-lazy-fix.txt"), "fixed\n");
+      }
+    },
+  });
+  const git = fixture.runtime.git;
+  const snapshot = git.snapshot;
+  const transition = fixture.runtime.transition;
+  const finishAgentTurn = fixture.runtime.finishAgentTurn;
+  let processStopped = false;
+  fixture.runtime.git = {
+    ...git,
+    async snapshot(options) {
+      if (
+        changed &&
+        !processStopped &&
+        fixture.currentRun.activeTurn?.phase === "check-and-fix"
+      ) {
+        processStopped = true;
+        throw processLoss;
+      }
+      return snapshot(options);
+    },
+  };
+  fixture.runtime.transition = async (patch, options) => {
+    if (processStopped) {
+      throw processLoss;
+    }
+    return transition(patch, options);
+  };
+  fixture.runtime.finishAgentTurn = async (turn) => {
+    if (processStopped) {
+      throw processLoss;
+    }
+    return finishAgentTurn(turn);
+  };
+
+  await assert.rejects(fixture.run(), (error) => error === processLoss);
+  assert.deepEqual(fixture.currentRun.activeTurn, {
+    role: "worker",
+    phase: "check-and-fix",
+  });
+  assert.equal(fixture.currentRun.pipelineState.workflowState, "CHECK_AND_FIX");
+  assert.equal(fixture.currentRun.counters.fixRounds, 0);
+
+  processStopped = false;
+  await fixture.recover();
+  fixture.runtime.git = git;
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.counters.fixRounds, 2);
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === CHECK_AND_FIX_SCHEMA)
+      .length,
+    2,
+  );
+  assert.equal(
+    fixture.calls.worker.filter(({ session }) => session?.mode === "fork")
+      .length,
+    1,
+  );
+});
+
+test("resumes a checkpointed unchanged lazy polishing check without replay", async (t) => {
+  const processLoss = new Error("Process stopped after lazy check checkpoint.");
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      polishingCompleted(),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmation(),
+    ],
+  });
+  const transition = fixture.runtime.transition;
+  let processStopped = false;
+  fixture.runtime.transition = async (patch, options) => {
+    if (processStopped) {
+      throw processLoss;
+    }
+    const next = await transition(patch, options);
+    if (next.pipelineState.workflowState === "CLEAN_CONFIRM") {
+      processStopped = true;
+      throw processLoss;
+    }
+    return next;
+  };
+
+  await assert.rejects(fixture.run(), (error) => error === processLoss);
+  assert.equal(fixture.currentRun.activeTurn, null);
+  assert.equal(fixture.currentRun.pipelineState.workflowState, "CLEAN_CONFIRM");
+  assert.equal(fixture.currentRun.counters.fixRounds, 1);
+
+  processStopped = false;
+  await fixture.recover();
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.counters.fixRounds, 1);
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === CHECK_AND_FIX_SCHEMA)
+      .length,
+    1,
+  );
+});
+
+test("reconstructs an ownerless lazy clean confirmation without recounting", async (t) => {
+  let interrupted = false;
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    sourceSession: SOURCE_SESSION,
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      polishingCompleted(),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmation(),
+    ],
+    onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        request.schema === CLEAN_CONFIRM_SCHEMA &&
+        !interrupted
+      ) {
+        interrupted = true;
+        const error = new Error("Provider interrupted during confirmation.");
+        error.recoverable = true;
+        throw error;
+      }
+    },
+  });
+
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "backend_unavailable");
+  assert.equal(paused.pause.resumeState, "CLEAN_CONFIRM");
+  await fixture.persistPipelineState(
+    { ...paused.pipelineState, workflowState: "CLEAN_CONFIRM" },
+    paused.counters,
+    null,
+  );
+  await fixture.runtime.startAgentTurn({
+    role: "worker",
+    phase: "clean-confirm",
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.counters.fixRounds, 1);
+  assert.equal(result.counters.correctionRounds, 0);
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === CLEAN_CONFIRM_SCHEMA)
+      .length,
+    2,
+  );
+  assert.equal(
+    fixture.calls.worker.filter(({ session }) => session?.mode === "fork")
+      .length,
+    1,
+  );
+});
+
+test("rejects Git-index mutation during lazy check/fix", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      polishingCompleted(),
+      finalizationPassed(),
+      checkAndFix(),
+    ],
+    async onRoleRun(role, request, _turn, { projectPath }) {
+      if (role === "worker" && request.schema === CHECK_AND_FIX_SCHEMA) {
+        await runGit(projectPath, "add", "change.txt");
+      }
+    },
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(result.pause.reason, "unexpected_git_index_change");
+  assert.equal(result.pipelineState.cleanConfirmationFingerprint, null);
+});
+
+test("bounds repeated lazy confirmation findings without arbitration", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    modeSettings: { maxSameFindingRounds: 1 },
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      polishingCompleted(),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmationFindings("R1"),
+      checkAndFix("REFINALIZE"),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmationFindings("R1"),
+    ],
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(result.pause.reason, "no_progress");
+  assert.equal(result.pause.resumeState, "CHECK_AND_FIX");
+  assert.deepEqual(result.pause.findingIds, ["R1"]);
+  assert.equal(fixture.calls.reviewer.length, 0);
+  assert.equal(fixture.calls.arbiter.length, 0);
+});
+
+test("applies additional lazy fix rounds without arbitration", async (t) => {
+  let checkRound = 0;
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    modeSettings: { maxFixRounds: 1 },
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      polishingCompleted(),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmationFindings("R1"),
+      checkAndFix("CHANGED"),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmation(),
+    ],
+    async onRoleRun(role, request, _turn, { projectPath }) {
+      if (role === "worker" && request.schema === CHECK_AND_FIX_SCHEMA) {
+        checkRound += 1;
+        if (checkRound === 2) {
+          await writeFile(join(projectPath, "extra-lazy-fix.txt"), "fixed\n");
+        }
+      }
+    },
+  });
+
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "fix_limit_reached");
+  assert.equal(paused.pause.resumeState, "CHECK_AND_FIX");
+
+  const result = await fixture.run({ type: "extra-fix-rounds", amount: 2 });
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.pipelineState.additionalFixRounds, 2);
+  assert.equal(fixture.calls.reviewer.length, 0);
+  assert.equal(fixture.calls.arbiter.length, 0);
+});
 
 for (const testCase of [
   {

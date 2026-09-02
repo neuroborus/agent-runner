@@ -94,6 +94,28 @@ For APPROVED, set findings, options, and evidence to []; set question and whyBlo
 For FINDINGS, provide one or more findings with stable IDs, repository-relative file, problem, reason, and suggestedAction; set question and whyBlocked to "", and options and evidence to [].
 For PRODUCT_DECISION_REQUIRED, set findings and validationEvidence to [], and validationChange to UNCHANGED; use the product-decision fields.`;
 
+export const CHECK_AND_FIX_INSTRUCTIONS = `Review the changes and verify that they are correct, idiomatic, minimal, and consistent with the project's conventions. If you find any problems, fix them idiomatically and minimally, following the project's conventions.
+
+Review the complete current result. Do not run the project finalization procedure or perform generic commit preparation; those remain owned by FINALIZE and HANDOFF. Do not stage, unstage, or commit.
+Verify the exact required-check evidence and fix any omission, substitution, weakening, fingerprint mismatch, or unauthorized validation-infrastructure change that can be fixed within the task.
+For CHANGED, use only when you changed repository content; provide summary and set reason, question, and whyBlocked to "", and options and evidence to [].
+For REFINALIZE, use only when repository content is unchanged but a clean-confirmation finding requires corrected finalization or validation evidence; provide summary and set reason, question, and whyBlocked to "", and options and evidence to [].
+For UNCHANGED, use only when you found no problem, changed no repository content, and no supplied clean-confirmation finding remains; provide summary and set reason, question, and whyBlocked to "", and options and evidence to [].
+For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or a comparable external constraint. Set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
+For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-decision fields.
+Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
+${PRODUCT_DECISION_INSTRUCTIONS}`;
+
+export const CLEAN_CONFIRM_INSTRUCTIONS = `Review the changes and verify that they are correct, idiomatic, minimal, and consistent with the project's conventions.
+
+Do not modify the repository. Return CLEAN only when there are no problems; otherwise return concrete findings without editing the content.
+Verify the exact required-check evidence and reject omissions, skips, substitutions, weakening, fingerprint mismatch, or validation-infrastructure changes that the task does not authorize.
+Use validationChange UNCHANGED when no change occurred, ACCEPTED with validationEvidence when an authorized change remains complete, or REJECTED with validationEvidence and a finding when it is evasive or unauthorized.
+For CLEAN, set question and whyBlocked to "", and findings, options, and evidence to [].
+For FINDINGS, provide one or more findings with unique stable R-prefixed numeric IDs, a repository-relative file, and populated problem, reason, and suggestedAction fields; set question and whyBlocked to "", and options and evidence to [].
+For PRODUCT_DECISION_REQUIRED, set findings and validationEvidence to [], and validationChange to UNCHANGED; use the product-decision fields.
+${PRODUCT_DECISION_INSTRUCTIONS}`;
+
 export const FINDING_RESOLUTION_INSTRUCTIONS = `Resolve every current blocker in one batch. Fix each valid blocker idiomatically and minimally. Dispute an incorrect Reviewer finding only with concise evidence. Modify safe workspace content only; do not stage or unstage changes or alter the Git index. The runner owns final staging after finalization and review.
 
 Do not run the project finalization procedure, execute the established required-check inventory, perform generic commit preparation, or create a commit. Those actions remain owned by FINALIZE or HANDOFF as applicable. Finalization failures must be fixed and cannot be disputed. A finding already upheld by the Arbiter must be fixed.

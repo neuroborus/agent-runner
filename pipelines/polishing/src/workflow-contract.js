@@ -13,6 +13,8 @@ export const WORKFLOW_STATES = Object.freeze([
   "BOOTSTRAP",
   "POLISH",
   "FINALIZE",
+  "CHECK_AND_FIX",
+  "CLEAN_CONFIRM",
   "REVIEW",
   "RESOLVE_FINDINGS",
   "HANDOFF",
@@ -22,16 +24,18 @@ export const WORKFLOW_STATES = Object.freeze([
 ]);
 
 const ROLES = Object.freeze(["worker", "reviewer", "arbiter"]);
+const LAZY_ROLES = Object.freeze(["worker"]);
 const SETTINGS_FIELDS = Object.freeze([
   "finalization",
   "maxFixRounds",
   "maxDisputesPerFinding",
   "maxSameFindingRounds",
+  "mode",
   "stagnationWindowRounds",
   "trustedChecks",
 ]);
 const NUMERIC_SETTINGS_FIELDS = SETTINGS_FIELDS.filter(
-  (field) => !["finalization", "trustedChecks"].includes(field),
+  (field) => !["finalization", "mode", "trustedChecks"].includes(field),
 );
 const COUNTER_FIELDS = Object.freeze([
   "clarificationRounds",
@@ -63,6 +67,8 @@ const PIPELINE_STATE_FIELDS = new Set([
   "pendingBootstrapCorrection",
   "finalizationCorrection",
   "pendingFinalizationCorrection",
+  "cleanConfirmationFingerprint",
+  "lazySourceForkConsumed",
   "polishSummary",
   "finalizationResult",
   "finalizedFingerprint",
@@ -196,8 +202,8 @@ export const MAX_DIAGNOSTIC_ITEMS = 32;
 export const MAX_DISPUTE_HISTORY_BYTES = 64 * 1024;
 export const MAX_DISPUTES_PER_FINDING = 2;
 
-export function resolveActiveRoles() {
-  return ROLES;
+export function resolveActiveRoles(settings) {
+  return settings?.mode === "lazy" ? LAZY_ROLES : ROLES;
 }
 
 const INVALID_OUTPUT_CODE = "ERR_INVALID_POLISHING_OUTPUT";
@@ -236,19 +242,26 @@ const PAUSE_RESUME_STATES = Object.freeze({
     "BOOTSTRAP",
     "POLISH",
     "FINALIZE",
+    "CHECK_AND_FIX",
+    "CLEAN_CONFIRM",
     "REVIEW",
     "RESOLVE_FINDINGS",
   ]),
   environment_blocked: Object.freeze([
     "POLISH",
     "FINALIZE",
+    "CHECK_AND_FIX",
     "RESOLVE_FINDINGS",
   ]),
   finalization_cannot_pass: Object.freeze(["FINALIZE"]),
   finalization_skill_invalid: Object.freeze(["FINALIZE"]),
   finalization_skill_missing: Object.freeze(["FINALIZE"]),
-  fix_limit_reached: Object.freeze(["POLISH", "RESOLVE_FINDINGS"]),
-  no_progress: Object.freeze(["RESOLVE_FINDINGS"]),
+  fix_limit_reached: Object.freeze([
+    "POLISH",
+    "CHECK_AND_FIX",
+    "RESOLVE_FINDINGS",
+  ]),
+  no_progress: Object.freeze(["CHECK_AND_FIX", "RESOLVE_FINDINGS"]),
 });
 
 export class PolishingWorkflowError extends Error {
@@ -1448,6 +1461,72 @@ export function normalizePolishResult(payload) {
   });
 }
 
+export function normalizeCheckAndFixResult(payload) {
+  const fields = [
+    "status",
+    "summary",
+    "reason",
+    "question",
+    "options",
+    "whyBlocked",
+    "evidence",
+  ];
+  assertExactFields(payload, fields, "Check/fix result", INVALID_OUTPUT_CODE);
+  assertStructuredResult(payload);
+  if (
+    ![
+      "CHANGED",
+      "REFINALIZE",
+      "UNCHANGED",
+      "BLOCKED",
+      "PRODUCT_DECISION_REQUIRED",
+    ].includes(payload.status)
+  ) {
+    throw outputError("Worker returned an invalid check/fix result.");
+  }
+  if (payload.status === "PRODUCT_DECISION_REQUIRED") {
+    if (payload.summary !== "" || payload.reason !== "") {
+      throw outputError("Product decision contains inapplicable fields.");
+    }
+    return Object.freeze({
+      status: payload.status,
+      decision: normalizeProductDecision(payload),
+    });
+  }
+  if (payload.status === "BLOCKED") {
+    if (
+      payload.summary !== "" ||
+      payload.question !== "" ||
+      payload.whyBlocked !== "" ||
+      !emptyArray(payload.options)
+    ) {
+      throw outputError("Blocked check/fix result contains inapplicable fields.");
+    }
+    return Object.freeze({
+      status: payload.status,
+      reason: normalizeText(
+        payload.reason,
+        "check/fix blocker",
+        INVALID_OUTPUT_CODE,
+      ),
+      evidence: normalizeTextList(payload.evidence, "check/fix evidence", {
+        code: INVALID_OUTPUT_CODE,
+      }),
+    });
+  }
+  if (payload.reason !== "" || !emptyDecision(payload)) {
+    throw outputError("Check/fix result contains inapplicable fields.");
+  }
+  return Object.freeze({
+    status: payload.status,
+    summary: normalizeSummary(
+      payload.summary,
+      "check/fix summary",
+      INVALID_OUTPUT_CODE,
+    ),
+  });
+}
+
 export function normalizeFinalizationResult(
   payload,
   { trustedCommands = [] } = {},
@@ -1676,6 +1755,30 @@ export function normalizeReviewResult(payload, previousFindings = []) {
     validationChange: payload.validationChange,
     validationEvidence,
   });
+}
+
+export function normalizeCleanConfirmationResult(
+  payload,
+  previousFindings = [],
+) {
+  if (
+    !isRecord(payload) ||
+    !["CLEAN", "FINDINGS", "PRODUCT_DECISION_REQUIRED"].includes(
+      payload.status,
+    )
+  ) {
+    throw outputError("Worker returned an invalid clean confirmation result.");
+  }
+  const result = normalizeReviewResult(
+    {
+      ...payload,
+      status: payload.status === "CLEAN" ? "APPROVED" : payload.status,
+    },
+    previousFindings,
+  );
+  return result.status === "APPROVED"
+    ? Object.freeze({ ...result, status: "CLEAN" })
+    : result;
 }
 
 export function normalizeResolutionResult(
@@ -1977,6 +2080,9 @@ export function assertSettings(settings) {
   }
   if (!isTrustedCheckSelection(settings.trustedChecks)) {
     throw workflowError("Polishing setting trustedChecks is invalid.");
+  }
+  if (!["independent", "lazy"].includes(settings.mode)) {
+    throw workflowError("Polishing setting mode is invalid.");
   }
   for (const field of NUMERIC_SETTINGS_FIELDS) {
     if (!Number.isSafeInteger(settings[field]) || settings[field] < 1) {
@@ -2618,6 +2724,19 @@ export function normalizePipelineState(value) {
       value = { ...value, settings };
     }
   }
+  const lazy = value.settings?.mode === "lazy";
+  if (
+    value.cleanConfirmationFingerprint !== null &&
+    (typeof value.cleanConfirmationFingerprint !== "string" ||
+      !HASH_PATTERN.test(value.cleanConfirmationFingerprint))
+  ) {
+    throw workflowError(
+      "Polishing clean confirmation fingerprint is invalid.",
+    );
+  }
+  if (typeof value.lazySourceForkConsumed !== "boolean") {
+    throw workflowError("Polishing source-fork state is invalid.");
+  }
   const trustedValidation = normalizeTrustedValidation(value.trustedValidation);
   if (trustedValidation !== value.trustedValidation) {
     value = { ...value, trustedValidation };
@@ -2645,18 +2764,22 @@ export function normalizePipelineState(value) {
     assertSnapshot(value.repositoryBaseline);
   }
   if (value.backendVersions !== null) {
-    assertExactFields(
-      value.backendVersions,
-      ROLES,
-      "Polishing backend versions",
-    );
+    const activeRoles = resolveActiveRoles(value.settings);
     if (
-      typeof value.backendVersions.worker !== "string" ||
-      typeof value.backendVersions.reviewer !== "string" ||
-      (value.backendVersions.arbiter !== null &&
-        typeof value.backendVersions.arbiter !== "string")
+      !isRecord(value.backendVersions) ||
+      Object.keys(value.backendVersions).length !== activeRoles.length ||
+      !activeRoles.every((role) => Object.hasOwn(value.backendVersions, role))
     ) {
       throw workflowError("Polishing backend versions are invalid.");
+    }
+    for (const [role, version] of Object.entries(value.backendVersions)) {
+      if (
+        (role !== "arbiter" && typeof version !== "string") ||
+        (version !== null &&
+          (typeof version !== "string" || version.trim().length === 0))
+      ) {
+        throw workflowError(`Polishing ${role} version is invalid.`);
+      }
     }
   }
   if (
@@ -2886,6 +3009,37 @@ export function normalizePipelineState(value) {
     throw workflowError("Polishing stagnation arbitration is inconsistent.");
   }
   if (
+    (!lazy &&
+      (value.cleanConfirmationFingerprint !== null ||
+        value.lazySourceForkConsumed ||
+        ["CHECK_AND_FIX", "CLEAN_CONFIRM"].includes(value.workflowState))) ||
+    (lazy && value.workflowState === "REVIEW")
+  ) {
+    throw workflowError("Polishing mode state is inconsistent.");
+  }
+  if (
+    lazy &&
+    (pendingDisputes.length !== 0 ||
+      Object.keys(disputeCounts).length !== 0 ||
+      value.disputeHistory.length !== 0 ||
+      findingArbitrations.length !== 0 ||
+      value.stagnationArbitrationUsed ||
+      stagnationDirection !== null ||
+      value.reviewReconsideration.length !== 0 ||
+      value.findingOverrides.length !== 0)
+  ) {
+    throw workflowError("Lazy polishing review state is inconsistent.");
+  }
+  if (
+    value.cleanConfirmationFingerprint !== null &&
+    (!lazy ||
+      value.cleanConfirmationFingerprint !== value.finalizedFingerprint ||
+      value.cleanConfirmationFingerprint !== value.reviewedFingerprint ||
+      reviewResult?.status !== "APPROVED")
+  ) {
+    throw workflowError("Polishing clean confirmation is inconsistent.");
+  }
+  if (
     (reviewerSummary !== null && workerSummary === null) ||
     (!value.validationMigrationPending &&
       (workerValidation !== null) !== (workerSummary !== null)) ||
@@ -2895,7 +3049,7 @@ export function normalizePipelineState(value) {
       reviewerValidation !== null &&
       workerValidation === null) ||
     ((resolvedSummary !== null || disagreement !== null) &&
-      (workerSummary === null || reviewerSummary === null)) ||
+      (workerSummary === null || (!lazy && reviewerSummary === null))) ||
     (resolvedSummary !== null && disagreement !== null)
   ) {
     throw workflowError("Polishing bootstrap context is inconsistent.");
@@ -2907,6 +3061,15 @@ export function normalizePipelineState(value) {
       typeof value.backendVersions?.arbiter !== "string")
   ) {
     throw workflowError("Polishing bootstrap arbitration is inconsistent.");
+  }
+  if (
+    lazy &&
+    (reviewerSummary !== null ||
+      reviewerValidation !== null ||
+      disagreement !== null ||
+      value.bootstrapArbitrationUsed)
+  ) {
+    throw workflowError("Lazy polishing bootstrap state is inconsistent.");
   }
   if (
     value.validationMigrationPending &&
@@ -2972,6 +3135,7 @@ export function normalizePipelineState(value) {
   if (
     finalizationResult === null &&
     (value.finalizedFingerprint !== null ||
+      value.cleanConfirmationFingerprint !== null ||
       reviewResult !== null ||
       value.reviewedFingerprint !== null ||
       findings.length !== 0 ||
@@ -3010,6 +3174,9 @@ export function normalizePipelineState(value) {
           value.repositoryBaseline.contentFingerprint) ||
       (value.reviewedFingerprint !== null &&
         value.reviewedFingerprint !==
+          value.repositoryBaseline.contentFingerprint) ||
+      (value.cleanConfirmationFingerprint !== null &&
+        value.cleanConfirmationFingerprint !==
           value.repositoryBaseline.contentFingerprint))
   ) {
     throw workflowError("Polishing content fingerprints are inconsistent.");
@@ -3023,9 +3190,15 @@ export function normalizePipelineState(value) {
   }
   if (
     value.pendingCorrection &&
-    !["POLISH", "FINALIZE", "REVIEW", "WAITING_FOR_USER", "FAILED"].includes(
-      value.workflowState,
-    )
+    ![
+      "POLISH",
+      "FINALIZE",
+      "CHECK_AND_FIX",
+      "CLEAN_CONFIRM",
+      "REVIEW",
+      "WAITING_FOR_USER",
+      "FAILED",
+    ].includes(value.workflowState)
   ) {
     throw workflowError("Polishing pending correction is inapplicable.");
   }
@@ -3067,6 +3240,7 @@ export function normalizePipelineState(value) {
     polishSummary !== null ||
     finalizationResult !== null ||
     value.finalizedFingerprint !== null ||
+    value.cleanConfirmationFingerprint !== null ||
     value.reviewedFingerprint !== null ||
     findings.length !== 0 ||
     previousFindings.length !== 0 ||
@@ -3088,6 +3262,7 @@ export function normalizePipelineState(value) {
       pendingBootstrapCorrection !== null ||
       finalizationCorrection !== null ||
       pendingFinalizationCorrection !== null ||
+      value.lazySourceForkConsumed ||
       validationMigrationDisagreement !== null ||
       hasWorkProgress)
   ) {
@@ -3123,6 +3298,8 @@ export function normalizePipelineState(value) {
     [
       "POLISH",
       "FINALIZE",
+      "CHECK_AND_FIX",
+      "CLEAN_CONFIRM",
       "REVIEW",
       "RESOLVE_FINDINGS",
       "HANDOFF",
@@ -3136,9 +3313,15 @@ export function normalizePipelineState(value) {
     throw workflowError("Polishing prepared state is inconsistent.");
   }
   if (
-    (["FINALIZE", "REVIEW", "RESOLVE_FINDINGS", "HANDOFF", "DONE"].includes(
-      value.workflowState,
-    ) &&
+    ([
+      "FINALIZE",
+      "CHECK_AND_FIX",
+      "CLEAN_CONFIRM",
+      "REVIEW",
+      "RESOLVE_FINDINGS",
+      "HANDOFF",
+      "DONE",
+    ].includes(value.workflowState) &&
       polishSummary === null)
   ) {
     throw workflowError("Polishing result state is inconsistent.");
@@ -3146,6 +3329,7 @@ export function normalizePipelineState(value) {
   if (
     value.workflowState === "FINALIZE" &&
     (finalizationResult !== null ||
+      value.cleanConfirmationFingerprint !== null ||
       findings.length !== 0 ||
       value.reviewReconsideration.length !== 0)
   ) {
@@ -3158,11 +3342,32 @@ export function normalizePipelineState(value) {
   ) {
     throw workflowError("Polishing review state is inconsistent.");
   }
+  if (
+    value.workflowState === "CHECK_AND_FIX" &&
+    (finalizationResult?.status !== "PASS" ||
+      value.finalizedFingerprint === null ||
+      value.cleanConfirmationFingerprint !== null)
+  ) {
+    throw workflowError("Polishing check/fix state is inconsistent.");
+  }
+  if (
+    value.workflowState === "CLEAN_CONFIRM" &&
+    (finalizationResult?.status !== "PASS" ||
+      value.finalizedFingerprint === null ||
+      reviewResult !== null ||
+      value.reviewedFingerprint !== null ||
+      findings.length !== 0 ||
+      value.cleanConfirmationFingerprint !== null)
+  ) {
+    throw workflowError("Polishing clean confirmation state is inconsistent.");
+  }
   const completionReady =
     finalizationResult?.status === "PASS" &&
     value.finalizedFingerprint !== null &&
     value.reviewedFingerprint === value.finalizedFingerprint &&
     ["UNCHANGED", "ACCEPTED"].includes(reviewResult.validationChange) &&
+    (!lazy ||
+      value.cleanConfirmationFingerprint === value.finalizedFingerprint) &&
     findings.length === 0 &&
     pendingDisputes.length === 0;
   const finalizationBlocked =
@@ -3238,6 +3443,8 @@ export function createPolishingState({
     pendingBootstrapCorrection: null,
     finalizationCorrection: null,
     pendingFinalizationCorrection: null,
+    cleanConfirmationFingerprint: null,
+    lazySourceForkConsumed: false,
     polishSummary: null,
     finalizationResult: null,
     finalizedFingerprint: null,
@@ -3327,7 +3534,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "polishing" ||
-    run.pipelineStateVersion !== 7 ||
+    run.pipelineStateVersion !== 8 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -3406,6 +3613,16 @@ export function assertRun(run) {
   }
   if (new Set(sessionIds).size !== sessionIds.length) {
     throw workflowError("Polishing child sessions must be unique.");
+  }
+  if (
+    (state.lazySourceForkConsumed && run.sessionLineage.source === null) ||
+    (state.settings?.mode === "lazy" &&
+      run.sessionLineage.source !== null &&
+      (run.sessionLineage.children.length > 0 ||
+        (run.activeTurn !== null && run.activeTurn !== undefined)) &&
+      !state.lazySourceForkConsumed)
+  ) {
+    throw workflowError("Polishing source-fork lineage is invalid.");
   }
   if (state.repositoryBaseline !== null) {
     const repositoryPath = state.repositoryBaseline.projectPath;

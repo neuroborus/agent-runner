@@ -309,6 +309,63 @@ export const REVIEW_SCHEMA = deepFreeze({
   additionalProperties: false,
 });
 
+export const CHECK_AND_FIX_SCHEMA = deepFreeze({
+  type: "object",
+  properties: {
+    status: {
+      type: "string",
+      enum: [
+        "CHANGED",
+        "REFINALIZE",
+        "UNCHANGED",
+        "BLOCKED",
+        "PRODUCT_DECISION_REQUIRED",
+      ],
+    },
+    summary: SUMMARY,
+    reason: TEXT,
+    ...DECISION_PROPERTIES,
+  },
+  required: [
+    "status",
+    "summary",
+    "reason",
+    "question",
+    "options",
+    "whyBlocked",
+    "evidence",
+  ],
+  additionalProperties: false,
+});
+
+export const CLEAN_CONFIRM_SCHEMA = deepFreeze({
+  type: "object",
+  properties: {
+    status: {
+      type: "string",
+      enum: ["CLEAN", "FINDINGS", "PRODUCT_DECISION_REQUIRED"],
+    },
+    findings: { type: "array", maxItems: MAX_ITEMS, items: REVIEW_FINDING },
+    validationChange: {
+      type: "string",
+      enum: ["UNCHANGED", "ACCEPTED", "REJECTED"],
+    },
+    validationEvidence: TEXT_LIST,
+    ...DECISION_PROPERTIES,
+  },
+  required: [
+    "status",
+    "findings",
+    "validationChange",
+    "validationEvidence",
+    "question",
+    "options",
+    "whyBlocked",
+    "evidence",
+  ],
+  additionalProperties: false,
+});
+
 export const FINDING_RESOLUTION_SCHEMA = deepFreeze({
   type: "object",
   properties: {

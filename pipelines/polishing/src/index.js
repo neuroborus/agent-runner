@@ -20,7 +20,9 @@ export {
   BOOTSTRAP_CORRECTION_INSTRUCTIONS,
   BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
+  CHECK_AND_FIX_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
+  CLEAN_CONFIRM_INSTRUCTIONS,
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
   FINALIZATION_CORRECTION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
@@ -58,6 +60,10 @@ function positiveIntegerSetting(defaultValue, maximum = null) {
   });
 }
 
+function pipelineMode(value) {
+  return ["independent", "lazy"].includes(value);
+}
+
 function trustedCheckSelection(value) {
   return (
     Array.isArray(value) &&
@@ -84,6 +90,11 @@ const SETTINGS = Object.freeze({
     MAX_DISPUTES_PER_FINDING,
   ),
   maxSameFindingRounds: positiveIntegerSetting(3),
+  mode: Object.freeze({
+    defaultValue: "independent",
+    errorMessage: "must be independent or lazy",
+    validate: pipelineMode,
+  }),
   stagnationWindowRounds: positiveIntegerSetting(3),
   trustedChecks: Object.freeze({
     defaultValue: Object.freeze([]),
@@ -115,6 +126,8 @@ const RESUMABLE_WORKFLOW_STATES = new Set([
   "BOOTSTRAP",
   "POLISH",
   "FINALIZE",
+  "CHECK_AND_FIX",
+  "CLEAN_CONFIRM",
   "REVIEW",
   "RESOLVE_FINDINGS",
 ]);
@@ -337,7 +350,9 @@ function validateResumeAction(run, action) {
     const additionalFixRounds = state.additionalFixRounds + action.amount;
     if (
       run.pause?.reason !== "fix_limit_reached" ||
-      !["POLISH", "RESOLVE_FINDINGS"].includes(run.pause.resumeState) ||
+      !["POLISH", "CHECK_AND_FIX", "RESOLVE_FINDINGS"].includes(
+        run.pause.resumeState,
+      ) ||
       !Number.isSafeInteger(additionalFixRounds) ||
       !Number.isSafeInteger(state.settings.maxFixRounds + additionalFixRounds)
     ) {
@@ -347,6 +362,7 @@ function validateResumeAction(run, action) {
   }
   if (action?.type === "override-finding") {
     if (
+      state.settings?.mode === "lazy" ||
       !["fix_limit_reached", "no_progress"].includes(run.pause?.reason) ||
       state.finalizationResult?.status !== "PASS" ||
       state.reviewedFingerprint === null ||
@@ -758,9 +774,22 @@ export function migratePolishingStateV6(run) {
   });
 }
 
+export function migratePolishingStateV7(run) {
+  const current = run.pipelineState;
+  return Object.freeze({
+    ...current,
+    settings:
+      current.settings === null
+        ? null
+        : Object.freeze({ ...current.settings, mode: "independent" }),
+    cleanConfirmationFingerprint: null,
+    lazySourceForkConsumed: false,
+  });
+}
+
 export const polishingPipeline = Object.freeze({
   id: POLISHING_PIPELINE_ID,
-  stateVersion: 7,
+  stateVersion: 8,
   migrations: Object.freeze({
     1: migratePolishingStateV1,
     2: migratePolishingStateV2,
@@ -768,6 +797,7 @@ export const polishingPipeline = Object.freeze({
     4: migratePolishingStateV4,
     5: migratePolishingStateV5,
     6: migratePolishingStateV6,
+    7: migratePolishingStateV7,
   }),
   roles: ROLES,
   resolveActiveRoles,

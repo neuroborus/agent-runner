@@ -6,7 +6,9 @@ import {
   BOOTSTRAP_CORRECTION_INSTRUCTIONS,
   BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
+  CHECK_AND_FIX_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
+  CLEAN_CONFIRM_INSTRUCTIONS,
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
   FINALIZATION_CORRECTION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
@@ -23,7 +25,9 @@ import {
   BOOTSTRAP_ARBITRATION_SCHEMA,
   BOOTSTRAP_RECONCILIATION_SCHEMA,
   BOOTSTRAP_SCHEMA,
+  CHECK_AND_FIX_SCHEMA,
   CLARIFICATION_SCHEMA,
+  CLEAN_CONFIRM_SCHEMA,
   DISPUTE_RECONSIDERATION_SCHEMA,
   FINALIZATION_SCHEMA,
   FINDING_ARBITRATION_SCHEMA,
@@ -160,6 +164,22 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
   assert.match(FINALIZATION_INSTRUCTIONS, /Do not weaken sandboxing/u);
   assert.match(REVIEW_INSTRUCTIONS, /Do not modify/u);
   assert.match(REVIEW_INSTRUCTIONS, /stable IDs/u);
+  assert.match(
+    CHECK_AND_FIX_INSTRUCTIONS,
+    /correct, idiomatic, minimal, and consistent/u,
+  );
+  assert.match(CHECK_AND_FIX_INSTRUCTIONS, /For CHANGED, use only/u);
+  assert.match(
+    CHECK_AND_FIX_INSTRUCTIONS,
+    /no supplied clean-confirmation finding remains/u,
+  );
+  assert.match(CHECK_AND_FIX_INSTRUCTIONS, /Do not stage, unstage, or commit/u);
+  assert.match(
+    CLEAN_CONFIRM_INSTRUCTIONS,
+    /correct, idiomatic, minimal, and consistent/u,
+  );
+  assert.match(CLEAN_CONFIRM_INSTRUCTIONS, /Do not modify the repository/u);
+  assert.match(CLEAN_CONFIRM_INSTRUCTIONS, /Return CLEAN only/u);
   assert.match(FINDING_RESOLUTION_INSTRUCTIONS, /one batch/u);
   assert.match(FINDING_RESOLUTION_INSTRUCTIONS, /runner owns final staging/u);
   assert.match(
@@ -196,6 +216,8 @@ test("polishing schemas are strict, bounded, and deeply frozen", () => {
     BOOTSTRAP_ARBITRATION_SCHEMA,
     POLISH_SCHEMA,
     FINALIZATION_SCHEMA,
+    CHECK_AND_FIX_SCHEMA,
+    CLEAN_CONFIRM_SCHEMA,
     REVIEW_SCHEMA,
     FINDING_RESOLUTION_SCHEMA,
     DISPUTE_RECONSIDERATION_SCHEMA,
