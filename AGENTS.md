@@ -20,10 +20,14 @@
 
 ## Source Of Truth
 
-Read `docs/ARCHITECTURE.md` before changing repository boundaries or dependency
-direction. Read the affected pipeline specification under `pipelines/*/docs/`
-before changing workflow behavior, prompts, review resolution, or pipeline CLI
-contracts. `packages/commit-plan/README.md` owns the shared plan contract.
+Use `docs/README.md` as the document map and change gate. Read
+`docs/CONVENTIONS.md` for the intended architecture and repository-wide code
+conventions before changing tracked content. Read `docs/ARCHITECTURE.md` for the
+detailed current runtime contract before changing boundaries or dependency
+direction, and update it when the implementation changes. Read the affected
+pipeline specification under `pipelines/*/docs/` before changing workflow
+behavior, prompts, review resolution, or pipeline CLI contracts.
+`packages/commit-plan/README.md` owns the shared plan contract.
 
 ## Working Agreements
 

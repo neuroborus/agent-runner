@@ -11,11 +11,16 @@ report only failures that cannot be resolved safely within the current scope.
 
 ## 1. Review Scope
 
-- Compare the change with `docs/ARCHITECTURE.md`, the affected pipeline
-  specifications, the shared plan contract, and the current request.
+- Use the change gate in `docs/README.md` to identify every owning document
+  affected by the change.
+- Compare the change with the intended architecture and repository-wide rules
+  in `docs/CONVENTIONS.md`, the detailed runtime contract in
+  `docs/ARCHITECTURE.md`, the affected pipeline specifications, the shared plan
+  contract, and the current request.
 - Keep the monorepo within its stated non-goals and avoid speculative abstractions.
 - Preserve unrelated user work and call out any overlap or uncertainty.
 - Verify that README, `AGENTS.md`, and project skills still match actual behavior.
+- Verify that the document map and its links still match the repository.
 - Verify that workspace dependencies point from the root runtime to pipelines and
   from pipelines to shared packages, never between pipelines.
 

@@ -7,8 +7,9 @@ persistence, Git safety, and backend execution in one small runner.
 All registered pipelines are runnable through the CLI and the local STDIO MCP
 control plane.
 
-Architecture is documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
-Each pipeline owns its specification under its workspace.
+Start with the [`docs` map and change gate](docs/README.md). Architecture is
+documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), and each pipeline
+owns its specification under its workspace.
 
 ## Core Guarantees
 
