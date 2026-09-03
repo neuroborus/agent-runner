@@ -27,7 +27,11 @@ detailed current runtime contract before changing boundaries or dependency
 direction, and update it when the implementation changes. Read the affected
 pipeline specification under `pipelines/*/docs/` before changing workflow
 behavior, prompts, review resolution, or pipeline CLI contracts.
-`packages/commit-plan/README.md` owns the shared plan contract.
+Use the product-document rows in `docs/README.md` for current workflow meaning,
+business rules, operator guarantees, and accepted nuances. `RHYTHM.md` records
+meaningful implemented decisions and their rationale; it does not replace a
+current owning document. `packages/commit-plan/README.md` owns the shared plan
+contract.
 
 ## Working Agreements
 
@@ -168,6 +172,8 @@ All pipelines additionally require:
 | `pipelines/polishing/` | Polishing workflow, prompts, tests, and specification |
 | `test/` | Root CLI, registry, adapter, and repository-boundary tests |
 | `docs/` | Cross-cutting architecture documentation |
+| `docs/product/` | Current product guarantees, workflow meaning, and accepted nuances |
+| `RHYTHM.md` | Newest-first record of meaningful implemented repository decisions |
 | `.agents/skills/` | Shared repository workflow skills |
 
 `.claude/skills` is a symlink to `.agents/skills`. Edit the canonical skill
@@ -187,8 +193,8 @@ Inside an Agent Runner pipeline, the established inventory ends with the
 `HEAD`-relative content check. The runner-owned `COMMIT` or `HANDOFF` boundary
 performs the staged check after it alone stages the accepted content.
 
-The test suite imports every root and workspace source module and validates
-project skill frontmatter and interface metadata without depending on one agent
-backend's installation path.
+The test suite imports every root and workspace source module, validates
+canonical project skill frontmatter and content without requiring local
+provider interface metadata, and checks the central product-document map.
 
 Use the `finalization` skill for the complete handoff gate.

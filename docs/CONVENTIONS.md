@@ -14,6 +14,24 @@ implementation. Pipeline specifications own pipeline behavior, and
 The narrower contract wins when rules overlap, but it may not weaken a safety
 invariant from `AGENTS.md`.
 
+## Deliberate adaptations
+
+These conventions adapt an ownership-first TypeScript service guide to a plain
+JavaScript CLI. Compile-time-only rules such as type/interface selection,
+explicit TypeScript return annotations, and framework enum syntax become strict
+runtime validation, closed serialized shapes, named finite constants, and
+documentation at non-obvious exported boundaries. Framework dependency
+injection becomes explicit construction and capability injection at the root
+composition boundary.
+
+Framework, HTTP/OpenAPI, database, finance, queue, and telemetry rules are not
+copied because Agent Runner exposes none of those product surfaces. ESLint is
+also not implied by the reference baseline: the repository uses runtime
+contracts, boundary tests, and root-owned Prettier formatting, and adding a
+semantic linter requires its own demonstrated need. The shared commit-plan
+contract intentionally omits the otherwise common `style` commit type, so its
+closed Conventional Commit allowlist remains authoritative.
+
 ## Architecture
 
 ### One runtime with explicit features

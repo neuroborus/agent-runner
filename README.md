@@ -673,10 +673,14 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   └── polishing/
 ├── test/
 ├── docs/
-│   └── ARCHITECTURE.md
+│   ├── product/
+│   ├── ARCHITECTURE.md
+│   ├── CONVENTIONS.md
+│   └── README.md
 ├── .agents/skills/
 ├── AGENTS.md
-└── CLAUDE.md
+├── CLAUDE.md
+└── RHYTHM.md
 ```
 
 `.agents/skills/` is the canonical shared skill directory.

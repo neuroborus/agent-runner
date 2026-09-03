@@ -20,7 +20,15 @@ report only failures that cannot be resolved safely within the current scope.
 - Keep the monorepo within its stated non-goals and avoid speculative abstractions.
 - Preserve unrelated user work and call out any overlap or uncertainty.
 - Verify that README, `AGENTS.md`, and project skills still match actual behavior.
-- Verify that the document map and its links still match the repository.
+- Keep every tracked `docs/product/*.md` document represented exactly once in
+  `docs/README.md`, with a concise description of what it owns and when to read
+  it. Update the owning product document when its behavior changes, without
+  duplicating detailed pipeline or runtime contracts.
+- Add a newest-first `RHYTHM.md` entry when the change creates or revises a
+  durable product, convention, safety, provider, workflow-ownership, or
+  architectural decision. Mechanical moves and corrections need no entry.
+- Verify that the complete `docs/README.md` map and its links still match the
+  repository.
 - Verify that workspace dependencies point from the root runtime to pipelines and
   from pipelines to shared packages, never between pipelines.
 

@@ -21,6 +21,9 @@ npm-debug.log*
 .claude/settings.local.json
 LOCAL_ARTIFACTS/
 
+# Provider-specific skill interface metadata is local configuration.
+/.agents/**/agents/*.yaml
+
 # Editors and operating systems
 .idea/
 .vscode/
