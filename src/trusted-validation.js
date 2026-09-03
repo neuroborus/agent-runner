@@ -11,7 +11,8 @@ import {
 const ALIAS_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const MAX_ARGUMENTS = 64;
-const MAX_COMMANDS = 32;
+const MAX_COMMAND_DEFINITIONS = 256;
+const MAX_SELECTED_COMMANDS = 32;
 const MAX_TEXT_LENGTH = 4_000;
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1_000;
 const SNAPSHOT_SCHEMA_VERSION = 1;
@@ -64,13 +65,17 @@ function sha256(value) {
 function assertExactText(
   value,
   name,
-  { allowEmpty = false, requireTrimmed = false } = {},
+  { allowEmpty = false, allowLineFeeds = false, requireTrimmed = false } = {},
 ) {
+  const inspectedValue =
+    allowLineFeeds && typeof value === "string"
+      ? value.replaceAll("\n", "")
+      : value;
   if (
     typeof value !== "string" ||
     (!allowEmpty && value.length === 0) ||
     [...value].length > MAX_TEXT_LENGTH ||
-    /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(value) ||
+    /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(inspectedValue) ||
     (requireTrimmed && value.trim() !== value)
   ) {
     throw new TrustedValidationError(`${name} is invalid.`, {
@@ -126,7 +131,7 @@ function normalizeCommand(alias, value) {
       assertExactText(
         argument,
         `Trusted command ${alias} argument ${index + 1}`,
-        { allowEmpty: true },
+        { allowEmpty: true, allowLineFeeds: true },
       ),
     ),
   );
@@ -140,6 +145,44 @@ function normalizeCommand(alias, value) {
     ...normalized,
     identity: commandIdentity(normalized),
   });
+}
+
+function normalizeCommandDefinitions(definitions) {
+  if (
+    !isRecord(definitions) ||
+    Object.keys(definitions).length > MAX_COMMAND_DEFINITIONS
+  ) {
+    throw new TrustedValidationError(
+      `Trusted validation may define at most ${MAX_COMMAND_DEFINITIONS} commands.`,
+      { code: "ERR_INVALID_TRUSTED_VALIDATION" },
+    );
+  }
+  return Object.freeze(
+    Object.fromEntries(
+      Object.entries(definitions).map(([alias, value]) => [
+        alias,
+        normalizeCommand(alias, value),
+      ]),
+    ),
+  );
+}
+
+export function normalizeTrustedValidationDefinitions(definitions = {}) {
+  const normalized = normalizeCommandDefinitions(definitions);
+  return Object.freeze(
+    Object.fromEntries(
+      Object.entries(normalized).map(
+        ([alias, { command, executable, arguments: argumentsList }]) => [
+          alias,
+          Object.freeze({
+            command,
+            executable,
+            arguments: argumentsList,
+          }),
+        ],
+      ),
+    ),
+  );
 }
 
 function snapshotFingerprints(commands) {
@@ -165,10 +208,8 @@ function snapshotFingerprints(commands) {
 
 export function createTrustedValidationSnapshot(definitions = {}, selections = []) {
   if (
-    !isRecord(definitions) ||
-    Object.keys(definitions).length > MAX_COMMANDS ||
     !Array.isArray(selections) ||
-    selections.length > MAX_COMMANDS ||
+    selections.length > MAX_SELECTED_COMMANDS ||
     new Set(selections).size !== selections.length ||
     selections.some((alias) => typeof alias !== "string" || !ALIAS_PATTERN.test(alias))
   ) {
@@ -176,12 +217,7 @@ export function createTrustedValidationSnapshot(definitions = {}, selections = [
       code: "ERR_INVALID_TRUSTED_VALIDATION",
     });
   }
-  const normalizedDefinitions = Object.fromEntries(
-    Object.entries(definitions).map(([alias, value]) => [
-      alias,
-      normalizeCommand(alias, value),
-    ]),
-  );
+  const normalizedDefinitions = normalizeCommandDefinitions(definitions);
   const commands = Object.freeze(
     selections.map((alias) => {
       const command = normalizedDefinitions[alias];
@@ -206,7 +242,7 @@ export function validateTrustedValidationSnapshot(value) {
     !hasExactFields(value, SNAPSHOT_FIELDS) ||
     value.schemaVersion !== SNAPSHOT_SCHEMA_VERSION ||
     !Array.isArray(value.commands) ||
-    value.commands.length > MAX_COMMANDS ||
+    value.commands.length > MAX_SELECTED_COMMANDS ||
     !HASH_PATTERN.test(value.commandFingerprint) ||
     !HASH_PATTERN.test(value.configurationFingerprint)
   ) {

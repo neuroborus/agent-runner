@@ -301,6 +301,72 @@ test("configuration rejects unsupported shapes and values", () => {
   );
 });
 
+test("configuration accepts 256 trusted command definitions", () => {
+  const trustedCommands = Object.fromEntries(
+    Array.from({ length: 256 }, (_, index) => [
+      `check-${index + 1}`,
+      {
+        command: `node validation-${index + 1}.js`,
+        executable: "node",
+        arguments: [`validation-${index + 1}.js`],
+      },
+    ]),
+  );
+
+  const configuration = parseRunnerConfiguration(
+    JSON.stringify({ schemaVersion: 1, trustedCommands }),
+  );
+
+  assert.equal(Object.keys(configuration.trustedCommands).length, 256);
+  assert.ok(Object.isFrozen(configuration.trustedCommands));
+  assert.ok(Object.isFrozen(configuration.trustedCommands["check-1"]));
+  assert.ok(
+    Object.isFrozen(configuration.trustedCommands["check-1"].arguments),
+  );
+});
+
+test("configuration rejects more than 256 trusted command definitions", () => {
+  const trustedCommands = Object.fromEntries(
+    Array.from({ length: 257 }, (_, index) => [
+      `check-${index + 1}`,
+      {
+        command: `node validation-${index + 1}.js`,
+        executable: "node",
+        arguments: [`validation-${index + 1}.js`],
+      },
+    ]),
+  );
+
+  assert.throws(
+    () =>
+      parseRunnerConfiguration(
+        JSON.stringify({ schemaVersion: 1, trustedCommands }),
+      ),
+    /may define at most 256 commands/u,
+  );
+});
+
+test("configuration preserves line feeds in trusted command arguments", () => {
+  const script = "first line\nsecond line";
+  const configuration = parseRunnerConfiguration(
+    JSON.stringify({
+      schemaVersion: 1,
+      trustedCommands: {
+        "multiline-check": {
+          command: "node --eval multiline-check",
+          executable: "node",
+          arguments: ["--eval", script],
+        },
+      },
+    }),
+  );
+
+  assert.equal(
+    configuration.trustedCommands["multiline-check"].arguments[1],
+    script,
+  );
+});
+
 test("configuration loads from the runner root without reading the target", async (t) => {
   const projectPath = await mkdtemp(join(tmpdir(), "agent-runner-config-"));
   t.after(() => rm(projectPath, { recursive: true, force: true }));

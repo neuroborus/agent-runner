@@ -73,6 +73,89 @@ function snapshot(alias, command, executable, argumentsList) {
   );
 }
 
+test("bounds each snapshot independently from the command catalog", () => {
+  const definitions = Object.fromEntries(
+    Array.from({ length: 256 }, (_, index) => [
+      `check-${index + 1}`,
+      {
+        command: `node validation-${index + 1}.js`,
+        executable: "node",
+        arguments: [`validation-${index + 1}.js`],
+      },
+    ]),
+  );
+  const aliases = Object.keys(definitions);
+
+  assert.equal(
+    createTrustedValidationSnapshot(definitions, aliases.slice(0, 32)).commands
+      .length,
+    32,
+  );
+  assert.throws(
+    () => createTrustedValidationSnapshot(definitions, aliases.slice(0, 33)),
+    /Trusted validation selection is invalid/u,
+  );
+});
+
+test("preserves line feeds in direct command arguments", () => {
+  const script = "first line\nsecond line";
+  const trusted = snapshot(
+    "multiline-check",
+    "python3 -c multiline-check",
+    "python3",
+    ["-c", script],
+  );
+
+  assert.equal(trusted.commands[0].arguments[1], script);
+  assert.deepEqual(validateTrustedValidationSnapshot(trusted), trusted);
+  assert.throws(
+    () =>
+      snapshot(
+        "multiline-command",
+        "python3\n-c multiline-command",
+        "python3",
+        ["-c", script],
+      ),
+    /command is invalid/u,
+  );
+  assert.throws(
+    () =>
+      snapshot(
+        "multiline-executable",
+        "python3 -c multiline-executable",
+        "python3\n-c",
+        ["-c", script],
+      ),
+    /executable is invalid/u,
+  );
+});
+
+test("rejects other control characters and line separators in direct arguments", () => {
+  const forbiddenCodePoints = [
+    ...Array.from({ length: 0x20 }, (_, codePoint) => codePoint),
+    ...Array.from({ length: 0x21 }, (_, index) => 0x7f + index),
+    0x2028,
+    0x2029,
+  ].filter((codePoint) => codePoint !== 0x0a);
+
+  for (const codePoint of forbiddenCodePoints) {
+    const character = String.fromCodePoint(codePoint);
+    const label = `U+${codePoint.toString(16).padStart(4, "0")}`;
+
+    assert.throws(
+      () =>
+        snapshot(
+          "invalid-control-check",
+          "python3 -c invalid-control-check",
+          "python3",
+          ["-c", `first line${character}second line`],
+        ),
+      /argument 2 is invalid/u,
+      label,
+    );
+  }
+});
+
 async function bindings(git, projectPath, trusted) {
   return {
     contentFingerprint: await git.contentFingerprint({

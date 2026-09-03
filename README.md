@@ -177,8 +177,11 @@ the dedicated fingerprint-bound finalization turn.
 
 Required checks that need loopback listeners, Docker, a local database, or a
 comparable host service may be delegated to the runner's trusted validation
-executor. Only the runner-root configuration may define an alias, its exact
-inventory command, and its executable/argument vector:
+executor. The runner-root catalog accepts at most 256 aliases; each pipeline
+run may select at most 32 of them. Exact direct arguments may contain line
+feeds for multiline scripts; other control characters remain invalid. Only the
+runner-root configuration may define an alias, its exact inventory command, and
+its executable/argument vector:
 
 ```json
 {

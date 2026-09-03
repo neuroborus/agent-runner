@@ -197,13 +197,16 @@ pipeline settings and is not reloaded on resume.
 
 `trustedCommands` is runner-only configuration. Each lowercase alias binds one
 exact inventory command to one executable and argument vector; definitions
-cannot carry environment values. Plan execution and polishing each own a
-`trustedChecks` setting that may select aliases, and an ignored project
-configuration may replace that pipeline's selection, but project configuration
-cannot define an alias, binary, argument, environment value, or new host
-command. The default selection is empty. Before agent work, the root resolves
-it into an immutable snapshot containing every selected vector, deterministic
-command identities, an ordered command fingerprint, and a
+cannot carry environment values. The runner catalog accepts at most 256
+definitions, while each immutable run snapshot remains limited to 32 selected
+commands. Direct argument strings may contain line feeds for exact multiline
+scripts; other control characters remain invalid. Plan execution and polishing
+each own a `trustedChecks` setting that may select aliases, and an ignored
+project configuration may replace that pipeline's selection, but project
+configuration cannot define an alias, binary, argument, environment value, or
+new host command. The default selection is empty. Before agent work, the root
+resolves it into an immutable snapshot containing every selected vector,
+deterministic command identities, an ordered command fingerprint, and a
 trusted-configuration fingerprint. Resume uses that durable snapshot without
 reloading either configuration source.
 

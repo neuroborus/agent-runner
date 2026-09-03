@@ -5,7 +5,10 @@ import { fileURLToPath } from "node:url";
 
 import { BACKEND_IDS } from "./agents/index.js";
 import { getPipeline, listPipelines } from "./pipeline-registry.js";
-import { createTrustedValidationSnapshot } from "./trusted-validation.js";
+import {
+  createTrustedValidationSnapshot,
+  normalizeTrustedValidationDefinitions,
+} from "./trusted-validation.js";
 
 export const CONFIG_FILENAME = ".agent-runner.json";
 export const DEFAULT_ARTIFACT_ROOT = "LOCAL_ARTIFACTS";
@@ -169,24 +172,7 @@ function normalizeProfile(name, value) {
 function normalizeTrustedCommands(value) {
   assertRecord(value, "configuration.trustedCommands");
   try {
-    const snapshot = createTrustedValidationSnapshot(
-      value,
-      Object.keys(value),
-    );
-    return Object.freeze(
-      Object.fromEntries(
-        snapshot.commands.map(
-          ({ alias, command, executable, arguments: argumentsList }) => [
-            alias,
-            Object.freeze({
-              command,
-              executable,
-              arguments: argumentsList,
-            }),
-          ],
-        ),
-      ),
-    );
+    return normalizeTrustedValidationDefinitions(value);
   } catch (cause) {
     throw new ConfigurationError(cause.message, { cause });
   }
