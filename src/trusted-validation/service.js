@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 
-import { createGitService } from "./git/index.js";
+import { createGitService } from "../git/index.js";
 import {
   resolveTrustedBubblewrap,
   runExactCommand,
   sandboxTrustedCommand,
   verifyTrustedBubblewrap,
-} from "./trusted-validation-execution.js";
+} from "./execution.js";
 
 const ALIAS_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;

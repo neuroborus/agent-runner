@@ -47,4 +47,4 @@ export {
   createTrustedValidationSnapshot,
   TrustedValidationError,
   validateTrustedValidationSnapshot,
-} from "./trusted-validation.js";
+} from "./trusted-validation/index.js";

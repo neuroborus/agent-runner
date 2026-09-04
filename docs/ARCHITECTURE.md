@@ -52,6 +52,12 @@ private service composes command execution, content and snapshot inspection,
 commit verification, and polishing handoff modules without exposing their
 implementation contracts to root consumers.
 
+The trusted-validation capability lives under `src/trusted-validation/` behind
+its public `index.js`. The index exposes only the contracts consumed by the
+root runtime and capability tests; private service and execution modules keep
+snapshot validation, exact command vectors, sandboxing, bounded evidence, and
+repository mutation guards within the capability.
+
 ## Pipeline Ownership
 
 Each pipeline owns its input interpretation, roles, configuration settings and

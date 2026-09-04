@@ -16,13 +16,13 @@ import { isAbsolute, join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
+import { createGitService } from "../src/git/index.js";
 import {
-  createGitService,
   createTrustedValidationService,
   createTrustedValidationSnapshot,
+  runExactCommand,
   validateTrustedValidationSnapshot,
-} from "../src/index.js";
-import { runExactCommand } from "../src/trusted-validation-execution.js";
+} from "../src/trusted-validation/index.js";
 
 const executeFile = promisify(execFile);
 

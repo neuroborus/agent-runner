@@ -29,6 +29,9 @@ choice affects the shared plan contract.
 - `src/git/index.js`: expose and coordinate the Git safety boundary.
 - `src/git/`: keep service coordination, command execution, snapshots and
   fingerprints, commit verification, and handoff support private to that boundary.
+- `src/trusted-validation/index.js`: expose the runner-trusted validation boundary.
+- `src/trusted-validation/`: keep contract normalization, snapshot handling,
+  sandbox construction, and exact-command execution owned by that boundary.
 - `src/agents/codex.js`: own Codex adapter coordination, probing, and
   request/result normalization.
 - `src/agents/codex-*.js`: keep its app-server transport and constrained commit

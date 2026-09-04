@@ -8,7 +8,7 @@ import { getPipeline, listPipelines } from "./pipeline-registry.js";
 import {
   createTrustedValidationSnapshot,
   normalizeTrustedValidationDefinitions,
-} from "./trusted-validation.js";
+} from "./trusted-validation/index.js";
 
 export const CONFIG_FILENAME = ".agent-runner.json";
 export const DEFAULT_ARTIFACT_ROOT = "LOCAL_ARTIFACTS";

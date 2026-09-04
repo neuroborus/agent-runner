@@ -676,8 +676,10 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   │   ├── lease.js
 │   │   ├── service.js
 │   │   └── validation.js
-│   ├── trusted-validation-execution.js
-│   └── trusted-validation.js
+│   └── trusted-validation/
+│       ├── execution.js
+│       ├── index.js
+│       └── service.js
 ├── packages/
 │   └── commit-plan/
 ├── pipelines/

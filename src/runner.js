@@ -26,7 +26,7 @@ import {
   RUNTIME_COMPATIBILITY_TOKEN,
   RUN_STATE_SCHEMA_VERSION,
 } from "./state/index.js";
-import { createTrustedValidationService } from "./trusted-validation.js";
+import { createTrustedValidationService } from "./trusted-validation/index.js";
 
 const BACKENDS = new Set(BACKEND_IDS);
 const WORKTREE_LEASE_PIPELINES = new Set(["plan-execution", "polishing"]);
