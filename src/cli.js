@@ -1,7 +1,7 @@
 import { parseArgs } from "node:util";
 
 import packageMetadata from "../package.json" with { type: "json" };
-import { DETACHED_RUNTIME_COMPATIBILITY_ENV, serveMcp } from "./mcp.js";
+import { DETACHED_RUNTIME_COMPATIBILITY_ENV, serveMcp } from "./mcp/index.js";
 import { getPipeline, listPipelines } from "./pipeline-registry.js";
 import { createRunner, parseSourceSession } from "./runner.js";
 import { RUNTIME_VERSION_SKEW_EXIT_CODE } from "./state/index.js";

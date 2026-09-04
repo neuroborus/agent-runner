@@ -20,13 +20,12 @@ import { promisify } from "node:util";
 
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 
+import { createRunStore, parseRunnerConfiguration } from "../../src/index.js";
 import {
   createMcpControlPlane,
   createMcpServer,
-  createRunStore,
-  parseRunnerConfiguration,
   serveMcp,
-} from "../src/index.js";
+} from "../../src/mcp/index.js";
 
 const executeFile = promisify(execFile);
 const FIXED_TIME = new Date("2026-08-24T16:45:12.123Z");

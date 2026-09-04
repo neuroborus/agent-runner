@@ -58,6 +58,12 @@ root runtime and capability tests; private service and execution modules keep
 snapshot validation, exact command vectors, sandboxing, bounded evidence, and
 repository mutation guards within the capability.
 
+The MCP capability lives under `src/mcp/` behind its public `index.js`. The
+index exposes only the control-plane and STDIO server contracts consumed by
+the root runtime and capability tests; private service and reporting modules
+keep protocol schemas, projections, revision waits, detached dispatch, and
+local issue publication within the capability.
+
 ## Pipeline Ownership
 
 Each pipeline owns its input interpretation, roles, configuration settings and
@@ -305,14 +311,14 @@ does not change the root or pipeline state versions.
 ## MCP Control Plane
 
 `agent-run mcp` exposes the same static registry and runner through the official
-Node MCP SDK over STDIO only. `src/mcp.js` owns the seven pipeline-control
-tools: `pipelines_list`, `run_start`, `run_status`, `run_activity`, `run_wait`,
-`run_respond`, and `run_resume`, plus the conditionally registered MCP-only
-`unexpected_issue_report`. It contains transport schemas and concise
-projections, not a second workflow implementation. `src/mcp-reporting.js` owns
-the narrow local publication service. Standard output belongs exclusively to
-MCP; bounded protocol diagnostics go to standard error without prompts or model
-transcripts.
+Node MCP SDK over STDIO only. The private `src/mcp/service.js` module owns the
+seven pipeline-control tools: `pipelines_list`, `run_start`, `run_status`,
+`run_activity`, `run_wait`, `run_respond`, and `run_resume`, plus the
+conditionally registered MCP-only `unexpected_issue_report`. It contains
+transport schemas and concise projections, not a second workflow
+implementation. The private `src/mcp/reporting.js` module owns the narrow local
+publication service. Standard output belongs exclusively to MCP; bounded
+protocol diagnostics go to standard error without prompts or model transcripts.
 
 Unexpected-issue reporting remains deliberate and caller-initiated. Its tool
 description and server instructions limit it to a supervising client agent

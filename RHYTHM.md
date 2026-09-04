@@ -80,8 +80,8 @@ remain in the owning documentation.
 - **Pipeline registration is static and the MCP boundary projects the same
   durable runner.** [`src/pipeline-registry.js`](src/pipeline-registry.js)
   explicitly registers independently owned pipelines, and
-  [`src/mcp.js`](src/mcp.js) exposes their control operations over STDIO rather
-  than implementing a second workflow engine. Persisted idempotency intent,
-  detached continuation, and reconnectable status let long runs outlive a
-  client call without introducing dynamic plugins, a network service, or a
-  daemon.
+  [`src/mcp/index.js`](src/mcp/index.js) exposes their control operations over
+  STDIO rather than implementing a second workflow engine. Persisted
+  idempotency intent, detached continuation, and reconnectable status let long
+  runs outlive a client call without introducing dynamic plugins, a network
+  service, or a daemon.

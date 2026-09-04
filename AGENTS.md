@@ -154,7 +154,8 @@ All pipelines additionally require:
 | `bin/agent-run.js`                | Thin executable entry point                                        |
 | `src/index.js`                    | Public root source boundary                                        |
 | `src/cli.js`                      | Argument parsing and terminal-facing command dispatch              |
-| `src/mcp.js`                      | STDIO MCP schemas, projections, waits, and detached dispatch       |
+| `src/mcp/index.js`                | Public STDIO MCP protocol capability boundary                      |
+| `src/mcp/`                        | Private schemas, projections, waits, detached dispatch, reporting  |
 | `src/config.js`                   | Runner configuration loading, validation, and role resolution      |
 | `src/clarifications/index.js`     | Public clarification-service boundary                              |
 | `src/clarifications/`             | Private coordination, confined transcript, and editor modules      |
@@ -174,6 +175,7 @@ All pipelines additionally require:
 | `pipelines/polishing/`            | Polishing workflow, prompts, tests, and specification              |
 | `test/clarifications/`            | Clarification-service behavior tests                               |
 | `test/git/`                       | Git-safety behavior tests                                          |
+| `test/mcp/`                       | MCP control-plane and issue-reporting behavior tests               |
 | `test/state/`                     | State persistence and safety behavior tests                        |
 | `test/`                           | Root CLI, registry, adapter, and repository-boundary tests         |
 | `docs/`                           | Cross-cutting architecture documentation                           |

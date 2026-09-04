@@ -6,28 +6,28 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import * as z from "zod/v4";
 
-import packageMetadata from "../package.json" with { type: "json" };
-import { createClarificationService } from "./clarifications/index.js";
-import { loadRunnerConfiguration } from "./config.js";
-import { createGitService } from "./git/index.js";
-import { createUnexpectedIssueReporter } from "./mcp-reporting.js";
+import packageMetadata from "../../package.json" with { type: "json" };
+import { createClarificationService } from "../clarifications/index.js";
+import { loadRunnerConfiguration } from "../config.js";
+import { createGitService } from "../git/index.js";
 import {
   DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
   getPipeline,
   listPipelines,
-} from "./pipeline-registry.js";
-import { createRunner, pipelineRequiresWorktreeLease } from "./runner.js";
+} from "../pipeline-registry.js";
+import { createRunner, pipelineRequiresWorktreeLease } from "../runner.js";
 import {
   createRunStore,
   RUNTIME_VERSION_SKEW_EXIT_CODE,
   RunStoreError,
-} from "./state/index.js";
+} from "../state/index.js";
+import { createUnexpectedIssueReporter } from "./reporting.js";
 
 const MAX_WAIT_MS = 24 * 60 * 60 * 1_000;
 const DEFAULT_WAIT_MS = 30_000;
 const RETRY_DELAY_MS = 25;
 const EXECUTABLE_PATH = fileURLToPath(
-  new URL("../bin/agent-run.js", import.meta.url),
+  new URL("../../bin/agent-run.js", import.meta.url),
 );
 export const DETACHED_RUNTIME_COMPATIBILITY_ENV =
   "AGENT_RUNNER_PARENT_RUNTIME_COMPATIBILITY";

@@ -25,7 +25,7 @@ export {
   launchDetachedRun,
   MCP_INSTRUCTIONS,
   serveMcp,
-} from "./mcp.js";
+} from "./mcp/index.js";
 export {
   createDetachedRuntimeCompatibilityToken,
   DETACHED_RUNTIME_COMPATIBILITY_TOKEN,

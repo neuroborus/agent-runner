@@ -18,21 +18,23 @@ import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
 import {
   createClarificationService,
-  createDetachedLauncher,
   createDetachedRuntimeCompatibilityToken,
   createGitService,
-  createMcpControlPlane,
   createRunner,
   createRunStore,
-  DETACHED_RUNTIME_COMPATIBILITY_ENV,
   DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
   listPipelines,
   main,
-  MCP_INSTRUCTIONS,
   parseRunnerConfiguration,
   RUNTIME_VERSION_SKEW_EXIT_CODE,
   RUN_STATE_SCHEMA_VERSION,
-} from "../src/index.js";
+} from "../../src/index.js";
+import {
+  createDetachedLauncher,
+  createMcpControlPlane,
+  DETACHED_RUNTIME_COMPATIBILITY_ENV,
+  MCP_INSTRUCTIONS,
+} from "../../src/mcp/index.js";
 
 const RUN_ID = "11111111-1111-4111-8111-111111111111";
 const SECOND_RUN_ID = "22222222-2222-4222-8222-222222222222";

@@ -3,8 +3,11 @@ import { constants } from "node:fs";
 import { link, lstat, mkdir, open, realpath, unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 
-import { loadProjectConfiguration, loadRunnerConfiguration } from "./config.js";
-import { createGitService } from "./git/index.js";
+import {
+  loadProjectConfiguration,
+  loadRunnerConfiguration,
+} from "../config.js";
+import { createGitService } from "../git/index.js";
 
 const ISSUES_PATH = ["agent-runner", "issues"];
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;

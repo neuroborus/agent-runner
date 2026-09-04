@@ -15,7 +15,9 @@ choice affects the shared plan contract.
 - `bin/agent-run.js`: keep the executable entry point thin.
 - `src/index.js`: expose the root source API to the executable and root tests.
 - `src/cli.js`: own argument parsing, validation, concise terminal output, and dispatch.
-- `src/mcp.js`: own STDIO MCP schemas, projections, revision waits, and detached dispatch without duplicating runner logic.
+- `src/mcp/index.js`: expose the STDIO MCP protocol capability boundary.
+- `src/mcp/`: keep schemas, projections, revision waits, detached dispatch,
+  and issue reporting private to that boundary without duplicating runner logic.
 - `src/config.js`: own runner-local configuration loading, strict validation, and role resolution precedence.
 - `src/clarifications/index.js`: expose the clarification boundary.
 - `src/clarifications/`: keep coordination, confined transcript files, and
@@ -44,6 +46,7 @@ choice affects the shared plan contract.
 - `pipelines/<id>/docs/`: keep that pipeline's product and implementation specification.
 - `test/clarifications/`: test clarification-service behavior.
 - `test/git/`: test Git-safety behavior.
+- `test/mcp/`: test MCP control-plane and issue-reporting behavior.
 - `test/state/`: test state persistence and safety behavior.
 - `test/`: test root runtime behavior, workspace boundaries, adapters, and temporary Git repositories.
 - `docs/`: keep cross-cutting architecture requirements.
