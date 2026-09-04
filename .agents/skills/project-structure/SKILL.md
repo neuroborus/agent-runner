@@ -38,10 +38,9 @@ choice affects the shared plan contract.
 - `src/trusted-validation/index.js`: expose the runner-trusted validation boundary.
 - `src/trusted-validation/`: keep contract normalization, snapshot handling,
   sandbox construction, and exact-command execution owned by that boundary.
-- `src/agents/codex.js`: own Codex adapter coordination, probing, and
-  request/result normalization.
-- `src/agents/codex-*.js`: keep its app-server transport and constrained commit
-  helpers internal to the Codex adapter.
+- `src/agents/codex/index.js`: expose the Codex provider boundary.
+- `src/agents/codex/`: keep Codex processes, App Server transport, flags,
+  parsing, sessions, local commits, and workspace storage private to that provider.
 - `src/agents/claude/index.js`: expose the Claude provider boundary.
 - `src/agents/claude/`: keep Claude Code processes, flags, parsing, sessions,
   local commits, and native sandbox behavior private to that provider.

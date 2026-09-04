@@ -9,7 +9,7 @@ import {
   CodexAdapterError,
   createCodexAdapter,
   normalizeCodexDiagnosticClass,
-} from "./codex.js";
+} from "./codex/index.js";
 import { STRUCTURED_OUTPUT_FAILURE_CLASS } from "./adapter-contract.js";
 
 const ERROR_CODE_PATTERN = /^[A-Z0-9_]{1,64}$/u;

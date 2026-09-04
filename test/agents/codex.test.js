@@ -6,19 +6,19 @@ import { join, parse } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
 
-import packageMetadata from "../package.json" with { type: "json" };
+import packageMetadata from "../../package.json" with { type: "json" };
 import {
-  AgentBoundaryError,
   CODEX_BACKEND_ID,
   CodexAdapterError,
-  STRUCTURED_OUTPUT_FAILURE_CLASS,
-  createCodexAdapter,
-  normalizeAdapterFailure,
-} from "../src/agents/index.js";
-import {
   CodexWorkspaceStorageError,
+  createCodexAdapter,
   createCodexWorkspaceStorage,
-} from "../src/agents/codex-workspace-storage.js";
+} from "../../src/agents/codex/index.js";
+import {
+  AgentBoundaryError,
+  STRUCTURED_OUTPUT_FAILURE_CLASS,
+  normalizeAdapterFailure,
+} from "../../src/agents/index.js";
 
 const PROJECT_PATH = process.cwd();
 const EXPECTED_HEAD = "a".repeat(40);

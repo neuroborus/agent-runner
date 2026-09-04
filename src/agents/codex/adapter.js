@@ -3,7 +3,7 @@ import { lstatSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
-import packageMetadata from "../../package.json" with { type: "json" };
+import packageMetadata from "../../../package.json" with { type: "json" };
 import {
   createAdapterContract,
   deepFreeze,
@@ -11,16 +11,16 @@ import {
   isRecord,
   isolateGitEnvironment,
   STRUCTURED_OUTPUT_FAILURE_CLASS,
-} from "./adapter-contract.js";
-import { createCodexAppServerClient } from "./codex-app-server.js";
+} from "../adapter-contract.js";
+import { createCodexAppServerClient } from "./app-server.js";
 import {
   executeCodexLocalCommit,
   probeCodexLocalCommit,
-} from "./codex-local-commit.js";
+} from "./local-commit.js";
 import {
   assertCodexWorkspaceStorage,
   createCodexWorkspaceStorage,
-} from "./codex-workspace-storage.js";
+} from "./workspace-storage.js";
 
 export const CODEX_BACKEND_ID = "codex";
 

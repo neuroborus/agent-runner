@@ -82,6 +82,11 @@ The Claude provider lives under `src/agents/claude/` behind its provider
 local-commit executor, and native-sandbox probe remain private siblings that
 own Claude processes, flags, parsing, sessions, and sandbox behavior.
 
+The Codex provider lives under `src/agents/codex/` behind its provider
+`index.js`. The root agent boundary imports only that index; the adapter, App
+Server transport, local-commit executor, and workspace storage remain private
+siblings that own Codex processes, protocols, flags, parsing, and sessions.
+
 ## Pipeline Ownership
 
 Each pipeline owns its input interpretation, roles, configuration settings and

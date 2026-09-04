@@ -150,46 +150,48 @@ All pipelines additionally require:
 
 ## Repository Map
 
-| Path                              | Ownership                                                          |
-| --------------------------------- | ------------------------------------------------------------------ |
-| `bin/agent-run.js`                | Thin executable entry point                                        |
-| `src/index.js`                    | Public root source boundary                                        |
-| `src/cli.js`                      | Argument parsing and terminal-facing command dispatch              |
-| `src/mcp/index.js`                | Public STDIO MCP protocol capability boundary                      |
-| `src/mcp/`                        | Private schemas, projections, waits, detached dispatch, reporting  |
-| `src/config/index.js`             | Public runner-configuration capability boundary                    |
-| `src/config/`                     | Private parsing, confined loading, profiles, and resolution        |
-| `src/clarifications/index.js`     | Public clarification-service boundary                              |
-| `src/clarifications/`             | Private coordination, confined transcript, and editor modules      |
-| `src/pipeline-registry.js`        | Explicit registry of built-in pipelines                            |
-| `src/runner/index.js`             | Public runner-orchestration capability boundary                    |
-| `src/runner/`                     | Private input, role/session, migration, and orchestration modules  |
-| `src/state/index.js`              | Public run-store capability boundary                               |
-| `src/state/`                      | Private service, files, journals, actions, leases, and validation  |
-| `src/git/index.js`                | Public Git-safety capability boundary                              |
-| `src/git/`                        | Private service, command, content, commit, and handoff modules     |
-| `src/trusted-validation/index.js` | Public runner-trusted validation capability boundary               |
-| `src/trusted-validation/`         | Private contracts, snapshots, sandboxing, and command execution    |
-| `src/agents/index.js`             | Public agent-adapter directory boundary                            |
-| `src/agents/claude/index.js`      | Public Claude provider boundary                                    |
-| `src/agents/claude/`              | Private Claude adapter, commit, and native-sandbox implementation  |
-| `src/agents/`                     | Shared agent contracts and provider implementations                |
-| `packages/commit-plan/`           | Shared deterministic commit-plan contract                          |
-| `pipelines/plan-authoring/`       | Plan-authoring workflow, prompts, tests, and specification         |
-| `pipelines/plan-execution/`       | Plan-execution workflow, prompts, tests, and specification         |
-| `pipelines/polishing/`            | Polishing workflow, prompts, tests, and specification              |
-| `test/agents/`                    | Provider behavior through provider boundaries                      |
-| `test/clarifications/`            | Clarification-service behavior tests                               |
-| `test/config/`                    | Configuration parsing, loading, and resolution tests               |
-| `test/git/`                       | Git-safety behavior tests                                          |
-| `test/integration/`               | Cross-capability workflow integration tests                        |
-| `test/mcp/`                       | MCP control-plane and issue-reporting behavior tests               |
-| `test/state/`                     | State persistence and safety behavior tests                        |
-| `test/`                           | Root CLI, registry, adapter, and repository-boundary tests         |
-| `docs/`                           | Cross-cutting architecture documentation                           |
-| `docs/product/`                   | Current product guarantees, workflow meaning, and accepted nuances |
-| `RHYTHM.md`                       | Newest-first record of meaningful implemented repository decisions |
-| `.agents/skills/`                 | Shared repository workflow skills                                  |
+| Path                              | Ownership                                                            |
+| --------------------------------- | -------------------------------------------------------------------- |
+| `bin/agent-run.js`                | Thin executable entry point                                          |
+| `src/index.js`                    | Public root source boundary                                          |
+| `src/cli.js`                      | Argument parsing and terminal-facing command dispatch                |
+| `src/mcp/index.js`                | Public STDIO MCP protocol capability boundary                        |
+| `src/mcp/`                        | Private schemas, projections, waits, detached dispatch, reporting    |
+| `src/config/index.js`             | Public runner-configuration capability boundary                      |
+| `src/config/`                     | Private parsing, confined loading, profiles, and resolution          |
+| `src/clarifications/index.js`     | Public clarification-service boundary                                |
+| `src/clarifications/`             | Private coordination, confined transcript, and editor modules        |
+| `src/pipeline-registry.js`        | Explicit registry of built-in pipelines                              |
+| `src/runner/index.js`             | Public runner-orchestration capability boundary                      |
+| `src/runner/`                     | Private input, role/session, migration, and orchestration modules    |
+| `src/state/index.js`              | Public run-store capability boundary                                 |
+| `src/state/`                      | Private service, files, journals, actions, leases, and validation    |
+| `src/git/index.js`                | Public Git-safety capability boundary                                |
+| `src/git/`                        | Private service, command, content, commit, and handoff modules       |
+| `src/trusted-validation/index.js` | Public runner-trusted validation capability boundary                 |
+| `src/trusted-validation/`         | Private contracts, snapshots, sandboxing, and command execution      |
+| `src/agents/index.js`             | Public agent-adapter directory boundary                              |
+| `src/agents/claude/index.js`      | Public Claude provider boundary                                      |
+| `src/agents/claude/`              | Private Claude adapter, commit, and native-sandbox implementation    |
+| `src/agents/codex/index.js`       | Public Codex provider boundary                                       |
+| `src/agents/codex/`               | Private Codex adapter, transport, commit, and storage implementation |
+| `src/agents/`                     | Shared agent contracts and provider implementations                  |
+| `packages/commit-plan/`           | Shared deterministic commit-plan contract                            |
+| `pipelines/plan-authoring/`       | Plan-authoring workflow, prompts, tests, and specification           |
+| `pipelines/plan-execution/`       | Plan-execution workflow, prompts, tests, and specification           |
+| `pipelines/polishing/`            | Polishing workflow, prompts, tests, and specification                |
+| `test/agents/`                    | Provider behavior through provider boundaries                        |
+| `test/clarifications/`            | Clarification-service behavior tests                                 |
+| `test/config/`                    | Configuration parsing, loading, and resolution tests                 |
+| `test/git/`                       | Git-safety behavior tests                                            |
+| `test/integration/`               | Cross-capability workflow integration tests                          |
+| `test/mcp/`                       | MCP control-plane and issue-reporting behavior tests                 |
+| `test/state/`                     | State persistence and safety behavior tests                          |
+| `test/`                           | Root CLI, registry, adapter, and repository-boundary tests           |
+| `docs/`                           | Cross-cutting architecture documentation                             |
+| `docs/product/`                   | Current product guarantees, workflow meaning, and accepted nuances   |
+| `RHYTHM.md`                       | Newest-first record of meaningful implemented repository decisions   |
+| `.agents/skills/`                 | Shared repository workflow skills                                    |
 
 `.claude/skills` is a symlink to `.agents/skills`. Edit the canonical skill
 files under `.agents/skills`; never create a second Claude-specific copy.

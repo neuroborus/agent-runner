@@ -648,9 +648,12 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   │   │   ├── index.js
 │   │   │   ├── local-commit.js
 │   │   │   └── native-sandbox.js
-│   │   ├── codex-app-server.js
-│   │   ├── codex-local-commit.js
-│   │   ├── codex.js
+│   │   ├── codex/
+│   │   │   ├── adapter.js
+│   │   │   ├── app-server.js
+│   │   │   ├── index.js
+│   │   │   ├── local-commit.js
+│   │   │   └── workspace-storage.js
 │   │   └── index.js
 │   ├── clarifications/
 │   │   ├── editor.js
@@ -703,7 +706,8 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   └── polishing/
 ├── test/
 │   ├── agents/
-│   │   └── claude.test.js
+│   │   ├── claude.test.js
+│   │   └── codex.test.js
 │   ├── clarifications/
 │   │   └── lifecycle.test.js
 │   ├── config/
@@ -775,7 +779,7 @@ git diff --cached --check
 Run the opt-in real-backend smoke turns explicitly:
 
 ```bash
-AGENT_RUNNER_LIVE_CODEX=1 npm test -- test/codex.test.js
+AGENT_RUNNER_LIVE_CODEX=1 npm test -- test/agents/codex.test.js
 AGENT_RUNNER_LIVE_CLAUDE=1 npm test -- test/agents/claude.test.js
 ```
 
