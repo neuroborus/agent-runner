@@ -392,6 +392,12 @@ correctness requires it. It must not stage or unstage changes, alter the index
 or other Git metadata, create a commit, change `HEAD` or refs, reconfigure
 remotes or Git identity, or perform a remote write. The runner owns final
 staging after the content passes finalization and the mode-specific review gate.
+The complete and recovery prompt for each Worker and Reviewer checkpoint treats
+project `.agents` changes as authorized only when the user's task explicitly
+requires them; otherwise the role neither makes nor approves those changes.
+Compatible continuation turns inherit this responsibility from their native
+session without repeating it. A violation follows the ordinary finding-and-fix
+path and never reopens user questions.
 
 An external validation blocker pauses at `POLISH` without discarding safe
 Worker changes. Any stale fingerprint-bound finalization and review results are

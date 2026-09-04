@@ -353,6 +353,13 @@ Every role:
 Produce this turn's result yourself as the authorized role. Do not delegate, spawn subagents, or use multi-agent collaboration.
 ```
 
+The complete and recovery prompt for each Planner and Plan Reviewer checkpoint
+treats project `.agents` changes as in scope only when the user's task
+explicitly requires them; otherwise the role neither proposes nor approves
+those changes. Compatible continuation turns inherit this responsibility from
+their native session without repeating it. A violation is a plan finding, not a
+user question.
+
 The pipeline may append finalized inputs, access restrictions, output schemas,
 the concise shared plan format, and the common product-decision instructions.
 First, forked, fresh, and context-invalidated turns receive that complete

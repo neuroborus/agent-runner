@@ -3330,6 +3330,15 @@ test("clarifies and bootstraps through independent source-session forks", async 
     mode: "continue",
     id: result.sessionLineage.children[1].sessionId,
   });
+  assert.match(
+    fixture.calls.worker[1].prompt,
+    /\.agents.*current plan step explicitly require them.*not a user question/u,
+  );
+  assert.doesNotMatch(fixture.calls.worker[2].prompt, /\.agents/u);
+  assert.match(
+    fixture.calls.worker[2].recoveryPrompt,
+    /\.agents.*current plan step explicitly require them.*not a user question/u,
+  );
   assert.deepEqual(fixture.calls.reviewer[0].session, {
     mode: "fork",
     id: SOURCE_SESSION,
@@ -3342,6 +3351,10 @@ test("clarifies and bootstraps through independent source-session forks", async 
     mode: "fork",
     id: SOURCE_SESSION,
   });
+  assert.match(
+    fixture.calls.reviewer[1].prompt,
+    /\.agents.*current plan step explicitly require them.*not a user question/u,
+  );
   assert.doesNotMatch(fixture.calls.reviewer[0].prompt, /Worker understands/u);
   assert.doesNotMatch(fixture.calls.worker[1].prompt, /Reviewer understands/u);
   assert.match(

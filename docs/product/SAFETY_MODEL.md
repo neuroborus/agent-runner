@@ -74,5 +74,12 @@ standard error, and chain-of-thought are neither logged nor persisted.
 
 Provider sandboxes deny remote writes and Git metadata writes according to the
 turn's access mode. Collaboration or subagent activity is forbidden for role
-turns and fails closed when detected. The runner does not broaden network,
-filesystem, process, or host-service access to overcome a validation blocker.
+turns and fails closed when detected. An existing real project `.agents`
+directory is eligible workspace content during Codex writable turns; a
+symlinked `.agents` and the Git-control `.git` and provider-control `.codex`
+paths remain protected. Eligibility does not imply task scope: role prompts
+allow project `.agents` changes only when the user explicitly requests them,
+and plan execution also requires the current planned commit to do so. A
+violation is corrected through the normal finding loop rather than a user
+question. The runner does not broaden network, filesystem, process, or
+host-service access to overcome a validation blocker.

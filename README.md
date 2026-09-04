@@ -26,6 +26,10 @@ owns its specification under its workspace.
   automatically.
 - Codex and Claude can be selected independently for each pipeline role.
 - Read-only agent turns include repository-mutation verification.
+- Codex writable turns expose an existing real project `.agents` directory,
+  while role prompts permit changing it only for an explicit task requirement
+  and, during plan execution, an explicit current plan step. A symlinked
+  `.agents`, `.git`, and `.codex` stay protected.
 - `plan-authoring` confines writes to its resolved `clarifications.md` and
   `plan.md` artifact paths, including task directories inside the target
   repository.

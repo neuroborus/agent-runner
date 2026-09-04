@@ -756,9 +756,22 @@ test("converges a lazy plan with one source fork and no review roles", async (t)
     mode: "fork",
   });
   assert.ok(
-    fixture.calls.planner.slice(1).every(({ session }) =>
-      ["continue", undefined].includes(session?.mode),
-    ),
+    fixture.calls.planner
+      .slice(1)
+      .every(({ session }) => ["continue", undefined].includes(session?.mode)),
+  );
+  assert.match(
+    fixture.calls.planner[0].prompt,
+    /\.agents.*unless the user's task explicitly requires them.*not a user question/u,
+  );
+  const compactCall = fixture.calls.planner.find(
+    ({ prompt, recoveryPrompt }) => prompt !== recoveryPrompt,
+  );
+  assert.ok(compactCall);
+  assert.doesNotMatch(compactCall.prompt, /\.agents/u);
+  assert.match(
+    compactCall.recoveryPrompt,
+    /\.agents.*unless the user's task explicitly requires them.*not a user question/u,
   );
   assert.match(
     fixture.calls.planner[2].prompt,

@@ -714,10 +714,14 @@ workspace and Git-metadata writes, closes command network access, and forbids
 unsandboxed fallback. Workspace-write turns retain Claude's separate `auto`
 permission policy and background classifier while denying Git-directory writes
 and `git add`. Codex workspace-write isolation likewise exposes safe content
-writes without Git-metadata writes. For each Codex app-server attempt, the
-runner creates one canonical owner-only private root beneath the fixed platform
-temporary location without consulting ambient temporary variables. Only the
-repository and that private root are writable. `TMPDIR`, `XDG_CACHE_HOME`, and
+writes without Git-metadata writes. Codex protects project-root `.agents` as
+provider metadata by default, so a workspace-write turn adds it as an explicit
+writable root only when it exists as a real directory. A missing or symlinked
+`.agents` stays protected, as do `.git` and `.codex`. For each Codex app-server
+attempt, the runner creates one canonical owner-only private root beneath the
+fixed platform temporary location without consulting ambient temporary
+variables. The effective writable set is the repository content, including an
+eligible `.agents`, and that private root. `TMPDIR`, `XDG_CACHE_HOME`, and
 `XDG_RUNTIME_DIR` project validated children of the root into command tooling
 through the effective shell policy; the provider process environment remains
 unchanged, ambient `TMPDIR` and host `/tmp` remain excluded, and command network
@@ -727,6 +731,15 @@ before returning or retrying, and unsafe preparation or cleanup fails closed.
 Read-only and local-commit storage remain independently isolated. Both adapters
 advertise `gitMetadataWriteBlocked`; the runner, not an agent turn, owns effects
 that require the index.
+Each pipeline's complete and recovery role-prompt envelope provides the
+semantic boundary for eligible project `.agents` content: plan authoring
+requires an explicit user task, polishing requires the same, and plan execution
+additionally requires the current planned commit to authorize the guidance
+change. The responsible roles must not propose, make, or approve a change
+outside that scope. A compatible continuation inherits the boundary from its
+native session, while every fresh or reconstructed context receives it again.
+Violations use the owning pipeline's ordinary finding-and-fix route and do not
+open a user question.
 Every retryable request carries a turn prompt and a complete recovery prompt
 reconstructed from validated run state, durable artifacts, and the observed
 workspace. A role session is continued only when its persisted key matches the

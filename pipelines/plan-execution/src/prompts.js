@@ -1,5 +1,8 @@
 import { MAX_BOOTSTRAP_ITEMS } from "./workflow-contract.js";
 
+export const AGENT_GUIDANCE_SCOPE_INSTRUCTIONS =
+  "Do not make or approve project `.agents` changes unless both the user's task and the current plan step explicitly require them; treat a violation as a finding, not a user question.";
+
 export const CLARIFICATION_INSTRUCTIONS = `Study the task, validated plan, existing clarifications, and repository before implementation. Ask only questions whose answers could materially change the required behavior, scope, or implementation of the plan.
 
 Do not modify the repository.

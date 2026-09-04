@@ -8,6 +8,7 @@ import {
 } from "@agent-runner/commit-plan";
 
 import {
+  AGENT_GUIDANCE_SCOPE_INSTRUCTIONS,
   BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
   BOOTSTRAP_CORRECTION_INSTRUCTIONS,
   BOOTSTRAP_INSTRUCTIONS,
@@ -134,6 +135,10 @@ function activity(actor, phase, kind, message) {
 
 function rolePrompt(prompt) {
   return `${prompt}\n\n${NO_DELEGATION_INSTRUCTIONS}`;
+}
+
+function completeRolePrompt(prompt) {
+  return rolePrompt(`${prompt}\n\n${AGENT_GUIDANCE_SCOPE_INSTRUCTIONS}`);
 }
 
 function adapterDiagnosticClass(cause) {
@@ -1231,7 +1236,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
             ? { id: sourceSession, mode: "fork" }
             : undefined;
     const roleConfiguration = currentRun.roles[role];
-    const recoveryPrompt = rolePrompt(buildPrompt(context));
+    const recoveryPrompt = completeRolePrompt(buildPrompt(context));
     const executionPreferences = Object.fromEntries(
       ["profile", "model", "contextSize"].flatMap((field) =>
         typeof roleConfiguration[field] === "string" &&

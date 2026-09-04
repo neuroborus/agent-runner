@@ -1,5 +1,8 @@
 import { MAX_BOOTSTRAP_ITEMS } from "./workflow-contract.js";
 
+export const AGENT_GUIDANCE_SCOPE_INSTRUCTIONS =
+  "Do not make or approve project `.agents` changes unless the user's task explicitly requires them; treat a violation as a finding, not a user question.";
+
 export const NO_DELEGATION_INSTRUCTIONS = `Produce this turn's result yourself as the authorized role. Do not delegate, spawn subagents, or use multi-agent collaboration.`;
 
 export const PRODUCT_DECISION_INSTRUCTIONS = `Do not ask questions after clarification closes.

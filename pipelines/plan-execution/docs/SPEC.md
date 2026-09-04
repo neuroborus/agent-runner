@@ -1581,6 +1581,14 @@ Finding resolution: For each finding below, fix it idiomatically and minimally, 
 Every role: Produce this turn's result yourself as the authorized role. Do not delegate, spawn subagents, or use multi-agent collaboration.
 ```
 
+The complete and recovery prompt for each Worker and Reviewer checkpoint treats
+project `.agents` changes as authorized only when both the user's task and the
+current planned commit explicitly require them; otherwise the role neither
+makes nor approves those changes. Compatible continuation turns inherit this
+responsibility from their native session without repeating it.
+A violation follows the ordinary finding-and-fix path and never reopens user
+questions.
+
 The pipeline may append turn-specific context, access restrictions, and output
 requirements. The Reviewer returns structured findings rather than a free-form
 handoff prompt; the pipeline attaches the canonical finding-resolution

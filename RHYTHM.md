@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-09-03
 
+- **Existing project agent guidance participates in writable turns.** Codex
+  protects project-root `.agents` by default, but Agent Runner reopens an
+  existing real directory during workspace-write turns so planned guidance
+  changes are possible. Complete and recovery role prompts keep that capability
+  outside normal maintenance without repeating the rule in compatible
+  continuation turns: the task must explicitly request the change, and plan
+  execution additionally requires it in the current plan step. A symlinked
+  `.agents`, `.git`, and `.codex` retain their provider protection, preserving
+  the narrow content-versus-control boundary.
 - **Current product meaning and repository decisions have explicit owners.**
   [`docs/README.md`](docs/README.md) is the single document map and change gate,
   while the focused documents under [`docs/product/`](docs/product/) explain

@@ -8,6 +8,7 @@ import {
 } from "@agent-runner/commit-plan";
 
 import {
+  AGENT_GUIDANCE_SCOPE_INSTRUCTIONS,
   CHECK_AND_FIX_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
   CLEAN_CONFIRM_INSTRUCTIONS,
@@ -76,6 +77,10 @@ function activity(actor, phase, kind, message) {
 
 function rolePrompt(prompt) {
   return `${prompt}\n\n${NO_DELEGATION_INSTRUCTIONS}`;
+}
+
+function completeRolePrompt(prompt) {
+  return rolePrompt(`${prompt}\n\n${AGENT_GUIDANCE_SCOPE_INSTRUCTIONS}`);
 }
 
 function adapterDiagnosticClass(cause) {
@@ -508,7 +513,7 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
             ? { id: sourceSession, mode: "fork" }
             : undefined;
     const roleConfiguration = currentRun.roles[role];
-    const recoveryPrompt = rolePrompt(buildPrompt(evidenceContext));
+    const recoveryPrompt = completeRolePrompt(buildPrompt(evidenceContext));
     const executionPreferences = Object.fromEntries(
       ["profile", "model", "contextSize"].flatMap((field) =>
         typeof roleConfiguration[field] === "string" &&
@@ -521,8 +526,12 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
       access: "read-only",
       cwd: currentRun.projectPath,
       prompt:
-        session?.mode === "continue" && latestSession?.contextKey === contextKey
-          ? rolePrompt(buildPrompt(""))
+        session?.mode === "continue"
+          ? rolePrompt(
+              buildPrompt(
+                latestSession?.contextKey === contextKey ? "" : evidenceContext,
+              ),
+            )
           : recoveryPrompt,
       recoveryPrompt,
       schema,

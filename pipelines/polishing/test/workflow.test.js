@@ -3888,6 +3888,15 @@ test("prepares a dirty worktree through independent source-session bootstraps", 
     mode: "continue",
     id: result.sessionLineage.children[1].sessionId,
   });
+  assert.match(
+    fixture.calls.worker[1].prompt,
+    /\.agents.*unless the user's task explicitly requires them.*not a user question/u,
+  );
+  assert.doesNotMatch(fixture.calls.worker[2].prompt, /\.agents/u);
+  assert.match(
+    fixture.calls.worker[2].recoveryPrompt,
+    /\.agents.*unless the user's task explicitly requires them.*not a user question/u,
+  );
   assert.deepEqual(fixture.calls.worker[3].session, {
     mode: "fork",
     id: SOURCE_SESSION,
@@ -3896,6 +3905,10 @@ test("prepares a dirty worktree through independent source-session bootstraps", 
     mode: "fork",
     id: SOURCE_SESSION,
   });
+  assert.match(
+    fixture.calls.reviewer[1].prompt,
+    /\.agents.*unless the user's task explicitly requires them.*not a user question/u,
+  );
   for (const heading of [
     /Task \(/u,
     /Task-level clarifications:/u,

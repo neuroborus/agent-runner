@@ -18,6 +18,9 @@ const PLAN_FORMAT_INSTRUCTIONS =
   "subject-only commit message, at most 72 Unicode code points and without a " +
   "trailing period. Put implementation details below it.";
 
+export const AGENT_GUIDANCE_SCOPE_INSTRUCTIONS =
+  "Do not propose or approve project `.agents` changes unless the user's task explicitly requires them; treat a violation as a finding, not a user question.";
+
 export const DRAFT_INSTRUCTIONS = `Write a concise commit-by-commit plan for the requested changes. Keep the plan idiomatic and minimal, follow the project's conventions, and ensure it contains no contradictions.
 
 ${PLAN_FORMAT_INSTRUCTIONS}

@@ -1,12 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import {
-  access,
-  lstat,
-  mkdtemp,
-  rm,
-  symlink,
-} from "node:fs/promises";
+import { access, mkdir, lstat, mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -990,7 +984,11 @@ test("limits workspace writes to the requested repository", async () => {
   );
   assert.deepEqual(turnRequest.params.sandboxPolicy, {
     type: "workspaceWrite",
-    writableRoots: [PROJECT_PATH, storage.rootPath],
+    writableRoots: [
+      PROJECT_PATH,
+      join(PROJECT_PATH, ".agents"),
+      storage.rootPath,
+    ],
     networkAccess: false,
     excludeTmpdirEnvVar: true,
     excludeSlashTmp: true,
@@ -1010,9 +1008,51 @@ test("limits workspace writes to the requested repository", async () => {
         `XDG_RUNTIME_DIR=${JSON.stringify(storage.shellEnvironment.XDG_RUNTIME_DIR)}}}`,
     ),
   );
-  assert.equal(
-    (await fixture.adapter.probe()).gitMetadataWriteBlocked,
-    true,
+  assert.equal((await fixture.adapter.probe()).gitMetadataWriteBlocked, true);
+});
+
+test("adds only a real project .agents directory to writable roots", async (t) => {
+  const projectPath = await mkdtemp(
+    join(tmpdir(), "agent-runner-codex-project-"),
+  );
+  const linkedTarget = await mkdtemp(
+    join(tmpdir(), "agent-runner-codex-linked-metadata-"),
+  );
+  const projectAgentsPath = join(projectPath, ".agents");
+  t.after(() => rm(projectPath, { force: true, recursive: true }));
+  t.after(() => rm(linkedTarget, { force: true, recursive: true }));
+
+  let fixture = createFixture();
+  await fixture.adapter.run(
+    request({ access: "workspace-write", cwd: projectPath }),
+  );
+  assert.deepEqual(
+    fixture.processes[0].messages.find(({ method }) => method === "turn/start")
+      .params.sandboxPolicy.writableRoots,
+    [projectPath, fixture.workspaceStorages[0].rootPath],
+  );
+
+  await mkdir(projectAgentsPath);
+  fixture = createFixture();
+  await fixture.adapter.run(
+    request({ access: "workspace-write", cwd: projectPath }),
+  );
+  assert.deepEqual(
+    fixture.processes[0].messages.find(({ method }) => method === "turn/start")
+      .params.sandboxPolicy.writableRoots,
+    [projectPath, projectAgentsPath, fixture.workspaceStorages[0].rootPath],
+  );
+
+  await rm(projectAgentsPath, { recursive: true });
+  await symlink(linkedTarget, projectAgentsPath, "dir");
+  fixture = createFixture();
+  await fixture.adapter.run(
+    request({ access: "workspace-write", cwd: projectPath }),
+  );
+  assert.deepEqual(
+    fixture.processes[0].messages.find(({ method }) => method === "turn/start")
+      .params.sandboxPolicy.writableRoots,
+    [projectPath, fixture.workspaceStorages[0].rootPath],
   );
 });
 
@@ -1403,7 +1443,11 @@ test("falls back to a fresh session when continuation is unavailable", async () 
   assert.equal(fixture.workspaceStorages[1].previousCleanupCalls, 1);
   assert.deepEqual(retry.params.sandboxPolicy, {
     type: "workspaceWrite",
-    writableRoots: [PROJECT_PATH, fixture.workspaceStorages[1].rootPath],
+    writableRoots: [
+      PROJECT_PATH,
+      join(PROJECT_PATH, ".agents"),
+      fixture.workspaceStorages[1].rootPath,
+    ],
     networkAccess: false,
     excludeTmpdirEnvVar: true,
     excludeSlashTmp: true,
@@ -2299,8 +2343,16 @@ test("hydrates summarized compaction and retries a full context once", async () 
     .filter(({ method }) => method === "turn/start")
     .map(({ params }) => params.sandboxPolicy.writableRoots);
   assert.deepEqual(roots, [
-    [PROJECT_PATH, fixture.workspaceStorages[0].rootPath],
-    [PROJECT_PATH, fixture.workspaceStorages[0].rootPath],
+    [
+      PROJECT_PATH,
+      join(PROJECT_PATH, ".agents"),
+      fixture.workspaceStorages[0].rootPath,
+    ],
+    [
+      PROJECT_PATH,
+      join(PROJECT_PATH, ".agents"),
+      fixture.workspaceStorages[0].rootPath,
+    ],
   ]);
 });
 

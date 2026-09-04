@@ -1,7 +1,6 @@
-import {
-  execFile as executeFileCallback,
-  spawn,
-} from "node:child_process";
+import { execFile as executeFileCallback, spawn } from "node:child_process";
+import { lstatSync } from "node:fs";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
 import packageMetadata from "../../package.json" with { type: "json" };
@@ -492,13 +491,29 @@ function assertIsolatedConfiguration(
   }
 }
 
+function existingProjectAgentsDirectory(cwd) {
+  const projectAgentsPath = join(cwd, ".agents");
+  try {
+    return lstatSync(projectAgentsPath).isDirectory()
+      ? projectAgentsPath
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function sandboxFor(request, workspaceStorage) {
   if (request.access !== "workspace-write") {
     return Object.freeze({ type: "readOnly", networkAccess: false });
   }
+  const projectAgentsPath = existingProjectAgentsDirectory(request.cwd);
   return Object.freeze({
     type: "workspaceWrite",
-    writableRoots: Object.freeze([request.cwd, workspaceStorage.rootPath]),
+    writableRoots: Object.freeze([
+      request.cwd,
+      ...(projectAgentsPath === undefined ? [] : [projectAgentsPath]),
+      workspaceStorage.rootPath,
+    ]),
     networkAccess: false,
     excludeTmpdirEnvVar: true,
     excludeSlashTmp: true,
