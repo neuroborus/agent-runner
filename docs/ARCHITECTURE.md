@@ -77,6 +77,11 @@ the root runtime and capability tests; private service and reporting modules
 keep protocol schemas, projections, revision waits, detached dispatch, and
 local issue publication within the capability.
 
+The Claude provider lives under `src/agents/claude/` behind its provider
+`index.js`. The root agent boundary imports only that index; the adapter,
+local-commit executor, and native-sandbox probe remain private siblings that
+own Claude processes, flags, parsing, sessions, and sandbox behavior.
+
 ## Pipeline Ownership
 
 Each pipeline owns its input interpretation, roles, configuration settings and

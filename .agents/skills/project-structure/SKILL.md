@@ -42,12 +42,15 @@ choice affects the shared plan contract.
   request/result normalization.
 - `src/agents/codex-*.js`: keep its app-server transport and constrained commit
   helpers internal to the Codex adapter.
-- `src/agents/claude.js`: own Claude Code probing, command construction, and output normalization.
+- `src/agents/claude/index.js`: expose the Claude provider boundary.
+- `src/agents/claude/`: keep Claude Code processes, flags, parsing, sessions,
+  local commits, and native sandbox behavior private to that provider.
 - `src/agents/index.js`: expose the agent-adapter directory API.
 - `packages/commit-plan/`: own deterministic plan parsing, serialization, and validation shared by multiple pipelines.
 - `pipelines/<id>/src/`: own that pipeline's states, transitions, prompts, roles, and descriptor.
 - `pipelines/<id>/test/`: test that pipeline's behavior with `node:test` and fake adapters.
 - `pipelines/<id>/docs/`: keep that pipeline's product and implementation specification.
+- `test/agents/`: test provider behavior through provider indexes.
 - `test/clarifications/`: test clarification-service behavior.
 - `test/config/`: test configuration parsing, loading, profiles, and resolution.
 - `test/git/`: test Git-safety behavior.

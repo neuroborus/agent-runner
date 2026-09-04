@@ -10,12 +10,12 @@ import {
   isRecord,
   isolateGitEnvironment,
   STRUCTURED_OUTPUT_FAILURE_CLASS,
-} from "./adapter-contract.js";
+} from "../adapter-contract.js";
 import {
   executeClaudeLocalCommit,
   probeClaudeLocalCommit,
-} from "./claude-local-commit.js";
-import { probeClaudeNativeSandbox } from "./claude-native-sandbox.js";
+} from "./local-commit.js";
+import { probeClaudeNativeSandbox } from "./native-sandbox.js";
 
 export const CLAUDE_BACKEND_ID = "claude";
 

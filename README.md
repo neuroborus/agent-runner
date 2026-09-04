@@ -643,8 +643,11 @@ Git services; pipeline workspaces own mode and workflow policy.
 ├── src/
 │   ├── agents/
 │   │   ├── adapter-contract.js
-│   │   ├── claude.js
-│   │   ├── claude-local-commit.js
+│   │   ├── claude/
+│   │   │   ├── adapter.js
+│   │   │   ├── index.js
+│   │   │   ├── local-commit.js
+│   │   │   └── native-sandbox.js
 │   │   ├── codex-app-server.js
 │   │   ├── codex-local-commit.js
 │   │   ├── codex.js
@@ -699,6 +702,8 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   ├── plan-execution/
 │   └── polishing/
 ├── test/
+│   ├── agents/
+│   │   └── claude.test.js
 │   ├── clarifications/
 │   │   └── lifecycle.test.js
 │   ├── config/
@@ -771,7 +776,7 @@ Run the opt-in real-backend smoke turns explicitly:
 
 ```bash
 AGENT_RUNNER_LIVE_CODEX=1 npm test -- test/codex.test.js
-AGENT_RUNNER_LIVE_CLAUDE=1 npm test -- test/claude.test.js
+AGENT_RUNNER_LIVE_CLAUDE=1 npm test -- test/agents/claude.test.js
 ```
 
 Inspect the CLI:

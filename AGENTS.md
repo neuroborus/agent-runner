@@ -171,11 +171,14 @@ All pipelines additionally require:
 | `src/trusted-validation/index.js` | Public runner-trusted validation capability boundary               |
 | `src/trusted-validation/`         | Private contracts, snapshots, sandboxing, and command execution    |
 | `src/agents/index.js`             | Public agent-adapter directory boundary                            |
-| `src/agents/`                     | Codex and Claude adapter implementations                           |
+| `src/agents/claude/index.js`      | Public Claude provider boundary                                    |
+| `src/agents/claude/`              | Private Claude adapter, commit, and native-sandbox implementation  |
+| `src/agents/`                     | Shared agent contracts and provider implementations                |
 | `packages/commit-plan/`           | Shared deterministic commit-plan contract                          |
 | `pipelines/plan-authoring/`       | Plan-authoring workflow, prompts, tests, and specification         |
 | `pipelines/plan-execution/`       | Plan-execution workflow, prompts, tests, and specification         |
 | `pipelines/polishing/`            | Polishing workflow, prompts, tests, and specification              |
+| `test/agents/`                    | Provider behavior through provider boundaries                      |
 | `test/clarifications/`            | Clarification-service behavior tests                               |
 | `test/config/`                    | Configuration parsing, loading, and resolution tests               |
 | `test/git/`                       | Git-safety behavior tests                                          |

@@ -5,9 +5,9 @@ import test from "node:test";
 import {
   CLAUDE_BACKEND_ID,
   ClaudeAdapterError,
-  STRUCTURED_OUTPUT_FAILURE_CLASS,
   createClaudeAdapter,
-} from "../src/agents/index.js";
+} from "../../src/agents/claude/index.js";
+import { STRUCTURED_OUTPUT_FAILURE_CLASS } from "../../src/agents/index.js";
 
 const PROJECT_PATH = process.cwd();
 const EXPECTED_HEAD = "a".repeat(40);

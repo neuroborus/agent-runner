@@ -3,7 +3,7 @@ import {
   ClaudeAdapterError,
   createClaudeAdapter,
   normalizeClaudeDiagnosticClass,
-} from "./claude.js";
+} from "./claude/index.js";
 import {
   CODEX_BACKEND_ID,
   CodexAdapterError,
