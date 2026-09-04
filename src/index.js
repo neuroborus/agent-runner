@@ -41,7 +41,7 @@ export {
   RUNTIME_VERSION_SKEW_EXIT_CODE,
   RUN_STATE_SCHEMA_VERSION,
   RunStoreError,
-} from "./state.js";
+} from "./state/index.js";
 export {
   createTrustedValidationService,
   createTrustedValidationSnapshot,

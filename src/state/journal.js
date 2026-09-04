@@ -6,14 +6,14 @@ import {
   atomicWriteFile,
   readOptionalText,
   truncateDurableFile,
-} from "./state-files.js";
+} from "./files.js";
 import {
   normalizePublicActivity,
   normalizeRunState,
   RUNTIME_COMPATIBILITY,
   RUN_STATE_SCHEMA_VERSION,
   RunStoreError,
-} from "./state-validation.js";
+} from "./validation.js";
 
 const STATE_FILENAME = "state.json";
 const EVENTS_FILENAME = "events.jsonl";

@@ -4,8 +4,8 @@ import {
   publishExclusiveFile,
   readOptionalPublishedText,
   removeFile,
-} from "./state-files.js";
-import { assertRunId, RunStoreError } from "./state-validation.js";
+} from "./files.js";
+import { assertRunId, RunStoreError } from "./validation.js";
 
 const LEASE_FILENAME = ".lease";
 const RECLAIMING_LEASE_FILENAME = ".lease-reclaiming";

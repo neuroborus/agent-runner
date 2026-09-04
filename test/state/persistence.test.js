@@ -19,7 +19,7 @@ import {
   RUNTIME_COMPATIBILITY,
   RUN_STATE_SCHEMA_VERSION,
   RunStoreError,
-} from "../src/index.js";
+} from "../../src/state/index.js";
 
 function runInput(projectPath, taskPath) {
   return {

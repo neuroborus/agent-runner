@@ -41,6 +41,11 @@ Each JavaScript source directory exposes outward-facing dependencies through
 its `index.js`. Imports between modules in the same directory remain direct to
 keep ownership visible and avoid barrel cycles.
 
+The state capability lives under `src/state/` behind its public `index.js`.
+The index exposes only the run-store and runtime contracts used outside the
+capability; its private service composes confined file operations, the
+write-ahead journal, durable actions, execution leases, and state validation.
+
 The Git capability lives under `src/git/` behind its public `index.js`. The
 small index exposes only the service factory and shared safety error; its
 private service composes command execution, content and snapshot inspection,

@@ -1,6 +1,6 @@
 import { isAbsolute, resolve } from "node:path";
 
-import { isAdapterDiagnosticClass } from "./agents/index.js";
+import { isAdapterDiagnosticClass } from "../agents/index.js";
 
 export const RUN_STATE_SCHEMA_VERSION = 3;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;

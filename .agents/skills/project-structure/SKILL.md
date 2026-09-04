@@ -22,9 +22,10 @@ choice affects the shared plan contract.
   editor support private to that boundary.
 - `src/pipeline-registry.js`: own the explicit list of built-in pipelines; do not turn it into a plugin system.
 - `src/runner.js`: coordinate `run`, `resume`, and `status` without backend-specific flags.
-- `src/state.js`: expose and coordinate the run-store boundary.
-- `src/state-*.js`: keep its atomic file, write-ahead journal, action-intent,
-  execution-lease, and persisted-shape helpers internal to the root state boundary.
+- `src/state/index.js`: expose and coordinate the run-store boundary.
+- `src/state/`: keep service coordination, atomic files, write-ahead journals,
+  action intents, execution leases, and persisted-shape validation private to
+  that boundary.
 - `src/git/index.js`: expose and coordinate the Git safety boundary.
 - `src/git/`: keep service coordination, command execution, snapshots and
   fingerprints, commit verification, and handoff support private to that boundary.
@@ -40,6 +41,7 @@ choice affects the shared plan contract.
 - `pipelines/<id>/docs/`: keep that pipeline's product and implementation specification.
 - `test/clarifications/`: test clarification-service behavior.
 - `test/git/`: test Git-safety behavior.
+- `test/state/`: test state persistence and safety behavior.
 - `test/`: test root runtime behavior, workspace boundaries, adapters, and temporary Git repositories.
 - `docs/`: keep cross-cutting architecture requirements.
 

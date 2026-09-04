@@ -149,34 +149,35 @@ All pipelines additionally require:
 
 ## Repository Map
 
-| Path                          | Ownership                                                           |
-| ----------------------------- | ------------------------------------------------------------------- |
-| `bin/agent-run.js`            | Thin executable entry point                                         |
-| `src/index.js`                | Public root source boundary                                         |
-| `src/cli.js`                  | Argument parsing and terminal-facing command dispatch               |
-| `src/mcp.js`                  | STDIO MCP schemas, projections, waits, and detached dispatch        |
-| `src/config.js`               | Runner configuration loading, validation, and role resolution       |
-| `src/clarifications/index.js` | Public clarification-service boundary                               |
-| `src/clarifications/`         | Private coordination, confined transcript, and editor modules       |
-| `src/pipeline-registry.js`    | Explicit registry of built-in pipelines                             |
-| `src/runner.js`               | High-level run, resume, and status orchestration                    |
-| `src/state.js`                | Public run-store coordination and state-directory resolution        |
-| `src/state-*.js`              | Internal state file, journal, action, lease, and validation helpers |
-| `src/git/index.js`            | Public Git-safety capability boundary                               |
-| `src/git/`                    | Private service, command, content, commit, and handoff modules      |
-| `src/agents/index.js`         | Public agent-adapter directory boundary                             |
-| `src/agents/`                 | Codex and Claude adapter implementations                            |
-| `packages/commit-plan/`       | Shared deterministic commit-plan contract                           |
-| `pipelines/plan-authoring/`   | Plan-authoring workflow, prompts, tests, and specification          |
-| `pipelines/plan-execution/`   | Plan-execution workflow, prompts, tests, and specification          |
-| `pipelines/polishing/`        | Polishing workflow, prompts, tests, and specification               |
-| `test/clarifications/`        | Clarification-service behavior tests                                |
-| `test/git/`                   | Git-safety behavior tests                                           |
-| `test/`                       | Root CLI, registry, adapter, and repository-boundary tests          |
-| `docs/`                       | Cross-cutting architecture documentation                            |
-| `docs/product/`               | Current product guarantees, workflow meaning, and accepted nuances  |
-| `RHYTHM.md`                   | Newest-first record of meaningful implemented repository decisions  |
-| `.agents/skills/`             | Shared repository workflow skills                                   |
+| Path                          | Ownership                                                          |
+| ----------------------------- | ------------------------------------------------------------------ |
+| `bin/agent-run.js`            | Thin executable entry point                                        |
+| `src/index.js`                | Public root source boundary                                        |
+| `src/cli.js`                  | Argument parsing and terminal-facing command dispatch              |
+| `src/mcp.js`                  | STDIO MCP schemas, projections, waits, and detached dispatch       |
+| `src/config.js`               | Runner configuration loading, validation, and role resolution      |
+| `src/clarifications/index.js` | Public clarification-service boundary                              |
+| `src/clarifications/`         | Private coordination, confined transcript, and editor modules      |
+| `src/pipeline-registry.js`    | Explicit registry of built-in pipelines                            |
+| `src/runner.js`               | High-level run, resume, and status orchestration                   |
+| `src/state/index.js`          | Public run-store capability boundary                               |
+| `src/state/`                  | Private service, files, journals, actions, leases, and validation  |
+| `src/git/index.js`            | Public Git-safety capability boundary                              |
+| `src/git/`                    | Private service, command, content, commit, and handoff modules     |
+| `src/agents/index.js`         | Public agent-adapter directory boundary                            |
+| `src/agents/`                 | Codex and Claude adapter implementations                           |
+| `packages/commit-plan/`       | Shared deterministic commit-plan contract                          |
+| `pipelines/plan-authoring/`   | Plan-authoring workflow, prompts, tests, and specification         |
+| `pipelines/plan-execution/`   | Plan-execution workflow, prompts, tests, and specification         |
+| `pipelines/polishing/`        | Polishing workflow, prompts, tests, and specification              |
+| `test/clarifications/`        | Clarification-service behavior tests                               |
+| `test/git/`                   | Git-safety behavior tests                                          |
+| `test/state/`                 | State persistence and safety behavior tests                        |
+| `test/`                       | Root CLI, registry, adapter, and repository-boundary tests         |
+| `docs/`                       | Cross-cutting architecture documentation                           |
+| `docs/product/`               | Current product guarantees, workflow meaning, and accepted nuances |
+| `RHYTHM.md`                   | Newest-first record of meaningful implemented repository decisions |
+| `.agents/skills/`             | Shared repository workflow skills                                  |
 
 `.claude/skills` is a symlink to `.agents/skills`. Edit the canonical skill
 files under `.agents/skills`; never create a second Claude-specific copy.

@@ -19,13 +19,13 @@ import {
   DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
   getPipeline,
 } from "./pipeline-registry.js";
-import { deepFreeze } from "./state-validation.js";
 import {
   createRunStore,
+  deepFreeze,
   RUNTIME_COMPATIBILITY,
   RUNTIME_COMPATIBILITY_TOKEN,
   RUN_STATE_SCHEMA_VERSION,
-} from "./state.js";
+} from "./state/index.js";
 import { createTrustedValidationService } from "./trusted-validation.js";
 
 const BACKENDS = new Set(BACKEND_IDS);

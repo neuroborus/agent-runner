@@ -5,10 +5,10 @@ import { homedir, hostname } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
-import { createActionStore } from "./state-actions.js";
-import { atomicWriteFile, resolveRunArtifactPath } from "./state-files.js";
-import { createStateJournal } from "./state-journal.js";
-import { createLeaseManager } from "./state-lease.js";
+import { createActionStore } from "./actions.js";
+import { atomicWriteFile, resolveRunArtifactPath } from "./files.js";
+import { createStateJournal } from "./journal.js";
+import { createLeaseManager } from "./lease.js";
 import {
   assertRunId,
   deepFreeze,
@@ -21,7 +21,7 @@ import {
   RUNTIME_VERSION_SKEW_EXIT_CODE,
   RUN_STATE_SCHEMA_VERSION,
   RunStoreError,
-} from "./state-validation.js";
+} from "./validation.js";
 
 export {
   RUNTIME_COMPATIBILITY,

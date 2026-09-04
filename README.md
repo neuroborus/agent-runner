@@ -668,12 +668,14 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   ├── mcp-reporting.js
 │   ├── pipeline-registry.js
 │   ├── runner.js
-│   ├── state-files.js
-│   ├── state-actions.js
-│   ├── state-journal.js
-│   ├── state-lease.js
-│   ├── state-validation.js
-│   ├── state.js
+│   ├── state/
+│   │   ├── actions.js
+│   │   ├── files.js
+│   │   ├── index.js
+│   │   ├── journal.js
+│   │   ├── lease.js
+│   │   ├── service.js
+│   │   └── validation.js
 │   ├── trusted-validation-execution.js
 │   └── trusted-validation.js
 ├── packages/
@@ -685,10 +687,13 @@ Git services; pipeline workspaces own mode and workflow policy.
 ├── test/
 │   ├── clarifications/
 │   │   └── lifecycle.test.js
-│   └── git/
-│       ├── local-commit.test.js
-│       ├── polishing-handoff.test.js
-│       └── repository-safety.test.js
+│   ├── git/
+│   │   ├── local-commit.test.js
+│   │   ├── polishing-handoff.test.js
+│   │   └── repository-safety.test.js
+│   └── state/
+│       ├── persistence.test.js
+│       └── safety.test.js
 ├── docs/
 │   ├── product/
 │   ├── ARCHITECTURE.md

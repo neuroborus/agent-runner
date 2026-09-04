@@ -9,8 +9,8 @@ import {
   readOptionalPublishedText,
   readOptionalText,
   removeFile,
-} from "./state-files.js";
-import { RunStoreError } from "./state-validation.js";
+} from "./files.js";
+import { RunStoreError } from "./validation.js";
 
 const ACTION_SCHEMA_VERSION = 1;
 const ACTIONS_DIRECTORY = "actions";

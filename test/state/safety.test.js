@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { createRunStore, RunStoreError } from "../src/index.js";
+import { createRunStore, RunStoreError } from "../../src/state/index.js";
 
 function createPublicationBarrier() {
   let pending;

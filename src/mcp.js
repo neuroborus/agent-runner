@@ -21,7 +21,7 @@ import {
   createRunStore,
   RUNTIME_VERSION_SKEW_EXIT_CODE,
   RunStoreError,
-} from "./state.js";
+} from "./state/index.js";
 
 const MAX_WAIT_MS = 24 * 60 * 60 * 1_000;
 const DEFAULT_WAIT_MS = 30_000;

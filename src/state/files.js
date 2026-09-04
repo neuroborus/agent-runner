@@ -21,7 +21,7 @@ import {
   sep,
 } from "node:path";
 
-import { RunStoreError } from "./state-validation.js";
+import { RunStoreError } from "./validation.js";
 
 const RESERVED_RUN_PATHS = new Set([
   ".lease",
