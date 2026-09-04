@@ -449,6 +449,9 @@ no repository mutation and unchanged content and validation fingerprints may
 reach the same runner-owned one-shot exact-subject commit boundary.
 Confirmation findings return directly to `CHECK_AND_FIX`; lazy mode has no
 review dispute or Arbiter path. Remote state remains read-only.
+If an unexpected runner-owned invariant rejects a finalization transition,
+status retains a resumable `FINALIZE` checkpoint and exposes only a bounded
+diagnostic through both the CLI and MCP.
 
 Polishing follows the same mode-specific, fingerprint-bound gate. In lazy mode,
 Worker changes after finalization require the complete finalization gate again,

@@ -58,6 +58,11 @@ the safe resume checkpoint when one exists, and concrete next actions. It does
 not expose prompts, transcripts, credentials, rejected provider output, or raw
 diagnostics.
 
+If an unexpected runner-owned invariant rejects a plan-execution finalization
+transition, both CLI and MCP status expose the same bounded diagnostic and an
+explicit retry from the retained `FINALIZE` checkpoint. Rejected finalization
+evidence and native process output do not enter the pause record.
+
 Public activity records the actor, phase, event kind, and concise message. The
 active role and phase combine with lease ownership to distinguish running,
 interrupted, and idle work without polling a provider or depending on a

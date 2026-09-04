@@ -2146,6 +2146,26 @@ function finalizationPassed(
   };
 }
 
+function finalizationWithTrustedCheck(trustedValidation) {
+  const requiredChecks = [
+    ...REQUIRED_CHECKS,
+    { id: "C2", command: trustedValidation.commands[0].command },
+  ];
+  return {
+    ...finalizationPassed(),
+    requiredChecks,
+    checks: [
+      ...checkResults("PASS"),
+      {
+        checkId: "C2",
+        command: trustedValidation.commands[0].command,
+        status: "NOT_RUN",
+        evidence: ["Reserved for the runner-trusted executor."],
+      },
+    ],
+  };
+}
+
 function reviewApproved(validationChange = "UNCHANGED") {
   return {
     status: "APPROVED",
@@ -3272,6 +3292,76 @@ async function createFixture(
     taskPath,
     transitions,
   };
+}
+
+async function createRevision55Fixture(
+  t,
+  {
+    refinalizationSummary,
+    resumeFinalization = false,
+    trustedEvidence,
+    trustedOutcomes = ["PASS", "PASS"],
+  } = {},
+) {
+  const trustedValidation = trustedValidationSnapshot();
+  const finalization = finalizationWithTrustedCheck(trustedValidation);
+  const refinalization =
+    refinalizationSummary === undefined
+      ? finalization
+      : { ...finalization, summary: refinalizationSummary };
+  const outcomes = [];
+  const failureRecovery = trustedOutcomes.includes("FAIL")
+    ? [
+        resolution({ id: "F1", decision: "FIX" }),
+        finalization,
+      ]
+    : [];
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    modeSettings: { trustedChecks: ["service-check"] },
+    trustedValidation,
+    worker: [
+      clarificationReady(),
+      {
+        ...bootstrapReady("Worker"),
+        requiredChecks: finalization.requiredChecks,
+      },
+    ],
+    workWorker: [
+      implementationCompleted(),
+      invalidProductionFinalization(),
+      finalization,
+      checkAndFix("REFINALIZE"),
+      checkAndFix(),
+      cleanConfirmationFindings("R1"),
+      checkAndFix("REFINALIZE"),
+      refinalization,
+      ...failureRecovery,
+      ...(resumeFinalization ? [finalization] : []),
+      checkAndFix(),
+      cleanConfirmation(),
+    ],
+    onTrustedValidation(options) {
+      const status = trustedOutcomes[outcomes.length];
+      assert.notEqual(status, undefined);
+      outcomes.push(status);
+      return {
+        status,
+        commandIdentity: options.commandIdentity,
+        exitCode: status === "PASS" ? 0 : 7,
+        signal: null,
+        timedOut: false,
+        evidence: [
+          trustedEvidence?.(outcomes.length, status) ??
+            (status === "PASS"
+              ? "The runner-trusted check passed."
+              : "The runner-trusted check exited with code 7."),
+        ],
+        ...options.bindings,
+      };
+    },
+  });
+  return { fixture, trustedOutcomes: outcomes };
 }
 
 test("clarifies and bootstraps through independent source-session forks", async (t) => {
@@ -5665,6 +5755,56 @@ test("turns a runner-trusted check failure into a bounded finalization issue", a
   ]);
 });
 
+test("validates runner-trusted evidence before attempting finalization advancement", async (t) => {
+  const trustedValidation = trustedValidationSnapshot();
+  const finalization = finalizationWithTrustedCheck(trustedValidation);
+  const fixture = await createFixture(t, {
+    trustedValidation,
+    worker: [
+      clarificationReady(),
+      {
+        ...bootstrapReady("Worker"),
+        requiredChecks: finalization.requiredChecks,
+      },
+      reconciliationResolved(),
+    ],
+    reviewer: [
+      {
+        ...bootstrapReady("Reviewer"),
+        requiredChecks: finalization.requiredChecks,
+      },
+    ],
+    workReviewer: [],
+    workWorker: [implementationCompleted(), finalization],
+    onTrustedValidation(options) {
+      return {
+        status: "PASS",
+        commandIdentity: options.commandIdentity,
+        exitCode: 7,
+        signal: null,
+        timedOut: false,
+        evidence: ["Invalid runner evidence must not be persisted."],
+        ...options.bindings,
+      };
+    },
+  });
+
+  const paused = await fixture.run({ trustedChecks: ["service-check"] });
+
+  assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(paused.pause.reason, "finalization_transition_invalid");
+  assert.equal(paused.pipelineState.finalizationResult, null);
+  assert.doesNotMatch(JSON.stringify(paused), /Invalid runner evidence/u);
+  assert.equal(
+    fixture.transitions.some(
+      ({ patch }) =>
+        patch?.pipelineState?.finalizationResult !== undefined &&
+        patch.pipelineState.finalizationResult !== null,
+    ),
+    false,
+  );
+});
+
 test("rejects trusted validation binding drift and repository mutation", async (t) => {
   for (const [name, code] of [
     ["binding drift", "ERR_TRUSTED_VALIDATION_BINDING_CHANGED"],
@@ -7902,6 +8042,183 @@ test("re-finalizes corrected evidence without requiring a content change", async
   );
   assert.equal(fixture.calls.reviewer.length, 0);
   assert.equal(fixture.calls.arbiter.length, 0);
+});
+
+test("persists corrected lazy re-finalization with runner-trusted PASS and FAIL evidence", async (t) => {
+  for (const trustedOutcome of ["PASS", "FAIL"]) {
+    await t.test(trustedOutcome, async (t) => {
+      const expectedOutcomes =
+        trustedOutcome === "PASS"
+          ? ["PASS", "PASS"]
+          : ["PASS", "FAIL", "PASS"];
+      const { fixture, trustedOutcomes } = await createRevision55Fixture(t, {
+        trustedOutcomes: expectedOutcomes,
+      });
+
+      const completed = await fixture.run({
+        trustedChecks: ["service-check"],
+      });
+      const initialTransition = fixture.transitions.find(
+        ({ patch, options }) =>
+          options.activity?.phase === "finalization" &&
+          patch?.pipelineState?.previousFindings.length === 0 &&
+          patch.pipelineState.finalizationResult?.status === "PASS",
+      );
+      const correctedTransition = fixture.transitions.find(
+        ({ patch, options }) =>
+          options.activity?.phase === "finalization" &&
+          patch?.pipelineState?.finalizationCorrections.length === 1 &&
+          patch.pipelineState.previousFindings.length === 1 &&
+          patch.pipelineState.finalizationResult?.checks.some(
+            ({ executor, status }) =>
+              executor === "runner" && status === trustedOutcome,
+          ),
+      );
+
+      assert.equal(completed.pipelineState.workflowState, "DONE");
+      assert.notEqual(initialTransition, undefined);
+      assert.notEqual(correctedTransition, undefined);
+      assert.equal(
+        correctedTransition.patch.pipelineState.pendingFinalizationCorrection,
+        null,
+      );
+      assert.equal(
+        correctedTransition.patch.pipelineState.finalizationResult.status,
+        trustedOutcome,
+      );
+      assert.equal(
+        correctedTransition.patch.pipelineState.finalizationResult.fingerprint,
+        initialTransition.patch.pipelineState.finalizationResult.fingerprint,
+      );
+      assert.equal(
+        correctedTransition.patch.pipelineState.lazyCorrections.length,
+        1,
+      );
+      assert.equal(
+        correctedTransition.patch.pipelineState.pendingLazyCorrection,
+        null,
+      );
+      assert.deepEqual(trustedOutcomes, expectedOutcomes);
+      assert.equal(fixture.calls.reviewer.length, 0);
+      assert.equal(fixture.calls.arbiter.length, 0);
+    });
+  }
+});
+
+test("resumes corrected lazy re-finalization after an interrupted evidence transition", async (t) => {
+  const processLoss = new Error("Process stopped before finalization advancement.");
+  const { fixture, trustedOutcomes } = await createRevision55Fixture(t, {
+    resumeFinalization: true,
+    trustedOutcomes: ["PASS", "PASS", "PASS"],
+  });
+  const transition = fixture.runtime.transition;
+  let interrupted = false;
+  let stopped = false;
+  fixture.runtime.transition = async (patch, options) => {
+    if (stopped) {
+      throw processLoss;
+    }
+    if (
+      !interrupted &&
+      options.activity?.phase === "finalization" &&
+      patch.pipelineState.workflowState === "CHECK_AND_FIX" &&
+      patch.pipelineState.finalizationCorrections.length === 1 &&
+      patch.pipelineState.previousFindings.length === 1 &&
+      patch.pipelineState.finalizationResult !== null
+    ) {
+      interrupted = true;
+      stopped = true;
+      throw processLoss;
+    }
+    return transition(patch, options);
+  };
+
+  await assert.rejects(
+    fixture.run({ trustedChecks: ["service-check"] }),
+    (cause) => cause === processLoss,
+  );
+  assert.equal(fixture.currentRun.pipelineState.workflowState, "FINALIZE");
+  assert.equal(fixture.currentRun.pipelineState.finalizationResult, null);
+  assert.equal(
+    fixture.currentRun.pipelineState.pendingFinalizationCorrection,
+    null,
+  );
+  assert.equal(
+    fixture.currentRun.pipelineState.finalizationCorrections.length,
+    1,
+  );
+
+  stopped = false;
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(trustedOutcomes.length, 3);
+  assert.equal(
+    fixture.transitions.filter(
+      ({ options }) => options.activity?.kind === "finalization-correction",
+    ).length,
+    1,
+  );
+});
+
+test("pauses an invalid corrected finalization transition at its resumable checkpoint", async (t) => {
+  const rejectedProviderSummary = "DO_NOT_PERSIST_PROVIDER_SUMMARY";
+  const rejectedRunnerEvidence = "DO_NOT_PERSIST_RUNNER_EVIDENCE";
+  const { fixture } = await createRevision55Fixture(t, {
+    refinalizationSummary: rejectedProviderSummary,
+    resumeFinalization: true,
+    trustedOutcomes: ["PASS", "PASS", "PASS"],
+    trustedEvidence: (call) =>
+      call === 2
+        ? rejectedRunnerEvidence
+        : "The runner-trusted check passed.",
+  });
+  const transition = fixture.runtime.transition;
+  let rejectTransition = true;
+  fixture.runtime.transition = (patch, options) => {
+    if (
+      rejectTransition &&
+      options.activity?.phase === "finalization" &&
+      patch.pipelineState.workflowState === "CHECK_AND_FIX" &&
+      patch.pipelineState.finalizationCorrections.length === 1 &&
+      patch.pipelineState.previousFindings.length === 1 &&
+      patch.pipelineState.finalizationResult !== null
+    ) {
+      rejectTransition = false;
+      const error = new Error("Unexpected finalization transition invariant.");
+      error.code = "ERR_INVALID_PLAN_EXECUTION_STATE";
+      throw error;
+    }
+    return transition(patch, options);
+  };
+
+  const paused = await fixture.run({ trustedChecks: ["service-check"] });
+  const projected = planExecutionPipeline.projections.pause(paused);
+
+  assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(paused.pipelineState.finalizationResult, null);
+  assert.equal(paused.pipelineState.finalizationCorrections.length, 1);
+  assert.equal(paused.pipelineState.pendingFinalizationCorrection, null);
+  assert.deepEqual(projected, {
+    reason: "finalization_transition_invalid",
+    code: "ERR_FINALIZATION_TRANSITION_INVALID",
+    explanation:
+      "The runner could not persist the validated finalization transition. The last valid FINALIZE checkpoint was retained and can be retried.",
+    evidence: [
+      "The rejected finalization evidence was not persisted.",
+      "Resume retries the bounded FINALIZE checkpoint.",
+    ],
+    resumeState: "FINALIZE",
+    nextActions: [{ type: "resume", action: null }],
+  });
+  assert.doesNotThrow(() =>
+    planExecutionPipeline.validateResumeAction(paused, null),
+  );
+  assert.doesNotMatch(JSON.stringify(paused), /DO_NOT_PERSIST/u);
+  assert.doesNotMatch(JSON.stringify(fixture.transitions), /DO_NOT_PERSIST/u);
+
+  const completed = await fixture.run();
+  assert.equal(completed.pipelineState.workflowState, "DONE");
 });
 
 test("pauses repeated invalid re-finalization without a confirmation finding", async (t) => {

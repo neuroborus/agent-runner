@@ -315,6 +315,7 @@ const PAUSE_RESUME_STATES = Object.freeze({
   finalization_cannot_pass: Object.freeze(["FINALIZE"]),
   finalization_skill_invalid: Object.freeze(["FINALIZE"]),
   finalization_skill_missing: Object.freeze(["FINALIZE"]),
+  finalization_transition_invalid: Object.freeze(["FINALIZE"]),
   fix_limit_reached: Object.freeze([
     "IMPLEMENT",
     "CHECK_AND_FIX",
@@ -2779,7 +2780,7 @@ function normalizePersistedFinalization(value) {
       "ERR_INVALID_PLAN_EXECUTION_STATE",
     );
   }
-  normalizeSummary(value.summary, "finalization summary");
+  const summary = normalizeSummary(value.summary, "finalization summary");
   const issues = normalizeFinalizationIssues(
     value.issues,
     "ERR_INVALID_PLAN_EXECUTION_STATE",
@@ -2798,7 +2799,7 @@ function normalizePersistedFinalization(value) {
     value.requiredChecks,
     "ERR_INVALID_PLAN_EXECUTION_STATE",
   );
-  normalizeValidationInfrastructure(
+  const validationInfrastructure = normalizeValidationInfrastructure(
     value.validationInfrastructure,
     "ERR_INVALID_PLAN_EXECUTION_STATE",
   );
@@ -2848,7 +2849,14 @@ function normalizePersistedFinalization(value) {
     ) {
       throw workflowError("Plan-execution check executor evidence is invalid.");
     }
-    return Object.freeze({ ...normalized, ...check });
+    return Object.freeze({
+      ...normalized,
+      executor: check.executor,
+      commandIdentity: check.commandIdentity,
+      exitCode: check.exitCode,
+      signal: check.signal,
+      timedOut: check.timedOut,
+    });
   });
   if (
     (value.status === "PASS" &&
@@ -2858,7 +2866,53 @@ function normalizePersistedFinalization(value) {
   ) {
     throw workflowError("Plan-execution check evidence is inconsistent.");
   }
-  return value;
+  return Object.freeze({
+    status: value.status,
+    skillPath: value.skillPath,
+    summary,
+    issues,
+    requiredChecks,
+    validationInfrastructure,
+    validationInfrastructureFingerprint:
+      value.validationInfrastructureFingerprint,
+    checks: Object.freeze(checks),
+    trustedCommandFingerprint: value.trustedCommandFingerprint,
+    trustedConfigurationFingerprint:
+      value.trustedConfigurationFingerprint,
+    validationChanged: value.validationChanged,
+    fingerprint: value.fingerprint,
+  });
+}
+
+/** Constructs the canonical persisted Worker and runner finalization tuple. */
+export function createPersistedFinalizationEvidence({
+  workerResult,
+  issues,
+  checks,
+  validationInfrastructureFingerprint,
+  trustedCommandFingerprint,
+  trustedConfigurationFingerprint,
+  validationChanged,
+  fingerprint,
+}) {
+  const status = issues.length === 0 ? "PASS" : "FAIL";
+  return normalizePersistedFinalization({
+    status,
+    skillPath: workerResult.skillPath,
+    summary:
+      status === workerResult.status
+        ? workerResult.summary
+        : "The project finalization procedure found blocking failures.",
+    issues,
+    requiredChecks: workerResult.requiredChecks,
+    validationInfrastructure: workerResult.validationInfrastructure,
+    validationInfrastructureFingerprint,
+    checks,
+    trustedCommandFingerprint,
+    trustedConfigurationFingerprint,
+    validationChanged,
+    fingerprint,
+  });
 }
 
 function normalizePersistedValidation(value, name) {
@@ -4464,6 +4518,7 @@ export function assertRun(run) {
           "environment_blocked",
           "finalization_skill_invalid",
           "finalization_skill_missing",
+          "finalization_transition_invalid",
           "lazy_output_invalid",
           "review_output_invalid",
         ].includes(run.pause.reason)) ||

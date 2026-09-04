@@ -118,6 +118,7 @@ const RETRYABLE_PAUSE_REASONS = new Set([
   "finalization_cannot_pass",
   "finalization_skill_invalid",
   "finalization_skill_missing",
+  "finalization_transition_invalid",
   "local_artifacts_not_ignored",
   "lazy_output_invalid",
   "review_output_invalid",
@@ -159,6 +160,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "The explicitly configured finalization skill is invalid.",
   finalization_skill_missing:
     "The explicitly configured finalization skill is missing.",
+  finalization_transition_invalid:
+    "The runner could not persist validated finalization evidence.",
   fix_limit_reached: "The current step reached its configured fix limit.",
   internal_failure: "Plan execution failed.",
   local_artifacts_not_ignored:
@@ -192,6 +195,7 @@ const PUBLIC_DETAIL_REASONS = new Set([
   "finalization_cannot_pass",
   "finalization_skill_invalid",
   "finalization_skill_missing",
+  "finalization_transition_invalid",
   "plan_revision_required",
   "lazy_output_invalid",
   "review_output_invalid",
@@ -470,6 +474,7 @@ function validateResumeAction(run, action) {
             "finalization_cannot_pass",
             "finalization_skill_invalid",
             "finalization_skill_missing",
+            "finalization_transition_invalid",
             "lazy_output_invalid",
             "review_output_invalid",
           ].includes(run.pause?.reason) &&

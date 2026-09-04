@@ -62,6 +62,7 @@ import {
   assertRun,
   assertRuntime,
   assertSettings,
+  createPersistedFinalizationEvidence,
   createPlanExecutionState,
   isRecord,
   isOutputDiagnostic,
@@ -109,6 +110,7 @@ const RETRYABLE_PAUSE_REASONS = new Set([
   "finalization_cannot_pass",
   "finalization_skill_invalid",
   "finalization_skill_missing",
+  "finalization_transition_invalid",
   "local_artifacts_not_ignored",
   "lazy_output_invalid",
   "review_output_invalid",
@@ -692,6 +694,32 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       ],
     });
     return false;
+  }
+
+  async function pauseForFinalizationTransitionInvariant() {
+    await pause("finalization_transition_invalid", {
+      code: "ERR_FINALIZATION_TRANSITION_INVALID",
+      explanation:
+        "The runner could not persist the validated finalization transition. The last valid FINALIZE checkpoint was retained and can be retried.",
+      evidence: [
+        "The rejected finalization evidence was not persisted.",
+        "Resume retries the bounded FINALIZE checkpoint.",
+      ],
+      resumeState: "FINALIZE",
+    });
+    return false;
+  }
+
+  async function transitionFinalizationCheckpoint(nextPipelineState, options) {
+    try {
+      await transition(nextPipelineState, options);
+      return true;
+    } catch (cause) {
+      if (cause?.code !== "ERR_INVALID_PLAN_EXECUTION_STATE") {
+        throw cause;
+      }
+      return pauseForFinalizationTransitionInvariant();
+    }
   }
 
   async function pausePreEffectCommitRejection(rejection) {
@@ -3317,7 +3345,6 @@ ${
         });
       }
     }
-    const finalStatus = issues.length === 0 ? "PASS" : "FAIL";
     const validationChanged =
       !isDeepStrictEqual(result.requiredChecks, state().requiredChecks) ||
       !isDeepStrictEqual(
@@ -3326,85 +3353,96 @@ ${
       ) ||
       candidateValidationFingerprint !==
         state().validationInfrastructureFingerprint;
-    const finalizationResult = {
-      ...result,
-      status: finalStatus,
-      summary:
-        finalStatus === result.status
-          ? result.summary
-          : "The project finalization procedure found blocking failures.",
-      issues,
-      checks,
-      validationInfrastructureFingerprint: candidateValidationFingerprint,
-      trustedCommandFingerprint:
-        state().trustedValidation.commandFingerprint,
-      trustedConfigurationFingerprint:
-        state().trustedValidation.configurationFingerprint,
-      validationChanged,
-      fingerprint,
-    };
-    if (finalStatus === "FAIL") {
+    let finalizationResult;
+    try {
+      finalizationResult = createPersistedFinalizationEvidence({
+        workerResult: result,
+        issues,
+        checks,
+        validationInfrastructureFingerprint: candidateValidationFingerprint,
+        trustedCommandFingerprint:
+          state().trustedValidation.commandFingerprint,
+        trustedConfigurationFingerprint:
+          state().trustedValidation.configurationFingerprint,
+        validationChanged,
+        fingerprint,
+      });
+    } catch (cause) {
+      if (cause?.code !== "ERR_INVALID_PLAN_EXECUTION_STATE") {
+        throw cause;
+      }
+      return pauseForFinalizationTransitionInvariant();
+    }
+    if (finalizationResult.status === "FAIL") {
       const correction = correctionUpdate({
         fingerprint,
         finalizationIssueIds: issues.map(({ id }) => id),
         findingIds: [],
       });
-      await transition(
+      if (
+        !(await transitionFinalizationCheckpoint(
+          {
+            ...state(),
+            workflowState: "RESOLVE_FINDINGS",
+            finalizationResult,
+            finalizedFingerprint: null,
+            reviewCorrection: null,
+            pendingReviewCorrection: null,
+            cleanConfirmationFingerprint: null,
+            reviewResult: null,
+            reviewedFingerprint: null,
+            findings: [],
+            pendingDisputes: state().pendingDisputes,
+            correctionHistory: correction.history,
+            sameFindingRounds: correction.sameFindingRounds,
+            pendingCorrection: false,
+            blockedSinceStagnation: correction.blockedSinceStagnation,
+            reviewReconsideration: [],
+          },
+          {
+            nextCounters: correction.counters,
+            publicActivity: activity(
+              "worker",
+              "finalization",
+              "failed",
+              `Finalization reported ${issues.length} blocking issues.`,
+            ),
+          },
+        ))
+      ) {
+        return false;
+      }
+      return true;
+    }
+    if (
+      !(await transitionFinalizationCheckpoint(
         {
           ...state(),
-          workflowState: "RESOLVE_FINDINGS",
+          workflowState:
+            state().settings.mode === "lazy"
+              ? (state().pendingLazyCorrection?.phase ?? "CHECK_AND_FIX")
+              : "REVIEW",
           finalizationResult,
-          finalizedFingerprint: null,
-          reviewCorrection: null,
-          pendingReviewCorrection: null,
+          finalizedFingerprint: fingerprint,
           cleanConfirmationFingerprint: null,
           reviewResult: null,
           reviewedFingerprint: null,
           findings: [],
           pendingDisputes: state().pendingDisputes,
-          correctionHistory: correction.history,
-          sameFindingRounds: correction.sameFindingRounds,
-          pendingCorrection: false,
-          blockedSinceStagnation: correction.blockedSinceStagnation,
           reviewReconsideration: [],
         },
         {
-          nextCounters: correction.counters,
           publicActivity: activity(
             "worker",
             "finalization",
-            "failed",
-            `Finalization reported ${issues.length} blocking issues.`,
+            "passed",
+            "Project finalization passed.",
           ),
         },
-      );
-      return true;
+      ))
+    ) {
+      return false;
     }
-    await transition(
-      {
-        ...state(),
-        workflowState:
-          state().settings.mode === "lazy"
-            ? (state().pendingLazyCorrection?.phase ?? "CHECK_AND_FIX")
-            : "REVIEW",
-        finalizationResult,
-        finalizedFingerprint: fingerprint,
-        cleanConfirmationFingerprint: null,
-        reviewResult: null,
-        reviewedFingerprint: null,
-        findings: [],
-        pendingDisputes: state().pendingDisputes,
-        reviewReconsideration: [],
-      },
-      {
-        publicActivity: activity(
-          "worker",
-          "finalization",
-          "passed",
-          "Project finalization passed.",
-        ),
-      },
-    );
     return true;
   }
 
@@ -5156,6 +5194,7 @@ ${step.subject}`),
             "finalization_cannot_pass",
             "finalization_skill_invalid",
             "finalization_skill_missing",
+            "finalization_transition_invalid",
             "lazy_output_invalid",
             "review_output_invalid",
           ].includes(currentRun.pause.reason) &&

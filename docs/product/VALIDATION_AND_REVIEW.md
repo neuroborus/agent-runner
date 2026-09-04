@@ -48,6 +48,12 @@ ordered-command, and trusted-configuration fingerprints. Skipped, weakened,
 replaced, unmatched, or stale evidence fails closed. Host attestations and user
 claims do not satisfy the gate.
 
+Plan execution constructs both passing and failing persisted evidence through
+one deterministic pipeline contract. The contract normalizes the Worker and
+runner-trusted portions together, derives the aggregate status, and validates
+the complete fingerprint-bound record before either finalization transition is
+attempted.
+
 If a planned change legitimately alters scripts, test discovery, validation
 configuration, or the inventory, the review gate must explicitly accept that
 complete change. An evasive or unauthorized change is a finding.
@@ -69,6 +75,9 @@ check or grant broader access to manufacture a pass.
 Correction and dispute budgets are bounded. Exhaustion, repeated invalid
 structured output, unsafe reconciliation, or a non-converging loop pauses
 rather than accepting incomplete evidence.
+An unexpected runner-owned finalization-state invariant retains the last valid
+`FINALIZE` checkpoint with a bounded explicit retry instead of turning the run
+into an opaque terminal failure.
 
 ## Commit and handoff gates
 

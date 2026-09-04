@@ -1702,6 +1702,24 @@ ordered-command, and trusted-configuration fingerprints. The executor runs
 outside agent turns and does not grant an agent loopback, Docker, database,
 network, host temporary-directory, or another host-service capability.
 
+Before either the passing or failing finalization transition is attempted, one
+pipeline-owned deterministic contract constructs and validates the exact
+persisted evidence record from the normalized Worker result and bounded
+runner-trusted results. It derives the aggregate status, normalizes every issue
+and ordered check with its executor provenance, and binds the complete record
+to the current content and validation fingerprints. Agent or runner evidence is
+not accepted merely because its producing boundary returned it.
+
+If that validated record or the runner-owned transition still encounters the
+unexpected `ERR_INVALID_PLAN_EXECUTION_STATE` invariant, retain the last valid
+`FINALIZE` checkpoint and persist `finalization_transition_invalid` with the
+fixed `ERR_FINALIZATION_TRANSITION_INVALID` code and `FINALIZE` resume state.
+CLI status, MCP status, and MCP wait expose the same bounded explanation,
+evidence, and explicit null retry. The diagnostic never retains the rejected
+finalization record, provider output, prompts, transcripts, runner-trusted
+process output, or detached-process logs. Resume reconstructs and reruns the
+bounded finalization checkpoint instead of trusting the rejected transition.
+
 The Worker must not change package scripts, test discovery, test runners,
 validation configuration, or the inventory merely to evade an environment
 blocker. A change required by the current planned commit remains possible, but

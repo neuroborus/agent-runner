@@ -265,6 +265,11 @@ text. A pipeline descriptor may derive bounded evidence from already validated
 pipeline state when the derivation exposes only finite public identifiers;
 plan-execution finalization-backed `no_progress` exposes only the active
 finalization issue IDs and never their commands, problems, evidence, or paths.
+Plan execution also projects `finalization_transition_invalid` as a resumable
+`FINALIZE` checkpoint with a fixed bounded diagnostic when an unexpected
+runner-owned finalization invariant rejects advancement. The retained state
+contains neither the rejected evidence record nor provider, prompt,
+transcript, trusted-process-output, or detached-log data.
 
 Public next actions are concrete descriptor-owned operations. `respond`
 identifies the exact pending request; `resume` carries either the validated
@@ -873,6 +878,14 @@ and candidate tuples, so acceptance cannot depend on a prior native session.
 Rejection remains a finding. Commands and repository-relative infrastructure
 paths are validated and compared without rewriting interior whitespace.
 Host-reported results and user attestations are outside this trust boundary.
+Plan execution builds both passing and failing persisted finalization evidence
+through one deterministic pipeline contract before attempting advancement.
+That contract normalizes the Worker and runner portions together, derives the
+aggregate status, validates ordered executor provenance, and binds the result
+to the content, validation-infrastructure, ordered-command, and trusted-
+configuration fingerprints. An unexpected persisted-state invariant therefore
+leaves the prior valid `FINALIZE` checkpoint available for the bounded public
+retry instead of turning the run into an opaque terminal failure.
 
 Plan execution gives each preparation phase one owner. Implementation,
 finding-resolution, and lazy check/fix turns do not invoke project finalization
