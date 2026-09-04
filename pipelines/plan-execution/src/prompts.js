@@ -77,9 +77,19 @@ Do not weaken sandboxing or grant network or host temporary-directory access to 
 
 ${PRODUCT_DECISION_INSTRUCTIONS}`;
 
-export const REVIEW_INSTRUCTIONS = `Review the changes and verify that they are correct, idiomatic, minimal, and consistent with the project's conventions.
+export const CANDIDATE_REVIEW_INSTRUCTIONS = `Review the changes and verify that they are correct, idiomatic, minimal, and consistent with the project's conventions.
 
 Do not modify the repository.
+Review the complete current result as a semantic candidate. Do not run the project finalization procedure, attest finalization evidence, or perform generic commit preparation; those remain owned by FINALIZE, CONFIRM, and COMMIT.
+For APPROVED, set question and whyBlocked to "", and findings, options, and evidence to [].
+For FINDINGS, provide one or more findings with unique stable R-prefixed numeric IDs, a repository-relative file, and populated problem, reason, and suggestedAction fields; set question and whyBlocked to "", and options and evidence to [].
+For PRODUCT_DECISION_REQUIRED, set findings to []; use the product-decision fields.
+${PRODUCT_DECISION_INSTRUCTIONS}
+Otherwise, return only the candidate decision and actionable findings using the provided schema.`;
+
+export const REVIEW_INSTRUCTIONS = `Confirm the finalized changes are correct, idiomatic, minimal, consistent with the project's conventions, and ready for the authorized commit.
+
+Do not modify the repository. This is the distinct terminal confirmation over the finalized content and evidence, not candidate review or generic commit preparation.
 Verify the exact required-check evidence and reject omissions, skips, substitutions, weakening, fingerprint mismatch, or validation-infrastructure changes that this planned commit does not authorize.
 Use validationChange UNCHANGED when no change occurred, ACCEPTED with validationEvidence when an authorized change remains complete, or REJECTED with validationEvidence and a finding when it is evasive or unauthorized.
 For APPROVED, set question and whyBlocked to "", and findings, options, and evidence to [].
@@ -90,19 +100,26 @@ Otherwise, return only the approval decision and actionable findings using the p
 
 export const CHECK_AND_FIX_INSTRUCTIONS = `Review the changes and verify that they are correct, idiomatic, minimal, and consistent with the project's conventions. If you find any problems, fix them idiomatically and minimally, following the project's conventions.
 
-Review the complete current result. Do not run the project finalization procedure or perform generic commit preparation; those remain owned by FINALIZE and COMMIT. Do not create a commit.
-Verify the exact required-check evidence and fix any omission, substitution, weakening, fingerprint mismatch, or unauthorized validation-infrastructure change that can be fixed within this planned commit.
+Review the complete current result as a semantic candidate. Do not run the project finalization procedure, attest finalization evidence, or perform generic commit preparation; those remain owned by FINALIZE, CONFIRM, and COMMIT. Do not create a commit.
 For CHANGED, use only when you changed repository content; provide summary and set reason, question, and whyBlocked to "", and options and evidence to [].
-For REFINALIZE, use only when repository content is unchanged but a clean-confirmation finding requires corrected finalization or validation evidence; provide summary and set reason, question, and whyBlocked to "", and options and evidence to [].
 For UNCHANGED, use only when you found no problem and changed no repository content; provide summary and set reason, question, and whyBlocked to "", and options and evidence to [].
 For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or a comparable external constraint. Set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
 For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-decision fields.
 Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
 ${PRODUCT_DECISION_INSTRUCTIONS}`;
 
-export const CLEAN_CONFIRM_INSTRUCTIONS = `Review the changes and verify that they are correct, idiomatic, minimal, and consistent with the project's conventions.
+export const CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS = `Review the candidate changes and verify that they are correct, idiomatic, minimal, and consistent with the project's conventions.
 
 Do not modify the repository. Return CLEAN only when there are no problems; otherwise return concrete findings without editing the content.
+Do not run or attest project finalization, validate terminal evidence, or perform generic commit preparation; those remain owned by FINALIZE, CONFIRM, and COMMIT.
+For CLEAN, set question and whyBlocked to "", and findings, options, and evidence to [].
+For FINDINGS, provide one or more findings with unique stable R-prefixed numeric IDs, a repository-relative file, and populated problem, reason, and suggestedAction fields; set question and whyBlocked to "", and options and evidence to [].
+For PRODUCT_DECISION_REQUIRED, set findings to []; use the product-decision fields.
+${PRODUCT_DECISION_INSTRUCTIONS}`;
+
+export const CLEAN_CONFIRM_INSTRUCTIONS = `Confirm the finalized changes are correct, idiomatic, minimal, consistent with the project's conventions, and ready for the authorized commit.
+
+Do not modify the repository. This is the distinct terminal confirmation over the finalized content and evidence. Return CLEAN only when there are no problems; otherwise return concrete findings without editing the content.
 Verify the exact required-check evidence and reject omissions, skips, substitutions, weakening, fingerprint mismatch, or validation-infrastructure changes that this planned commit does not authorize.
 Use validationChange UNCHANGED when no change occurred, ACCEPTED with validationEvidence when an authorized change remains complete, or REJECTED with validationEvidence and a finding when it is evasive or unauthorized.
 For CLEAN, set question and whyBlocked to "", and findings, options, and evidence to [].
@@ -113,8 +130,11 @@ ${PRODUCT_DECISION_INSTRUCTIONS}`;
 export const LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS = `Your previous structured lazy checkpoint result was rejected by provider or deterministic validation. Return a complete replacement result using the same checkpoint schema.
 Correct every identified field-and-constraint violation from the current repository and durable checkpoint evidence. Do not repeat or quote the rejected result, findings, commands, paths, provider output, prompt, or transcript; do not ask an ordinary clarification question. During CHECK_AND_FIX, reconcile only safe workspace content and report its actual mutation status. During CLEAN_CONFIRM, keep the repository read-only. Preserve the original checkpoint semantics exactly. A still-invalid replacement pauses for an explicit retry and never supplies finalization, confirmation, review, or commit evidence early.`;
 
-export const REVIEW_CORRECTION_INSTRUCTIONS = `Your previous structured review result was rejected by deterministic validation. Make the pending read-only correction and return a complete replacement result using the same review schema.
-Correct every identified field-and-constraint violation from current repository and finalized evidence. Do not repeat or quote the rejected result, findings, commands, paths, provider output, prompt, or transcript; do not ask an ordinary clarification question or modify repository content, staging, history, refs, remotes, or Git identity. Preserve APPROVED, FINDINGS, validation-change, and PRODUCT_DECISION_REQUIRED semantics exactly as required by the unchanged review contract. A still-invalid replacement pauses for an explicit retry and never approves the work.`;
+export const REVIEW_CORRECTION_INSTRUCTIONS = `Your previous structured candidate-review result was rejected by deterministic validation. Make the pending read-only correction and return a complete replacement result using the same candidate-review schema.
+Correct every identified field-and-constraint violation from the current repository and candidate-review context. Do not repeat or quote the rejected result, findings, provider output, prompt, or transcript; do not ask an ordinary clarification question or modify repository content, staging, history, refs, remotes, or Git identity. Preserve APPROVED, FINDINGS, and PRODUCT_DECISION_REQUIRED semantics exactly. A still-invalid replacement pauses for an explicit retry and never accepts the candidate.`;
+
+export const CONFIRMATION_CORRECTION_INSTRUCTIONS = `Your previous structured terminal-confirmation result was rejected by deterministic validation. Make the pending read-only correction and return a complete replacement result using the same confirmation schema.
+Correct every identified field-and-constraint violation from current repository and finalized evidence. Do not repeat or quote the rejected result, findings, commands, paths, provider output, prompt, or transcript; do not ask an ordinary clarification question or modify repository content, staging, history, refs, remotes, or Git identity. Preserve clean or approved, findings, validation-change, and PRODUCT_DECISION_REQUIRED semantics exactly as required by the unchanged confirmation contract. A still-invalid replacement pauses for an explicit retry and never confirms the work.`;
 
 export const FINDING_RESOLUTION_INSTRUCTIONS = `For each finding below, fix it idiomatically and minimally, following the project's conventions.
 If a finding is incorrect, dispute it with concise evidence instead of changing the code.
@@ -133,7 +153,7 @@ export const FINALIZATION_INSTRUCTIONS = `Run the complete project finalization 
 
 Do not perform unrelated fixes or create a commit.
 Keep the finalization inventory staging-independent. When project finalization guidance includes generic commit preparation, defer staging, staged/index-relative inspection, alternate-index workarounds, staged handoff, and commit-message drafting to the authorized COMMIT turn. Do not run git add, inspect the staged diff, or draft a commit message in this turn. Express each applicable content check against HEAD or explicit trees. This phase-owned deferral is neither a validation blocker nor a skipped required check and must not prevent PASS.
-The validated plan subject remains authoritative. After the fingerprint-bound finalization and review gate passes, the constrained COMMIT executor alone runs git add -A, performs fixed runner-owned staged-diff hygiene, and creates the subject-only commit.
+The validated plan subject remains authoritative. After candidate convergence and the fingerprint-bound finalization and terminal-confirmation gate pass, the constrained COMMIT executor alone runs git add -A, performs fixed runner-owned staged-diff hygiene, and creates the subject-only commit.
 Use PASS only after every agent-executed required check succeeds without being skipped, excluded, substituted, replaced, or weakened. Return the complete requiredChecks and validationInfrastructure actually used, and exactly one ordered checks entry for every required check with bounded direct evidence. Return NOT_RUN only for a command explicitly listed as runner-trusted in the turn context; the runner executes that persisted vector before it accepts the gate. Do not use any other host-reported or user-attested results.
 Changes to package scripts, test discovery, test runners, validation configuration, the check inventory, or its infrastructure paths are allowed only when this planned commit requires them; never make them merely to evade an environmental blocker.
 Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.

@@ -340,7 +340,20 @@ function createBackend(
           evidence: [],
         };
       } else if (
-        request.prompt.includes("Review the changes and verify") ||
+        request.prompt.includes("Review the changes and verify") &&
+        request.prompt.includes("semantic candidate")
+      ) {
+        role = "reviewer";
+        structured = {
+          status: "APPROVED",
+          findings: [],
+          question: "",
+          options: [],
+          whyBlocked: "",
+          evidence: [],
+        };
+      } else if (
+        request.prompt.includes("Confirm the finalized changes") ||
         request.prompt.includes("Review the complete current change set")
       ) {
         role = "reviewer";
@@ -801,14 +814,23 @@ test("executes every planned commit across backend configurations", async (t) =>
         );
         assert.ok(sourceCalls.length >= 3);
         assert.ok(sourceCalls.every(({ session }) => session.mode === "fork"));
-        const stepReviews = allCalls.filter((call) =>
+        const candidateReviews = allCalls.filter((call) =>
           call.prompt.includes("Review the changes and verify"),
         );
-        assert.equal(stepReviews.length, 2);
+        const terminalConfirmations = allCalls.filter((call) =>
+          call.prompt.includes("Confirm the finalized changes"),
+        );
+        assert.equal(candidateReviews.length, 2);
         assert.ok(
-          stepReviews.every(
+          candidateReviews.every(
             ({ session }) =>
               session?.mode === "fork" && session.id === scenario.source,
+          ),
+        );
+        assert.equal(terminalConfirmations.length, 2);
+        assert.ok(
+          terminalConfirmations.every(
+            ({ session }) => session?.mode === "continue",
           ),
         );
         assert.equal(
@@ -1088,13 +1110,16 @@ test("runs registered workflows through recoverable MCP controls", async (t) => 
     runStore,
   });
   implementationGate.release.resolve();
-  const executionDone = await afterDisconnect.runWait({
+  await afterDisconnect.runWait({
     runId: execution.runId,
     cursor: timedOut.activityCursor,
     timeoutMs: 5_000,
     progress: false,
   });
   await pipelineProcess.settle();
+  const executionDone = await afterDisconnect.runStatus({
+    runId: execution.runId,
+  });
   assert.equal(executionDone.status, "DONE");
   assert.equal(executionDone.completedCommits.length, 2);
   const executionActivity = await afterDisconnect.runActivity({

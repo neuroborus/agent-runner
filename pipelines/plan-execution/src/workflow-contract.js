@@ -20,10 +20,11 @@ export const WORKFLOW_STATES = Object.freeze([
   "CLARIFY",
   "BOOTSTRAP",
   "IMPLEMENT",
-  "FINALIZE",
+  "REVIEW",
   "CHECK_AND_FIX",
   "CLEAN_CONFIRM",
-  "REVIEW",
+  "FINALIZE",
+  "CONFIRM",
   "RESOLVE_FINDINGS",
   "COMMIT",
   "WAITING_FOR_USER",
@@ -57,8 +58,14 @@ const PIPELINE_STATE_FIELDS = new Set([
   "pendingFinalizationCorrection",
   "reviewCorrection",
   "pendingReviewCorrection",
+  "confirmationCorrection",
+  "pendingConfirmationCorrection",
   "lazyCorrections",
   "pendingLazyCorrection",
+  "candidateReviewResult",
+  "candidateReviewedFingerprint",
+  "candidateConfirmationFingerprint",
+  "candidateMigrationPending",
   "cleanConfirmationFingerprint",
   "lazySourceForkConsumed",
   "compatibilityCheckRequired",
@@ -183,6 +190,14 @@ const REVIEW_RESULT_FIELDS = Object.freeze([
   "whyBlocked",
   "evidence",
 ]);
+const CANDIDATE_REVIEW_RESULT_FIELDS = Object.freeze([
+  "status",
+  "findings",
+  "question",
+  "options",
+  "whyBlocked",
+  "evidence",
+]);
 const BOOTSTRAP_RESULT_FIELDS = Object.freeze([
   "status",
   "summary",
@@ -298,6 +313,7 @@ const PAUSE_RESUME_STATES = Object.freeze({
     "FINALIZE",
     "CHECK_AND_FIX",
     "CLEAN_CONFIRM",
+    "CONFIRM",
     "REVIEW",
     "RESOLVE_FINDINGS",
     "COMMIT",
@@ -307,8 +323,10 @@ const PAUSE_RESUME_STATES = Object.freeze({
     "IMPLEMENT",
     "FINALIZE",
     "CHECK_AND_FIX",
+    "REVIEW",
     "RESOLVE_FINDINGS",
   ]),
+  confirmation_output_invalid: Object.freeze(["CONFIRM"]),
   finalization_cannot_pass: Object.freeze(["FINALIZE"]),
   finalization_skill_invalid: Object.freeze(["FINALIZE"]),
   finalization_skill_missing: Object.freeze(["FINALIZE"]),
@@ -1718,13 +1736,9 @@ export function normalizeCheckAndFixResult(payload) {
   ];
   if (
     !isRecord(payload) ||
-    ![
-      "CHANGED",
-      "REFINALIZE",
-      "UNCHANGED",
-      "BLOCKED",
-      "PRODUCT_DECISION_REQUIRED",
-    ].includes(payload.status)
+    !["CHANGED", "UNCHANGED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"].includes(
+      payload.status,
+    )
   ) {
     throw outputError("Worker returned an invalid check/fix result.");
   }
@@ -1774,6 +1788,56 @@ export function normalizeCheckAndFixResult(payload) {
       INVALID_OUTPUT_CODE,
     ),
   });
+}
+
+export function normalizeCandidateReviewResult(
+  payload,
+  previousFindings = [],
+  { clean = false } = {},
+) {
+  const acceptedStatus = clean ? "CLEAN" : "APPROVED";
+  if (!isRecord(payload)) {
+    throw outputError("Agent returned an invalid candidate-review result.");
+  }
+  assertExactOutputFields(payload, CANDIDATE_REVIEW_RESULT_FIELDS);
+  if (
+    ![acceptedStatus, "FINDINGS", "PRODUCT_DECISION_REQUIRED"].includes(
+      payload.status,
+    )
+  ) {
+    throw outputError("Agent returned an invalid candidate-review result.");
+  }
+  assertStructuredResultSize(payload);
+  if (payload.status === "PRODUCT_DECISION_REQUIRED") {
+    if (!emptyArray(payload.findings)) {
+      throw outputError("Product decision must not include findings.");
+    }
+    return Object.freeze({
+      status: payload.status,
+      decision: normalizeProductDecision(payload),
+    });
+  }
+  if (!emptyDecision(payload)) {
+    throw outputError("Candidate review contains inapplicable fields.");
+  }
+  const findings = normalizeReviewFindings(payload.findings);
+  if (
+    (payload.status === acceptedStatus && findings.length !== 0) ||
+    (payload.status === "FINDINGS" && findings.length === 0)
+  ) {
+    throw outputError("Candidate-review status does not match its findings.");
+  }
+  for (const finding of findings) {
+    const previous = previousFindings.find(
+      (candidate) =>
+        candidate.file === finding.file &&
+        candidate.problem === finding.problem,
+    );
+    if (previous !== undefined && previous.id !== finding.id) {
+      throw outputError("Agent changed the ID of an unchanged finding.");
+    }
+  }
+  return Object.freeze({ status: payload.status, findings });
 }
 
 export function normalizeFinalizationResult(
@@ -2605,7 +2669,11 @@ function normalizeFinalizationCorrections(value, planSteps) {
   return value;
 }
 
-function normalizeReviewCorrection(value, planSteps) {
+function normalizeScopedCorrection(
+  value,
+  planSteps,
+  { name, roles, phase, contract },
+) {
   if (
     !isRecord(value) ||
     !hasExactFields(value, REVIEW_CORRECTION_FIELDS) ||
@@ -2619,27 +2687,45 @@ function normalizeReviewCorrection(value, planSteps) {
     value.diagnostics.length === 0 ||
     value.diagnostics.length > MAX_DIAGNOSTIC_ITEMS
   ) {
-    throw workflowError("Plan-execution review correction is invalid.");
+    throw workflowError(`Plan-execution ${name} correction is invalid.`);
   }
   const identities = new Set();
   for (const diagnostic of value.diagnostics) {
     if (
       !isOutputDiagnostic(diagnostic) ||
-      diagnostic.role !== "reviewer" ||
-      diagnostic.phase !== "review" ||
-      diagnostic.contract !== "review"
+      !roles.includes(diagnostic.role) ||
+      diagnostic.phase !== phase ||
+      diagnostic.contract !== contract
     ) {
-      throw workflowError("Plan-execution review correction is invalid.");
+      throw workflowError(`Plan-execution ${name} correction is invalid.`);
     }
     const identity = `${diagnostic.field}\0${diagnostic.constraint}`;
     if (identities.has(identity)) {
       throw workflowError(
-        "Plan-execution review correction diagnostics must be unique.",
+        `Plan-execution ${name} correction diagnostics must be unique.`,
       );
     }
     identities.add(identity);
   }
   return value;
+}
+
+function normalizeReviewCorrection(value, planSteps) {
+  return normalizeScopedCorrection(value, planSteps, {
+    name: "review",
+    roles: ["reviewer"],
+    phase: "review",
+    contract: "candidate-review",
+  });
+}
+
+function normalizeConfirmationCorrection(value, planSteps) {
+  return normalizeScopedCorrection(value, planSteps, {
+    name: "confirmation",
+    roles: ["worker", "reviewer"],
+    phase: "confirmation",
+    contract: "confirmation",
+  });
 }
 
 function sameReviewCorrectionScope(left, right) {
@@ -2975,6 +3061,29 @@ function normalizePersistedReview(value) {
   return value;
 }
 
+function normalizePersistedCandidateReview(value) {
+  if (value === null) {
+    return null;
+  }
+  assertExactFields(
+    value,
+    ["status", "findingIds", "fingerprint"],
+    "Plan-execution candidate-review result",
+  );
+  if (
+    !["APPROVED", "FINDINGS"].includes(value.status) ||
+    !Array.isArray(value.findingIds) ||
+    value.findingIds.length > MAX_ITEMS ||
+    value.findingIds.some((id) => !REVIEW_FINDING_ID_PATTERN.test(id)) ||
+    new Set(value.findingIds).size !== value.findingIds.length ||
+    (value.status === "APPROVED") !== (value.findingIds.length === 0) ||
+    !HASH_PATTERN.test(value.fingerprint)
+  ) {
+    throw workflowError("Plan-execution candidate-review result is invalid.");
+  }
+  return value;
+}
+
 function normalizeStringCountRecord(value, name) {
   if (!isRecord(value) || Object.keys(value).length > MAX_DIAGNOSTIC_ITEMS) {
     throw workflowError(`${name} is invalid.`);
@@ -3179,6 +3288,23 @@ function reviewGatePassed({
   );
 }
 
+function candidateReviewGatePassed({
+  candidateReviewResult,
+  candidateReviewedFingerprint,
+  findingOverrides,
+}) {
+  if (candidateReviewResult?.status === "APPROVED") {
+    return true;
+  }
+  return (
+    candidateReviewResult?.status === "FINDINGS" &&
+    candidateReviewedFingerprint !== null &&
+    candidateReviewResult.findingIds.every((id) =>
+      findingIsOverridden(findingOverrides, id, candidateReviewedFingerprint),
+    )
+  );
+}
+
 function normalizePendingCommit(value) {
   if (value === null) {
     return null;
@@ -3291,6 +3417,7 @@ export function normalizePipelineState(value) {
     "bootstrapArbitrationUsed",
     "compatibilityCheckRequired",
     "validationMigrationPending",
+    "candidateMigrationPending",
     "pendingCorrection",
     "stagnationArbitrationUsed",
   ]) {
@@ -3314,6 +3441,17 @@ export function normalizePipelineState(value) {
     throw workflowError(
       "Plan-execution clean confirmation fingerprint is invalid.",
     );
+  }
+  for (const [field, label] of [
+    ["candidateReviewedFingerprint", "candidate-reviewed"],
+    ["candidateConfirmationFingerprint", "candidate-confirmation"],
+  ]) {
+    if (
+      value[field] !== null &&
+      (typeof value[field] !== "string" || !HASH_PATTERN.test(value[field]))
+    ) {
+      throw workflowError(`Plan-execution ${label} fingerprint is invalid.`);
+    }
   }
   if (typeof value.lazySourceForkConsumed !== "boolean") {
     throw workflowError("Plan-execution source-fork state is invalid.");
@@ -3494,6 +3632,32 @@ export function normalizePipelineState(value) {
       "Plan-execution pending review correction is inconsistent.",
     );
   }
+  const confirmationCorrection =
+    value.confirmationCorrection === null
+      ? null
+      : normalizeConfirmationCorrection(
+          value.confirmationCorrection,
+          planSteps,
+        );
+  const pendingConfirmationCorrection =
+    value.pendingConfirmationCorrection === null
+      ? null
+      : normalizeConfirmationCorrection(
+          value.pendingConfirmationCorrection,
+          planSteps,
+        );
+  if (
+    pendingConfirmationCorrection !== null &&
+    (confirmationCorrection === null ||
+      !sameReviewCorrectionScope(
+        pendingConfirmationCorrection,
+        confirmationCorrection,
+      ))
+  ) {
+    throw workflowError(
+      "Plan-execution pending confirmation correction is inconsistent.",
+    );
+  }
   const lazyCorrections = normalizeLazyCorrections(
     value.lazyCorrections,
     planSteps,
@@ -3555,6 +3719,16 @@ export function normalizePipelineState(value) {
       ["CLARIFY", "BOOTSTRAP", "DONE"].includes(value.workflowState))
   ) {
     throw workflowError("Plan-execution validation migration is inapplicable.");
+  }
+  if (
+    value.candidateMigrationPending &&
+    (value.workflowState !== "WAITING_FOR_USER" ||
+      !value.preflightComplete ||
+      value.resolvedSummary === null ||
+      value.currentStep === null ||
+      value.pendingCommit?.status === "consumed")
+  ) {
+    throw workflowError("Plan-execution candidate migration is inapplicable.");
   }
   if (
     value.compatibilityCheckRequired &&
@@ -3622,6 +3796,9 @@ export function normalizePipelineState(value) {
           "ERR_INVALID_PLAN_EXECUTION_STATE",
         );
   const reviewResult = normalizePersistedReview(value.reviewResult);
+  const candidateReviewResult = normalizePersistedCandidateReview(
+    value.candidateReviewResult,
+  );
   if (
     (requiredChecks === null) !== (resolvedSummary === null) ||
     (validationInfrastructure === null) !== (resolvedSummary === null) ||
@@ -3694,9 +3871,10 @@ export function normalizePipelineState(value) {
   if (
     reviewCorrection !== null &&
     (value.currentStep !== reviewCorrection.step ||
-      finalizationResult?.status !== "PASS" ||
-      value.finalizedFingerprint !== reviewCorrection.contentFingerprint ||
-      finalizationResult.validationInfrastructureFingerprint !==
+      (value.candidateReviewedFingerprint ??
+        value.repositoryBaseline?.contentFingerprint) !==
+        reviewCorrection.contentFingerprint ||
+      value.validationInfrastructureFingerprint !==
         reviewCorrection.validationInfrastructureFingerprint ||
       (pendingReviewCorrection !== null &&
         !["REVIEW", "WAITING_FOR_USER", "FAILED"].includes(
@@ -3709,10 +3887,38 @@ export function normalizePipelineState(value) {
     reviewCorrection !== null &&
     value.workflowState === "REVIEW" &&
     pendingReviewCorrection === null &&
-    (reviewResult === null || value.reviewedFingerprint === null)
+    (candidateReviewResult === null ||
+      value.candidateReviewedFingerprint === null)
   ) {
     throw workflowError(
       "Plan-execution review correction is missing its pending marker.",
+    );
+  }
+  if (
+    confirmationCorrection !== null &&
+    (value.currentStep !== confirmationCorrection.step ||
+      finalizationResult?.status !== "PASS" ||
+      value.finalizedFingerprint !==
+        confirmationCorrection.contentFingerprint ||
+      finalizationResult.validationInfrastructureFingerprint !==
+        confirmationCorrection.validationInfrastructureFingerprint ||
+      (pendingConfirmationCorrection !== null &&
+        !["CONFIRM", "WAITING_FOR_USER", "FAILED"].includes(
+          value.workflowState,
+        )))
+  ) {
+    throw workflowError(
+      "Plan-execution confirmation correction is inapplicable.",
+    );
+  }
+  if (
+    confirmationCorrection !== null &&
+    value.workflowState === "CONFIRM" &&
+    pendingConfirmationCorrection === null &&
+    (reviewResult === null || value.reviewedFingerprint === null)
+  ) {
+    throw workflowError(
+      "Plan-execution confirmation correction is missing its pending marker.",
     );
   }
   if (
@@ -3802,9 +4008,20 @@ export function normalizePipelineState(value) {
   });
   const pendingCommit = normalizePendingCommit(value.pendingCommit);
   const completedCommits = normalizeCompletedCommits(value.completedCommits);
+  const acceptedCandidateReview = candidateReviewGatePassed({
+    candidateReviewResult,
+    candidateReviewedFingerprint: value.candidateReviewedFingerprint,
+    findingOverrides,
+  });
+  const acceptedCandidateGate = lazy
+    ? acceptedCandidateReview &&
+      value.candidateConfirmationFingerprint ===
+        value.candidateReviewedFingerprint
+    : acceptedCandidateReview;
   if (
     (!lazy &&
-      (value.cleanConfirmationFingerprint !== null ||
+      (value.candidateConfirmationFingerprint !== null ||
+        value.cleanConfirmationFingerprint !== null ||
         value.lazySourceForkConsumed ||
         lazyCorrections.length !== 0 ||
         pendingLazyCorrection !== null ||
@@ -3837,6 +4054,17 @@ export function normalizePipelineState(value) {
       value.reviewResult?.status !== "APPROVED")
   ) {
     throw workflowError("Plan-execution clean confirmation is inconsistent.");
+  }
+  if (
+    value.candidateConfirmationFingerprint !== null &&
+    (!lazy ||
+      value.candidateConfirmationFingerprint !==
+        value.candidateReviewedFingerprint ||
+      candidateReviewResult?.status !== "APPROVED")
+  ) {
+    throw workflowError(
+      "Plan-execution candidate confirmation is inconsistent.",
+    );
   }
   if (
     completedCommits.length > (planSteps?.length ?? 0) ||
@@ -3877,15 +4105,24 @@ export function normalizePipelineState(value) {
   }
   const currentFindingIds = new Set(findings.map(({ id }) => id));
   const previousFindingIds = new Set(previousFindings.map(({ id }) => id));
+  const reconsiderableFindingIds = new Set([
+    ...currentFindingIds,
+    ...previousFindingIds,
+  ]);
   const deferredDisputes =
     pendingDisputes.length > 0 &&
     findings.length === 0 &&
     pendingDisputes.every(({ findingId }) =>
       previousFindingIds.has(findingId),
     ) &&
-    (["IMPLEMENT", "FINALIZE", "REVIEW", "WAITING_FOR_USER", "FAILED"].includes(
-      value.workflowState,
-    ) ||
+    ([
+      "IMPLEMENT",
+      "REVIEW",
+      "FINALIZE",
+      "CONFIRM",
+      "WAITING_FOR_USER",
+      "FAILED",
+    ].includes(value.workflowState) ||
       (value.workflowState === "RESOLVE_FINDINGS" &&
         finalizationResult?.status === "FAIL"));
   if (
@@ -3893,10 +4130,12 @@ export function normalizePipelineState(value) {
       ({ findingId }) => !currentFindingIds.has(findingId),
     ) &&
       !deferredDisputes) ||
-    (["FINALIZE", "REVIEW"].includes(value.workflowState) &&
+    (["FINALIZE", "CONFIRM", "REVIEW"].includes(value.workflowState) &&
       pendingDisputes.length > 0 &&
       !deferredDisputes) ||
-    value.reviewReconsideration.some((id) => !currentFindingIds.has(id)) ||
+    value.reviewReconsideration.some(
+      (id) => !reconsiderableFindingIds.has(id),
+    ) ||
     Object.keys(disputeCounts).some(
       (id) =>
         !currentFindingIds.has(id) &&
@@ -3912,8 +4151,7 @@ export function normalizePipelineState(value) {
     (value.finalizedFingerprint !== null ||
       reviewResult !== null ||
       value.reviewedFingerprint !== null ||
-      findings.length !== 0 ||
-      (pendingDisputes.length !== 0 && !deferredDisputes))
+      value.cleanConfirmationFingerprint !== null)
   ) {
     throw workflowError("Plan-execution validation progress is inconsistent.");
   }
@@ -3926,10 +4164,20 @@ export function normalizePipelineState(value) {
       (finalizationResult.status === "FAIL" &&
         (reviewResult !== null ||
           value.reviewedFingerprint !== null ||
-          findings.length !== 0)))
+          value.cleanConfirmationFingerprint !== null)))
   ) {
     throw workflowError(
       "Plan-execution finalization progress is inconsistent.",
+    );
+  }
+  if (
+    (candidateReviewResult === null) !==
+      (value.candidateReviewedFingerprint === null) ||
+    (candidateReviewResult !== null &&
+      candidateReviewResult.fingerprint !== value.candidateReviewedFingerprint)
+  ) {
+    throw workflowError(
+      "Plan-execution candidate-review evidence is inconsistent.",
     );
   }
   if (
@@ -3943,6 +4191,7 @@ export function normalizePipelineState(value) {
   if (
     (findings.length > 0 || pendingDisputes.length > 0) &&
     value.reviewedFingerprint === null &&
+    value.candidateReviewedFingerprint === null &&
     !deferredDisputes
   ) {
     throw workflowError("Plan-execution review progress is inconsistent.");
@@ -3965,6 +4214,7 @@ export function normalizePipelineState(value) {
       "CHECK_AND_FIX",
       "CLEAN_CONFIRM",
       "REVIEW",
+      "CONFIRM",
       "WAITING_FOR_USER",
       "FAILED",
     ].includes(value.workflowState)
@@ -3977,6 +4227,7 @@ export function normalizePipelineState(value) {
       "IMPLEMENT",
       "FINALIZE",
       "REVIEW",
+      "CONFIRM",
       "RESOLVE_FINDINGS",
       "COMMIT",
       "DONE",
@@ -3988,7 +4239,9 @@ export function normalizePipelineState(value) {
   }
   if (
     value.reviewReconsideration.length > 0 &&
-    !["REVIEW", "WAITING_FOR_USER", "FAILED"].includes(value.workflowState)
+    !["REVIEW", "CONFIRM", "WAITING_FOR_USER", "FAILED"].includes(
+      value.workflowState,
+    )
   ) {
     throw workflowError(
       "Plan-execution review reconsideration is inapplicable.",
@@ -4011,8 +4264,14 @@ export function normalizePipelineState(value) {
       pendingFinalizationCorrection !== null ||
       reviewCorrection !== null ||
       pendingReviewCorrection !== null ||
+      confirmationCorrection !== null ||
+      pendingConfirmationCorrection !== null ||
       lazyCorrections.length !== 0 ||
       pendingLazyCorrection !== null ||
+      candidateReviewResult !== null ||
+      value.candidateReviewedFingerprint !== null ||
+      value.candidateConfirmationFingerprint !== null ||
+      value.candidateMigrationPending ||
       value.cleanConfirmationFingerprint !== null ||
       value.lazySourceForkConsumed ||
       value.compatibilityCheckRequired ||
@@ -4059,8 +4318,14 @@ export function normalizePipelineState(value) {
       value.findingOverrides.length !== 0 ||
       reviewCorrection !== null ||
       pendingReviewCorrection !== null ||
+      confirmationCorrection !== null ||
+      pendingConfirmationCorrection !== null ||
       lazyCorrections.length !== 0 ||
       pendingLazyCorrection !== null ||
+      candidateReviewResult !== null ||
+      value.candidateReviewedFingerprint !== null ||
+      value.candidateConfirmationFingerprint !== null ||
+      value.candidateMigrationPending ||
       value.cleanConfirmationFingerprint !== null ||
       pendingCommit !== null ||
       completedCommits.length !== 0)
@@ -4106,6 +4371,7 @@ export function normalizePipelineState(value) {
       "CHECK_AND_FIX",
       "CLEAN_CONFIRM",
       "REVIEW",
+      "CONFIRM",
       "RESOLVE_FINDINGS",
       "COMMIT",
     ].includes(value.workflowState) &&
@@ -4119,6 +4385,7 @@ export function normalizePipelineState(value) {
   if (
     value.workflowState === "FINALIZE" &&
     (finalizationResult !== null ||
+      !acceptedCandidateGate ||
       findings.length !== 0 ||
       value.cleanConfirmationFingerprint !== null ||
       value.reviewReconsideration.length !== 0)
@@ -4127,31 +4394,48 @@ export function normalizePipelineState(value) {
   }
   if (
     value.workflowState === "REVIEW" &&
-    (finalizationResult?.status !== "PASS" ||
-      value.finalizedFingerprint === null)
+    (lazy ||
+      finalizationResult !== null ||
+      reviewResult !== null ||
+      value.reviewedFingerprint !== null)
   ) {
     throw workflowError("Plan-execution review state is inconsistent.");
   }
   if (
     value.workflowState === "CHECK_AND_FIX" &&
-    (finalizationResult?.status !== "PASS" ||
-      value.finalizedFingerprint === null ||
+    (!lazy ||
+      finalizationResult !== null ||
+      reviewResult !== null ||
+      value.reviewedFingerprint !== null ||
       value.cleanConfirmationFingerprint !== null)
   ) {
     throw workflowError("Plan-execution check/fix state is inconsistent.");
   }
   if (
     value.workflowState === "CLEAN_CONFIRM" &&
+    (!lazy ||
+      finalizationResult !== null ||
+      reviewResult !== null ||
+      value.reviewedFingerprint !== null ||
+      findings.length !== 0 ||
+      value.cleanConfirmationFingerprint !== null ||
+      value.candidateConfirmationFingerprint !== null)
+  ) {
+    throw workflowError(
+      "Plan-execution clean confirmation state is inconsistent.",
+    );
+  }
+  if (
+    value.workflowState === "CONFIRM" &&
     (finalizationResult?.status !== "PASS" ||
       value.finalizedFingerprint === null ||
+      !acceptedCandidateGate ||
       reviewResult !== null ||
       value.reviewedFingerprint !== null ||
       findings.length !== 0 ||
       value.cleanConfirmationFingerprint !== null)
   ) {
-    throw workflowError(
-      "Plan-execution clean confirmation state is inconsistent.",
-    );
+    throw workflowError("Plan-execution confirmation state is inconsistent.");
   }
   const finalizationBlocked =
     finalizationResult?.status === "FAIL" &&
@@ -4168,6 +4452,7 @@ export function normalizePipelineState(value) {
     value.workflowState === "COMMIT" &&
     (finalizationResult?.status !== "PASS" ||
       value.finalizedFingerprint === null ||
+      !acceptedCandidateGate ||
       value.reviewedFingerprint !== value.finalizedFingerprint ||
       !acceptedReviewGate ||
       (lazy &&
@@ -4184,6 +4469,7 @@ export function normalizePipelineState(value) {
       pendingCommit !== null ||
       finalizationResult?.status !== "PASS" ||
       value.finalizedFingerprint === null ||
+      !acceptedCandidateGate ||
       value.reviewedFingerprint !== value.finalizedFingerprint ||
       !acceptedReviewGate ||
       (lazy &&
@@ -4250,8 +4536,14 @@ export function createPlanExecutionState({
       pendingFinalizationCorrection: null,
       reviewCorrection: null,
       pendingReviewCorrection: null,
+      confirmationCorrection: null,
+      pendingConfirmationCorrection: null,
       lazyCorrections: Object.freeze([]),
       pendingLazyCorrection: null,
+      candidateReviewResult: null,
+      candidateReviewedFingerprint: null,
+      candidateConfirmationFingerprint: null,
+      candidateMigrationPending: false,
       cleanConfirmationFingerprint: null,
       lazySourceForkConsumed: false,
       compatibilityCheckRequired: false,
@@ -4333,7 +4625,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 13 ||
+    run.pipelineStateVersion !== 14 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -4546,6 +4838,7 @@ export function assertRun(run) {
       (state.preflightComplete &&
         [
           "backend_unavailable",
+          "confirmation_output_invalid",
           "environment_blocked",
           "finalization_skill_invalid",
           "finalization_skill_missing",
@@ -4563,7 +4856,7 @@ export function assertRun(run) {
     ) {
       throw workflowError("Plan-execution pause resume state is invalid.");
     }
-    if (hasResumeState) {
+    if (hasResumeState && !state.candidateMigrationPending) {
       normalizePipelineState({
         ...state,
         workflowState: run.pause.resumeState,

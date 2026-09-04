@@ -7,6 +7,13 @@ remain in the owning documentation.
 
 ## 2026-09-04
 
+- **Plan execution finalizes only stable semantic candidates.** Independent
+  Reviewer convergence, or lazy Worker check/fix plus read-only candidate
+  confirmation, now completes before the writable terminal finalization gate.
+  One distinct read-only confirmation then binds the resulting content and
+  exact validation evidence immediately before `COMMIT`, so intermediate
+  candidate corrections do not prematurely run finalization and stale evidence
+  cannot authorize a commit.
 - **Provider registration is one static, testable composition seam.** A frozen
   descriptor registry under [`src/agents/`](src/agents/) supplies backend IDs,
   adapter factories, native option and profile rules, source-session support,

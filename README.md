@@ -34,7 +34,8 @@ owns its specification under its workspace.
   `plan.md` artifact paths, including task directories inside the target
   repository.
 - In `plan-execution`, the Worker receives one-shot authorization for the exact
-  planned local commit after successful finalization and review gates.
+  planned local commit after candidate convergence, successful finalization,
+  and a distinct read-only terminal confirmation.
 - `polishing` finalizes and applies the selected review gate to existing
   workspace changes while preserving `HEAD` for a later commit workflow.
 - Commit creation uses the repository's configured Git identity and the exact
@@ -73,7 +74,7 @@ For repository development, run `node bin/agent-run.js` directly.
 | Pipeline         | Purpose                                                                                         | Specification                                                                    |
 | ---------------- | ----------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
 | `plan-authoring` | Analyze a task, review a draft, and atomically write `plan.md`                                  | [`pipelines/plan-authoring/docs/SPEC.md`](pipelines/plan-authoring/docs/SPEC.md) |
-| `plan-execution` | Implement, finalize, review, and locally commit every plan step                                 | [`pipelines/plan-execution/docs/SPEC.md`](pipelines/plan-execution/docs/SPEC.md) |
+| `plan-execution` | Converge, finalize, confirm, and locally commit every plan step                                 | [`pipelines/plan-execution/docs/SPEC.md`](pipelines/plan-execution/docs/SPEC.md) |
 | `polishing`      | Polish, finalize, review, and stage existing dirty-worktree changes for a later commit workflow | [`pipelines/polishing/docs/SPEC.md`](pipelines/polishing/docs/SPEC.md)           |
 
 Plan authoring and execution share the deterministic
@@ -393,7 +394,7 @@ ID, pipeline state-schema version, and an explicit runtime compatibility tuple
 independent from the package version. Compatible legacy state is migrated by
 the owning pipeline under the per-run lease; incompatible readers return a
 specific version-skew error while preserving the run. The mode-aware pipeline
-versions are plan-authoring version 3, plan-execution version 13, and polishing
+versions are plan-authoring version 3, plan-execution version 14, and polishing
 version 9. Their ordered migrations resolve every supported legacy run to
 `independent` without moving terminal workflows or replaying role turns,
 commits, or handoffs. Complete write-ahead events precede atomic state
@@ -445,16 +446,15 @@ atomic `plan.md` writing; drafts never become repository writes or commits. An
 invalid lazy checkpoint receives one fresh read-only correction with the same
 schema and exact draft scope before an explicit retry is required.
 
-For every execution step, the Worker implements the change and runs a dedicated
-finalization gate using the configured guidance policy. Independent mode then
-requires a separate Reviewer over that fingerprint. Lazy mode instead runs a
-writable Worker `CHECK_AND_FIX` turn with the established review criteria;
-changes return through full finalization, while an unchanged result requires a
-separate read-only `CLEAN_CONFIRM`. Only a structured clean confirmation with
-no repository mutation and unchanged content and validation fingerprints may
-reach the same runner-owned one-shot exact-subject commit boundary.
-Confirmation findings return directly to `CHECK_AND_FIX`; lazy mode has no
-review dispute or Arbiter path. Remote state remains read-only.
+For every execution step, the Worker implements the change before candidate
+convergence. Independent mode uses Reviewer passes; lazy mode alternates a
+writable Worker `CHECK_AND_FIX` turn with a separate read-only candidate
+`CLEAN_CONFIRM`. The stable candidate then runs the dedicated finalization gate
+using the configured guidance policy and one distinct read-only terminal
+confirmation over the resulting content and validation fingerprints. Any
+content-changing repair returns through candidate convergence and the complete
+terminal gate. Lazy mode has no review dispute or Arbiter path. Remote state
+remains read-only.
 If an unexpected runner-owned invariant rejects a finalization transition,
 status retains a resumable `FINALIZE` checkpoint and exposes only a bounded
 diagnostic through both the CLI and MCP.

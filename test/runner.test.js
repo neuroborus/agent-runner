@@ -318,8 +318,17 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
           whyBlocked: "",
           evidence: [],
         };
+      } else if (request.prompt.includes("semantic candidate")) {
+        structured = {
+          status: "APPROVED",
+          findings: [],
+          question: "",
+          options: [],
+          whyBlocked: "",
+          evidence: [],
+        };
       } else if (
-        request.prompt.includes("Review the changes and verify") ||
+        request.prompt.includes("Confirm the finalized changes") ||
         request.prompt.includes("Review the complete current change set")
       ) {
         structured = {

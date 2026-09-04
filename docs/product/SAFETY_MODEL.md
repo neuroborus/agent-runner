@@ -59,10 +59,13 @@ only path; it is never replayed. A handoff may be accepted as already complete
 or retried only from its exact unchanged pre-effect state. Ambiguous partial
 effects fail closed.
 
-Content changes invalidate finalization and review evidence. A commit or
-handoff proceeds only when current content and validation infrastructure still
-match the accepted fingerprints and no mutation can occur between the final
-read-only gate and the runner-owned effect.
+Content-changing repairs invalidate candidate-review, finalization, and
+terminal-confirmation evidence. The terminal formatter may transform an
+accepted candidate, but finalization and confirmation must then bind its exact
+resulting fingerprint. A commit or handoff proceeds only when current content
+and validation infrastructure still match the accepted fingerprints and no
+mutation can occur between the final read-only gate and the runner-owned
+effect.
 
 ## Redaction and provider isolation
 

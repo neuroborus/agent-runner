@@ -25,6 +25,12 @@ not by adding separate review-fix commits. A completed earlier commit is durable
 history and is never rewritten automatically when later work encounters a
 problem.
 
+Each step converges semantically before its terminal gate: independent mode
+uses candidate Reviewer passes, while lazy mode alternates Worker check/fix and
+read-only candidate confirmation. The stable candidate then passes full
+finalization and one distinct read-only terminal confirmation immediately
+before the constrained commit.
+
 The plan defines the authorized commit boundaries. Clarification may explain a
 requirement, but it cannot silently expand, reorder, or reinterpret those
 boundaries. A conflicting clarification or product decision requires a revised

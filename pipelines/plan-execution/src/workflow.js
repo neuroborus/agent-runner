@@ -14,9 +14,12 @@ import {
   BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
   CHECK_AND_FIX_INSTRUCTIONS,
+  CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS,
+  CANDIDATE_REVIEW_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
   CLEAN_CONFIRM_INSTRUCTIONS,
   COMMIT_INSTRUCTIONS,
+  CONFIRMATION_CORRECTION_INSTRUCTIONS,
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
   FINALIZATION_CORRECTION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
@@ -37,6 +40,8 @@ import {
   BOOTSTRAP_ARBITRATION_SCHEMA,
   BOOTSTRAP_RECONCILIATION_SCHEMA,
   BOOTSTRAP_SCHEMA,
+  CANDIDATE_CLEAN_CONFIRM_SCHEMA,
+  CANDIDATE_REVIEW_SCHEMA,
   CHECK_AND_FIX_SCHEMA,
   CLARIFICATION_SCHEMA,
   CLEAN_CONFIRM_SCHEMA,
@@ -69,6 +74,7 @@ import {
   normalizeAdapterCapabilities,
   normalizeBootstrapArbitration,
   normalizeBootstrapResultCandidate,
+  normalizeCandidateReviewResult,
   normalizeCheckAndFixResult,
   normalizeClarificationResult,
   normalizeCleanConfirmationResult,
@@ -106,6 +112,7 @@ const INPUT_DRIFT_ERROR_CODES = new Set([
 ]);
 const RETRYABLE_PAUSE_REASONS = new Set([
   "backend_unavailable",
+  "confirmation_output_invalid",
   "environment_blocked",
   "finalization_cannot_pass",
   "finalization_skill_invalid",
@@ -338,7 +345,15 @@ function reviewOutputContext() {
   return Object.freeze({
     role: "reviewer",
     phase: "review",
-    contract: "review",
+    contract: "candidate-review",
+  });
+}
+
+function confirmationOutputContext(role) {
+  return Object.freeze({
+    role,
+    phase: "confirmation",
+    contract: "confirmation",
   });
 }
 
@@ -366,14 +381,20 @@ function roleOutputContextFor(role, schema, checkpoint) {
   if (schema === FINALIZATION_SCHEMA && role === "worker") {
     return finalizationOutputContext();
   }
-  if (schema === REVIEW_SCHEMA && role === "reviewer") {
+  if (schema === CANDIDATE_REVIEW_SCHEMA && role === "reviewer") {
     return reviewOutputContext();
   }
   if (schema === CHECK_AND_FIX_SCHEMA && role === "worker") {
     return lazyOutputContext("CHECK_AND_FIX");
   }
-  if (schema === CLEAN_CONFIRM_SCHEMA && role === "worker") {
+  if (schema === CANDIDATE_CLEAN_CONFIRM_SCHEMA && role === "worker") {
     return lazyOutputContext("CLEAN_CONFIRM");
+  }
+  if (
+    [REVIEW_SCHEMA, CLEAN_CONFIRM_SCHEMA].includes(schema) &&
+    ["reviewer", "worker"].includes(role)
+  ) {
+    return confirmationOutputContext(role);
   }
   return undefined;
 }
@@ -531,22 +552,48 @@ function normalizeFinalizationRoleOutput(output, trustedCommands) {
   }
 }
 
-function normalizeReviewRoleOutput(
-  output,
-  previousFindings,
-  validationChanged,
-) {
-  const context = reviewOutputContext();
-  let result;
+function normalizeCandidateReviewRoleOutput(output, previousFindings, options) {
+  const context =
+    options?.clean === true
+      ? lazyOutputContext("CLEAN_CONFIRM")
+      : reviewOutputContext();
   try {
-    result = normalizeReviewResult(output, previousFindings);
+    return normalizeCandidateReviewResult(output, previousFindings, options);
   } catch (cause) {
     if (cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT") {
       throw cause;
     }
     const diagnostics = outputDiagnostics(cause, context);
     throw new PlanExecutionWorkflowError(
-      "Structured review result violates its contract.",
+      "Structured candidate-review result violates its contract.",
+      {
+        code: cause.code,
+        diagnostic: diagnostics[0],
+        diagnostics,
+      },
+    );
+  }
+}
+
+function normalizeConfirmationRoleOutput(
+  output,
+  previousFindings,
+  validationChanged,
+  { clean = false } = {},
+) {
+  const context = confirmationOutputContext(clean ? "worker" : "reviewer");
+  let result;
+  try {
+    result = clean
+      ? normalizeCleanConfirmationResult(output, previousFindings)
+      : normalizeReviewResult(output, previousFindings);
+  } catch (cause) {
+    if (cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT") {
+      throw cause;
+    }
+    const diagnostics = outputDiagnostics(cause, context);
+    throw new PlanExecutionWorkflowError(
+      "Structured confirmation result violates its contract.",
       {
         code: cause.code,
         diagnostic: diagnostics[0],
@@ -634,6 +681,32 @@ Phase ownership: the established required-check inventory is input only to FINAL
     return `Runner-trusted validation commands selected before agent work:
 ${JSON.stringify(commands, null, 2)}
 Include every listed command exactly once in requiredChecks. Do not execute these commands in an agent turn. During finalization, return NOT_RUN for only these checks with evidence that each is reserved for the runner; the runner will execute their persisted exact vectors outside the agent turn.`;
+  }
+
+  function clearedTerminalGate() {
+    return {
+      finalizationResult: null,
+      finalizedFingerprint: null,
+      confirmationCorrection: null,
+      pendingConfirmationCorrection: null,
+      cleanConfirmationFingerprint: null,
+      reviewResult: null,
+      reviewedFingerprint: null,
+    };
+  }
+
+  function clearedCandidateAndTerminalGate() {
+    return {
+      ...clearedTerminalGate(),
+      reviewCorrection: null,
+      pendingReviewCorrection: null,
+      candidateReviewResult: null,
+      candidateReviewedFingerprint: null,
+      candidateConfirmationFingerprint: null,
+      candidateMigrationPending: false,
+      lazyCorrections: [],
+      pendingLazyCorrection: null,
+    };
   }
 
   async function transition(
@@ -803,8 +876,14 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         pendingFinalizationCorrection: null,
         reviewCorrection: null,
         pendingReviewCorrection: null,
+        confirmationCorrection: null,
+        pendingConfirmationCorrection: null,
         lazyCorrections: [],
         pendingLazyCorrection: null,
+        candidateReviewResult: null,
+        candidateReviewedFingerprint: null,
+        candidateConfirmationFingerprint: null,
+        candidateMigrationPending: false,
         cleanConfirmationFingerprint: null,
         compatibilityCheckRequired: false,
         currentStep: null,
@@ -1060,9 +1139,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     return (
       turn.role === "worker" &&
       ((turn.phase === "check-and-fix" &&
-        ["FINALIZE", "CLEAN_CONFIRM"].includes(current.workflowState)) ||
+        ["CHECK_AND_FIX", "CLEAN_CONFIRM"].includes(current.workflowState)) ||
         (turn.phase === "resolve-findings" &&
-          current.workflowState === "FINALIZE" &&
+          ["REVIEW", "CHECK_AND_FIX"].includes(current.workflowState) &&
           current.pendingCorrection))
     );
   }
@@ -1119,13 +1198,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
             repositoryBaseline: reconciledRepository,
             ...(contentChanged
               ? {
-                  finalizationResult: null,
-                  finalizedFingerprint: null,
-                  reviewCorrection: null,
-                  pendingReviewCorrection: null,
-                  cleanConfirmationFingerprint: null,
-                  reviewResult: null,
-                  reviewedFingerprint: null,
+                  ...clearedCandidateAndTerminalGate(),
                   previousFindings:
                     current.findings.length === 0
                       ? current.previousFindings
@@ -1156,15 +1229,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       await transition(
         {
           ...current,
-          workflowState: "FINALIZE",
+          ...clearedCandidateAndTerminalGate(),
+          workflowState: "CHECK_AND_FIX",
           repositoryBaseline: reconciledRepository,
-          finalizationResult: null,
-          finalizedFingerprint: null,
-          reviewCorrection: null,
-          pendingReviewCorrection: null,
-          cleanConfirmationFingerprint: null,
-          reviewResult: null,
-          reviewedFingerprint: null,
           previousFindings:
             current.findings.length === 0
               ? current.previousFindings
@@ -1342,15 +1409,12 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
             changedCorrection || changedLazyCheck
               ? {
                   ...current,
-                  workflowState: "FINALIZE",
+                  ...clearedCandidateAndTerminalGate(),
+                  workflowState:
+                    current.settings.mode === "lazy"
+                      ? "CHECK_AND_FIX"
+                      : "REVIEW",
                   repositoryBaseline: nextRepositoryBaseline,
-                  finalizationResult: null,
-                  finalizedFingerprint: null,
-                  reviewCorrection: null,
-                  pendingReviewCorrection: null,
-                  cleanConfirmationFingerprint: null,
-                  reviewResult: null,
-                  reviewedFingerprint: null,
                   previousFindings:
                     current.findings.length === 0
                       ? current.previousFindings
@@ -1367,13 +1431,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
                   repositoryBaseline: nextRepositoryBaseline,
                   ...(contentChanged
                     ? {
-                        finalizationResult: null,
-                        finalizedFingerprint: null,
-                        reviewCorrection: null,
-                        pendingReviewCorrection: null,
-                        cleanConfirmationFingerprint: null,
-                        reviewResult: null,
-                        reviewedFingerprint: null,
+                        ...clearedTerminalGate(),
                         previousFindings:
                           current.findings.length === 0
                             ? current.previousFindings
@@ -1415,8 +1473,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         throw invalidRoleOutput(
           `${role} returned invalid structured output.`,
           outputContext,
-          outputContext.contract === "review" ||
-            outputContext.contract.startsWith("lazy-")
+          ["candidate-review", "confirmation", "review"].includes(
+            outputContext.contract,
+          ) || outputContext.contract.startsWith("lazy-")
             ? {
                 field: "result",
                 constraint: "provider-structured-output",
@@ -1645,8 +1704,14 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           finalizedFingerprint: null,
           reviewCorrection: null,
           pendingReviewCorrection: null,
+          confirmationCorrection: null,
+          pendingConfirmationCorrection: null,
           lazyCorrections: [],
           pendingLazyCorrection: null,
+          candidateReviewResult: null,
+          candidateReviewedFingerprint: null,
+          candidateConfirmationFingerprint: null,
+          candidateMigrationPending: false,
           cleanConfirmationFingerprint: null,
           requiredChecks: bootstrapDecision ? null : current.requiredChecks,
           validationInfrastructure: bootstrapDecision
@@ -1792,6 +1857,16 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     return Object.freeze({
       attempt: 1,
       step: current.currentStep,
+      contentFingerprint: current.repositoryBaseline.contentFingerprint,
+      validationInfrastructureFingerprint:
+        current.validationInfrastructureFingerprint,
+    });
+  }
+
+  function confirmationCorrectionScope(current = state()) {
+    return Object.freeze({
+      attempt: 1,
+      step: current.currentStep,
       contentFingerprint: current.finalizedFingerprint,
       validationInfrastructureFingerprint:
         current.finalizationResult.validationInfrastructureFingerprint,
@@ -1815,9 +1890,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       fixRoundCharged: false,
       step: current.currentStep,
       phase,
-      contentFingerprint: current.finalizedFingerprint,
+      contentFingerprint: current.repositoryBaseline.contentFingerprint,
       validationInfrastructureFingerprint:
-        current.finalizationResult.validationInfrastructureFingerprint,
+        current.validationInfrastructureFingerprint,
     });
   }
 
@@ -2075,6 +2150,12 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       pendingFinalizationCorrection: null,
       reviewCorrection: null,
       pendingReviewCorrection: null,
+      confirmationCorrection: null,
+      pendingConfirmationCorrection: null,
+      candidateReviewResult: null,
+      candidateReviewedFingerprint: null,
+      candidateConfirmationFingerprint: null,
+      candidateMigrationPending: false,
       cleanConfirmationFingerprint: null,
       finalizationResult: null,
       finalizedFingerprint: null,
@@ -2118,7 +2199,11 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         ? { ...current, workflowState: "COMMIT", additionalFixRounds }
         : {
             ...invalidatedLegacyValidation(current),
-            workflowState: resumeImplementation ? "IMPLEMENT" : "FINALIZE",
+            workflowState: resumeImplementation
+              ? "IMPLEMENT"
+              : current.settings.mode === "lazy"
+                ? "CHECK_AND_FIX"
+                : "REVIEW",
             additionalFixRounds,
           },
       {
@@ -2130,6 +2215,40 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           verifyConsumedCommit
             ? "Legacy commit authorization retained for verification."
             : "Legacy validation evidence invalidated before resume.",
+        ),
+      },
+    );
+    return resumeAction !== null;
+  }
+
+  async function prepareCandidateMigrationResume() {
+    const current = state();
+    if (
+      !current.candidateMigrationPending ||
+      current.workflowState !== "WAITING_FOR_USER" ||
+      current.pendingEdit !== null
+    ) {
+      return false;
+    }
+    const additionalFixRounds =
+      resumeAction?.type === "extra-fix-rounds"
+        ? current.additionalFixRounds + resumeAction.amount
+        : current.additionalFixRounds;
+    await transition(
+      {
+        ...current,
+        workflowState:
+          current.settings.mode === "lazy" ? "CHECK_AND_FIX" : "REVIEW",
+        candidateMigrationPending: false,
+        additionalFixRounds,
+      },
+      {
+        pause: null,
+        publicActivity: activity(
+          "runner",
+          "migration",
+          "terminal-gate-invalidated",
+          "Legacy gate evidence was invalidated before candidate convergence.",
         ),
       },
     );
@@ -2817,21 +2936,20 @@ The runner will derive validation inventories from the independently accepted ro
       !["fix_limit_reached", "no_progress", "dispute_limit_reached"].includes(
         currentRun.pause.reason,
       ) ||
-      state().finalizationResult?.status !== "PASS" ||
-      state().reviewedFingerprint === null
+      (state().reviewedFingerprint === null &&
+        state().candidateReviewedFingerprint === null)
     ) {
       throw workflowError("Finding override is not applicable.");
     }
+    const findingFingerprint =
+      state().reviewedFingerprint ?? state().candidateReviewedFingerprint;
     const finding = state().findings.find(
       ({ id }) => id === resumeAction.findingId,
     );
     if (
       finding === undefined ||
-      (await contentFingerprint()) !== state().reviewedFingerprint ||
-      findingOverrideApplies(
-        resumeAction.findingId,
-        state().reviewedFingerprint,
-      )
+      (await contentFingerprint()) !== findingFingerprint ||
+      findingOverrideApplies(resumeAction.findingId, findingFingerprint)
     ) {
       throw workflowError("Finding override is stale or inapplicable.");
     }
@@ -2845,26 +2963,36 @@ The runner will derive validation inventories from the independently accepted ro
       ...state().findingOverrides,
       {
         findingId: resumeAction.findingId,
-        fingerprint: state().reviewedFingerprint,
+        fingerprint: findingFingerprint,
       },
     ].slice(-MAX_DIAGNOSTIC_ITEMS);
-    const rejectedValidationResolved =
-      state().reviewResult?.validationChange === "REJECTED" &&
-      validationRejectionIsOverridden(
-        state().previousFindings,
-        state().reviewedFingerprint,
-        findingOverrides,
-      );
+    const blockersResolved =
+      findings.length === 0 && pendingDisputes.length === 0;
+    const terminalConfirmation = state().reviewResult !== null;
     await transition(
       {
         ...state(),
-        workflowState:
-          findings.length === 0 && pendingDisputes.length === 0
-            ? state().reviewResult?.validationChange === "REJECTED" &&
-              !rejectedValidationResolved
-              ? "REVIEW"
-              : "COMMIT"
-            : "RESOLVE_FINDINGS",
+        ...(blockersResolved
+          ? terminalConfirmation
+            ? {
+                confirmationCorrection: null,
+                pendingConfirmationCorrection: null,
+                cleanConfirmationFingerprint: null,
+                reviewResult: null,
+                reviewedFingerprint: null,
+              }
+            : {
+                reviewCorrection: null,
+                pendingReviewCorrection: null,
+                candidateReviewResult: null,
+                candidateReviewedFingerprint: null,
+              }
+          : {}),
+        workflowState: blockersResolved
+          ? terminalConfirmation
+            ? "CONFIRM"
+            : "REVIEW"
+          : "RESOLVE_FINDINGS",
         findings,
         pendingDisputes,
         reviewReconsideration: state().reviewReconsideration.filter(
@@ -2947,17 +3075,11 @@ ${step.body}${
     await transition(
       {
         ...state(),
-        workflowState: "FINALIZE",
+        workflowState:
+          state().settings.mode === "lazy" ? "CHECK_AND_FIX" : "REVIEW",
         implementationDirection: null,
-        finalizationResult: null,
-        finalizedFingerprint: null,
-        reviewCorrection: null,
-        pendingReviewCorrection: null,
+        ...clearedCandidateAndTerminalGate(),
         lazyCorrections: [],
-        pendingLazyCorrection: null,
-        cleanConfirmationFingerprint: null,
-        reviewResult: null,
-        reviewedFingerprint: null,
         findings: [],
         pendingDisputes: correction ? current.pendingDisputes : [],
         pendingCorrection: correction,
@@ -3028,12 +3150,7 @@ ${evidence}
 Current planned commit:
 ## Commit ${step.number}: ${step.subject}
 
-${step.body}${
-              state().settings.mode === "lazy" &&
-              state().previousFindings.length > 0
-                ? `\n\nLazy clean-confirmation findings requiring correction:\n${JSON.stringify(state().previousFindings, null, 2)}`
-                : ""
-            }
+${step.body}
 ${
   correction === undefined
     ? ""
@@ -3140,7 +3257,7 @@ ${
             attempt: attempts.length + 1,
             step: state().currentStep,
             guidance: guidanceScope,
-            contentFingerprint: beforeFingerprint,
+            contentFingerprint: await contentFingerprint(),
             diagnostics,
           };
           const violationLabel =
@@ -3376,8 +3493,8 @@ ${
             workflowState: "RESOLVE_FINDINGS",
             finalizationResult,
             finalizedFingerprint: null,
-            reviewCorrection: null,
-            pendingReviewCorrection: null,
+            confirmationCorrection: null,
+            pendingConfirmationCorrection: null,
             cleanConfirmationFingerprint: null,
             reviewResult: null,
             reviewedFingerprint: null,
@@ -3408,12 +3525,11 @@ ${
       !(await transitionFinalizationCheckpoint(
         {
           ...state(),
-          workflowState:
-            state().settings.mode === "lazy"
-              ? (state().pendingLazyCorrection?.phase ?? "CHECK_AND_FIX")
-              : "REVIEW",
+          workflowState: "CONFIRM",
           finalizationResult,
           finalizedFingerprint: fingerprint,
+          confirmationCorrection: null,
+          pendingConfirmationCorrection: null,
           cleanConfirmationFingerprint: null,
           reviewResult: null,
           reviewedFingerprint: null,
@@ -3436,7 +3552,7 @@ ${
     return true;
   }
 
-  function lazyValidationPrompt(current) {
+  function confirmationValidationPrompt(current) {
     return `Established validation tuple:
 ${JSON.stringify(
   {
@@ -3480,9 +3596,7 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
     const correction = {
       ...scope,
       fixRoundCharged:
-        scope.fixRoundCharged ||
-        existing?.fixRoundCharged === true ||
-        current.workflowState === "FINALIZE",
+        scope.fixRoundCharged || existing?.fixRoundCharged === true,
       diagnostics,
     };
     if (existing === null) {
@@ -3503,7 +3617,7 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
           ),
         },
       );
-      return state().workflowState === "FINALIZE" ? "defer" : "retry";
+      return "retry";
     }
     await transition(
       {
@@ -3521,8 +3635,7 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
             ({ field, constraint }) =>
               `Worker field ${field} violated ${constraint}.`,
           ),
-          resumeState:
-            state().workflowState === "FINALIZE" ? "FINALIZE" : scope.phase,
+          resumeState: scope.phase,
         },
         publicActivity: activity(
           "runner",
@@ -3574,6 +3687,7 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
       const correction = current.pendingLazyCorrection;
       const scope = correction ?? lazyCorrectionScope("CHECK_AND_FIX", current);
       const alreadyCharged = correction?.fixRoundCharged === true;
+      const fixRoundsBeforeTurn = counters().fixRounds;
       const beforeFingerprint = await contentFingerprint();
       try {
         const output = await runRole(
@@ -3587,8 +3701,6 @@ Current planned commit:
 ## Commit ${step.number}: ${step.subject}
 
 ${step.body}
-
-${lazyValidationPrompt(state())}
 
 Concrete findings from the preceding clean confirmation:
 ${JSON.stringify(state().findings, null, 2)}${lazyCorrectionPrompt(correction)}`,
@@ -3617,13 +3729,6 @@ ${JSON.stringify(state().findings, null, 2)}${lazyCorrectionPrompt(correction)}`
             { field: "status", constraint: "matches-repository-mutation" },
           );
         }
-        if (result.status === "REFINALIZE" && current.findings.length === 0) {
-          throw invalidRoleOutput(
-            "Worker requested re-finalization without a clean-confirmation finding.",
-            context,
-            { field: "status", constraint: "requires-confirmation-finding" },
-          );
-        }
         if (result.status === "PRODUCT_DECISION_REQUIRED") {
           return productDecision(result.decision, "IMPLEMENT");
         }
@@ -3631,71 +3736,68 @@ ${JSON.stringify(state().findings, null, 2)}${lazyCorrectionPrompt(correction)}`
           if (correction !== null) {
             await transition({ ...state(), pendingLazyCorrection: null });
           }
-          await pause("environment_blocked", {
-            explanation: result.reason,
-            evidence: result.evidence,
-            resumeState: changed ? "FINALIZE" : "CHECK_AND_FIX",
-          });
-          return false;
-        }
-        if (changed) {
-          await transition(
-            { ...state(), pendingLazyCorrection: null },
-            {
-              publicActivity: activity(
-                "worker",
-                "check-and-fix",
-                "changed",
-                "Worker check/fix changed content; full finalization is required again.",
-              ),
-            },
-          );
-          return true;
-        }
-        const nextCounters = alreadyCharged
-          ? counters()
-          : { ...counters(), fixRounds: counters().fixRounds + 1 };
-        if (result.status === "REFINALIZE") {
-          await transition(
-            {
+          if (changed) {
+            await transition({
               ...state(),
-              workflowState: "FINALIZE",
-              finalizationResult: null,
-              finalizedFingerprint: null,
-              reviewCorrection: null,
-              pendingReviewCorrection: null,
-              pendingLazyCorrection: null,
-              cleanConfirmationFingerprint: null,
-              reviewResult: null,
-              reviewedFingerprint: null,
+              ...clearedCandidateAndTerminalGate(),
               previousFindings:
                 current.findings.length === 0
                   ? current.previousFindings
                   : current.findings,
               findings: [],
               pendingCorrection: true,
-              reviewReconsideration: [],
+            });
+          }
+          await pause("environment_blocked", {
+            explanation: result.reason,
+            evidence: result.evidence,
+            resumeState: "CHECK_AND_FIX",
+          });
+          return false;
+        }
+        if (changed) {
+          const nextCounters =
+            alreadyCharged || counters().fixRounds > fixRoundsBeforeTurn
+              ? counters()
+              : { ...counters(), fixRounds: counters().fixRounds + 1 };
+          await transition(
+            {
+              ...state(),
+              ...clearedCandidateAndTerminalGate(),
+              workflowState: "CHECK_AND_FIX",
+              previousFindings:
+                current.findings.length === 0
+                  ? current.previousFindings
+                  : current.findings,
+              findings: [],
+              pendingCorrection: true,
             },
             {
               nextCounters,
               publicActivity: activity(
                 "worker",
                 "check-and-fix",
-                "refinalize",
-                "Worker requested corrected finalization evidence without a content change.",
+                "changed",
+                "Worker check/fix changed content; candidate convergence continues.",
               ),
             },
           );
           return true;
         }
+        const nextCounters =
+          alreadyCharged || counters().fixRounds > fixRoundsBeforeTurn
+            ? counters()
+            : { ...counters(), fixRounds: counters().fixRounds + 1 };
         const fixingConfirmationFindings = current.findings.length > 0;
         await transition(
           {
             ...state(),
             workflowState: "CLEAN_CONFIRM",
+            ...clearedTerminalGate(),
             pendingLazyCorrection: null,
-            reviewResult: null,
-            reviewedFingerprint: null,
+            candidateReviewResult: null,
+            candidateReviewedFingerprint: null,
+            candidateConfirmationFingerprint: null,
             previousFindings: fixingConfirmationFindings
               ? current.findings
               : current.previousFindings,
@@ -3715,7 +3817,11 @@ ${JSON.stringify(state().findings, null, 2)}${lazyCorrectionPrompt(correction)}`
         );
         return true;
       } catch (cause) {
-        const resolution = await handleInvalidLazyOutput(cause, context, scope);
+        const resolution = await handleInvalidLazyOutput(cause, context, {
+          ...scope,
+          fixRoundCharged:
+            scope.fixRoundCharged || counters().fixRounds > fixRoundsBeforeTurn,
+        });
         if (resolution === "retry") {
           continue;
         }
@@ -3731,6 +3837,159 @@ ${JSON.stringify(state().findings, null, 2)}${lazyCorrectionPrompt(correction)}`
       const current = state();
       const correction = current.pendingLazyCorrection;
       const scope = correction ?? lazyCorrectionScope("CLEAN_CONFIRM", current);
+      const inspectedFingerprint = await contentFingerprint();
+      if (
+        correction !== null &&
+        (correction.contentFingerprint !== inspectedFingerprint ||
+          correction.validationInfrastructureFingerprint !==
+            current.validationInfrastructureFingerprint)
+      ) {
+        await transition(
+          {
+            ...current,
+            workflowState: "WAITING_FOR_USER",
+            pendingLazyCorrection: null,
+          },
+          {
+            pause: {
+              reason: "unsafe_git_state",
+              code: "ERR_LAZY_CORRECTION_SCOPE_CHANGED",
+            },
+            publicActivity: activity(
+              "runner",
+              "clean-confirm",
+              "paused",
+              "Plan execution paused: unsafe_git_state.",
+            ),
+          },
+        );
+        return false;
+      }
+      try {
+        const output = await runRole(
+          "worker",
+          CANDIDATE_CLEAN_CONFIRM_SCHEMA,
+          (evidence) => `${CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS}
+
+${evidence}
+
+Current planned commit:
+## Commit ${step.number}: ${step.subject}
+
+${step.body}
+
+Inspected candidate fingerprint: ${inspectedFingerprint}
+
+Previous candidate-confirmation findings for this step:
+${JSON.stringify(state().previousFindings, null, 2)}${lazyCorrectionPrompt(correction)}`,
+          {
+            checkpoint:
+              correction === null
+                ? `candidate:${current.currentStep}`
+                : `lazy-correction:${current.currentStep}:clean-confirm`,
+            freshSession: correction !== null,
+            recoveryContext: resolvedContext(),
+          },
+        );
+        if (output === null) {
+          return false;
+        }
+        const result = normalizeCandidateReviewRoleOutput(
+          output,
+          current.previousFindings,
+          { clean: true },
+        );
+        const confirmedFingerprint = await contentFingerprint();
+        if (confirmedFingerprint !== inspectedFingerprint) {
+          await transition({ ...state(), pendingLazyCorrection: null });
+          await pause("unsafe_git_state", {
+            code: "ERR_CANDIDATE_CONFIRMATION_FINGERPRINT_CHANGED",
+          });
+          return false;
+        }
+        if (result.status === "PRODUCT_DECISION_REQUIRED") {
+          return productDecision(result.decision, "IMPLEMENT");
+        }
+        const candidateReviewResult = {
+          status: result.status === "CLEAN" ? "APPROVED" : "FINDINGS",
+          findingIds:
+            result.status === "FINDINGS"
+              ? result.findings.map(({ id }) => id)
+              : [],
+          fingerprint: confirmedFingerprint,
+        };
+        if (result.status === "FINDINGS") {
+          const progress = correctionUpdate({
+            fingerprint: confirmedFingerprint,
+            finalizationIssueIds: [],
+            findingIds: result.findings.map(({ id }) => id),
+          });
+          await transition(
+            {
+              ...state(),
+              workflowState: "CHECK_AND_FIX",
+              pendingLazyCorrection: null,
+              candidateReviewResult,
+              candidateReviewedFingerprint: confirmedFingerprint,
+              candidateConfirmationFingerprint: null,
+              findings: result.findings,
+              previousFindings: result.findings,
+              correctionHistory: progress.history,
+              sameFindingRounds: progress.sameFindingRounds,
+              pendingCorrection: false,
+              blockedSinceStagnation: progress.blockedSinceStagnation,
+            },
+            {
+              nextCounters: progress.counters,
+              publicActivity: activity(
+                "worker",
+                "clean-confirm",
+                "findings",
+                `Candidate confirmation returned ${result.findings.length} blocking findings.`,
+              ),
+            },
+          );
+          return true;
+        }
+        await transition(
+          {
+            ...state(),
+            workflowState: "FINALIZE",
+            pendingLazyCorrection: null,
+            candidateReviewResult,
+            candidateReviewedFingerprint: confirmedFingerprint,
+            candidateConfirmationFingerprint: confirmedFingerprint,
+            findings: [],
+            previousFindings: [],
+            pendingCorrection: current.pendingCorrection,
+          },
+          {
+            publicActivity: activity(
+              "worker",
+              "clean-confirm",
+              "clean",
+              "Worker accepted an unchanged candidate for terminal finalization.",
+            ),
+          },
+        );
+        return true;
+      } catch (cause) {
+        const resolution = await handleInvalidLazyOutput(cause, context, scope);
+        if (resolution === "retry") {
+          continue;
+        }
+        return false;
+      }
+    }
+  }
+
+  async function runLazyConfirmationTurn() {
+    const step = planStep();
+    const context = confirmationOutputContext("worker");
+    while (true) {
+      const current = state();
+      const correction = current.pendingConfirmationCorrection;
+      const scope = confirmationCorrectionScope(current);
       const inspectedFingerprint = current.finalizedFingerprint;
       const inspectedValidationFingerprint =
         current.finalizationResult.validationInfrastructureFingerprint;
@@ -3744,12 +4003,12 @@ ${JSON.stringify(state().findings, null, 2)}${lazyCorrectionPrompt(correction)}`
           {
             ...current,
             workflowState: "WAITING_FOR_USER",
-            pendingLazyCorrection: null,
+            pendingConfirmationCorrection: null,
           },
           {
             pause: {
               reason: "unsafe_git_state",
-              code: "ERR_LAZY_CORRECTION_SCOPE_CHANGED",
+              code: "ERR_CONFIRMATION_CORRECTION_SCOPE_CHANGED",
             },
             publicActivity: activity(
               "runner",
@@ -3777,15 +4036,19 @@ ${step.body}
 Finalized content fingerprint: ${inspectedFingerprint}
 Validation-infrastructure fingerprint: ${inspectedValidationFingerprint}
 
-${lazyValidationPrompt(state())}
+${confirmationValidationPrompt(state())}
 
 Previous clean-confirmation findings for this step:
-${JSON.stringify(state().previousFindings, null, 2)}${lazyCorrectionPrompt(correction)}`,
+${JSON.stringify(state().previousFindings, null, 2)}${
+            correction === null
+              ? ""
+              : `\n\n${CONFIRMATION_CORRECTION_INSTRUCTIONS}\n\nPending correction diagnostic batch:\n${JSON.stringify(correction, null, 2)}`
+          }`,
           {
             checkpoint:
               correction === null
-                ? `lazy-commit:${current.currentStep}`
-                : `lazy-correction:${current.currentStep}:clean-confirm`,
+                ? `confirmation:${current.currentStep}`
+                : `confirmation-correction:${current.currentStep}`,
             freshSession: correction !== null,
             recoveryContext: resolvedContext(),
           },
@@ -3793,9 +4056,11 @@ ${JSON.stringify(state().previousFindings, null, 2)}${lazyCorrectionPrompt(corre
         if (output === null) {
           return false;
         }
-        const result = normalizeCleanConfirmationResult(
+        const result = normalizeConfirmationRoleOutput(
           output,
           current.previousFindings,
+          current.finalizationResult.validationChanged,
+          { clean: true },
         );
         const confirmedFingerprint = await contentFingerprint();
         const confirmedValidationFingerprint =
@@ -3806,7 +4071,7 @@ ${JSON.stringify(state().previousFindings, null, 2)}${lazyCorrectionPrompt(corre
           confirmedFingerprint !== inspectedFingerprint ||
           confirmedValidationFingerprint !== inspectedValidationFingerprint
         ) {
-          await transition({ ...state(), pendingLazyCorrection: null });
+          await transition({ ...state(), pendingConfirmationCorrection: null });
           await pause("unsafe_git_state", {
             code: "ERR_CLEAN_CONFIRMATION_FINGERPRINT_CHANGED",
           });
@@ -3814,20 +4079,6 @@ ${JSON.stringify(state().previousFindings, null, 2)}${lazyCorrectionPrompt(corre
         }
         if (result.status === "PRODUCT_DECISION_REQUIRED") {
           return productDecision(result.decision, "IMPLEMENT");
-        }
-        const validationChanged = current.finalizationResult.validationChanged;
-        if (
-          (validationChanged && result.validationChange === "UNCHANGED") ||
-          (!validationChanged && result.validationChange !== "UNCHANGED")
-        ) {
-          throw invalidRoleOutput(
-            "Clean confirmation returned an inconsistent validation-change decision.",
-            context,
-            {
-              field: "validationChange",
-              constraint: "matches-finalization-validation-change",
-            },
-          );
         }
         const reviewResult = {
           status: result.status === "CLEAN" ? "APPROVED" : "FINDINGS",
@@ -3856,10 +4107,14 @@ ${JSON.stringify(state().previousFindings, null, 2)}${lazyCorrectionPrompt(corre
             {
               ...state(),
               ...acceptedValidation,
+              ...clearedCandidateAndTerminalGate(),
               workflowState: "CHECK_AND_FIX",
-              pendingLazyCorrection: null,
-              reviewResult,
-              reviewedFingerprint: confirmedFingerprint,
+              candidateReviewResult: {
+                status: "FINDINGS",
+                findingIds: result.findings.map(({ id }) => id),
+                fingerprint: confirmedFingerprint,
+              },
+              candidateReviewedFingerprint: confirmedFingerprint,
               findings: result.findings,
               previousFindings: result.findings,
               correctionHistory: progress.history,
@@ -3884,7 +4139,7 @@ ${JSON.stringify(state().previousFindings, null, 2)}${lazyCorrectionPrompt(corre
             ...state(),
             ...acceptedValidation,
             workflowState: "COMMIT",
-            pendingLazyCorrection: null,
+            pendingConfirmationCorrection: null,
             reviewResult,
             reviewedFingerprint: confirmedFingerprint,
             cleanConfirmationFingerprint: confirmedFingerprint,
@@ -3903,11 +4158,62 @@ ${JSON.stringify(state().previousFindings, null, 2)}${lazyCorrectionPrompt(corre
         );
         return true;
       } catch (cause) {
-        const resolution = await handleInvalidLazyOutput(cause, context, scope);
-        if (resolution === "retry") {
+        if (
+          cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT" ||
+          !isOutputDiagnostic(cause.diagnostic)
+        ) {
+          throw cause;
+        }
+        const diagnostics = outputDiagnostics(cause, context).slice(
+          0,
+          MAX_DIAGNOSTIC_ITEMS,
+        );
+        const pendingCorrection = { ...scope, diagnostics };
+        if (state().confirmationCorrection === null) {
+          await transition(
+            {
+              ...state(),
+              confirmationCorrection: pendingCorrection,
+              pendingConfirmationCorrection: pendingCorrection,
+            },
+            {
+              publicActivity: activity(
+                "worker",
+                "confirmation",
+                "confirmation-correction",
+                `Worker must correct ${diagnostics.length} confirmation contract ${diagnostics.length === 1 ? "violation" : "violations"}.`,
+              ),
+            },
+          );
           continue;
         }
-        return resolution === "defer";
+        await transition(
+          {
+            ...state(),
+            workflowState: "WAITING_FOR_USER",
+            pendingConfirmationCorrection: pendingCorrection,
+          },
+          {
+            pause: {
+              reason: "confirmation_output_invalid",
+              code: "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+              explanation:
+                "The bounded automatic terminal-confirmation correction remains invalid. Retry the same read-only correction after the backend can satisfy the unchanged contract.",
+              evidence: diagnostics.map(
+                ({ field, constraint }) =>
+                  `Worker field ${field} violated ${constraint}.`,
+              ),
+              resumeState: "CONFIRM",
+            },
+            publicActivity: activity(
+              "runner",
+              "confirmation",
+              "paused",
+              "Plan execution paused: confirmation_output_invalid.",
+            ),
+          },
+        );
+        return false;
       }
     }
   }
@@ -3916,19 +4222,273 @@ ${JSON.stringify(state().previousFindings, null, 2)}${lazyCorrectionPrompt(corre
     const step = planStep();
     const context = reviewOutputContext();
 
+    async function verifiedCandidateScope() {
+      const current = state();
+      try {
+        await runtime.git.assertUnchanged(current.repositoryBaseline);
+      } catch (cause) {
+        if (cause?.code !== "ERR_READ_ONLY_REPOSITORY_CHANGED") {
+          throw cause;
+        }
+        await pause("unsafe_git_state", { code: cause.code });
+        return null;
+      }
+      const fingerprint = await contentFingerprint();
+      const correctionScope = reviewCorrectionScope(current);
+      if (
+        current.reviewCorrection !== null &&
+        !reviewCorrectionMatchesScope(current.reviewCorrection, correctionScope)
+      ) {
+        await transition({
+          ...current,
+          reviewCorrection: null,
+          pendingReviewCorrection: null,
+        });
+      }
+      return Object.freeze({ correctionScope, fingerprint });
+    }
+
+    function candidateReviewPrompt(evidence, correction) {
+      const current = state();
+      return `${CANDIDATE_REVIEW_INSTRUCTIONS}
+
+Reuse an existing ID for an unchanged finding. Use FINDINGS with every actionable blocker.
+
+${evidence}
+
+Current planned commit:
+## Commit ${step.number}: ${step.subject}
+
+${step.body}
+
+Previous candidate findings for this step:
+${JSON.stringify(current.previousFindings, null, 2)}${
+        current.reviewReconsideration.length === 0
+          ? ""
+          : `\n\nReconsider these current finding IDs as requested by the Arbiter:\n${current.reviewReconsideration.join(", ")}`
+      }
+
+Prior decisions for this step:
+${JSON.stringify(priorFindingDecisions(), null, 2)}
+
+User overrides are runner-owned audit decisions. Do not describe an override as Reviewer acceptance.${
+        correction === null
+          ? ""
+          : `\n\n${REVIEW_CORRECTION_INSTRUCTIONS}\n\nPending correction diagnostic batch:\n${JSON.stringify(correction, null, 2)}`
+      }`;
+    }
+
+    let scope;
+    let result;
+    while (true) {
+      scope = await verifiedCandidateScope();
+      if (scope === null) {
+        return false;
+      }
+      const current = state();
+      const correction = current.pendingReviewCorrection;
+      try {
+        const output = await runRole(
+          "reviewer",
+          CANDIDATE_REVIEW_SCHEMA,
+          (evidence) => candidateReviewPrompt(evidence, correction),
+          {
+            checkpoint:
+              correction === null
+                ? `commit:${current.currentStep}`
+                : `candidate-review-correction:${current.currentStep}`,
+            freshSession: correction !== null,
+            recoveryContext: resolvedContext(),
+          },
+        );
+        if (output === null) {
+          return false;
+        }
+        result = normalizeCandidateReviewRoleOutput(
+          output,
+          current.previousFindings,
+        );
+        scope = await verifiedCandidateScope();
+        if (scope === null) {
+          return false;
+        }
+        break;
+      } catch (cause) {
+        if (
+          cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT" ||
+          !isOutputDiagnostic(cause.diagnostic)
+        ) {
+          throw cause;
+        }
+        const diagnostics = outputDiagnostics(cause, context).slice(
+          0,
+          MAX_DIAGNOSTIC_ITEMS,
+        );
+        const pendingCorrection = {
+          ...scope.correctionScope,
+          diagnostics,
+        };
+        if (state().reviewCorrection === null) {
+          await transition(
+            {
+              ...state(),
+              reviewCorrection: pendingCorrection,
+              pendingReviewCorrection: pendingCorrection,
+            },
+            {
+              publicActivity: activity(
+                "reviewer",
+                "review",
+                "review-correction",
+                `Reviewer must correct ${diagnostics.length} candidate-review contract ${diagnostics.length === 1 ? "violation" : "violations"}.`,
+              ),
+            },
+          );
+          continue;
+        }
+        await transition(
+          {
+            ...state(),
+            workflowState: "WAITING_FOR_USER",
+            pendingReviewCorrection: pendingCorrection,
+          },
+          {
+            pause: {
+              reason: "review_output_invalid",
+              code: "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+              explanation:
+                "The bounded automatic candidate-Reviewer correction remains invalid. Retry the same read-only correction after the backend can satisfy the unchanged contract.",
+              evidence: diagnostics.map(
+                ({ field, constraint }) =>
+                  `Reviewer field ${field} violated ${constraint}.`,
+              ),
+              resumeState: "REVIEW",
+            },
+            publicActivity: activity(
+              "runner",
+              "review",
+              "paused",
+              "Plan execution paused: review_output_invalid.",
+            ),
+          },
+        );
+        return false;
+      }
+    }
+    if (result.status === "PRODUCT_DECISION_REQUIRED") {
+      return productDecision(result.decision, "IMPLEMENT");
+    }
+    const reviewedFingerprint = await contentFingerprint();
+    if (reviewedFingerprint !== scope.fingerprint) {
+      await pause("unsafe_git_state", {
+        code: "ERR_CANDIDATE_REVIEW_FINGERPRINT_CHANGED",
+      });
+      return false;
+    }
+    const candidateReviewResult = {
+      status: result.status,
+      findingIds:
+        result.status === "FINDINGS" ? result.findings.map(({ id }) => id) : [],
+      fingerprint: reviewedFingerprint,
+    };
+    const reportedFindings =
+      result.status === "FINDINGS"
+        ? result.findings.filter(
+            ({ id }) => !findingOverrideApplies(id, reviewedFingerprint),
+          )
+        : [];
+    const deferredFindings = state().previousFindings.filter(
+      ({ id }) =>
+        state().pendingDisputes.some(({ findingId }) => findingId === id) &&
+        !reportedFindings.some((finding) => finding.id === id),
+    );
+    const findings = [...reportedFindings, ...deferredFindings];
+    if (findings.length > 0) {
+      const correction = correctionUpdate({
+        fingerprint: reviewedFingerprint,
+        finalizationIssueIds: [],
+        findingIds: findings.map(({ id }) => id),
+      });
+      await transition(
+        {
+          ...state(),
+          workflowState: "RESOLVE_FINDINGS",
+          candidateReviewResult,
+          candidateReviewedFingerprint: reviewedFingerprint,
+          findings,
+          previousFindings: result.findings,
+          pendingDisputes: state().pendingDisputes,
+          correctionHistory: correction.history,
+          sameFindingRounds: correction.sameFindingRounds,
+          pendingCorrection: false,
+          blockedSinceStagnation: correction.blockedSinceStagnation,
+          reviewerStep: state().currentStep,
+          reviewReconsideration: [],
+          pendingReviewCorrection: null,
+        },
+        {
+          nextCounters: correction.counters,
+          publicActivity: activity(
+            "reviewer",
+            "review",
+            "findings",
+            `Candidate review left ${findings.length} blocking findings.`,
+          ),
+        },
+      );
+      return true;
+    }
+    await transition(
+      {
+        ...state(),
+        workflowState:
+          state().pendingDisputes.length === 0
+            ? "FINALIZE"
+            : "RESOLVE_FINDINGS",
+        candidateReviewResult,
+        candidateReviewedFingerprint: reviewedFingerprint,
+        findings: [],
+        previousFindings:
+          state().pendingDisputes.length === 0
+            ? result.status === "FINDINGS"
+              ? result.findings
+              : []
+            : state().previousFindings,
+        pendingDisputes: state().pendingDisputes,
+        pendingCorrection: state().pendingCorrection,
+        reviewerStep: state().currentStep,
+        reviewReconsideration: [],
+        pendingReviewCorrection: null,
+      },
+      {
+        publicActivity: activity(
+          "reviewer",
+          "review",
+          result.status === "APPROVED" ? "approved" : "overrides-applied",
+          "Candidate review converged before terminal finalization.",
+        ),
+      },
+    );
+    return true;
+  }
+
+  async function runIndependentConfirmationTurn() {
+    const step = planStep();
+    const context = confirmationOutputContext("reviewer");
+
     async function pauseForReviewScopeDrift(code) {
       await transition(
         {
           ...state(),
           workflowState: "WAITING_FOR_USER",
-          reviewCorrection: null,
-          pendingReviewCorrection: null,
+          confirmationCorrection: null,
+          pendingConfirmationCorrection: null,
         },
         {
           pause: { reason: "unsafe_git_state", code },
           publicActivity: activity(
             "runner",
-            "review",
+            "confirmation",
             "paused",
             "Plan execution paused: unsafe_git_state.",
           ),
@@ -3965,15 +4525,18 @@ ${JSON.stringify(state().previousFindings, null, 2)}${lazyCorrectionPrompt(corre
           "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED",
         );
       }
-      const correctionScope = reviewCorrectionScope(current);
+      const correctionScope = confirmationCorrectionScope(current);
       if (
-        current.reviewCorrection !== null &&
-        !reviewCorrectionMatchesScope(current.reviewCorrection, correctionScope)
+        current.confirmationCorrection !== null &&
+        !reviewCorrectionMatchesScope(
+          current.confirmationCorrection,
+          correctionScope,
+        )
       ) {
         await transition({
           ...current,
-          reviewCorrection: null,
-          pendingReviewCorrection: null,
+          confirmationCorrection: null,
+          pendingConfirmationCorrection: null,
         });
       }
       return Object.freeze({ correctionScope, fingerprint });
@@ -4025,7 +4588,7 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}
 User overrides are runner-owned audit decisions. Do not describe an override as Reviewer acceptance.${
         correction === null
           ? ""
-          : `\n\n${REVIEW_CORRECTION_INSTRUCTIONS}\n\nPending correction diagnostic batch:\n${JSON.stringify(correction, null, 2)}`
+          : `\n\n${CONFIRMATION_CORRECTION_INSTRUCTIONS}\n\nPending correction diagnostic batch:\n${JSON.stringify(correction, null, 2)}`
       }`;
     }
 
@@ -4037,7 +4600,7 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
         return false;
       }
       const current = state();
-      const correction = current.pendingReviewCorrection;
+      const correction = current.pendingConfirmationCorrection;
       try {
         const output = await runRole(
           "reviewer",
@@ -4047,7 +4610,7 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
             checkpoint:
               correction === null
                 ? `commit:${current.currentStep}`
-                : `review-correction:${current.currentStep}`,
+                : `confirmation-correction:${current.currentStep}`,
             freshSession: correction !== null,
             recoveryContext: resolvedContext(),
           },
@@ -4055,7 +4618,7 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
         if (output === null) {
           return false;
         }
-        result = normalizeReviewRoleOutput(
+        result = normalizeConfirmationRoleOutput(
           output,
           current.previousFindings,
           current.finalizationResult.validationChanged,
@@ -4080,21 +4643,21 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
           ...scope.correctionScope,
           diagnostics,
         };
-        if (state().reviewCorrection === null) {
+        if (state().confirmationCorrection === null) {
           const violationLabel =
             diagnostics.length === 1 ? "violation" : "violations";
           await transition(
             {
               ...state(),
-              reviewCorrection: pendingCorrection,
-              pendingReviewCorrection: pendingCorrection,
+              confirmationCorrection: pendingCorrection,
+              pendingConfirmationCorrection: pendingCorrection,
             },
             {
               publicActivity: activity(
                 "reviewer",
-                "review",
-                "review-correction",
-                `reviewer must correct ${diagnostics.length} review contract ${violationLabel}.`,
+                "confirmation",
+                "confirmation-correction",
+                `Reviewer must correct ${diagnostics.length} confirmation contract ${violationLabel}.`,
               ),
             },
           );
@@ -4104,11 +4667,11 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
           {
             ...state(),
             workflowState: "WAITING_FOR_USER",
-            pendingReviewCorrection: pendingCorrection,
+            pendingConfirmationCorrection: pendingCorrection,
           },
           {
             pause: {
-              reason: "review_output_invalid",
+              reason: "confirmation_output_invalid",
               code: "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
               explanation:
                 "The bounded automatic final Reviewer correction remains invalid. Retry the same read-only correction after the backend can satisfy the unchanged contract.",
@@ -4116,13 +4679,13 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
                 ({ field, constraint }) =>
                   `Reviewer field ${field} violated ${constraint}.`,
               ),
-              resumeState: "REVIEW",
+              resumeState: "CONFIRM",
             },
             publicActivity: activity(
               "runner",
-              "review",
+              "confirmation",
               "paused",
-              "Plan execution paused: review_output_invalid.",
+              "Plan execution paused: confirmation_output_invalid.",
             ),
           },
         );
@@ -4196,13 +4759,13 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
           blockedSinceStagnation: correction.blockedSinceStagnation,
           reviewerStep: current.currentStep,
           reviewReconsideration: [],
-          pendingReviewCorrection: null,
+          pendingConfirmationCorrection: null,
         },
         {
           nextCounters: correction.counters,
           publicActivity: activity(
             "reviewer",
-            "review",
+            "confirmation",
             "findings",
             `Review left ${findings.length} non-overridden blocking findings.`,
           ),
@@ -4231,12 +4794,12 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
         pendingCorrection: false,
         reviewerStep: current.currentStep,
         reviewReconsideration: [],
-        pendingReviewCorrection: null,
+        pendingConfirmationCorrection: null,
       },
       {
         publicActivity: activity(
           "reviewer",
-          "review",
+          "confirmation",
           result.status === "APPROVED" ? "approved" : "overrides-applied",
           result.status === "APPROVED"
             ? "Review approved the finalized content."
@@ -4287,9 +4850,9 @@ ${JSON.stringify(current.pendingDisputes, null, 2)}`,
     const decisions = new Map(
       result.decisions.map((decision) => [decision.findingId, decision]),
     );
-    const reviewPending =
-      current.reviewedFingerprint === null ||
-      current.reviewResult?.validationChange === "REJECTED";
+    const terminalConfirmation =
+      current.finalizationResult?.status === "PASS" &&
+      current.reviewResult !== null;
     const findings = disputedFindings.filter((finding) => {
       return decisions.get(finding.id)?.direction !== "WITHDRAW";
     });
@@ -4319,13 +4882,30 @@ ${JSON.stringify(current.pendingDisputes, null, 2)}`,
     await transition(
       {
         ...current,
-        workflowState: reviewPending
-          ? "REVIEW"
-          : findings.length === 0 && pendingDisputes.length === 0
-            ? "COMMIT"
+        ...(findings.length === 0 && pendingDisputes.length === 0
+          ? terminalConfirmation
+            ? {
+                confirmationCorrection: null,
+                pendingConfirmationCorrection: null,
+                cleanConfirmationFingerprint: null,
+                reviewResult: null,
+                reviewedFingerprint: null,
+              }
+            : {
+                reviewCorrection: null,
+                pendingReviewCorrection: null,
+                candidateReviewResult: null,
+                candidateReviewedFingerprint: null,
+              }
+          : {}),
+        workflowState:
+          findings.length === 0 && pendingDisputes.length === 0
+            ? terminalConfirmation
+              ? "CONFIRM"
+              : "REVIEW"
             : "RESOLVE_FINDINGS",
-        findings: reviewPending ? [] : findings,
-        pendingDisputes: reviewPending ? [] : pendingDisputes,
+        findings,
+        pendingDisputes,
         disputeHistory: history,
       },
       {
@@ -4383,15 +4963,35 @@ ${JSON.stringify(priorFindingDecisions([dispute.findingId]), null, 2)}`,
     const pendingDisputes = current.pendingDisputes.filter(
       ({ findingId }) => findingId !== dispute.findingId,
     );
+    const blockersResolved =
+      findings.length === 0 && pendingDisputes.length === 0;
+    const terminalConfirmation =
+      current.finalizationResult?.status === "PASS" &&
+      current.reviewResult !== null;
     await transition(
       {
         ...state(),
-        workflowState:
-          findings.length === 0 && pendingDisputes.length === 0
-            ? current.reviewResult?.validationChange === "REJECTED"
-              ? "REVIEW"
-              : "COMMIT"
-            : "RESOLVE_FINDINGS",
+        ...(blockersResolved
+          ? terminalConfirmation
+            ? {
+                confirmationCorrection: null,
+                pendingConfirmationCorrection: null,
+                cleanConfirmationFingerprint: null,
+                reviewResult: null,
+                reviewedFingerprint: null,
+              }
+            : {
+                reviewCorrection: null,
+                pendingReviewCorrection: null,
+                candidateReviewResult: null,
+                candidateReviewedFingerprint: null,
+              }
+          : {}),
+        workflowState: blockersResolved
+          ? terminalConfirmation
+            ? "CONFIRM"
+            : "REVIEW"
+          : "RESOLVE_FINDINGS",
         findings,
         pendingDisputes,
         findingArbitrations: [
@@ -4464,13 +5064,7 @@ ${JSON.stringify(
       const nextState = {
         ...state(),
         implementationDirection: direction,
-        finalizationResult: null,
-        finalizedFingerprint: null,
-        reviewCorrection: null,
-        pendingReviewCorrection: null,
-        cleanConfirmationFingerprint: null,
-        reviewResult: null,
-        reviewedFingerprint: null,
+        ...clearedCandidateAndTerminalGate(),
         previousFindings:
           current.findings.length === 0
             ? current.previousFindings
@@ -4519,10 +5113,29 @@ ${JSON.stringify(
       return true;
     }
     if (result.direction === "RECONSIDER_FINDINGS") {
+      const terminalConfirmation =
+        current.finalizationResult?.status === "PASS" &&
+        current.reviewResult !== null;
       await transition(
         {
           ...state(),
-          workflowState: "REVIEW",
+          ...(terminalConfirmation
+            ? {
+                workflowState: "CONFIRM",
+                confirmationCorrection: null,
+                pendingConfirmationCorrection: null,
+                cleanConfirmationFingerprint: null,
+                reviewResult: null,
+                reviewedFingerprint: null,
+                previousFindings: current.findings,
+                findings: [],
+              }
+            : {
+                workflowState: "REVIEW",
+                ...clearedTerminalGate(),
+                reviewCorrection: null,
+                pendingReviewCorrection: null,
+              }),
           blockedSinceStagnation: 0,
           stagnationArbitrationUsed: true,
           stagnationDirection: direction,
@@ -4560,7 +5173,10 @@ ${JSON.stringify(
 
   async function runResolutionTurn() {
     const current = state();
-    if (current.finalizationResult?.status === "PASS") {
+    if (
+      current.settings.mode === "independent" &&
+      current.finalizationResult?.status !== "FAIL"
+    ) {
       const arbitration = current.pendingDisputes.find(disputeNeedsArbitration);
       if (arbitration !== undefined) {
         return arbitrateFinding(arbitration);
@@ -4670,13 +5286,11 @@ ${JSON.stringify(
       return productDecision(result.decision, "IMPLEMENT");
     }
     if (result.status === "BLOCKED") {
+      const resumeState = state().workflowState;
       await pause("environment_blocked", {
         explanation: result.reason,
         evidence: result.evidence,
-        resumeState:
-          state().workflowState === "FINALIZE"
-            ? "FINALIZE"
-            : "RESOLVE_FINDINGS",
+        resumeState,
       });
       return false;
     }
@@ -4744,14 +5358,9 @@ ${JSON.stringify(
       await transition(
         {
           ...state(),
-          workflowState: "FINALIZE",
-          finalizationResult: null,
-          finalizedFingerprint: null,
-          reviewCorrection: null,
-          pendingReviewCorrection: null,
-          cleanConfirmationFingerprint: null,
-          reviewResult: null,
-          reviewedFingerprint: null,
+          ...clearedCandidateAndTerminalGate(),
+          workflowState:
+            current.settings.mode === "lazy" ? "CHECK_AND_FIX" : "REVIEW",
           previousFindings:
             current.findings.length === 0
               ? current.previousFindings
@@ -4771,7 +5380,7 @@ ${JSON.stringify(
             "worker",
             "resolution",
             "fixed",
-            "Worker completed a finding-resolution fix round.",
+            "Worker completed a finding-resolution fix round; candidate convergence is required again.",
           ),
         },
       );
@@ -5058,6 +5667,9 @@ ${step.subject}`),
           finalizedFingerprint: null,
           reviewCorrection: null,
           pendingReviewCorrection: null,
+          candidateReviewResult: null,
+          candidateReviewedFingerprint: null,
+          candidateConfirmationFingerprint: null,
           cleanConfirmationFingerprint: null,
           reviewResult: null,
           reviewedFingerprint: null,
@@ -5092,6 +5704,8 @@ ${step.subject}`),
         pendingFinalizationCorrection: null,
         reviewCorrection: null,
         pendingReviewCorrection: null,
+        confirmationCorrection: null,
+        pendingConfirmationCorrection: null,
         lazyCorrections: [],
         pendingLazyCorrection: null,
         pendingCommit: null,
@@ -5124,7 +5738,14 @@ ${step.subject}`),
       return currentRun;
     }
     const resumeActionSuperseded = await prepareValidationMigrationResume();
-    if (!resumeActionSuperseded && !(await applyResumeAction())) {
+    const candidateResumeActionSuperseded = resumeActionSuperseded
+      ? false
+      : await prepareCandidateMigrationResume();
+    if (
+      !resumeActionSuperseded &&
+      !candidateResumeActionSuperseded &&
+      !(await applyResumeAction())
+    ) {
       return currentRun;
     }
     if (state().workflowState === "WAITING_FOR_USER") {
@@ -5147,6 +5768,7 @@ ${step.subject}`),
         (!state().preflightComplete ||
           ([
             "backend_unavailable",
+            "confirmation_output_invalid",
             "environment_blocked",
             "finalization_cannot_pass",
             "finalization_skill_invalid",
@@ -5162,6 +5784,7 @@ ${step.subject}`),
               "FINALIZE",
               "CHECK_AND_FIX",
               "CLEAN_CONFIRM",
+              "CONFIRM",
               "REVIEW",
               "RESOLVE_FINDINGS",
               "COMMIT",
@@ -5413,6 +6036,17 @@ ${evidence}`,
         continue;
       }
 
+      if (current.workflowState === "CONFIRM") {
+        const confirmed =
+          current.settings.mode === "lazy"
+            ? await runLazyConfirmationTurn()
+            : await runIndependentConfirmationTurn();
+        if (!confirmed) {
+          return currentRun;
+        }
+        continue;
+      }
+
       if (current.workflowState === "CHECK_AND_FIX") {
         if (!(await runCheckAndFixTurn())) {
           return currentRun;
@@ -5428,12 +6062,6 @@ ${evidence}`,
       }
 
       if (current.workflowState === "REVIEW") {
-        if (current.pendingDisputes.length > 0) {
-          if (!(await reconsiderDisputes())) {
-            return currentRun;
-          }
-          continue;
-        }
         if (!(await runReviewTurn())) {
           return currentRun;
         }

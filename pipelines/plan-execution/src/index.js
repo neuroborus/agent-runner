@@ -22,9 +22,12 @@ export {
   BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
   CHECK_AND_FIX_INSTRUCTIONS,
+  CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS,
+  CANDIDATE_REVIEW_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
   CLEAN_CONFIRM_INSTRUCTIONS,
   COMMIT_INSTRUCTIONS,
+  CONFIRMATION_CORRECTION_INSTRUCTIONS,
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
   FINALIZATION_CORRECTION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
@@ -113,6 +116,7 @@ const TASK_INPUTS = Object.freeze({
 });
 const RETRYABLE_PAUSE_REASONS = new Set([
   "backend_unavailable",
+  "confirmation_output_invalid",
   "environment_blocked",
   "finalization_cannot_pass",
   "finalization_skill_invalid",
@@ -130,6 +134,7 @@ const RESUMABLE_WORKFLOW_STATES = new Set([
   "FINALIZE",
   "CHECK_AND_FIX",
   "CLEAN_CONFIRM",
+  "CONFIRM",
   "REVIEW",
   "RESOLVE_FINDINGS",
   "COMMIT",
@@ -149,6 +154,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   commit_contract_violated:
     "The attempted commit did not satisfy its one-shot authorization contract.",
   commit_failed: "The authorized commit could not be verified as complete.",
+  confirmation_output_invalid:
+    "The terminal confirmation result remains invalid and requires an explicit read-only retry.",
   dispute_limit_reached: "A finding reached its configured dispute limit.",
   environment_blocked:
     "Required validation is blocked by the execution environment.",
@@ -176,7 +183,7 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   read_only_agent_mutated_repository:
     "A read-only turn contaminated the repository; abandon this run and restart from an uncontaminated worktree.",
   review_output_invalid:
-    "The final Reviewer result remains invalid and requires an explicit read-only retry.",
+    "The candidate Reviewer result remains invalid and requires an explicit read-only retry.",
   task_input_changed: "A task or plan input changed after the run began.",
   unexpected_git_identity_change:
     "The effective Git identity changed during execution.",
@@ -189,6 +196,7 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
 });
 const PUBLIC_DETAIL_REASONS = new Set([
   "environment_blocked",
+  "confirmation_output_invalid",
   "bootstrap_inventory_capacity_exhausted",
   "finalization_cannot_pass",
   "finalization_skill_invalid",
@@ -443,13 +451,14 @@ function validateResumeAction(run, action) {
       !["fix_limit_reached", "no_progress", "dispute_limit_reached"].includes(
         run.pause?.reason,
       ) ||
-      state.finalizationResult?.status !== "PASS" ||
-      state.reviewedFingerprint === null ||
+      (state.reviewedFingerprint === null &&
+        state.candidateReviewedFingerprint === null) ||
       !state.findings?.some(({ id }) => id === action.findingId) ||
       state.findingOverrides.some(
         ({ findingId, fingerprint }) =>
           findingId === action.findingId &&
-          fingerprint === state.reviewedFingerprint,
+          fingerprint ===
+            (state.reviewedFingerprint ?? state.candidateReviewedFingerprint),
       )
     ) {
       throw new Error("Finding override is not applicable.");
@@ -466,6 +475,7 @@ function validateResumeAction(run, action) {
         (!state.preflightComplete ||
           ([
             "backend_unavailable",
+            "confirmation_output_invalid",
             "environment_blocked",
             "finalization_cannot_pass",
             "finalization_skill_invalid",
@@ -943,9 +953,106 @@ export function migratePlanExecutionStateV12(run) {
   });
 }
 
+function migrateLegacyConfirmationCorrection(correction) {
+  if (correction === null) {
+    return null;
+  }
+  return Object.freeze({
+    ...correction,
+    diagnostics: Object.freeze(
+      correction.diagnostics.map((diagnostic) =>
+        Object.freeze({
+          ...diagnostic,
+          phase: "confirmation",
+          contract: "confirmation",
+        }),
+      ),
+    ),
+  });
+}
+
+export function migratePlanExecutionStateV13(run) {
+  const current = run.pipelineState;
+  const immutableTerminal = ["DONE", "FAILED"].includes(current.workflowState);
+  const verificationOnly = current.pendingCommit?.status === "consumed";
+  const paused = current.workflowState === "WAITING_FOR_USER";
+  const effectiveCheckpoint = paused
+    ? (run.pause?.resumeState ?? current.pendingEdit?.suspendedState)
+    : current.workflowState;
+  const prepared =
+    current.preflightComplete &&
+    current.resolvedSummary !== null &&
+    current.currentStep !== null;
+  const needsCandidateMigration =
+    prepared &&
+    !immutableTerminal &&
+    !verificationOnly &&
+    effectiveCheckpoint !== "IMPLEMENT";
+  const preservedFingerprint =
+    current.reviewedFingerprint ?? current.finalizedFingerprint;
+  const preserveAcceptedGate =
+    (immutableTerminal || verificationOnly) && preservedFingerprint !== null;
+  const preserveLegacyConfirmation =
+    (immutableTerminal || verificationOnly) &&
+    current.finalizationResult?.status === "PASS";
+  return Object.freeze({
+    ...current,
+    workflowState:
+      needsCandidateMigration && !paused
+        ? current.settings?.mode === "lazy"
+          ? "CHECK_AND_FIX"
+          : "REVIEW"
+        : current.workflowState,
+    reviewCorrection: null,
+    pendingReviewCorrection: null,
+    confirmationCorrection: preserveLegacyConfirmation
+      ? migrateLegacyConfirmationCorrection(current.reviewCorrection)
+      : null,
+    pendingConfirmationCorrection: preserveLegacyConfirmation
+      ? migrateLegacyConfirmationCorrection(current.pendingReviewCorrection)
+      : null,
+    candidateReviewResult: preserveAcceptedGate
+      ? Object.freeze({
+          status: "APPROVED",
+          findingIds: Object.freeze([]),
+          fingerprint: preservedFingerprint,
+        })
+      : null,
+    candidateReviewedFingerprint: preserveAcceptedGate
+      ? preservedFingerprint
+      : null,
+    candidateConfirmationFingerprint:
+      preserveAcceptedGate && current.settings?.mode === "lazy"
+        ? preservedFingerprint
+        : null,
+    candidateMigrationPending: needsCandidateMigration && paused,
+    ...(needsCandidateMigration
+      ? {
+          finalizationCorrections: Object.freeze([]),
+          pendingFinalizationCorrection: null,
+          lazyCorrections: Object.freeze([]),
+          pendingLazyCorrection: null,
+          cleanConfirmationFingerprint: null,
+          finalizationResult: null,
+          finalizedFingerprint: null,
+          reviewResult: null,
+          reviewedFingerprint: null,
+          previousFindings:
+            current.findings.length === 0
+              ? current.previousFindings
+              : current.findings,
+          findings: Object.freeze([]),
+          pendingDisputes: Object.freeze([]),
+          reviewReconsideration: Object.freeze([]),
+          pendingCommit: null,
+        }
+      : {}),
+  });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
-  stateVersion: 13,
+  stateVersion: 14,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -959,6 +1066,7 @@ export const planExecutionPipeline = Object.freeze({
     10: migratePlanExecutionStateV10,
     11: migratePlanExecutionStateV11,
     12: migratePlanExecutionStateV12,
+    13: migratePlanExecutionStateV13,
   }),
   roles: ROLES,
   resolveActiveRoles,
@@ -967,7 +1075,7 @@ export const planExecutionPipeline = Object.freeze({
   runOptions: Object.freeze(["project", "task", "mode", ...ROLES]),
   requiredRunOptions: Object.freeze(["project", "task"]),
   description:
-    "Execute, finalize, review, and commit each step of a commit plan.",
+    "Execute, converge, finalize, confirm, and commit each plan step.",
   projections: Object.freeze({
     clarification: projectClarification,
     pause: projectPause,

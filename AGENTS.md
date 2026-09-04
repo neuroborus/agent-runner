@@ -109,10 +109,12 @@ All pipelines additionally require:
 - Allow only the Worker to create the planned local commit, and only in the one-shot `COMMIT` turn explicitly authorized by the runner after the gate passes.
 - Reject all other agent history/ref changes and verify that remote configuration remains unchanged across every agent turn.
 - Require the exact validated plan subject, reject bodies/footers, and reject `Co-authored-by` trailers.
-- Tie finalization and independent review or lazy clean confirmation to the
-  same staging-independent content fingerprint and invalidate the evidence
-  after any content change. A lazy check/fix change must pass full finalization
-  again before confirmation.
+- Converge independent candidate review or lazy check/fix plus candidate clean
+  confirmation before `FINALIZE`, then tie finalization and one distinct
+  read-only terminal confirmation to the same staging-independent content
+  fingerprint. Invalidate candidate, finalization, and confirmation evidence
+  after any content-changing repair; the terminal formatter is reviewed by the
+  final confirmation over its resulting fingerprint.
 - In independent mode resolve every Reviewer finding by fix, withdrawal,
   arbitration, or explicit recorded user override. Route lazy confirmation
   findings directly to fixing; they are never disputed or arbitrated.

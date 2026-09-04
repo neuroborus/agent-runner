@@ -21,24 +21,26 @@ trusted-command snapshot rather than reloading mutable configuration.
 
 ## Finalization and semantic review
 
-Plan execution implements a step, runs its dedicated full finalization turn,
-and then applies the mode-specific review gate. Polishing follows the same
-shape for its complete change set. Finalization follows applicable repository
-guidance, runs required writable formatting before generation and every
-established non-mutating check, and accepts no omission or substitution. A
-project-required content change is fingerprinted after it finishes.
+Plan execution first converges a stable semantic candidate, then runs its
+dedicated full finalization turn, and finally applies a distinct read-only
+confirmation immediately before `COMMIT`. Polishing retains its independently
+owned workflow. Finalization follows applicable repository guidance, runs
+required writable formatting before generation and every established
+non-mutating check, and accepts no omission or substitution. A project-required
+content change is fingerprinted after it finishes.
 
-In independent mode, the Reviewer checks the complete current result and the
-finalization evidence. All findings remain blocking until fixed, withdrawn,
-arbitrated, or explicitly overridden for the exact reviewed fingerprint. A
-content-changing resolution invalidates the old evidence and requires complete
-finalization and review again.
+In independent mode, the Reviewer first checks the complete candidate without
+attesting finalization. All findings remain blocking until fixed, withdrawn,
+arbitrated, or explicitly overridden for the exact candidate fingerprint.
+After finalization passes, a separate Reviewer confirmation checks the finalized
+content and exact validation evidence. Confirmation findings return through
+candidate convergence, finalization, and confirmation again.
 
-In lazy mode, successful finalization enters a writable check-and-fix pass. Any
-change invalidates the evidence and returns through complete finalization. An
-unchanged pass requires a separate read-only clean confirmation. Only a clean
-result over unchanged fingerprints advances; findings return directly to the
-next check-and-fix pass.
+In lazy mode, writable check-and-fix and read-only candidate clean-confirmation
+turns converge before finalization. A passing finalization enters a distinct
+read-only terminal clean confirmation over the exact validation evidence. Only
+a clean result over unchanged fingerprints advances; findings return directly
+to the next check-and-fix pass.
 
 ## Evidence and fingerprints
 
@@ -55,8 +57,8 @@ the complete fingerprint-bound record before either finalization transition is
 attempted.
 
 If a planned change legitimately alters scripts, test discovery, validation
-configuration, or the inventory, the review gate must explicitly accept that
-complete change. An evasive or unauthorized change is a finding.
+configuration, or the inventory, terminal confirmation must explicitly accept
+that complete change. An evasive or unauthorized change is a finding.
 
 Runner-trusted checks are a narrow exception for commands that an agent sandbox
 cannot safely execute. The runner executes only the exact persisted executable
@@ -72,7 +74,9 @@ permission limitation is an environment blocker. The workflow preserves safe
 content and pauses at the precise resumable checkpoint; it does not weaken a
 check or grant broader access to manufacture a pass.
 
-Correction and dispute budgets are bounded. Exhaustion, repeated invalid
+Candidate-review and terminal-confirmation corrections are distinct, bounded,
+and resumable without retaining rejected provider output. Correction and
+dispute budgets are bounded. Exhaustion, repeated invalid
 structured output, unsafe reconciliation, or a non-converging loop pauses
 rather than accepting incomplete evidence.
 An unexpected runner-owned finalization-state invariant retains the last valid

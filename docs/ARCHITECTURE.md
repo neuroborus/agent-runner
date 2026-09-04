@@ -687,6 +687,18 @@ initializes both fields empty without moving active or terminal workflow
 positions, changing accepted gates or completed commits, reviving terminal
 runs, or replaying agent or commit effects.
 
+Plan execution state version 14 separates semantic candidate convergence from
+the terminal gate. Independent `REVIEW`, or lazy `CHECK_AND_FIX` plus candidate
+`CLEAN_CONFIRM`, now precedes `FINALIZE`; passing finalization enters the new
+read-only `CONFIRM` checkpoint before `COMMIT`. Candidate and terminal results,
+fingerprints, correction diagnostics, and public activity are distinct. The
+version-13 migration preserves terminal runs and consumed commit authorization
+on verification-only paths and retains an unfinished `IMPLEMENT` checkpoint.
+Evidence at every later active checkpoint that cannot prove the new ordering is
+invalidated and routed to safe mode-specific candidate convergence. Retained
+legacy terminal-Reviewer correction diagnostics are translated into the new
+terminal-confirmation namespace on immutable paths.
+
 Polishing state version 3 adopts the same resolved trusted-validation snapshot,
 per-check executor provenance, and fingerprint-bound evidence tuple. Its
 version-2 migration selects empty legacy trust, preserves safe workspace
@@ -843,13 +855,16 @@ pipeline review criteria and fixes any problem immediately. An unchanged
 result enters a separate read-only `CLEAN_CONFIRM` turn with the same criteria,
 an explicit edit prohibition, and a strict `CLEAN` or concrete-findings result.
 Advancement requires `CLEAN`, no repository mutation, and the exact inspected
-content fingerprint; execution and polishing also require the unchanged
-validation-infrastructure fingerprint and a valid validation-change decision.
+content fingerprint. In plan execution this first converges the candidate;
+`FINALIZE` follows, then a distinct read-only `CONFIRM` applies the validation-
+change decision to the finalized evidence. Polishing retains its existing
+finalization-bound clean confirmation until its owning workflow changes.
 Findings return directly to `CHECK_AND_FIX`, never to dispute or arbitration.
 Every change invalidates fingerprint-bound evidence. Plan-authoring drafts stay
 in external state and are deterministically validated only after confirmation;
-execution and polishing return through their complete `FINALIZE` gate after a
-change before another confirmation. Existing fix/revision, stable-finding,
+plan-execution terminal findings return through candidate convergence and
+complete finalization, while polishing changes return through its complete
+`FINALIZE` gate. Existing fix/revision, stable-finding,
 stagnation, and additional-round budgets bound the loop and never silently
 accept an unconfirmed result.
 
@@ -923,8 +938,9 @@ loopback, process-isolation, missing-service, permission, or comparable external
 constraints returns a bounded structured blocker. Plan execution and polishing
 persist `environment_blocked` rather than treating that condition as a code
 failure, preserve safe workspace content, and invalidate any stale
-fingerprint-bound finalization and review evidence. A content-changing finding
-resolution resumes at `FINALIZE`; an unchanged turn resumes at its original
+fingerprint-bound candidate, finalization, and confirmation evidence. A
+content-changing finding resolution resumes at `REVIEW` in independent mode or
+`CHECK_AND_FIX` in lazy mode; an unchanged turn resumes at its original
 checkpoint. Finalization always resumes at `FINALIZE`. The workflow does not
 weaken isolation or grant network or host temporary-directory access to bypass
 the unavailable validation.
@@ -935,7 +951,7 @@ substituted, replaced, or weakened checks are invalid output. The runner hashes
 the identified package scripts, test-discovery and runner files, skill guidance,
 and validation configuration rather than trusting an agent-supplied hash.
 Changing that inventory, its file set, or its fingerprint is provisional until
-the independent read-only Reviewer, or the lazy read-only clean confirmation,
+the independent read-only terminal Reviewer, or the lazy read-only terminal clean confirmation,
 accepts that the task or current plan step authorizes the complete change for
 the same content fingerprint. The confirming turn receives both the established
 and candidate tuples, so acceptance cannot depend on a prior native session.
@@ -951,11 +967,12 @@ configuration fingerprints. An unexpected persisted-state invariant therefore
 leaves the prior valid `FINALIZE` checkpoint available for the bounded public
 retry instead of turning the run into an opaque terminal failure.
 
-Plan execution gives each preparation phase one owner. Implementation,
-finding-resolution, and lazy check/fix turns do not invoke project finalization
+Plan execution gives each preparation phase one owner. Independent semantic
+review, or lazy check/fix and candidate clean confirmation, converges first.
+Implementation, finding-resolution, and lazy check/fix turns do not invoke project finalization
 or perform generic commit preparation. The dedicated finalization turn follows
 every substantive instruction in the selected guidance. It runs the writable
-repository formatter first, treats its output as candidate content, then runs
+repository formatter first, treats its output as the content under finalization, then runs
 generation, the non-mutating repository gate, Git whitespace checks, and
 staging-independent content review. Bootstrap,
 validation-migration, and finalization inventories deterministically reject
@@ -963,8 +980,8 @@ index mutation, staged or index-relative inspection, implicit
 worktree-versus-index assertions, alternate-index workarounds, and commit
 preparation; applicable content checks use `HEAD` or explicit trees.
 Established checks are input only to `FINALIZE`.
-After finalization and the mode-specific review gate bind the same content and
-validation-infrastructure fingerprints, the constrained local-commit executor
+After finalization and the distinct mode-specific terminal confirmation bind
+the same content and validation-infrastructure fingerprints, the constrained local-commit executor
 alone runs `git add -A`, fixed unstaged-clean, staged-diff whitespace, and
 nonempty-diff hygiene, and the subject-only commit with the validated plan
 subject. The contract is
@@ -1027,7 +1044,7 @@ introduces no daemon or shell DSL.
 
 Before plan execution or polishing accepts a producing role's bootstrap or
 legacy validation-migration inventory, and before plan execution fingerprints
-or reviews a finalization candidate, the root Git boundary verifies every
+finalization evidence, the root Git boundary verifies every
 validation-infrastructure entry is an existing regular file whose canonical
 repository-relative path exactly matches the proposed path. Missing files,
 directories, symlinks, and paths traversing a symlink are field-specific
@@ -1119,8 +1136,8 @@ workspace-write authority; any index drift is rejected. Plan execution retains
 its owning pipeline's one-shot commit reconciliation rules. `HEAD`, branch and
 detached state, local refs, remotes, Git identity, canonical root, and allowed
 runner paths must remain unchanged. The pipeline advances its baseline only
-after those checks, invalidates fingerprint-bound finalization and review
-evidence when content changed, and charges interrupted correction work once.
+after those checks, invalidates its fingerprint-bound gate evidence when
+content changed, and charges interrupted correction work once.
 The reconstructed request uses the complete recovery prompt in a fresh native
 session, and its `turn-started` event replaces the stale marker before normal
 post-turn reconciliation clears it. If a correction transition was already
