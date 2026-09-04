@@ -6,9 +6,12 @@ import {
   BOOTSTRAP_CORRECTION_INSTRUCTIONS,
   BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
+  CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS,
+  CANDIDATE_REVIEW_INSTRUCTIONS,
   CHECK_AND_FIX_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
   CLEAN_CONFIRM_INSTRUCTIONS,
+  CONFIRMATION_CORRECTION_INSTRUCTIONS,
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
   FINALIZATION_CORRECTION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
@@ -20,12 +23,15 @@ import {
   POLISH_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
   REVIEW_INSTRUCTIONS,
+  REVIEW_CORRECTION_INSTRUCTIONS,
   STAGNATION_INSTRUCTIONS,
 } from "../src/index.js";
 import {
   BOOTSTRAP_ARBITRATION_SCHEMA,
   BOOTSTRAP_RECONCILIATION_SCHEMA,
   BOOTSTRAP_SCHEMA,
+  CANDIDATE_CLEAN_CONFIRM_SCHEMA,
+  CANDIDATE_REVIEW_SCHEMA,
   CHECK_AND_FIX_SCHEMA,
   CLARIFICATION_SCHEMA,
   CLEAN_CONFIRM_SCHEMA,
@@ -171,6 +177,10 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
   assert.match(FINALIZATION_INSTRUCTIONS, /Do not weaken sandboxing/u);
   assert.match(REVIEW_INSTRUCTIONS, /Do not modify/u);
   assert.match(REVIEW_INSTRUCTIONS, /stable IDs/u);
+  assert.match(CANDIDATE_REVIEW_INSTRUCTIONS, /semantic candidate/u);
+  assert.match(CANDIDATE_REVIEW_INSTRUCTIONS, /Do not run.*finalization/u);
+  assert.match(REVIEW_CORRECTION_INSTRUCTIONS, /candidate-review/u);
+  assert.match(CONFIRMATION_CORRECTION_INSTRUCTIONS, /terminal-confirmation/u);
   assert.match(
     CHECK_AND_FIX_INSTRUCTIONS,
     /correct, idiomatic, minimal, and consistent/u,
@@ -178,7 +188,7 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
   assert.match(CHECK_AND_FIX_INSTRUCTIONS, /For CHANGED, use only/u);
   assert.match(
     CHECK_AND_FIX_INSTRUCTIONS,
-    /no supplied clean-confirmation finding remains/u,
+    /no supplied candidate-confirmation finding remains/u,
   );
   assert.match(CHECK_AND_FIX_INSTRUCTIONS, /Do not stage, unstage, or commit/u);
   assert.match(
@@ -207,6 +217,11 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
     /handoff evidence early/u,
   );
   assert.match(CLEAN_CONFIRM_INSTRUCTIONS, /Return CLEAN only/u);
+  assert.match(CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS, /Return CLEAN only/u);
+  assert.match(
+    CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS,
+    /Do not run the project finalization procedure/u,
+  );
   assert.match(FINDING_RESOLUTION_INSTRUCTIONS, /one batch/u);
   assert.match(FINDING_RESOLUTION_INSTRUCTIONS, /runner owns final staging/u);
   assert.match(
@@ -242,6 +257,8 @@ test("polishing schemas are strict, bounded, and deeply frozen", () => {
     BOOTSTRAP_RECONCILIATION_SCHEMA,
     BOOTSTRAP_ARBITRATION_SCHEMA,
     POLISH_SCHEMA,
+    CANDIDATE_REVIEW_SCHEMA,
+    CANDIDATE_CLEAN_CONFIRM_SCHEMA,
     FINALIZATION_SCHEMA,
     CHECK_AND_FIX_SCHEMA,
     CLEAN_CONFIRM_SCHEMA,

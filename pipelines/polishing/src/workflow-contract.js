@@ -12,10 +12,11 @@ export const WORKFLOW_STATES = Object.freeze([
   "CLARIFY",
   "BOOTSTRAP",
   "POLISH",
-  "FINALIZE",
+  "REVIEW",
   "CHECK_AND_FIX",
   "CLEAN_CONFIRM",
-  "REVIEW",
+  "FINALIZE",
+  "CONFIRM",
   "RESOLVE_FINDINGS",
   "HANDOFF",
   "WAITING_FOR_USER",
@@ -67,8 +68,16 @@ const PIPELINE_STATE_FIELDS = new Set([
   "pendingBootstrapCorrection",
   "finalizationCorrection",
   "pendingFinalizationCorrection",
+  "reviewCorrection",
+  "pendingReviewCorrection",
+  "confirmationCorrection",
+  "pendingConfirmationCorrection",
   "lazyCorrections",
   "pendingLazyCorrection",
+  "candidateReviewResult",
+  "candidateReviewedFingerprint",
+  "candidateConfirmationFingerprint",
+  "candidateMigrationPending",
   "cleanConfirmationFingerprint",
   "lazySourceForkConsumed",
   "polishSummary",
@@ -233,6 +242,12 @@ const FINALIZATION_CORRECTION_FIELDS = Object.freeze([
   "contentFingerprint",
   ...OUTPUT_DIAGNOSTIC_FIELDS,
 ]);
+const REVIEW_CORRECTION_FIELDS = Object.freeze([
+  "attempt",
+  "contentFingerprint",
+  "validationInfrastructureFingerprint",
+  "diagnostics",
+]);
 const LAZY_CORRECTION_FIELDS = Object.freeze([
   "attempt",
   "fixRoundCharged",
@@ -257,22 +272,22 @@ const PAUSE_RESUME_STATES = Object.freeze({
     "CHECK_AND_FIX",
     "CLEAN_CONFIRM",
     "REVIEW",
+    "CONFIRM",
     "RESOLVE_FINDINGS",
   ]),
   environment_blocked: Object.freeze([
     "POLISH",
     "FINALIZE",
     "CHECK_AND_FIX",
+    "REVIEW",
     "RESOLVE_FINDINGS",
   ]),
   finalization_cannot_pass: Object.freeze(["FINALIZE"]),
   finalization_skill_invalid: Object.freeze(["FINALIZE"]),
   finalization_skill_missing: Object.freeze(["FINALIZE"]),
-  lazy_output_invalid: Object.freeze([
-    "FINALIZE",
-    "CHECK_AND_FIX",
-    "CLEAN_CONFIRM",
-  ]),
+  confirmation_output_invalid: Object.freeze(["CONFIRM"]),
+  review_output_invalid: Object.freeze(["REVIEW"]),
+  lazy_output_invalid: Object.freeze(["CHECK_AND_FIX", "CLEAN_CONFIRM"]),
   fix_limit_reached: Object.freeze([
     "POLISH",
     "CHECK_AND_FIX",
@@ -1527,15 +1542,14 @@ export function normalizeCheckAndFixResult(payload) {
   assertExactFields(payload, fields, "Check/fix result", INVALID_OUTPUT_CODE);
   assertStructuredResult(payload);
   if (
-    ![
-      "CHANGED",
-      "REFINALIZE",
-      "UNCHANGED",
-      "BLOCKED",
-      "PRODUCT_DECISION_REQUIRED",
-    ].includes(payload.status)
+    !["CHANGED", "UNCHANGED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"].includes(
+      payload.status,
+    )
   ) {
-    throw outputError("Worker returned an invalid check/fix result.");
+    throw outputError(
+      "Worker returned an invalid check/fix result.",
+      outputConstraint("status", "supported-status"),
+    );
   }
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
     if (payload.summary !== "" || payload.reason !== "") {
@@ -1580,6 +1594,66 @@ export function normalizeCheckAndFixResult(payload) {
       INVALID_OUTPUT_CODE,
     ),
   });
+}
+
+export function normalizeCandidateReviewResult(
+  payload,
+  previousFindings = [],
+  { clean = false } = {},
+) {
+  const acceptedStatus = clean ? "CLEAN" : "APPROVED";
+  const fields = [
+    "status",
+    "findings",
+    "question",
+    "options",
+    "whyBlocked",
+    "evidence",
+  ];
+  assertExactFields(
+    payload,
+    fields,
+    "Candidate review result",
+    INVALID_OUTPUT_CODE,
+  );
+  assertStructuredResult(payload);
+  if (
+    ![acceptedStatus, "FINDINGS", "PRODUCT_DECISION_REQUIRED"].includes(
+      payload.status,
+    )
+  ) {
+    throw outputError("Agent returned an invalid candidate-review result.");
+  }
+  if (payload.status === "PRODUCT_DECISION_REQUIRED") {
+    if (!emptyArray(payload.findings)) {
+      throw outputError("Product decision must not include findings.");
+    }
+    return Object.freeze({
+      status: payload.status,
+      decision: normalizeProductDecision(payload),
+    });
+  }
+  if (!emptyDecision(payload)) {
+    throw outputError("Candidate review contains inapplicable fields.");
+  }
+  const findings = normalizeReviewFindings(payload.findings);
+  if (
+    (payload.status === acceptedStatus && findings.length !== 0) ||
+    (payload.status === "FINDINGS" && findings.length === 0)
+  ) {
+    throw outputError("Candidate-review status does not match its findings.");
+  }
+  for (const finding of findings) {
+    const previous = previousFindings.find(
+      (candidate) =>
+        candidate.file === finding.file &&
+        candidate.problem === finding.problem,
+    );
+    if (previous !== undefined && previous.id !== finding.id) {
+      throw outputError("Agent changed the ID of an unchanged finding.");
+    }
+  }
+  return Object.freeze({ status: payload.status, findings });
 }
 
 export function normalizeFinalizationResult(
@@ -2398,6 +2472,65 @@ function normalizeFinalizationCorrection(value) {
   return value;
 }
 
+function normalizeScopedCorrection(value, { name, roles, phase, contract }) {
+  if (
+    value === null ||
+    !hasExactFields(value, REVIEW_CORRECTION_FIELDS) ||
+    value.attempt !== 1 ||
+    !HASH_PATTERN.test(value.contentFingerprint) ||
+    !HASH_PATTERN.test(value.validationInfrastructureFingerprint) ||
+    !Array.isArray(value.diagnostics) ||
+    value.diagnostics.length === 0 ||
+    value.diagnostics.length > MAX_DIAGNOSTIC_ITEMS
+  ) {
+    throw workflowError(`Polishing ${name} correction is invalid.`);
+  }
+  const identities = new Set();
+  for (const diagnostic of value.diagnostics) {
+    if (
+      !isOutputDiagnostic(diagnostic) ||
+      !roles.includes(diagnostic.role) ||
+      diagnostic.phase !== phase ||
+      diagnostic.contract !== contract
+    ) {
+      throw workflowError(`Polishing ${name} correction is invalid.`);
+    }
+    const identity = `${diagnostic.field}\0${diagnostic.constraint}`;
+    if (identities.has(identity)) {
+      throw workflowError(`Polishing ${name} correction is invalid.`);
+    }
+    identities.add(identity);
+  }
+  return value;
+}
+
+function normalizeReviewCorrection(value) {
+  return normalizeScopedCorrection(value, {
+    name: "review",
+    roles: ["reviewer"],
+    phase: "review",
+    contract: "candidate-review",
+  });
+}
+
+function normalizeConfirmationCorrection(value) {
+  return normalizeScopedCorrection(value, {
+    name: "confirmation",
+    roles: ["worker", "reviewer"],
+    phase: "confirmation",
+    contract: "confirmation",
+  });
+}
+
+function sameReviewCorrectionScope(left, right) {
+  return (
+    left.attempt === right.attempt &&
+    left.contentFingerprint === right.contentFingerprint &&
+    left.validationInfrastructureFingerprint ===
+      right.validationInfrastructureFingerprint
+  );
+}
+
 function normalizeLazyCorrection(value) {
   if (
     !isRecord(value) ||
@@ -2647,6 +2780,29 @@ function normalizePersistedReview(value) {
   return value;
 }
 
+function normalizePersistedCandidateReview(value) {
+  if (value === null) {
+    return null;
+  }
+  assertExactFields(
+    value,
+    ["status", "findingIds", "fingerprint"],
+    "Polishing candidate-review result",
+  );
+  if (
+    !["APPROVED", "FINDINGS"].includes(value.status) ||
+    !Array.isArray(value.findingIds) ||
+    value.findingIds.length > MAX_ITEMS ||
+    value.findingIds.some((id) => !REVIEW_FINDING_ID_PATTERN.test(id)) ||
+    new Set(value.findingIds).size !== value.findingIds.length ||
+    (value.status === "APPROVED") !== (value.findingIds.length === 0) ||
+    !HASH_PATTERN.test(value.fingerprint)
+  ) {
+    throw workflowError("Polishing candidate-review result is invalid.");
+  }
+  return value;
+}
+
 function normalizeCountRecord(value, name) {
   if (!isRecord(value) || Object.keys(value).length > MAX_DIAGNOSTIC_ITEMS) {
     throw workflowError(`${name} is invalid.`);
@@ -2830,6 +2986,53 @@ function normalizeFindingOverrides(value) {
   return value;
 }
 
+function findingIsOverridden(findingOverrides, findingId, fingerprint) {
+  return findingOverrides.some(
+    (entry) =>
+      entry.findingId === findingId && entry.fingerprint === fingerprint,
+  );
+}
+
+function reviewGatePassed({
+  findingOverrides,
+  findings,
+  previousFindings,
+  reviewedFingerprint,
+  reviewResult,
+}) {
+  const findingsAccepted =
+    reviewResult?.status === "APPROVED" ||
+    (reviewResult?.status === "FINDINGS" &&
+      reviewedFingerprint !== null &&
+      findings.length === 0 &&
+      previousFindings.length > 0 &&
+      previousFindings.every(({ id }) =>
+        findingIsOverridden(findingOverrides, id, reviewedFingerprint),
+      ));
+  return (
+    findingsAccepted &&
+    reviewedFingerprint !== null &&
+    reviewResult.fingerprint === reviewedFingerprint
+  );
+}
+
+function candidateReviewGatePassed({
+  candidateReviewResult,
+  candidateReviewedFingerprint,
+  findingOverrides,
+}) {
+  if (candidateReviewResult?.status === "APPROVED") {
+    return true;
+  }
+  return (
+    candidateReviewResult?.status === "FINDINGS" &&
+    candidateReviewedFingerprint !== null &&
+    candidateReviewResult.findingIds.every((id) =>
+      findingIsOverridden(findingOverrides, id, candidateReviewedFingerprint),
+    )
+  );
+}
+
 function assertSnapshot(value) {
   if (
     !isRecord(value) ||
@@ -2899,6 +3102,7 @@ export function normalizePipelineState(value) {
     "refreezeRequired",
     "bootstrapArbitrationUsed",
     "validationMigrationPending",
+    "candidateMigrationPending",
     "pendingCorrection",
     "stagnationArbitrationUsed",
   ]) {
@@ -2920,6 +3124,17 @@ export function normalizePipelineState(value) {
       !HASH_PATTERN.test(value.cleanConfirmationFingerprint))
   ) {
     throw workflowError("Polishing clean confirmation fingerprint is invalid.");
+  }
+  for (const [field, label] of [
+    ["candidateReviewedFingerprint", "candidate-reviewed"],
+    ["candidateConfirmationFingerprint", "candidate-confirmation"],
+  ]) {
+    if (
+      value[field] !== null &&
+      (typeof value[field] !== "string" || !HASH_PATTERN.test(value[field]))
+    ) {
+      throw workflowError(`Polishing ${label} fingerprint is invalid.`);
+    }
   }
   if (typeof value.lazySourceForkConsumed !== "boolean") {
     throw workflowError("Polishing source-fork state is invalid.");
@@ -3050,6 +3265,41 @@ export function normalizePipelineState(value) {
       "Polishing pending finalization correction is inconsistent.",
     );
   }
+  const reviewCorrection =
+    value.reviewCorrection === null
+      ? null
+      : normalizeReviewCorrection(value.reviewCorrection);
+  const pendingReviewCorrection =
+    value.pendingReviewCorrection === null
+      ? null
+      : normalizeReviewCorrection(value.pendingReviewCorrection);
+  if (
+    pendingReviewCorrection !== null &&
+    (reviewCorrection === null ||
+      !sameReviewCorrectionScope(pendingReviewCorrection, reviewCorrection))
+  ) {
+    throw workflowError("Polishing pending review correction is inconsistent.");
+  }
+  const confirmationCorrection =
+    value.confirmationCorrection === null
+      ? null
+      : normalizeConfirmationCorrection(value.confirmationCorrection);
+  const pendingConfirmationCorrection =
+    value.pendingConfirmationCorrection === null
+      ? null
+      : normalizeConfirmationCorrection(value.pendingConfirmationCorrection);
+  if (
+    pendingConfirmationCorrection !== null &&
+    (confirmationCorrection === null ||
+      !sameReviewCorrectionScope(
+        pendingConfirmationCorrection,
+        confirmationCorrection,
+      ))
+  ) {
+    throw workflowError(
+      "Polishing pending confirmation correction is inconsistent.",
+    );
+  }
   const lazyCorrections = normalizeLazyCorrections(value.lazyCorrections);
   const pendingLazyCorrection =
     value.pendingLazyCorrection === null
@@ -3087,6 +3337,9 @@ export function normalizePipelineState(value) {
           "ERR_INVALID_POLISHING_STATE",
         );
   const reviewResult = normalizePersistedReview(value.reviewResult);
+  const candidateReviewResult = normalizePersistedCandidateReview(
+    value.candidateReviewResult,
+  );
   if (
     (requiredChecks === null) !== (resolvedSummary === null) ||
     (validationInfrastructure === null) !== (resolvedSummary === null) ||
@@ -3181,7 +3434,24 @@ export function normalizePipelineState(value) {
   const stagnationDirection = normalizeStagnationDirection(
     value.stagnationDirection,
   );
-  normalizeFindingOverrides(value.findingOverrides);
+  const findingOverrides = normalizeFindingOverrides(value.findingOverrides);
+  const acceptedReviewGate = reviewGatePassed({
+    findingOverrides,
+    findings,
+    previousFindings,
+    reviewedFingerprint: value.reviewedFingerprint,
+    reviewResult,
+  });
+  const acceptedCandidateReview = candidateReviewGatePassed({
+    candidateReviewResult,
+    candidateReviewedFingerprint: value.candidateReviewedFingerprint,
+    findingOverrides,
+  });
+  const acceptedCandidateGate = lazy
+    ? acceptedCandidateReview &&
+      value.candidateConfirmationFingerprint ===
+        value.candidateReviewedFingerprint
+    : acceptedCandidateReview;
   if (
     (value.finalizedFingerprint !== null &&
       !HASH_PATTERN.test(value.finalizedFingerprint)) ||
@@ -3210,8 +3480,11 @@ export function normalizePipelineState(value) {
   }
   if (
     (!lazy &&
-      (value.cleanConfirmationFingerprint !== null ||
+      (value.candidateConfirmationFingerprint !== null ||
+        value.cleanConfirmationFingerprint !== null ||
         value.lazySourceForkConsumed ||
+        lazyCorrections.length !== 0 ||
+        pendingLazyCorrection !== null ||
         ["CHECK_AND_FIX", "CLEAN_CONFIRM"].includes(value.workflowState))) ||
     (lazy && value.workflowState === "REVIEW")
   ) {
@@ -3219,7 +3492,9 @@ export function normalizePipelineState(value) {
   }
   if (
     lazy &&
-    (pendingDisputes.length !== 0 ||
+    (reviewCorrection !== null ||
+      pendingReviewCorrection !== null ||
+      pendingDisputes.length !== 0 ||
       Object.keys(disputeCounts).length !== 0 ||
       value.disputeHistory.length !== 0 ||
       findingArbitrations.length !== 0 ||
@@ -3238,6 +3513,15 @@ export function normalizePipelineState(value) {
       reviewResult?.status !== "APPROVED")
   ) {
     throw workflowError("Polishing clean confirmation is inconsistent.");
+  }
+  if (
+    value.candidateConfirmationFingerprint !== null &&
+    (!lazy ||
+      value.candidateConfirmationFingerprint !==
+        value.candidateReviewedFingerprint ||
+      candidateReviewResult?.status !== "APPROVED")
+  ) {
+    throw workflowError("Polishing candidate confirmation is inconsistent.");
   }
   if (
     (reviewerSummary !== null && workerSummary === null) ||
@@ -3283,6 +3567,14 @@ export function normalizePipelineState(value) {
     throw workflowError("Polishing validation migration is inapplicable.");
   }
   if (
+    value.candidateMigrationPending &&
+    (value.workflowState !== "WAITING_FOR_USER" ||
+      !value.preflightComplete ||
+      resolvedSummary === null)
+  ) {
+    throw workflowError("Polishing candidate migration is inapplicable.");
+  }
+  if (
     finalizationCorrection !== null &&
     (value.repositoryBaseline === null ||
       value.repositoryBaseline.contentFingerprint !==
@@ -3296,14 +3588,59 @@ export function normalizePipelineState(value) {
     throw workflowError("Polishing finalization correction is inapplicable.");
   }
   if (
+    reviewCorrection !== null &&
+    ((value.candidateReviewedFingerprint ??
+      value.repositoryBaseline?.contentFingerprint) !==
+      reviewCorrection.contentFingerprint ||
+      value.validationInfrastructureFingerprint !==
+        reviewCorrection.validationInfrastructureFingerprint ||
+      (pendingReviewCorrection !== null &&
+        !["REVIEW", "WAITING_FOR_USER", "FAILED"].includes(
+          value.workflowState,
+        )))
+  ) {
+    throw workflowError("Polishing review correction is inapplicable.");
+  }
+  if (
+    reviewCorrection !== null &&
+    value.workflowState === "REVIEW" &&
+    pendingReviewCorrection === null &&
+    (candidateReviewResult === null ||
+      value.candidateReviewedFingerprint === null)
+  ) {
+    throw workflowError(
+      "Polishing review correction is missing its pending marker.",
+    );
+  }
+  if (
+    confirmationCorrection !== null &&
+    (finalizationResult?.status !== "PASS" ||
+      value.finalizedFingerprint !==
+        confirmationCorrection.contentFingerprint ||
+      finalizationResult.validationInfrastructureFingerprint !==
+        confirmationCorrection.validationInfrastructureFingerprint ||
+      (pendingConfirmationCorrection !== null &&
+        !["CONFIRM", "WAITING_FOR_USER", "FAILED"].includes(
+          value.workflowState,
+        )))
+  ) {
+    throw workflowError("Polishing confirmation correction is inapplicable.");
+  }
+  if (
+    confirmationCorrection !== null &&
+    value.workflowState === "CONFIRM" &&
+    pendingConfirmationCorrection === null &&
+    (reviewResult === null || value.reviewedFingerprint === null)
+  ) {
+    throw workflowError(
+      "Polishing confirmation correction is missing its pending marker.",
+    );
+  }
+  if (
     pendingLazyCorrection !== null &&
-    ![
-      "FINALIZE",
-      "RESOLVE_FINDINGS",
-      pendingLazyCorrection.phase,
-      "WAITING_FOR_USER",
-      "FAILED",
-    ].includes(value.workflowState)
+    ![pendingLazyCorrection.phase, "WAITING_FOR_USER", "FAILED"].includes(
+      value.workflowState,
+    )
   ) {
     throw workflowError("Polishing lazy correction is inapplicable.");
   }
@@ -3328,9 +3665,14 @@ export function normalizePipelineState(value) {
     pendingDisputes.every(({ findingId }) =>
       previousFindingIds.has(findingId),
     ) &&
-    (["POLISH", "FINALIZE", "REVIEW", "WAITING_FOR_USER", "FAILED"].includes(
-      value.workflowState,
-    ) ||
+    ([
+      "POLISH",
+      "REVIEW",
+      "FINALIZE",
+      "CONFIRM",
+      "WAITING_FOR_USER",
+      "FAILED",
+    ].includes(value.workflowState) ||
       (value.workflowState === "RESOLVE_FINDINGS" &&
         finalizationResult?.status === "FAIL"));
   if (
@@ -3338,7 +3680,12 @@ export function normalizePipelineState(value) {
       ({ findingId }) => !currentFindingIds.has(findingId),
     ) &&
       !deferredDisputes) ||
-    value.reviewReconsideration.some((id) => !currentFindingIds.has(id)) ||
+    (["FINALIZE", "CONFIRM", "REVIEW"].includes(value.workflowState) &&
+      pendingDisputes.length > 0 &&
+      !deferredDisputes) ||
+    value.reviewReconsideration.some(
+      (id) => !currentFindingIds.has(id) && !previousFindingIds.has(id),
+    ) ||
     Object.keys(disputeCounts).some(
       (id) =>
         !currentFindingIds.has(id) &&
@@ -3354,9 +3701,7 @@ export function normalizePipelineState(value) {
     (value.finalizedFingerprint !== null ||
       value.cleanConfirmationFingerprint !== null ||
       reviewResult !== null ||
-      value.reviewedFingerprint !== null ||
-      findings.length !== 0 ||
-      (pendingDisputes.length !== 0 && !deferredDisputes))
+      value.reviewedFingerprint !== null)
   ) {
     throw workflowError("Polishing validation progress is inconsistent.");
   }
@@ -3369,9 +3714,17 @@ export function normalizePipelineState(value) {
       (finalizationResult.status === "FAIL" &&
         (reviewResult !== null ||
           value.reviewedFingerprint !== null ||
-          findings.length !== 0)))
+          value.cleanConfirmationFingerprint !== null)))
   ) {
     throw workflowError("Polishing finalization progress is inconsistent.");
+  }
+  if (
+    (candidateReviewResult === null) !==
+      (value.candidateReviewedFingerprint === null) ||
+    (candidateReviewResult !== null &&
+      candidateReviewResult.fingerprint !== value.candidateReviewedFingerprint)
+  ) {
+    throw workflowError("Polishing candidate-review evidence is inconsistent.");
   }
   if (
     (reviewResult === null) !== (value.reviewedFingerprint === null) ||
@@ -3380,6 +3733,27 @@ export function normalizePipelineState(value) {
     (reviewResult?.status === "APPROVED" && findings.length !== 0)
   ) {
     throw workflowError("Polishing review evidence is inconsistent.");
+  }
+  if (
+    value.repositoryBaseline !== null &&
+    (value.candidateReviewedFingerprint !== null ||
+      value.candidateConfirmationFingerprint !== null) &&
+    ![
+      "FINALIZE",
+      "CONFIRM",
+      "RESOLVE_FINDINGS",
+      "HANDOFF",
+      "DONE",
+      "WAITING_FOR_USER",
+      "FAILED",
+    ].includes(value.workflowState) &&
+    (value.candidateReviewedFingerprint !==
+      value.repositoryBaseline.contentFingerprint ||
+      (value.candidateConfirmationFingerprint !== null &&
+        value.candidateConfirmationFingerprint !==
+          value.repositoryBaseline.contentFingerprint))
+  ) {
+    throw workflowError("Polishing candidate fingerprint is inconsistent.");
   }
   if (
     value.repositoryBaseline !== null &&
@@ -3401,7 +3775,15 @@ export function normalizePipelineState(value) {
   if (
     (findings.length > 0 || pendingDisputes.length > 0) &&
     value.reviewedFingerprint === null &&
-    !deferredDisputes
+    value.candidateReviewedFingerprint === null &&
+    !deferredDisputes &&
+    !(
+      lazy &&
+      value.workflowState === "CHECK_AND_FIX" &&
+      value.pendingCorrection &&
+      findings.length > 0 &&
+      pendingDisputes.length === 0
+    )
   ) {
     throw workflowError("Polishing review progress is inconsistent.");
   }
@@ -3413,6 +3795,7 @@ export function normalizePipelineState(value) {
       "CHECK_AND_FIX",
       "CLEAN_CONFIRM",
       "REVIEW",
+      "CONFIRM",
       "WAITING_FOR_USER",
       "FAILED",
     ].includes(value.workflowState)
@@ -3425,6 +3808,7 @@ export function normalizePipelineState(value) {
       "POLISH",
       "FINALIZE",
       "REVIEW",
+      "CONFIRM",
       "RESOLVE_FINDINGS",
       "HANDOFF",
       "DONE",
@@ -3436,7 +3820,9 @@ export function normalizePipelineState(value) {
   }
   if (
     value.reviewReconsideration.length > 0 &&
-    !["REVIEW", "WAITING_FOR_USER", "FAILED"].includes(value.workflowState)
+    !["REVIEW", "CONFIRM", "WAITING_FOR_USER", "FAILED"].includes(
+      value.workflowState,
+    )
   ) {
     throw workflowError("Polishing review reconsideration is inapplicable.");
   }
@@ -3455,6 +3841,14 @@ export function normalizePipelineState(value) {
     value.findingOverrides.length !== 0;
   const hasWorkProgress =
     polishSummary !== null ||
+    reviewCorrection !== null ||
+    pendingReviewCorrection !== null ||
+    confirmationCorrection !== null ||
+    pendingConfirmationCorrection !== null ||
+    candidateReviewResult !== null ||
+    value.candidateReviewedFingerprint !== null ||
+    value.candidateConfirmationFingerprint !== null ||
+    value.candidateMigrationPending ||
     finalizationResult !== null ||
     value.finalizedFingerprint !== null ||
     value.cleanConfirmationFingerprint !== null ||
@@ -3480,6 +3874,10 @@ export function normalizePipelineState(value) {
       pendingBootstrapCorrection !== null ||
       finalizationCorrection !== null ||
       pendingFinalizationCorrection !== null ||
+      reviewCorrection !== null ||
+      pendingReviewCorrection !== null ||
+      confirmationCorrection !== null ||
+      pendingConfirmationCorrection !== null ||
       lazyCorrections.length !== 0 ||
       pendingLazyCorrection !== null ||
       value.lazySourceForkConsumed ||
@@ -3521,6 +3919,7 @@ export function normalizePipelineState(value) {
       "CHECK_AND_FIX",
       "CLEAN_CONFIRM",
       "REVIEW",
+      "CONFIRM",
       "RESOLVE_FINDINGS",
       "HANDOFF",
       "DONE",
@@ -3538,6 +3937,7 @@ export function normalizePipelineState(value) {
       "CHECK_AND_FIX",
       "CLEAN_CONFIRM",
       "REVIEW",
+      "CONFIRM",
       "RESOLVE_FINDINGS",
       "HANDOFF",
       "DONE",
@@ -3549,6 +3949,7 @@ export function normalizePipelineState(value) {
   if (
     value.workflowState === "FINALIZE" &&
     (finalizationResult !== null ||
+      !acceptedCandidateGate ||
       value.cleanConfirmationFingerprint !== null ||
       findings.length !== 0 ||
       value.reviewReconsideration.length !== 0)
@@ -3557,35 +3958,53 @@ export function normalizePipelineState(value) {
   }
   if (
     value.workflowState === "REVIEW" &&
-    (finalizationResult?.status !== "PASS" ||
-      value.finalizedFingerprint === null)
+    (lazy ||
+      finalizationResult !== null ||
+      reviewResult !== null ||
+      value.reviewedFingerprint !== null)
   ) {
     throw workflowError("Polishing review state is inconsistent.");
   }
   if (
     value.workflowState === "CHECK_AND_FIX" &&
-    (finalizationResult?.status !== "PASS" ||
-      value.finalizedFingerprint === null ||
+    (!lazy ||
+      finalizationResult !== null ||
+      reviewResult !== null ||
+      value.reviewedFingerprint !== null ||
       value.cleanConfirmationFingerprint !== null)
   ) {
     throw workflowError("Polishing check/fix state is inconsistent.");
   }
   if (
     value.workflowState === "CLEAN_CONFIRM" &&
+    (!lazy ||
+      finalizationResult !== null ||
+      reviewResult !== null ||
+      value.reviewedFingerprint !== null ||
+      findings.length !== 0 ||
+      value.cleanConfirmationFingerprint !== null ||
+      value.candidateConfirmationFingerprint !== null)
+  ) {
+    throw workflowError("Polishing clean confirmation state is inconsistent.");
+  }
+  if (
+    value.workflowState === "CONFIRM" &&
     (finalizationResult?.status !== "PASS" ||
       value.finalizedFingerprint === null ||
+      !acceptedCandidateGate ||
       reviewResult !== null ||
       value.reviewedFingerprint !== null ||
       findings.length !== 0 ||
       value.cleanConfirmationFingerprint !== null)
   ) {
-    throw workflowError("Polishing clean confirmation state is inconsistent.");
+    throw workflowError("Polishing confirmation state is inconsistent.");
   }
   const completionReady =
     finalizationResult?.status === "PASS" &&
     value.finalizedFingerprint !== null &&
+    acceptedCandidateGate &&
     value.reviewedFingerprint === value.finalizedFingerprint &&
-    ["UNCHANGED", "ACCEPTED"].includes(reviewResult.validationChange) &&
+    acceptedReviewGate &&
     (!lazy ||
       value.cleanConfirmationFingerprint === value.finalizedFingerprint) &&
     findings.length === 0 &&
@@ -3595,7 +4014,6 @@ export function normalizePipelineState(value) {
     finalizationResult.issues.length > 0;
   if (
     value.workflowState === "RESOLVE_FINDINGS" &&
-    !completionReady &&
     !finalizationBlocked &&
     findings.length === 0 &&
     pendingDisputes.length === 0
@@ -3662,8 +4080,16 @@ export function createPolishingState({
       pendingBootstrapCorrection: null,
       finalizationCorrection: null,
       pendingFinalizationCorrection: null,
+      reviewCorrection: null,
+      pendingReviewCorrection: null,
+      confirmationCorrection: null,
+      pendingConfirmationCorrection: null,
       lazyCorrections: Object.freeze([]),
       pendingLazyCorrection: null,
+      candidateReviewResult: null,
+      candidateReviewedFingerprint: null,
+      candidateConfirmationFingerprint: null,
+      candidateMigrationPending: false,
       cleanConfirmationFingerprint: null,
       lazySourceForkConsumed: false,
       polishSummary: null,
@@ -3756,7 +4182,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "polishing" ||
-    run.pipelineStateVersion !== 9 ||
+    run.pipelineStateVersion !== 10 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -3949,9 +4375,7 @@ export function assertRun(run) {
         run.pause.code !== INVALID_OUTPUT_CODE ||
         run.pause.explanation !== LAZY_OUTPUT_RETRY_EXPLANATION ||
         !isDeepStrictEqual(run.pause.evidence, expectedEvidence) ||
-        !["FINALIZE", state.pendingLazyCorrection.phase].includes(
-          run.pause.resumeState,
-        )
+        run.pause.resumeState !== state.pendingLazyCorrection.phase
       ) {
         throw workflowError("Polishing lazy output pause is invalid.");
       }
@@ -3982,9 +4406,11 @@ export function assertRun(run) {
       (state.preflightComplete &&
         [
           "backend_unavailable",
+          "confirmation_output_invalid",
           "environment_blocked",
           "finalization_skill_invalid",
           "finalization_skill_missing",
+          "review_output_invalid",
         ].includes(run.pause.reason)) ||
       (run.pause.reason === "finalization_cannot_pass" &&
         run.pause.code !== "ERR_FINALIZATION_MODIFIED_BEFORE_VALIDATION");
@@ -3996,7 +4422,7 @@ export function assertRun(run) {
     ) {
       throw workflowError("Polishing pause resume state is invalid.");
     }
-    if (hasResumeState) {
+    if (hasResumeState && !state.candidateMigrationPending) {
       normalizePipelineState({
         ...state,
         workflowState: run.pause.resumeState,

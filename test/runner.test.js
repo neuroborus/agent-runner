@@ -329,6 +329,7 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
         };
       } else if (
         request.prompt.includes("Confirm the finalized changes") ||
+        request.prompt.includes("Confirm the finalized change set") ||
         request.prompt.includes("Review the complete current change set")
       ) {
         structured = {

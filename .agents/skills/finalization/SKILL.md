@@ -50,7 +50,9 @@ report only failures that cannot be resolved safely within the current scope.
 - Verify that planned commit messages contain no `Co-authored-by` trailer and use the existing Git identity.
 - Verify that state remains outside the task and target repositories and is written atomically.
 - Verify that content fingerprints include changed tracked content, deletions, and non-ignored untracked content while ignoring staging placement.
-- Verify that every content change invalidates prior finalization and review results.
+- Verify that ordinary content changes invalidate candidate, finalization, and
+  terminal-confirmation evidence, while terminal formatting is covered by the
+  final confirmation over its resulting fingerprint.
 - Verify that unresolved findings, disputes, exhausted budgets, or unsafe Git state pause instead of advancing.
 
 ## 3. Format And Run Checks
@@ -62,8 +64,9 @@ gate:
 npm run format
 ```
 
-Review its output as part of the current candidate. Then run the non-mutating
-repository gate and staging-independent Git whitespace check:
+Review its output as the content being finalized and subsequently confirmed.
+Then run the non-mutating repository gate and staging-independent Git
+whitespace check:
 
 ```bash
 npm run check

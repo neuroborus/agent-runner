@@ -339,10 +339,7 @@ function createBackend(
           whyBlocked: "",
           evidence: [],
         };
-      } else if (
-        request.prompt.includes("Review the changes and verify") &&
-        request.prompt.includes("semantic candidate")
-      ) {
+      } else if (request.prompt.includes("semantic candidate")) {
         role = "reviewer";
         structured = {
           status: "APPROVED",
@@ -354,6 +351,7 @@ function createBackend(
         };
       } else if (
         request.prompt.includes("Confirm the finalized changes") ||
+        request.prompt.includes("Confirm the finalized change set") ||
         request.prompt.includes("Review the complete current change set")
       ) {
         role = "reviewer";
@@ -645,7 +643,7 @@ test("polishes a dirty worktree through mixed CLI roles without committing", asy
     { runner, stderr: stderr.stream, stdout: stdout.stream },
   );
 
-  assert.equal(exitCode, 0);
+  assert.equal(exitCode, 0, stderr.value());
   assert.equal(stderr.value(), "");
   assert.match(stdout.value(), /Pipeline: polishing/u);
   assert.match(stdout.value(), /State: DONE/u);
@@ -1179,7 +1177,11 @@ test("runs registered workflows through recoverable MCP controls", async (t) => 
     progress: false,
   });
   await pipelineProcess.settle();
-  assert.equal(polishingDone.status, "DONE");
+  assert.equal(
+    polishingDone.status,
+    "DONE",
+    JSON.stringify(polishingDone.pause),
+  );
   assert.equal(polishingDone.planPath, null);
   assert.equal(polishingDone.completedCommits.length, 0);
   assert.equal(

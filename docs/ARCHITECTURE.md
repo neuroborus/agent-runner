@@ -765,6 +765,15 @@ migration initializes both fields empty without moving active or terminal
 workflow positions, changing safe workspace content, or replaying a pending or
 completed `HANDOFF` effect.
 
+Polishing state version 10 separates semantic candidate convergence from the
+terminal gate. Independent `REVIEW`, or lazy `CHECK_AND_FIX` plus candidate
+`CLEAN_CONFIRM`, precedes `FINALIZE`; passing finalization enters the new
+read-only `CONFIRM` checkpoint before `HANDOFF`. Candidate and terminal results,
+fingerprints, and bounded correction diagnostics are distinct. The version-9
+migration invalidates unprovable active gate evidence and routes it through safe
+mode-specific candidate convergence, defers the same repair for paused runs,
+and preserves `HANDOFF`, `DONE`, and `FAILED` without replaying staging.
+
 Common run-envelope version 3 adds `activeTurn`, either `null` or the current
 bounded `{ role, phase }`. Version-1 and version-2 runs project it as `null`
 without rewriting state or history; the next mutating continuation persists the
@@ -855,16 +864,14 @@ pipeline review criteria and fixes any problem immediately. An unchanged
 result enters a separate read-only `CLEAN_CONFIRM` turn with the same criteria,
 an explicit edit prohibition, and a strict `CLEAN` or concrete-findings result.
 Advancement requires `CLEAN`, no repository mutation, and the exact inspected
-content fingerprint. In plan execution this first converges the candidate;
-`FINALIZE` follows, then a distinct read-only `CONFIRM` applies the validation-
-change decision to the finalized evidence. Polishing retains its existing
-finalization-bound clean confirmation until its owning workflow changes.
+content fingerprint. In plan execution and polishing this first converges the
+candidate; `FINALIZE` follows, then a distinct read-only `CONFIRM` applies the
+validation-change decision to the finalized evidence.
 Findings return directly to `CHECK_AND_FIX`, never to dispute or arbitration.
 Every change invalidates fingerprint-bound evidence. Plan-authoring drafts stay
 in external state and are deterministically validated only after confirmation;
-plan-execution terminal findings return through candidate convergence and
-complete finalization, while polishing changes return through its complete
-`FINALIZE` gate. Existing fix/revision, stable-finding,
+plan-execution and polishing terminal findings return through candidate
+convergence and complete finalization. Existing fix/revision, stable-finding,
 stagnation, and additional-round budgets bound the loop and never silently
 accept an unconfirmed result.
 
@@ -893,12 +900,14 @@ commit evidence.
 
 Polishing owns the corresponding lazy structured-output recovery before its
 runner-owned handoff. A writable check/fix correction reconciles safe content
-and charges actual fix work once, invalidates stale gate evidence, and passes
-through complete finalization before the pending checkpoint resumes. A
-clean-confirmation correction remains read-only and retains the index,
-finalized content, and validation-infrastructure guards. Repeated invalid output
-pauses with bounded redacted diagnostics and an explicit null retry; neither a
-correction nor its recovery can stage, approve, or enter `HANDOFF` early.
+and charges actual fix work once, invalidates stale gate evidence, and returns
+through candidate convergence. A candidate clean-confirmation correction
+remains read-only and retains the index, content, and
+validation-infrastructure guards. Terminal Reviewer and Worker corrections are
+separately scoped to finalized evidence and cannot rerun finalization. Repeated
+invalid output pauses with bounded redacted diagnostics and an explicit null
+retry; neither a correction nor its recovery can stage, approve, or enter
+`HANDOFF` early.
 
 When a native context is full, an adapter may compact it and retry the complete
 recovery prompt once. If continuation still fails, writable and read-only work
@@ -994,9 +1003,10 @@ are content-only, including when selected finalization guidance normally
 requests staging. Bootstrap, validation-migration, and finalization inventories
 use the same deterministic staging-independence policy as plan execution;
 applicable tracked content checks use `HEAD` or explicit trees, and established
-checks are input only to `FINALIZE`. Once finalization and the mode-specific
-review gate bind the same staging-independent content and
-validation-infrastructure fingerprints, the pipeline persists `HANDOFF`.
+checks are input only to `FINALIZE`. Once candidate convergence has completed
+and finalization plus the distinct mode-specific terminal confirmation bind the
+same staging-independent content and validation-infrastructure fingerprints,
+the pipeline persists `HANDOFF`.
 The root Git boundary then accepts either an unchanged pre-effect state or an
 already-complete recovered effect, runs `git add -A` only for the former, and
 verifies unchanged content and Git controls, a nonempty complete staged set,

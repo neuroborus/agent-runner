@@ -40,9 +40,11 @@ plan and a new execution run.
 
 Polishing starts from an existing non-empty local change set rather than a
 plan. It makes that whole change set correct, idiomatic, minimal, finalized, and
-reviewed. The runner then stages the complete accepted result and leaves it
-uncommitted. Polishing never requests local-commit access and never changes
-`HEAD`.
+reviewed. Independent Reviewer convergence, or lazy Worker convergence, occurs
+before finalization; a distinct read-only terminal confirmation then accepts
+the finalized content and validation evidence. The runner stages that complete
+accepted result and leaves it uncommitted. Polishing never requests local-commit
+access and never changes `HEAD`.
 
 Ignored files are outside the polishing change set. Task inputs inside the
 repository must not overlap writable changes.

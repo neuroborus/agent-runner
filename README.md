@@ -395,7 +395,7 @@ independent from the package version. Compatible legacy state is migrated by
 the owning pipeline under the per-run lease; incompatible readers return a
 specific version-skew error while preserving the run. The mode-aware pipeline
 versions are plan-authoring version 3, plan-execution version 14, and polishing
-version 9. Their ordered migrations resolve every supported legacy run to
+version 10. Their ordered migrations resolve every supported legacy run to
 `independent` without moving terminal workflows or replaying role turns,
 commits, or handoffs. Complete write-ahead events precede atomic state
 replacement; recovery repairs a lagging state file and derived progress.
@@ -459,11 +459,15 @@ If an unexpected runner-owned invariant rejects a finalization transition,
 status retains a resumable `FINALIZE` checkpoint and exposes only a bounded
 diagnostic through both the CLI and MCP.
 
-Polishing follows the same mode-specific, fingerprint-bound gate. In lazy mode,
-Worker changes after finalization require the complete finalization gate again,
-and only an unchanged clean confirmation can reach `HANDOFF`. Agent turns
-change content only; the runner then stages the complete confirmed change set
-and leaves it uncommitted for a separate commit workflow.
+Polishing follows the same mode-specific, fingerprint-bound ordering.
+Independent candidate review, or lazy check/fix plus candidate clean
+confirmation, converges before full finalization. Finalization may format the
+accepted candidate; one distinct read-only Reviewer or Worker confirmation then
+binds the resulting content and exact validation evidence before `HANDOFF`.
+Confirmation findings and every content-changing repair return through
+candidate convergence and the complete terminal gate. Agent turns change
+content only; the runner then stages the complete confirmed change set and
+leaves it uncommitted for a separate commit workflow.
 Invalid lazy polishing checkpoints receive one fresh correction with the same
 schema and exact content and validation-infrastructure scope. Check/fix
 corrections remain content-writable and are reconciled and charged once;

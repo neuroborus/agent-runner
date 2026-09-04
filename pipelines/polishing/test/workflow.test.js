@@ -28,13 +28,18 @@ import {
   migratePolishingStateV6,
   migratePolishingStateV7,
   migratePolishingStateV8,
+  migratePolishingStateV9,
   polishingPipeline,
   runPolishing,
 } from "../src/index.js";
 import {
+  CANDIDATE_CLEAN_CONFIRM_SCHEMA,
+  CANDIDATE_REVIEW_SCHEMA,
   CHECK_AND_FIX_SCHEMA,
   CLEAN_CONFIRM_SCHEMA,
   FINALIZATION_SCHEMA,
+  FINDING_RESOLUTION_SCHEMA,
+  REVIEW_SCHEMA,
 } from "../src/schemas.js";
 import {
   assertRun,
@@ -45,6 +50,7 @@ import {
   MAX_DISPUTES_PER_FINDING,
   MAX_VALIDATION_ITEMS,
   normalizeBootstrapResult,
+  normalizeCandidateReviewResult,
   normalizeCheckAndFixResult,
   normalizeCleanConfirmationResult,
   normalizeFinalizationResult,
@@ -161,6 +167,23 @@ function versionEightState(state) {
   return legacy;
 }
 
+function versionNineState(state) {
+  const legacy = { ...state };
+  for (const field of [
+    "reviewCorrection",
+    "pendingReviewCorrection",
+    "confirmationCorrection",
+    "pendingConfirmationCorrection",
+    "candidateReviewResult",
+    "candidateReviewedFingerprint",
+    "candidateConfirmationFingerprint",
+    "candidateMigrationPending",
+  ]) {
+    delete legacy[field];
+  }
+  return legacy;
+}
+
 function versionThreeState(state) {
   const legacy = { ...state };
   delete legacy.bootstrapCorrections;
@@ -238,7 +261,10 @@ function migrateVersionOneState(state) {
   const versionSix = migratePolishingStateV5({ pipelineState: versionFive });
   const versionSeven = migratePolishingStateV6({ pipelineState: versionSix });
   const versionEight = migratePolishingStateV7({ pipelineState: versionSeven });
-  return migratePolishingStateV8({ pipelineState: versionEight });
+  const versionNine = migratePolishingStateV8({
+    pipelineState: versionEight,
+  });
+  return migratePolishingStateV9({ pipelineState: versionNine });
 }
 
 test("rejects incomplete or substituted finalization PASS evidence", () => {
@@ -903,7 +929,7 @@ test("migrates version-2 state with empty trust and invalidates its active gate"
   assert.deepEqual(migrated.settings.trustedChecks, []);
   assert.deepEqual(migrated.trustedValidation.commands, []);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(polishingPipeline.stateVersion, 9);
+  assert.equal(polishingPipeline.stateVersion, 10);
 });
 
 test("migrates version-3 state with no consumed bootstrap corrections", () => {
@@ -971,7 +997,7 @@ test("migrates active version-5 validation through an independent checkpoint", a
       command: unsafeCommand,
     })),
   };
-  const active = {
+  const active = versionNineState({
     ...completed.pipelineState,
     workflowState: "REVIEW",
     workerValidation: unsafeValidation,
@@ -980,15 +1006,18 @@ test("migrates active version-5 validation through an independent checkpoint", a
     finalizationResult: unsafeFinalization,
     reviewResult: null,
     reviewedFingerprint: null,
-  };
-  assert.doesNotThrow(() => normalizePipelineState(active));
+  });
 
-  const migrated = migratePolishingStateV5({
+  const versionSix = migratePolishingStateV5({
     pause: null,
     pipelineState: active,
   });
+  const migrated = migratePolishingStateV9({
+    pause: null,
+    pipelineState: versionSix,
+  });
 
-  assert.equal(migrated.workflowState, "FINALIZE");
+  assert.equal(migrated.workflowState, "REVIEW");
   assert.equal(migrated.workerValidation, null);
   assert.equal(migrated.reviewerValidation, null);
   assert.equal(migrated.validationMigrationPending, true);
@@ -1105,7 +1134,7 @@ test("migrates version-7 handoff and terminal states without replay", async (t) 
   }
 });
 
-test("migrates version-8 active and terminal states without replaying handoff", async (t) => {
+test("migrates version-9 active and terminal states through candidate convergence", async (t) => {
   const fixture = await createFixture(t);
   const completed = await fixture.run();
   const cases = [
@@ -1131,20 +1160,111 @@ test("migrates version-8 active and terminal states without replaying handoff", 
 
   for (const migrationCase of cases) {
     await t.test(migrationCase.name, () => {
-      const legacy = versionEightState(migrationCase.state);
-      const migrated = migratePolishingStateV8({ pipelineState: legacy });
+      const legacy = versionEightState(versionNineState(migrationCase.state));
+      const versionNine = migratePolishingStateV8({ pipelineState: legacy });
+      const migrated = migratePolishingStateV9({
+        pipelineState: versionNine,
+      });
 
-      assert.deepEqual(migrated, {
+      assert.deepEqual(versionNine, {
         ...legacy,
         lazyCorrections: [],
         pendingLazyCorrection: null,
       });
-      assert.equal(migrated.workflowState, legacy.workflowState);
+      assert.equal(
+        migrated.workflowState,
+        migrationCase.name === "active" ? "REVIEW" : legacy.workflowState,
+      );
       assert.deepEqual(migrated.repositoryBaseline, legacy.repositoryBaseline);
-      assert.deepEqual(migrated.finalizationResult, legacy.finalizationResult);
+      assert.deepEqual(
+        migrated.finalizationResult,
+        migrationCase.name === "active" ? null : legacy.finalizationResult,
+      );
+      assert.equal(
+        migrated.candidateReviewResult?.status ?? null,
+        migrationCase.name === "active" ? null : "APPROVED",
+      );
       assert.doesNotThrow(() => normalizePipelineState(migrated));
     });
   }
+});
+
+test("defers a paused version-9 gate migration until safe resume", async (t) => {
+  const fixture = await createFixture(t);
+  const completed = await fixture.run();
+  const pause = { reason: "no_progress", resumeState: "RESOLVE_FINDINGS" };
+  const legacy = versionNineState({
+    ...completed.pipelineState,
+    workflowState: "WAITING_FOR_USER",
+  });
+
+  const migrated = migratePolishingStateV9({
+    pause,
+    pipelineState: legacy,
+  });
+
+  assert.equal(migrated.workflowState, "WAITING_FOR_USER");
+  assert.equal(migrated.candidateMigrationPending, true);
+  assert.equal(migrated.candidateReviewResult, null);
+  assert.equal(migrated.finalizationResult, null);
+  assert.equal(migrated.reviewResult, null);
+  assert.doesNotThrow(() => normalizePipelineState(migrated));
+  assert.doesNotThrow(() =>
+    polishingPipeline.validateResumeAction(
+      { pause, pipelineState: migrated },
+      null,
+    ),
+  );
+  assert.deepEqual(
+    polishingPipeline.projections.pause({ pause, pipelineState: migrated })
+      .nextActions,
+    [{ type: "resume", action: null }],
+  );
+});
+
+test("resumes a paused version-9 gate migration through candidate convergence", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    modeSettings: { maxSameFindingRounds: 1 },
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      polishingCompleted(),
+      checkAndFix(),
+      candidateFindings("R1"),
+      checkAndFix(),
+      candidateFindings("R1"),
+      checkAndFix(),
+      candidateClean(),
+      finalizationPassed(),
+      cleanConfirmation(),
+    ],
+  });
+
+  const paused = await fixture.run();
+  assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(paused.pause.reason, "no_progress");
+
+  const migrated = migratePolishingStateV9({
+    pause: paused.pause,
+    pipelineState: versionNineState(paused.pipelineState),
+  });
+  await fixture.persistPipelineState(migrated, paused.counters, paused.pause);
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.pipelineState.candidateMigrationPending, false);
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
+      .length,
+    1,
+  );
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === CLEAN_CONFIRM_SCHEMA)
+      .length,
+    1,
+  );
 });
 
 test("normalizes strict lazy polishing convergence results", () => {
@@ -1158,7 +1278,18 @@ test("normalizes strict lazy polishing convergence results", () => {
     validationChange: "UNCHANGED",
     validationEvidence: [],
   });
+  assert.deepEqual(
+    normalizeCandidateReviewResult(candidateClean(), [], {
+      clean: true,
+    }),
+    {
+      status: "CLEAN",
+      findings: [],
+    },
+  );
   assert.equal(CHECK_AND_FIX_SCHEMA.additionalProperties, false);
+  assert.equal(CANDIDATE_CLEAN_CONFIRM_SCHEMA.additionalProperties, false);
+  assert.equal(CANDIDATE_REVIEW_SCHEMA.additionalProperties, false);
   assert.equal(CLEAN_CONFIRM_SCHEMA.additionalProperties, false);
 });
 
@@ -1218,6 +1349,27 @@ test("rejects pending bootstrap correction without matching history", () => {
   );
 });
 
+test("rejects unoverridden terminal findings as completion evidence", async (t) => {
+  const fixture = await createFixture(t);
+  const completed = await fixture.run();
+  const fingerprint = completed.pipelineState.reviewedFingerprint;
+
+  assert.throws(
+    () =>
+      normalizePipelineState({
+        ...completed.pipelineState,
+        reviewResult: {
+          ...completed.pipelineState.reviewResult,
+          status: "FINDINGS",
+        },
+        previousFindings: reviewFindings("R1").findings,
+        findingOverrides: [],
+        reviewedFingerprint: fingerprint,
+      }),
+    /Completed polishing state is inconsistent/u,
+  );
+});
+
 test("migrates incomplete paused and terminal version-2 checks fail closed", async (t) => {
   const fixture = await createFixture(t);
   const completed = await fixture.run();
@@ -1267,8 +1419,10 @@ test("invalidates version-1 validation evidence before completed polishing resum
   const fixture = await createFixture(t, {
     reviewer: [
       bootstrapReady("Reviewer"),
+      candidateApproved(),
       reviewApproved(),
       bootstrapReady("Migrating Reviewer"),
+      candidateApproved(),
       reviewApproved(),
     ],
     worker: [
@@ -1295,7 +1449,7 @@ test("invalidates version-1 validation evidence before completed polishing resum
   );
 
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(migrated.workflowState, "FINALIZE");
+  assert.equal(migrated.workflowState, "REVIEW");
   assert.equal(migrated.finalizationResult, null);
   assert.equal(migrated.finalizedFingerprint, null);
   assert.equal(migrated.reviewResult, null);
@@ -1564,7 +1718,9 @@ test("re-establishes validation before retrying a migrated finalization pause", 
   const fixture = await createFixture(t, {
     reviewer: [
       bootstrapReady("Reviewer"),
+      candidateApproved(),
       bootstrapReady("Migrating Reviewer"),
+      candidateApproved(),
       reviewApproved(),
     ],
     worker: [
@@ -1784,6 +1940,31 @@ function checkAndFix(status = "UNCHANGED") {
     reason: "",
     ...emptyDecision(),
   };
+}
+
+function candidateApproved() {
+  return {
+    status: "APPROVED",
+    findings: [],
+    ...emptyDecision(),
+  };
+}
+
+function candidateClean() {
+  return {
+    status: "CLEAN",
+    findings: [],
+    ...emptyDecision(),
+  };
+}
+
+function candidateFindings(...ids) {
+  const {
+    validationChange: _change,
+    validationEvidence: _evidence,
+    ...result
+  } = reviewFindingBatch(ids);
+  return result;
 }
 
 function cleanConfirmation(validationChange = "UNCHANGED") {
@@ -2112,7 +2293,11 @@ async function createFixture(
     onTrustedValidation,
     prepareProject,
     proactiveClarification = false,
-    reviewer = [bootstrapReady("Reviewer"), reviewApproved()],
+    reviewer = [
+      bootstrapReady("Reviewer"),
+      candidateApproved(),
+      reviewApproved(),
+    ],
     roleBackends = {
       worker: "codex",
       reviewer: "codex",
@@ -2205,13 +2390,38 @@ async function createFixture(
 
   const queues = {
     worker: [...worker],
-    reviewer: [...reviewer],
+    reviewer:
+      mode === "lazy"
+        ? [...reviewer]
+        : [...reviewer, reviewApproved(), reviewApproved()],
     arbiter: [...arbiter],
   };
   const calls = { worker: [], reviewer: [], arbiter: [] };
   const probes = { worker: 0, reviewer: 0, arbiter: 0 };
   const transitions = [];
   let sessionIndex = 0;
+  let deferredFinalization = null;
+  const deferredConfirmation = { worker: null, reviewer: null };
+  const isFinalizationResult = (result) =>
+    ["PASS", "FAIL", "SKILL_MISSING", "SKILL_INVALID", "BLOCKED"].includes(
+      result?.status,
+    ) && Object.hasOwn(result, "requiredChecks");
+  const isTerminalReview = (result) =>
+    Object.hasOwn(result ?? {}, "validationChange");
+  function candidateResult(result, acceptedStatus) {
+    const {
+      validationChange: _validationChange,
+      validationEvidence: _validationEvidence,
+      ...candidate
+    } = result;
+    return {
+      ...candidate,
+      status:
+        acceptedStatus === "CLEAN" && candidate.status === "APPROVED"
+          ? "CLEAN"
+          : candidate.status,
+    };
+  }
   const adapters = Object.fromEntries(
     Object.keys(queues).map((role) => [
       role,
@@ -2225,8 +2435,70 @@ async function createFixture(
           assert.match(request.prompt, /Do not delegate/u);
           assert.match(request.recoveryPrompt, /Do not delegate/u);
           await onRoleRun?.(role, request, calls[role].length, { projectPath });
-          assert.ok(queues[role].length > 0, `Unexpected ${role} turn.`);
-          const structured = queues[role].shift();
+          if (
+            role === "worker" &&
+            [CHECK_AND_FIX_SCHEMA, FINDING_RESOLUTION_SCHEMA].includes(
+              request.schema,
+            ) &&
+            isFinalizationResult(queues.worker[0])
+          ) {
+            deferredFinalization = queues.worker.shift();
+          }
+          let structured;
+          if (
+            role === "worker" &&
+            request.schema === CHECK_AND_FIX_SCHEMA &&
+            !["CHANGED", "UNCHANGED", "BLOCKED", "INVALID"].includes(
+              queues.worker[0]?.status,
+            )
+          ) {
+            structured = checkAndFix();
+          } else if (
+            role === "worker" &&
+            request.schema === CANDIDATE_CLEAN_CONFIRM_SCHEMA &&
+            isTerminalReview(queues.worker[0])
+          ) {
+            const terminal = queues.worker.shift();
+            if (terminal.status === "CLEAN") {
+              deferredConfirmation.worker = terminal;
+            }
+            structured = candidateResult(terminal, "CLEAN");
+          } else if (
+            role === "reviewer" &&
+            request.schema === CANDIDATE_REVIEW_SCHEMA &&
+            isTerminalReview(queues.reviewer[0])
+          ) {
+            const terminal = queues.reviewer.shift();
+            if (terminal.status === "APPROVED") {
+              deferredConfirmation.reviewer = terminal;
+            }
+            structured = candidateResult(terminal, "APPROVED");
+          } else if (
+            role === "worker" &&
+            request.schema === FINALIZATION_SCHEMA &&
+            deferredFinalization !== null
+          ) {
+            if (isFinalizationResult(queues.worker[0])) {
+              deferredFinalization = queues.worker.shift();
+            }
+            structured = deferredFinalization;
+            deferredFinalization = null;
+          } else if (
+            request.schema === CLEAN_CONFIRM_SCHEMA &&
+            deferredConfirmation.worker !== null
+          ) {
+            structured = deferredConfirmation.worker;
+            deferredConfirmation.worker = null;
+          } else if (
+            request.schema === REVIEW_SCHEMA &&
+            deferredConfirmation.reviewer !== null
+          ) {
+            structured = deferredConfirmation.reviewer;
+            deferredConfirmation.reviewer = null;
+          } else {
+            assert.ok(queues[role].length > 0, `Unexpected ${role} turn.`);
+            structured = queues[role].shift();
+          }
           sessionIndex += 1;
           return {
             output: "structured",
@@ -2245,7 +2517,7 @@ async function createFixture(
   const store = createRunStore({ stateRoot });
   let created = await store.createRun({
     pipelineId: "polishing",
-    pipelineStateVersion: 9,
+    pipelineStateVersion: 10,
     projectPath,
     taskPath,
     roles: Object.fromEntries(
@@ -2431,8 +2703,9 @@ test("runs lazy polishing with one Worker source fork and no review roles", asyn
       clarificationReady(),
       bootstrapReady("Worker"),
       polishingCompleted(),
-      finalizationPassed(),
       checkAndFix(),
+      candidateClean(),
+      finalizationPassed(),
       cleanConfirmation(),
     ],
   });
@@ -2478,7 +2751,7 @@ test("runs lazy polishing with one Worker source fork and no review roles", asyn
   );
 });
 
-test("re-finalizes a content-changing lazy polishing check", async (t) => {
+test("finalizes only after a content-changing lazy candidate converges", async (t) => {
   let checkRound = 0;
   const fixture = await createFixture(t, {
     mode: "lazy",
@@ -2486,10 +2759,10 @@ test("re-finalizes a content-changing lazy polishing check", async (t) => {
       clarificationReady(),
       bootstrapReady("Worker"),
       polishingCompleted(),
-      finalizationPassed(),
       checkAndFix("CHANGED"),
-      finalizationPassed(),
       checkAndFix(),
+      candidateClean(),
+      finalizationPassed(),
       cleanConfirmation(),
     ],
     async onRoleRun(role, request, _turn, { projectPath }) {
@@ -2508,7 +2781,7 @@ test("re-finalizes a content-changing lazy polishing check", async (t) => {
   assert.equal(
     fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
       .length,
-    2,
+    1,
   );
   assert.equal(
     fixture.calls.worker.filter(({ schema }) => schema === CHECK_AND_FIX_SCHEMA)
@@ -2518,7 +2791,7 @@ test("re-finalizes a content-changing lazy polishing check", async (t) => {
   assert.equal(result.counters.fixRounds, 2);
 });
 
-test("routes lazy confirmation findings directly back to Worker fixing", async (t) => {
+test("routes lazy candidate findings directly back to Worker fixing", async (t) => {
   let checkRound = 0;
   const fixture = await createFixture(t, {
     mode: "lazy",
@@ -2526,12 +2799,12 @@ test("routes lazy confirmation findings directly back to Worker fixing", async (
       clarificationReady(),
       bootstrapReady("Worker"),
       polishingCompleted(),
-      finalizationPassed(),
       checkAndFix(),
-      cleanConfirmationFindings("R1"),
+      candidateFindings("R1"),
       checkAndFix("CHANGED"),
-      finalizationPassed(),
       checkAndFix(),
+      candidateClean(),
+      finalizationPassed(),
       cleanConfirmation(),
     ],
     async onRoleRun(role, request, _turn, { projectPath }) {
@@ -2557,24 +2830,78 @@ test("routes lazy confirmation findings directly back to Worker fixing", async (
   assert.equal(
     fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
       .length,
-    2,
+    1,
   );
 });
 
-test("corrects an unchanged lazy check with confirmation findings", async (t) => {
+test("routes lazy terminal findings through candidate convergence and finalization", async (t) => {
+  let checkRound = 0;
+  let finalizationRound = 0;
   const fixture = await createFixture(t, {
     mode: "lazy",
     worker: [
       clarificationReady(),
       bootstrapReady("Worker"),
       polishingCompleted(),
-      finalizationPassed(),
       checkAndFix(),
+      candidateClean(),
+      finalizationPassed(),
       cleanConfirmationFindings("R1"),
+      checkAndFix("CHANGED"),
       checkAndFix(),
-      checkAndFix("REFINALIZE"),
+      candidateClean(),
       finalizationPassed(),
+      cleanConfirmation(),
+    ],
+    async onRoleRun(role, request, _turn, { projectPath }) {
+      if (role === "worker" && request.schema === CHECK_AND_FIX_SCHEMA) {
+        checkRound += 1;
+        if (checkRound === 2) {
+          await writeFile(join(projectPath, "terminal-fix.txt"), "fixed\n");
+        }
+      }
+      if (role === "worker" && request.schema === FINALIZATION_SCHEMA) {
+        finalizationRound += 1;
+        if (finalizationRound === 1) {
+          await writeFile(join(projectPath, "formatted.txt"), "formatted\n");
+        }
+      }
+    },
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
+      .length,
+    2,
+  );
+  assert.equal(
+    fixture.calls.worker.filter(
+      ({ schema }) => schema === CANDIDATE_CLEAN_CONFIRM_SCHEMA,
+    ).length,
+    2,
+  );
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === CLEAN_CONFIRM_SCHEMA)
+      .length,
+    2,
+  );
+  assert.equal(result.pipelineState.findings.length, 0);
+});
+
+test("corrects one invalid lazy candidate check before finalization", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      polishingCompleted(),
+      { ...checkAndFix(), status: "INVALID" },
       checkAndFix(),
+      candidateClean(),
+      finalizationPassed(),
       cleanConfirmation(),
     ],
   });
@@ -2585,13 +2912,14 @@ test("corrects an unchanged lazy check with confirmation findings", async (t) =>
   assert.equal(result.pipelineState.lazyCorrections.length, 1);
   assert.equal(result.pipelineState.pendingLazyCorrection, null);
   assert.equal(
-    fixture.calls.worker.filter(({ schema }) => schema === CLEAN_CONFIRM_SCHEMA)
-      .length,
-    2,
+    fixture.calls.worker.filter(
+      ({ schema }) => schema === CANDIDATE_CLEAN_CONFIRM_SCHEMA,
+    ).length,
+    1,
   );
   const correctionCall = fixture.calls.worker.filter(
     ({ schema }) => schema === CHECK_AND_FIX_SCHEMA,
-  )[2];
+  )[1];
   assert.equal(correctionCall.session, undefined);
   assert.match(correctionCall.prompt, /Pending correction diagnostic batch/u);
   assert.equal(fixture.calls.reviewer.length, 0);
@@ -2636,10 +2964,10 @@ test("reconciles a content-changing invalid lazy check exactly once", async (t) 
       clarificationReady(),
       bootstrapReady("Worker"),
       polishingCompleted(),
-      finalizationPassed(),
       checkAndFix(),
-      finalizationPassed(),
       checkAndFix(),
+      candidateClean(),
+      finalizationPassed(),
       cleanConfirmation(),
     ],
     async onRoleRun(role, request, _turn, { projectPath }) {
@@ -2664,7 +2992,7 @@ test("reconciles a content-changing invalid lazy check exactly once", async (t) 
   assert.equal(
     fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
       .length,
-    2,
+    1,
   );
 });
 
@@ -2708,23 +3036,24 @@ test("corrects a provider-classified lazy check in a fresh redacted session", as
   assert.doesNotMatch(JSON.stringify(result), new RegExp(sensitiveMarker, "u"));
 });
 
-test("corrects a lazy clean confirmation without accepting evidence early", async (t) => {
+test("corrects a lazy candidate confirmation without accepting evidence early", async (t) => {
   const fixture = await createFixture(t, {
     mode: "lazy",
     worker: [
       clarificationReady(),
       bootstrapReady("Worker"),
       polishingCompleted(),
-      finalizationPassed(),
       checkAndFix(),
-      cleanConfirmation("ACCEPTED"),
+      { ...candidateClean(), unexpected: "field" },
+      candidateClean(),
+      finalizationPassed(),
       cleanConfirmation(),
     ],
   });
 
   const result = await fixture.run();
   const cleanCalls = fixture.calls.worker.filter(
-    ({ schema }) => schema === CLEAN_CONFIRM_SCHEMA,
+    ({ schema }) => schema === CANDIDATE_CLEAN_CONFIRM_SCHEMA,
   );
 
   assert.equal(result.pipelineState.workflowState, "DONE");
@@ -2748,14 +3077,11 @@ test("pauses a repeated invalid lazy checkpoint and resumes its null retry", asy
       clarificationReady(),
       bootstrapReady("Worker"),
       polishingCompleted(),
+      { ...checkAndFix(), status: "INVALID" },
+      { ...checkAndFix(), status: "INVALID" },
+      checkAndFix(),
+      candidateClean(),
       finalizationPassed(),
-      checkAndFix(),
-      cleanConfirmationFindings("R1"),
-      checkAndFix(),
-      checkAndFix(),
-      checkAndFix("REFINALIZE"),
-      finalizationPassed(),
-      checkAndFix(),
       cleanConfirmation(),
     ],
   });
@@ -2766,12 +3092,12 @@ test("pauses a repeated invalid lazy checkpoint and resumes its null retry", asy
   assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
   assert.equal(paused.pause.reason, "lazy_output_invalid");
   assert.equal(paused.pause.resumeState, "CHECK_AND_FIX");
-  assert.equal(paused.counters.fixRounds, 1);
+  assert.equal(paused.counters.fixRounds, 0);
   assert.equal(paused.pipelineState.lazyCorrections.length, 1);
   assert.notEqual(paused.pipelineState.pendingLazyCorrection, null);
   assert.deepEqual(projected.nextActions, [{ type: "resume", action: null }]);
   assert.deepEqual(projected.evidence, [
-    "Worker field status violated resolves-confirmation-findings.",
+    "Worker field status violated supported-status.",
   ]);
 
   await fixture.recover();
@@ -2780,7 +3106,7 @@ test("pauses a repeated invalid lazy checkpoint and resumes its null retry", asy
   assert.equal(completed.pipelineState.workflowState, "DONE");
   assert.equal(completed.pipelineState.lazyCorrections.length, 1);
   assert.equal(completed.pipelineState.pendingLazyCorrection, null);
-  assert.equal(completed.counters.fixRounds, 3);
+  assert.equal(completed.counters.fixRounds, 1);
 });
 
 test("rejects index mutation during a writable lazy correction", async (t) => {
@@ -2823,11 +3149,11 @@ test("reconciles an interrupted content-changing lazy correction once", async (t
       clarificationReady(),
       bootstrapReady("Worker"),
       polishingCompleted(),
-      finalizationPassed(),
       { ...checkAndFix(), status: "INVALID" },
       checkAndFix("CHANGED"),
-      finalizationPassed(),
       checkAndFix(),
+      candidateClean(),
+      finalizationPassed(),
       cleanConfirmation(),
     ],
     async onRoleRun(role, request, _turn, { projectPath }) {
@@ -2892,7 +3218,7 @@ test("reconciles an interrupted content-changing lazy correction once", async (t
   assert.equal(
     fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
       .length,
-    2,
+    1,
   );
   assert.equal(
     fixture.calls.worker.filter(({ schema }) => schema === CHECK_AND_FIX_SCHEMA)
@@ -3000,8 +3326,9 @@ test("resumes a checkpointed unchanged lazy polishing check without replay", asy
       clarificationReady(),
       bootstrapReady("Worker"),
       polishingCompleted(),
-      finalizationPassed(),
       checkAndFix(),
+      candidateClean(),
+      finalizationPassed(),
       cleanConfirmation(),
     ],
   });
@@ -3046,14 +3373,15 @@ test("reconstructs an ownerless lazy clean confirmation without recounting", asy
       clarificationReady(),
       bootstrapReady("Worker"),
       polishingCompleted(),
-      finalizationPassed(),
       checkAndFix(),
+      candidateClean(),
+      finalizationPassed(),
       cleanConfirmation(),
     ],
     onRoleRun(role, request) {
       if (
         role === "worker" &&
-        request.schema === CLEAN_CONFIRM_SCHEMA &&
+        request.schema === CANDIDATE_CLEAN_CONFIRM_SCHEMA &&
         !interrupted
       ) {
         interrupted = true;
@@ -3083,8 +3411,9 @@ test("reconstructs an ownerless lazy clean confirmation without recounting", asy
   assert.equal(result.counters.fixRounds, 1);
   assert.equal(result.counters.correctionRounds, 0);
   assert.equal(
-    fixture.calls.worker.filter(({ schema }) => schema === CLEAN_CONFIRM_SCHEMA)
-      .length,
+    fixture.calls.worker.filter(
+      ({ schema }) => schema === CANDIDATE_CLEAN_CONFIRM_SCHEMA,
+    ).length,
     2,
   );
   assert.equal(
@@ -3126,13 +3455,10 @@ test("bounds repeated lazy confirmation findings without arbitration", async (t)
       clarificationReady(),
       bootstrapReady("Worker"),
       polishingCompleted(),
-      finalizationPassed(),
       checkAndFix(),
-      cleanConfirmationFindings("R1"),
-      checkAndFix("REFINALIZE"),
-      finalizationPassed(),
+      candidateFindings("R1"),
       checkAndFix(),
-      cleanConfirmationFindings("R1"),
+      candidateFindings("R1"),
     ],
   });
 
@@ -3280,6 +3606,14 @@ test("recovers a verified runner handoff after DONE persistence is interrupted",
 
   await assert.rejects(fixture.run(), (error) => error === processLoss);
   assert.equal(fixture.currentRun.pipelineState.workflowState, "HANDOFF");
+  const finalizationCalls = fixture.calls.worker.filter(
+    ({ schema }) => schema === FINALIZATION_SCHEMA,
+  ).length;
+  const confirmationCalls = fixture.calls.reviewer.filter(
+    ({ schema }) => schema === REVIEW_SCHEMA,
+  ).length;
+  assert.equal(finalizationCalls, 1);
+  assert.equal(confirmationCalls, 1);
   assert.notEqual(
     fixture.currentRun.pipelineState.repositoryBaseline.indexFingerprint,
     (await fixture.runtime.git.snapshot({ projectPath: fixture.projectPath }))
@@ -3292,6 +3626,16 @@ test("recovers a verified runner handoff after DONE persistence is interrupted",
   const completed = await fixture.run();
 
   assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
+      .length,
+    finalizationCalls,
+  );
+  assert.equal(
+    fixture.calls.reviewer.filter(({ schema }) => schema === REVIEW_SCHEMA)
+      .length,
+    confirmationCalls,
+  );
   assert.equal(
     completed.pipelineState.repositoryBaseline.indexFingerprint,
     (await fixture.runtime.git.snapshot({ projectPath: fixture.projectPath }))
@@ -3530,7 +3874,7 @@ test("rejects and refuses to recover inconsistent correction progress", async (t
   };
   assert.throws(
     () => assertRun({ ...completed, pause, pipelineState: pausedState }),
-    /persisted progress is invalid/u,
+    /persisted progress is invalid|finding resolution has no blockers/u,
   );
 
   const finding = reviewFindings().findings[0];
@@ -5551,7 +5895,7 @@ test("preserves a partial fix before missing-service validation", async (t) => {
   const paused = await fixture.run();
 
   assert.equal(paused.pause.reason, "environment_blocked");
-  assert.equal(paused.pause.resumeState, "FINALIZE");
+  assert.equal(paused.pause.resumeState, "REVIEW");
   assert.equal(paused.pipelineState.finalizationResult, null);
   assert.equal(paused.pipelineState.finalizedFingerprint, null);
   assert.equal(paused.pipelineState.reviewedFingerprint, null);
@@ -5609,6 +5953,10 @@ test("binds finalization changes and review to one fingerprint without committin
     result.pipelineState.reviewedFingerprint,
   );
   assert.equal(result.pipelineState.finalizationResult.status, "PASS");
+  assert.notEqual(
+    result.pipelineState.candidateReviewedFingerprint,
+    result.pipelineState.finalizedFingerprint,
+  );
   assert.equal(beforeHead, afterHead);
   assert.equal(
     await readFile(join(fixture.projectPath, "generated.txt"), "utf8"),
@@ -5625,6 +5973,188 @@ test("binds finalization changes and review to one fingerprint without committin
   assert.match(
     finalizationCall.recoveryPrompt,
     new RegExp(beforeFinalizationFingerprint, "u"),
+  );
+});
+
+test("corrects candidate Reviewer output before terminal finalization", async (t) => {
+  const fixture = await createFixture(t, {
+    reviewer: [
+      bootstrapReady("Reviewer"),
+      { ...candidateApproved(), unexpected: "field" },
+      candidateApproved(),
+      reviewApproved(),
+    ],
+  });
+
+  const result = await fixture.run();
+  const candidateCalls = fixture.calls.reviewer.filter(
+    ({ schema }) => schema === CANDIDATE_REVIEW_SCHEMA,
+  );
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(candidateCalls.length, 2);
+  assert.equal(candidateCalls[1].session, undefined);
+  assert.match(
+    candidateCalls[1].prompt,
+    /Pending correction diagnostic batch/u,
+  );
+  assert.ok(
+    fixture.transitions.some(
+      ({ patch }) => patch.pipelineState.reviewCorrection !== null,
+    ),
+  );
+  assert.equal(result.pipelineState.pendingReviewCorrection, null);
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
+      .length,
+    1,
+  );
+});
+
+test("projects candidate and terminal gate activity in order", async (t) => {
+  const fixture = await createFixture(t);
+
+  const result = await fixture.run();
+  const gateActivity = fixture.transitions
+    .map(({ options }) => options.activity)
+    .filter(({ phase }) =>
+      ["review", "finalization", "confirmation"].includes(phase),
+    )
+    .map(({ actor, phase, kind }) => ({ actor, phase, kind }));
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.deepEqual(gateActivity, [
+    { actor: "reviewer", phase: "review", kind: "approved" },
+    { actor: "worker", phase: "finalization", kind: "passed" },
+    { actor: "reviewer", phase: "confirmation", kind: "approved" },
+  ]);
+});
+
+test("routes independent terminal findings through candidate review and finalization", async (t) => {
+  const fixture = await createFixture(t, {
+    reviewer: [
+      bootstrapReady("Reviewer"),
+      candidateApproved(),
+      reviewFindings("R1"),
+      candidateApproved(),
+      reviewApproved(),
+    ],
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationPassed(),
+      resolution("FIX", "R1"),
+      finalizationPassed(),
+    ],
+    async onRoleRun(role, request, _turn, { projectPath }) {
+      if (role === "worker" && request.schema === FINDING_RESOLUTION_SCHEMA) {
+        await writeFile(join(projectPath, "terminal-fix.txt"), "fixed\n");
+      }
+    },
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(
+    fixture.calls.reviewer.filter(
+      ({ schema }) => schema === CANDIDATE_REVIEW_SCHEMA,
+    ).length,
+    2,
+  );
+  assert.equal(
+    fixture.calls.reviewer.filter(({ schema }) => schema === REVIEW_SCHEMA)
+      .length,
+    2,
+  );
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
+      .length,
+    2,
+  );
+  assert.equal(result.pipelineState.findings.length, 0);
+});
+
+test("corrects terminal Reviewer output without rerunning finalization", async (t) => {
+  const fixture = await createFixture(t, {
+    reviewer: [
+      bootstrapReady("Reviewer"),
+      candidateApproved(),
+      { ...reviewApproved(), unexpected: "field" },
+      reviewApproved(),
+    ],
+  });
+
+  const result = await fixture.run();
+  const confirmationCalls = fixture.calls.reviewer.filter(
+    ({ schema }) => schema === REVIEW_SCHEMA,
+  );
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(confirmationCalls.length, 2);
+  assert.equal(confirmationCalls[1].session, undefined);
+  assert.match(
+    confirmationCalls[1].prompt,
+    /Pending correction diagnostic batch/u,
+  );
+  assert.ok(
+    fixture.transitions.some(
+      ({ patch }) => patch.pipelineState.confirmationCorrection !== null,
+    ),
+  );
+  assert.equal(result.pipelineState.pendingConfirmationCorrection, null);
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
+      .length,
+    1,
+  );
+});
+
+test("resumes the persisted terminal confirmation without rerunning finalization", async (t) => {
+  const processLoss = new Error("Process stopped before confirmation.");
+  const fixture = await createFixture(t);
+  const transition = fixture.runtime.transition;
+  const startAgentTurn = fixture.runtime.startAgentTurn;
+  let stopped = false;
+  fixture.runtime.transition = async (patch, options) => {
+    if (stopped) {
+      throw processLoss;
+    }
+    const next = await transition(patch, options);
+    if (patch.pipelineState.workflowState === "CONFIRM") {
+      stopped = true;
+    }
+    return next;
+  };
+  fixture.runtime.startAgentTurn = async (turn, options) => {
+    if (stopped && turn.phase === "confirm") {
+      throw processLoss;
+    }
+    return startAgentTurn(turn, options);
+  };
+
+  await assert.rejects(fixture.run(), (error) => error === processLoss);
+  assert.equal(fixture.currentRun.pipelineState.workflowState, "CONFIRM");
+  assert.equal(fixture.currentRun.activeTurn, null);
+
+  stopped = false;
+  fixture.runtime.transition = transition;
+  fixture.runtime.startAgentTurn = startAgentTurn;
+  await fixture.recover();
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
+      .length,
+    1,
+  );
+  assert.equal(
+    fixture.calls.reviewer.filter(({ schema }) => schema === REVIEW_SCHEMA)
+      .length,
+    1,
   );
 });
 
@@ -6195,7 +6725,7 @@ test("records an exact-fingerprint override only after a stable finding pause", 
 
   const paused = await fixture.run();
   assert.equal(paused.pause.reason, "no_progress");
-  const fingerprint = paused.pipelineState.reviewedFingerprint;
+  const fingerprint = paused.pipelineState.candidateReviewedFingerprint;
 
   assert.throws(
     () =>
@@ -6653,7 +7183,7 @@ test("accounts for a content-changing interrupted correction before recovery", a
 
   const interruptedRun = await fixture.run();
   assert.equal(interruptedRun.pause.reason, "backend_unavailable");
-  assert.equal(interruptedRun.pause.resumeState, "FINALIZE");
+  assert.equal(interruptedRun.pause.resumeState, "REVIEW");
   assert.equal(interruptedRun.counters.fixRounds, 1);
   assert.equal(interruptedRun.pipelineState.pendingCorrection, true);
 
@@ -6702,7 +7232,7 @@ test("clears a reconciled correction marker without replaying the turn", async (
     const next = await transition(patch, options);
     if (
       next.activeTurn?.phase === "resolve-findings" &&
-      next.pipelineState.workflowState === "FINALIZE" &&
+      next.pipelineState.workflowState === "REVIEW" &&
       next.pipelineState.pendingCorrection
     ) {
       processStopped = true;
@@ -6721,7 +7251,7 @@ test("clears a reconciled correction marker without replaying the turn", async (
     role: "worker",
     phase: "resolve-findings",
   });
-  assert.equal(fixture.currentRun.pipelineState.workflowState, "FINALIZE");
+  assert.equal(fixture.currentRun.pipelineState.workflowState, "REVIEW");
   assert.equal(fixture.currentRun.pipelineState.pendingCorrection, true);
   assert.equal(fixture.currentRun.counters.fixRounds, 1);
   const resolutionTurns = fixture.calls.worker.filter(({ prompt }) =>
@@ -6860,7 +7390,7 @@ test("requires Reviewer acceptance for task-authorized validation changes", asyn
     "ACCEPTED",
   );
   const reviewPrompt = fixture.calls.reviewer.find(({ prompt }) =>
-    prompt.includes("Review the complete current change set"),
+    prompt.includes("Confirm the finalized change set"),
   ).prompt;
   assert.match(
     reviewPrompt,

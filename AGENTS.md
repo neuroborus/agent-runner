@@ -147,10 +147,13 @@ All pipelines additionally require:
   `HANDOFF`.
 - Never request `local-commit`, create a commit, or change `HEAD`, refs, remotes,
   or Git identity.
-- Tie successful finalization and independent review or lazy clean confirmation
-  to the same staging-independent content fingerprint and invalidate the
-  evidence after content changes. A lazy check/fix change must pass full
-  finalization again before confirmation.
+- Converge independent candidate review, or lazy check/fix plus candidate clean
+  confirmation, before `FINALIZE`. After finalization, require one distinct
+  read-only Reviewer or Worker terminal confirmation over the resulting content
+  and validation evidence before `HANDOFF`.
+- Invalidate candidate, finalization, and terminal-confirmation evidence after
+  content-changing repairs. Finalization may format the accepted candidate, but
+  the terminal confirmation and handoff must bind the resulting fingerprint.
 - Leave the finalized and reviewed workspace changes staged and uncommitted.
 
 ## Repository Map

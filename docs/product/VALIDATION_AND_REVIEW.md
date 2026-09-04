@@ -21,13 +21,13 @@ trusted-command snapshot rather than reloading mutable configuration.
 
 ## Finalization and semantic review
 
-Plan execution first converges a stable semantic candidate, then runs its
-dedicated full finalization turn, and finally applies a distinct read-only
-confirmation immediately before `COMMIT`. Polishing retains its independently
-owned workflow. Finalization follows applicable repository guidance, runs
-required writable formatting before generation and every established
-non-mutating check, and accepts no omission or substitution. A project-required
-content change is fingerprinted after it finishes.
+Plan execution and polishing first converge a stable semantic candidate, then
+run their dedicated full finalization turn, and finally apply a distinct
+read-only confirmation immediately before `COMMIT` or `HANDOFF`. Finalization
+follows applicable repository guidance, runs required writable formatting
+before generation and every established non-mutating check, and accepts no
+omission or substitution. A project-required content change is fingerprinted
+after it finishes.
 
 In independent mode, the Reviewer first checks the complete candidate without
 attesting finalization. All findings remain blocking until fixed, withdrawn,

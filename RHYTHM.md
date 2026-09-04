@@ -7,6 +7,12 @@ remain in the owning documentation.
 
 ## 2026-09-04
 
+- **Polishing finalizes only stable semantic candidates.** Independent Reviewer
+  convergence, or lazy Worker check/fix plus read-only candidate confirmation,
+  now precedes the writable finalization gate. A distinct read-only terminal
+  confirmation binds the resulting content and exact validation evidence before
+  the runner-owned `HANDOFF`, so formatter changes are reviewed and every repair
+  returns through convergence without duplicating staging.
 - **Plan execution finalizes only stable semantic candidates.** Independent
   Reviewer convergence, or lazy Worker check/fix plus read-only candidate
   confirmation, now completes before the writable terminal finalization gate.
