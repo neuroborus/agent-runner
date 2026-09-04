@@ -309,6 +309,11 @@ function normalizeExecutionOptions(value) {
   return validateExecutionOptions(normalizeContractExecutionOptions(value));
 }
 
+export function validateCodexExecutionOptions(value) {
+  normalizeExecutionOptions(value);
+  return value;
+}
+
 function normalizeRequest(value) {
   return validateExecutionOptions(normalizeContractRequest(value));
 }

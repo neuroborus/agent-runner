@@ -127,6 +127,7 @@ Provider integrations are feature slices under `src/agents/`:
 src/agents/
 |-- index.js                 # public adapter boundary
 |-- adapter-contract.js      # provider-neutral contract
+|-- registry.js              # frozen provider descriptors
 |-- codex/
 |   |-- index.js             # Codex feature boundary
 |   |-- adapter.js
@@ -145,6 +146,14 @@ important part. Code outside `src/agents/` imports its public index. The adapter
 directory imports each provider through that provider's index. Files inside one
 provider import private siblings directly rather than routing through the index.
 
+The source-controlled provider registry is the one composition seam for a
+backend. Each frozen descriptor supplies its backend ID, adapter factory,
+execution-option validator, trusted-profile normalization and resolution,
+source-session capability, and native diagnostic classifier. Configuration,
+runner construction, source checks, failure normalization, and MCP schemas
+derive from those descriptors. Production registration remains static; an
+injected registry exists for deterministic tests, not runtime plugin loading.
+
 A provider adapter owns:
 
 - executable discovery and capability probing;
@@ -155,9 +164,9 @@ A provider adapter owns:
 
 Provider-specific values must not leak into pipeline state machines, the CLI,
 or MCP policy. A new provider implements the small public adapter contract and
-is registered at the composition boundary. Add a shared abstraction only when
-at least two implementations demonstrate the same semantics; do not predict a
-future provider with empty interfaces.
+adds one descriptor rather than new branches across runtime consumers. Add a
+shared abstraction only when at least two implementations demonstrate the same
+semantics; do not predict a future provider with empty interfaces.
 
 ### Cross-cutting infrastructure
 

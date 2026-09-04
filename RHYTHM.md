@@ -7,6 +7,13 @@ remain in the owning documentation.
 
 ## 2026-09-04
 
+- **Provider registration is one static, testable composition seam.** A frozen
+  descriptor registry under [`src/agents/`](src/agents/) supplies backend IDs,
+  adapter factories, native option and profile rules, source-session support,
+  and failure classification to root runtime consumers. A fake descriptor and
+  source-boundary regression prove that adding a provider does not require
+  pipeline branches or private cross-capability imports, while production
+  remains source-controlled rather than dynamically extensible.
 - **Repository formatting is one root-owned terminal-gate concern.** The exact
   stable Prettier 3 release is pinned once at the root, and the root scripts
   format the Git-visible supported file set while preserving repository and

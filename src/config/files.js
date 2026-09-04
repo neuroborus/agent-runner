@@ -3,6 +3,8 @@ import { lstat, open, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { PROVIDER_REGISTRY } from "../agents/index.js";
+
 import {
   CONFIG_FILENAME,
   CONFIG_SCHEMA_VERSION,
@@ -122,6 +124,7 @@ export async function loadProjectConfiguration({
   configurationPath,
   inspectPath,
   projectPath,
+  providers = PROVIDER_REGISTRY,
   runnerConfiguration,
 }) {
   if (typeof inspectPath !== "function") {
@@ -164,17 +167,21 @@ export async function loadProjectConfiguration({
     configuration: parseProjectConfiguration(
       await readConfinedConfiguration(inspection.path),
       runnerConfiguration,
+      providers,
     ),
   });
 }
 
-export async function loadRunnerConfiguration() {
+export async function loadRunnerConfiguration(providers = PROVIDER_REGISTRY) {
   let source;
   try {
     source = await readFile(CONFIG_PATH, "utf8");
   } catch (cause) {
     if (cause?.code === "ENOENT") {
-      return normalizeConfiguration({ schemaVersion: CONFIG_SCHEMA_VERSION });
+      return normalizeConfiguration(
+        { schemaVersion: CONFIG_SCHEMA_VERSION },
+        providers,
+      );
     }
 
     throw new ConfigurationError(
@@ -183,5 +190,5 @@ export async function loadRunnerConfiguration() {
     );
   }
 
-  return parseRunnerConfiguration(source);
+  return parseRunnerConfiguration(source, providers);
 }

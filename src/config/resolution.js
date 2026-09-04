@@ -1,3 +1,4 @@
+import { PROVIDER_REGISTRY } from "../agents/index.js";
 import { getPipeline } from "../pipeline-registry.js";
 import { createTrustedValidationSnapshot } from "../trusted-validation/index.js";
 
@@ -16,10 +17,10 @@ import { profileImplementation, selectedProfile } from "./profiles.js";
 
 const EXECUTION_FIELDS = new Set(["contextSize", "model", "profile"]);
 
-function normalizeExecution(value, path) {
+function normalizeExecution(value, path, providers) {
   assertRecord(value, path);
   rejectUnknownFields(value, EXECUTION_FIELDS, path);
-  return normalizeRole(value, path);
+  return normalizeRole(value, path, providers);
 }
 
 function normalizeSettingOverrides(pipeline, input) {
@@ -48,7 +49,7 @@ function normalizeSettingOverrides(pipeline, input) {
   );
 }
 
-function normalizeSourceSession(value) {
+function normalizeSourceSession(value, providers) {
   if (value === undefined || value === null) {
     return null;
   }
@@ -58,7 +59,13 @@ function normalizeSourceSession(value) {
     new Set(["backend", "id", "profile"]),
     "sourceSession",
   );
-  assertBackend(value.backend, "sourceSession.backend");
+  assertBackend(value.backend, "sourceSession.backend", providers);
+  if (!providers.supportsSourceSessionFork(value.backend)) {
+    throw new ConfigurationError(
+      `Source backend ${value.backend} does not support session forks.`,
+      { code: "ERR_UNSUPPORTED_SOURCE_SESSION" },
+    );
+  }
   assertSelection(value.id, "sourceSession.id");
   if (value.profile !== undefined) {
     assertSelection(value.profile, "sourceSession.profile");
@@ -78,6 +85,7 @@ export function resolvePipelineConfiguration(
   sourceSession = null,
   projectConfiguration = null,
   settingOverrides = {},
+  providers = PROVIDER_REGISTRY,
 ) {
   const pipeline = getPipeline(pipelineId);
   if (pipeline === undefined) {
@@ -85,20 +93,28 @@ export function resolvePipelineConfiguration(
       code: "ERR_UNKNOWN_PIPELINE",
     });
   }
-  const normalizedConfiguration = normalizeConfiguration(configuration);
+  const normalizedConfiguration = normalizeConfiguration(
+    configuration,
+    providers,
+  );
   const normalizedProjectConfiguration =
     projectConfiguration === null
       ? null
       : normalizeProjectConfiguration(
           projectConfiguration,
           normalizedConfiguration,
+          providers,
         );
   assertRecord(roleOverrides, "roleOverrides");
   const normalizedExecutionOverrides = normalizeExecution(
     executionOverrides,
     "executionOverrides",
+    providers,
   );
-  const normalizedSourceSession = normalizeSourceSession(sourceSession);
+  const normalizedSourceSession = normalizeSourceSession(
+    sourceSession,
+    providers,
+  );
   const normalizedSettingOverrides = normalizeSettingOverrides(
     pipeline,
     settingOverrides,
@@ -116,7 +132,7 @@ export function resolvePipelineConfiguration(
     Object.fromEntries(
       Object.entries(roleOverrides).map(([role, value]) => [
         role,
-        normalizeRole(value, `roleOverrides.${role}`),
+        normalizeRole(value, `roleOverrides.${role}`, providers),
       ]),
     ),
   );
@@ -232,27 +248,32 @@ export function resolvePipelineConfiguration(
         );
       }
 
-      return [
-        role,
-        Object.freeze({
-          backend,
-          profile: profileImplementation(profile),
-          model:
-            override.model ??
-            normalizedExecutionOverrides.model ??
-            projectRole.model ??
-            normalizedProjectConfiguration?.defaultModel ??
-            configuredRole.model ??
-            normalizedConfiguration.defaultModel,
-          contextSize:
-            override.contextSize ??
-            normalizedExecutionOverrides.contextSize ??
-            projectRole.contextSize ??
-            normalizedProjectConfiguration?.defaultContextSize ??
-            configuredRole.contextSize ??
-            normalizedConfiguration.defaultContextSize,
-        }),
-      ];
+      const execution = Object.freeze({
+        profile: profileImplementation(profile, providers),
+        model:
+          override.model ??
+          normalizedExecutionOverrides.model ??
+          projectRole.model ??
+          normalizedProjectConfiguration?.defaultModel ??
+          configuredRole.model ??
+          normalizedConfiguration.defaultModel,
+        contextSize:
+          override.contextSize ??
+          normalizedExecutionOverrides.contextSize ??
+          projectRole.contextSize ??
+          normalizedProjectConfiguration?.defaultContextSize ??
+          configuredRole.contextSize ??
+          normalizedConfiguration.defaultContextSize,
+      });
+      try {
+        providers.validateExecutionOptions(backend, execution);
+      } catch (cause) {
+        throw new ConfigurationError(cause.message, {
+          cause,
+          code: cause.code,
+        });
+      }
+      return [role, Object.freeze({ backend, ...execution })];
     }),
   );
 

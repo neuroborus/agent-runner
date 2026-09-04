@@ -41,6 +41,9 @@ contract.
 - Use `node:test`; keep real Codex and Claude smoke tests opt-in.
 - Prefer small functional modules and split them only when they become meaningfully large.
 - Keep backend-specific flags and output normalization inside `src/agents/`.
+- Register each backend once in the frozen `src/agents/registry.js` descriptor
+  list; derive configuration, runner, source-session, failure, and MCP backend
+  behavior from it without provider branches in pipelines.
 - Keep runner configuration behind `src/config/index.js`; keep strict parsing,
   confined file loading, trusted profiles, and resolution precedence private
   to that capability. Let pipeline descriptors own their roles, settings,
@@ -171,22 +174,24 @@ All pipelines additionally require:
 | `src/trusted-validation/index.js` | Public runner-trusted validation capability boundary                 |
 | `src/trusted-validation/`         | Private contracts, snapshots, sandboxing, and command execution      |
 | `src/agents/index.js`             | Public agent-adapter directory boundary                              |
+| `src/agents/registry.js`          | Frozen source-controlled provider descriptor registry                |
 | `src/agents/claude/index.js`      | Public Claude provider boundary                                      |
 | `src/agents/claude/`              | Private Claude adapter, commit, and native-sandbox implementation    |
 | `src/agents/codex/index.js`       | Public Codex provider boundary                                       |
 | `src/agents/codex/`               | Private Codex adapter, transport, commit, and storage implementation |
-| `src/agents/`                     | Shared agent contracts and provider implementations                  |
+| `src/agents/`                     | Shared agent contracts, registration, and provider implementations   |
 | `packages/commit-plan/`           | Shared deterministic commit-plan contract                            |
 | `pipelines/plan-authoring/`       | Plan-authoring workflow, prompts, tests, and specification           |
 | `pipelines/plan-execution/`       | Plan-execution workflow, prompts, tests, and specification           |
 | `pipelines/polishing/`            | Polishing workflow, prompts, tests, and specification                |
-| `test/agents/`                    | Provider behavior through provider boundaries                        |
+| `test/agents/`                    | Provider boundaries and descriptor-registry behavior                 |
 | `test/clarifications/`            | Clarification-service behavior tests                                 |
 | `test/config/`                    | Configuration parsing, loading, and resolution tests                 |
 | `test/git/`                       | Git-safety behavior tests                                            |
 | `test/integration/`               | Cross-capability workflow integration tests                          |
 | `test/mcp/`                       | MCP control-plane and issue-reporting behavior tests                 |
 | `test/state/`                     | State persistence and safety behavior tests                          |
+| `test/source-boundaries.test.js`  | Source indexes and workspace dependency-direction regression         |
 | `test/`                           | Root CLI, registry, adapter, and repository-boundary tests           |
 | `docs/`                           | Cross-cutting architecture documentation                             |
 | `docs/product/`                   | Current product guarantees, workflow meaning, and accepted nuances   |

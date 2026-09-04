@@ -3,4 +3,5 @@ export {
   ClaudeAdapterError,
   createClaudeAdapter,
   normalizeClaudeDiagnosticClass,
+  validateClaudeExecutionOptions,
 } from "./adapter.js";

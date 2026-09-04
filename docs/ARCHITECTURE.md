@@ -25,7 +25,8 @@ dependency before an actual import needs it.
 - Versioned runner configuration loading, validation, and role resolution.
 - Run IDs, atomic state, append-only events, resume, and status.
 - Clarification files, editor invocation, transcript updates, and input hashes.
-- Codex and Claude adapter execution and access-mode enforcement.
+- Frozen provider registration plus adapter execution and access-mode
+  enforcement.
 - Git snapshots, content fingerprints, read-only guards, remote/identity guards,
   constrained local-commit verification, and verified polishing staging
   handoffs.
@@ -39,7 +40,9 @@ lifecycle, or dependency boundary.
 
 Each JavaScript source directory exposes outward-facing dependencies through
 its `index.js`. Imports between modules in the same directory remain direct to
-keep ownership visible and avoid barrel cycles.
+keep ownership visible and avoid barrel cycles. The source-boundary regression
+checks those imports and the root-to-pipeline-to-shared-package dependency
+direction from source and workspace manifests.
 
 The state capability lives under `src/state/` behind its public `index.js`.
 The index exposes only the run-store and runtime contracts used outside the
@@ -87,6 +90,16 @@ The Codex provider lives under `src/agents/codex/` behind its provider
 Server transport, local-commit executor, and workspace storage remain private
 siblings that own Codex processes, protocols, flags, parsing, and sessions.
 
+The root `src/agents/index.js` is the only agent API consumed outside the agent
+capability. Its private `registry.js` defines one frozen, source-controlled
+descriptor per provider. A descriptor binds the backend ID to its adapter
+factory, execution-option validation, trusted-profile normalization and
+resolution, source-session fork capability, and native diagnostic
+classification. Configuration validation, runner adapter construction and
+source checks, normalized failures, and MCP backend schemas all derive from
+that registry. Tests may inject another complete descriptor; production has no
+dynamic discovery, plugin loading, or provider-specific pipeline branches.
+
 ## Pipeline Ownership
 
 Each pipeline owns its input interpretation, roles, configuration settings and
@@ -110,8 +123,8 @@ V1 registers:
 - `polishing`: polishes, finalizes, and reviews an existing dirty worktree, then
   stages the complete result while leaving it uncommitted.
 
-The registry is static. V1 has no dynamic plugins, workflow DSL, or generic DAG
-executor.
+The pipeline registry is static. V1 has no dynamic plugins, workflow DSL, or
+generic DAG executor.
 
 ## Runner Configuration
 
@@ -333,9 +346,9 @@ does not change the root or pipeline state versions.
 
 ## MCP Control Plane
 
-`agent-run mcp` exposes the same static registry and runner through the official
-Node MCP SDK over STDIO only. The private `src/mcp/service.js` module owns the
-seven pipeline-control tools: `pipelines_list`, `run_start`, `run_status`,
+`agent-run mcp` exposes the same static pipeline registry and runner through the
+official Node MCP SDK over STDIO only. The private `src/mcp/service.js` module
+owns the seven pipeline-control tools: `pipelines_list`, `run_start`, `run_status`,
 `run_activity`, `run_wait`, `run_respond`, and `run_resume`, plus the
 conditionally registered MCP-only `unexpected_issue_report`. It contains
 transport schemas and concise projections, not a second workflow
@@ -406,6 +419,11 @@ Independent mode forks the complete source context into primary and review
 roles; lazy mode forks it once into the primary role. A fresh start is
 recommended for a long, multi-topic, or uncertain source session to avoid
 unnecessary provider context and quota use.
+
+The role-backend and source-session backend enums are projections of the
+provider registry. A descriptor that does not advertise source-session forks
+does not appear in the latter enum; the selected installed adapter must still
+prove native fork support at its capability probe.
 
 `run_wait` is one revision-driven server-side wait that ends at an unresolved
 `WAITING_FOR_USER`, `DONE`, `FAILED`, or its caller-selected timeout. Optional

@@ -1,6 +1,6 @@
-import { isAbsolute, posix, resolve } from "node:path";
+import { posix } from "node:path";
 
-import { BACKEND_IDS } from "../agents/index.js";
+import { PROVIDER_REGISTRY } from "../agents/index.js";
 import { listPipelines } from "../pipeline-registry.js";
 import {
   createTrustedValidationSnapshot,
@@ -12,7 +12,6 @@ export const DEFAULT_ARTIFACT_ROOT = "LOCAL_ARTIFACTS";
 export const PROJECT_CONFIG_FILENAME = "agent-runner.json";
 export const CONFIG_SCHEMA_VERSION = 1;
 
-const BACKENDS = new Set(BACKEND_IDS);
 export const CURRENT = "current";
 const PROFILE_NAME_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const TOP_LEVEL_FIELDS = new Set([
@@ -34,10 +33,6 @@ const PROJECT_TOP_LEVEL_FIELDS = new Set(
   ),
 );
 const ROLE_FIELDS = new Set(["backend", "contextSize", "model", "profile"]);
-const PROFILE_FIELDS = Object.freeze({
-  claude: new Set(["backend", "configDirectory"]),
-  codex: new Set(["backend", "profile"]),
-});
 
 export class ConfigurationError extends Error {
   constructor(message, { cause, code = "ERR_INVALID_CONFIGURATION" } = {}) {
@@ -67,10 +62,10 @@ export function rejectUnknownFields(value, allowedFields, path) {
   }
 }
 
-export function assertBackend(value, path) {
-  if (typeof value !== "string" || !BACKENDS.has(value)) {
+export function assertBackend(value, path, providers = PROVIDER_REGISTRY) {
+  if (typeof value !== "string" || providers.get(value) === undefined) {
     throw new ConfigurationError(
-      `${path} must be one of: ${BACKEND_IDS.join(", ")}.`,
+      `${path} must be one of: ${providers.ids.join(", ")}.`,
     );
   }
 }
@@ -101,13 +96,13 @@ function assertArtifactRoot(value, path) {
   }
 }
 
-export function normalizeRole(role, path) {
+export function normalizeRole(role, path, providers = PROVIDER_REGISTRY) {
   assertRecord(role, path);
   rejectUnknownFields(role, ROLE_FIELDS, path);
 
   const normalized = {};
   if (role.backend !== undefined) {
-    assertBackend(role.backend, `${path}.backend`);
+    assertBackend(role.backend, `${path}.backend`, providers);
     normalized.backend = role.backend;
   }
   for (const field of ["profile", "model", "contextSize"]) {
@@ -120,7 +115,7 @@ export function normalizeRole(role, path) {
   return Object.freeze(normalized);
 }
 
-function normalizeProfile(name, value) {
+function normalizeProfile(name, value, providers) {
   const path = `configuration.profiles.${name}`;
   if (!PROFILE_NAME_PATTERN.test(name) || name === CURRENT) {
     throw new ConfigurationError(
@@ -128,30 +123,12 @@ function normalizeProfile(name, value) {
     );
   }
   assertRecord(value, path);
-  assertBackend(value.backend, `${path}.backend`);
-  rejectUnknownFields(value, PROFILE_FIELDS[value.backend], path);
-
-  if (value.backend === "codex") {
-    assertSelection(value.profile, `${path}.profile`);
-    if (value.profile === CURRENT) {
-      throw new ConfigurationError(`${path}.profile must not be current.`);
-    }
-    return Object.freeze({ backend: value.backend, profile: value.profile });
+  assertBackend(value.backend, `${path}.backend`, providers);
+  try {
+    return providers.normalizeTrustedProfile(value, path);
+  } catch (cause) {
+    throw new ConfigurationError(cause.message, { cause });
   }
-
-  assertSelection(value.configDirectory, `${path}.configDirectory`);
-  if (
-    !isAbsolute(value.configDirectory) ||
-    resolve(value.configDirectory) !== value.configDirectory
-  ) {
-    throw new ConfigurationError(
-      `${path}.configDirectory must be an absolute normalized path.`,
-    );
-  }
-  return Object.freeze({
-    backend: value.backend,
-    configDirectory: value.configDirectory,
-  });
 }
 
 function normalizeTrustedCommands(value) {
@@ -183,7 +160,11 @@ function assertKnownTrustedSelection(settings, trustedCommands, path) {
 function normalizePipeline(
   pipeline,
   input,
-  { applyDefaults = true, rootPath = "configuration" } = {},
+  {
+    applyDefaults = true,
+    providers = PROVIDER_REGISTRY,
+    rootPath = "configuration",
+  } = {},
 ) {
   const path = `${rootPath}.pipelines.${pipeline.id}`;
   assertRecord(input, path);
@@ -225,7 +206,7 @@ function normalizePipeline(
     Object.fromEntries(
       Object.entries(inputRoles).map(([role, value]) => [
         role,
-        normalizeRole(value, `${path}.roles.${role}`),
+        normalizeRole(value, `${path}.roles.${role}`, providers),
       ]),
     ),
   );
@@ -233,7 +214,7 @@ function normalizePipeline(
   return Object.freeze(normalized);
 }
 
-export function normalizeConfiguration(input) {
+export function normalizeConfiguration(input, providers = PROVIDER_REGISTRY) {
   assertRecord(input, "configuration");
   rejectUnknownFields(input, TOP_LEVEL_FIELDS, "configuration");
 
@@ -247,7 +228,11 @@ export function normalizeConfiguration(input) {
     );
   }
   if (input.defaultBackend !== undefined) {
-    assertBackend(input.defaultBackend, "configuration.defaultBackend");
+    assertBackend(
+      input.defaultBackend,
+      "configuration.defaultBackend",
+      providers,
+    );
   }
   if (input.artifactRoot !== undefined) {
     assertArtifactRoot(input.artifactRoot, "configuration.artifactRoot");
@@ -276,7 +261,7 @@ export function normalizeConfiguration(input) {
     Object.fromEntries(
       Object.entries(inputProfiles).map(([name, value]) => [
         name,
-        normalizeProfile(name, value),
+        normalizeProfile(name, value, providers),
       ]),
     ),
   );
@@ -315,6 +300,7 @@ export function normalizeConfiguration(input) {
             inputPipelines[pipeline.id] === undefined
               ? {}
               : inputPipelines[pipeline.id],
+            { providers },
           ),
         ]),
       ),
@@ -357,7 +343,11 @@ export function normalizeConfiguration(input) {
   return Object.freeze(normalized);
 }
 
-export function normalizeProjectConfiguration(input, runnerConfiguration) {
+export function normalizeProjectConfiguration(
+  input,
+  runnerConfiguration,
+  providers = PROVIDER_REGISTRY,
+) {
   const rootPath = "projectConfiguration";
   assertRecord(input, rootPath);
   rejectUnknownFields(input, PROJECT_TOP_LEVEL_FIELDS, rootPath);
@@ -376,7 +366,11 @@ export function normalizeProjectConfiguration(input, runnerConfiguration) {
     assertArtifactRoot(input.artifactRoot, `${rootPath}.artifactRoot`);
   }
   if (input.defaultBackend !== undefined) {
-    assertBackend(input.defaultBackend, `${rootPath}.defaultBackend`);
+    assertBackend(
+      input.defaultBackend,
+      `${rootPath}.defaultBackend`,
+      providers,
+    );
   }
   for (const field of [
     "defaultProfile",
@@ -413,6 +407,7 @@ export function normalizeProjectConfiguration(input, runnerConfiguration) {
                   pipeline.id,
                   normalizePipeline(pipeline, inputPipelines[pipeline.id], {
                     applyDefaults: false,
+                    providers,
                     rootPath,
                   }),
                 ],
@@ -469,7 +464,10 @@ export function normalizeProjectConfiguration(input, runnerConfiguration) {
   return Object.freeze(normalized);
 }
 
-export function parseRunnerConfiguration(source) {
+export function parseRunnerConfiguration(
+  source,
+  providers = PROVIDER_REGISTRY,
+) {
   if (typeof source !== "string") {
     throw new ConfigurationError("Configuration source must be a string.");
   }
@@ -483,10 +481,14 @@ export function parseRunnerConfiguration(source) {
     });
   }
 
-  return normalizeConfiguration(parsed);
+  return normalizeConfiguration(parsed, providers);
 }
 
-export function parseProjectConfiguration(source, runnerConfiguration) {
+export function parseProjectConfiguration(
+  source,
+  runnerConfiguration,
+  providers = PROVIDER_REGISTRY,
+) {
   if (typeof source !== "string") {
     throw new ConfigurationError(
       "Project configuration source must be a string.",
@@ -505,6 +507,7 @@ export function parseProjectConfiguration(source, runnerConfiguration) {
 
   return normalizeProjectConfiguration(
     parsed,
-    normalizeConfiguration(runnerConfiguration),
+    normalizeConfiguration(runnerConfiguration, providers),
+    providers,
   );
 }

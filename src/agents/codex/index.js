@@ -3,6 +3,7 @@ export {
   CodexAdapterError,
   createCodexAdapter,
   normalizeCodexDiagnosticClass,
+  validateCodexExecutionOptions,
 } from "./adapter.js";
 export {
   CodexWorkspaceStorageError,

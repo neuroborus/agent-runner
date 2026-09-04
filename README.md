@@ -125,6 +125,12 @@ A selected profile supplies its backend; `defaultBackend` provides the fallback.
 Explicit decimal context sizes are validated by the chosen adapter and map to
 Codex's context window or Claude's auto-compaction token window.
 
+The supported backend IDs and their trusted-profile and execution rules come
+from one frozen, source-controlled provider registry. The same registry builds
+runner adapters, validates source-session selections, and supplies MCP backend
+enums. It is an explicit extension seam for repository development, not a
+runtime plugin or configuration surface.
+
 | Backend | `model: "current"`                                                        | `profile: "current"`                                                   |
 | ------- | ------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
 | Codex   | Omit the model override and use the effective native Codex default        | Omit `--profile` and inherit the current process/profile               |
@@ -622,10 +628,18 @@ notifications while the model sleeps; live rendering depends on the MCP host.
 Public projections contain no inactive role configuration or provider-private
 data.
 
+## Provider Boundary
+
+One provider descriptor binds a backend ID to its adapter factory,
+execution-option validation, trusted-profile mapping, source-session support,
+and normalized native-failure hooks. Root configuration, orchestration, and MCP
+code consume the registry through the public agent boundary; pipelines remain
+provider-neutral. Production registration is static and frozen.
+
 ## Pipeline Boundary
 
-The registry is static in V1. A pipeline descriptor exports an ID, a state
-version, roles, configuration settings and defaults, setting allowed values and
+The pipeline registry is static in V1. A pipeline descriptor exports an ID, a
+state version, roles, configuration settings and defaults, setting allowed values and
 recommendations, descriptor-owned active-role selection, ordered migrations
 from supported prior versions, pipeline-specific accepted and required `run`
 options, task-input definitions, clarification and status projections,
@@ -643,6 +657,7 @@ Git services; pipeline workspaces own mode and workflow policy.
 ├── src/
 │   ├── agents/
 │   │   ├── adapter-contract.js
+│   │   ├── registry.js
 │   │   ├── claude/
 │   │   │   ├── adapter.js
 │   │   │   ├── index.js
@@ -707,7 +722,8 @@ Git services; pipeline workspaces own mode and workflow policy.
 ├── test/
 │   ├── agents/
 │   │   ├── claude.test.js
-│   │   └── codex.test.js
+│   │   ├── codex.test.js
+│   │   └── registry.test.js
 │   ├── clarifications/
 │   │   └── lifecycle.test.js
 │   ├── config/
@@ -724,9 +740,10 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   ├── mcp/
 │   │   ├── control-plane.test.js
 │   │   └── issue-reporting.test.js
-│   └── state/
-│       ├── persistence.test.js
-│       └── safety.test.js
+│   ├── state/
+│   │   ├── persistence.test.js
+│   │   └── safety.test.js
+│   └── source-boundaries.test.js
 ├── docs/
 │   ├── product/
 │   ├── ARCHITECTURE.md

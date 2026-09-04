@@ -1,16 +1,9 @@
-import {
-  createClaudeAdapter,
-  createCodexAdapter,
-  normalizeAdapterFailure,
-} from "../agents/index.js";
+import { normalizeAdapterFailure, PROVIDER_REGISTRY } from "../agents/index.js";
 
 import { isRecord, RunnerError } from "./input.js";
 
-export function defaultAdapters() {
-  return Object.freeze({
-    codex: createCodexAdapter(),
-    claude: createClaudeAdapter(),
-  });
+export function defaultAdapters(providers = PROVIDER_REGISTRY) {
+  return providers.createAdapters();
 }
 
 function resolveAdapter(adapters, pipelineId, role, backend) {
@@ -56,23 +49,25 @@ function validateCapabilities(
   return capabilities;
 }
 
-function executionOptions(configuration) {
-  return Object.freeze({
+function executionOptions(configuration, providers) {
+  const options = Object.freeze({
     profile: configuration.profile,
     model: configuration.model,
     contextSize: configuration.contextSize,
   });
+  providers.validateExecutionOptions(configuration.backend, options);
+  return options;
 }
 
-async function runAdapter(adapter, backend, request) {
+async function runAdapter(adapter, backend, request, providers) {
   try {
     return await adapter.run(request);
   } catch (cause) {
-    throw normalizeAdapterFailure(backend, cause);
+    throw normalizeAdapterFailure(backend, cause, providers);
   }
 }
 
-function lazyArbiterAdapter(run, configuration, adapters) {
+function lazyArbiterAdapter(run, configuration, adapters, providers) {
   let adapter;
   let capabilitiesPromise;
   const resolve = () => {
@@ -86,7 +81,7 @@ function lazyArbiterAdapter(run, configuration, adapters) {
   };
   const resolveCapabilities = async () => {
     capabilitiesPromise ??= Promise.resolve()
-      .then(() => resolve().probe(executionOptions(configuration)))
+      .then(() => resolve().probe(executionOptions(configuration, providers)))
       .then((capabilities) =>
         validateCapabilities(capabilities, {
           backend: configuration.backend,
@@ -106,12 +101,12 @@ function lazyArbiterAdapter(run, configuration, adapters) {
     probe: resolveCapabilities,
     async run(request) {
       await resolveCapabilities();
-      return runAdapter(resolve(), configuration.backend, request);
+      return runAdapter(resolve(), configuration.backend, request, providers);
     },
   });
 }
 
-function configuredAdapter(run, role, configuration, adapters) {
+function configuredAdapter(run, role, configuration, adapters, providers) {
   const adapter = resolveAdapter(
     adapters,
     run.pipelineId,
@@ -119,27 +114,39 @@ function configuredAdapter(run, role, configuration, adapters) {
     configuration.backend,
   );
   return Object.freeze({
-    probe: () => adapter.probe(executionOptions(configuration)),
-    run: (request) => runAdapter(adapter, configuration.backend, request),
+    probe: () => adapter.probe(executionOptions(configuration, providers)),
+    run: (request) =>
+      runAdapter(adapter, configuration.backend, request, providers),
   });
 }
 
-export function roleAdapters(run, adapters) {
+export function roleAdapters(run, adapters, providers = PROVIDER_REGISTRY) {
   return Object.freeze(
     Object.fromEntries(
       Object.entries(run.roles).map(([role, configuration]) => [
         role,
         role === "arbiter"
-          ? lazyArbiterAdapter(run, configuration, adapters)
-          : configuredAdapter(run, role, configuration, adapters),
+          ? lazyArbiterAdapter(run, configuration, adapters, providers)
+          : configuredAdapter(run, role, configuration, adapters, providers),
       ]),
     ),
   );
 }
 
-export function validateSourceRoles(pipeline, roles, sourceSession) {
+export function validateSourceRoles(
+  pipeline,
+  roles,
+  sourceSession,
+  providers = PROVIDER_REGISTRY,
+) {
   if (sourceSession === null) {
     return;
+  }
+  if (!providers.supportsSourceSessionFork(sourceSession.backend)) {
+    throw new RunnerError(
+      `Backend cannot fork the supplied source: ${sourceSession.backend}.`,
+      { code: "ERR_UNSUPPORTED_SOURCE_SESSION" },
+    );
   }
   const incompatibleRole = Object.keys(roles)
     .filter((role) => role !== "arbiter")
@@ -157,6 +164,7 @@ export async function probeRequiredRoles(
   roles,
   adapters,
   sourceSession,
+  providers = PROVIDER_REGISTRY,
 ) {
   const requiredRoles = Object.keys(roles).filter((role) => role !== "arbiter");
   const capabilitiesByConfiguration = new Map();
@@ -168,7 +176,7 @@ export async function probeRequiredRoles(
       const adapter = resolveAdapter(adapters, pipeline.id, role, backend);
       capabilitiesByConfiguration.set(
         key,
-        await adapter.probe(executionOptions(configuration)),
+        await adapter.probe(executionOptions(configuration, providers)),
       );
     }
     validateCapabilities(capabilitiesByConfiguration.get(key), {

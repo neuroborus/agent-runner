@@ -7,6 +7,7 @@ import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import * as z from "zod/v4";
 
 import packageMetadata from "../../package.json" with { type: "json" };
+import { PROVIDER_REGISTRY } from "../agents/index.js";
 import { createClarificationService } from "../clarifications/index.js";
 import { loadRunnerConfiguration } from "../config/index.js";
 import { createGitService } from "../git/index.js";
@@ -66,36 +67,6 @@ const pipelineMode = z
 const idempotencyKey = boundedSingleLine(1_024).describe(
   "Opaque key unique to this logical mutation.",
 );
-const roleOverride = z
-  .object({
-    backend: z.enum(["codex", "claude"]).optional(),
-    profile: z.string().min(1).max(4_096).optional(),
-    model: z.string().min(1).max(256).optional(),
-    contextSize: z.string().min(1).max(64).optional(),
-  })
-  .strict()
-  .refine((value) => Object.values(value).some((entry) => entry !== undefined));
-const sourceSession = z
-  .object({
-    backend: z
-      .enum(["codex", "claude"])
-      .describe("Backend that owns the deliberately selected source session."),
-    id: sessionReference.describe(
-      "Opaque native session ID supplied only after the user chooses a fork.",
-    ),
-    profile: z
-      .string()
-      .min(1)
-      .max(4_096)
-      .optional()
-      .describe(
-        'Known trusted source profile alias, or "current" inheritance when unknown; never guess an alias.',
-      ),
-  })
-  .strict()
-  .describe(
-    "Compatible current session deliberately selected for complete-context forks: independently by primary and review roles in independent mode, or once by the primary role in lazy mode. Leave unset for a fresh start.",
-  );
 const resumeAction = z.discriminatedUnion("type", [
   z
     .object({
@@ -110,22 +81,61 @@ const resumeAction = z.discriminatedUnion("type", [
     })
     .strict(),
 ]);
-const runStartSchema = z
-  .object({
-    idempotencyKey,
-    pipelineId: identifier,
-    projectPath: z.string().min(1),
-    projectConfigurationPath: z.string().min(1).optional(),
-    taskPath: z.string().min(1),
-    proactiveClarification: z.boolean().default(false),
-    mode: pipelineMode.optional(),
-    profile: z.string().min(1).max(4_096).optional(),
-    model: z.string().min(1).max(256).optional(),
-    contextSize: z.string().min(1).max(64).optional(),
-    roleOverrides: z.record(identifier, roleOverride).default({}),
-    sourceSession: sourceSession.nullable().default(null),
-  })
-  .strict();
+function createRunStartSchema(providers) {
+  const backend = z.enum(providers.ids);
+  const sourceBackend =
+    providers.sourceSessionIds.length === 0
+      ? z.never()
+      : z.enum(providers.sourceSessionIds);
+  const roleOverride = z
+    .object({
+      backend: backend.optional(),
+      profile: z.string().min(1).max(4_096).optional(),
+      model: z.string().min(1).max(256).optional(),
+      contextSize: z.string().min(1).max(64).optional(),
+    })
+    .strict()
+    .refine((value) =>
+      Object.values(value).some((entry) => entry !== undefined),
+    );
+  const sourceSession = z
+    .object({
+      backend: sourceBackend.describe(
+        "Backend that owns the deliberately selected source session.",
+      ),
+      id: sessionReference.describe(
+        "Opaque native session ID supplied only after the user chooses a fork.",
+      ),
+      profile: z
+        .string()
+        .min(1)
+        .max(4_096)
+        .optional()
+        .describe(
+          'Known trusted source profile alias, or "current" inheritance when unknown; never guess an alias.',
+        ),
+    })
+    .strict()
+    .describe(
+      "Compatible current session deliberately selected for complete-context forks: independently by primary and review roles in independent mode, or once by the primary role in lazy mode. Leave unset for a fresh start.",
+    );
+  return z
+    .object({
+      idempotencyKey,
+      pipelineId: identifier,
+      projectPath: z.string().min(1),
+      projectConfigurationPath: z.string().min(1).optional(),
+      taskPath: z.string().min(1),
+      proactiveClarification: z.boolean().default(false),
+      mode: pipelineMode.optional(),
+      profile: z.string().min(1).max(4_096).optional(),
+      model: z.string().min(1).max(256).optional(),
+      contextSize: z.string().min(1).max(64).optional(),
+      roleOverrides: z.record(identifier, roleOverride).default({}),
+      sourceSession: sourceSession.nullable().default(null),
+    })
+    .strict();
+}
 const runRespondSchema = z
   .object({
     idempotencyKey,
@@ -402,6 +412,7 @@ export function createDetachedLauncher({
 }
 
 export function createMcpControlPlane(options = {}) {
+  const providers = options.providers ?? PROVIDER_REGISTRY;
   const detachedCompatibilityToken =
     options.detachedCompatibilityToken ?? DETACHED_RUNTIME_COMPATIBILITY_TOKEN;
   const runStore = options.runStore ?? createRunStore();
@@ -409,6 +420,7 @@ export function createMcpControlPlane(options = {}) {
     options.runner ??
     createRunner({
       clarifications: createClarificationService({ interactive: false }),
+      providers,
       runStore,
     });
   const launchRun = options.launchRun ?? launchDetachedRun;
@@ -422,7 +434,8 @@ export function createMcpControlPlane(options = {}) {
       loadConfiguration:
         options.reportingOptions?.loadConfiguration ??
         options.loadConfiguration ??
-        loadRunnerConfiguration,
+        (() => loadRunnerConfiguration(providers)),
+      providers,
     });
 
   async function projectStatus(current) {
@@ -898,6 +911,8 @@ export function createMcpControlPlane(options = {}) {
 }
 
 export function createMcpServer(options = {}) {
+  const providers = options.providers ?? PROVIDER_REGISTRY;
+  const runStartSchema = createRunStartSchema(providers);
   const issueReportingEnabled =
     options.issueReportingEnabled ??
     options.runnerConfiguration?.issueReporting ??
@@ -1047,9 +1062,12 @@ export function createMcpServer(options = {}) {
 
 export async function serveMcp(options = {}) {
   const stderr = options.stderr ?? process.stderr;
+  const providers = options.providers ?? PROVIDER_REGISTRY;
   const configuration =
     options.runnerConfiguration ??
-    (await (options.loadConfiguration ?? loadRunnerConfiguration)());
+    (await (
+      options.loadConfiguration ?? (() => loadRunnerConfiguration(providers))
+    )());
   const createServer =
     options.createServer ??
     (() =>

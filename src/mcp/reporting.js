@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { link, lstat, mkdir, open, realpath, unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 
+import { PROVIDER_REGISTRY } from "../agents/index.js";
 import {
   loadProjectConfiguration,
   loadRunnerConfiguration,
@@ -456,6 +457,7 @@ export function createUnexpectedIssueReporter({
   linkFile = link,
   loadConfiguration = loadRunnerConfiguration,
   onPublished = async () => {},
+  providers = PROVIDER_REGISTRY,
   tokenFactory = randomUUID,
 } = {}) {
   if (
@@ -505,6 +507,7 @@ export function createUnexpectedIssueReporter({
           : { configurationPath: input.projectConfigurationPath }),
         inspectPath: git.inspectPath,
         projectPath,
+        providers,
         runnerConfiguration: configuration,
       });
       const artifactRoot =

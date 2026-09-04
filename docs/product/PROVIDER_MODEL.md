@@ -24,6 +24,20 @@ write blocking, native session behavior, and constrained local commit when the
 pipeline needs it. A capability probe does not prove authentication or provider
 availability; the first real turn under the selected profile establishes that.
 
+## Registration
+
+Providers are registered through one frozen, source-controlled descriptor list.
+Each descriptor binds a backend ID to its adapter factory, execution-option
+validation, trusted-profile rules, source-session capability, and native
+failure classifier. Configuration, runner construction and source checks,
+failure normalization, and MCP backend discovery all consume that list. Adding
+a backend is one explicit repository change rather than a plugin installation
+or a set of provider branches in pipeline policy.
+
+Tests may inject a complete fake descriptor to prove the seam. Production
+registration is fixed at process startup and does not load descriptors from
+configuration, target repositories, provider storage, or the network.
+
 ## Sessions and context
 
 Native sessions are disposable execution context, never durable workflow

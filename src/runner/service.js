@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
+import { PROVIDER_REGISTRY } from "../agents/index.js";
 import { createClarificationService } from "../clarifications/index.js";
 import {
   loadProjectConfiguration,
@@ -45,6 +46,7 @@ const RUNNER_OPTION_FIELDS = new Set([
   "git",
   "loadConfiguration",
   "onActivity",
+  "providers",
   "runStore",
   "trustedValidation",
 ]);
@@ -113,11 +115,27 @@ export function pipelineRequiresWorktreeLease(pipelineId) {
 
 export function createRunner(options = {}) {
   rejectUnknownFields(options, RUNNER_OPTION_FIELDS, "runnerOptions");
-  const adapters = options.adapters ?? defaultAdapters();
+  const providers = options.providers ?? PROVIDER_REGISTRY;
+  if (
+    !isRecord(providers) ||
+    !Array.isArray(providers.ids) ||
+    !Array.isArray(providers.sourceSessionIds) ||
+    typeof providers.get !== "function" ||
+    typeof providers.createAdapters !== "function" ||
+    typeof providers.validateExecutionOptions !== "function" ||
+    typeof providers.supportsSourceSessionFork !== "function" ||
+    typeof providers.normalizeDiagnosticClass !== "function" ||
+    typeof providers.isDiagnosticClass !== "function"
+  ) {
+    throw new RunnerError("Runner services are invalid.", {
+      code: "ERR_INVALID_RUNNER_OPTIONS",
+    });
+  }
+  const adapters = options.adapters ?? defaultAdapters(providers);
   const clarifications = options.clarifications ?? createClarificationService();
   const git = options.git ?? createGitService();
   const loadConfiguration =
-    options.loadConfiguration ?? loadRunnerConfiguration;
+    options.loadConfiguration ?? (() => loadRunnerConfiguration(providers));
   const onActivity = options.onActivity ?? (async () => {});
   const runStore = options.runStore ?? createRunStore();
   const trustedValidation =
@@ -225,7 +243,12 @@ export function createRunner(options = {}) {
     return pipeline.workflow.run({
       action,
       run,
-      runtime: runtimeFor(pipeline, lease, run, roleAdapters(run, adapters)),
+      runtime: runtimeFor(
+        pipeline,
+        lease,
+        run,
+        roleAdapters(run, adapters, providers),
+      ),
       settings,
     });
   }
@@ -336,7 +359,7 @@ export function createRunner(options = {}) {
   }
 
   async function prepare(input, options = {}) {
-    const normalized = normalizeRunInput(input);
+    const normalized = normalizeRunInput(input, providers);
     const createOptions = normalizeCreateOptions(options);
     if (typeof normalized.proactiveClarification !== "boolean") {
       throw new RunnerError("run.proactiveClarification must be a boolean.", {
@@ -370,6 +393,7 @@ export function createRunner(options = {}) {
       configurationPath: normalized.projectConfigurationPath,
       inspectPath: (options) => git.inspectPath(options),
       projectPath,
+      providers,
       runnerConfiguration: configuration,
     });
     let resolved;
@@ -382,6 +406,7 @@ export function createRunner(options = {}) {
         normalized.sourceSession,
         projectConfiguration?.configuration ?? null,
         normalized.settingOverrides,
+        providers,
       );
     } catch (cause) {
       if (cause?.code !== "ERR_SOURCE_BACKEND_MISMATCH") {
@@ -392,7 +417,12 @@ export function createRunner(options = {}) {
         code: "ERR_SOURCE_BACKEND_MISMATCH",
       });
     }
-    validateSourceRoles(pipeline, resolved.roles, normalized.sourceSession);
+    validateSourceRoles(
+      pipeline,
+      resolved.roles,
+      normalized.sourceSession,
+      providers,
+    );
     if ((resolved.trustedValidation?.commands.length ?? 0) > 0) {
       await trustedValidation.preflight({ projectPath });
     }
@@ -401,6 +431,7 @@ export function createRunner(options = {}) {
       resolved.roles,
       adapters,
       normalized.sourceSession,
+      providers,
     );
     const pipelineState = pipeline.workflow.createState({
       artifactRoot: resolved.artifactRoot,

@@ -14,10 +14,6 @@ export function selectedProfile(configuration, selection, path) {
   return profile;
 }
 
-export function profileImplementation(profile) {
-  return profile === null
-    ? CURRENT
-    : profile.backend === "codex"
-      ? profile.profile
-      : profile.configDirectory;
+export function profileImplementation(profile, providers) {
+  return profile === null ? CURRENT : providers.resolveTrustedProfile(profile);
 }

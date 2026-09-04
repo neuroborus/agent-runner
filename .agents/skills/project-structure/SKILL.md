@@ -45,6 +45,9 @@ choice affects the shared plan contract.
 - `src/agents/claude/`: keep Claude Code processes, flags, parsing, sessions,
   local commits, and native sandbox behavior private to that provider.
 - `src/agents/index.js`: expose the agent-adapter directory API.
+- `src/agents/registry.js`: own the frozen source-controlled provider
+  descriptors used by configuration, runner construction, source checks,
+  failure normalization, and MCP backend schemas.
 - `packages/commit-plan/`: own deterministic plan parsing, serialization, and validation shared by multiple pipelines.
 - `pipelines/<id>/src/`: own that pipeline's states, transitions, prompts, roles, and descriptor.
 - `pipelines/<id>/test/`: test that pipeline's behavior with `node:test` and fake adapters.
@@ -56,6 +59,8 @@ choice affects the shared plan contract.
 - `test/integration/`: test cross-capability workflows.
 - `test/mcp/`: test MCP control-plane and issue-reporting behavior.
 - `test/state/`: test state persistence and safety behavior.
+- `test/source-boundaries.test.js`: enforce public source indexes and internal
+  workspace dependency direction.
 - `test/`: test root runtime behavior, workspace boundaries, adapters, and temporary Git repositories.
 - `docs/`: keep cross-cutting architecture requirements.
 
@@ -69,6 +74,8 @@ choice affects the shared plan contract.
 - Keep pipelines explicit and independently owned; do not introduce a generic workflow DSL or dynamic plugin loader.
 - Do not extract CLI, Git, state, agent adapters, or test helpers into packages until another real consumer needs them.
 - Keep the backend contract small and functional; contain CLI-specific details inside adapters.
+- Add a provider through one complete static descriptor; do not duplicate its
+  ID or branch on it in configuration, runner, MCP, or pipeline policy.
 - Keep the configuration envelope and precedence in the root runtime while
   pipeline descriptors own roles, settings, defaults, and persisted-run
   validators; load runtime defaults from the runner root, never from a target
@@ -92,6 +99,8 @@ choice affects the shared plan contract.
 - Is this logic runtime-wide, pipeline-specific, plan-contract-specific, backend-specific, Git-specific, or persistence-specific?
 - Does the change preserve the mandatory invariants in `AGENTS.md`, the architecture, and the affected pipeline specification?
 - Can the behavior be tested with a fake adapter or temporary repository?
+- Does one injected provider descriptor exercise every runtime consumer without
+  a provider-specific pipeline branch?
 - Is a new module or dependency solving a present problem rather than a hypothetical one?
 
 ## Checks

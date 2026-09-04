@@ -1,7 +1,6 @@
-import { BACKEND_IDS } from "../agents/index.js";
+import { PROVIDER_REGISTRY } from "../agents/index.js";
 import { DETACHED_RUNTIME_COMPATIBILITY_TOKEN } from "../pipeline-registry.js";
 
-const BACKENDS = new Set(BACKEND_IDS);
 const RUN_FIELDS = new Set([
   "pipelineId",
   "projectPath",
@@ -64,10 +63,11 @@ export function assertNonEmptyString(value, name) {
   return value;
 }
 
-export function parseSourceSession(value) {
+export function parseSourceSession(value, providers = PROVIDER_REGISTRY) {
+  const backends = new Set(providers.sourceSessionIds);
   if (typeof value !== "string" || value.trim().length === 0) {
     throw new RunnerError(
-      `Source session must use <${BACKEND_IDS.join("|")}>:<session-id>.`,
+      `Source session must use <${providers.sourceSessionIds.join("|")}>:<session-id>.`,
       { code: "ERR_INVALID_SOURCE_SESSION" },
     );
   }
@@ -76,25 +76,25 @@ export function parseSourceSession(value) {
   const id = value.slice(separator + 1);
   if (
     separator < 1 ||
-    !BACKENDS.has(backend) ||
+    !backends.has(backend) ||
     id.trim().length === 0 ||
     /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(id)
   ) {
     throw new RunnerError(
-      `Source session must use <${BACKEND_IDS.join("|")}>:<session-id>.`,
+      `Source session must use <${providers.sourceSessionIds.join("|")}>:<session-id>.`,
       { code: "ERR_INVALID_SOURCE_SESSION" },
     );
   }
   return Object.freeze({ backend, id });
 }
 
-function normalizeSourceSession(value) {
+function normalizeSourceSession(value, providers) {
   if (value === undefined || value === null) {
     return null;
   }
   rejectUnknownFields(value, SOURCE_SESSION_FIELDS, "sourceSession");
   if (
-    !BACKENDS.has(value.backend) ||
+    !providers.supportsSourceSessionFork(value.backend) ||
     typeof value.id !== "string" ||
     value.id.trim().length === 0 ||
     /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(value.id)
@@ -118,7 +118,7 @@ function normalizeSourceSession(value) {
   });
 }
 
-export function normalizeRunInput(input) {
+export function normalizeRunInput(input, providers = PROVIDER_REGISTRY) {
   rejectUnknownFields(input, RUN_FIELDS, "run");
   return Object.freeze({
     pipelineId: assertNonEmptyString(input.pipelineId, "run.pipelineId"),
@@ -138,7 +138,7 @@ export function normalizeRunInput(input) {
             input.projectConfigurationPath,
             "run.projectConfigurationPath",
           ),
-    sourceSession: normalizeSourceSession(input.sourceSession),
+    sourceSession: normalizeSourceSession(input.sourceSession, providers),
   });
 }
 

@@ -1,22 +1,7 @@
-import {
-  CLAUDE_BACKEND_ID,
-  ClaudeAdapterError,
-  createClaudeAdapter,
-  normalizeClaudeDiagnosticClass,
-} from "./claude/index.js";
-import {
-  CODEX_BACKEND_ID,
-  CodexAdapterError,
-  createCodexAdapter,
-  normalizeCodexDiagnosticClass,
-} from "./codex/index.js";
 import { STRUCTURED_OUTPUT_FAILURE_CLASS } from "./adapter-contract.js";
+import { PROVIDER_REGISTRY } from "./registry.js";
 
 const ERROR_CODE_PATTERN = /^[A-Z0-9_]{1,64}$/u;
-const DIAGNOSTIC_NORMALIZERS = Object.freeze({
-  [CLAUDE_BACKEND_ID]: normalizeClaudeDiagnosticClass,
-  [CODEX_BACKEND_ID]: normalizeCodexDiagnosticClass,
-});
 
 export class AgentBoundaryError extends Error {
   constructor(cause, diagnosticClass) {
@@ -39,32 +24,42 @@ export class AgentBoundaryError extends Error {
   }
 }
 
-export function normalizeAdapterFailure(backend, cause) {
+export function normalizeAdapterFailure(
+  backend,
+  cause,
+  providers = PROVIDER_REGISTRY,
+) {
   if (cause instanceof AgentBoundaryError) {
     return cause;
   }
-  const diagnosticClass = DIAGNOSTIC_NORMALIZERS[backend]?.(
+  const diagnosticClass = providers.normalizeDiagnosticClass(
+    backend,
     cause?.diagnosticClass,
   );
   return new AgentBoundaryError(cause, diagnosticClass);
 }
 
-export function isAdapterDiagnosticClass(value) {
-  return Object.values(DIAGNOSTIC_NORMALIZERS).some(
-    (normalize) => normalize(value) !== undefined,
-  );
+export function isAdapterDiagnosticClass(value, providers = PROVIDER_REGISTRY) {
+  return providers.isDiagnosticClass(value);
 }
 
 export {
   CLAUDE_BACKEND_ID,
   ClaudeAdapterError,
+  createClaudeAdapter,
+  normalizeClaudeDiagnosticClass,
+} from "./claude/index.js";
+export {
   CODEX_BACKEND_ID,
   CodexAdapterError,
-  createClaudeAdapter,
   createCodexAdapter,
-  normalizeClaudeDiagnosticClass,
   normalizeCodexDiagnosticClass,
-};
+} from "./codex/index.js";
 export { STRUCTURED_OUTPUT_FAILURE_CLASS };
+export {
+  createProviderRegistry,
+  PROVIDER_REGISTRY,
+  ProviderRegistryError,
+} from "./registry.js";
 
-export const BACKEND_IDS = Object.freeze([CODEX_BACKEND_ID, CLAUDE_BACKEND_ID]);
+export const BACKEND_IDS = PROVIDER_REGISTRY.ids;
