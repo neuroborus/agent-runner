@@ -18,7 +18,7 @@ import {
   CLARIFICATION_TEMPLATE,
   ClarificationError,
   createClarificationService,
-} from "../src/index.js";
+} from "../../src/clarifications/index.js";
 
 async function createFixture(t) {
   const workspace = await mkdtemp(

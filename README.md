@@ -649,11 +649,13 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   │   ├── codex-local-commit.js
 │   │   ├── codex.js
 │   │   └── index.js
+│   ├── clarifications/
+│   │   ├── editor.js
+│   │   ├── files.js
+│   │   ├── index.js
+│   │   └── service.js
 │   ├── cli.js
 │   ├── config.js
-│   ├── clarification-editor.js
-│   ├── clarification-files.js
-│   ├── clarifications.js
 │   ├── git-commit.js
 │   ├── git-command.js
 │   ├── git-content.js
@@ -679,6 +681,8 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   ├── plan-execution/
 │   └── polishing/
 ├── test/
+│   └── clarifications/
+│       └── lifecycle.test.js
 ├── docs/
 │   ├── product/
 │   ├── ARCHITECTURE.md

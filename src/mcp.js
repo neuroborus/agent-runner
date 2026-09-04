@@ -7,7 +7,7 @@ import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import * as z from "zod/v4";
 
 import packageMetadata from "../package.json" with { type: "json" };
-import { createClarificationService } from "./clarifications.js";
+import { createClarificationService } from "./clarifications/index.js";
 import { loadRunnerConfiguration } from "./config.js";
 import { createGitService } from "./git.js";
 import { createUnexpectedIssueReporter } from "./mcp-reporting.js";

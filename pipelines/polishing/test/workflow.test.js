@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
-import { createClarificationService } from "../../../src/clarifications.js";
+import { createClarificationService } from "../../../src/clarifications/index.js";
 import { createGitService } from "../../../src/git.js";
 import { createRunStore } from "../../../src/state.js";
 import {

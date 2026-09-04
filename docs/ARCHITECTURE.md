@@ -1098,12 +1098,12 @@ behavior, scope, or planned work, or a pipeline-owned blocking outcome.
 `--clarify` opens the text editor before that turn so the user can add context
 proactively; otherwise the editor opens only when the agent asks a question.
 
-The root runtime owns the common mechanics in `src/clarifications.js`: creating
-the `clarifications.md` artifact, invoking `$VISUAL` or `$EDITOR`, appending
-question rounds, and hashing the result. Pipelines own the artifact location,
-prompt, round limit, transition out of `CLARIFY`, and safe re-entry after an
-exceptional product decision. This is a bounded preparation protocol, not a
-general chat or dialogue engine.
+The root runtime owns the common mechanics under `src/clarifications/` behind
+its public `index.js`: creating the `clarifications.md` artifact, invoking
+`$VISUAL` or `$EDITOR`, appending question rounds, and hashing the result.
+Pipelines own the artifact location, prompt, round limit, transition out of
+`CLARIFY`, and safe re-entry after an exceptional product decision. This is a
+bounded preparation protocol, not a general chat or dialogue engine.
 
 Before the first clarification turn, the runner creates the Markdown artifact
 when missing and otherwise preserves its existing transcript. Keep the format

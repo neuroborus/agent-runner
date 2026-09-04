@@ -8,7 +8,7 @@ import {
   createCodexAdapter,
   normalizeAdapterFailure,
 } from "./agents/index.js";
-import { createClarificationService } from "./clarifications.js";
+import { createClarificationService } from "./clarifications/index.js";
 import {
   loadProjectConfiguration,
   loadRunnerConfiguration,

@@ -1,10 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
 
-import {
-  defaultLaunchEditor,
-  editorCandidates,
-} from "./clarification-editor.js";
+import { defaultLaunchEditor, editorCandidates } from "./editor.js";
 import {
   CLARIFICATION_TEMPLATE,
   ClarificationError,
@@ -12,9 +9,7 @@ import {
   readTranscript,
   replaceTranscript,
   resolveTranscriptPath,
-} from "./clarification-files.js";
-
-export { CLARIFICATION_TEMPLATE, ClarificationError };
+} from "./files.js";
 
 const EDIT_AUTHORIZATION_SCHEMA_VERSION = 1;
 const MAX_STRUCTURED_TEXT_LENGTH = 4_000;

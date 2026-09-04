@@ -17,9 +17,9 @@ choice affects the shared plan contract.
 - `src/cli.js`: own argument parsing, validation, concise terminal output, and dispatch.
 - `src/mcp.js`: own STDIO MCP schemas, projections, revision waits, and detached dispatch without duplicating runner logic.
 - `src/config.js`: own runner-local configuration loading, strict validation, and role resolution precedence.
-- `src/clarifications.js`: expose and coordinate the clarification boundary.
-- `src/clarification-*.js`: keep its confined file and editor helpers internal
-  to the root clarification boundary.
+- `src/clarifications/index.js`: expose the clarification boundary.
+- `src/clarifications/`: keep coordination, confined transcript files, and
+  editor support private to that boundary.
 - `src/pipeline-registry.js`: own the explicit list of built-in pipelines; do not turn it into a plugin system.
 - `src/runner.js`: coordinate `run`, `resume`, and `status` without backend-specific flags.
 - `src/state.js`: expose and coordinate the run-store boundary.
@@ -38,6 +38,7 @@ choice affects the shared plan contract.
 - `pipelines/<id>/src/`: own that pipeline's states, transitions, prompts, roles, and descriptor.
 - `pipelines/<id>/test/`: test that pipeline's behavior with `node:test` and fake adapters.
 - `pipelines/<id>/docs/`: keep that pipeline's product and implementation specification.
+- `test/clarifications/`: test clarification-service behavior.
 - `test/`: test root runtime behavior, workspace boundaries, adapters, and temporary Git repositories.
 - `docs/`: keep cross-cutting architecture requirements.
 

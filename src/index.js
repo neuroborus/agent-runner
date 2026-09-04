@@ -3,7 +3,7 @@ export {
   CLARIFICATION_TEMPLATE,
   ClarificationError,
   createClarificationService,
-} from "./clarifications.js";
+} from "./clarifications/index.js";
 export {
   CONFIG_FILENAME,
   CONFIG_SCHEMA_VERSION,

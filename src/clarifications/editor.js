@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 
-import { ClarificationError } from "./clarification-files.js";
+import { ClarificationError } from "./files.js";
 
 function parseEditorCommand(command) {
   const argumentsList = [];
