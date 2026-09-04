@@ -9,7 +9,7 @@ import * as z from "zod/v4";
 import packageMetadata from "../package.json" with { type: "json" };
 import { createClarificationService } from "./clarifications/index.js";
 import { loadRunnerConfiguration } from "./config.js";
-import { createGitService } from "./git.js";
+import { createGitService } from "./git/index.js";
 import { createUnexpectedIssueReporter } from "./mcp-reporting.js";
 import {
   DETACHED_RUNTIME_COMPATIBILITY_TOKEN,

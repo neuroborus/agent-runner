@@ -16,7 +16,7 @@ export {
   PROJECT_CONFIG_FILENAME,
   resolvePipelineConfiguration,
 } from "./config.js";
-export { createGitService, GitSafetyError } from "./git.js";
+export { createGitService, GitSafetyError } from "./git/index.js";
 export {
   createDetachedLauncher,
   createMcpControlPlane,

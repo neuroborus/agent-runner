@@ -41,6 +41,12 @@ Each JavaScript source directory exposes outward-facing dependencies through
 its `index.js`. Imports between modules in the same directory remain direct to
 keep ownership visible and avoid barrel cycles.
 
+The Git capability lives under `src/git/` behind its public `index.js`. The
+small index exposes only the service factory and shared safety error; its
+private service composes command execution, content and snapshot inspection,
+commit verification, and polishing handoff modules without exposing their
+implementation contracts to root consumers.
+
 ## Pipeline Ownership
 
 Each pipeline owns its input interpretation, roles, configuration settings and

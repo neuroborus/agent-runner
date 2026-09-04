@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
-import { createGitService, GitSafetyError } from "../src/index.js";
+import { createGitService, GitSafetyError } from "../../src/git/index.js";
 
 const executeFile = promisify(execFile);
 

@@ -9,7 +9,7 @@ import {
   GitSafetyError,
   hashBuffer,
   isWithin,
-} from "./git-command.js";
+} from "./command.js";
 
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
 

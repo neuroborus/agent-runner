@@ -656,11 +656,13 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   │   └── service.js
 │   ├── cli.js
 │   ├── config.js
-│   ├── git-commit.js
-│   ├── git-command.js
-│   ├── git-content.js
-│   ├── git-handoff.js
-│   ├── git.js
+│   ├── git/
+│   │   ├── command.js
+│   │   ├── commit.js
+│   │   ├── content.js
+│   │   ├── handoff.js
+│   │   ├── index.js
+│   │   └── service.js
 │   ├── index.js
 │   ├── mcp.js
 │   ├── mcp-reporting.js
@@ -681,8 +683,12 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   ├── plan-execution/
 │   └── polishing/
 ├── test/
-│   └── clarifications/
-│       └── lifecycle.test.js
+│   ├── clarifications/
+│   │   └── lifecycle.test.js
+│   └── git/
+│       ├── local-commit.test.js
+│       ├── polishing-handoff.test.js
+│       └── repository-safety.test.js
 ├── docs/
 │   ├── product/
 │   ├── ARCHITECTURE.md

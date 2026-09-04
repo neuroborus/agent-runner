@@ -16,7 +16,7 @@ import { promisify } from "node:util";
 import test from "node:test";
 
 import { createClarificationService } from "../../../src/clarifications/index.js";
-import { createGitService } from "../../../src/git.js";
+import { createGitService } from "../../../src/git/index.js";
 import { createRunStore } from "../../../src/state.js";
 import {
   createPolishingState,

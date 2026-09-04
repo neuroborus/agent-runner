@@ -1,4 +1,4 @@
-import { GitSafetyError } from "./git-command.js";
+import { GitSafetyError } from "./command.js";
 
 const CONTROL_FIELDS = Object.freeze([
   ["projectPath", "project-path"],

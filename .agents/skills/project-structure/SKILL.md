@@ -25,9 +25,9 @@ choice affects the shared plan contract.
 - `src/state.js`: expose and coordinate the run-store boundary.
 - `src/state-*.js`: keep its atomic file, write-ahead journal, action-intent,
   execution-lease, and persisted-shape helpers internal to the root state boundary.
-- `src/git.js`: expose and coordinate the Git safety boundary.
-- `src/git-*.js`: keep Git process, snapshot, and commit-verification helpers
-  internal to the root Git boundary.
+- `src/git/index.js`: expose and coordinate the Git safety boundary.
+- `src/git/`: keep service coordination, command execution, snapshots and
+  fingerprints, commit verification, and handoff support private to that boundary.
 - `src/agents/codex.js`: own Codex adapter coordination, probing, and
   request/result normalization.
 - `src/agents/codex-*.js`: keep its app-server transport and constrained commit
@@ -39,6 +39,7 @@ choice affects the shared plan contract.
 - `pipelines/<id>/test/`: test that pipeline's behavior with `node:test` and fake adapters.
 - `pipelines/<id>/docs/`: keep that pipeline's product and implementation specification.
 - `test/clarifications/`: test clarification-service behavior.
+- `test/git/`: test Git-safety behavior.
 - `test/`: test root runtime behavior, workspace boundaries, adapters, and temporary Git repositories.
 - `docs/`: keep cross-cutting architecture requirements.
 

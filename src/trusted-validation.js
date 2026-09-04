@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { createGitService } from "./git.js";
+import { createGitService } from "./git/index.js";
 import {
   resolveTrustedBubblewrap,
   runExactCommand,

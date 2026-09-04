@@ -41,6 +41,14 @@ async function openRegularFile(filePath, flags, mode) {
       try {
         const metadata = await lstat(filePath);
         if (
+          metadata.isFile() &&
+          metadata.nlink === 0 &&
+          attempt + 1 < attempts
+        ) {
+          // Atomic replacement may unlink the observed inode before it is opened.
+          continue;
+        }
+        if (
           metadata.isSymbolicLink() ||
           !metadata.isFile() ||
           metadata.nlink !== 1

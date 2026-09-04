@@ -162,8 +162,8 @@ All pipelines additionally require:
 | `src/runner.js`               | High-level run, resume, and status orchestration                    |
 | `src/state.js`                | Public run-store coordination and state-directory resolution        |
 | `src/state-*.js`              | Internal state file, journal, action, lease, and validation helpers |
-| `src/git.js`                  | Public Git-safety coordination                                      |
-| `src/git-*.js`                | Internal Git process, snapshot, and commit-verification helpers     |
+| `src/git/index.js`            | Public Git-safety capability boundary                               |
+| `src/git/`                    | Private service, command, content, commit, and handoff modules      |
 | `src/agents/index.js`         | Public agent-adapter directory boundary                             |
 | `src/agents/`                 | Codex and Claude adapter implementations                            |
 | `packages/commit-plan/`       | Shared deterministic commit-plan contract                           |
@@ -171,6 +171,7 @@ All pipelines additionally require:
 | `pipelines/plan-execution/`   | Plan-execution workflow, prompts, tests, and specification          |
 | `pipelines/polishing/`        | Polishing workflow, prompts, tests, and specification               |
 | `test/clarifications/`        | Clarification-service behavior tests                                |
+| `test/git/`                   | Git-safety behavior tests                                           |
 | `test/`                       | Root CLI, registry, adapter, and repository-boundary tests          |
 | `docs/`                       | Cross-cutting architecture documentation                            |
 | `docs/product/`               | Current product guarantees, workflow meaning, and accepted nuances  |

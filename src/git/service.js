@@ -8,8 +8,8 @@ import {
   hashBuffer,
   isEnvironment,
   resolveRepository,
-} from "./git-command.js";
-import { createGitCommitService } from "./git-commit.js";
+} from "./command.js";
+import { createGitCommitService } from "./commit.js";
 import {
   contentChangesAtRoot,
   contentFingerprintsAtRoot,
@@ -17,8 +17,8 @@ import {
   inspectPathAtRoot,
   normalizeAllowedPaths,
   pathsFingerprintAtRoot,
-} from "./git-content.js";
-import { createGitHandoffService } from "./git-handoff.js";
+} from "./content.js";
+import { createGitHandoffService } from "./handoff.js";
 
 export { GitSafetyError };
 

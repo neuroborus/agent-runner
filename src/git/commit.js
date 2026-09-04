@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
 
-import { decodeUtf8, GitSafetyError, hashBuffer } from "./git-command.js";
+import { decodeUtf8, GitSafetyError, hashBuffer } from "./command.js";
 
 const COMMIT_AUTHORIZATION_SCHEMA_VERSION = 1;
 const MAX_COMMIT_SUBJECT_LENGTH = 72;
