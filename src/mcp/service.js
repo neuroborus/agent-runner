@@ -8,7 +8,7 @@ import * as z from "zod/v4";
 
 import packageMetadata from "../../package.json" with { type: "json" };
 import { createClarificationService } from "../clarifications/index.js";
-import { loadRunnerConfiguration } from "../config.js";
+import { loadRunnerConfiguration } from "../config/index.js";
 import { createGitService } from "../git/index.js";
 import {
   DETACHED_RUNTIME_COMPATIBILITY_TOKEN,

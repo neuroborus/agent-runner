@@ -13,7 +13,7 @@ import {
   loadProjectConfiguration,
   loadRunnerConfiguration,
   resolvePipelineConfiguration,
-} from "./config.js";
+} from "./config/index.js";
 import { createGitService } from "./git/index.js";
 import {
   DETACHED_RUNTIME_COMPATIBILITY_TOKEN,

@@ -18,7 +18,9 @@ choice affects the shared plan contract.
 - `src/mcp/index.js`: expose the STDIO MCP protocol capability boundary.
 - `src/mcp/`: keep schemas, projections, revision waits, detached dispatch,
   and issue reporting private to that boundary without duplicating runner logic.
-- `src/config.js`: own runner-local configuration loading, strict validation, and role resolution precedence.
+- `src/config/index.js`: expose the runner-configuration boundary.
+- `src/config/`: keep strict parsing, confined file loading, trusted profiles,
+  and resolution precedence private to that boundary.
 - `src/clarifications/index.js`: expose the clarification boundary.
 - `src/clarifications/`: keep coordination, confined transcript files, and
   editor support private to that boundary.
@@ -45,6 +47,7 @@ choice affects the shared plan contract.
 - `pipelines/<id>/test/`: test that pipeline's behavior with `node:test` and fake adapters.
 - `pipelines/<id>/docs/`: keep that pipeline's product and implementation specification.
 - `test/clarifications/`: test clarification-service behavior.
+- `test/config/`: test configuration parsing, loading, profiles, and resolution.
 - `test/git/`: test Git-safety behavior.
 - `test/mcp/`: test MCP control-plane and issue-reporting behavior.
 - `test/state/`: test state persistence and safety behavior.

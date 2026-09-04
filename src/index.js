@@ -15,7 +15,7 @@ export {
   parseRunnerConfiguration,
   PROJECT_CONFIG_FILENAME,
   resolvePipelineConfiguration,
-} from "./config.js";
+} from "./config/index.js";
 export { createGitService, GitSafetyError } from "./git/index.js";
 export {
   createDetachedLauncher,

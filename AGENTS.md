@@ -41,9 +41,10 @@ contract.
 - Use `node:test`; keep real Codex and Claude smoke tests opt-in.
 - Prefer small functional modules and split them only when they become meaningfully large.
 - Keep backend-specific flags and output normalization inside `src/agents/`.
-- Keep runner configuration loading and precedence in `src/config.js`; let
-  pipeline descriptors own their roles, settings, defaults, and persisted-run
-  validation.
+- Keep runner configuration behind `src/config/index.js`; keep strict parsing,
+  confined file loading, trusted profiles, and resolution precedence private
+  to that capability. Let pipeline descriptors own their roles, settings,
+  defaults, and persisted-run validation.
 - Keep shared plan parsing and structural and subject validation in
   `packages/commit-plan/`. The plan-authoring Planner proposes exact commit
   subjects, deterministic code validates them, and plan execution consumes
@@ -156,7 +157,8 @@ All pipelines additionally require:
 | `src/cli.js`                      | Argument parsing and terminal-facing command dispatch              |
 | `src/mcp/index.js`                | Public STDIO MCP protocol capability boundary                      |
 | `src/mcp/`                        | Private schemas, projections, waits, detached dispatch, reporting  |
-| `src/config.js`                   | Runner configuration loading, validation, and role resolution      |
+| `src/config/index.js`             | Public runner-configuration capability boundary                    |
+| `src/config/`                     | Private parsing, confined loading, profiles, and resolution        |
 | `src/clarifications/index.js`     | Public clarification-service boundary                              |
 | `src/clarifications/`             | Private coordination, confined transcript, and editor modules      |
 | `src/pipeline-registry.js`        | Explicit registry of built-in pipelines                            |
@@ -174,6 +176,7 @@ All pipelines additionally require:
 | `pipelines/plan-execution/`       | Plan-execution workflow, prompts, tests, and specification         |
 | `pipelines/polishing/`            | Polishing workflow, prompts, tests, and specification              |
 | `test/clarifications/`            | Clarification-service behavior tests                               |
+| `test/config/`                    | Configuration parsing, loading, and resolution tests               |
 | `test/git/`                       | Git-safety behavior tests                                          |
 | `test/mcp/`                       | MCP control-plane and issue-reporting behavior tests               |
 | `test/state/`                     | State persistence and safety behavior tests                        |

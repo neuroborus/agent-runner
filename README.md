@@ -655,7 +655,12 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   │   ├── index.js
 │   │   └── service.js
 │   ├── cli.js
-│   ├── config.js
+│   ├── config/
+│   │   ├── files.js
+│   │   ├── index.js
+│   │   ├── parsing.js
+│   │   ├── profiles.js
+│   │   └── resolution.js
 │   ├── git/
 │   │   ├── command.js
 │   │   ├── commit.js
@@ -691,6 +696,11 @@ Git services; pipeline workspaces own mode and workflow policy.
 ├── test/
 │   ├── clarifications/
 │   │   └── lifecycle.test.js
+│   ├── config/
+│   │   ├── documentation.test.js
+│   │   ├── loading.test.js
+│   │   ├── parsing.test.js
+│   │   └── resolution.test.js
 │   ├── git/
 │   │   ├── local-commit.test.js
 │   │   ├── polishing-handoff.test.js

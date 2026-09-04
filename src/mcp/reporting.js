@@ -6,7 +6,7 @@ import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import {
   loadProjectConfiguration,
   loadRunnerConfiguration,
-} from "../config.js";
+} from "../config/index.js";
 import { createGitService } from "../git/index.js";
 
 const ISSUES_PATH = ["agent-runner", "issues"];

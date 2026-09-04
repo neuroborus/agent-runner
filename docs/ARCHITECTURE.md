@@ -58,6 +58,12 @@ root runtime and capability tests; private service and execution modules keep
 snapshot validation, exact command vectors, sandboxing, bounded evidence, and
 repository mutation guards within the capability.
 
+The configuration capability lives under `src/config/` behind its public
+`index.js`. Strict runner and project parsing, confined file loading, trusted
+profile interpretation, and precedence-based resolution remain private,
+acyclic modules. Root consumers use only the index, while pipeline descriptors
+continue to own role lists, settings, defaults, and persisted-run validation.
+
 The MCP capability lives under `src/mcp/` behind its public `index.js`. The
 index exposes only the control-plane and STDIO server contracts consumed by
 the root runtime and capability tests; private service and reporting modules
