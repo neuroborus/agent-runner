@@ -64,6 +64,13 @@ profile interpretation, and precedence-based resolution remain private,
 acyclic modules. Root consumers use only the index, while pipeline descriptors
 continue to own role lists, settings, defaults, and persisted-run validation.
 
+The runner capability lives under `src/runner/` behind its public `index.js`.
+Private modules keep input normalization, role adapters and source-session
+setup, pipeline migration, and run and resume orchestration distinct and
+acyclic. Root consumers use the index; orchestration composes the other root
+capabilities without exposing their private modules or moving workflow policy
+out of pipeline descriptors.
+
 The MCP capability lives under `src/mcp/` behind its public `index.js`. The
 index exposes only the control-plane and STDIO server contracts consumed by
 the root runtime and capability tests; private service and reporting modules

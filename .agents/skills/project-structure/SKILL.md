@@ -25,7 +25,9 @@ choice affects the shared plan contract.
 - `src/clarifications/`: keep coordination, confined transcript files, and
   editor support private to that boundary.
 - `src/pipeline-registry.js`: own the explicit list of built-in pipelines; do not turn it into a plugin system.
-- `src/runner.js`: coordinate `run`, `resume`, and `status` without backend-specific flags.
+- `src/runner/index.js`: expose the runner-orchestration boundary.
+- `src/runner/`: keep input normalization, role and session setup, pipeline
+  migration, and run and resume orchestration private to that boundary.
 - `src/state/index.js`: expose and coordinate the run-store boundary.
 - `src/state/`: keep service coordination, atomic files, write-ahead journals,
   action intents, execution leases, and persisted-shape validation private to
@@ -49,6 +51,7 @@ choice affects the shared plan contract.
 - `test/clarifications/`: test clarification-service behavior.
 - `test/config/`: test configuration parsing, loading, profiles, and resolution.
 - `test/git/`: test Git-safety behavior.
+- `test/integration/`: test cross-capability workflows.
 - `test/mcp/`: test MCP control-plane and issue-reporting behavior.
 - `test/state/`: test state persistence and safety behavior.
 - `test/`: test root runtime behavior, workspace boundaries, adapters, and temporary Git repositories.

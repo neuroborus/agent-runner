@@ -24,7 +24,7 @@ import {
   RUN_STATE_SCHEMA_VERSION,
   RunnerError,
 } from "../src/index.js";
-import { preparePipelineMigration } from "../src/runner.js";
+import { preparePipelineMigration } from "../src/runner/index.js";
 
 const executeFile = promisify(execFile);
 const SOURCE_SESSION = "11111111-1111-4111-8111-111111111111";

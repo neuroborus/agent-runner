@@ -437,6 +437,8 @@ The runtime floor is Node.js `>=24 <25`; keep `package.json` engines aligned.
 - Keep arrange, act, and assert phases readable without ceremonial comments.
 - Prioritize deterministic contract and pure transformation tests, then runtime
   orchestration and boundary integration tests.
+- Keep cross-capability workflow coverage under `test/integration/`; keep
+  capability-specific behavior tests beside their owning root test area.
 - Test public behavior and safety boundaries rather than private function shape.
 - Validate negative paths at every trust boundary: malformed input, unknown
   fields, interrupted effects, partial writes, and unsafe repository state.

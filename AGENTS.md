@@ -162,7 +162,8 @@ All pipelines additionally require:
 | `src/clarifications/index.js`     | Public clarification-service boundary                              |
 | `src/clarifications/`             | Private coordination, confined transcript, and editor modules      |
 | `src/pipeline-registry.js`        | Explicit registry of built-in pipelines                            |
-| `src/runner.js`                   | High-level run, resume, and status orchestration                   |
+| `src/runner/index.js`             | Public runner-orchestration capability boundary                    |
+| `src/runner/`                     | Private input, role/session, migration, and orchestration modules  |
 | `src/state/index.js`              | Public run-store capability boundary                               |
 | `src/state/`                      | Private service, files, journals, actions, leases, and validation  |
 | `src/git/index.js`                | Public Git-safety capability boundary                              |
@@ -178,6 +179,7 @@ All pipelines additionally require:
 | `test/clarifications/`            | Clarification-service behavior tests                               |
 | `test/config/`                    | Configuration parsing, loading, and resolution tests               |
 | `test/git/`                       | Git-safety behavior tests                                          |
+| `test/integration/`               | Cross-capability workflow integration tests                        |
 | `test/mcp/`                       | MCP control-plane and issue-reporting behavior tests               |
 | `test/state/`                     | State persistence and safety behavior tests                        |
 | `test/`                           | Root CLI, registry, adapter, and repository-boundary tests         |

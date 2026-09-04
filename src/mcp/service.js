@@ -15,7 +15,10 @@ import {
   getPipeline,
   listPipelines,
 } from "../pipeline-registry.js";
-import { createRunner, pipelineRequiresWorktreeLease } from "../runner.js";
+import {
+  createRunner,
+  pipelineRequiresWorktreeLease,
+} from "../runner/index.js";
 import {
   createRunStore,
   RUNTIME_VERSION_SKEW_EXIT_CODE,

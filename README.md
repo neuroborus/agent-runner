@@ -674,7 +674,12 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   │   ├── reporting.js
 │   │   └── service.js
 │   ├── pipeline-registry.js
-│   ├── runner.js
+│   ├── runner/
+│   │   ├── index.js
+│   │   ├── input.js
+│   │   ├── migration.js
+│   │   ├── roles.js
+│   │   └── service.js
 │   ├── state/
 │   │   ├── actions.js
 │   │   ├── files.js
@@ -705,6 +710,8 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   │   ├── local-commit.test.js
 │   │   ├── polishing-handoff.test.js
 │   │   └── repository-safety.test.js
+│   ├── integration/
+│   │   └── workflows.test.js
 │   ├── mcp/
 │   │   ├── control-plane.test.js
 │   │   └── issue-reporting.test.js

@@ -21,7 +21,7 @@ import {
   createRunStore,
   main,
   parseRunnerConfiguration,
-} from "../src/index.js";
+} from "../../src/index.js";
 
 const executeFile = promisify(execFile);
 const TWO_STEP_PLAN = `## Commit 1: feat(feature): add value
