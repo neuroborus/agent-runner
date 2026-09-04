@@ -114,19 +114,21 @@ export async function probeClaudeLocalCommit({
   try {
     fixturePath = await mkdtemp(join(tmpdir(), "agent-runner-claude-"));
     gitDirectory = await mkdtemp(join(tmpdir(), "agent-runner-claude-git-"));
-    outsidePath = await mkdtemp(
-      join(tmpdir(), "agent-runner-claude-outside-"),
-    );
+    outsidePath = await mkdtemp(join(tmpdir(), "agent-runner-claude-outside-"));
     const result = await execute(
       bubblewrapBinary,
-      sandboxArguments(fixturePath, [gitDirectory], [
-        process.execPath,
-        "--input-type=module",
-        "-e",
-        PROBE_SCRIPT,
-        gitDirectory,
-        outsidePath,
-      ]),
+      sandboxArguments(
+        fixturePath,
+        [gitDirectory],
+        [
+          process.execPath,
+          "--input-type=module",
+          "-e",
+          PROBE_SCRIPT,
+          gitDirectory,
+          outsidePath,
+        ],
+      ),
       {
         encoding: "utf8",
         env,
@@ -160,13 +162,7 @@ export async function executeClaudeLocalCommit({
 }) {
   const gitResult = await execute(
     "git",
-    [
-      "-C",
-      cwd,
-      "rev-parse",
-      "--absolute-git-dir",
-      "--git-common-dir",
-    ],
+    ["-C", cwd, "rev-parse", "--absolute-git-dir", "--git-common-dir"],
     {
       encoding: "utf8",
       env,

@@ -58,8 +58,7 @@ const RECOVERABLE_CLAUDE_DIAGNOSTIC_CLASSES = new Set([
 const DECIMAL_CONTEXT_SIZE_PATTERN = /^[1-9][0-9]*$/u;
 const MINIMUM_CONTEXT_SIZE = 100_000n;
 const MAXIMUM_CONTEXT_SIZE = 1_000_000n;
-const SESSION_ID_PATTERN =
-  /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu;
+const SESSION_ID_PATTERN = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu;
 const REQUIRED_HELP_FLAGS = Object.freeze([
   "--append-system-prompt",
   "--autocompact",
@@ -209,17 +208,15 @@ export class ClaudeAdapterError extends Error {
     this.code = code;
     this.ambiguous = ambiguous;
     this.recoverable =
-      recoverable &&
-      RECOVERABLE_CLAUDE_DIAGNOSTIC_CLASSES.has(diagnosticClass);
+      recoverable && RECOVERABLE_CLAUDE_DIAGNOSTIC_CLASSES.has(diagnosticClass);
     if (typeof effectStarted === "boolean") {
       this.effectStarted = effectStarted;
     }
     if (failureClass === STRUCTURED_OUTPUT_FAILURE_CLASS) {
       this.failureClass = failureClass;
     }
-    const normalizedDiagnosticClass = normalizeClaudeDiagnosticClass(
-      diagnosticClass,
-    );
+    const normalizedDiagnosticClass =
+      normalizeClaudeDiagnosticClass(diagnosticClass);
     if (normalizedDiagnosticClass !== undefined) {
       this.diagnosticClass = normalizedDiagnosticClass;
     }
@@ -299,13 +296,9 @@ function isRuntimeInjectionEnvironmentName(name) {
   return (
     normalizedName.startsWith("LD_") ||
     normalizedName.startsWith("DYLD_") ||
-    [
-      "BASH_ENV",
-      "ENV",
-      "NODE_OPTIONS",
-      "NODE_PATH",
-      "SHELLOPTS",
-    ].includes(normalizedName)
+    ["BASH_ENV", "ENV", "NODE_OPTIONS", "NODE_PATH", "SHELLOPTS"].includes(
+      normalizedName,
+    )
   );
 }
 
@@ -369,8 +362,7 @@ function parseVersion(value) {
   }
   return Object.freeze({
     text:
-      `${match[1]}.${match[2]}.${match[3]}${match[4] ?? ""}` +
-      (match[5] ?? ""),
+      `${match[1]}.${match[2]}.${match[3]}${match[4] ?? ""}` + (match[5] ?? ""),
     parts: Object.freeze(match.slice(1, 4).map(Number)),
     prerelease: match[4] !== undefined,
   });
@@ -495,8 +487,7 @@ function cliSettings(
     sandbox: {
       enabled: true,
       failIfUnavailable: true,
-      autoAllowBashIfSandboxed:
-        accessConfiguration.autoAllowBashIfSandboxed,
+      autoAllowBashIfSandboxed: accessConfiguration.autoAllowBashIfSandboxed,
       excludedCommands: [],
       allowUnsandboxedCommands: false,
       enableWeakerNestedSandbox: false,
@@ -626,10 +617,7 @@ function authenticationUnavailableError(sessionId) {
   });
 }
 
-function classifiedAvailabilityError(
-  message,
-  { profile, session, sessionId },
-) {
+function classifiedAvailabilityError(message, { profile, session, sessionId }) {
   if (AUTHENTICATION_ERROR_PATTERN.test(message)) {
     return authenticationUnavailableError(sessionId);
   }
@@ -679,15 +667,12 @@ function classifiedAvailabilityError(
     });
   }
   if (session?.mode === "continue") {
-    return diagnosticError(
-      "Claude continuation session is unavailable.",
-      {
-        code: "ERR_CLAUDE_CONTINUATION_SESSION_UNAVAILABLE",
-        diagnosticClass: "continuation_session_unavailable",
-        recoverable: true,
-        sessionId,
-      },
-    );
+    return diagnosticError("Claude continuation session is unavailable.", {
+      code: "ERR_CLAUDE_CONTINUATION_SESSION_UNAVAILABLE",
+      diagnosticClass: "continuation_session_unavailable",
+      recoverable: true,
+      sessionId,
+    });
   }
   if (profile !== undefined) {
     return diagnosticError("Claude profile is unavailable.", {
@@ -791,10 +776,11 @@ function outputError(payload, request, session) {
       sessionId,
     });
   }
-  const availabilityError = classifiedAvailabilityError(
-    diagnosticMessage,
-    { profile: request.profile, session, sessionId },
-  );
+  const availabilityError = classifiedAvailabilityError(diagnosticMessage, {
+    profile: request.profile,
+    session,
+    sessionId,
+  });
   if (availabilityError !== undefined) {
     return availabilityError;
   }
@@ -911,10 +897,7 @@ function normalizeResult(payload, request, session) {
     payload?.permission_denials == null ||
     Array.isArray(payload.permission_denials);
   const sessionId = payloadSessionId(payload);
-  if (
-    hasValidPermissionDenials &&
-    payload.permission_denials?.length > 0
-  ) {
+  if (hasValidPermissionDenials && payload.permission_denials?.length > 0) {
     if (sessionId === undefined) {
       throw new ClaudeAdapterError("Claude returned an invalid result.", {
         code: "ERR_CLAUDE_PROTOCOL",
@@ -1127,13 +1110,7 @@ export function createClaudeAdapter(options = {}) {
     try {
       result = await execute(
         "git",
-        [
-          "-C",
-          cwd,
-          "rev-parse",
-          "--absolute-git-dir",
-          "--git-common-dir",
-        ],
+        ["-C", cwd, "rev-parse", "--absolute-git-dir", "--git-common-dir"],
         {
           encoding: "utf8",
           env: processEnvironment,
@@ -1193,17 +1170,13 @@ export function createClaudeAdapter(options = {}) {
     );
     let processResult;
     try {
-      processResult = await execute(
-        claudeBinary,
-        argumentsList,
-        {
-          cwd: request.cwd,
-          encoding: "utf8",
-          env: executionEnvironment(processEnvironment, request),
-          input: turnPrompt(request, recovery),
-          maxBuffer: MAX_PROCESS_OUTPUT_BYTES,
-        },
-      );
+      processResult = await execute(claudeBinary, argumentsList, {
+        cwd: request.cwd,
+        encoding: "utf8",
+        env: executionEnvironment(processEnvironment, request),
+        input: turnPrompt(request, recovery),
+        maxBuffer: MAX_PROCESS_OUTPUT_BYTES,
+      });
     } catch (cause) {
       const standardError = processOutput(cause?.stderr);
       if (PERMISSION_MODE_FALLBACK_PATTERN.test(standardError)) {
@@ -1279,10 +1252,9 @@ export function createClaudeAdapter(options = {}) {
       selectedSession?.mode === "continue" &&
       result.sessionId !== selectedSession.id
     ) {
-      throw new ClaudeAdapterError(
-        "Claude continued an unexpected session.",
-        { code: "ERR_CLAUDE_PROTOCOL" },
-      );
+      throw new ClaudeAdapterError("Claude continued an unexpected session.", {
+        code: "ERR_CLAUDE_PROTOCOL",
+      });
     }
     return result;
   }

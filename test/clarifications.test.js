@@ -21,7 +21,9 @@ import {
 } from "../src/index.js";
 
 async function createFixture(t) {
-  const workspace = await mkdtemp(join(tmpdir(), "agent-runner-clarifications-"));
+  const workspace = await mkdtemp(
+    join(tmpdir(), "agent-runner-clarifications-"),
+  );
   const artifactRoot = join(workspace, "artifacts");
   const transcriptPath = join(artifactRoot, "nested", "clarifications.md");
   await mkdir(artifactRoot);
@@ -34,8 +36,7 @@ function sha256(value) {
 }
 
 function isClarificationError(code) {
-  return (error) =>
-    error instanceof ClarificationError && error.code === code;
+  return (error) => error instanceof ClarificationError && error.code === code;
 }
 
 test("uses the native process environment by default", () => {
@@ -111,7 +112,10 @@ test("appends structured rounds and product decisions without changing prior con
     afterRound.content,
     /Why it matters: It changes the public contract\./u,
   );
-  assert.match(afterRound.content, /### A2\n\n<!-- Write the answer here\. -->/u);
+  assert.match(
+    afterRound.content,
+    /### A2\n\n<!-- Write the answer here\. -->/u,
+  );
 
   const beforeDecision = afterRound.content;
   const afterDecision = await service.appendProductDecision({
@@ -182,7 +186,10 @@ test("rejects traversal, linked targets, and symlink escapes", async (t) => {
 test("detects changes outside an authorized edit window", async (t) => {
   const { artifactRoot, transcriptPath } = await createFixture(t);
   const service = createClarificationService({ env: {}, interactive: false });
-  const initial = await service.ensureTranscript({ artifactRoot, transcriptPath });
+  const initial = await service.ensureTranscript({
+    artifactRoot,
+    transcriptPath,
+  });
   await writeFile(transcriptPath, `${initial.content}\nUnexpected edit.\n`);
 
   await assert.rejects(
@@ -225,7 +232,10 @@ test("persists authorization before opening the preferred editor and consumes it
       await writeFile(path, `${await readFile(path, "utf8")}User context.\n`);
     },
   });
-  const initial = await service.ensureTranscript({ artifactRoot, transcriptPath });
+  const initial = await service.ensureTranscript({
+    artifactRoot,
+    transcriptPath,
+  });
   const authorization = await service.prepareEdit({
     artifactRoot,
     transcriptPath,
@@ -271,7 +281,10 @@ test("falls back to EDITOR and accepts an unchanged proactive close", async (t) 
       }
     },
   });
-  const initial = await service.ensureTranscript({ artifactRoot, transcriptPath });
+  const initial = await service.ensureTranscript({
+    artifactRoot,
+    transcriptPath,
+  });
   const authorization = await service.prepareEdit({
     artifactRoot,
     transcriptPath,
@@ -303,7 +316,10 @@ test("skips invalid editor environment values", async (t) => {
     authorizationIdFactory: () => "authorization-invalid-visual",
     launchEditor: async (command) => launched.push(command),
   });
-  const initial = await service.ensureTranscript({ artifactRoot, transcriptPath });
+  const initial = await service.ensureTranscript({
+    artifactRoot,
+    transcriptPath,
+  });
   const authorization = await service.prepareEdit({
     artifactRoot,
     transcriptPath,
@@ -335,7 +351,10 @@ test("consumes authorization whenever a launched editor closes", async (t) => {
     interactive: true,
     authorizationIdFactory: () => "authorization-nonzero-editor",
   });
-  const initial = await service.ensureTranscript({ artifactRoot, transcriptPath });
+  const initial = await service.ensureTranscript({
+    artifactRoot,
+    transcriptPath,
+  });
   const authorization = await service.prepareEdit({
     artifactRoot,
     transcriptPath,
@@ -368,7 +387,10 @@ test("requires durable consumption before launch and never retries its failure",
     authorizationIdFactory: () => "authorization-consume-failure",
     launchEditor: async (command) => launched.push(command),
   });
-  const initial = await service.ensureTranscript({ artifactRoot, transcriptPath });
+  const initial = await service.ensureTranscript({
+    artifactRoot,
+    transcriptPath,
+  });
   const authorization = await service.prepareEdit({
     artifactRoot,
     transcriptPath,
@@ -424,7 +446,10 @@ test("never opens an unpersisted or altered edit authorization", async (t) => {
       launches += 1;
     },
   });
-  const initial = await service.ensureTranscript({ artifactRoot, transcriptPath });
+  const initial = await service.ensureTranscript({
+    artifactRoot,
+    transcriptPath,
+  });
   const authorization = await service.prepareEdit({
     artifactRoot,
     transcriptPath,
@@ -479,7 +504,10 @@ test("opens at most one editor for an authorization", async (t) => {
       await editorOpen;
     },
   });
-  const initial = await service.ensureTranscript({ artifactRoot, transcriptPath });
+  const initial = await service.ensureTranscript({
+    artifactRoot,
+    transcriptPath,
+  });
   const authorization = await service.prepareEdit({
     artifactRoot,
     transcriptPath,
@@ -519,7 +547,10 @@ test("reserves authorization IDs while pending edits are persisted", async (t) =
     interactive: false,
     authorizationIdFactory: () => "duplicate-authorization",
   });
-  const initial = await service.ensureTranscript({ artifactRoot, transcriptPath });
+  const initial = await service.ensureTranscript({
+    artifactRoot,
+    transcriptPath,
+  });
   let pendingAuthorization;
   const firstPreparation = service.prepareEdit({
     artifactRoot,
@@ -567,7 +598,10 @@ test("keeps a non-interactive edit pending and accepts it after resume", async (
     authorizationIdFactory: () => "authorization-3",
     launchEditor: async () => assert.fail("editor must not be launched"),
   });
-  const initial = await service.ensureTranscript({ artifactRoot, transcriptPath });
+  const initial = await service.ensureTranscript({
+    artifactRoot,
+    transcriptPath,
+  });
   const authorization = await service.prepareEdit({
     artifactRoot,
     transcriptPath,
@@ -607,7 +641,10 @@ test("writes identified MCP answers atomically and retries the exact content", a
     interactive: false,
     authorizationIdFactory: () => "mcp-answer",
   });
-  const initial = await service.ensureTranscript({ artifactRoot, transcriptPath });
+  const initial = await service.ensureTranscript({
+    artifactRoot,
+    transcriptPath,
+  });
   const questions = await service.appendQuestionRound({
     artifactRoot,
     transcriptPath,
@@ -616,7 +653,8 @@ test("writes identified MCP answers atomically and retries the exact content", a
     questions: [
       { question: "First question?", whyItMatters: "It changes scope." },
       {
-        question: "Does <!-- Write the answer here. --> remain in the question?",
+        question:
+          "Does <!-- Write the answer here. --> remain in the question?",
         whyItMatters: "It changes behavior.",
       },
     ],
@@ -649,9 +687,11 @@ test("writes identified MCP answers atomically and retries the exact content", a
     /Does <!-- Write the answer here\. --> remain in the question\?/u,
   );
   assert.equal(
-    (await service.writeEditAnswers(authorization, answers, {
-      expectedHash: preview.hash,
-    })).hash,
+    (
+      await service.writeEditAnswers(authorization, answers, {
+        expectedHash: preview.hash,
+      })
+    ).hash,
     preview.hash,
   );
   await assert.rejects(
@@ -789,7 +829,10 @@ test("accepts an empty proactive MCP response", async (t) => {
     interactive: false,
     authorizationIdFactory: () => "mcp-empty",
   });
-  const initial = await service.ensureTranscript({ artifactRoot, transcriptPath });
+  const initial = await service.ensureTranscript({
+    artifactRoot,
+    transcriptPath,
+  });
   const authorization = await service.prepareEdit({
     artifactRoot,
     transcriptPath,
@@ -810,7 +853,10 @@ test("accepts an empty proactive MCP response", async (t) => {
 test("validates structured input and transcript size", async (t) => {
   const { artifactRoot, transcriptPath } = await createFixture(t);
   const service = createClarificationService({ env: {}, interactive: false });
-  const initial = await service.ensureTranscript({ artifactRoot, transcriptPath });
+  const initial = await service.ensureTranscript({
+    artifactRoot,
+    transcriptPath,
+  });
 
   await assert.rejects(
     service.appendQuestionRound({

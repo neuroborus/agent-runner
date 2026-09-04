@@ -2,14 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { watch } from "node:fs";
 import { lstat, mkdir, realpath, rm, rmdir } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
-import {
-  dirname,
-  isAbsolute,
-  join,
-  relative,
-  resolve,
-  sep,
-} from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import { createActionStore } from "./state-actions.js";
@@ -174,10 +167,7 @@ export function resolveStateRoot({
   let basePath;
   if (typeof xdgStateHome === "string" && isAbsolute(xdgStateHome)) {
     basePath = xdgStateHome;
-  } else if (
-    typeof homeDirectory === "string" &&
-    isAbsolute(homeDirectory)
-  ) {
+  } else if (typeof homeDirectory === "string" && isAbsolute(homeDirectory)) {
     basePath = join(homeDirectory, ".local", "state");
   }
 
@@ -359,9 +349,7 @@ export function createRunStore({
       join(rootPath, WORKTREES_DIRECTORY),
       "State worktrees path",
     );
-    const key = createHash("sha256")
-      .update(canonicalProjectPath)
-      .digest("hex");
+    const key = createHash("sha256").update(canonicalProjectPath).digest("hex");
     return ensureManagedDirectory(
       join(worktreesPath, key),
       "Worktree lease path",
@@ -511,9 +499,7 @@ export function createRunStore({
         try {
           await rmdir(runDirectory);
         } catch (cleanupCause) {
-          if (
-            !["EEXIST", "ENOENT", "ENOTEMPTY"].includes(cleanupCause?.code)
-          ) {
+          if (!["EEXIST", "ENOENT", "ENOTEMPTY"].includes(cleanupCause?.code)) {
             throw cleanupCause;
           }
         }
@@ -838,21 +824,12 @@ export function createRunStore({
         },
         record.runId,
       );
-      await journal.appendTransition(
-        runDirectory,
-        nextState,
-        snapshot,
-        null,
-      );
+      await journal.appendTransition(runDirectory, nextState, snapshot, null);
       return deepFreeze(nextState);
     });
   }
 
-  async function recordChildSession(
-    lease,
-    childSession,
-    { activity } = {},
-  ) {
+  async function recordChildSession(lease, childSession, { activity } = {}) {
     const normalizedChild = normalizeChildSession(childSession);
     const normalizedActivity = normalizePublicActivity(activity);
 

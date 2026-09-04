@@ -105,11 +105,7 @@ test("writes only confined run artifacts with atomic replacement", async (t) => 
     "context/worker.md",
     "first\n",
   );
-  await store.writeRunArtifact(
-    created.lease,
-    "context/worker.md",
-    "second\n",
-  );
+  await store.writeRunArtifact(created.lease, "context/worker.md", "second\n");
 
   assert.equal(await readFile(artifactPath, "utf8"), "second\n");
   assert.deepEqual(await readdir(join(created.directoryPath, "context")), [
@@ -145,7 +141,10 @@ test("writes only confined run artifacts with atomic replacement", async (t) => 
   await mkdir(outsideDirectory);
   await writeFile(outsideFile, "outside\n");
   await symlink(outsideDirectory, join(created.directoryPath, "linked"));
-  await symlink(outsideFile, join(created.directoryPath, "context", "linked.md"));
+  await symlink(
+    outsideFile,
+    join(created.directoryPath, "context", "linked.md"),
+  );
 
   for (const relativePath of ["linked/escape.md", "context/linked.md"]) {
     await assert.rejects(
@@ -182,12 +181,13 @@ test("keeps status lock-free and rejects concurrent mutating ownership", async (
       { counters: { attempts: 1 } },
     ),
     (error) =>
-      error instanceof RunStoreError &&
-      error.code === "ERR_INVALID_RUN_LEASE",
+      error instanceof RunStoreError && error.code === "ERR_INVALID_RUN_LEASE",
   );
 
   await created.lease.release();
-  const resumedLease = await competingStore.acquireRunLease(created.state.runId);
+  const resumedLease = await competingStore.acquireRunLease(
+    created.state.runId,
+  );
   t.after(() => resumedLease.release().catch(() => {}));
   const resumed = await competingStore.recoverRun(resumedLease);
   assert.equal(resumed.revision, 1);
@@ -301,9 +301,7 @@ test("reads a complete worktree lease during no-replace publication", async (t) 
   const { created, projectPath, stateRoot, store } = await createFixture(t, {
     onLeasePublicationBoundary: (boundary) => barrier.onBoundary(boundary),
   });
-  const paused = barrier.pause(
-    (boundary) => boundary.phase === "published",
-  );
+  const paused = barrier.pause((boundary) => boundary.phase === "published");
   const acquisition = store.acquireWorktreeLease(
     projectPath,
     created.state.runId,
@@ -439,10 +437,7 @@ test("reads the durable event while a state replacement is pending", async (t) =
   await paused;
 
   assert.equal((await store.loadRun(created.state.runId)).revision, 2);
-  assert.equal(
-    (await store.readPublicActivity(created.state.runId)).cursor,
-    2,
-  );
+  assert.equal((await store.readPublicActivity(created.state.runId)).cursor, 2);
 
   continueTransition();
   await transition;
@@ -462,8 +457,7 @@ test("revalidates the state root before every run lookup", async (t) => {
   await assert.rejects(
     store.getRunDirectory(created.state.runId),
     (error) =>
-      error instanceof RunStoreError &&
-      error.code === "ERR_UNSAFE_STATE_ROOT",
+      error instanceof RunStoreError && error.code === "ERR_UNSAFE_STATE_ROOT",
   );
 });
 
@@ -630,9 +624,7 @@ test("publishes complete MCP action leases under contention", async (t) => {
     arguments: { pipelineId: "plan-authoring" },
     context: { runId: "11111111-1111-4111-8111-111111111111" },
   };
-  const paused = barrier.pause(
-    (boundary) => boundary.phase === "prepared",
-  );
+  const paused = barrier.pause((boundary) => boundary.phase === "prepared");
   const acquisition = store.beginAction(input);
   const { filePath: leasePath } = await paused.reached;
 
@@ -723,8 +715,7 @@ test("reports opaque run-ID collisions without taking another run", async (t) =>
   await assert.rejects(
     store.createRun(runInput(projectPath, taskPath)),
     (error) =>
-      error instanceof RunStoreError &&
-      error.code === "ERR_RUN_ID_COLLISION",
+      error instanceof RunStoreError && error.code === "ERR_RUN_ID_COLLISION",
   );
   assert.equal((await store.loadRun(runId)).runId, runId);
 });
@@ -800,32 +791,26 @@ test("validates opaque state and public activity without interpreting it", async
       pipelineState: { invalid: () => {} },
     }),
     (error) =>
-      error instanceof RunStoreError &&
-      error.code === "ERR_INVALID_RUN_STATE",
+      error instanceof RunStoreError && error.code === "ERR_INVALID_RUN_STATE",
   );
   await assert.rejects(
     store.createRun(
       runInput(projectPath, taskPath, { childSessions: Array(1) }),
     ),
     (error) =>
-      error instanceof RunStoreError &&
-      error.code === "ERR_INVALID_RUN_STATE",
+      error instanceof RunStoreError && error.code === "ERR_INVALID_RUN_STATE",
   );
   await assert.rejects(
-    store.createRun(
-      runInput(projectPath, taskPath, { pipelineState: null }),
-    ),
+    store.createRun(runInput(projectPath, taskPath, { pipelineState: null })),
     (error) =>
-      error instanceof RunStoreError &&
-      error.code === "ERR_INVALID_RUN_STATE",
+      error instanceof RunStoreError && error.code === "ERR_INVALID_RUN_STATE",
   );
   await assert.rejects(
     store.transitionRun(created.lease, {
       pipelineState: { sparse: Array(1) },
     }),
     (error) =>
-      error instanceof RunStoreError &&
-      error.code === "ERR_INVALID_RUN_STATE",
+      error instanceof RunStoreError && error.code === "ERR_INVALID_RUN_STATE",
   );
   assert.deepEqual(await store.loadRun(created.state.runId), initialState);
   await assert.rejects(
@@ -864,10 +849,9 @@ test("validates opaque state and public activity without interpreting it", async
       error instanceof RunStoreError &&
       error.code === "ERR_INVALID_RUN_ARTIFACT",
   );
-  assert.deepEqual(
-    (await store.loadRun(created.state.runId)).pipelineState,
-    { normalizedNumber: 0 },
-  );
+  assert.deepEqual((await store.loadRun(created.state.runId)).pipelineState, {
+    normalizedNumber: 0,
+  });
 });
 
 test("rejects a durable malformed event instead of hiding it as a partial tail", async (t) => {
@@ -878,8 +862,7 @@ test("rejects a durable malformed event instead of hiding it as a partial tail",
   await assert.rejects(
     store.loadRun(created.state.runId),
     (error) =>
-      error instanceof RunStoreError &&
-      error.code === "ERR_INVALID_EVENT_LOG",
+      error instanceof RunStoreError && error.code === "ERR_INVALID_EVENT_LOG",
   );
 });
 
@@ -907,8 +890,7 @@ test("rejects discontinuous durable event history", async (t) => {
   await assert.rejects(
     store.loadRun(created.state.runId),
     (error) =>
-      error instanceof RunStoreError &&
-      error.code === "ERR_INVALID_EVENT_LOG",
+      error instanceof RunStoreError && error.code === "ERR_INVALID_EVENT_LOG",
   );
 });
 
@@ -936,8 +918,7 @@ test("rejects empty durable transitions", async (t) => {
   await assert.rejects(
     store.loadRun(created.state.runId),
     (error) =>
-      error instanceof RunStoreError &&
-      error.code === "ERR_INVALID_EVENT_LOG",
+      error instanceof RunStoreError && error.code === "ERR_INVALID_EVENT_LOG",
   );
 });
 
@@ -947,17 +928,13 @@ test("rejects linked managed state files", async (t) => {
   const eventPath = join(created.directoryPath, "events.jsonl");
   const outsidePath = join(workspace, "outside-events.jsonl");
   const outsideContent = await readFile(eventPath, "utf8");
-  await Promise.all([
-    rm(eventPath),
-    writeFile(outsidePath, outsideContent),
-  ]);
+  await Promise.all([rm(eventPath), writeFile(outsidePath, outsideContent)]);
   await symlink(outsidePath, eventPath);
 
   await assert.rejects(
     store.loadRun(created.state.runId),
     (error) =>
-      error instanceof RunStoreError &&
-      error.code === "ERR_UNSAFE_STATE_FILE",
+      error instanceof RunStoreError && error.code === "ERR_UNSAFE_STATE_FILE",
   );
   assert.equal(await readFile(outsidePath, "utf8"), outsideContent);
 
@@ -966,8 +943,7 @@ test("rejects linked managed state files", async (t) => {
   await assert.rejects(
     store.loadRun(created.state.runId),
     (error) =>
-      error instanceof RunStoreError &&
-      error.code === "ERR_UNSAFE_STATE_FILE",
+      error instanceof RunStoreError && error.code === "ERR_UNSAFE_STATE_FILE",
   );
   assert.equal(await readFile(outsidePath, "utf8"), outsideContent);
 });

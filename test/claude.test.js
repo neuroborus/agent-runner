@@ -44,8 +44,7 @@ function hasCode(code) {
 }
 
 function hasFailureClass(code, failureClass) {
-  return (error) =>
-    hasCode(code)(error) && error.failureClass === failureClass;
+  return (error) => hasCode(code)(error) && error.failureClass === failureClass;
 }
 
 function hasDiagnostic(code, diagnosticClass) {
@@ -195,13 +194,10 @@ test("constructs and probes enforceable Claude capabilities", async () => {
     }).failureClass,
     undefined,
   );
-  const invalidDiagnostic = new ClaudeAdapterError(
-    "invalid diagnostic class",
-    {
-      diagnosticClass: "native-provider-text",
-      recoverable: true,
-    },
-  );
+  const invalidDiagnostic = new ClaudeAdapterError("invalid diagnostic class", {
+    diagnosticClass: "native-provider-text",
+    recoverable: true,
+  });
   assert.equal(invalidDiagnostic.diagnosticClass, undefined);
   assert.equal(invalidDiagnostic.recoverable, false);
   assert.throws(
@@ -230,10 +226,9 @@ test("constructs and probes enforceable Claude capabilities", async () => {
     nativeSessionFork: true,
   });
   assert.deepEqual(
-    fixture.calls.slice(0, 5).map(({ file, argumentsList }) => [
-      file,
-      argumentsList[0],
-    ]),
+    fixture.calls
+      .slice(0, 5)
+      .map(({ file, argumentsList }) => [file, argumentsList[0]]),
     [
       ["claude", "--version"],
       ["claude", "--help"],
@@ -387,9 +382,8 @@ test("keeps native-turn and local-commit isolation proofs independent", async ()
       return true;
     },
   );
-  const nativeSandboxCall = incompatibleNativeSandbox.calls.find(
-    isNativeSandboxProbe,
-  );
+  const nativeSandboxCall =
+    incompatibleNativeSandbox.calls.find(isNativeSandboxProbe);
   assert.equal(nativeSandboxCall.options.env.ANTHROPIC_API_KEY, undefined);
   assert.equal(nativeSandboxCall.options.env.HTTPS_PROXY, undefined);
   assert.equal(nativeSandboxCall.options.env.NODE_OPTIONS, undefined);
@@ -496,7 +490,9 @@ test("runs strict read-only turns with isolated tools and an explicit model", as
   assert.deepEqual(settings.sandbox.network.deniedDomains, ["*"]);
   assert.equal(settings.sandbox.network.strictAllowlist, true);
   assert.ok(settings.sandbox.filesystem.denyWrite.includes(PROJECT_PATH));
-  assert.ok(settings.sandbox.filesystem.denyWrite.includes(`${PROJECT_PATH}/.git`));
+  assert.ok(
+    settings.sandbox.filesystem.denyWrite.includes(`${PROJECT_PATH}/.git`),
+  );
   assert.equal(turn.options.env.ANTHROPIC_API_KEY, "provider-token");
   assert.equal(turn.options.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY, undefined);
   assert.equal(turn.options.env.DISABLE_AUTO_COMPACT, undefined);
@@ -553,10 +549,7 @@ test("omits current Claude execution overrides", async () => {
   const turn = turnCalls(fixture)[0];
   assert.equal(option(turn.argumentsList, "--model"), undefined);
   assert.equal(option(turn.argumentsList, "--autocompact"), undefined);
-  assert.equal(
-    turn.options.env.CLAUDE_CONFIG_DIR,
-    "/profiles/process-default",
-  );
+  assert.equal(turn.options.env.CLAUDE_CONFIG_DIR, "/profiles/process-default");
 });
 
 test("rejects invalid Claude profiles and context sizes", async () => {
@@ -597,10 +590,7 @@ test("uses auto mode only for autonomous workspace turns", async () => {
   await fixture.adapter.run(request({ access: "workspace-write" }));
 
   const turn = turnCalls(fixture)[0];
-  assert.equal(
-    option(turn.argumentsList, "--permission-mode"),
-    "auto",
-  );
+  assert.equal(option(turn.argumentsList, "--permission-mode"), "auto");
   assert.equal(
     option(turn.argumentsList, "--tools"),
     "Bash,Read,Edit,Write,Glob,Grep",
@@ -969,12 +959,7 @@ test("classifies explicit usage limits without retrying the rejected turn", asyn
 });
 
 test("prefers structured Claude failure fields over native text", async (t) => {
-  for (const {
-    code,
-    diagnosticClass,
-    payload,
-    recoverable,
-  } of [
+  for (const { code, diagnosticClass, payload, recoverable } of [
     {
       code: "ERR_CLAUDE_USAGE_LIMIT",
       diagnosticClass: "usage_limit",
@@ -1137,18 +1122,15 @@ test("retries only harmless unclassified read-only process failures", async () =
       },
     });
 
-    await assert.rejects(
-      fixture.adapter.run(request({ access })),
-      (error) => {
-        assert.ok(hasCode("ERR_CLAUDE_PROCESS_INTERRUPTED")(error));
-        assert.equal(error.diagnosticClass, diagnosticClass);
-        assert.equal(error.recoverable, recoverable);
-        assert.equal(error.ambiguous, access === "workspace-write");
-        assert.doesNotMatch(error.message, /provider-native/u);
-        assert.equal(error.cause, undefined);
-        return true;
-      },
-    );
+    await assert.rejects(fixture.adapter.run(request({ access })), (error) => {
+      assert.ok(hasCode("ERR_CLAUDE_PROCESS_INTERRUPTED")(error));
+      assert.equal(error.diagnosticClass, diagnosticClass);
+      assert.equal(error.recoverable, recoverable);
+      assert.equal(error.ambiguous, access === "workspace-write");
+      assert.doesNotMatch(error.message, /provider-native/u);
+      assert.equal(error.cause, undefined);
+      return true;
+    });
   }
 });
 
@@ -1263,17 +1245,14 @@ test("classifies fresh-turn profile, authentication, and provider failures", asy
         },
       });
 
-      await assert.rejects(
-        fixture.adapter.run(request(options)),
-        (error) => {
-          assert.ok(hasCode(code)(error));
-          assert.equal(error.diagnosticClass, diagnosticClass);
-          assert.equal(error.recoverable, recoverable);
-          assert.doesNotMatch(error.message, /secret-value/u);
-          assert.equal(error.cause, undefined);
-          return true;
-        },
-      );
+      await assert.rejects(fixture.adapter.run(request(options)), (error) => {
+        assert.ok(hasCode(code)(error));
+        assert.equal(error.diagnosticClass, diagnosticClass);
+        assert.equal(error.recoverable, recoverable);
+        assert.doesNotMatch(error.message, /secret-value/u);
+        assert.equal(error.cause, undefined);
+        return true;
+      });
       assert.equal(turnCalls(fixture).length, 1);
 
       const localCommitFixture = createFixture({

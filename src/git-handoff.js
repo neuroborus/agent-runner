@@ -110,10 +110,7 @@ export function createGitHandoffService({
           "--exclude-standard",
           "-z",
         ]),
-        indexContentFingerprint(
-          current.projectPath,
-          current.allowedPaths,
-        ),
+        indexContentFingerprint(current.projectPath, current.allowedPaths),
       ]);
     const complete =
       staged.exitCode === 1 &&
@@ -173,8 +170,7 @@ export function createGitHandoffService({
       });
     }
     if (
-      inspected.snapshot.indexFingerprint !==
-      expectedSnapshot.indexFingerprint
+      inspected.snapshot.indexFingerprint !== expectedSnapshot.indexFingerprint
     ) {
       throw new GitSafetyError(
         "Polishing handoff found an incomplete or contaminated index.",

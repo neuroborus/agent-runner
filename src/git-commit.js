@@ -1,11 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
 
-import {
-  decodeUtf8,
-  GitSafetyError,
-  hashBuffer,
-} from "./git-command.js";
+import { decodeUtf8, GitSafetyError, hashBuffer } from "./git-command.js";
 
 const COMMIT_AUTHORIZATION_SCHEMA_VERSION = 1;
 const MAX_COMMIT_SUBJECT_LENGTH = 72;
@@ -238,8 +234,7 @@ export function createGitCommitService({
       changes.push("refs");
     }
     if (
-      current.contentFingerprint !==
-      authorization.expectedContentFingerprint
+      current.contentFingerprint !== authorization.expectedContentFingerprint
     ) {
       changes.push("content");
     }
@@ -317,18 +312,20 @@ export function createGitCommitService({
       expectedRemoteConfigurationFingerprint:
         expectedSnapshot.remoteConfigurationFingerprint,
       expectedIdentityFingerprint: expectedSnapshot.identityFingerprint,
-      expectedAuthorIdentityFingerprint:
-        identity.authorIdentityFingerprint,
+      expectedAuthorIdentityFingerprint: identity.authorIdentityFingerprint,
       expectedCommitterIdentityFingerprint:
         identity.committerIdentityFingerprint,
       subject: validatedSubject,
     });
     const changes = gateChanges(authorization, current, identity, refs);
     if (changes.length > 0) {
-      throw new GitSafetyError("Repository changed before commit authorization.", {
-        changes,
-        code: "ERR_COMMIT_GATE_CHANGED",
-      });
+      throw new GitSafetyError(
+        "Repository changed before commit authorization.",
+        {
+          changes,
+          code: "ERR_COMMIT_GATE_CHANGED",
+        },
+      );
     }
     if (authorizationRecords.has(authorization.id)) {
       throw new GitSafetyError("Commit authorization ID is not unique.", {
@@ -452,8 +449,7 @@ export function createGitCommitService({
     }
     if (
       current.identityFingerprint !== normalized.expectedIdentityFingerprint ||
-      identity.identityFingerprint !==
-        normalized.expectedIdentityFingerprint ||
+      identity.identityFingerprint !== normalized.expectedIdentityFingerprint ||
       identity.authorIdentityFingerprint !==
         normalized.expectedAuthorIdentityFingerprint ||
       identity.committerIdentityFingerprint !==

@@ -67,7 +67,4 @@ export {
 };
 export { STRUCTURED_OUTPUT_FAILURE_CLASS };
 
-export const BACKEND_IDS = Object.freeze([
-  CODEX_BACKEND_ID,
-  CLAUDE_BACKEND_ID,
-]);
+export const BACKEND_IDS = Object.freeze([CODEX_BACKEND_ID, CLAUDE_BACKEND_ID]);

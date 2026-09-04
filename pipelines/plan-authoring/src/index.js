@@ -81,8 +81,7 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "Plan revision reached its configured correction limit.",
   plan_revision_not_converging:
     "Plan revision did not converge within the bounded correction window.",
-  proactive_clarification:
-    "Optional proactive clarification input is pending.",
+  proactive_clarification: "Optional proactive clarification input is pending.",
   product_decision_required:
     "A material product decision is required before planning can continue.",
   read_only_mutation:
@@ -128,9 +127,7 @@ function publicEvidence(run) {
 
 function publicResumeState(run) {
   return run.pipelineState.workflowState === "WAITING_FOR_USER" &&
-    ["backend_unavailable", "lazy_output_invalid"].includes(
-      run.pause.reason,
-    ) &&
+    ["backend_unavailable", "lazy_output_invalid"].includes(run.pause.reason) &&
     WORKFLOW_STATES.includes(run.pause.resumeState)
     ? run.pause.resumeState
     : null;
@@ -256,7 +253,8 @@ export const planAuthoringPipeline = Object.freeze({
   taskInputs: TASK_INPUTS,
   runOptions: Object.freeze(["project", "task", "mode", ...ROLES]),
   requiredRunOptions: Object.freeze(["project", "task"]),
-  description: "Analyze a task, draft a commit plan, review it, and write plan.md.",
+  description:
+    "Analyze a task, draft a commit plan, review it, and write plan.md.",
   projections: Object.freeze({
     clarification: projectClarification,
     pause: projectPause,

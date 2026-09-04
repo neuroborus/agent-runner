@@ -84,7 +84,7 @@ async function createFixture(t) {
     createGitService({
       env,
       authorizationIdFactory: () =>
-        `commit-authorization-${nextAuthorization += 1}`,
+        `commit-authorization-${(nextAuthorization += 1)}`,
     });
   t.after(() => rm(workspace, { force: true, recursive: true }));
   return { createService, env, repositoryPath };
@@ -138,8 +138,9 @@ test("persists, consumes, and verifies one exact local commit", async (t) => {
     },
   });
   assert.equal(
-    (await runGit(fixture.repositoryPath, fixture.env, "rev-parse", "HEAD"))
-      .stdout.trim(),
+    (
+      await runGit(fixture.repositoryPath, fixture.env, "rev-parse", "HEAD")
+    ).stdout.trim(),
     expectedSnapshot.head,
   );
   assert.ok(Object.isFrozen(authorization));
@@ -260,7 +261,10 @@ test("validates the gate before issuing and consuming authorization", async (t) 
     service.verifyCommit(authorization),
     isGitError("ERR_COMMIT_AUTHORIZATION_NOT_CONSUMED"),
   );
-  await writeFile(join(fixture.repositoryPath, "tracked.txt"), "changed again\n");
+  await writeFile(
+    join(fixture.repositoryPath, "tracked.txt"),
+    "changed again\n",
+  );
   let consumed = false;
   await assert.rejects(
     service.consumeCommit(authorization, {

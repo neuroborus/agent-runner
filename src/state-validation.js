@@ -45,11 +45,7 @@ const STATE_FIELDS = new Set([
   "createdAt",
   "updatedAt",
 ]);
-const SESSION_LINEAGE_FIELDS = new Set([
-  "source",
-  "sourceProfile",
-  "children",
-]);
+const SESSION_LINEAGE_FIELDS = new Set(["source", "sourceProfile", "children"]);
 const CHILD_SESSION_FIELDS = new Set(["role", "sessionId", "contextKey"]);
 const ACTIVITY_FIELDS = new Set(["actor", "phase", "kind", "message"]);
 const ACTIVE_TURN_FIELDS = new Set(["role", "phase"]);
@@ -123,12 +119,7 @@ function rejectUnknownFields(value, fields, path, code) {
   }
 }
 
-function assertIdentifier(
-  value,
-  path,
-  pattern = IDENTIFIER_PATTERN,
-  code,
-) {
+function assertIdentifier(value, path, pattern = IDENTIFIER_PATTERN, code) {
   if (typeof value !== "string" || !pattern.test(value)) {
     fail(`${path} must be a lowercase kebab-case identifier.`, code);
   }
@@ -312,10 +303,7 @@ function cloneJson(value, path, depth, ancestors) {
         ) {
           fail(`${path} contains an unsupported field name.`);
         }
-        return [
-          key,
-          cloneJson(entry, `${path}.${key}`, depth + 1, ancestors),
-        ];
+        return [key, cloneJson(entry, `${path}.${key}`, depth + 1, ancestors)];
       }),
     );
   } finally {
@@ -406,10 +394,7 @@ export function normalizeChildSession(value, path = "childSession") {
     ...(value.contextKey === undefined
       ? {}
       : {
-          contextKey: assertContextKey(
-            value.contextKey,
-            `${path}.contextKey`,
-          ),
+          contextKey: assertContextKey(value.contextKey, `${path}.contextKey`),
         }),
   };
 }
@@ -473,10 +458,7 @@ function normalizeRoles(value) {
   return roles;
 }
 
-function normalizeActiveTurn(
-  value,
-  schemaVersion = RUN_STATE_SCHEMA_VERSION,
-) {
+function normalizeActiveTurn(value, schemaVersion = RUN_STATE_SCHEMA_VERSION) {
   if (schemaVersion < ACTIVITY_RUN_STATE_SCHEMA_VERSION) {
     if (value !== undefined) {
       fail("Legacy run state must not declare an active turn.");
@@ -502,10 +484,7 @@ export function normalizeRunState(value, expectedRunId) {
   assertRecord(value, "run");
   rejectUnknownFields(value, STATE_FIELDS, "run");
 
-  if (
-    !Number.isSafeInteger(value.schemaVersion) ||
-    value.schemaVersion < 1
-  ) {
+  if (!Number.isSafeInteger(value.schemaVersion) || value.schemaVersion < 1) {
     fail("run.schemaVersion must be a positive safe integer.");
   }
   if (!SUPPORTED_RUN_STATE_SCHEMA_VERSIONS.has(value.schemaVersion)) {
@@ -590,9 +569,7 @@ export function normalizeTransitionPatch(value) {
   }
   if (Object.hasOwn(patch, "pause")) {
     normalized.pause =
-      patch.pause === null
-        ? null
-        : normalizePause(patch.pause);
+      patch.pause === null ? null : normalizePause(patch.pause);
   }
   if (Object.hasOwn(patch, "activeTurn")) {
     normalized.activeTurn = normalizeActiveTurn(patch.activeTurn);
@@ -614,8 +591,7 @@ export function normalizePublicActivity(value) {
     "ERR_INVALID_PUBLIC_ACTIVITY",
   );
 
-  const rawMessage =
-    typeof value.message === "string" ? value.message : "";
+  const rawMessage = typeof value.message === "string" ? value.message : "";
   const message =
     rawMessage.length <= MAX_ACTIVITY_MESSAGE_LENGTH * 2
       ? rawMessage.trim()

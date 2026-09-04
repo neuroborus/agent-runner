@@ -114,10 +114,9 @@ export function verifyTrustedBubblewrap(path, projectPath = null) {
     metadata.nlink !== 1 ||
     (projectPath !== null && coversPath(projectPath, canonicalPath))
   ) {
-    throw new TrustedExecutionError(
-      "Trusted validation launcher is unsafe.",
-      { code: "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE" },
-    );
+    throw new TrustedExecutionError("Trusted validation launcher is unsafe.", {
+      code: "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE",
+    });
   }
   try {
     accessSync(canonicalPath, constants.X_OK);
@@ -141,8 +140,9 @@ export function resolveTrustedBubblewrap(executable = null) {
       { code: "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE" },
     );
   }
-  for (const candidate of
-    executable === null ? BUBBLEWRAP_CANDIDATES : [executable]) {
+  for (const candidate of executable === null
+    ? BUBBLEWRAP_CANDIDATES
+    : [executable]) {
     if (!existsSync(candidate)) {
       continue;
     }
@@ -479,7 +479,10 @@ function gitMetadataExposures(cwd) {
 function dynamicExposures(command, { cwd, environment, homePath }) {
   const exposures = [
     { source: cwd, target: cwd },
-    ...gitMetadataExposures(cwd).map((path) => ({ source: path, target: path })),
+    ...gitMetadataExposures(cwd).map((path) => ({
+      source: path,
+      target: path,
+    })),
   ];
   for (const path of String(environment.PATH ?? "").split(delimiter)) {
     if (isAbsolute(path) && existsSync(path)) {
@@ -496,9 +499,7 @@ function dynamicExposures(command, { cwd, environment, homePath }) {
     (path) => realpathSync(path),
   );
   const ordered = [
-    ...new Map(
-      exposures.map((value) => [value.target, value]),
-    ).values(),
+    ...new Map(exposures.map((value) => [value.target, value])).values(),
   ]
     .filter(
       ({ target }) =>
@@ -518,9 +519,7 @@ function dynamicExposures(command, { cwd, environment, homePath }) {
     ) {
       throw new Error("Trusted validation exposure is too broad.");
     }
-    if (
-      !confined.some(({ target }) => coversPath(target, exposure.target))
-    ) {
+    if (!confined.some(({ target }) => coversPath(target, exposure.target))) {
       confined.push(exposure);
     }
   }
@@ -574,12 +573,7 @@ function sandboxArguments(command, { cwd, environment, homePath }) {
 
 export function sandboxTrustedCommand(
   command,
-  {
-    bubblewrapPath,
-    cwd,
-    environment,
-    platform = process.platform,
-  },
+  { bubblewrapPath, cwd, environment, platform = process.platform },
 ) {
   const homePath = environment.HOME;
   if (

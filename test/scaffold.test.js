@@ -53,9 +53,7 @@ async function findJavaScriptModules(directoryUrl) {
 }
 
 function parseFrontmatter(document, skillPath) {
-  const match = /^---\r?\n(?<body>[\s\S]*?)\r?\n---(?:\r?\n|$)/u.exec(
-    document,
-  );
+  const match = /^---\r?\n(?<body>[\s\S]*?)\r?\n---(?:\r?\n|$)/u.exec(document);
   assert.ok(match, `${skillPath} must start with YAML frontmatter`);
 
   const fields = Object.create(null);
@@ -110,11 +108,12 @@ test("documented Node range matches package metadata", async () => {
 });
 
 test("workspace topology keeps pipelines independent", async () => {
-  const [commitPlan, planAuthoring, planExecution, polishing] = await Promise.all(
-    PACKAGE_METADATA_FILES.slice(1).map(async (metadataUrl) =>
-      JSON.parse(await readFile(metadataUrl, "utf8")),
-    ),
-  );
+  const [commitPlan, planAuthoring, planExecution, polishing] =
+    await Promise.all(
+      PACKAGE_METADATA_FILES.slice(1).map(async (metadataUrl) =>
+        JSON.parse(await readFile(metadataUrl, "utf8")),
+      ),
+    );
 
   assert.deepEqual(packageMetadata.workspaces, ["packages/*", "pipelines/*"]);
   assert.equal(packageMetadata.exports, "./src/index.js");
@@ -170,7 +169,11 @@ test("canonical project skills have valid instructions", async () => {
     assert.ok(fields.description.trim(), `${skillPath} needs a description`);
     assert.doesNotMatch(fields.description, /\bTODO\b/u);
     assert.match(content, /^#\s+\S/mu, `${skillPath} needs a Markdown title`);
-    assert.doesNotMatch(content, /\bTODO\b/u, `${skillPath} has unfinished content`);
+    assert.doesNotMatch(
+      content,
+      /\bTODO\b/u,
+      `${skillPath} has unfinished content`,
+    );
   }
 });
 

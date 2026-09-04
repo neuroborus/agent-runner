@@ -42,8 +42,7 @@ function hasDiagnostic(code, diagnosticClass) {
 }
 
 function hasFailureClass(code, failureClass) {
-  return (error) =>
-    hasCode(code)(error) && error.failureClass === failureClass;
+  return (error) => hasCode(code)(error) && error.failureClass === failureClass;
 }
 
 function hasStorageError(error) {
@@ -187,8 +186,7 @@ function createFixture({
     });
     const record = {
       cleanupCalls: 0,
-      previousCleanupCalls:
-        workspaceStorages.at(-1)?.cleanupCalls ?? null,
+      previousCleanupCalls: workspaceStorages.at(-1)?.cleanupCalls ?? null,
       rootPath,
       shellEnvironment,
     };
@@ -304,13 +302,10 @@ function createFixture({
             ),
           };
         case "turn/start": {
-          const turnId = `turn-${nextTurn += 1}`;
+          const turnId = `turn-${(nextTurn += 1)}`;
           return {
             result: { turn: { id: turnId } },
-            notification: completedTurn(
-              message.params.threadId,
-              turnId,
-            ),
+            notification: completedTurn(message.params.threadId, turnId),
           };
         }
         default:
@@ -533,7 +528,10 @@ test("constructs with the native environment and probes capabilities", async () 
   assert.ok(
     fixture.executeCalls[2].argumentsList.includes("agent_runner_local_commit"),
   );
-  assert.strictEqual(await fixture.adapter.probe(), await fixture.adapter.probe());
+  assert.strictEqual(
+    await fixture.adapter.probe(),
+    await fixture.adapter.probe(),
+  );
 });
 
 test("fails preflight when the installed Codex cannot enforce access", async () => {
@@ -563,40 +561,37 @@ test("fails preflight when the installed Codex cannot enforce access", async () 
   assert.equal(missingFlagFixture.processes.length, 0);
 });
 
-test(
-  "advertises local commits only with an enforceable isolated sandbox",
-  async () => {
-    const fixture = createFixture({
-      executeHandle({ argumentsList }) {
-        if (argumentsList[0] === "sandbox") {
-          return { stdout: "", stderr: "" };
-        }
-        return undefined;
-      },
-    });
+test("advertises local commits only with an enforceable isolated sandbox", async () => {
+  const fixture = createFixture({
+    executeHandle({ argumentsList }) {
+      if (argumentsList[0] === "sandbox") {
+        return { stdout: "", stderr: "" };
+      }
+      return undefined;
+    },
+  });
 
-    const capabilities = await fixture.adapter.probe();
-    assert.equal(capabilities.workspaceWrite, true);
-    assert.equal(capabilities.localCommit, false);
-    await assert.rejects(
-      fixture.adapter.run(
-        request({
-          access: "local-commit",
-          authorizationId: "authorization-1",
-          commit: {
-            expectedHead: EXPECTED_HEAD,
-            message: "feat(test): create commit",
-          },
-        }),
-      ),
-      hasDiagnostic(
-        "ERR_UNSUPPORTED_CODEX_CAPABILITY",
-        "capability_local_commit",
-      ),
-    );
-    assert.equal(fixture.processes.length, 0);
-  },
-);
+  const capabilities = await fixture.adapter.probe();
+  assert.equal(capabilities.workspaceWrite, true);
+  assert.equal(capabilities.localCommit, false);
+  await assert.rejects(
+    fixture.adapter.run(
+      request({
+        access: "local-commit",
+        authorizationId: "authorization-1",
+        commit: {
+          expectedHead: EXPECTED_HEAD,
+          message: "feat(test): create commit",
+        },
+      }),
+    ),
+    hasDiagnostic(
+      "ERR_UNSUPPORTED_CODEX_CAPABILITY",
+      "capability_local_commit",
+    ),
+  );
+  assert.equal(fixture.processes.length, 0);
+});
 
 test("removes ambient Git redirection and identity overrides", async () => {
   const fixture = createFixture({
@@ -755,7 +750,7 @@ test("runs a structured read-only turn with an explicit model", async () => {
     "notify=[]",
     "-c",
     'shell_environment_policy={inherit="core",ignore_default_excludes=false,' +
-      'experimental_use_profile=false,set={}}',
+      "experimental_use_profile=false,set={}}",
     "-c",
     "memories.generate_memories=false",
     "-c",
@@ -846,9 +841,7 @@ test("omits current Codex execution overrides", async () => {
     false,
   );
   assert.equal(
-    fixture.processes[0].messages.some(
-      ({ method }) => method === "model/list",
-    ),
+    fixture.processes[0].messages.some(({ method }) => method === "model/list"),
     false,
   );
   const thread = fixture.processes[0].messages.find(
@@ -931,11 +924,7 @@ for (const itemsView of ["notLoaded", "summary"]) {
               thread: {
                 id: "thread-0",
                 turns: [
-                  completedTurn(
-                    "thread-0",
-                    turnId,
-                    "Hydrated.",
-                  ).params.turn,
+                  completedTurn("thread-0", turnId, "Hydrated.").params.turn,
                 ],
               },
             },
@@ -1110,8 +1099,8 @@ test("rejects an incorrect workspace shell-environment projection", async () => 
   );
   assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
   assert.equal(
-    fixture.processes[0].messages.some(
-      ({ method }) => method?.startsWith("thread/"),
+    fixture.processes[0].messages.some(({ method }) =>
+      method?.startsWith("thread/"),
     ),
     false,
   );
@@ -1184,22 +1173,19 @@ test("fails before starting a thread when isolation is incomplete", async () => 
       },
     });
 
-    await assert.rejects(
-      fixture.adapter.run(request()),
-      (error) => {
-        assert.ok(
-          hasDiagnostic("ERR_CODEX_ISOLATION", diagnostics[index])(error),
-        );
-        assert.equal(error.message, "Codex external tools are not isolated.");
-        assert.equal(error.cause, undefined);
-        assert.equal(error.config, undefined);
-        assert.doesNotMatch(JSON.stringify(error), /sensitive-native-output/u);
-        return true;
-      },
-    );
+    await assert.rejects(fixture.adapter.run(request()), (error) => {
+      assert.ok(
+        hasDiagnostic("ERR_CODEX_ISOLATION", diagnostics[index])(error),
+      );
+      assert.equal(error.message, "Codex external tools are not isolated.");
+      assert.equal(error.cause, undefined);
+      assert.equal(error.config, undefined);
+      assert.doesNotMatch(JSON.stringify(error), /sensitive-native-output/u);
+      return true;
+    });
     assert.equal(
-      fixture.processes[0].messages.some(
-        ({ method }) => method?.startsWith("thread/"),
+      fixture.processes[0].messages.some(({ method }) =>
+        method?.startsWith("thread/"),
       ),
       false,
     );
@@ -1655,7 +1641,10 @@ test("creates an authorized commit through a networkless sandbox", async () => {
 
 test("rejects forbidden Git and remote-write commands reported by Codex", async () => {
   for (const [command, code] of [
-    ["git commit -m 'feat(test): bypass adapter'", "ERR_CODEX_LOCAL_COMMIT_POLICY"],
+    [
+      "git commit -m 'feat(test): bypass adapter'",
+      "ERR_CODEX_LOCAL_COMMIT_POLICY",
+    ],
     ["git reset --hard HEAD^", "ERR_CODEX_LOCAL_COMMIT_POLICY"],
     ["git status && git stash", "ERR_CODEX_LOCAL_COMMIT_POLICY"],
     ["git -C . push origin main", "ERR_CODEX_REMOTE_WRITE_ATTEMPT"],
@@ -1678,10 +1667,7 @@ test("rejects forbidden Git and remote-write commands reported by Codex", async 
       "gh api --method POST repos/owner/repository/issues",
       "ERR_CODEX_REMOTE_WRITE_ATTEMPT",
     ],
-    [
-      "glab api --method=patch projects/1",
-      "ERR_CODEX_REMOTE_WRITE_ATTEMPT",
-    ],
+    ["glab api --method=patch projects/1", "ERR_CODEX_REMOTE_WRITE_ATTEMPT"],
   ]) {
     const fixture = createFixture({
       handle({ message }) {
@@ -1880,17 +1866,14 @@ test("rejects hosted, dynamic, and read-only policy violations", async () => {
       },
     });
 
-    await assert.rejects(
-      fixture.adapter.run(request()),
-      (error) => {
-        assert.ok(hasDiagnostic(code, diagnosticClass)(error));
-        assert.equal(error.message, message);
-        assert.equal(error.cause, undefined);
-        assert.equal(error.command, undefined);
-        assert.doesNotMatch(JSON.stringify(error), /sensitive-native-output/u);
-        return true;
-      },
-    );
+    await assert.rejects(fixture.adapter.run(request()), (error) => {
+      assert.ok(hasDiagnostic(code, diagnosticClass)(error));
+      assert.equal(error.message, message);
+      assert.equal(error.cause, undefined);
+      assert.equal(error.command, undefined);
+      assert.doesNotMatch(JSON.stringify(error), /sensitive-native-output/u);
+      return true;
+    });
   }
 });
 
@@ -2092,9 +2075,7 @@ test("never replays when a partial completed turn cannot be hydrated", async () 
   assert.equal(fixture.processes.length, 1);
 });
 
-test("classifies recognized terminal turn failures without retaining native details", async (
-  t,
-) => {
+test("classifies recognized terminal turn failures without retaining native details", async (t) => {
   const variants = [
     [
       { activeTurnNotSteerable: { turnKind: "review" } },
@@ -2147,25 +2128,19 @@ test("classifies recognized terminal turn failures without retaining native deta
         },
       });
 
-      await assert.rejects(
-        fixture.adapter.run(request()),
-        (error) => {
-          assert.ok(
-            hasDiagnostic("ERR_CODEX_TURN_FAILED", diagnosticClass)(error),
-          );
-          assert.equal(error.cause, undefined);
-          const retainedError = JSON.stringify({
-            ...error,
-            message: error.message,
-          });
-          assert.doesNotMatch(
-            retainedError,
-            /DO_NOT_RETAIN/u,
-          );
-          assert.doesNotMatch(retainedError, /httpStatusCode|turnKind/u);
-          return true;
-        },
-      );
+      await assert.rejects(fixture.adapter.run(request()), (error) => {
+        assert.ok(
+          hasDiagnostic("ERR_CODEX_TURN_FAILED", diagnosticClass)(error),
+        );
+        assert.equal(error.cause, undefined);
+        const retainedError = JSON.stringify({
+          ...error,
+          message: error.message,
+        });
+        assert.doesNotMatch(retainedError, /DO_NOT_RETAIN/u);
+        assert.doesNotMatch(retainedError, /httpStatusCode|turnKind/u);
+        return true;
+      });
     });
   }
 });
@@ -2189,19 +2164,16 @@ test("discards unknown terminal turn classifications", async () => {
     },
   });
 
-  await assert.rejects(
-    fixture.adapter.run(request()),
-    (error) => {
-      assert.ok(hasCode("ERR_CODEX_TURN_FAILED")(error));
-      assert.equal(error.diagnosticClass, undefined);
-      assert.equal(error.cause, undefined);
-      assert.doesNotMatch(
-        JSON.stringify({ ...error, message: error.message }),
-        /DO_NOT_RETAIN/u,
-      );
-      return true;
-    },
-  );
+  await assert.rejects(fixture.adapter.run(request()), (error) => {
+    assert.ok(hasCode("ERR_CODEX_TURN_FAILED")(error));
+    assert.equal(error.diagnosticClass, undefined);
+    assert.equal(error.cause, undefined);
+    assert.doesNotMatch(
+      JSON.stringify({ ...error, message: error.message }),
+      /DO_NOT_RETAIN/u,
+    );
+    return true;
+  });
 });
 
 test("returns commit-executor failures for Git-state verification", async () => {
@@ -2307,7 +2279,11 @@ test("hydrates summarized compaction and retries a full context once", async () 
       }
       return {
         result: { turn: { id: turnId } },
-        notification: completedTurn(message.params.threadId, turnId, "Recovered."),
+        notification: completedTurn(
+          message.params.threadId,
+          turnId,
+          "Recovered.",
+        ),
       };
     },
   });

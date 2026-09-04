@@ -223,10 +223,7 @@ async function repositoryFingerprint(
       if (entry.isDirectory()) {
         await visit(path);
       } else {
-        entries.push([
-          relative(root, path),
-          hash(await readFile(path)),
-        ]);
+        entries.push([relative(root, path), hash(await readFile(path))]);
       }
     }
   }
@@ -377,7 +374,10 @@ async function createFixture(
   const planPath = join(taskPath, "plan.md");
   await executeFile("git", ["init", "-q", projectPath]);
   await mkdir(taskPath);
-  await writeFile(join(taskPath, "task.md"), "Implement the requested behavior.\n");
+  await writeFile(
+    join(taskPath, "task.md"),
+    "Implement the requested behavior.\n",
+  );
   await writeFile(
     join(projectPath, ".gitignore"),
     clarificationIgnored ? "/task/clarifications.md\n" : "",
@@ -387,7 +387,11 @@ async function createFixture(
   }
   t.after(() => rm(projectPath, { recursive: true, force: true }));
 
-  const queues = { planner: [...planner], reviewer: [...reviewer], arbiter: [...arbiter] };
+  const queues = {
+    planner: [...planner],
+    reviewer: [...reviewer],
+    arbiter: [...arbiter],
+  };
   const calls = { planner: [], reviewer: [], arbiter: [] };
   const freshSessionCounts = { planner: 0, reviewer: 0, arbiter: 0 };
   const adapters = Object.fromEntries(
@@ -441,10 +445,7 @@ async function createFixture(
     taskPath,
     roles: Object.fromEntries(
       (mode === "lazy" ? ["planner"] : ["planner", "reviewer", "arbiter"]).map(
-        (role) => [
-          role,
-          { backend: "codex", model: models[role] ?? null },
-        ],
+        (role) => [role, { backend: "codex", model: models[role] ?? null }],
       ),
     ),
     counters: {},
@@ -473,7 +474,14 @@ async function createFixture(
       async preflight({ allowedPaths, requiredIgnoredPaths }) {
         for (const path of requiredIgnoredPaths) {
           try {
-            await executeFile("git", ["-C", projectPath, "check-ignore", "-q", "--", path]);
+            await executeFile("git", [
+              "-C",
+              projectPath,
+              "check-ignore",
+              "-q",
+              "--",
+              path,
+            ]);
           } catch (cause) {
             const error = new Error("Artifact is not ignored.");
             error.code = "ERR_REPOSITORY_ARTIFACT_NOT_IGNORED";
@@ -507,19 +515,31 @@ async function createFixture(
       let context = null;
       try {
         const content = await readFile(join(taskPath, "context.md"), "utf8");
-        context = { path: join(taskPath, "context.md"), content, hash: hash(content) };
+        context = {
+          path: join(taskPath, "context.md"),
+          content,
+          hash: hash(content),
+        };
       } catch (cause) {
         if (cause?.code !== "ENOENT") {
           throw cause;
         }
       }
       return {
-        task: { path: join(taskPath, "task.md"), content: taskContent, hash: hash(taskContent) },
+        task: {
+          path: join(taskPath, "task.md"),
+          content: taskContent,
+          hash: hash(taskContent),
+        },
         context,
       };
     },
     async transition(patch, options) {
-      currentRun = { ...currentRun, ...patch, revision: currentRun.revision + 1 };
+      currentRun = {
+        ...currentRun,
+        ...patch,
+        revision: currentRun.revision + 1,
+      };
       transitions.push({ patch, options });
       return currentRun;
     },
@@ -669,10 +689,7 @@ test("selects lazy Planner-only mode and migrates legacy runs to independent", a
   assert.deepEqual(planAuthoringPipeline.resolveActiveRoles({ mode: "lazy" }), [
     "planner",
   ]);
-  assert.equal(
-    planAuthoringPipeline.settings.mode.defaultValue,
-    "independent",
-  );
+  assert.equal(planAuthoringPipeline.settings.mode.defaultValue, "independent");
 
   const initial = createPlanAuthoringState({
     settings: {
@@ -727,13 +744,7 @@ test("selects lazy Planner-only mode and migrates legacy runs to independent", a
 test("converges a lazy plan with one source fork and no review roles", async (t) => {
   const fixture = await createFixture(t, {
     mode: "lazy",
-    planner: [
-      ready(),
-      draft(),
-      checkChanged(),
-      checkUnchanged(),
-      clean(),
-    ],
+    planner: [ready(), draft(), checkChanged(), checkUnchanged(), clean()],
     reviewer: [],
     arbiter: [],
     sourceSession: SOURCE_SESSION,
@@ -812,10 +823,7 @@ test("routes lazy confirmation findings back through fixing", async (t) => {
   assert.equal(result.counters.correctionRounds, 1);
   assert.equal(fixture.calls.reviewer.length, 0);
   assert.equal(fixture.calls.arbiter.length, 0);
-  assert.match(
-    fixture.calls.planner[4].prompt,
-    /missing-detail/u,
-  );
+  assert.match(fixture.calls.planner[4].prompt, /missing-detail/u);
 });
 
 test("corrects a provider-rejected lazy checkpoint in one fresh read-only session", async (t) => {
@@ -856,8 +864,14 @@ test("corrects a provider-rejected lazy checkpoint in one fresh read-only sessio
   assert.equal(correctionRequest.access, "read-only");
   assert.equal(correctionRequest.session, undefined);
   assert.equal(correctionRequest.schema, fixture.calls.planner[2].schema);
-  assert.match(correctionRequest.prompt, /Pending correction diagnostic batch/u);
-  assert.match(correctionRequest.prompt, /Plan to check and fix:\n## Commit 1/u);
+  assert.match(
+    correctionRequest.prompt,
+    /Pending correction diagnostic batch/u,
+  );
+  assert.match(
+    correctionRequest.prompt,
+    /Plan to check and fix:\n## Commit 1/u,
+  );
   assert.equal(await readFile(fixture.planPath, "utf8"), REVISED_PLAN);
   assert.doesNotMatch(
     JSON.stringify({
@@ -946,7 +960,10 @@ test("rejects pending lazy correction scope after draft fingerprint drift", asyn
     draftFingerprint: hash(REVISED_PLAN),
   };
 
-  await assert.rejects(fixture.run(), /pending lazy correction is inconsistent/u);
+  await assert.rejects(
+    fixture.run(),
+    /pending lazy correction is inconsistent/u,
+  );
   await assert.rejects(readFile(fixture.planPath, "utf8"), /ENOENT/u);
 });
 
@@ -1027,7 +1044,10 @@ test("accepts findings only after invalid clean confirmation is corrected", asyn
 
   assert.equal(completed.pipelineState.workflowState, "DONE");
   assert.equal(completed.pipelineState.lazyCorrections.length, 1);
-  assert.equal(completed.pipelineState.lazyCorrections[0].phase, "CLEAN_CONFIRM");
+  assert.equal(
+    completed.pipelineState.lazyCorrections[0].phase,
+    "CLEAN_CONFIRM",
+  );
   assert.equal(completed.counters.revisionRounds, 3);
   assert.equal(completed.counters.correctionRounds, 1);
   assert.equal(fixture.calls.planner[4].session, undefined);
@@ -1052,7 +1072,10 @@ test("invalidates a pending correction after read-only repository mutation", asy
         !mutated
       ) {
         mutated = true;
-        await writeFile(join(fixture.projectPath, "contamination.txt"), "bad\n");
+        await writeFile(
+          join(fixture.projectPath, "contamination.txt"),
+          "bad\n",
+        );
       }
     },
   });
@@ -1165,7 +1188,10 @@ test("rejects repository mutation during lazy clean confirmation", async (t) => 
         !mutated
       ) {
         mutated = true;
-        await writeFile(join(fixture.projectPath, "contamination.txt"), "bad\n");
+        await writeFile(
+          join(fixture.projectPath, "contamination.txt"),
+          "bad\n",
+        );
       }
     },
   });
@@ -1200,12 +1226,7 @@ test("rejects lazy clean evidence for a different draft fingerprint", async (t) 
 test("bounds lazy confirmation findings without invoking an Arbiter", async (t) => {
   const fixture = await createFixture(t, {
     mode: "lazy",
-    planner: [
-      ready(),
-      draft(),
-      checkUnchanged(),
-      findings("still-blocked"),
-    ],
+    planner: [ready(), draft(), checkUnchanged(), findings("still-blocked")],
     reviewer: [],
     arbiter: [],
   });
@@ -1371,10 +1392,7 @@ test("rejects explicit null persisted counters", async (t) => {
   const fixture = await createFixture(t);
   fixture.currentRun.counters.revisionRounds = null;
 
-  await assert.rejects(
-    fixture.run(),
-    /counter revisionRounds is invalid/u,
-  );
+  await assert.rejects(fixture.run(), /counter revisionRounds is invalid/u);
 });
 
 test("rejects inconsistent persisted correction progress", async (t) => {
@@ -1461,8 +1479,7 @@ test("rejects inconsistent persisted proactive clarification state", async (t) =
     proactiveClarification: true,
   });
   await completedFixture.run();
-  completedFixture.currentRun.pipelineState.proactiveClarificationComplete =
-    false;
+  completedFixture.currentRun.pipelineState.proactiveClarificationComplete = false;
 
   await assert.rejects(
     completedFixture.run(),
@@ -2034,7 +2051,10 @@ test("invalidates dependent work after a read-only repository mutation", async (
     async onRoleRun(role) {
       if (role === "reviewer" && !mutated) {
         mutated = true;
-        await writeFile(join(fixture.projectPath, "unexpected.txt"), "mutation");
+        await writeFile(
+          join(fixture.projectPath, "unexpected.txt"),
+          "mutation",
+        );
       }
     },
   });

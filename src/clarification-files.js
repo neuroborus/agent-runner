@@ -102,18 +102,16 @@ async function canonicalArtifactRoot(artifactRoot) {
   }
 }
 
-function relativeTranscriptPath(
-  transcriptPath,
-  requestedRoot,
-  canonicalRoot,
-) {
+function relativeTranscriptPath(transcriptPath, requestedRoot, canonicalRoot) {
   if (
     typeof transcriptPath !== "string" ||
     transcriptPath.length === 0 ||
     transcriptPath.includes("\0") ||
     /[\\/]$/u.test(transcriptPath)
   ) {
-    throw pathError("Transcript path must name a file within its artifact root.");
+    throw pathError(
+      "Transcript path must name a file within its artifact root.",
+    );
   }
 
   let pathFromRoot;
@@ -174,7 +172,11 @@ export async function resolveTranscriptPath(
   options,
   { createParents = false } = {},
 ) {
-  if (options === null || typeof options !== "object" || Array.isArray(options)) {
+  if (
+    options === null ||
+    typeof options !== "object" ||
+    Array.isArray(options)
+  ) {
     throw pathError("Transcript options must be an object.");
   }
   const { artifactRoot, transcriptPath } = options;
@@ -320,10 +322,13 @@ export async function createTranscriptFile(location) {
     return created;
   } catch (cause) {
     await unlinkIfPresent(temporaryPath);
-    throw new ClarificationError("Cannot create the clarification transcript.", {
-      cause,
-      code: "ERR_CLARIFICATION_WRITE",
-    });
+    throw new ClarificationError(
+      "Cannot create the clarification transcript.",
+      {
+        cause,
+        code: "ERR_CLARIFICATION_WRITE",
+      },
+    );
   }
 }
 
@@ -358,9 +363,12 @@ export async function replaceTranscript(location, content) {
     await syncDirectory(dirname(location.transcriptPath));
   } catch (cause) {
     await unlinkIfPresent(temporaryPath);
-    throw new ClarificationError("Cannot update the clarification transcript.", {
-      cause,
-      code: "ERR_CLARIFICATION_WRITE",
-    });
+    throw new ClarificationError(
+      "Cannot update the clarification transcript.",
+      {
+        cause,
+        code: "ERR_CLARIFICATION_WRITE",
+      },
+    );
   }
 }

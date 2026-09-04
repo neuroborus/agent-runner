@@ -90,8 +90,7 @@ test("resolves the external state root and creates a complete run", async (t) =>
   assert.throws(
     () => resolveStateRoot({ env: {}, homeDirectory: null }),
     (error) =>
-      error instanceof RunStoreError &&
-      error.code === "ERR_INVALID_STATE_ROOT",
+      error instanceof RunStoreError && error.code === "ERR_INVALID_STATE_ROOT",
   );
 
   const { created, projectPath, stateRoot, store, taskPath } =
@@ -101,15 +100,9 @@ test("resolves the external state root and creates a complete run", async (t) =>
     await readFile(join(created.directoryPath, "state.json"), "utf8"),
   );
 
-  assert.match(
-    created.state.runId,
-    /^[0-9a-f]{8}-[0-9a-f-]{27}$/u,
-  );
+  assert.match(created.state.runId, /^[0-9a-f]{8}-[0-9a-f-]{27}$/u);
   assert.equal(created.state.schemaVersion, RUN_STATE_SCHEMA_VERSION);
-  assert.deepEqual(
-    created.state.runtimeCompatibility,
-    RUNTIME_COMPATIBILITY,
-  );
+  assert.deepEqual(created.state.runtimeCompatibility, RUNTIME_COMPATIBILITY);
   assert.equal(created.state.revision, 1);
   assert.equal(created.state.projectPath, projectPath);
   assert.equal(created.state.taskPath, taskPath);
@@ -125,7 +118,10 @@ test("resolves the external state root and creates a complete run", async (t) =>
     "progress.md",
     "state.json",
   ]);
-  assert.equal(await store.getRunDirectory(created.state.runId), created.directoryPath);
+  assert.equal(
+    await store.getRunDirectory(created.state.runId),
+    created.directoryPath,
+  );
   assert.deepEqual(await store.loadRun(created.state.runId), created.state);
   assert.ok(Object.isFrozen(created.state));
   assert.ok(Object.isFrozen(created.state.pipelineState));
@@ -210,11 +206,7 @@ test("normalizes legacy role records for every pipeline without rewriting histor
 });
 
 test("projects version-2 activity state for every pipeline without rewriting", async (t) => {
-  for (const pipelineId of [
-    "plan-authoring",
-    "plan-execution",
-    "polishing",
-  ]) {
+  for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
     const workspace = await mkdtemp(
       join(tmpdir(), `agent-runner-v2-${pipelineId}-`),
     );
@@ -282,7 +274,10 @@ test("persists bounded agent turns until owner-checked reconciliation", async (t
 
   await created.lease.release();
   const resumedStore = createRunStore({ stateRoot });
-  assert.deepEqual((await resumedStore.loadRun(started.runId)).activeTurn, turn);
+  assert.deepEqual(
+    (await resumedStore.loadRun(started.runId)).activeTurn,
+    turn,
+  );
   const lease = await resumedStore.acquireRunLease(started.runId);
   const recovered = await resumedStore.recoverRun(lease);
   assert.deepEqual(recovered.activeTurn, turn);
@@ -374,10 +369,7 @@ test("preserves actionable runtime skew errors from state and journal reads", as
   const originalEvent = await readFile(eventsPath, "utf8");
   const incompatibleState = JSON.parse(originalState);
   incompatibleState.runtimeCompatibility.runnerVersion += 1;
-  await writeFile(
-    statePath,
-    `${JSON.stringify(incompatibleState, null, 2)}\n`,
-  );
+  await writeFile(statePath, `${JSON.stringify(incompatibleState, null, 2)}\n`);
 
   await assert.rejects(
     store.loadRun(created.state.runId),
@@ -481,10 +473,9 @@ test("persists child sessions, opaque pipeline state, and public activity", asyn
   assert.deepEqual(transitioned.counters, { fixRounds: 1 });
   assert.deepEqual(transitioned.pause, { reason: "review_required" });
 
-  const firstPage = await resumedStore.readPublicActivity(
-    created.state.runId,
-    { limit: 1 },
-  );
+  const firstPage = await resumedStore.readPublicActivity(created.state.runId, {
+    limit: 1,
+  });
   const secondPage = await resumedStore.readPublicActivity(
     created.state.runId,
     { afterRevision: firstPage.cursor, limit: 1 },
@@ -569,10 +560,7 @@ test("accepts only finite adapter diagnostics in durable pause state", async (t)
       diagnosticClass: "operation_multi_agent",
     },
   });
-  assert.equal(
-    transitioned.pause.diagnosticClass,
-    "operation_multi_agent",
-  );
+  assert.equal(transitioned.pause.diagnosticClass, "operation_multi_agent");
 
   await assert.rejects(
     store.transitionRun(created.lease, {
@@ -637,7 +625,10 @@ test("recovers every transition write boundary from the complete event", async (
     await created.lease.release();
 
     const recoveringStore = createRunStore({ stateRoot });
-    assert.equal((await recoveringStore.loadRun(created.state.runId)).revision, 2);
+    assert.equal(
+      (await recoveringStore.loadRun(created.state.runId)).revision,
+      2,
+    );
     const lease = await recoveringStore.acquireRunLease(created.state.runId);
     const recovered = await recoveringStore.recoverRun(lease);
     assert.equal(recovered.revision, 2);
@@ -694,7 +685,6 @@ test("repairs only a partial final event and rejects invalid durable state", asy
   await assert.rejects(
     reopenedStore.loadRun(created.state.runId),
     (error) =>
-      error instanceof RunStoreError &&
-      error.code === "ERR_INVALID_RUN_STATE",
+      error instanceof RunStoreError && error.code === "ERR_INVALID_RUN_STATE",
   );
 });

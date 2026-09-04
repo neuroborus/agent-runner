@@ -28,12 +28,7 @@ function parseJson(source, description, invalidLeaseCode) {
   }
 }
 
-function parseLease(
-  source,
-  expectedRunId,
-  description,
-  invalidLeaseCode,
-) {
+function parseLease(source, expectedRunId, description, invalidLeaseCode) {
   const value = parseJson(source, description, invalidLeaseCode);
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new RunStoreError(`${description} must be an object.`, {
@@ -87,12 +82,7 @@ async function readLease(
   const source = await readOptionalPublishedText(filePath);
   return source === null
     ? null
-    : parseLease(
-        source,
-        expectedRunId,
-        description,
-        invalidLeaseCode,
-      );
+    : parseLease(source, expectedRunId, description, invalidLeaseCode);
 }
 
 export function createLeaseManager({
@@ -255,28 +245,16 @@ export function createLeaseManager({
 
       const currentLease = await readManagedLease(leasePath, runId);
       if (currentLease?.token !== existingLease.token) {
-        await removeOwnedMarker(
-          runDirectory,
-          runId,
-          reclaimingLease.token,
-        );
+        await removeOwnedMarker(runDirectory, runId, reclaimingLease.token);
         continue;
       }
 
       try {
         await removeFile(leasePath);
-        await removeOwnedMarker(
-          runDirectory,
-          runId,
-          reclaimingLease.token,
-        );
+        await removeOwnedMarker(runDirectory, runId, reclaimingLease.token);
         return await createLeaseFile(runDirectory, runId);
       } catch (cause) {
-        await removeOwnedMarker(
-          runDirectory,
-          runId,
-          reclaimingLease.token,
-        );
+        await removeOwnedMarker(runDirectory, runId, reclaimingLease.token);
         if (cause?.code === "EEXIST") {
           throw new RunStoreError(`${leaseSubject(runId)} is already leased.`, {
             cause,
@@ -298,9 +276,7 @@ export function createLeaseManager({
       join(runDirectory, LEASE_FILENAME),
       runId,
     );
-    return lease !== null && !(await leaseIsStale(lease))
-      ? lease.runId
-      : null;
+    return lease !== null && !(await leaseIsStale(lease)) ? lease.runId : null;
   }
 
   async function isLeased(runDirectory, runId) {

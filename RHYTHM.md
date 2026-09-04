@@ -5,6 +5,15 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-09-04
+
+- **Repository formatting is one root-owned terminal-gate concern.** The exact
+  stable Prettier 3 release is pinned once at the root, and the root scripts
+  format the Git-visible supported file set while preserving repository and
+  local ignore rules. Finalization runs the writable formatter first, then the
+  non-mutating repository and whitespace gates, so accepted evidence describes
+  the formatted candidate without adding per-workspace tools or configuration.
+
 ## 2026-09-03
 
 - **Existing project agent guidance participates in writable turns.** Codex

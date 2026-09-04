@@ -719,7 +719,7 @@ const backend = {
       localCommit: true,
       remoteWriteBlocked: true,
       nativeSessionContinuation: true,
-      nativeSessionFork: true
+      nativeSessionFork: true,
     };
   },
 
@@ -727,9 +727,9 @@ const backend = {
     return {
       output: "...",
       structured: {},
-      sessionId: "optional"
+      sessionId: "optional",
     };
-  }
+  },
 };
 ```
 

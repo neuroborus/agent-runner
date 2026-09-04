@@ -38,7 +38,8 @@ const TOP_LEVEL_FIELDS = new Set([
 ]);
 const PROJECT_TOP_LEVEL_FIELDS = new Set(
   [...TOP_LEVEL_FIELDS].filter(
-    (field) => !["issueReporting", "profiles", "trustedCommands"].includes(field),
+    (field) =>
+      !["issueReporting", "profiles", "trustedCommands"].includes(field),
   ),
 );
 const ROLE_FIELDS = new Set(["backend", "contextSize", "model", "profile"]);
@@ -185,10 +186,13 @@ function assertKnownTrustedSelection(settings, trustedCommands, path) {
   try {
     createTrustedValidationSnapshot(trustedCommands, settings.trustedChecks);
   } catch (cause) {
-    throw new ConfigurationError(`${path}.trustedChecks is invalid: ${cause.message}`, {
-      cause,
-      code: cause.code,
-    });
+    throw new ConfigurationError(
+      `${path}.trustedChecks is invalid: ${cause.message}`,
+      {
+        cause,
+        code: cause.code,
+      },
+    );
   }
 }
 
@@ -211,8 +215,7 @@ function normalizePipeline(
     if (value === undefined && !applyDefaults) {
       continue;
     }
-    const resolvedValue =
-      value === undefined ? definition.defaultValue : value;
+    const resolvedValue = value === undefined ? definition.defaultValue : value;
     if (!definition.validate(resolvedValue)) {
       throw new ConfigurationError(
         `${path}.${settingName} ${definition.errorMessage}.`,
@@ -427,8 +430,7 @@ function normalizeProjectConfiguration(input, runnerConfiguration) {
     }
   }
 
-  const inputPipelines =
-    input.pipelines === undefined ? {} : input.pipelines;
+  const inputPipelines = input.pipelines === undefined ? {} : input.pipelines;
   assertRecord(inputPipelines, `${rootPath}.pipelines`);
   const pipelines = listPipelines();
   const pipelineIds = new Set(pipelines.map(({ id }) => id));

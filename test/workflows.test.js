@@ -284,7 +284,9 @@ function createBackend(
                 whyBlocked: "",
                 evidence: [],
               };
-      } else if (request.prompt.includes("Resolve the bootstrap disagreement")) {
+      } else if (
+        request.prompt.includes("Resolve the bootstrap disagreement")
+      ) {
         role = "arbiter";
         structured = {
           direction: "SYNTHESIZE",
@@ -303,7 +305,8 @@ function createBackend(
       ) {
         structured = {
           status: "COMPLETED",
-          summary: "The existing dirty change is already idiomatic and minimal.",
+          summary:
+            "The existing dirty change is already idiomatic and minimal.",
           reason: "",
           question: "",
           options: [],
@@ -311,7 +314,9 @@ function createBackend(
           evidence: [],
         };
       } else if (
-        request.prompt.includes("Run the complete project finalization procedure")
+        request.prompt.includes(
+          "Run the complete project finalization procedure",
+        )
       ) {
         structured = {
           status: "PASS",
@@ -519,14 +524,26 @@ test("authors a complete plan through mixed CLI roles", async (t) => {
   assert.equal(exitCode, 0);
   assert.equal(stderr.value(), "");
   assert.match(stdout.value(), /State: DONE/u);
-  assert.equal(await readFile(join(paths.taskPath, "plan.md"), "utf8"), TWO_STEP_PLAN);
+  assert.equal(
+    await readFile(join(paths.taskPath, "plan.md"), "utf8"),
+    TWO_STEP_PLAN,
+  );
   const run = await onlyRun(runStore);
   assert.equal(run.pipelineState.workflowState, "DONE");
   assert.equal(run.roles.planner.backend, "codex");
   assert.equal(run.roles.reviewer.backend, "claude");
-  assert.equal(codex.calls.some((call) => call.access === "workspace-write"), false);
-  assert.equal(claude.calls.some((call) => call.access !== "read-only"), false);
-  assert.equal(await gitOutput(paths.projectPath, ["status", "--porcelain"]), "");
+  assert.equal(
+    codex.calls.some((call) => call.access === "workspace-write"),
+    false,
+  );
+  assert.equal(
+    claude.calls.some((call) => call.access !== "read-only"),
+    false,
+  );
+  assert.equal(
+    await gitOutput(paths.projectPath, ["status", "--porcelain"]),
+    "",
+  );
   assert.equal(
     await gitOutput(paths.projectPath, ["log", "-1", "--pretty=%s"]),
     "chore(test): initialize",
@@ -570,8 +587,14 @@ test("persists and resumes plan authoring after a Claude usage limit", async (t)
   assert.equal(completed.run.pipelineState.workflowState, "DONE");
   assert.equal(completed.run.pause, null);
   assert.equal(claude.calls.length, 4);
-  assert.equal(await readFile(join(paths.taskPath, "plan.md"), "utf8"), TWO_STEP_PLAN);
-  assert.equal(await gitOutput(paths.projectPath, ["status", "--porcelain"]), "");
+  assert.equal(
+    await readFile(join(paths.taskPath, "plan.md"), "utf8"),
+    TWO_STEP_PLAN,
+  );
+  assert.equal(
+    await gitOutput(paths.projectPath, ["status", "--porcelain"]),
+    "",
+  );
 });
 
 test("polishes a dirty worktree through mixed CLI roles without committing", async (t) => {
@@ -624,7 +647,10 @@ test("polishes a dirty worktree through mixed CLI roles without committing", asy
     ),
     false,
   );
-  assert.equal(await gitOutput(paths.projectPath, ["rev-parse", "HEAD"]), initialHead);
+  assert.equal(
+    await gitOutput(paths.projectPath, ["rev-parse", "HEAD"]),
+    initialHead,
+  );
   assert.equal(
     await gitOutput(paths.projectPath, ["status", "--porcelain"]),
     "M  src/base.js",
@@ -711,11 +737,7 @@ test("executes every planned commit across backend configurations", async (t) =>
         { runner, stderr: stderr.stream, stdout: stdout.stream },
       );
 
-      assert.equal(
-        exitCode,
-        0,
-        `${stdout.value()}${stderr.value()}`,
-      );
+      assert.equal(exitCode, 0, `${stdout.value()}${stderr.value()}`);
       assert.equal(stderr.value(), "");
       assert.match(stdout.value(), /State: DONE/u);
       const run = await onlyRun(runStore);
@@ -723,17 +745,29 @@ test("executes every planned commit across backend configurations", async (t) =>
       assert.equal(run.pipelineState.completedCommits.length, 2);
       assert.deepEqual(
         Object.fromEntries(
-          Object.entries(run.roles).map(([role, value]) => [role, value.backend]),
+          Object.entries(run.roles).map(([role, value]) => [
+            role,
+            value.backend,
+          ]),
         ),
         scenario.roles,
       );
       assert.deepEqual(
-        (await gitOutput(paths.projectPath, ["log", "--reverse", "--pretty=%s"]))
+        (
+          await gitOutput(paths.projectPath, [
+            "log",
+            "--reverse",
+            "--pretty=%s",
+          ])
+        )
           .split("\n")
           .slice(-2),
         ["feat(feature): add value", "test(feature): cover value"],
       );
-      assert.equal(await gitOutput(paths.projectPath, ["status", "--porcelain"]), "");
+      assert.equal(
+        await gitOutput(paths.projectPath, ["status", "--porcelain"]),
+        "",
+      );
       assert.equal(
         await gitOutput(paths.projectPath, ["remote", "get-url", "origin"]),
         "https://example.invalid/repository.git",
@@ -830,9 +864,7 @@ test("does not replace an unavailable source session", async (t) => {
   }
 });
 
-test("projects a forbidden-delegation diagnostic without durable provider data", async (
-  t,
-) => {
+test("projects a forbidden-delegation diagnostic without durable provider data", async (t) => {
   const sensitiveMarker = "DO_NOT_PERSIST_CODEX_TERMINAL_DATA";
   const paths = await fixture(t);
   const codex = createBackend("codex");
@@ -995,7 +1027,10 @@ test("runs registered workflows through recoverable MCP controls", async (t) => 
     await readFile(join(paths.taskPath, "clarifications.md"), "utf8"),
     /### A1\n\nExpose the value directly\./u,
   );
-  assert.equal(await readFile(join(paths.taskPath, "plan.md"), "utf8"), TWO_STEP_PLAN);
+  assert.equal(
+    await readFile(join(paths.taskPath, "plan.md"), "utf8"),
+    TWO_STEP_PLAN,
+  );
 
   const execution = await control.runStart({
     idempotencyKey: "execution-start",
@@ -1073,7 +1108,10 @@ test("runs registered workflows through recoverable MCP controls", async (t) => 
   assert.ok(
     executionActivity.activities.some(({ actor }) => actor === "reviewer"),
   );
-  assert.equal(await gitOutput(paths.projectPath, ["status", "--porcelain"]), "");
+  assert.equal(
+    await gitOutput(paths.projectPath, ["status", "--porcelain"]),
+    "",
+  );
   assert.equal(
     await gitOutput(paths.projectPath, ["remote", "get-url", "origin"]),
     "https://example.invalid/repository.git",
@@ -1120,7 +1158,9 @@ test("runs registered workflows through recoverable MCP controls", async (t) => 
   assert.equal(polishingDone.planPath, null);
   assert.equal(polishingDone.completedCommits.length, 0);
   assert.equal(
-    codex.calls.slice(callCount).some(({ access }) => access === "local-commit"),
+    codex.calls
+      .slice(callCount)
+      .some(({ access }) => access === "local-commit"),
     false,
   );
   assert.equal(

@@ -28,10 +28,7 @@ function createSink() {
   };
 }
 
-function commandResult({
-  pipelineId = "plan-execution",
-  state = "DONE",
-} = {}) {
+function commandResult({ pipelineId = "plan-execution", state = "DONE" } = {}) {
   return {
     directoryPath: `/state/runs/${RUN_ID}`,
     run: {
@@ -721,8 +718,7 @@ test("detached resume rejects runtime skew with a distinct exit code", async () 
   const stderr = createSink();
   const exitCode = await main(["resume", "--run", RUN_ID], {
     environment: {
-      [DETACHED_RUNTIME_COMPATIBILITY_ENV]:
-        `${DETACHED_RUNTIME_COMPATIBILITY_TOKEN}-old`,
+      [DETACHED_RUNTIME_COMPATIBILITY_ENV]: `${DETACHED_RUNTIME_COMPATIBILITY_TOKEN}-old`,
     },
     stdout: createSink().stream,
     stderr: stderr.stream,

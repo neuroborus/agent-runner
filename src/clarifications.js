@@ -391,13 +391,8 @@ export function createClarificationService(options = {}) {
 
   async function appendQuestionRound(options) {
     assertOptions(options, "Question-round options");
-    const {
-      artifactRoot,
-      transcriptPath,
-      expectedHash,
-      round,
-      questions,
-    } = options;
+    const { artifactRoot, transcriptPath, expectedHash, round, questions } =
+      options;
     assertPositiveInteger(round, "round");
     const normalizedQuestions = normalizeQuestions(questions);
     const snapshot = await inspectTranscript({ artifactRoot, transcriptPath });
@@ -702,10 +697,9 @@ export function createClarificationService(options = {}) {
         } catch (cause) {
           if (
             cause instanceof ClarificationError &&
-            ![
-              "ERR_EDITOR_UNAVAILABLE",
-              "ERR_INVALID_EDITOR_COMMAND",
-            ].includes(cause.code)
+            !["ERR_EDITOR_UNAVAILABLE", "ERR_INVALID_EDITOR_COMMAND"].includes(
+              cause.code,
+            )
           ) {
             throw cause;
           }

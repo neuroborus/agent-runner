@@ -88,10 +88,7 @@ const SETTINGS = Object.freeze({
     validate: isFinalizationPolicy,
   }),
   maxFixRounds: positiveIntegerSetting(5),
-  maxDisputesPerFinding: positiveIntegerSetting(
-    2,
-    MAX_DISPUTES_PER_FINDING,
-  ),
+  maxDisputesPerFinding: positiveIntegerSetting(2, MAX_DISPUTES_PER_FINDING),
   maxSameFindingRounds: positiveIntegerSetting(3),
   mode: Object.freeze({
     defaultValue: "independent",
@@ -170,14 +167,12 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   read_only_agent_mutated_repository:
     "A read-only turn contaminated the repository; abandon this run and restart from an uncontaminated worktree.",
   task_input_changed: "A task input changed after the run began.",
-  task_input_overlaps_changes:
-    "A task input overlaps the writable change set.",
+  task_input_overlaps_changes: "A task input overlaps the writable change set.",
   unexpected_git_identity_change:
     "The effective Git identity changed during polishing.",
   unexpected_git_index_change:
     "The Git index changed during a content-only polishing turn.",
-  unexpected_git_ref_change:
-    "Git history or refs changed during polishing.",
+  unexpected_git_ref_change: "Git history or refs changed during polishing.",
   unexpected_remote_configuration_change:
     "Git remote configuration changed during polishing.",
   unsafe_git_state:
@@ -311,9 +306,7 @@ function projectPause(run) {
           findingId: finding.id,
         });
         if (resumeActionApplies(run, override)) {
-          nextActions.push(
-            Object.freeze({ type: "resume", action: override }),
-          );
+          nextActions.push(Object.freeze({ type: "resume", action: override }));
         }
       }
     }
@@ -482,9 +475,7 @@ export function migratePolishingStateV1(run) {
       : null,
     validationMigrationPending,
     finalizationResult,
-    finalizedFingerprint: keepLegacyGate
-      ? current.finalizedFingerprint
-      : null,
+    finalizedFingerprint: keepLegacyGate ? current.finalizedFingerprint : null,
     reviewResult:
       reviewedFingerprint === null
         ? null
@@ -526,8 +517,7 @@ function upgradedTrustedFinalization(result) {
         }),
       ),
     ),
-    trustedCommandFingerprint:
-      EMPTY_TRUSTED_VALIDATION.commandFingerprint,
+    trustedCommandFingerprint: EMPTY_TRUSTED_VALIDATION.commandFingerprint,
     trustedConfigurationFingerprint:
       EMPTY_TRUSTED_VALIDATION.configurationFingerprint,
   });
@@ -536,17 +526,13 @@ function upgradedTrustedFinalization(result) {
 export function migratePolishingStateV2(run) {
   const current = run.pipelineState;
   const prepared = current.resolvedSummary !== null;
-  const immutableTerminal = ["DONE", "FAILED"].includes(
-    current.workflowState,
-  );
+  const immutableTerminal = ["DONE", "FAILED"].includes(current.workflowState);
   const validationMigrationPending = prepared && !immutableTerminal;
   const paused = current.workflowState === "WAITING_FOR_USER";
   const rerunFinalization =
     validationMigrationPending &&
     !paused &&
-    ["FINALIZE", "REVIEW", "RESOLVE_FINDINGS"].includes(
-      current.workflowState,
-    );
+    ["FINALIZE", "REVIEW", "RESOLVE_FINDINGS"].includes(current.workflowState);
   const keepLegacyGate = immutableTerminal || paused;
   const reviewedFingerprint = keepLegacyGate
     ? current.reviewedFingerprint
@@ -572,9 +558,7 @@ export function migratePolishingStateV2(run) {
     finalizationResult: keepLegacyGate
       ? upgradedTrustedFinalization(current.finalizationResult)
       : null,
-    finalizedFingerprint: keepLegacyGate
-      ? current.finalizedFingerprint
-      : null,
+    finalizedFingerprint: keepLegacyGate ? current.finalizedFingerprint : null,
     reviewResult: keepLegacyGate ? current.reviewResult : null,
     reviewedFingerprint,
     findings: keepLegacyGate ? current.findings : Object.freeze([]),
@@ -598,9 +582,7 @@ export function migratePolishingStateV3(run) {
 
 export function migratePolishingStateV4(run) {
   const current = run.pipelineState;
-  const immutableTerminal = ["DONE", "FAILED"].includes(
-    current.workflowState,
-  );
+  const immutableTerminal = ["DONE", "FAILED"].includes(current.workflowState);
   const resumeState = run.pause?.resumeState;
   const checkpoint =
     current.workflowState === "WAITING_FOR_USER" &&
@@ -652,9 +634,7 @@ export function migratePolishingStateV4(run) {
   const paused = current.workflowState === "WAITING_FOR_USER";
   const rerunFinalization =
     !paused &&
-    ["FINALIZE", "REVIEW", "RESOLVE_FINDINGS"].includes(
-      current.workflowState,
-    );
+    ["FINALIZE", "REVIEW", "RESOLVE_FINDINGS"].includes(current.workflowState);
   const keepProvisionalGate = paused;
   return Object.freeze({
     ...current,
@@ -663,9 +643,7 @@ export function migratePolishingStateV4(run) {
     reviewerValidation: null,
     validationMigrationPending: true,
     validationMigrationDisagreement: null,
-    finalizationResult: keepProvisionalGate
-      ? current.finalizationResult
-      : null,
+    finalizationResult: keepProvisionalGate ? current.finalizationResult : null,
     finalizedFingerprint: keepProvisionalGate
       ? current.finalizedFingerprint
       : null,
@@ -690,9 +668,7 @@ export function migratePolishingStateV4(run) {
 
 export function migratePolishingStateV5(run) {
   const current = run.pipelineState;
-  const immutableTerminal = ["DONE", "FAILED"].includes(
-    current.workflowState,
-  );
+  const immutableTerminal = ["DONE", "FAILED"].includes(current.workflowState);
   const resumeState = run.pause?.resumeState;
   const checkpoint =
     current.workflowState === "WAITING_FOR_USER" &&
@@ -749,9 +725,7 @@ export function migratePolishingStateV5(run) {
   const paused = current.workflowState === "WAITING_FOR_USER";
   const rerunFinalization =
     !paused &&
-    ["FINALIZE", "REVIEW", "RESOLVE_FINDINGS"].includes(
-      current.workflowState,
-    );
+    ["FINALIZE", "REVIEW", "RESOLVE_FINDINGS"].includes(current.workflowState);
   const keepProvisionalGate = paused;
   return Object.freeze({
     ...current,
@@ -760,9 +734,7 @@ export function migratePolishingStateV5(run) {
     reviewerValidation: null,
     validationMigrationPending: true,
     validationMigrationDisagreement: null,
-    finalizationResult: keepProvisionalGate
-      ? current.finalizationResult
-      : null,
+    finalizationResult: keepProvisionalGate ? current.finalizationResult : null,
     finalizedFingerprint: keepProvisionalGate
       ? current.finalizedFingerprint
       : null,
@@ -833,7 +805,8 @@ export const polishingPipeline = Object.freeze({
   taskInputs: TASK_INPUTS,
   runOptions: Object.freeze(["project", "task", "mode", ...ROLES]),
   requiredRunOptions: Object.freeze(["project", "task"]),
-  description: "Polish, review, and stage an existing dirty worktree without committing it.",
+  description:
+    "Polish, review, and stage an existing dirty worktree without committing it.",
   projections: Object.freeze({
     clarification: projectClarification,
     pause: projectPause,

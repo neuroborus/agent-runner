@@ -34,8 +34,7 @@ const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
 const READ_REPLACEMENT_ATTEMPTS = 5;
 
 async function openRegularFile(filePath, flags, mode) {
-  const attempts =
-    flags === constants.O_RDONLY ? READ_REPLACEMENT_ATTEMPTS : 1;
+  const attempts = flags === constants.O_RDONLY ? READ_REPLACEMENT_ATTEMPTS : 1;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     let handle;
     try {
@@ -59,11 +58,7 @@ async function openRegularFile(filePath, flags, mode) {
 
       handle = await open(filePath, flags | NO_FOLLOW, mode);
       const metadata = await handle.stat();
-      if (
-        metadata.isFile() &&
-        metadata.nlink === 0 &&
-        attempt + 1 < attempts
-      ) {
+      if (metadata.isFile() && metadata.nlink === 0 && attempt + 1 < attempts) {
         // Atomic replacement may unlink the validated inode before it is read.
         const replacedHandle = handle;
         handle = undefined;
@@ -91,9 +86,12 @@ async function openRegularFile(filePath, flags, mode) {
       );
     }
   }
-  throw new RunStoreError(`Managed state path could not be read: ${filePath}.`, {
-    code: "ERR_UNSAFE_STATE_FILE",
-  });
+  throw new RunStoreError(
+    `Managed state path could not be read: ${filePath}.`,
+    {
+      code: "ERR_UNSAFE_STATE_FILE",
+    },
+  );
 }
 
 async function syncDirectory(directoryPath) {

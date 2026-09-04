@@ -29,10 +29,7 @@ import {
 import { createTrustedValidationService } from "./trusted-validation.js";
 
 const BACKENDS = new Set(BACKEND_IDS);
-const WORKTREE_LEASE_PIPELINES = new Set([
-  "plan-execution",
-  "polishing",
-]);
+const WORKTREE_LEASE_PIPELINES = new Set(["plan-execution", "polishing"]);
 const RUN_FIELDS = new Set([
   "pipelineId",
   "projectPath",
@@ -179,14 +176,12 @@ async function readInputs(pipeline, taskPath) {
   return Object.freeze(
     Object.fromEntries(
       await Promise.all(
-        Object.entries(pipeline.taskInputs).map(
-          async ([name, definition]) => [
-            name,
-            await inputFile(join(taskPath, definition.filename), {
-              optional: definition.optional,
-            }),
-          ],
-        ),
+        Object.entries(pipeline.taskInputs).map(async ([name, definition]) => [
+          name,
+          await inputFile(join(taskPath, definition.filename), {
+            optional: definition.optional,
+          }),
+        ]),
       ),
     ),
   );
@@ -258,9 +253,12 @@ function validateCapabilities(
     );
   }
   if (sourceSession !== null && capabilities.nativeSessionFork !== true) {
-    throw new RunnerError(`Backend cannot fork the supplied source: ${backend}.`, {
-      code: "ERR_UNSUPPORTED_SOURCE_SESSION",
-    });
+    throw new RunnerError(
+      `Backend cannot fork the supplied source: ${backend}.`,
+      {
+        code: "ERR_UNSUPPORTED_SOURCE_SESSION",
+      },
+    );
   }
   return capabilities;
 }
@@ -362,9 +360,7 @@ function validateSourceRoles(pipeline, roles, sourceSession) {
 }
 
 async function probeRequiredRoles(pipeline, roles, adapters, sourceSession) {
-  const requiredRoles = Object.keys(roles).filter(
-    (role) => role !== "arbiter",
-  );
+  const requiredRoles = Object.keys(roles).filter((role) => role !== "arbiter");
   const capabilitiesByConfiguration = new Map();
   for (const role of requiredRoles) {
     const configuration = roles[role];
@@ -414,8 +410,7 @@ function normalizeResumeInput(input) {
   rejectUnknownFields(input, RESUME_FIELDS, "resume");
   if (
     input.expectedRuntimeCompatibility !== undefined &&
-    input.expectedRuntimeCompatibility !==
-      DETACHED_RUNTIME_COMPATIBILITY_TOKEN
+    input.expectedRuntimeCompatibility !== DETACHED_RUNTIME_COMPATIBILITY_TOKEN
   ) {
     throw new RunnerError(
       "Detached continuation runtime is incompatible with the process that " +
@@ -430,8 +425,7 @@ function normalizeResumeInput(input) {
     ...(input.expectedRuntimeCompatibility === undefined
       ? {}
       : {
-          expectedRuntimeCompatibility:
-            input.expectedRuntimeCompatibility,
+          expectedRuntimeCompatibility: input.expectedRuntimeCompatibility,
         }),
   });
 }
@@ -615,8 +609,7 @@ export function pipelineRequiresWorktreeLease(pipelineId) {
 export function createRunner(options = {}) {
   rejectUnknownFields(options, RUNNER_OPTION_FIELDS, "runnerOptions");
   const adapters = options.adapters ?? defaultAdapters();
-  const clarifications =
-    options.clarifications ?? createClarificationService();
+  const clarifications = options.clarifications ?? createClarificationService();
   const git = options.git ?? createGitService();
   const loadConfiguration =
     options.loadConfiguration ?? loadRunnerConfiguration;
@@ -677,14 +670,10 @@ export function createRunner(options = {}) {
           kind: "turn-started",
           message: `${activeTurn?.role} ${activeTurn?.phase} turn started.`,
         };
-        const next = await runStore.startAgentTurn(
-          lease,
-          activeTurn,
-          {
-            activity,
-            ...(pipelineState === undefined ? {} : { pipelineState }),
-          },
-        );
+        const next = await runStore.startAgentTurn(lease, activeTurn, {
+          activity,
+          ...(pipelineState === undefined ? {} : { pipelineState }),
+        });
         await publish(activity, next);
         return next;
       },
@@ -731,12 +720,7 @@ export function createRunner(options = {}) {
     return pipeline.workflow.run({
       action,
       run,
-      runtime: runtimeFor(
-        pipeline,
-        lease,
-        run,
-        roleAdapters(run, adapters),
-      ),
+      runtime: runtimeFor(pipeline, lease, run, roleAdapters(run, adapters)),
       settings,
     });
   }
@@ -987,8 +971,12 @@ export function createRunner(options = {}) {
         lease,
         normalized.runId,
       );
-      if ((recovered.pipelineState.trustedValidation?.commands.length ?? 0) > 0) {
-        await trustedValidation.preflight({ projectPath: recovered.projectPath });
+      if (
+        (recovered.pipelineState.trustedValidation?.commands.length ?? 0) > 0
+      ) {
+        await trustedValidation.preflight({
+          projectPath: recovered.projectPath,
+        });
       }
       if (
         recovered.pipelineState.workflowState === "WAITING_FOR_USER" ||
@@ -1045,15 +1033,11 @@ export function createRunner(options = {}) {
     const lease = await runStore.acquireRunLease(normalized.runId);
     try {
       let answers;
-      const { run } = await recoverCompatibleRun(
-        lease,
-        normalized.runId,
-        {
-          validatePreparedRun(preparedRun) {
-            answers = orderedInputAnswers(preparedRun, normalized);
-          },
+      const { run } = await recoverCompatibleRun(lease, normalized.runId, {
+        validatePreparedRun(preparedRun) {
+          answers = orderedInputAnswers(preparedRun, normalized);
         },
-      );
+      });
       return await withWorktreeLease(run, async () => {
         const transcript = await clarifications.writeEditAnswers(
           run.pipelineState.pendingEdit,

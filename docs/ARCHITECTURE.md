@@ -890,8 +890,10 @@ retry instead of turning the run into an opaque terminal failure.
 Plan execution gives each preparation phase one owner. Implementation,
 finding-resolution, and lazy check/fix turns do not invoke project finalization
 or perform generic commit preparation. The dedicated finalization turn follows
-every substantive instruction in the selected guidance, including checks,
-formatting, generation, and staging-independent content review. Bootstrap,
+every substantive instruction in the selected guidance. It runs the writable
+repository formatter first, treats its output as candidate content, then runs
+generation, the non-mutating repository gate, Git whitespace checks, and
+staging-independent content review. Bootstrap,
 validation-migration, and finalization inventories deterministically reject
 index mutation, staged or index-relative inspection, implicit
 worktree-versus-index assertions, alternate-index workarounds, and commit

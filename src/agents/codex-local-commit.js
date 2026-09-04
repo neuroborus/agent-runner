@@ -10,7 +10,7 @@ const PROBE_SCRIPT =
   'import { createConnection } from "node:net"; ' +
   'import { join } from "node:path"; ' +
   'try { writeFileSync(join(process.argv[1], "probe"), ""); process.exit(6); } ' +
-  'catch ({ code }) { ' +
+  "catch ({ code }) { " +
   'if (!["EACCES", "EPERM", "EROFS"].includes(code)) process.exit(3); } ' +
   'writeFileSync(".git/probe", ""); ' +
   'const socket = createConnection({ host: "1.1.1.1", port: 53 }); ' +
@@ -18,7 +18,7 @@ const PROBE_SCRIPT =
   'if (!["EACCES", "EPERM"].includes(code)) process.exit(2); ' +
   `writeSync(1, ${JSON.stringify(PROBE_OUTPUT)}); process.exit(0); }); ` +
   'socket.once("connect", () => process.exit(4)); ' +
-  'setTimeout(() => process.exit(5), 1_000);';
+  "setTimeout(() => process.exit(5), 1_000);";
 const COMMIT_SCRIPT = `
 import { spawnSync } from "node:child_process";
 
@@ -112,13 +112,17 @@ export async function probeCodexLocalCommit({ codexBinary, env, execute }) {
     await mkdir(gitDirectory);
     const result = await execute(
       codexBinary,
-      sandboxArguments(fixturePath, [gitDirectory], [
-        process.execPath,
-        "--input-type=module",
-        "-e",
-        PROBE_SCRIPT,
-        outsidePath,
-      ]),
+      sandboxArguments(
+        fixturePath,
+        [gitDirectory],
+        [
+          process.execPath,
+          "--input-type=module",
+          "-e",
+          PROBE_SCRIPT,
+          outsidePath,
+        ],
+      ),
       {
         encoding: "utf8",
         env,
@@ -152,13 +156,7 @@ export async function executeCodexLocalCommit({
 }) {
   const gitResult = await execute(
     "git",
-    [
-      "-C",
-      cwd,
-      "rev-parse",
-      "--absolute-git-dir",
-      "--git-common-dir",
-    ],
+    ["-C", cwd, "rev-parse", "--absolute-git-dir", "--git-common-dir"],
     {
       encoding: "utf8",
       env,

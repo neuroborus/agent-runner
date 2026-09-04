@@ -157,10 +157,7 @@ function assertEventContinuity(events) {
       state.schemaVersion === RUN_STATE_SCHEMA_VERSION &&
       state.schemaVersion >= previousState.schemaVersion &&
       state.pipelineStateVersion >= previousState.pipelineStateVersion &&
-      isDeepStrictEqual(
-        state.runtimeCompatibility,
-        RUNTIME_COMPATIBILITY,
-      );
+      isDeepStrictEqual(state.runtimeCompatibility, RUNTIME_COMPATIBILITY);
     const lineageChanged =
       state.sessionLineage.source !== previousState.sessionLineage.source ||
       state.sessionLineage.sourceProfile !==
@@ -168,8 +165,7 @@ function assertEventContinuity(events) {
       children.length < previousChildren.length ||
       children.length > previousChildren.length + 1 ||
       previousChildren.some(
-        (child, childIndex) =>
-          !isDeepStrictEqual(child, children[childIndex]),
+        (child, childIndex) => !isDeepStrictEqual(child, children[childIndex]),
       );
     const hasContentChange =
       children.length > previousChildren.length ||
@@ -294,10 +290,9 @@ async function loadSnapshot(runDirectory, runId) {
 
   const matchingEvent = events[storedState.revision - 1];
   if (!isDeepStrictEqual(storedState, matchingEvent?.state)) {
-    throw new RunStoreError(
-      "Run state does not match its write-ahead event.",
-      { code: "ERR_INVALID_RUN_STATE" },
-    );
+    throw new RunStoreError("Run state does not match its write-ahead event.", {
+      code: "ERR_INVALID_RUN_STATE",
+    });
   }
 
   return {

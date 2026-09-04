@@ -56,7 +56,13 @@ async function repository(t) {
   ]);
   await writeFile(join(projectPath, "tracked.txt"), "initial\n");
   await executeFile("git", ["-C", projectPath, "add", "."]);
-  await executeFile("git", ["-C", projectPath, "commit", "-qm", "test: fixture"]);
+  await executeFile("git", [
+    "-C",
+    projectPath,
+    "commit",
+    "-qm",
+    "test: fixture",
+  ]);
   return projectPath;
 }
 
@@ -328,8 +334,7 @@ test("isolates host-control and remote-write probes", async (t) => {
   });
   await assert.rejects(
     shadowed.preflight({ projectPath }),
-    (cause) =>
-      cause.code === "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE",
+    (cause) => cause.code === "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE",
   );
 });
 

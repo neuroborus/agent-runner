@@ -16,10 +16,7 @@ import {
   getPipeline,
   listPipelines,
 } from "./pipeline-registry.js";
-import {
-  createRunner,
-  pipelineRequiresWorktreeLease,
-} from "./runner.js";
+import { createRunner, pipelineRequiresWorktreeLease } from "./runner.js";
 import {
   createRunStore,
   RUNTIME_VERSION_SKEW_EXIT_CODE,
@@ -37,8 +34,7 @@ export const DETACHED_RUNTIME_COMPATIBILITY_ENV =
 
 const RUN_INSTRUCTIONS = `Use run_start to start a durable pipeline, then use one run_wait call for the desired waiting interval. Use run_activity only for explicit or historical reads; do not poll status, activity, or wait at a fixed cadence. independent is the default and recommended mode because it provides genuinely independent semantic review, but it uses more provider context and tokens. lazy is opt-in, reduces consumption, and does not provide independent review; never select it automatically to save tokens. Leave sourceSession unset unless the user deliberately chooses to fork a compatible current native session after being offered a fresh start. Offer its known trusted profile with the fork choice; when the profile is unknown, offer only current profile inheritance and never guess an alias. In independent mode the primary and review roles fork the complete source context independently; in lazy mode the primary role forks it once. Recommend a fresh start for a long, multi-topic, or uncertain source session. Keep native session IDs opaque; never inspect provider-private storage or infer or fabricate an ID. Answer pending input from explicit user context when sufficient; otherwise ask the user. Never invent a material product decision.`;
 const ISSUE_REPORTING_INSTRUCTIONS = `Use unexpected_issue_report only when you, as the supervising client agent, explicitly conclude that Agent Runner behaved genuinely unexpectedly or contrary to its documented contract. Expected completion, exhausted configured budgets, usage limits, expected user pauses, documented environment blockers, and invalid user or configuration input are not reportable issues. Supply concise English Markdown deliberately; the server never collects or attaches logs, transcripts, prompts, environment values, credentials, secrets, or other diagnostics automatically.`;
-export const MCP_INSTRUCTIONS =
-  `${RUN_INSTRUCTIONS} ${ISSUE_REPORTING_INSTRUCTIONS}`;
+export const MCP_INSTRUCTIONS = `${RUN_INSTRUCTIONS} ${ISSUE_REPORTING_INSTRUCTIONS}`;
 
 function boundedSingleLine(maximumLength) {
   return z
@@ -47,8 +43,7 @@ function boundedSingleLine(maximumLength) {
     .max(maximumLength)
     .refine(
       (value) =>
-        value.trim().length > 0 &&
-        !/[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(value),
+        value.trim().length > 0 && !/[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(value),
     );
 }
 
@@ -65,8 +60,9 @@ const pipelineMode = z
   .describe(
     "independent is the default and recommended mode with genuinely independent review and higher context/token use. lazy is an explicit lower-consumption choice without independent review; never select it automatically.",
   );
-const idempotencyKey = boundedSingleLine(1_024)
-  .describe("Opaque key unique to this logical mutation.");
+const idempotencyKey = boundedSingleLine(1_024).describe(
+  "Opaque key unique to this logical mutation.",
+);
 const roleOverride = z
   .object({
     backend: z.enum(["codex", "claude"]).optional(),
@@ -366,10 +362,7 @@ export function createDetachedLauncher({
   return (
     runIdValue,
     action = null,
-    {
-      expectedRuntimeCompatibility = detachedCompatibilityToken,
-      onExit,
-    } = {},
+    { expectedRuntimeCompatibility = detachedCompatibilityToken, onExit } = {},
   ) =>
     new Promise((resolvePromise, rejectPromise) => {
       if (expectedRuntimeCompatibility !== detachedCompatibilityToken) {
@@ -389,8 +382,7 @@ export function createDetachedLauncher({
           detached: true,
           env: {
             ...environment,
-            [DETACHED_RUNTIME_COMPATIBILITY_ENV]:
-              expectedRuntimeCompatibility,
+            [DETACHED_RUNTIME_COMPATIBILITY_ENV]: expectedRuntimeCompatibility,
           },
           stdio: "ignore",
         },
@@ -408,8 +400,7 @@ export function createDetachedLauncher({
 
 export function createMcpControlPlane(options = {}) {
   const detachedCompatibilityToken =
-    options.detachedCompatibilityToken ??
-    DETACHED_RUNTIME_COMPATIBILITY_TOKEN;
+    options.detachedCompatibilityToken ?? DETACHED_RUNTIME_COMPATIBILITY_TOKEN;
   const runStore = options.runStore ?? createRunStore();
   const runner =
     options.runner ??
@@ -454,12 +445,7 @@ export function createMcpControlPlane(options = {}) {
   async function launchIfNeeded(
     runIdValue,
     baselineRevision,
-    {
-      action = null,
-      allowWaiting = false,
-      signal,
-      waitForLease = false,
-    } = {},
+    { action = null, allowWaiting = false, signal, waitForLease = false } = {},
   ) {
     let dispatchedChildExitCode = null;
     let dispatchedChildExited = false;
@@ -496,10 +482,7 @@ export function createMcpControlPlane(options = {}) {
           run.projectPath,
           run.runId,
         );
-        if (
-          worktreeLeaseOwner !== null &&
-          worktreeLeaseOwner !== run.runId
-        ) {
+        if (worktreeLeaseOwner !== null && worktreeLeaseOwner !== run.runId) {
           throw new RunStoreError(
             `Run ${run.runId} is durable, but its Git worktree is already ` +
               "owned by another mutating run; retry this MCP request with " +
@@ -869,8 +852,7 @@ export function createMcpControlPlane(options = {}) {
       const reportPath = await issueReporter.report(argumentsValue, {
         reservedIssuesPath: action.record.context.issuesPath,
         reservedPath: action.record.context.reportPath,
-        reservedPublicationPhase:
-          action.record.context.publicationPhase,
+        reservedPublicationPhase: action.record.context.publicationPhase,
         reservedProjectPath: action.record.context.projectPath,
         reservedTemporaryPath: action.record.context.temporaryPath,
         async prepare(identityValue) {
@@ -921,9 +903,7 @@ export function createMcpServer(options = {}) {
   const server = new McpServer(
     { name: "agent-runner", version: packageMetadata.version },
     {
-      instructions: issueReportingEnabled
-        ? MCP_INSTRUCTIONS
-        : RUN_INSTRUCTIONS,
+      instructions: issueReportingEnabled ? MCP_INSTRUCTIONS : RUN_INSTRUCTIONS,
     },
   );
   const readOnly = {
@@ -1026,7 +1006,9 @@ export function createMcpServer(options = {}) {
       annotations: mutating,
     },
     async (input, context) =>
-      result(await control.runRespond(input, { signal: context.mcpReq.signal })),
+      result(
+        await control.runRespond(input, { signal: context.mcpReq.signal }),
+      ),
   );
   server.registerTool(
     "run_resume",

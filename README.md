@@ -70,11 +70,11 @@ For repository development, run `node bin/agent-run.js` directly.
 
 ## Pipelines
 
-| Pipeline | Purpose | Specification |
-| --- | --- | --- |
-| `plan-authoring` | Analyze a task, review a draft, and atomically write `plan.md` | [`pipelines/plan-authoring/docs/SPEC.md`](pipelines/plan-authoring/docs/SPEC.md) |
-| `plan-execution` | Implement, finalize, review, and locally commit every plan step | [`pipelines/plan-execution/docs/SPEC.md`](pipelines/plan-execution/docs/SPEC.md) |
-| `polishing` | Polish, finalize, review, and stage existing dirty-worktree changes for a later commit workflow | [`pipelines/polishing/docs/SPEC.md`](pipelines/polishing/docs/SPEC.md) |
+| Pipeline         | Purpose                                                                                         | Specification                                                                    |
+| ---------------- | ----------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `plan-authoring` | Analyze a task, review a draft, and atomically write `plan.md`                                  | [`pipelines/plan-authoring/docs/SPEC.md`](pipelines/plan-authoring/docs/SPEC.md) |
+| `plan-execution` | Implement, finalize, review, and locally commit every plan step                                 | [`pipelines/plan-execution/docs/SPEC.md`](pipelines/plan-execution/docs/SPEC.md) |
+| `polishing`      | Polish, finalize, review, and stage existing dirty-worktree changes for a later commit workflow | [`pipelines/polishing/docs/SPEC.md`](pipelines/polishing/docs/SPEC.md)           |
 
 Plan authoring and execution share the deterministic
 [`@agent-runner/commit-plan`](packages/commit-plan/README.md) contract. The
@@ -125,10 +125,10 @@ A selected profile supplies its backend; `defaultBackend` provides the fallback.
 Explicit decimal context sizes are validated by the chosen adapter and map to
 Codex's context window or Claude's auto-compaction token window.
 
-| Backend | `model: "current"` | `profile: "current"` |
-| --- | --- | --- |
-| Codex | Omit the model override and use the effective native Codex default | Omit `--profile` and inherit the current process/profile |
-| Claude | Omit `--model` and use the effective Claude configuration/account default | Omit `CLAUDE_CONFIG_DIR` and inherit the current process configuration |
+| Backend | `model: "current"`                                                        | `profile: "current"`                                                   |
+| ------- | ------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| Codex   | Omit the model override and use the effective native Codex default        | Omit `--profile` and inherit the current process/profile               |
+| Claude  | Omit `--model` and use the effective Claude configuration/account default | Omit `CLAUDE_CONFIG_DIR` and inherit the current process configuration |
 
 The `current` selection delegates changing native model IDs to each backend.
 The tracked [example](.agent-runner.example.json) makes these native defaults
@@ -137,25 +137,25 @@ explicit and shows `claude-primary` and `claude-secondary` aliases.
 
 Pipeline settings use these defaults:
 
-| Pipeline | Setting | Default |
-| --- | --- | ---: |
-| `plan-authoring` | `mode` | `independent` |
-| `plan-authoring` | `maxRevisionRounds` | 15 |
-| `plan-authoring` | `stagnationWindowRounds` | 3 |
-| `plan-execution` | `mode` | `independent` |
-| `plan-execution` | `maxFixRoundsPerStep` | 5 |
-| `plan-execution` | `finalization` | `auto` |
-| `plan-execution` | `maxDisputesPerFinding` | 2 |
-| `plan-execution` | `maxSameFindingRounds` | 3 |
-| `plan-execution` | `stagnationWindowRounds` | 3 |
-| `plan-execution` | `trustedChecks` | `[]` |
-| `polishing` | `mode` | `independent` |
-| `polishing` | `maxFixRounds` | 5 |
-| `polishing` | `finalization` | `auto` |
-| `polishing` | `maxDisputesPerFinding` | 2 |
-| `polishing` | `maxSameFindingRounds` | 3 |
-| `polishing` | `stagnationWindowRounds` | 3 |
-| `polishing` | `trustedChecks` | `[]` |
+| Pipeline         | Setting                  |       Default |
+| ---------------- | ------------------------ | ------------: |
+| `plan-authoring` | `mode`                   | `independent` |
+| `plan-authoring` | `maxRevisionRounds`      |            15 |
+| `plan-authoring` | `stagnationWindowRounds` |             3 |
+| `plan-execution` | `mode`                   | `independent` |
+| `plan-execution` | `maxFixRoundsPerStep`    |             5 |
+| `plan-execution` | `finalization`           |        `auto` |
+| `plan-execution` | `maxDisputesPerFinding`  |             2 |
+| `plan-execution` | `maxSameFindingRounds`   |             3 |
+| `plan-execution` | `stagnationWindowRounds` |             3 |
+| `plan-execution` | `trustedChecks`          |          `[]` |
+| `polishing`      | `mode`                   | `independent` |
+| `polishing`      | `maxFixRounds`           |             5 |
+| `polishing`      | `finalization`           |        `auto` |
+| `polishing`      | `maxDisputesPerFinding`  |             2 |
+| `polishing`      | `maxSameFindingRounds`   |             3 |
+| `polishing`      | `stagnationWindowRounds` |             3 |
+| `polishing`      | `trustedChecks`          |          `[]` |
 
 `mode` accepts exactly `independent` and `lazy`. A missing value resolves to
 `independent`. The tracked [example](.agent-runner.example.json) selects
@@ -706,6 +706,18 @@ Run the unit tests:
 
 ```bash
 npm test
+```
+
+Format every supported tracked or non-ignored repository file:
+
+```bash
+npm run format
+```
+
+Verify formatting without changing files:
+
+```bash
+npm run format:check
 ```
 
 Run the complete repository gate:

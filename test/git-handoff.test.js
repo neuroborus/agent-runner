@@ -102,18 +102,14 @@ test("stages the complete finalized polishing handoff without committing", async
         "--cached",
         "--name-only",
       )
-    ).stdout.trim().split("\n"),
+    ).stdout
+      .trim()
+      .split("\n"),
     ["added.txt", "deleted.txt", "tracked.txt"],
   );
   assert.equal(
-    (
-      await runGit(
-        fixture.repositoryPath,
-        fixture.env,
-        "diff",
-        "--name-only",
-      )
-    ).stdout,
+    (await runGit(fixture.repositoryPath, fixture.env, "diff", "--name-only"))
+      .stdout,
     "",
   );
   assert.equal(
@@ -130,7 +126,13 @@ test("stages the complete finalized polishing handoff without committing", async
   );
   assert.equal(
     (
-      await runGit(fixture.repositoryPath, fixture.env, "rev-list", "--count", "HEAD")
+      await runGit(
+        fixture.repositoryPath,
+        fixture.env,
+        "rev-list",
+        "--count",
+        "HEAD",
+      )
     ).stdout.trim(),
     "1",
   );
@@ -241,7 +243,10 @@ test("does not accept index-hidden content that git add cannot stage", async (t)
     "--skip-worktree",
     "tracked.txt",
   );
-  await writeFile(join(fixture.repositoryPath, "tracked.txt"), "hidden update\n");
+  await writeFile(
+    join(fixture.repositoryPath, "tracked.txt"),
+    "hidden update\n",
+  );
   await writeFile(join(fixture.repositoryPath, "added.txt"), "added\n");
   const baseline = await fixture.service.snapshot({
     projectPath: fixture.repositoryPath,

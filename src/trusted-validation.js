@@ -33,11 +33,7 @@ const COMMAND_FIELDS = Object.freeze([
 export class TrustedValidationError extends Error {
   constructor(
     message,
-    {
-      cause,
-      changes = [],
-      code = "ERR_TRUSTED_VALIDATION",
-    } = {},
+    { cause, changes = [], code = "ERR_TRUSTED_VALIDATION" } = {},
   ) {
     super(message, cause === undefined ? undefined : { cause });
     this.name = "TrustedValidationError";
@@ -97,15 +93,13 @@ function commandIdentity(command) {
 }
 
 function normalizeCommand(alias, value) {
-  if (!ALIAS_PATTERN.test(alias) || !hasExactFields(value, [
-    "command",
-    "executable",
-    "arguments",
-  ])) {
-    throw new TrustedValidationError(
-      `Trusted command ${alias} is invalid.`,
-      { code: "ERR_INVALID_TRUSTED_VALIDATION" },
-    );
+  if (
+    !ALIAS_PATTERN.test(alias) ||
+    !hasExactFields(value, ["command", "executable", "arguments"])
+  ) {
+    throw new TrustedValidationError(`Trusted command ${alias} is invalid.`, {
+      code: "ERR_INVALID_TRUSTED_VALIDATION",
+    });
   }
   const command = assertExactText(
     value.command,
@@ -206,16 +200,24 @@ function snapshotFingerprints(commands) {
   });
 }
 
-export function createTrustedValidationSnapshot(definitions = {}, selections = []) {
+export function createTrustedValidationSnapshot(
+  definitions = {},
+  selections = [],
+) {
   if (
     !Array.isArray(selections) ||
     selections.length > MAX_SELECTED_COMMANDS ||
     new Set(selections).size !== selections.length ||
-    selections.some((alias) => typeof alias !== "string" || !ALIAS_PATTERN.test(alias))
+    selections.some(
+      (alias) => typeof alias !== "string" || !ALIAS_PATTERN.test(alias),
+    )
   ) {
-    throw new TrustedValidationError("Trusted validation selection is invalid.", {
-      code: "ERR_INVALID_TRUSTED_VALIDATION",
-    });
+    throw new TrustedValidationError(
+      "Trusted validation selection is invalid.",
+      {
+        code: "ERR_INVALID_TRUSTED_VALIDATION",
+      },
+    );
   }
   const normalizedDefinitions = normalizeCommandDefinitions(definitions);
   const commands = Object.freeze(
@@ -246,9 +248,12 @@ export function validateTrustedValidationSnapshot(value) {
     !HASH_PATTERN.test(value.commandFingerprint) ||
     !HASH_PATTERN.test(value.configurationFingerprint)
   ) {
-    throw new TrustedValidationError("Trusted validation snapshot is invalid.", {
-      code: "ERR_INVALID_TRUSTED_VALIDATION",
-    });
+    throw new TrustedValidationError(
+      "Trusted validation snapshot is invalid.",
+      {
+        code: "ERR_INVALID_TRUSTED_VALIDATION",
+      },
+    );
   }
   const commands = Object.freeze(
     value.commands.map((value, index) => {
@@ -310,9 +315,12 @@ function normalizeBindings(value) {
     !hasExactFields(value, fields) ||
     fields.some((field) => !HASH_PATTERN.test(value[field]))
   ) {
-    throw new TrustedValidationError("Trusted validation bindings are invalid.", {
-      code: "ERR_INVALID_TRUSTED_VALIDATION",
-    });
+    throw new TrustedValidationError(
+      "Trusted validation bindings are invalid.",
+      {
+        code: "ERR_INVALID_TRUSTED_VALIDATION",
+      },
+    );
   }
   return Object.freeze({ ...value });
 }
@@ -343,9 +351,12 @@ function boundedEvidence(command, result) {
 
 export function createTrustedValidationService(options = {}) {
   if (!isRecord(options)) {
-    throw new TrustedValidationError("Trusted validation options are invalid.", {
-      code: "ERR_INVALID_TRUSTED_VALIDATION_OPTIONS",
-    });
+    throw new TrustedValidationError(
+      "Trusted validation options are invalid.",
+      {
+        code: "ERR_INVALID_TRUSTED_VALIDATION_OPTIONS",
+      },
+    );
   }
   const environment = options.environment ?? process.env;
   const git = options.git ?? createGitService();
@@ -367,9 +378,12 @@ export function createTrustedValidationService(options = {}) {
     !Number.isSafeInteger(timeoutMs) ||
     timeoutMs < 1
   ) {
-    throw new TrustedValidationError("Trusted validation options are invalid.", {
-      code: "ERR_INVALID_TRUSTED_VALIDATION_OPTIONS",
-    });
+    throw new TrustedValidationError(
+      "Trusted validation options are invalid.",
+      {
+        code: "ERR_INVALID_TRUSTED_VALIDATION_OPTIONS",
+      },
+    );
   }
   const defaultSandbox = options.sandboxCommand === undefined;
   let launcherPath = null;
@@ -392,7 +406,12 @@ export function createTrustedValidationService(options = {}) {
     launcherPath = verifyLauncher(launcherPath, projectPath);
   }
 
-  async function execute({ bindings, commandIdentity: identity, projectPath, snapshot }) {
+  async function execute({
+    bindings,
+    commandIdentity: identity,
+    projectPath,
+    snapshot,
+  }) {
     if (
       typeof git.snapshot !== "function" ||
       typeof git.assertUnchanged !== "function"
@@ -405,7 +424,8 @@ export function createTrustedValidationService(options = {}) {
     const trustedSnapshot = validateTrustedValidationSnapshot(snapshot);
     const normalizedBindings = normalizeBindings(bindings);
     if (
-      trustedSnapshot.commandFingerprint !== normalizedBindings.commandFingerprint ||
+      trustedSnapshot.commandFingerprint !==
+        normalizedBindings.commandFingerprint ||
       trustedSnapshot.configurationFingerprint !==
         normalizedBindings.configurationFingerprint
     ) {

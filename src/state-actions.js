@@ -104,8 +104,7 @@ function parseRecord(source, keyHash) {
     !["intent", "completed"].includes(value.status) ||
     !isRecord(value.context) ||
     (value.status === "intent" && value.result !== null) ||
-    (value.status === "completed" &&
-      !isRecord(value.result)) ||
+    (value.status === "completed" && !isRecord(value.result)) ||
     Number.isNaN(createdAt.valueOf()) ||
     createdAt.toISOString() !== value.createdAt ||
     Number.isNaN(updatedAt.valueOf()) ||
@@ -191,9 +190,7 @@ export function createActionStore({
       throw actionError("MCP action clock returned an invalid date.");
     }
     const current = value.toISOString();
-    return notBefore !== undefined && current < notBefore
-      ? notBefore
-      : current;
+    return notBefore !== undefined && current < notBefore ? notBefore : current;
   }
 
   async function acquireLease(actionDirectory) {
@@ -264,7 +261,9 @@ export function createActionStore({
       tool,
       actionArguments,
     );
-    const actionsPath = await ensureDirectory(join(stateRoot, ACTIONS_DIRECTORY));
+    const actionsPath = await ensureDirectory(
+      join(stateRoot, ACTIONS_DIRECTORY),
+    );
     const actionDirectory = join(actionsPath, keyHash);
     try {
       await mkdir(actionDirectory, { mode: 0o700 });
@@ -397,7 +396,9 @@ export function createActionStore({
         throw cause;
       }
     }
-    const source = await readOptionalText(join(actionDirectory, ACTION_FILENAME));
+    const source = await readOptionalText(
+      join(actionDirectory, ACTION_FILENAME),
+    );
     if (source === null) {
       return null;
     }

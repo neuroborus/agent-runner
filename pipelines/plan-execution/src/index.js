@@ -98,8 +98,7 @@ const SETTINGS = Object.freeze({
   stagnationWindowRounds: positiveIntegerSetting(3),
   trustedChecks: Object.freeze({
     defaultValue: Object.freeze([]),
-    errorMessage:
-      "must be an array of unique trusted command aliases",
+    errorMessage: "must be an array of unique trusted command aliases",
     validate: trustedCheckSelection,
   }),
 });
@@ -150,8 +149,7 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   commit_contract_violated:
     "The attempted commit did not satisfy its one-shot authorization contract.",
   commit_failed: "The authorized commit could not be verified as complete.",
-  dispute_limit_reached:
-    "A finding reached its configured dispute limit.",
+  dispute_limit_reached: "A finding reached its configured dispute limit.",
   environment_blocked:
     "Required validation is blocked by the execution environment.",
   finalization_cannot_pass:
@@ -351,9 +349,7 @@ function projectPause(run) {
           findingId: finding.id,
         });
         if (resumeActionApplies(run, override)) {
-          nextActions.push(
-            Object.freeze({ type: "resume", action: override }),
-          );
+          nextActions.push(Object.freeze({ type: "resume", action: override }));
         }
       }
       if (finalizationIssueIds.length > 0 && nextActions.length === 0) {
@@ -568,9 +564,7 @@ export function migratePlanExecutionStateV1(run) {
       : null,
     validationMigrationPending,
     finalizationResult,
-    finalizedFingerprint: keepLegacyGate
-      ? current.finalizedFingerprint
-      : null,
+    finalizedFingerprint: keepLegacyGate ? current.finalizedFingerprint : null,
     reviewResult:
       reviewedFingerprint === null
         ? null
@@ -635,8 +629,7 @@ function upgradedTrustedFinalization(result) {
         }),
       ),
     ),
-    trustedCommandFingerprint:
-      EMPTY_TRUSTED_VALIDATION.commandFingerprint,
+    trustedCommandFingerprint: EMPTY_TRUSTED_VALIDATION.commandFingerprint,
     trustedConfigurationFingerprint:
       EMPTY_TRUSTED_VALIDATION.configurationFingerprint,
   });
@@ -685,9 +678,7 @@ export function migratePlanExecutionStateV4(run) {
     finalizationResult: keepLegacyGate
       ? upgradedTrustedFinalization(current.finalizationResult)
       : null,
-    finalizedFingerprint: keepLegacyGate
-      ? current.finalizedFingerprint
-      : null,
+    finalizedFingerprint: keepLegacyGate ? current.finalizedFingerprint : null,
     reviewResult: keepLegacyGate ? current.reviewResult : null,
     reviewedFingerprint,
     findings: keepLegacyGate ? current.findings : Object.freeze([]),
@@ -706,9 +697,7 @@ export function migratePlanExecutionStateV4(run) {
 
 export function migratePlanExecutionStateV5(run) {
   const current = run.pipelineState;
-  const immutableTerminal = ["DONE", "FAILED"].includes(
-    current.workflowState,
-  );
+  const immutableTerminal = ["DONE", "FAILED"].includes(current.workflowState);
   const resumeState = run.pause?.resumeState;
   const checkpoint =
     current.workflowState === "WAITING_FOR_USER" &&
@@ -776,9 +765,7 @@ export function migratePlanExecutionStateV5(run) {
     workerValidation: null,
     reviewerValidation: null,
     validationMigrationPending: true,
-    finalizationResult: keepProvisionalGate
-      ? current.finalizationResult
-      : null,
+    finalizationResult: keepProvisionalGate ? current.finalizationResult : null,
     finalizedFingerprint: keepProvisionalGate
       ? current.finalizedFingerprint
       : null,
@@ -791,9 +778,7 @@ export function migratePlanExecutionStateV5(run) {
       : current.findings.length === 0
         ? current.previousFindings
         : current.findings,
-    findings: keepProvisionalGate
-      ? current.findings
-      : Object.freeze([]),
+    findings: keepProvisionalGate ? current.findings : Object.freeze([]),
     pendingDisputes: keepProvisionalGate
       ? current.pendingDisputes
       : Object.freeze([]),
@@ -826,11 +811,8 @@ function upgradeFinalizationCorrection(correction) {
 }
 
 export function migratePlanExecutionStateV7(run) {
-  const {
-    finalizationCorrection,
-    pendingFinalizationCorrection,
-    ...current
-  } = run.pipelineState;
+  const { finalizationCorrection, pendingFinalizationCorrection, ...current } =
+    run.pipelineState;
   const correction = upgradeFinalizationCorrection(finalizationCorrection);
   return Object.freeze({
     ...current,
@@ -860,9 +842,7 @@ function uniqueFindingOverrides(overrides) {
 export function migratePlanExecutionStateV8(run) {
   const current = run.pipelineState;
   const findingOverrides = uniqueFindingOverrides(current.findingOverrides);
-  const immutableTerminal = ["DONE", "FAILED"].includes(
-    current.workflowState,
-  );
+  const immutableTerminal = ["DONE", "FAILED"].includes(current.workflowState);
   if (
     immutableTerminal ||
     !current.preflightComplete ||
@@ -901,9 +881,7 @@ export function migratePlanExecutionStateV8(run) {
         ? current.previousFindings
         : current.findings,
     findings: paused ? current.findings : Object.freeze([]),
-    pendingDisputes: paused
-      ? current.pendingDisputes
-      : Object.freeze([]),
+    pendingDisputes: paused ? current.pendingDisputes : Object.freeze([]),
     reviewReconsideration: paused
       ? current.reviewReconsideration
       : Object.freeze([]),
@@ -988,7 +966,8 @@ export const planExecutionPipeline = Object.freeze({
   taskInputs: TASK_INPUTS,
   runOptions: Object.freeze(["project", "task", "mode", ...ROLES]),
   requiredRunOptions: Object.freeze(["project", "task"]),
-  description: "Execute, finalize, review, and commit each step of a commit plan.",
+  description:
+    "Execute, finalize, review, and commit each step of a commit plan.",
   projections: Object.freeze({
     clarification: projectClarification,
     pause: projectPause,

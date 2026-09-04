@@ -105,7 +105,8 @@ function assertSnapshot(value) {
     value.projectPath.length === 0 ||
     !isPathList(value.allowedPaths) ||
     (value.head !== null &&
-      (typeof value.head !== "string" || !OBJECT_ID_PATTERN.test(value.head))) ||
+      (typeof value.head !== "string" ||
+        !OBJECT_ID_PATTERN.test(value.head))) ||
     (value.branch !== null &&
       (typeof value.branch !== "string" || value.branch.length === 0)) ||
     typeof value.detached !== "boolean" ||
@@ -114,8 +115,7 @@ function assertSnapshot(value) {
     typeof value.identityAvailable !== "boolean" ||
     SNAPSHOT_FINGERPRINT_FIELDS.some(
       (field) =>
-        typeof value[field] !== "string" ||
-        !SHA256_PATTERN.test(value[field]),
+        typeof value[field] !== "string" || !SHA256_PATTERN.test(value[field]),
     )
   ) {
     throw new GitSafetyError("Previous Git snapshot is invalid.", {
@@ -152,9 +152,7 @@ export function createGitService(options = {}) {
       ["rev-parse", "--verify", "HEAD"],
       { allowedExitCodes: [0, 128] },
     );
-    return result.exitCode === 0
-      ? decodeLine(result.stdout, "Git HEAD")
-      : null;
+    return result.exitCode === 0 ? decodeLine(result.stdout, "Git HEAD") : null;
   }
 
   const contentContext = Object.freeze({ currentHead, runGit });
@@ -196,12 +194,7 @@ export function createGitService(options = {}) {
 
   async function indexFingerprint(repositoryPath) {
     const [entries, flags, cachedChanges] = await Promise.all([
-      runGit(repositoryPath, [
-        "ls-files",
-        "--stage",
-        "--resolve-undo",
-        "-z",
-      ]),
+      runGit(repositoryPath, ["ls-files", "--stage", "--resolve-undo", "-z"]),
       runGit(repositoryPath, ["ls-files", "-v", "-z"]),
       runGit(repositoryPath, [
         "diff",
@@ -375,12 +368,9 @@ export function createGitService(options = {}) {
 
   async function contentFingerprintAgainst(repositoryPath, baseHead) {
     return (
-      await contentFingerprintsAtRoot(
-        contentContext,
-        repositoryPath,
-        [],
-        { baseHead },
-      )
+      await contentFingerprintsAtRoot(contentContext, repositoryPath, [], {
+        baseHead,
+      })
     ).contentFingerprint;
   }
 
@@ -407,11 +397,7 @@ export function createGitService(options = {}) {
     const { paths, projectPath } = options;
     assertPathList(paths, "paths");
     const repositoryPath = await resolveRepository(runGit, projectPath);
-    return pathsFingerprintAtRoot(
-      contentContext,
-      repositoryPath,
-      paths,
-    );
+    return pathsFingerprintAtRoot(contentContext, repositoryPath, paths);
   }
 
   async function preflight(options) {

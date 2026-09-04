@@ -53,13 +53,21 @@ report only failures that cannot be resolved safely within the current scope.
 - Verify that every content change invalidates prior finalization and review results.
 - Verify that unresolved findings, disputes, exhausted budgets, or unsafe Git state pause instead of advancing.
 
-## 3. Run Checks
+## 3. Format And Run Checks
 
-Run the repository gate:
+Run the writable repository formatter as the first operation of the terminal
+gate:
+
+```bash
+npm run format
+```
+
+Review its output as part of the current candidate. Then run the non-mutating
+repository gate and staging-independent Git whitespace check:
 
 ```bash
 npm run check
-git diff --check
+git diff --check HEAD
 ```
 
 Add or update tests in the same change when behavior changes. Prefer fake adapters

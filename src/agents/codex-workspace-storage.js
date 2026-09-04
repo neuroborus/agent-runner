@@ -1,14 +1,7 @@
-import {
-  lstat,
-  mkdir,
-  mkdtemp,
-  realpath,
-  rm,
-} from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
-const STORAGE_PARENT =
-  process.platform === "darwin" ? "/private/tmp" : "/tmp";
+const STORAGE_PARENT = process.platform === "darwin" ? "/private/tmp" : "/tmp";
 const STORAGE_PREFIX = "agent-runner-codex-workspace-";
 const DIRECTORY_MODE = 0o700;
 const DIRECTORY_MODE_BIGINT = 0o700n;
@@ -239,7 +232,10 @@ export async function createCodexWorkspaceStorage({
           await assertRemoved(rootPath);
           cleaned = true;
         } catch (cause) {
-          throw storageError("Cannot safely clean Codex workspace storage.", cause);
+          throw storageError(
+            "Cannot safely clean Codex workspace storage.",
+            cause,
+          );
         }
         if (validationFailure !== undefined) {
           throw storageError(

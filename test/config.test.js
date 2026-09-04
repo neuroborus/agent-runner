@@ -70,10 +70,7 @@ test("tracked example is valid and local configuration is ignored", async () => 
     profile: "claude-primary",
     model: "sonnet",
   });
-  assert.deepEqual(
-    configuration.pipelines["plan-authoring"].roles.arbiter,
-    {},
-  );
+  assert.deepEqual(configuration.pipelines["plan-authoring"].roles.arbiter, {});
   assert.deepEqual(configuration.pipelines.polishing.roles.reviewer, {
     backend: "claude",
     profile: "claude-primary",
@@ -149,7 +146,10 @@ test("configuration rejects unsupported shapes and values", () => {
       /defaultProfile selects unknown profile/u,
     ],
     ['{"schemaVersion":1,"profiles":[]}', /profiles must be an object/u],
-    ['{"schemaVersion":1,"trustedCommands":[]}', /trustedCommands must be an object/u],
+    [
+      '{"schemaVersion":1,"trustedCommands":[]}',
+      /trustedCommands must be an object/u,
+    ],
     [
       '{"schemaVersion":1,"trustedCommands":{"service":{"command":"npm test","executable":"npm","arguments":["test"],"environment":{}}}}',
       /Trusted command service is invalid/u,
@@ -176,10 +176,7 @@ test("configuration rejects unsupported shapes and values", () => {
     ],
     ['{"schemaVersion":1,"pipelines":null}', /pipelines must be an object/u],
     ['{"schemaVersion":1,"pipelines":[]}', /pipelines must be an object/u],
-    [
-      '{"schemaVersion":1,"pipelines":{"unknown":{}}}',
-      /pipelines\.unknown/u,
-    ],
+    ['{"schemaVersion":1,"pipelines":{"unknown":{}}}', /pipelines\.unknown/u],
     [
       '{"schemaVersion":1,"pipelines":{"plan-authoring":{"extra":1}}}',
       /plan-authoring\.extra/u,
@@ -401,9 +398,8 @@ test("runner issue reporting is default-enabled and explicitly disableable", () 
     true,
   );
   assert.equal(
-    parseRunnerConfiguration(
-      '{"schemaVersion":1,"issueReporting":false}',
-    ).issueReporting,
+    parseRunnerConfiguration('{"schemaVersion":1,"issueReporting":false}')
+      .issueReporting,
     false,
   );
 });
@@ -875,10 +871,7 @@ test("loads only ignored confined project configuration files", async (t) => {
     DEFAULT_ARTIFACT_ROOT,
     PROJECT_CONFIG_FILENAME,
   );
-  await writeFile(
-    defaultPath,
-    '{"schemaVersion":1,"artifactRoot":"custom"}\n',
-  );
+  await writeFile(defaultPath, '{"schemaVersion":1,"artifactRoot":"custom"}\n');
   const runnerConfiguration = parseRunnerConfiguration(
     JSON.stringify({ schemaVersion: 1, defaultBackend: "codex" }),
   );
@@ -944,10 +937,7 @@ test(
     await executeFile("git", ["init", "-q", projectPath]);
     const artifactPath = join(projectPath, DEFAULT_ARTIFACT_ROOT);
     await mkdir(artifactPath);
-    await writeFile(
-      join(projectPath, ".gitignore"),
-      "/LOCAL_ARTIFACTS/\n",
-    );
+    await writeFile(join(projectPath, ".gitignore"), "/LOCAL_ARTIFACTS/\n");
     const configurationPath = join(artifactPath, "fifo.json");
     await executeFile("mkfifo", [configurationPath]);
 
@@ -1082,11 +1072,7 @@ test("configuration resolves only descriptor-selected roles after settings", () 
     JSON.stringify({ schemaVersion: 1, defaultBackend: "codex" }),
   );
 
-  for (const pipelineId of [
-    "plan-authoring",
-    "plan-execution",
-    "polishing",
-  ]) {
+  for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
     const pipeline = getPipeline(pipelineId);
     const resolved = resolvePipelineConfiguration(
       pipelineId,

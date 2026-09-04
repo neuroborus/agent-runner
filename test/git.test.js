@@ -174,9 +174,14 @@ test("ignores ambient repository redirection", async (t) => {
     projectPath,
   });
   assert.equal(snapshot.projectPath, target.repositoryPath);
-  assert.equal(snapshot.head, (await target.service.snapshot({
-    projectPath: target.repositoryPath,
-  })).head);
+  assert.equal(
+    snapshot.head,
+    (
+      await target.service.snapshot({
+        projectPath: target.repositoryPath,
+      })
+    ).head,
+  );
 });
 
 test("enforces caller-selected cleanliness and identity requirements", async (t) => {
@@ -354,7 +359,10 @@ test("content fingerprints ignore staging placement and ignored files", async (t
     afterStaging.contentFingerprint,
     beforeStaging.contentFingerprint,
   );
-  assert.notEqual(afterStaging.indexFingerprint, beforeStaging.indexFingerprint);
+  assert.notEqual(
+    afterStaging.indexFingerprint,
+    beforeStaging.indexFingerprint,
+  );
 
   await writeFile(join(repositoryPath, "ignored.txt"), "ignored two\n");
   assert.equal(
@@ -376,7 +384,7 @@ test("content fingerprints ignore staging placement and ignored files", async (t
 test("validation-infrastructure fingerprints cover only the selected files", async (t) => {
   const { repositoryPath, service } = await createFixture(t);
   const validationPath = "validation  strict.json";
-  await writeFile(join(repositoryPath, validationPath), "{\"strict\":true}\n");
+  await writeFile(join(repositoryPath, validationPath), '{"strict":true}\n');
   const initial = await service.validationInfrastructureFingerprint({
     paths: [validationPath],
     projectPath: repositoryPath,
@@ -391,7 +399,7 @@ test("validation-infrastructure fingerprints cover only the selected files", asy
     initial,
   );
 
-  await writeFile(join(repositoryPath, validationPath), "{\"strict\":false}\n");
+  await writeFile(join(repositoryPath, validationPath), '{"strict":false}\n');
   assert.notEqual(
     await service.validationInfrastructureFingerprint({
       paths: [validationPath],
@@ -476,10 +484,12 @@ test("content fingerprints guard index-hidden tracked paths", async (t) => {
   assert.equal(assumed.clean, true);
   await writeFile(trackedPath, "changed while assumed\n");
   assert.equal(
-    (await service.inspectPath({
-      path: trackedPath,
-      projectPath: repositoryPath,
-    })).changed,
+    (
+      await service.inspectPath({
+        path: trackedPath,
+        projectPath: repositoryPath,
+      })
+    ).changed,
     true,
   );
   assert.equal(
@@ -506,10 +516,12 @@ test("content fingerprints guard index-hidden tracked paths", async (t) => {
   assert.equal(skipped.clean, true);
   await writeFile(trackedPath, "changed while skipped\n");
   assert.equal(
-    (await service.inspectPath({
-      path: trackedPath,
-      projectPath: repositoryPath,
-    })).changed,
+    (
+      await service.inspectPath({
+        path: trackedPath,
+        projectPath: repositoryPath,
+      })
+    ).changed,
     true,
   );
   assert.equal(
@@ -735,11 +747,7 @@ test("index fingerprints ignore stat-cache refreshes and include semantic flags"
   const baseline = await service.snapshot({ projectPath: repositoryPath });
   const trackedPath = join(repositoryPath, "tracked.txt");
   const metadata = await stat(trackedPath);
-  await utimes(
-    trackedPath,
-    metadata.atime,
-    new Date(metadata.mtimeMs + 2_000),
-  );
+  await utimes(trackedPath, metadata.atime, new Date(metadata.mtimeMs + 2_000));
   await runGit(repositoryPath, env, "status", "--short");
 
   await assert.doesNotReject(service.assertUnchanged(baseline));
@@ -852,7 +860,9 @@ test("snapshots detect refs, remote configuration, and identity without exposing
       error.changes.includes("remote-configuration"),
   );
 
-  const beforeIdentity = await service.snapshot({ projectPath: repositoryPath });
+  const beforeIdentity = await service.snapshot({
+    projectPath: repositoryPath,
+  });
   await runGit(repositoryPath, env, "config", "user.name", "Changed Identity");
   await assert.rejects(
     service.assertUnchanged(beforeIdentity),

@@ -32,11 +32,7 @@ export {
   getPipeline,
   listPipelines,
 } from "./pipeline-registry.js";
-export {
-  createRunner,
-  parseSourceSession,
-  RunnerError,
-} from "./runner.js";
+export { createRunner, parseSourceSession, RunnerError } from "./runner.js";
 export {
   createRunStore,
   resolveStateRoot,

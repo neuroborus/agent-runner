@@ -59,14 +59,7 @@ export const PLANNER_SCHEMA = deepFreeze({
     whyBlocked: TEXT,
     evidence: TEXT_LIST,
   },
-  required: [
-    "status",
-    "plan",
-    "question",
-    "options",
-    "whyBlocked",
-    "evidence",
-  ],
+  required: ["status", "plan", "question", "options", "whyBlocked", "evidence"],
   additionalProperties: false,
 });
 
@@ -107,14 +100,7 @@ export const CHECK_AND_FIX_SCHEMA = deepFreeze({
     whyBlocked: TEXT,
     evidence: TEXT_LIST,
   },
-  required: [
-    "status",
-    "plan",
-    "question",
-    "options",
-    "whyBlocked",
-    "evidence",
-  ],
+  required: ["status", "plan", "question", "options", "whyBlocked", "evidence"],
   additionalProperties: false,
 });
 

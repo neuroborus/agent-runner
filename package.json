@@ -13,7 +13,9 @@
     "agent-run": "./bin/agent-run.js"
   },
   "scripts": {
-    "check": "npm test && node bin/agent-run.js --help",
+    "check": "npm run format:check && npm test && node bin/agent-run.js --help",
+    "format": "node scripts/format.js --write",
+    "format:check": "node scripts/format.js --check",
     "test": "node --test"
   },
   "engines": {
@@ -27,6 +29,7 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@modelcontextprotocol/client": "2.0.0"
+    "@modelcontextprotocol/client": "2.0.0",
+    "prettier": "3.9.6"
   }
 }

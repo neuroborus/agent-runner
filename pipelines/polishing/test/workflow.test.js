@@ -315,9 +315,7 @@ test("rejects mixed failed and blocked finalization before persistence", async (
     ],
   };
   const fixture = await createFixture(t, {
-    reviewer: [
-      { ...bootstrapReady("Reviewer"), requiredChecks },
-    ],
+    reviewer: [{ ...bootstrapReady("Reviewer"), requiredChecks }],
     worker: [
       clarificationReady(),
       { ...bootstrapReady("Worker"), requiredChecks },
@@ -380,7 +378,10 @@ test("derives one stable complete inventory from independent role evidence", asy
     reviewer: [reviewer],
     worker: [clarificationReady(), worker, reconciliationResolved()],
     onRoleRun(role, request) {
-      if (role === "worker" && /Polish the existing local/u.test(request.prompt)) {
+      if (
+        role === "worker" &&
+        /Polish the existing local/u.test(request.prompt)
+      ) {
         throw stop;
       }
     },
@@ -401,13 +402,10 @@ test("derives one stable complete inventory from independent role evidence", asy
 
 test("persists and finalizes a disjoint maximum role-derived inventory", async (t) => {
   const roleInventory = (role) => ({
-    requiredChecks: Array.from(
-      { length: MAX_BOOTSTRAP_ITEMS },
-      (_, index) => ({
-        id: `C${index + 1}`,
-        command: `node --test validation/${role}-${index + 1}.test.js`,
-      }),
-    ),
+    requiredChecks: Array.from({ length: MAX_BOOTSTRAP_ITEMS }, (_, index) => ({
+      id: `C${index + 1}`,
+      command: `node --test validation/${role}-${index + 1}.test.js`,
+    })),
     validationInfrastructure: Array.from(
       { length: MAX_BOOTSTRAP_ITEMS },
       (_, index) => `validation/${role}-${index + 1}.test.js`,
@@ -463,7 +461,10 @@ test("persists and finalizes a disjoint maximum role-derived inventory", async (
       projectPath: fixture.projectPath,
     });
 
-  assert.equal(state.workerValidation.requiredChecks.length, MAX_BOOTSTRAP_ITEMS);
+  assert.equal(
+    state.workerValidation.requiredChecks.length,
+    MAX_BOOTSTRAP_ITEMS,
+  );
   assert.equal(
     state.reviewerValidation.validationInfrastructure.length,
     MAX_BOOTSTRAP_ITEMS,
@@ -483,10 +484,7 @@ test("persists and finalizes a disjoint maximum role-derived inventory", async (
 });
 
 test("pauses deterministically when a bootstrap inventory exceeds capacity", async (t) => {
-  for (const capacityField of [
-    "requiredChecks",
-    "validationInfrastructure",
-  ]) {
+  for (const capacityField of ["requiredChecks", "validationInfrastructure"]) {
     await t.test(capacityField, async (t) => {
       const fixture = await createFixture(t, {
         worker: [
@@ -684,8 +682,7 @@ test("fails closed when corrected bootstrap checks still depend on staging", asy
     fixture.run(),
     (cause) =>
       cause.code === "ERR_INVALID_POLISHING_OUTPUT" &&
-      cause.diagnostic?.constraint ===
-        "staging-independent-validation-command",
+      cause.diagnostic?.constraint === "staging-independent-validation-command",
   );
   assert.equal(fixture.currentRun.pipelineState.workflowState, "FAILED");
   assert.equal(fixture.currentRun.pipelineState.bootstrapCorrections.length, 1);
@@ -954,7 +951,10 @@ test("migrates version-4 runs through the content-only handoff boundary", async 
 
 test("migrates active version-5 validation through an independent checkpoint", async (t) => {
   const initial = createPolishingState();
-  assert.deepEqual(migratePolishingStateV5({ pipelineState: initial }), initial);
+  assert.deepEqual(
+    migratePolishingStateV5({ pipelineState: initial }),
+    initial,
+  );
 
   const fixture = await createFixture(t);
   const completed = await fixture.run();
@@ -1030,11 +1030,10 @@ test("migrates version-6 state without changing workflow evidence", async (t) =>
 });
 
 test("selects Worker-only lazy mode and migrates version 7 to independent", () => {
-  assert.deepEqual(polishingPipeline.resolveActiveRoles({ mode: "independent" }), [
-    "worker",
-    "reviewer",
-    "arbiter",
-  ]);
+  assert.deepEqual(
+    polishingPipeline.resolveActiveRoles({ mode: "independent" }),
+    ["worker", "reviewer", "arbiter"],
+  );
   assert.deepEqual(polishingPipeline.resolveActiveRoles({ mode: "lazy" }), [
     "worker",
   ]);
@@ -1098,10 +1097,7 @@ test("migrates version-7 handoff and terminal states without replay", async (t) 
         lazySourceForkConsumed: false,
       });
       assert.equal(migrated.workflowState, legacy.workflowState);
-      assert.deepEqual(
-        migrated.repositoryBaseline,
-        legacy.repositoryBaseline,
-      );
+      assert.deepEqual(migrated.repositoryBaseline, legacy.repositoryBaseline);
       assert.deepEqual(migrated.finalizationResult, legacy.finalizationResult);
       assert.deepEqual(migrated.reviewResult, legacy.reviewResult);
       assert.doesNotThrow(() => normalizePipelineState(migrated));
@@ -1465,7 +1461,10 @@ test("persists repeated invalid validation-migration output as terminal", async 
     (cause) => cause.code === "ERR_INVALID_POLISHING_OUTPUT",
   );
   assert.equal(fixture.currentRun.pipelineState.workflowState, "FAILED");
-  assert.equal(fixture.currentRun.pipelineState.validationMigrationPending, true);
+  assert.equal(
+    fixture.currentRun.pipelineState.validationMigrationPending,
+    true,
+  );
   assert.deepEqual(fixture.currentRun.pause.diagnostic, {
     role: "worker",
     phase: "validation-migration",
@@ -1622,8 +1621,14 @@ test("invalidates migrated findings before applying an override", async (t) => {
       finalizationPassed(),
     ],
     async onRoleRun(role, request, _turn, { projectPath }) {
-      if (role === "worker" && /Resolve every current blocker/u.test(request.prompt)) {
-        await writeFile(join(projectPath, "tracked.txt"), "reviewed correction\n");
+      if (
+        role === "worker" &&
+        /Resolve every current blocker/u.test(request.prompt)
+      ) {
+        await writeFile(
+          join(projectPath, "tracked.txt"),
+          "reviewed correction\n",
+        );
       }
     },
   });
@@ -1688,7 +1693,8 @@ function clarificationQuestions() {
     questions: [
       {
         question: "Which public behavior should the existing changes preserve?",
-        whyItMatters: "The answer changes how the dirty implementation is polished.",
+        whyItMatters:
+          "The answer changes how the dirty implementation is polished.",
       },
     ],
     reason: "",
@@ -1749,8 +1755,10 @@ function reconciliationDisagreement() {
 function arbitrationResolved() {
   return {
     direction: "SYNTHESIZE",
-    summary: "Use the existing narrow module boundary and preserve the public behavior.",
-    rationale: "Repository ownership and tests support the combined interpretation.",
+    summary:
+      "Use the existing narrow module boundary and preserve the public behavior.",
+    rationale:
+      "Repository ownership and tests support the combined interpretation.",
     reason: "",
     ...emptyDecision(),
   };
@@ -1759,7 +1767,8 @@ function arbitrationResolved() {
 function polishingCompleted() {
   return {
     status: "COMPLETED",
-    summary: "Polished the existing changes and completed a concise self-review.",
+    summary:
+      "Polished the existing changes and completed a concise self-review.",
     reason: "",
     ...emptyDecision(),
   };
@@ -1965,17 +1974,17 @@ function resolutionBatch(decisions) {
   return {
     status: "RESOLVED",
     decisions: decisions.map(({ id, decision }) => ({
-        id,
-        decision,
-        reason:
-          decision === "FIX"
-            ? "Applied the minimal scoped correction."
-            : "Repository evidence shows the finding is incorrect.",
-        evidence:
-          decision === "DISPUTE"
-            ? ["The current test covers the reported behavior."]
-            : [],
-      })),
+      id,
+      decision,
+      reason:
+        decision === "FIX"
+          ? "Applied the minimal scoped correction."
+          : "Repository evidence shows the finding is incorrect.",
+      evidence:
+        decision === "DISPUTE"
+          ? ["The current test covers the reported behavior."]
+          : [],
+    })),
     reason: "",
     ...emptyDecision(),
   };
@@ -2183,11 +2192,7 @@ async function createFixture(
     );
   }
   if (finalizationSkill) {
-    await runGit(
-      projectPath,
-      "add",
-      ".agents/skills/finalization/SKILL.md",
-    );
+    await runGit(projectPath, "add", ".agents/skills/finalization/SKILL.md");
   }
   await runGit(projectPath, "commit", "-qm", "initialize fixture");
   if (taskLocation === "dirty-tracked") {
@@ -2606,7 +2611,10 @@ test("rejects repository mutation during lazy clean confirmation", async (t) => 
     ],
     async onRoleRun(role, request, _turn, { projectPath }) {
       if (role === "worker" && request.schema === CLEAN_CONFIRM_SCHEMA) {
-        await writeFile(join(projectPath, "illegal-confirmation.txt"), "changed\n");
+        await writeFile(
+          join(projectPath, "illegal-confirmation.txt"),
+          "changed\n",
+        );
       }
     },
   });
@@ -2894,7 +2902,9 @@ test("reconciles an interrupted content-changing lazy correction once", async (t
 });
 
 test("resumes a reconciled lazy polishing check without replay", async (t) => {
-  const processLoss = new Error("Process stopped during lazy check reconciliation.");
+  const processLoss = new Error(
+    "Process stopped during lazy check reconciliation.",
+  );
   let changed = false;
   const fixture = await createFixture(t, {
     mode: "lazy",
@@ -2916,7 +2926,10 @@ test("resumes a reconciled lazy polishing check without replay", async (t) => {
         !changed
       ) {
         changed = true;
-        await writeFile(join(projectPath, "interrupted-lazy-fix.txt"), "fixed\n");
+        await writeFile(
+          join(projectPath, "interrupted-lazy-fix.txt"),
+          "fixed\n",
+        );
       }
     },
   });
@@ -3204,10 +3217,7 @@ for (const testCase of [
               .stdout,
             "",
           );
-          await writeFile(
-            join(projectPath, testCase.path),
-            testCase.content,
-          );
+          await writeFile(join(projectPath, testCase.path), testCase.content);
         }
       },
     });
@@ -3231,12 +3241,8 @@ for (const testCase of [
       fixture.calls.worker.every(({ access }) => access !== "local-commit"),
     );
     assert.match(
-      (await runGit(
-        fixture.projectPath,
-        "diff",
-        "--cached",
-        "--name-only",
-      )).stdout,
+      (await runGit(fixture.projectPath, "diff", "--cached", "--name-only"))
+        .stdout,
       new RegExp(`^${testCase.path.replace(".", "\\.")}$`, "mu"),
     );
     assert.equal(
@@ -3276,9 +3282,8 @@ test("recovers a verified runner handoff after DONE persistence is interrupted",
   assert.equal(fixture.currentRun.pipelineState.workflowState, "HANDOFF");
   assert.notEqual(
     fixture.currentRun.pipelineState.repositoryBaseline.indexFingerprint,
-    (
-      await fixture.runtime.git.snapshot({ projectPath: fixture.projectPath })
-    ).indexFingerprint,
+    (await fixture.runtime.git.snapshot({ projectPath: fixture.projectPath }))
+      .indexFingerprint,
   );
 
   interrupt = false;
@@ -3289,9 +3294,8 @@ test("recovers a verified runner handoff after DONE persistence is interrupted",
   assert.equal(completed.pipelineState.workflowState, "DONE");
   assert.equal(
     completed.pipelineState.repositoryBaseline.indexFingerprint,
-    (
-      await fixture.runtime.git.snapshot({ projectPath: fixture.projectPath })
-    ).indexFingerprint,
+    (await fixture.runtime.git.snapshot({ projectPath: fixture.projectPath }))
+      .indexFingerprint,
   );
   assert.ok(
     fixture.calls.worker.every(({ access }) => access !== "local-commit"),
@@ -3426,9 +3430,7 @@ test("rejects dispute settings that cannot fit bounded durable history", () => {
     /must not exceed/u,
   );
   assert.equal(
-    polishingPipeline.settings.maxDisputesPerFinding.validate(
-      unrepresentable,
-    ),
+    polishingPipeline.settings.maxDisputesPerFinding.validate(unrepresentable),
     false,
   );
 });
@@ -3625,9 +3627,7 @@ test("rejects and refuses to recover inconsistent correction progress", async (t
     reason: detail,
     suggestedAction: detail,
   }));
-  const disputeCounts = Object.fromEntries(
-    findings.map(({ id }) => [id, 2]),
-  );
+  const disputeCounts = Object.fromEntries(findings.map(({ id }) => [id, 2]));
   const disputeHistory = findings.flatMap(({ id }) =>
     [1, 2].map((attempt) => ({
       findingId: id,
@@ -3659,10 +3659,7 @@ test("rejects and refuses to recover inconsistent correction progress", async (t
   const oversizedRun = { ...completed, pipelineState };
 
   assert.ok(Buffer.byteLength(JSON.stringify(oversizedRun)) > 1024 * 1024);
-  assert.throws(
-    () => assertRun(oversizedRun),
-    /durable size budget/u,
-  );
+  assert.throws(() => assertRun(oversizedRun), /durable size budget/u);
 
   const nearCapacityDetail = "n".repeat(3_500);
   const nearCapacityEvidence = "e".repeat(3_900);
@@ -3779,10 +3776,7 @@ test("preflights digit-boundary transition growth before persistence", async (t)
     revision: 9,
     sessionLineage: {
       ...completed.sessionLineage,
-      children: [
-        ...completed.sessionLineage.children,
-        ...paddingChildren,
-      ],
+      children: [...completed.sessionLineage.children, ...paddingChildren],
     },
     pipelineState: {
       ...targetPipelineState,
@@ -3924,8 +3918,14 @@ test("prepares a dirty worktree through independent source-session bootstraps", 
     /Change-set fingerprint before this turn:/u,
   );
   assert.match(fixture.calls.worker[3].prompt, /Resolved bootstrap context:/u);
-  assert.doesNotMatch(fixture.calls.reviewer[0].prompt, /Worker independently/u);
-  assert.doesNotMatch(fixture.calls.worker[1].prompt, /Reviewer independently/u);
+  assert.doesNotMatch(
+    fixture.calls.reviewer[0].prompt,
+    /Worker independently/u,
+  );
+  assert.doesNotMatch(
+    fixture.calls.worker[1].prompt,
+    /Reviewer independently/u,
+  );
   assert.match(fixture.calls.worker[2].prompt, /Reviewer bootstrap summary/u);
   const finalizationCall = fixture.calls.worker.find(({ prompt }) =>
     prompt.includes("Run the complete project finalization procedure"),
@@ -3939,7 +3939,10 @@ test("prepares a dirty worktree through independent source-session bootstraps", 
   assert.doesNotMatch(finalizationCall.prompt, /Worker polishing summary:/u);
   assert.match(finalizationCall.recoveryPrompt, /Resolved bootstrap context:/u);
   assert.match(finalizationCall.recoveryPrompt, /Worker polishing summary:/u);
-  assert.match(fixture.calls.reviewer[1].prompt, /Resolved bootstrap context:/u);
+  assert.match(
+    fixture.calls.reviewer[1].prompt,
+    /Resolved bootstrap context:/u,
+  );
   assert.match(fixture.calls.reviewer[1].prompt, /Worker polishing summary:/u);
   assert.equal(
     fixture.calls.reviewer[1].prompt,
@@ -3968,7 +3971,10 @@ test("prepares a dirty worktree through independent source-session bootstraps", 
     assert.equal(call.schema.additionalProperties, false);
   }
   assert.match(
-    await readFile(join(fixture.directoryPath, "context", "resolved.md"), "utf8"),
+    await readFile(
+      join(fixture.directoryPath, "context", "resolved.md"),
+      "utf8",
+    ),
     /existing change set/u,
   );
 });
@@ -4046,7 +4052,8 @@ test("corrects an invalid finalization inventory into an environment pause", asy
   assert.deepEqual(correction, {
     attempt: 1,
     guidance: "resolved",
-    contentFingerprint: paused.pipelineState.repositoryBaseline.contentFingerprint,
+    contentFingerprint:
+      paused.pipelineState.repositoryBaseline.contentFingerprint,
     role: "worker",
     phase: "finalization",
     contract: "finalization",
@@ -4063,7 +4070,10 @@ test("corrects an invalid finalization inventory into an environment pause", asy
   assert.equal(finalizationCalls[0].schema, finalizationCalls[1].schema);
   assert.match(finalizationCalls[1].prompt, /one read-only correction/u);
   assert.equal(finalizationCalls[1].session, undefined);
-  assert.match(finalizationCalls[1].recoveryPrompt, /Resolved bootstrap context/u);
+  assert.match(
+    finalizationCalls[1].recoveryPrompt,
+    /Resolved bootstrap context/u,
+  );
   assert.doesNotMatch(finalizationCalls[1].prompt, /git status/u);
   const correctionActivity = fixture.transitions.find(
     ({ options }) => options.activity?.kind === "finalization-correction",
@@ -4348,7 +4358,9 @@ test("corrects a finalization structured-output failure without provider text", 
     onRoleRun(role, request) {
       if (
         role === "worker" &&
-        request.prompt.includes("Run the complete project finalization procedure") &&
+        request.prompt.includes(
+          "Run the complete project finalization procedure",
+        ) &&
         !request.prompt.includes("one read-only correction") &&
         !rejected
       ) {
@@ -4370,7 +4382,10 @@ test("corrects a finalization structured-output failure without provider text", 
   assert.equal(completed.pipelineState.workflowState, "DONE");
   assert.equal(correction.field, "result");
   assert.equal(correction.constraint, "semantic-contract");
-  assert.doesNotMatch(JSON.stringify(completed), new RegExp(sensitiveMarker, "u"));
+  assert.doesNotMatch(
+    JSON.stringify(completed),
+    new RegExp(sensitiveMarker, "u"),
+  );
   assert.doesNotMatch(
     JSON.stringify(fixture.transitions),
     new RegExp(sensitiveMarker, "u"),
@@ -4409,7 +4424,8 @@ test("scopes finalization correction attempts to the current content fingerprint
       ({ options }) => options.activity?.kind === "finalization-correction",
     )
     .map(
-      ({ patch }) => patch.pipelineState.finalizationCorrection.contentFingerprint,
+      ({ patch }) =>
+        patch.pipelineState.finalizationCorrection.contentFingerprint,
     );
 
   assert.equal(completed.pipelineState.workflowState, "DONE");
@@ -4423,7 +4439,9 @@ test("scopes correction after an invalid finalization turn changes content", asy
     async onRoleRun(role, request, _turn, { projectPath }) {
       if (
         role === "worker" &&
-        request.prompt.includes("Run the complete project finalization procedure") &&
+        request.prompt.includes(
+          "Run the complete project finalization procedure",
+        ) &&
         !request.prompt.includes("one read-only correction") &&
         !changed
       ) {
@@ -4628,7 +4646,10 @@ test("resumes finalization after an explicit skill is corrected", async (t) => {
 
       assert.equal(resumed.pipelineState.workflowState, "DONE");
       assert.equal(resumed.pause, null);
-      assert.equal(resumed.pipelineState.finalizationResult.skillPath, skillPath);
+      assert.equal(
+        resumed.pipelineState.finalizationResult.skillPath,
+        skillPath,
+      );
     });
   }
 });
@@ -4711,7 +4732,10 @@ test("resumes preflight after the clarification path becomes ignored", async (t)
   assert.equal(paused.pause.reason, "local_artifacts_not_ignored");
   assert.equal(paused.pipelineState.clarificationPath, null);
 
-  await appendFile(join(fixture.projectPath, ".gitignore"), "LOCAL_ARTIFACTS/\n");
+  await appendFile(
+    join(fixture.projectPath, ".gitignore"),
+    "LOCAL_ARTIFACTS/\n",
+  );
   const completed = await fixture.run();
 
   assert.equal(completed.pipelineState.workflowState, "DONE");
@@ -4810,7 +4834,10 @@ for (const [name, flag] of [
   test(`fails closed when ${name} hides handoff content`, async (t) => {
     const fixture = await createFixture(t, { dirty: false });
     await runGit(fixture.projectPath, "update-index", flag, "tracked.txt");
-    await writeFile(join(fixture.projectPath, "tracked.txt"), "hidden change\n");
+    await writeFile(
+      join(fixture.projectPath, "tracked.txt"),
+      "hidden change\n",
+    );
 
     await assert.rejects(
       fixture.run(),
@@ -4898,7 +4925,10 @@ test("stops after the bounded clarification question rounds", async (t) => {
     const paused = await fixture.run();
     assert.equal(paused.pause.reason, "clarification_answers_required");
     assert.equal(paused.counters.clarificationRounds, round);
-    await appendFile(paused.pipelineState.clarificationPath, `Answer ${round}.\n`);
+    await appendFile(
+      paused.pipelineState.clarificationPath,
+      `Answer ${round}.\n`,
+    );
   }
 
   const exhausted = await fixture.run();
@@ -4912,7 +4942,10 @@ test("detects immutable task-input drift during a read-only turn", async (t) => 
     async onRoleRun(role) {
       if (role === "worker" && !changed) {
         changed = true;
-        await appendFile(join(fixture.taskPath, "task.md"), "Unexpected drift.\n");
+        await appendFile(
+          join(fixture.taskPath, "task.md"),
+          "Unexpected drift.\n",
+        );
       }
     },
   });
@@ -5028,9 +5061,7 @@ test("persists and reconstructs an allowlisted failed Claude read-only turn", as
     join(fixture.directoryPath, "events.jsonl"),
     "utf8",
   );
-  const eventCount = events
-    .trimEnd()
-    .split("\n").length;
+  const eventCount = events.trimEnd().split("\n").length;
   assert.ok(eventCount > 1);
   assert.doesNotMatch(events, /provider-native/u);
 
@@ -5048,11 +5079,7 @@ test("persists and reconstructs an allowlisted failed Claude read-only turn", as
 test("preserves Worker changes when a valid environment blocker pauses polishing", async (t) => {
   let polishTurns = 0;
   const fixture = await createFixture(t, {
-    reviewer: [
-      bootstrapReady("Reviewer"),
-      reviewApproved(),
-      reviewApproved(),
-    ],
+    reviewer: [bootstrapReady("Reviewer"), reviewApproved(), reviewApproved()],
     worker: [
       clarificationReady(),
       bootstrapReady("Worker"),
@@ -5070,7 +5097,10 @@ test("preserves Worker changes when a valid environment blocker pauses polishing
       ) {
         polishTurns += 1;
         if (polishTurns === 2) {
-          await writeFile(join(projectPath, "tracked.txt"), "safe blocked work\n");
+          await writeFile(
+            join(projectPath, "tracked.txt"),
+            "safe blocked work\n",
+          );
         }
       }
     },
@@ -5304,8 +5334,14 @@ test("turns a runner-trusted polishing failure into a bounded issue", async (t) 
       finalization,
     ],
     async onRoleRun(role, request, _turn, { projectPath }) {
-      if (role === "worker" && /Resolve every current blocker/u.test(request.prompt)) {
-        await writeFile(join(projectPath, "tracked.txt"), "fixed service input\n");
+      if (
+        role === "worker" &&
+        /Resolve every current blocker/u.test(request.prompt)
+      ) {
+        await writeFile(
+          join(projectPath, "tracked.txt"),
+          "fixed service input\n",
+        );
       }
     },
     onTrustedValidation(options) {
@@ -5364,9 +5400,7 @@ for (const [name, code] of [
     const fixture = await createFixture(t, {
       settings: { ...SETTINGS, trustedChecks: ["service-check"] },
       trustedValidation,
-      reviewer: [
-        { ...bootstrapReady("Reviewer"), requiredChecks },
-      ],
+      reviewer: [{ ...bootstrapReady("Reviewer"), requiredChecks }],
       worker: [
         clarificationReady(),
         { ...bootstrapReady("Worker"), requiredChecks },
@@ -5400,10 +5434,7 @@ test("rejects validation-infrastructure drift after trusted polishing execution"
   const fixture = await createFixture(t, {
     async prepareProject(projectPath) {
       await mkdir(join(projectPath, "LOCAL_ARTIFACTS"), { recursive: true });
-      await writeFile(
-        join(projectPath, infrastructurePath),
-        '{"version":1}\n',
-      );
+      await writeFile(join(projectPath, infrastructurePath), '{"version":1}\n');
     },
     settings: { ...SETTINGS, trustedChecks: ["service-check"] },
     trustedValidation,
@@ -5540,7 +5571,10 @@ test("binds finalization changes and review to one fingerprint without committin
   let beforePolishFingerprint;
   const fixture = await createFixture(t, {
     async onRoleRun(role, request, _turn, { projectPath }) {
-      if (role === "worker" && /Polish the existing local/u.test(request.prompt)) {
+      if (
+        role === "worker" &&
+        /Polish the existing local/u.test(request.prompt)
+      ) {
         beforePolishFingerprint = await createGitService().contentFingerprint({
           allowedPaths: [],
           projectPath,
@@ -5560,11 +5594,15 @@ test("binds finalization changes and review to one fingerprint without committin
       }
     },
   });
-  const beforeHead = (await runGit(fixture.projectPath, "rev-parse", "HEAD")).stdout.trim();
+  const beforeHead = (
+    await runGit(fixture.projectPath, "rev-parse", "HEAD")
+  ).stdout.trim();
 
   const result = await fixture.run();
 
-  const afterHead = (await runGit(fixture.projectPath, "rev-parse", "HEAD")).stdout.trim();
+  const afterHead = (
+    await runGit(fixture.projectPath, "rev-parse", "HEAD")
+  ).stdout.trim();
   assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(
     result.pipelineState.finalizedFingerprint,
@@ -5572,7 +5610,10 @@ test("binds finalization changes and review to one fingerprint without committin
   );
   assert.equal(result.pipelineState.finalizationResult.status, "PASS");
   assert.equal(beforeHead, afterHead);
-  assert.equal(await readFile(join(fixture.projectPath, "generated.txt"), "utf8"), "generated\n");
+  assert.equal(
+    await readFile(join(fixture.projectPath, "generated.txt"), "utf8"),
+    "generated\n",
+  );
   assert.notEqual(beforePolishFingerprint, beforeFinalizationFingerprint);
   const polishCall = fixture.calls.worker.find(({ prompt }) =>
     /Polish the existing local/u.test(prompt),
@@ -5599,7 +5640,10 @@ test("fixes finalization failures in one batch and reruns the complete gate", as
       finalizationPassed(),
     ],
     async onRoleRun(role, request, _turn, { projectPath }) {
-      if (role === "worker" && /Resolve every current blocker/u.test(request.prompt)) {
+      if (
+        role === "worker" &&
+        /Resolve every current blocker/u.test(request.prompt)
+      ) {
         await writeFile(join(projectPath, "tracked.txt"), "fixed validation\n");
       }
     },
@@ -5630,7 +5674,10 @@ test("fixes stable review findings and invalidates prior fingerprints", async (t
       finalizationPassed(),
     ],
     async onRoleRun(role, request, _turn, { projectPath }) {
-      if (role === "worker" && /Resolve every current blocker/u.test(request.prompt)) {
+      if (
+        role === "worker" &&
+        /Resolve every current blocker/u.test(request.prompt)
+      ) {
         await writeFile(join(projectPath, "tracked.txt"), "minimal\n");
       }
     },
@@ -5643,7 +5690,9 @@ test("fixes stable review findings and invalidates prior fingerprints", async (t
   assert.equal(result.pipelineState.findings.length, 0);
   assert.equal(result.pipelineState.correctionHistory.length, 0);
   assert.equal(
-    fixture.calls.reviewer.filter(({ prompt }) => /Review the complete/u.test(prompt)).length,
+    fixture.calls.reviewer.filter(({ prompt }) =>
+      /Review the complete/u.test(prompt),
+    ).length,
     2,
   );
 });
@@ -5734,12 +5783,8 @@ test("preserves maximum concurrent dispute attempts through recovery", async (t)
       reconciliationResolved(),
       polishingCompleted(),
       finalizationPassed(),
-      resolutionBatch(
-        findingIds.map((id) => ({ id, decision: "DISPUTE" })),
-      ),
-      resolutionBatch(
-        findingIds.map((id) => ({ id, decision: "DISPUTE" })),
-      ),
+      resolutionBatch(findingIds.map((id) => ({ id, decision: "DISPUTE" }))),
+      resolutionBatch(findingIds.map((id) => ({ id, decision: "DISPUTE" }))),
     ],
   });
 
@@ -5823,9 +5868,7 @@ test("rejects oversized Reviewer evidence without losing pending disputes", asyn
       reconciliationResolved(),
       polishingCompleted(),
       finalizationPassed(),
-      resolutionBatch(
-        findingIds.map((id) => ({ id, decision: "DISPUTE" })),
-      ),
+      resolutionBatch(findingIds.map((id) => ({ id, decision: "DISPUTE" }))),
     ],
   });
 
@@ -5947,7 +5990,10 @@ test("pauses at the fix budget and resumes with persisted additional rounds", as
       finalizationPassed(),
     ],
     async onRoleRun(role, request, _turn, { projectPath }) {
-      if (role === "worker" && /Resolve every current blocker/u.test(request.prompt)) {
+      if (
+        role === "worker" &&
+        /Resolve every current blocker/u.test(request.prompt)
+      ) {
         fix += 1;
         await writeFile(join(projectPath, "tracked.txt"), `fix ${fix}\n`);
       }
@@ -6017,7 +6063,10 @@ test("persists mixed exhausted-budget disputes and fixes a reappearing exhausted
         /Resolve every current blocker/u.test(request.prompt)
       ) {
         fix += 1;
-        await writeFile(join(projectPath, "tracked.txt"), `budget fix ${fix}\n`);
+        await writeFile(
+          join(projectPath, "tracked.txt"),
+          `budget fix ${fix}\n`,
+        );
       }
     },
   });
@@ -6037,22 +6086,26 @@ test("persists mixed exhausted-budget disputes and fixes a reappearing exhausted
   assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(result.counters.fixRounds, 3);
   assert.equal(result.pipelineState.disputeCounts.R2, 1);
-  assert.equal(result.pipelineState.disputeHistory.at(-1).direction, "WITHDRAW");
+  assert.equal(
+    result.pipelineState.disputeHistory.at(-1).direction,
+    "WITHDRAW",
+  );
   assert.ok(
-    fixture.calls.worker.some(
-      ({ prompt }) =>
-        /cannot be disputed and must be fixed:[\s\S]*R2/u.test(prompt),
+    fixture.calls.worker.some(({ prompt }) =>
+      /cannot be disputed and must be fixed:[\s\S]*R2/u.test(prompt),
     ),
   );
   const laterReviews = fixture.calls.reviewer.filter(({ prompt }) =>
     /Review the complete current change set independently/u.test(prompt),
   );
   assert.ok(
-    laterReviews.slice(2).some(({ prompt }) =>
-      /Prior decisions:[\s\S]*"findingId": "R2"[\s\S]*"direction": "WITHDRAW"/u.test(
-        prompt,
+    laterReviews
+      .slice(2)
+      .some(({ prompt }) =>
+        /Prior decisions:[\s\S]*"findingId": "R2"[\s\S]*"direction": "WITHDRAW"/u.test(
+          prompt,
+        ),
       ),
-    ),
   );
 });
 
@@ -6087,7 +6140,10 @@ test("defers invalidated disputes until review re-establishes the finding", asyn
         /Resolve every current blocker/u.test(request.prompt)
       ) {
         fix += 1;
-        await writeFile(join(projectPath, "tracked.txt"), `deferred fix ${fix}\n`);
+        await writeFile(
+          join(projectPath, "tracked.txt"),
+          `deferred fix ${fix}\n`,
+        );
       }
     },
   });
@@ -6096,7 +6152,10 @@ test("defers invalidated disputes until review re-establishes the finding", asyn
 
   assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(result.pipelineState.disputeCounts.R2, 1);
-  assert.equal(result.pipelineState.disputeHistory.at(-1).direction, "WITHDRAW");
+  assert.equal(
+    result.pipelineState.disputeHistory.at(-1).direction,
+    "WITHDRAW",
+  );
   assert.equal(fixture.calls.arbiter.length, 0);
   const reconsiderationCalls = fixture.calls.reviewer.filter(({ prompt }) =>
     /Reconsider each disputed finding/u.test(prompt),
@@ -6111,11 +6170,7 @@ test("defers invalidated disputes until review re-establishes the finding", asyn
 test("records an exact-fingerprint override only after a stable finding pause", async (t) => {
   const fixture = await createFixture(t, {
     settings: { ...SETTINGS, maxSameFindingRounds: 1 },
-    reviewer: [
-      bootstrapReady("Reviewer"),
-      reviewFindings(),
-      reviewFindings(),
-    ],
+    reviewer: [bootstrapReady("Reviewer"), reviewFindings(), reviewFindings()],
     worker: [
       clarificationReady(),
       bootstrapReady("Worker"),
@@ -6126,8 +6181,14 @@ test("records an exact-fingerprint override only after a stable finding pause", 
       finalizationPassed(),
     ],
     async onRoleRun(role, request, _turn, { projectPath }) {
-      if (role === "worker" && /Resolve every current blocker/u.test(request.prompt)) {
-        await writeFile(join(projectPath, "tracked.txt"), "reviewed correction\n");
+      if (
+        role === "worker" &&
+        /Resolve every current blocker/u.test(request.prompt)
+      ) {
+        await writeFile(
+          join(projectPath, "tracked.txt"),
+          "reviewed correction\n",
+        );
       }
     },
   });
@@ -6150,7 +6211,10 @@ test("records an exact-fingerprint override only after a stable finding pause", 
   );
   assert.equal(fixture.currentRun.revision, paused.revision);
 
-  const result = await fixture.run({ type: "override-finding", findingId: "R1" });
+  const result = await fixture.run({
+    type: "override-finding",
+    findingId: "R1",
+  });
   assert.equal(result.pipelineState.workflowState, "DONE");
   assert.deepEqual(result.pipelineState.findingOverrides, [
     { findingId: "R1", fingerprint },
@@ -6184,9 +6248,15 @@ test("uses one bounded stagnation arbitration before continuing fixes", async (t
       finalizationPassed(),
     ],
     async onRoleRun(role, request, _turn, { projectPath }) {
-      if (role === "worker" && /Resolve every current blocker/u.test(request.prompt)) {
+      if (
+        role === "worker" &&
+        /Resolve every current blocker/u.test(request.prompt)
+      ) {
         fix += 1;
-        await writeFile(join(projectPath, "tracked.txt"), `stagnation fix ${fix}\n`);
+        await writeFile(
+          join(projectPath, "tracked.txt"),
+          `stagnation fix ${fix}\n`,
+        );
       }
     },
   });
@@ -6287,7 +6357,10 @@ test("preserves safe writable changes across a Claude usage rejection", async (t
         !interrupted
       ) {
         interrupted = true;
-        await writeFile(join(projectPath, "tracked.txt"), "interrupted polish\n");
+        await writeFile(
+          join(projectPath, "tracked.txt"),
+          "interrupted polish\n",
+        );
         const error = new Error("Claude usage capacity is unavailable.");
         error.code = "ERR_CLAUDE_USAGE_LIMIT";
         error.recoverable = true;
@@ -6313,7 +6386,10 @@ test("preserves safe writable changes across a Claude usage rejection", async (t
 test("does not let Claude provider recovery mask a control mutation", async (t) => {
   const fixture = await createFixture(t, {
     async onRoleRun(role, request, _turn, { projectPath }) {
-      if (role === "worker" && /Polish the existing local/u.test(request.prompt)) {
+      if (
+        role === "worker" &&
+        /Polish the existing local/u.test(request.prompt)
+      ) {
         await runGit(
           projectPath,
           "remote",
@@ -6345,7 +6421,10 @@ test("fails closed after an ambiguous writable Claude process failure", async (t
         !interrupted
       ) {
         interrupted = true;
-        await writeFile(join(projectPath, "tracked.txt"), "interrupted polish\n");
+        await writeFile(
+          join(projectPath, "tracked.txt"),
+          "interrupted polish\n",
+        );
         const error = new Error("provider-native secret text");
         error.code = "ERR_CLAUDE_PROCESS_INTERRUPTED";
         error.ambiguous = true;
@@ -6426,7 +6505,12 @@ test("recovers an ownerless writable turn with content-only changes", async (t) 
             await readFile(join(projectPath, "partial.txt"), "utf8"),
             "partial polish\n",
           );
-          const staged = await runGit(projectPath, "diff", "--cached", "--name-only");
+          const staged = await runGit(
+            projectPath,
+            "diff",
+            "--cached",
+            "--name-only",
+          );
           assert.doesNotMatch(staged.stdout, /^partial\.txt$/mu);
           recovering = false;
         }
@@ -6542,11 +6626,7 @@ test("accounts for a content-changing interrupted correction before recovery", a
   let interrupted = false;
   const fixture = await createFixture(t, {
     settings: { ...SETTINGS, maxSameFindingRounds: 1 },
-    reviewer: [
-      bootstrapReady("Reviewer"),
-      reviewFindings(),
-      reviewFindings(),
-    ],
+    reviewer: [bootstrapReady("Reviewer"), reviewFindings(), reviewFindings()],
     worker: [
       clarificationReady(),
       bootstrapReady("Worker"),
@@ -6766,13 +6846,7 @@ test("requires Reviewer acceptance for task-authorized validation changes", asyn
     onRoleRun: async (role, request) => {
       if (role === "worker" && request.prompt.includes("Polish the existing")) {
         await writeFile(
-          join(
-            request.cwd,
-            ".agents",
-            "skills",
-            "finalization",
-            "SKILL.md",
-          ),
+          join(request.cwd, ".agents", "skills", "finalization", "SKILL.md"),
           "---\nname: finalization\ndescription: Updated checks.\n---\n\nRun every required check.\n",
         );
       }

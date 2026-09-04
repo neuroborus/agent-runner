@@ -163,11 +163,7 @@ test("pipeline pause projections preserve bounded details and redact private fie
   assert.ok(Object.isFrozen(projected.evidence));
   assert.ok(Object.isFrozen(projected.nextActions));
 
-  for (const pipelineId of [
-    "plan-authoring",
-    "plan-execution",
-    "polishing",
-  ]) {
+  for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
     assert.deepEqual(
       getPipeline(pipelineId).projections.pause(
         pausedRun({
@@ -350,8 +346,7 @@ test("every pipeline projects bounded adapter diagnostics", () => {
       {
         reason: "internal_failure",
         code: "ERR_CODEX_ISOLATION",
-        explanation:
-          `${explanation} Adapter diagnostic: operation_multi_agent.`,
+        explanation: `${explanation} Adapter diagnostic: operation_multi_agent.`,
         evidence: [],
         resumeState: null,
         nextActions: [],
@@ -377,9 +372,7 @@ test("plan-execution pause projection distinguishes fresh-run requirements", () 
       explanation: "Commit 2 conflicts with the accepted clarification.",
       evidence: ["The plan requires the opposite behavior."],
       resumeState: null,
-      nextActions: [
-        { type: "start-new-run", requirement: "revised-plan" },
-      ],
+      nextActions: [{ type: "start-new-run", requirement: "revised-plan" }],
     },
   );
 
@@ -553,7 +546,10 @@ test("pipelines own their pipeline-specific run options", () => {
     "project",
     "task",
   ]);
-  assert.equal(typeof getPipeline("polishing").workflow.createState, "function");
+  assert.equal(
+    typeof getPipeline("polishing").workflow.createState,
+    "function",
+  );
   assert.equal(typeof getPipeline("polishing").workflow.run, "function");
   assert.equal(
     typeof getPipeline("polishing").workflow.validateRun,

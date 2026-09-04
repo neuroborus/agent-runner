@@ -178,7 +178,10 @@ test("loads the disabled switch once when the MCP server starts", async (t) => {
     ),
     false,
   );
-  assert.doesNotMatch(client.getInstructions(), /unexpected issue|reportable/iu);
+  assert.doesNotMatch(
+    client.getInstructions(),
+    /unexpected issue|reportable/iu,
+  );
 });
 
 test("rejects an in-project state root before persisting an action", async (t) => {
@@ -269,7 +272,10 @@ test("writes only caller-supplied Markdown to the configured ignored root", asyn
   assert.match(content, /^## Details$/mu);
   assert.match(content, /- Run ID: `22222222-2222-4222-8222-222222222222`/u);
   assert.match(content, /- Error code: `ERR_EXAMPLE`/u);
-  assert.doesNotMatch(content, /LOCAL_ARTIFACTS|PROJECT_REPORTS|agent-runner\.json/u);
+  assert.doesNotMatch(
+    content,
+    /LOCAL_ARTIFACTS|PROJECT_REPORTS|agent-runner\.json/u,
+  );
   assert.doesNotMatch(content, /AUTOMATIC_SECRET_SHOULD_NOT_APPEAR/u);
 
   assert.deepEqual(await control.unexpectedIssueReport(input), first);
@@ -298,10 +304,7 @@ test("bounds reads of oversized collision files", async (t) => {
     "agent-runner",
     "issues",
   );
-  const collisionPath = join(
-    issuesPath,
-    "issue_2026-08-24_164512.123Z.md",
-  );
+  const collisionPath = join(issuesPath, "issue_2026-08-24_164512.123Z.md");
   await mkdir(issuesPath, { recursive: true });
   await Promise.all([
     writeFile(join(paths.projectPath, ".gitignore"), "/LOCAL_ARTIFACTS/\n"),
@@ -322,10 +325,7 @@ test("bounds reads of oversized collision files", async (t) => {
 
 test("recovers publication interrupted before its idempotency receipt", async (t) => {
   const paths = await repository(t, "agent-runner-issue-recovery-");
-  await writeFile(
-    join(paths.projectPath, ".gitignore"),
-    "/LOCAL_ARTIFACTS/\n",
-  );
+  await writeFile(join(paths.projectPath, ".gitignore"), "/LOCAL_ARTIFACTS/\n");
   const store = createRunStore({ stateRoot: paths.stateRoot });
   let interrupt = true;
   const configuration = runnerConfiguration();
@@ -356,7 +356,10 @@ test("recovers publication interrupted before its idempotency receipt", async (t
     arguments: argumentsWithoutKey,
   });
   assert.equal(intent.status, "intent");
-  assert.match(intent.context.reportPath, /issue_2026-08-24_164512\.123Z\.md$/u);
+  assert.match(
+    intent.context.reportPath,
+    /issue_2026-08-24_164512\.123Z\.md$/u,
+  );
   assert.equal(intent.context.publicationPhase, "published");
   assert.match(intent.context.temporaryPath, /^.+\.tmp$/u);
 
@@ -383,17 +386,16 @@ test("recovers publication interrupted before its idempotency receipt", async (t
     "completed",
   );
   assert.deepEqual(
-    await readdir(join(paths.projectPath, "LOCAL_ARTIFACTS", "agent-runner", "issues")),
+    await readdir(
+      join(paths.projectPath, "LOCAL_ARTIFACTS", "agent-runner", "issues"),
+    ),
     ["issue_2026-08-24_164512.123Z.md"],
   );
 });
 
 test("does not adopt an identical report reserved by another action", async (t) => {
   const paths = await repository(t, "agent-runner-issue-interleaving-");
-  await writeFile(
-    join(paths.projectPath, ".gitignore"),
-    "/LOCAL_ARTIFACTS/\n",
-  );
+  await writeFile(join(paths.projectPath, ".gitignore"), "/LOCAL_ARTIFACTS/\n");
   const store = createRunStore({ stateRoot: paths.stateRoot });
   const issuesPath = join(
     paths.projectPath,
@@ -401,10 +403,7 @@ test("does not adopt an identical report reserved by another action", async (t) 
     "agent-runner",
     "issues",
   );
-  const reportPath = join(
-    issuesPath,
-    "issue_2026-08-24_164512.123Z.md",
-  );
+  const reportPath = join(issuesPath, "issue_2026-08-24_164512.123Z.md");
   const inputs = [
     reportInput(paths.projectPath),
     reportInput(paths.projectPath, { idempotencyKey: "issue-report-2" }),
@@ -456,10 +455,7 @@ test("does not adopt an identical report reserved by another action", async (t) 
 
 test("advances after a collision races interrupted recovery", async (t) => {
   const paths = await repository(t, "agent-runner-issue-recovery-race-");
-  await writeFile(
-    join(paths.projectPath, ".gitignore"),
-    "/LOCAL_ARTIFACTS/\n",
-  );
+  await writeFile(join(paths.projectPath, ".gitignore"), "/LOCAL_ARTIFACTS/\n");
   const store = createRunStore({ stateRoot: paths.stateRoot });
   const baseOptions = {
     clock: () => FIXED_TIME,
@@ -568,7 +564,10 @@ test("rejects unignored, tracked, symbolic, and hard-linked destinations", async
     const paths = await repository(t, "agent-runner-issue-symbolic-");
     const outsidePath = join(paths.root, "outside");
     await mkdir(outsidePath);
-    await writeFile(join(paths.projectPath, ".gitignore"), "/LOCAL_ARTIFACTS/\n");
+    await writeFile(
+      join(paths.projectPath, ".gitignore"),
+      "/LOCAL_ARTIFACTS/\n",
+    );
     await symlink(outsidePath, join(paths.projectPath, "LOCAL_ARTIFACTS"));
     await assert.rejects(
       reportingControl(paths).unexpectedIssueReport(

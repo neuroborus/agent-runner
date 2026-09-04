@@ -354,19 +354,16 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
     /fresh start for a long, multi-topic, or uncertain source session/u,
   );
   const { tools } = await client.listTools();
-  assert.deepEqual(
-    tools.map((tool) => tool.name).sort(),
-    [
-      "pipelines_list",
-      "run_activity",
-      "run_respond",
-      "run_resume",
-      "run_start",
-      "run_status",
-      "run_wait",
-      "unexpected_issue_report",
-    ],
-  );
+  assert.deepEqual(tools.map((tool) => tool.name).sort(), [
+    "pipelines_list",
+    "run_activity",
+    "run_respond",
+    "run_resume",
+    "run_start",
+    "run_status",
+    "run_wait",
+    "unexpected_issue_report",
+  ]);
   assert.equal(
     tools.find((tool) => tool.name === "run_status").annotations.readOnlyHint,
     true,
@@ -710,10 +707,7 @@ test("rejects detached pipeline skew and retries the exact start after restart",
         : pipeline,
     ),
   });
-  assert.notEqual(
-    oldParentToken,
-    DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
-  );
+  assert.notEqual(oldParentToken, DETACHED_RUNTIME_COMPATIBILITY_TOKEN);
   let childTouchedRunStore = false;
   let childExitCode = null;
   let launchedToken = null;
@@ -732,8 +726,7 @@ test("rejects detached pipeline skew and retries the exact start after restart",
       queueMicrotask(async () => {
         childExitCode = await main(["resume", "--run", id], {
           environment: {
-            [DETACHED_RUNTIME_COMPATIBILITY_ENV]:
-              expectedRuntimeCompatibility,
+            [DETACHED_RUNTIME_COMPATIBILITY_ENV]: expectedRuntimeCompatibility,
           },
           runner: childRunner,
           stderr: { write() {} },
@@ -767,10 +760,7 @@ test("rejects detached pipeline skew and retries the exact start after restart",
   assert.equal(childTouchedRunStore, false);
   assert.equal((await store.loadRun(RUN_ID)).revision, 1);
   assert.equal(await store.runIsLeased(RUN_ID), false);
-  assert.equal(
-    await store.worktreeIsLeased(paths.projectPath, RUN_ID),
-    false,
-  );
+  assert.equal(await store.worktreeIsLeased(paths.projectPath, RUN_ID), false);
   const identity = {
     key: input.idempotencyKey,
     tool: "run_start",
@@ -1168,9 +1158,7 @@ test("records complete pending answers before detached continuation", async (t) 
       inputRequest: {
         id: "request-1",
         kind: "clarification",
-        questions: [
-          { id: "q1", question: "Choose?", options: ["A", "B"] },
-        ],
+        questions: [{ id: "q1", question: "Choose?", options: ["A", "B"] }],
         rationale: "Required for scope.",
         artifactPath: pendingEdit.transcriptPath,
       },
@@ -1221,12 +1209,14 @@ test("records complete pending answers before detached continuation", async (t) 
   assert.equal(status.pendingInput, null);
   assert.equal(status.revision, 3);
   assert.equal(
-    (await control.runWait({
-      runId: RUN_ID,
-      cursor: 3,
-      timeoutMs: 10,
-      progress: false,
-    })).timedOut,
+    (
+      await control.runWait({
+        runId: RUN_ID,
+        cursor: 3,
+        timeoutMs: 10,
+        progress: false,
+      })
+    ).timedOut,
     true,
   );
   await assert.rejects(
@@ -1257,10 +1247,8 @@ test("records complete pending answers before detached continuation", async (t) 
     },
     workflowState: "WAITING_FOR_USER",
   });
-  const {
-    idempotencyKey: recoveredKey,
-    ...recoveredArguments
-  } = recoveredInput;
+  const { idempotencyKey: recoveredKey, ...recoveredArguments } =
+    recoveredInput;
   const intent = await store.beginAction({
     key: recoveredKey,
     tool: "run_respond",
@@ -1285,11 +1273,13 @@ test("records complete pending answers before detached continuation", async (t) 
   });
   assert.deepEqual(launches, [RUN_ID, SECOND_RUN_ID]);
   assert.equal(
-    (await store.readAction({
-      key: recoveredKey,
-      tool: "run_respond",
-      arguments: recoveredArguments,
-    })).status,
+    (
+      await store.readAction({
+        key: recoveredKey,
+        tool: "run_respond",
+        arguments: recoveredArguments,
+      })
+    ).status,
     "completed",
   );
 });
@@ -1330,9 +1320,11 @@ test("responds to pending input projected from a compatible legacy run", async (
     runner,
     runStore: store,
   });
-  const pendingInput = (await control.runStatus({
-    runId: paused.run.runId,
-  })).pendingInput;
+  const pendingInput = (
+    await control.runStatus({
+      runId: paused.run.runId,
+    })
+  ).pendingInput;
   const input = {
     idempotencyKey: "legacy-response-key",
     runId: paused.run.runId,
@@ -1434,45 +1426,42 @@ test("resumes only an action valid for the persisted pause", async (t) => {
     },
     workflowState: "WAITING_FOR_USER",
   });
-  assert.deepEqual(
-    await control.runStatus({ runId: FIFTH_RUN_ID }),
-    {
-      runId: FIFTH_RUN_ID,
-      pipelineId: "polishing",
-      mode: "independent",
-      revision: 1,
-      activityCursor: 1,
-      status: "WAITING_FOR_USER",
-      execution: { state: "idle", role: null, phase: null },
-      currentStep: null,
-      pause: {
-        reason: "fix_limit_reached",
-        code: null,
-        explanation: "Polishing reached its configured fix limit.",
-        evidence: [],
-        resumeState: "POLISH",
-        nextActions: [
-          {
-            type: "resume",
-            action: { type: "extra-fix-rounds", amount: 1 },
-          },
-          {
-            type: "resume",
-            action: { type: "override-finding", findingId: "R1" },
-          },
-        ],
-      },
-      clarificationPath: null,
-      planPath: null,
-      pendingInput: null,
-      findings: [{ id: "R1", summary: "Review is incomplete." }],
-      completedCommits: [],
-      stagnationDirection: null,
-      finalizedFingerprint: null,
-      reviewedFingerprint: "a".repeat(12),
-      stateDirectory: await store.getRunDirectory(FIFTH_RUN_ID),
+  assert.deepEqual(await control.runStatus({ runId: FIFTH_RUN_ID }), {
+    runId: FIFTH_RUN_ID,
+    pipelineId: "polishing",
+    mode: "independent",
+    revision: 1,
+    activityCursor: 1,
+    status: "WAITING_FOR_USER",
+    execution: { state: "idle", role: null, phase: null },
+    currentStep: null,
+    pause: {
+      reason: "fix_limit_reached",
+      code: null,
+      explanation: "Polishing reached its configured fix limit.",
+      evidence: [],
+      resumeState: "POLISH",
+      nextActions: [
+        {
+          type: "resume",
+          action: { type: "extra-fix-rounds", amount: 1 },
+        },
+        {
+          type: "resume",
+          action: { type: "override-finding", findingId: "R1" },
+        },
+      ],
     },
-  );
+    clarificationPath: null,
+    planPath: null,
+    pendingInput: null,
+    findings: [{ id: "R1", summary: "Review is incomplete." }],
+    completedCommits: [],
+    stagnationDirection: null,
+    finalizedFingerprint: null,
+    reviewedFingerprint: "a".repeat(12),
+    stateDirectory: await store.getRunDirectory(FIFTH_RUN_ID),
+  });
   assert.deepEqual(
     await control.runResume({
       ...input,
@@ -1914,7 +1903,10 @@ test("waits by revision, emits public progress, and leaves timeouts read-only", 
   assert.equal(waited.status, "WAITING_FOR_USER");
   assert.equal(waited.mode, "independent");
   assert.equal(waited.timedOut, false);
-  assert.match(notifications.at(-1).params.message, /^\[planner\/clarification\]/u);
+  assert.match(
+    notifications.at(-1).params.message,
+    /^\[planner\/clarification\]/u,
+  );
   assert.equal(notifications.at(-1).params.progress, waited.revision);
   const activity = await control.runActivity({
     runId: RUN_ID,
@@ -2190,8 +2182,7 @@ test("launches continuation independently from the MCP process streams", async (
   assert.equal(calls[0].options.stdio, "ignore");
   assert.deepEqual(calls[0].options.env, {
     XDG_STATE_HOME: "/state",
-    [DETACHED_RUNTIME_COMPATIBILITY_ENV]:
-      DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
+    [DETACHED_RUNTIME_COMPATIBILITY_ENV]: DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
   });
   await assert.rejects(
     launch(RUN_ID, null, { expectedRuntimeCompatibility: "other" }),

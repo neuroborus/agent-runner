@@ -201,7 +201,9 @@ function inputEvidence(inputs, canonicalPlan, clarification) {
       ? inputs.taskClarifications.content
       : "(not provided)";
   const context =
-    inputs.context?.content.length > 0 ? inputs.context.content : "(not provided)";
+    inputs.context?.content.length > 0
+      ? inputs.context.content
+      : "(not provided)";
   const executionClarifications =
     clarification.content.length > 0 ? clarification.content : "(empty)";
   return `Task (${inputs.task.path}):
@@ -262,7 +264,8 @@ function canonicalPlan(source) {
 }
 
 function diagnosticCode(cause, fallback) {
-  return typeof cause?.code === "string" && /^[A-Z0-9_]{1,64}$/u.test(cause.code)
+  return typeof cause?.code === "string" &&
+    /^[A-Z0-9_]{1,64}$/u.test(cause.code)
     ? cause.code
     : fallback;
 }
@@ -285,12 +288,11 @@ function outputDiagnostic(cause, context) {
 }
 
 function outputDiagnostics(cause, context) {
-  const candidates =
-    Array.isArray(cause?.diagnostics)
-      ? cause.diagnostics.length !== 0 || cause?.diagnostic === undefined
-        ? cause.diagnostics
-        : [cause.diagnostic]
-      : [cause?.diagnostic];
+  const candidates = Array.isArray(cause?.diagnostics)
+    ? cause.diagnostics.length !== 0 || cause?.diagnostic === undefined
+      ? cause.diagnostics
+      : [cause.diagnostic]
+    : [cause?.diagnostic];
   const diagnostics = candidates.map((diagnostic) =>
     outputDiagnostic({ diagnostic }, context),
   );
@@ -345,9 +347,7 @@ function lazyOutputContext(phase) {
     role: "worker",
     phase: phase === "CHECK_AND_FIX" ? "check-and-fix" : "clean-confirm",
     contract:
-      phase === "CHECK_AND_FIX"
-        ? "lazy-check-and-fix"
-        : "lazy-clean-confirm",
+      phase === "CHECK_AND_FIX" ? "lazy-check-and-fix" : "lazy-clean-confirm",
   });
 }
 
@@ -398,9 +398,7 @@ function invalidRoleOutputBatch(message, context, diagnostics) {
 }
 
 function persistedOutputDiagnostic(value) {
-  return isOutputDiagnostic(value)
-    ? Object.freeze({ ...value })
-    : undefined;
+  return isOutputDiagnostic(value) ? Object.freeze({ ...value }) : undefined;
 }
 
 function normalizeRoleOutput(normalize, output, context) {
@@ -445,10 +443,7 @@ function normalizeBootstrapRoleOutputCandidate(
   );
 }
 
-function normalizeBootstrapReconciliationOutput(
-  output,
-  phase = "bootstrap",
-) {
+function normalizeBootstrapReconciliationOutput(output, phase = "bootstrap") {
   return normalizeRoleOutput(
     normalizeReconciliationResult,
     output,
@@ -502,9 +497,7 @@ function normalizeValidationMigrationArbitrationOutput(output) {
     "validation-migration",
   );
   if (
-    !["USE_WORKER", "USE_REVIEWER", "SYNTHESIZE"].includes(
-      result.direction,
-    )
+    !["USE_WORKER", "USE_REVIEWER", "SYNTHESIZE"].includes(result.direction)
   ) {
     throw invalidRoleOutput(
       "Validation migration requires an inventory direction.",
@@ -581,8 +574,7 @@ function normalizeReviewRoleOutput(
           },
         ]
       : []),
-    ...(result.validationChange === "REJECTED" &&
-    result.status !== "FINDINGS"
+    ...(result.validationChange === "REJECTED" && result.status !== "FINDINGS"
       ? [
           {
             field: "status",
@@ -723,8 +715,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
   }
 
   async function pausePreEffectCommitRejection(rejection) {
-    const reason =
-      rejection.recoverable ? "backend_unavailable" : "commit_failed";
+    const reason = rejection.recoverable
+      ? "backend_unavailable"
+      : "commit_failed";
     await transition(
       {
         ...state(),
@@ -965,7 +958,12 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     currentRun = await runtime.recordChildSession(
       { role, sessionId, contextKey },
       {
-        activity: activity(role, "session", "started", `${role} session recorded.`),
+        activity: activity(
+          role,
+          "session",
+          "started",
+          `${role} session recorded.`,
+        ),
       },
     );
     assertRun(currentRun);
@@ -1053,8 +1051,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       return true;
     }
     return (
-      turn.phase === "resolve-findings" &&
-      counters().fixRounds < fixBudget()
+      turn.phase === "resolve-findings" && counters().fixRounds < fixBudget()
     );
   }
 
@@ -1083,8 +1080,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     }
     const correctionWasReconciled =
       interruptedCorrectionWasReconciled(interruptedTurn);
-    const supersededByValidationMigration =
-      state().validationMigrationPending;
+    const supersededByValidationMigration = state().validationMigrationPending;
     const allowWorkspaceChanges = interruptedTurnIsWritable(interruptedTurn);
     let reconciledRepository;
     try {
@@ -1114,7 +1110,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         reconciledRepository.contentFingerprint;
       const changedCorrection =
         interruptedTurn.phase === "resolve-findings" && contentChanged;
-      if (!isDeepStrictEqual(reconciledRepository, current.repositoryBaseline)) {
+      if (
+        !isDeepStrictEqual(reconciledRepository, current.repositoryBaseline)
+      ) {
         await transition(
           {
             ...current,
@@ -1143,8 +1141,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
                 nextCounters: {
                   ...counters(),
                   fixRounds:
-                    counters().fixRounds +
-                    (current.pendingCorrection ? 0 : 1),
+                    counters().fixRounds + (current.pendingCorrection ? 0 : 1),
                 },
               }
             : {},
@@ -1252,17 +1249,16 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         ? latestSession.sessionId
         : undefined;
     const sourceSession = currentRun.sessionLineage.source;
-    const session =
-      freshSession
-        ? undefined
-        : previousSession !== undefined
-          ? { id: previousSession, mode: "continue" }
-          : !recovering &&
-              sourceSession !== null &&
-              role !== "arbiter" &&
-              (!lazyPrimary || !state().lazySourceForkConsumed)
-            ? { id: sourceSession, mode: "fork" }
-            : undefined;
+    const session = freshSession
+      ? undefined
+      : previousSession !== undefined
+        ? { id: previousSession, mode: "continue" }
+        : !recovering &&
+            sourceSession !== null &&
+            role !== "arbiter" &&
+            (!lazyPrimary || !state().lazySourceForkConsumed)
+          ? { id: sourceSession, mode: "fork" }
+          : undefined;
     const roleConfiguration = currentRun.roles[role];
     const recoveryPrompt = completeRolePrompt(buildPrompt(context));
     const executionPreferences = Object.fromEntries(
@@ -1334,8 +1330,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           baseline.contentFingerprint !==
           nextRepositoryBaseline.contentFingerprint;
         const changedCorrection =
-          current.workflowState === "RESOLVE_FINDINGS" &&
-          contentChanged;
+          current.workflowState === "RESOLVE_FINDINGS" && contentChanged;
         const changedLazyCheck =
           current.workflowState === "CHECK_AND_FIX" && contentChanged;
         if (
@@ -1404,7 +1399,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
                       fixRounds: counters().fixRounds + 1,
                     },
                   }
-              : {},
+                : {},
           );
         }
       }
@@ -1439,12 +1434,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           )
         : invalidRoleOutput(`${role} returned no response.`, outputContext);
     }
-    await recordSession(
-      role,
-      response.sessionId,
-      previousSession,
-      contextKey,
-    );
+    await recordSession(role, response.sessionId, previousSession, contextKey);
     if (!isRecord(response.structured)) {
       throw outputContext === undefined
         ? workflowError(
@@ -1503,7 +1493,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     return runtime.clarifications.prepareEdit({
       artifactRoot: state().repositoryBaseline.projectPath,
       transcriptPath: state().clarificationPath,
-      expectedHash: options?.expectedHash ?? currentRun.hashes.executionClarifications,
+      expectedHash:
+        options?.expectedHash ?? currentRun.hashes.executionClarifications,
       suspendedState,
       action,
       persistPendingEdit: (authorization) =>
@@ -1580,9 +1571,12 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       reason,
       options,
     );
-    const editorResult = await runtime.clarifications.openEditor(authorization, {
-      consumePendingEdit: consumeEdit,
-    });
+    const editorResult = await runtime.clarifications.openEditor(
+      authorization,
+      {
+        consumePendingEdit: consumeEdit,
+      },
+    );
     if (editorResult.status === "WAITING_FOR_USER") {
       return false;
     }
@@ -1709,7 +1703,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
   }
 
   function planStep() {
-    return parseCommitPlan(state().canonicalPlan).steps[state().currentStep - 1];
+    return parseCommitPlan(state().canonicalPlan).steps[
+      state().currentStep - 1
+    ];
   }
 
   function fixBudget() {
@@ -1938,9 +1934,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     }
     const resolvedInventory =
       ["READY", "RESOLVED"].includes(result.status) ||
-      ["USE_WORKER", "USE_REVIEWER", "SYNTHESIZE"].includes(
-        result.direction,
-      );
+      ["USE_WORKER", "USE_REVIEWER", "SYNTHESIZE"].includes(result.direction);
     const omitsTrustedCommand =
       resolvedInventory &&
       state().trustedValidation.commands.some(
@@ -2041,10 +2035,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         await transition(
           {
             ...state(),
-            bootstrapCorrections: [
-              ...state().bootstrapCorrections,
-              correction,
-            ],
+            bootstrapCorrections: [...state().bootstrapCorrections, correction],
             pendingBootstrapCorrection: correction,
           },
           {
@@ -2113,7 +2104,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       current.pendingCommit?.status === "consumed" &&
       (["commit_failed", "commit_contract_violated"].includes(
         currentRun.pause?.reason,
-      ) || currentRun.pause?.resumeState === "COMMIT");
+      ) ||
+        currentRun.pause?.resumeState === "COMMIT");
     const resumeImplementation =
       currentRun.pause?.resumeState === "IMPLEMENT" &&
       current.finalizationResult === null;
@@ -2303,9 +2295,7 @@ ${JSON.stringify(
       return Object.freeze({ required: false, skillPath: null });
     }
     const candidates =
-      policy === "auto"
-        ? CONVENTIONAL_FINALIZATION_SKILL_PATHS
-        : [policy];
+      policy === "auto" ? CONVENTIONAL_FINALIZATION_SKILL_PATHS : [policy];
     for (const skillPath of candidates) {
       let inspection;
       try {
@@ -2380,8 +2370,8 @@ ${JSON.stringify(
   }
 
   function exhaustedStableFindingIds() {
-    return state().findings
-      .map(({ id }) => id)
+    return state()
+      .findings.map(({ id }) => id)
       .filter(
         (id) =>
           (state().sameFindingRounds[id] ?? 0) >=
@@ -2396,17 +2386,16 @@ ${JSON.stringify(
   }
 
   function priorFindingDecisions(findingIds) {
-    const relevantIds =
-      findingIds === undefined ? null : new Set(findingIds);
+    const relevantIds = findingIds === undefined ? null : new Set(findingIds);
     return {
-      disputes: state().disputeHistory.filter(({ findingId }) =>
-        relevantIds === null || relevantIds.has(findingId),
+      disputes: state().disputeHistory.filter(
+        ({ findingId }) => relevantIds === null || relevantIds.has(findingId),
       ),
-      arbitrations: state().findingArbitrations.filter(({ findingId }) =>
-        relevantIds === null || relevantIds.has(findingId),
+      arbitrations: state().findingArbitrations.filter(
+        ({ findingId }) => relevantIds === null || relevantIds.has(findingId),
       ),
-      overrides: state().findingOverrides.filter(({ findingId }) =>
-        relevantIds === null || relevantIds.has(findingId),
+      overrides: state().findingOverrides.filter(
+        ({ findingId }) => relevantIds === null || relevantIds.has(findingId),
       ),
     };
   }
@@ -2502,7 +2491,9 @@ ${JSON.stringify(
       throw cause;
     }
     if (preflight?.snapshot?.projectPath !== repositoryPath) {
-      throw workflowError("Git preflight returned an unstable repository root.");
+      throw workflowError(
+        "Git preflight returned an unstable repository root.",
+      );
     }
     const preflightRoles = Object.keys(currentRun.roles).filter(
       (role) => role !== "arbiter",
@@ -3044,11 +3035,11 @@ ${step.body}${
                 : ""
             }
 ${
-              correction === undefined
-                ? ""
-                : `\n${FINALIZATION_CORRECTION_INSTRUCTIONS}\n\n` +
-                  `Correction diagnostic batch:\n${JSON.stringify(correction, null, 2)}`
-            }`,
+  correction === undefined
+    ? ""
+    : `\n${FINALIZATION_CORRECTION_INSTRUCTIONS}\n\n` +
+      `Correction diagnostic batch:\n${JSON.stringify(correction, null, 2)}`
+}`,
             {
               access:
                 correction === undefined ? "workspace-write" : "read-only",
@@ -3360,8 +3351,7 @@ ${
         issues,
         checks,
         validationInfrastructureFingerprint: candidateValidationFingerprint,
-        trustedCommandFingerprint:
-          state().trustedValidation.commandFingerprint,
+        trustedCommandFingerprint: state().trustedValidation.commandFingerprint,
         trustedConfigurationFingerprint:
           state().trustedValidation.configurationFingerprint,
         validationChanged,
@@ -3454,8 +3444,7 @@ ${JSON.stringify(
     validationInfrastructure: current.validationInfrastructure,
     validationInfrastructureFingerprint:
       current.validationInfrastructureFingerprint,
-    trustedCommandFingerprint:
-      current.trustedValidation.commandFingerprint,
+    trustedCommandFingerprint: current.trustedValidation.commandFingerprint,
     trustedConfigurationFingerprint:
       current.trustedValidation.configurationFingerprint,
   },
@@ -3559,10 +3548,7 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
       return false;
     }
     const stableFindingIds = exhaustedStableFindingIds();
-    if (
-      current.pendingLazyCorrection === null &&
-      stableFindingIds.length > 0
-    ) {
+    if (current.pendingLazyCorrection === null && stableFindingIds.length > 0) {
       await pause("no_progress", {
         findingIds: stableFindingIds,
         reason: "stable_findings",
@@ -3572,8 +3558,7 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
     }
     if (
       current.pendingLazyCorrection === null &&
-      current.blockedSinceStagnation >=
-      current.settings.stagnationWindowRounds
+      current.blockedSinceStagnation >= current.settings.stagnationWindowRounds
     ) {
       await pause("no_progress", {
         correctionRounds: counters().correctionRounds,
@@ -3983,10 +3968,7 @@ ${JSON.stringify(state().previousFindings, null, 2)}${lazyCorrectionPrompt(corre
       const correctionScope = reviewCorrectionScope(current);
       if (
         current.reviewCorrection !== null &&
-        !reviewCorrectionMatchesScope(
-          current.reviewCorrection,
-          correctionScope,
-        )
+        !reviewCorrectionMatchesScope(current.reviewCorrection, correctionScope)
       ) {
         await transition({
           ...current,
@@ -4017,8 +3999,7 @@ ${JSON.stringify(
     validationInfrastructure: current.validationInfrastructure,
     validationInfrastructureFingerprint:
       current.validationInfrastructureFingerprint,
-    trustedCommandFingerprint:
-      current.trustedValidation.commandFingerprint,
+    trustedCommandFingerprint: current.trustedValidation.commandFingerprint,
     trustedConfigurationFingerprint:
       current.trustedValidation.configurationFingerprint,
   },
@@ -4154,9 +4135,7 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
     }
     const reviewedFingerprint = await contentFingerprint();
     if (reviewedFingerprint !== scope.fingerprint) {
-      await pauseForReviewScopeDrift(
-        "ERR_REVIEW_CONTENT_FINGERPRINT_CHANGED",
-      );
+      await pauseForReviewScopeDrift("ERR_REVIEW_CONTENT_FINGERPRINT_CHANGED");
       return false;
     }
     const reviewResult = {
@@ -4182,9 +4161,7 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
         return latest?.direction === "UPHOLD" &&
           latest.attempt === current.disputeCounts[id] &&
           current.disputeCounts[id] >= current.settings.maxDisputesPerFinding &&
-          !current.findingArbitrations.some(
-            ({ findingId }) => findingId === id,
-          )
+          !current.findingArbitrations.some(({ findingId }) => findingId === id)
           ? [
               {
                 findingId: id,
@@ -4243,15 +4220,13 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
               validationInfrastructure:
                 current.finalizationResult.validationInfrastructure,
               validationInfrastructureFingerprint:
-                current.finalizationResult
-                  .validationInfrastructureFingerprint,
+                current.finalizationResult.validationInfrastructureFingerprint,
             }
           : {}),
         reviewResult,
         reviewedFingerprint,
         findings: [],
-        previousFindings:
-          result.status === "FINDINGS" ? result.findings : [],
+        previousFindings: result.status === "FINDINGS" ? result.findings : [],
         pendingDisputes: [],
         pendingCorrection: false,
         reviewerStep: current.currentStep,
@@ -4367,9 +4342,7 @@ ${JSON.stringify(current.pendingDisputes, null, 2)}`,
 
   async function arbitrateFinding(dispute) {
     const current = state();
-    const finding = current.findings.find(
-      ({ id }) => id === dispute.findingId,
-    );
+    const finding = current.findings.find(({ id }) => id === dispute.findingId);
     const reviewerResponse = latestDispute(dispute.findingId);
     const output = await runRole(
       "arbiter",
@@ -4588,9 +4561,7 @@ ${JSON.stringify(
   async function runResolutionTurn() {
     const current = state();
     if (current.finalizationResult?.status === "PASS") {
-      const arbitration = current.pendingDisputes.find(
-        disputeNeedsArbitration,
-      );
+      const arbitration = current.pendingDisputes.find(disputeNeedsArbitration);
       if (arbitration !== undefined) {
         return arbitrateFinding(arbitration);
       }
@@ -4608,8 +4579,7 @@ ${JSON.stringify(
       return false;
     }
     if (
-      current.blockedSinceStagnation >=
-      current.settings.stagnationWindowRounds
+      current.blockedSinceStagnation >= current.settings.stagnationWindowRounds
     ) {
       if (
         current.settings.mode === "lazy" ||
@@ -4685,18 +4655,16 @@ ${JSON.stringify(
     const result = normalizeResolutionResult(
       output,
       blockers,
-      new Set(
-        [
-          ...current.findingArbitrations
-            .filter(({ direction }) => direction === "REVIEWER_CORRECT")
-            .map(({ findingId }) => findingId),
-          ...Object.entries(current.disputeCounts)
-            .filter(
-              ([, count]) => count >= current.settings.maxDisputesPerFinding,
-            )
-            .map(([findingId]) => findingId),
-        ],
-      ),
+      new Set([
+        ...current.findingArbitrations
+          .filter(({ direction }) => direction === "REVIEWER_CORRECT")
+          .map(({ findingId }) => findingId),
+        ...Object.entries(current.disputeCounts)
+          .filter(
+            ([, count]) => count >= current.settings.maxDisputesPerFinding,
+          )
+          .map(([findingId]) => findingId),
+      ]),
     );
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "IMPLEMENT");
@@ -4797,9 +4765,7 @@ ${JSON.stringify(
         {
           nextCounters: {
             ...counters(),
-            fixRounds:
-              counters().fixRounds +
-              (fixRoundAlreadyCounted ? 0 : 1),
+            fixRounds: counters().fixRounds + (fixRoundAlreadyCounted ? 0 : 1),
           },
           publicActivity: activity(
             "worker",
@@ -4903,8 +4869,7 @@ ${JSON.stringify(
     let agentError;
     const commitTurn = activeTurn("worker", "COMMIT");
     let commitTurnNeedsReconciliation =
-      currentRun.activeTurn !== undefined &&
-      currentRun.activeTurn !== null;
+      currentRun.activeTurn !== undefined && currentRun.activeTurn !== null;
     if (
       commitTurnNeedsReconciliation &&
       !isDeepStrictEqual(currentRun.activeTurn, commitTurn)
@@ -5006,10 +4971,7 @@ ${step.subject}`),
       const preEffectRejection =
         agentError?.effectStarted === false
           ? Object.freeze({
-              code: diagnosticCode(
-                agentError,
-                "ERR_COMMIT_ADAPTER_REJECTED",
-              ),
+              code: diagnosticCode(agentError, "ERR_COMMIT_ADAPTER_REJECTED"),
               recoverable: agentError?.recoverable === true,
             })
           : null;
@@ -5039,10 +5001,9 @@ ${step.subject}`),
       await finishCommitTurn();
     } catch (cause) {
       if (
-        ![
-          "ERR_COMMIT_NOT_CREATED",
-          "ERR_COMMIT_CONTRACT_VIOLATED",
-        ].includes(cause?.code)
+        !["ERR_COMMIT_NOT_CREATED", "ERR_COMMIT_CONTRACT_VIOLATED"].includes(
+          cause?.code,
+        )
       ) {
         throw cause;
       }
@@ -5051,20 +5012,15 @@ ${step.subject}`),
         cause.code === "ERR_COMMIT_NOT_CREATED" &&
         pendingCommit.preEffectRejection !== null
       ) {
-        await pausePreEffectCommitRejection(
-          pendingCommit.preEffectRejection,
-        );
+        await pausePreEffectCommitRejection(pendingCommit.preEffectRejection);
         return false;
       }
-      const contractViolation =
-        cause?.code === "ERR_COMMIT_CONTRACT_VIOLATED";
+      const contractViolation = cause?.code === "ERR_COMMIT_CONTRACT_VIOLATED";
       await pause(
         contractViolation ? "commit_contract_violated" : "commit_failed",
         {
           code: diagnosticCode(cause, "ERR_COMMIT_FAILED"),
-          ...(Array.isArray(cause?.changes)
-            ? { changes: cause.changes }
-            : {}),
+          ...(Array.isArray(cause?.changes) ? { changes: cause.changes } : {}),
           ...(agentError === undefined
             ? {}
             : {
@@ -5126,8 +5082,9 @@ ${step.subject}`),
         ...state(),
         ...nextStepState,
         workflowState: done ? "DONE" : "IMPLEMENT",
-        validationMigrationPending:
-          done ? false : current.validationMigrationPending,
+        validationMigrationPending: done
+          ? false
+          : current.validationMigrationPending,
         repositoryBaseline: nextRepositoryBaseline,
         currentStep: done ? null : current.currentStep + 1,
         reviewerStep: null,
@@ -5233,9 +5190,9 @@ ${step.subject}`),
       state().preflightComplete &&
       !interruptedRepositoryReconciled &&
       !["WAITING_FOR_USER", "FAILED", "DONE"].includes(state().workflowState) &&
-      (!commitVerificationPending &&
-        ((await readCurrentInputs()) === null ||
-          !(await verifyPersistedRepository())))
+      !commitVerificationPending &&
+      ((await readCurrentInputs()) === null ||
+        !(await verifyPersistedRepository()))
     ) {
       return currentRun;
     }
@@ -5498,16 +5455,14 @@ ${evidence}`,
       }
 
       if (
-        [
-          "WAITING_FOR_USER",
-          "DONE",
-          "FAILED",
-        ].includes(current.workflowState)
+        ["WAITING_FOR_USER", "DONE", "FAILED"].includes(current.workflowState)
       ) {
         return currentRun;
       }
 
-      throw workflowError(`Unsupported workflow state: ${current.workflowState}.`);
+      throw workflowError(
+        `Unsupported workflow state: ${current.workflowState}.`,
+      );
     }
   } catch (cause) {
     const preflightComplete = state().preflightComplete;
@@ -5557,7 +5512,11 @@ ${evidence}`,
     ) {
       return invalidateInputs("clarifications_changed");
     }
-    if (preflightComplete && filesystemDrift && inputPaths.includes(causePath)) {
+    if (
+      preflightComplete &&
+      filesystemDrift &&
+      inputPaths.includes(causePath)
+    ) {
       return invalidateInputs("task_input_changed");
     }
     return fail(cause);

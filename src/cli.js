@@ -1,10 +1,7 @@
 import { parseArgs } from "node:util";
 
 import packageMetadata from "../package.json" with { type: "json" };
-import {
-  DETACHED_RUNTIME_COMPATIBILITY_ENV,
-  serveMcp,
-} from "./mcp.js";
+import { DETACHED_RUNTIME_COMPATIBILITY_ENV, serveMcp } from "./mcp.js";
 import { getPipeline, listPipelines } from "./pipeline-registry.js";
 import { createRunner, parseSourceSession } from "./runner.js";
 import { RUNTIME_VERSION_SKEW_EXIT_CODE } from "./state.js";
@@ -199,9 +196,7 @@ function runSummary({ directoryPath, run }) {
   if (reviewed !== null) {
     lines.push(`Reviewed fingerprint: ${reviewed}`);
   }
-  if (
-    status.completedCommits.length > 0
-  ) {
+  if (status.completedCommits.length > 0) {
     lines.push(
       `Commits: ${status.completedCommits.map(shortFingerprint).join(", ")}`,
     );
@@ -410,9 +405,9 @@ export async function main(
   }
 
   if (command === "pipelines") {
-    const output = PIPELINES
-      .map((entry) => `${entry.id}\t${entry.description}`)
-      .join("\n");
+    const output = PIPELINES.map(
+      (entry) => `${entry.id}\t${entry.description}`,
+    ).join("\n");
     stdout.write(`${output}\n`);
     return 0;
   }

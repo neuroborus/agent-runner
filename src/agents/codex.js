@@ -270,9 +270,8 @@ export class CodexAdapterError extends Error {
     if (failureClass === STRUCTURED_OUTPUT_FAILURE_CLASS) {
       this.failureClass = failureClass;
     }
-    const normalizedDiagnosticClass = normalizeCodexDiagnosticClass(
-      diagnosticClass,
-    );
+    const normalizedDiagnosticClass =
+      normalizeCodexDiagnosticClass(diagnosticClass);
     if (normalizedDiagnosticClass !== undefined) {
       this.diagnosticClass = normalizedDiagnosticClass;
     }
@@ -447,9 +446,7 @@ function assertIsolatedConfiguration(
   let diagnosticClass;
   if (!isRecord(config) || !isRecord(features)) {
     diagnosticClass = "isolation_effective_configuration";
-  } else if (
-    DISABLED_FEATURES.some((feature) => features[feature] !== false)
-  ) {
+  } else if (DISABLED_FEATURES.some((feature) => features[feature] !== false)) {
     diagnosticClass = "isolation_feature";
   } else if (features.code_mode_host !== true) {
     diagnosticClass = "isolation_command_host";
@@ -521,9 +518,7 @@ function sandboxFor(request, workspaceStorage) {
 }
 
 function threadSandboxFor(request) {
-  return request.access === "workspace-write"
-    ? "workspace-write"
-    : "read-only";
+  return request.access === "workspace-write" ? "workspace-write" : "read-only";
 }
 
 function threadOptions(request) {
@@ -797,20 +792,10 @@ async function resolveCompletedTurn(client, value, threadId, turnId) {
   if (matches.length !== 1) {
     throw invalidCompletedTurn();
   }
-  return assertCompletedTurn(
-    { threadId, turn: matches[0] },
-    threadId,
-    turnId,
-  );
+  return assertCompletedTurn({ threadId, turn: matches[0] }, threadId, turnId);
 }
 
-async function startTurn(
-  client,
-  request,
-  threadId,
-  prompt,
-  workspaceStorage,
-) {
+async function startTurn(client, request, threadId, prompt, workspaceStorage) {
   let response;
   try {
     response = await client.request(
@@ -928,10 +913,13 @@ async function runTurn(
       workspaceStorage,
     );
     if (isContextWindowExceeded(turn)) {
-      throw new CodexAdapterError("Codex context remains full after compaction.", {
-        code: "ERR_CODEX_CONTEXT_RECOVERY_FAILED",
-        recoverable: true,
-      });
+      throw new CodexAdapterError(
+        "Codex context remains full after compaction.",
+        {
+          code: "ERR_CODEX_CONTEXT_RECOVERY_FAILED",
+          recoverable: true,
+        },
+      );
     }
   }
   if (turn.status === "interrupted") {
@@ -975,19 +963,15 @@ function auditItems(items, request) {
       (item.type === "commandExecution" || item.type === "fileChange") &&
       !TERMINAL_ITEM_STATUSES.has(item.status)
     ) {
-      throw new CodexAdapterError(
-        "Codex returned an unfinished turn item.",
-        { code: "ERR_CODEX_PROTOCOL" },
-      );
+      throw new CodexAdapterError("Codex returned an unfinished turn item.", {
+        code: "ERR_CODEX_PROTOCOL",
+      });
     }
     if (item.type === "mcpToolCall") {
-      throw new CodexAdapterError(
-        "Codex used a disabled MCP server.",
-        {
-          code: "ERR_CODEX_ISOLATION",
-          diagnosticClass: "operation_mcp_tool",
-        },
-      );
+      throw new CodexAdapterError("Codex used a disabled MCP server.", {
+        code: "ERR_CODEX_ISOLATION",
+        diagnosticClass: "operation_mcp_tool",
+      });
     }
     if (
       item.type === "collabAgentToolCall" ||
@@ -1017,13 +1001,10 @@ function auditItems(items, request) {
       );
     }
     if (item.type === "webSearch" || item.type === "imageGeneration") {
-      throw new CodexAdapterError(
-        "Codex attempted a disabled hosted tool.",
-        {
-          code: "ERR_CODEX_NETWORK_POLICY",
-          diagnosticClass: "operation_hosted_tool",
-        },
-      );
+      throw new CodexAdapterError("Codex attempted a disabled hosted tool.", {
+        code: "ERR_CODEX_NETWORK_POLICY",
+        diagnosticClass: "operation_hosted_tool",
+      });
     }
     if (request.access !== "workspace-write" && item.type === "fileChange") {
       throw new CodexAdapterError(
@@ -1052,10 +1033,9 @@ function auditItems(items, request) {
     }
     if (item.type === "commandExecution") {
       if (typeof item.command !== "string") {
-        throw new CodexAdapterError(
-          "Codex returned an invalid command item.",
-          { code: "ERR_CODEX_PROTOCOL" },
-        );
+        throw new CodexAdapterError("Codex returned an invalid command item.", {
+          code: "ERR_CODEX_PROTOCOL",
+        });
       }
       if (item.pluginId !== undefined && item.pluginId !== null) {
         throw new CodexAdapterError("Codex used a disabled plugin.", {
@@ -1186,16 +1166,12 @@ export function createCodexAdapter(options = {}) {
           maxBuffer: 1024 * 1024,
           timeout: 10_000,
         }),
-        execute(
-          codexBinary,
-          ["app-server", "--help"],
-          {
-            encoding: "utf8",
-            env: processEnvironment,
-            maxBuffer: 1024 * 1024,
-            timeout: 10_000,
-          },
-        ),
+        execute(codexBinary, ["app-server", "--help"], {
+          encoding: "utf8",
+          env: processEnvironment,
+          maxBuffer: 1024 * 1024,
+          timeout: 10_000,
+        }),
       ]);
     } catch (cause) {
       throw processError("Codex CLI is unavailable.", cause);

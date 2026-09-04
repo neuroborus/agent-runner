@@ -1,11 +1,6 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import {
-  lstat,
-  open,
-  readlink,
-  realpath,
-} from "node:fs/promises";
+import { lstat, open, readlink, realpath } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
 
 import {
@@ -77,9 +72,7 @@ function hiddenIndexPaths(value) {
       });
     }
     const tag = entry[0];
-    return tag === "S" || (tag >= "a" && tag <= "z")
-      ? [entry.slice(2)]
-      : [];
+    return tag === "S" || (tag >= "a" && tag <= "z") ? [entry.slice(2)] : [];
   });
 }
 
@@ -229,9 +222,12 @@ async function contentParentIsSafe(
   if (missingAllowed) {
     return false;
   }
-  throw new GitSafetyError("Repository content path escapes through a symlink.", {
-    code: "ERR_UNSUPPORTED_GIT_PATH",
-  });
+  throw new GitSafetyError(
+    "Repository content path escapes through a symlink.",
+    {
+      code: "ERR_UNSUPPORTED_GIT_PATH",
+    },
+  );
 }
 
 async function directoryReplacement(
@@ -253,10 +249,7 @@ async function directoryReplacement(
   });
 }
 
-export async function normalizeRepositoryPath(
-  repositoryPath,
-  requestedPath,
-) {
+export async function normalizeRepositoryPath(repositoryPath, requestedPath) {
   if (
     typeof requestedPath !== "string" ||
     requestedPath.length === 0 ||
@@ -307,10 +300,7 @@ export async function inspectPathAtRoot(
   repositoryPath,
   requestedPath,
 ) {
-  const location = await normalizeRepositoryPath(
-    repositoryPath,
-    requestedPath,
-  );
+  const location = await normalizeRepositoryPath(repositoryPath, requestedPath);
   const pathspec = literalPathspec(location.relativePath);
   const indexResult = await runGit(
     repositoryPath,
@@ -501,12 +491,7 @@ async function contentEntry(
   });
 }
 
-async function headContentEntry(
-  { runGit },
-  repositoryPath,
-  head,
-  path,
-) {
+async function headContentEntry({ runGit }, repositoryPath, head, path) {
   const result = await runGit(repositoryPath, [
     "ls-tree",
     "-z",
@@ -624,9 +609,13 @@ export async function indexContentFingerprintAtRoot(
     "-z",
   ]);
   const entries = new Map();
-  for (const record of decodeNullList(entriesResult.stdout, "Git index entries")) {
+  for (const record of decodeNullList(
+    entriesResult.stdout,
+    "Git index entries",
+  )) {
     const separator = record.indexOf("\t");
-    const metadata = separator === -1 ? [] : record.slice(0, separator).split(" ");
+    const metadata =
+      separator === -1 ? [] : record.slice(0, separator).split(" ");
     const path = separator === -1 ? "" : record.slice(separator + 1);
     if (
       metadata.length !== 3 ||
@@ -677,9 +666,8 @@ export async function contentChangesAtRoot(
 ) {
   const { currentHead, runGit } = context;
   const excludedPaths = new Set(allowedPaths);
-  const head = baseHead === undefined
-    ? await currentHead(repositoryPath)
-    : baseHead;
+  const head =
+    baseHead === undefined ? await currentHead(repositoryPath) : baseHead;
   const trackedResult =
     head === null
       ? await runGit(repositoryPath, ["ls-files", "--cached", "-z"])
@@ -701,11 +689,7 @@ export async function contentChangesAtRoot(
     "--exclude-standard",
     "-z",
   ]);
-  const indexResult = await runGit(repositoryPath, [
-    "ls-files",
-    "-v",
-    "-z",
-  ]);
+  const indexResult = await runGit(repositoryPath, ["ls-files", "-v", "-z"]);
   const trackedPaths = new Set(
     decodeNullList(trackedResult.stdout, "Tracked Git paths").filter(
       (path) => !excludedPaths.has(path),
@@ -780,11 +764,6 @@ export async function contentFingerprintsAtRoot(
   options,
 ) {
   const { changedPaths: _changedPaths, ...fingerprints } =
-    await contentChangesAtRoot(
-      context,
-      repositoryPath,
-      allowedPaths,
-      options,
-    );
+    await contentChangesAtRoot(context, repositoryPath, allowedPaths, options);
   return Object.freeze(fingerprints);
 }

@@ -30,13 +30,22 @@ test("bootstrap instructions preserve independent evidence and arbitration", () 
   assert.match(BOOTSTRAP_INSTRUCTIONS, /schema's result object/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /Required-check IDs must be unique/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /Exact commands must be unique/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /canonical repository-relative file paths/u);
+  assert.match(
+    BOOTSTRAP_INSTRUCTIONS,
+    /canonical repository-relative file paths/u,
+  );
   assert.match(BOOTSTRAP_INSTRUCTIONS, /symlink alias/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /independently identify every required check/iu);
+  assert.match(
+    BOOTSTRAP_INSTRUCTIONS,
+    /independently identify every required check/iu,
+  );
   assert.match(BOOTSTRAP_INSTRUCTIONS, /validationInfrastructure/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /capacity of 64 items/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /CAPACITY_EXHAUSTED/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /keep the summary and required-check inventory staging-independent/u);
+  assert.match(
+    BOOTSTRAP_INSTRUCTIONS,
+    /keep the summary and required-check inventory staging-independent/u,
+  );
   assert.match(BOOTSTRAP_INSTRUCTIONS, /against HEAD or explicit trees/u);
   assert.match(
     BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
@@ -58,7 +67,10 @@ test("bootstrap instructions preserve independent evidence and arbitration", () 
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /complete replacement/u);
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /every violation/u);
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /diagnostic batch/u);
-  assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /ordinary clarification question/u);
+  assert.match(
+    BOOTSTRAP_CORRECTION_INSTRUCTIONS,
+    /ordinary clarification question/u,
+  );
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /PRODUCT_DECISION_REQUIRED/u);
   assert.match(
     BOOTSTRAP_CORRECTION_INSTRUCTIONS,
@@ -217,10 +229,7 @@ test("finalization and dispute prompts preserve their narrow roles", () => {
     FINALIZATION_INSTRUCTIONS,
     /defer staging, staged\/index-relative inspection, alternate-index workarounds/u,
   );
-  assert.match(
-    FINALIZATION_INSTRUCTIONS,
-    /against HEAD or explicit trees/u,
-  );
+  assert.match(FINALIZATION_INSTRUCTIONS, /against HEAD or explicit trees/u);
   assert.match(
     FINALIZATION_INSTRUCTIONS,
     /neither a validation blocker nor a skipped required check/u,

@@ -49,7 +49,10 @@ import {
 function assertStrictSchema(schema) {
   assert.equal(schema.type, "object");
   assert.equal(schema.additionalProperties, false);
-  assert.deepEqual([...schema.required].sort(), Object.keys(schema.properties).sort());
+  assert.deepEqual(
+    [...schema.required].sort(),
+    Object.keys(schema.properties).sort(),
+  );
   assert.ok(Object.isFrozen(schema));
 }
 
@@ -126,7 +129,10 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
     /modify repository content, staging, history, refs, remotes, or Git identity/u,
   );
   assert.match(FINALIZATION_CORRECTION_INSTRUCTIONS, /fails closed/u);
-  assert.match(BOOTSTRAP_RECONCILIATION_INSTRUCTIONS, /Do not force agreement/u);
+  assert.match(
+    BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
+    /Do not force agreement/u,
+  );
   assert.match(BOOTSTRAP_ARBITRATION_INSTRUCTIONS, /Do not modify/u);
   for (const instructions of [
     BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,

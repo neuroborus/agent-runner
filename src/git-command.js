@@ -17,10 +17,7 @@ const REPOSITORY_ENV_OVERRIDES = Object.freeze([
 ]);
 
 export class GitSafetyError extends Error {
-  constructor(
-    message,
-    { cause, changes = [], code = "ERR_GIT_SAFETY" } = {},
-  ) {
+  constructor(message, { cause, changes = [], code = "ERR_GIT_SAFETY" } = {}) {
     super(message, { cause });
     this.name = "GitSafetyError";
     this.code = code;
@@ -107,7 +104,13 @@ export function createGitCommandRunner({ env, gitBinary }) {
       let settled = false;
       const child = spawn(
         gitBinary,
-        ["-c", "core.fsmonitor=false", "-C", workingDirectory, ...argumentsList],
+        [
+          "-c",
+          "core.fsmonitor=false",
+          "-C",
+          workingDirectory,
+          ...argumentsList,
+        ],
         {
           env: { ...gitEnvironment, ...extraEnv },
           stdio: ["ignore", "pipe", "pipe"],

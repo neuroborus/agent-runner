@@ -1,26 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import {
-  link,
-  lstat,
-  mkdir,
-  open,
-  realpath,
-  unlink,
-} from "node:fs/promises";
-import {
-  basename,
-  dirname,
-  isAbsolute,
-  join,
-  relative,
-  sep,
-} from "node:path";
+import { link, lstat, mkdir, open, realpath, unlink } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 
-import {
-  loadProjectConfiguration,
-  loadRunnerConfiguration,
-} from "./config.js";
+import { loadProjectConfiguration, loadRunnerConfiguration } from "./config.js";
 import { createGitService } from "./git.js";
 
 const ISSUES_PATH = ["agent-runner", "issues"];
@@ -207,9 +190,7 @@ function assertReservedPaths(issuesPath, reportPath, temporaryPath) {
     dirname(temporaryPath) !== issuesPath ||
     relative(issuesPath, temporaryPath) !== basename(temporaryPath) ||
     !basename(temporaryPath).startsWith(`.${basename(reportPath)}.`) ||
-    !/^\.issue_.+\.\d+\.[A-Za-z0-9-]+\.tmp$/u.test(
-      basename(temporaryPath),
-    )
+    !/^\.issue_.+\.\d+\.[A-Za-z0-9-]+\.tmp$/u.test(basename(temporaryPath))
   ) {
     throw reportError("Reserved issue report identity is invalid.");
   }
@@ -483,9 +464,7 @@ export function createUnexpectedIssueReporter({
     typeof onPublished !== "function" ||
     typeof tokenFactory !== "function"
   ) {
-    throw new UnexpectedIssueReportError(
-      "Issue reporter options are invalid.",
-    );
+    throw new UnexpectedIssueReportError("Issue reporter options are invalid.");
   }
 
   async function report(
@@ -511,10 +490,7 @@ export function createUnexpectedIssueReporter({
       );
     }
     const projectPath = await git.resolveProject(input.projectPath);
-    if (
-      reservedProjectPath !== null &&
-      reservedProjectPath !== projectPath
-    ) {
+    if (reservedProjectPath !== null && reservedProjectPath !== projectPath) {
       throw reportError("Reserved issue report project changed unexpectedly.");
     }
     let requestedIssuesPath = reservedIssuesPath;

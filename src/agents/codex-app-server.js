@@ -1,10 +1,7 @@
 import { createInterface } from "node:readline";
 
 const MAX_PROTOCOL_LINE_BYTES = 16 * 1024 * 1024;
-const RETAINED_NOTIFICATIONS = new Set([
-  "model/rerouted",
-  "turn/completed",
-]);
+const RETAINED_NOTIFICATIONS = new Set(["model/rerouted", "turn/completed"]);
 
 function isRecord(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -214,8 +211,7 @@ export function createCodexAppServerClient(child, AdapterError) {
 
   async function waitForNotification(method, predicate) {
     const index = notifications.findIndex(
-      (message) =>
-        message.method === method && predicate(message.params),
+      (message) => message.method === method && predicate(message.params),
     );
     if (index !== -1) {
       return notifications.splice(index, 1)[0].params;

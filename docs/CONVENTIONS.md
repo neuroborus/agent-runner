@@ -69,16 +69,16 @@ transport handlers.
 
 Assign every behavior to one owner before deciding where its file belongs.
 
-| Concern | Owner |
-| --- | --- |
-| Command parsing and terminal projection | root CLI |
-| STDIO protocol and detached control operations | root MCP boundary |
-| Configuration loading and precedence | root configuration boundary |
-| Run and resume coordination | root runner |
-| State, Git, clarification, and trusted-command effects | their root capability |
-| Provider protocol, flags, sessions, and output normalization | owning provider adapter |
-| Workflow decisions and structured role contracts | owning pipeline |
-| Commit-plan parsing and subject validation | `packages/commit-plan` |
+| Concern                                                      | Owner                       |
+| ------------------------------------------------------------ | --------------------------- |
+| Command parsing and terminal projection                      | root CLI                    |
+| STDIO protocol and detached control operations               | root MCP boundary           |
+| Configuration loading and precedence                         | root configuration boundary |
+| Run and resume coordination                                  | root runner                 |
+| State, Git, clarification, and trusted-command effects       | their root capability       |
+| Provider protocol, flags, sessions, and output normalization | owning provider adapter     |
+| Workflow decisions and structured role contracts             | owning pipeline             |
+| Commit-plan parsing and subject validation                   | `packages/commit-plan`      |
 
 - Do not use `shared`, `common`, `utils`, or a workspace package as a dumping
   ground for code that lacks a clear owner.

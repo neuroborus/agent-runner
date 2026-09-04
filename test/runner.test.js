@@ -293,7 +293,9 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
           evidence: [],
         };
       } else if (
-        request.prompt.includes("Run the complete project finalization procedure")
+        request.prompt.includes(
+          "Run the complete project finalization procedure",
+        )
       ) {
         structured = {
           status: "PASS",
@@ -493,11 +495,7 @@ test("validates the canonical Git root before creating external state", async (t
 test("serializes execution and polishing runs for one temporary worktree", async (t) => {
   const fixture = await createFixture(t);
   const runStore = createRunStore({ stateRoot: fixture.stateRoot });
-  const runner = runnerFor(
-    fixture,
-    { codex: createAdapter() },
-    { runStore },
-  );
+  const runner = runnerFor(fixture, { codex: createAdapter() }, { runStore });
   const preparedRuns = await Promise.all(
     ["plan-execution", "polishing"].map((pipelineId) =>
       runner.create({
@@ -627,7 +625,8 @@ test("publishes blocking provider activity before every pipeline turn", async (t
       const runId = await Promise.race([
         started.promise,
         executing.then(
-          () => assert.fail("Pipeline completed before its first provider turn."),
+          () =>
+            assert.fail("Pipeline completed before its first provider turn."),
           (cause) => Promise.reject(cause),
         ),
       ]);
@@ -706,7 +705,10 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
     action: null,
   });
 
-  assert.equal(beforeResume.run.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(
+    beforeResume.run.pipelineState.workflowState,
+    "WAITING_FOR_USER",
+  );
   assert.equal(completed.run.pipelineState.workflowState, "DONE");
   assert.equal(await readFile(join(fixture.taskPath, "plan.md"), "utf8"), PLAN);
   assert.deepEqual(completed.run.roles, paused.run.roles);
@@ -774,10 +776,9 @@ test("migrates a legacy runtime envelope under the run lease before resume", asy
         actor === "runner" && kind === "migrated" && phase === "runtime",
     ),
   );
-  const events = (await readFile(
-    join(prepared.directoryPath, "events.jsonl"),
-    "utf8",
-  ))
+  const events = (
+    await readFile(join(prepared.directoryPath, "events.jsonl"), "utf8")
+  )
     .trimEnd()
     .split("\n")
     .map((line) => JSON.parse(line));
@@ -807,8 +808,7 @@ test("rejects a detached runtime mismatch before touching a durable run", async 
     runner.resume({
       runId: prepared.run.runId,
       action: null,
-      expectedRuntimeCompatibility:
-        `${DETACHED_RUNTIME_COMPATIBILITY_TOKEN}-other`,
+      expectedRuntimeCompatibility: `${DETACHED_RUNTIME_COMPATIBILITY_TOKEN}-other`,
     }),
     (error) =>
       error instanceof RunnerError &&
@@ -941,10 +941,22 @@ test("prepares a durable run and submits identified input before continuation", 
 
 test("resumes plan execution from its durable trusted-command snapshot", async (t) => {
   const fixture = await createFixture(t);
-  await writeFile(join(fixture.projectPath, ".gitignore"), "/LOCAL_ARTIFACTS/\n");
-  await writeFile(join(fixture.projectPath, "source.js"), "export const value = 1;\n");
+  await writeFile(
+    join(fixture.projectPath, ".gitignore"),
+    "/LOCAL_ARTIFACTS/\n",
+  );
+  await writeFile(
+    join(fixture.projectPath, "source.js"),
+    "export const value = 1;\n",
+  );
   await writeFile(join(fixture.taskPath, "plan.md"), PLAN);
-  await executeFile("git", ["-C", fixture.projectPath, "config", "user.name", "Test"]);
+  await executeFile("git", [
+    "-C",
+    fixture.projectPath,
+    "config",
+    "user.name",
+    "Test",
+  ]);
   await executeFile("git", [
     "-C",
     fixture.projectPath,
@@ -1109,10 +1121,9 @@ test("submits input previewed from a compatible legacy run", async (t) => {
     submitted.run.pause.inputResponse.transcriptHash,
     preview.responseHash,
   );
-  const events = (await readFile(
-    join(paused.directoryPath, "events.jsonl"),
-    "utf8",
-  ))
+  const events = (
+    await readFile(join(paused.directoryPath, "events.jsonl"), "utf8")
+  )
     .trimEnd()
     .split("\n")
     .map((line) => JSON.parse(line));
@@ -1397,11 +1408,7 @@ test("persists project overrides and ignores later configuration changes", async
       },
     },
   };
-  const runner = runnerFor(
-    fixture,
-    { codex: adapter },
-    { configuration },
-  );
+  const runner = runnerFor(fixture, { codex: adapter }, { configuration });
 
   const paused = await runner.run({
     pipelineId: "plan-authoring",
@@ -1549,7 +1556,10 @@ test("dispatches plan execution through the root Git and state services", async 
   const fixture = await createFixture(t);
   await Promise.all([
     writeFile(join(fixture.projectPath, ".gitignore"), "/LOCAL_ARTIFACTS/\n"),
-    writeFile(join(fixture.projectPath, "source.js"), "export const value = 0;\n"),
+    writeFile(
+      join(fixture.projectPath, "source.js"),
+      "export const value = 0;\n",
+    ),
     writeFile(join(fixture.taskPath, "plan.md"), PLAN),
   ]);
   await executeFile("git", [
@@ -1644,10 +1654,7 @@ test("dispatches plan execution through the root Git and state services", async 
   );
 });
 
-for (const pauseReason of [
-  "local_artifacts_not_ignored",
-  "unsafe_git_state",
-]) {
+for (const pauseReason of ["local_artifacts_not_ignored", "unsafe_git_state"]) {
   test(`resumes polishing after ${pauseReason} preflight is corrected`, async (t) => {
     const fixture = await createFixture(t);
     const ignoreArtifacts = pauseReason === "unsafe_git_state";
@@ -1656,7 +1663,10 @@ for (const pauseReason of [
         join(fixture.projectPath, ".gitignore"),
         ignoreArtifacts ? "/LOCAL_ARTIFACTS/\n" : "/ignored/\n",
       ),
-      writeFile(join(fixture.projectPath, "source.js"), "export const value = 0;\n"),
+      writeFile(
+        join(fixture.projectPath, "source.js"),
+        "export const value = 0;\n",
+      ),
     ]);
     await executeFile("git", [
       "-C",

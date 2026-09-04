@@ -24,9 +24,9 @@ trusted-command snapshot rather than reloading mutable configuration.
 Plan execution implements a step, runs its dedicated full finalization turn,
 and then applies the mode-specific review gate. Polishing follows the same
 shape for its complete change set. Finalization follows applicable repository
-guidance, performs required formatting or generation, and executes every
-established check without omission or substitution. A project-required content
-change is fingerprinted after it finishes.
+guidance, runs required writable formatting before generation and every
+established non-mutating check, and accepts no omission or substitution. A
+project-required content change is fingerprinted after it finishes.
 
 In independent mode, the Reviewer checks the complete current result and the
 finalization evidence. All findings remain blocking until fixed, withdrawn,

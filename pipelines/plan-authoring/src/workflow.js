@@ -128,9 +128,7 @@ function lazyOutputContext(phase) {
     role: "planner",
     phase: phase === "CHECK_AND_FIX" ? "check-and-fix" : "clean-confirm",
     contract:
-      phase === "CHECK_AND_FIX"
-        ? "lazy-check-and-fix"
-        : "lazy-clean-confirm",
+      phase === "CHECK_AND_FIX" ? "lazy-check-and-fix" : "lazy-clean-confirm",
   });
 }
 
@@ -193,9 +191,7 @@ function isWithin(parentPath, childPath) {
 function evidencePrompt(inputs, clarification) {
   const context = inputs.context?.content ?? "(not provided)";
   const clarifications =
-    clarification.content.length === 0
-      ? "(empty)"
-      : clarification.content;
+    clarification.content.length === 0 ? "(empty)" : clarification.content;
   return `Task (${inputs.task.path}):
 ${inputs.task.content}
 
@@ -362,12 +358,7 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
       },
       {
         pause: { reason, ...details },
-        publicActivity: activity(
-          "runner",
-          phase,
-          "changed",
-          message,
-        ),
+        publicActivity: activity("runner", phase, "changed", message),
       },
     );
     return currentRun;
@@ -501,17 +492,16 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
         ? latestSession.sessionId
         : undefined;
     const sourceSession = currentRun.sessionLineage.source;
-    const session =
-      freshSession
-        ? undefined
-        : previousSession !== undefined
-          ? { id: previousSession, mode: "continue" }
-          : !recovering &&
-              sourceSession !== null &&
-              role !== "arbiter" &&
-              (!lazyPrimary || !pipelineState().lazySourceForkConsumed)
-            ? { id: sourceSession, mode: "fork" }
-            : undefined;
+    const session = freshSession
+      ? undefined
+      : previousSession !== undefined
+        ? { id: previousSession, mode: "continue" }
+        : !recovering &&
+            sourceSession !== null &&
+            role !== "arbiter" &&
+            (!lazyPrimary || !pipelineState().lazySourceForkConsumed)
+          ? { id: sourceSession, mode: "fork" }
+          : undefined;
     const roleConfiguration = currentRun.roles[role];
     const recoveryPrompt = completeRolePrompt(buildPrompt(evidenceContext));
     const executionPreferences = Object.fromEntries(
@@ -701,8 +691,7 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
     return runtime.clarifications.prepareEdit({
       artifactRoot: currentRun.taskPath,
       transcriptPath: clarificationPath,
-      expectedHash:
-        options?.expectedHash ?? currentRun.hashes.clarifications,
+      expectedHash: options?.expectedHash ?? currentRun.hashes.clarifications,
       suspendedState,
       action,
       persistPendingEdit: (authorization) =>
@@ -717,15 +706,16 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
       reason,
       options,
     );
-    const editorResult = await runtime.clarifications.openEditor(authorization, {
-      consumePendingEdit: consumeEdit,
-    });
+    const editorResult = await runtime.clarifications.openEditor(
+      authorization,
+      {
+        consumePendingEdit: consumeEdit,
+      },
+    );
     if (editorResult.status === "WAITING_FOR_USER") {
       return false;
     }
-    return (
-      editorResult.result.changed || action === "proactive-clarification"
-    );
+    return editorResult.result.changed || action === "proactive-clarification";
   }
 
   async function resumeEdit() {
@@ -984,8 +974,7 @@ ${JSON.stringify(
       currentCounters.revisionRounds > state.lastCountedRevision;
     const nextCorrectionRounds =
       currentCounters.correctionRounds + (isCorrection ? 1 : 0);
-    const nextBlocked =
-      state.blockedSinceArbitration + (isCorrection ? 1 : 0);
+    const nextBlocked = state.blockedSinceArbitration + (isCorrection ? 1 : 0);
     const history = isCorrection
       ? [
           ...state.correctionHistory,
@@ -1052,7 +1041,9 @@ ${JSON.stringify(
         resolve(repositoryPath) !== repositoryPath ||
         !isWithin(repositoryPath, currentRun.projectPath)
       ) {
-        throw workflowError("Git preflight returned an invalid repository root.");
+        throw workflowError(
+          "Git preflight returned an invalid repository root.",
+        );
       }
       return repositoryPath;
     };
@@ -1113,10 +1104,9 @@ ${JSON.stringify(
     if ((await readCurrentInputs()) === null) {
       return false;
     }
-    await runtime.git.reconcileInterrupted(
-      pipelineState().repositoryBaseline,
-      { allowWorkspaceChanges: false },
-    );
+    await runtime.git.reconcileInterrupted(pipelineState().repositoryBaseline, {
+      allowWorkspaceChanges: false,
+    });
     interruptedRepositoryReconciled = true;
     return true;
   }
@@ -1352,8 +1342,7 @@ ${evidence}`,
         }
         if (
           state.pendingLazyCorrection === null &&
-          state.blockedSinceArbitration >=
-          state.settings.stagnationWindowRounds
+          state.blockedSinceArbitration >= state.settings.stagnationWindowRounds
         ) {
           return pause("plan_revision_not_converging", {
             correctionRounds: counters().correctionRounds,
@@ -1621,8 +1610,7 @@ ${pipelineState().draft}${reviewDirectionPrompt(pipelineState())}`,
           });
         }
         if (
-          state.blockedSinceArbitration >=
-          state.settings.stagnationWindowRounds
+          state.blockedSinceArbitration >= state.settings.stagnationWindowRounds
         ) {
           if (state.arbitrationUsed) {
             return pause("plan_revision_not_converging", {
@@ -1726,7 +1714,9 @@ ${findingPrompt(pipelineState())}`,
         await runtime.git.assertUnchanged(state.repositoryBaseline);
         const canonicalPlan = serializeCommitPlan(parseCommitPlan(state.draft));
         if (canonicalPlan !== state.canonicalPlan) {
-          throw workflowError("Canonical plan does not match the reviewed draft.");
+          throw workflowError(
+            "Canonical plan does not match the reviewed draft.",
+          );
         }
         const writtenPath = await runtime.writePlan({
           artifactRoot: currentRun.taskPath,
@@ -1759,11 +1749,15 @@ ${findingPrompt(pipelineState())}`,
         return currentRun;
       }
 
-      if (["WAITING_FOR_USER", "DONE", "FAILED"].includes(state.workflowState)) {
+      if (
+        ["WAITING_FOR_USER", "DONE", "FAILED"].includes(state.workflowState)
+      ) {
         return currentRun;
       }
 
-      throw workflowError(`Unsupported workflow state: ${state.workflowState}.`);
+      throw workflowError(
+        `Unsupported workflow state: ${state.workflowState}.`,
+      );
     }
   } catch (cause) {
     const preflightComplete = pipelineState().preflightComplete;
