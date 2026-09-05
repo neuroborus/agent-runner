@@ -33,7 +33,7 @@ test("root metadata pins the repository formatting gate", async () => {
     check: "npm run format:check && npm test && node bin/agent-run.js --help",
     format: "node scripts/format.js --write",
     "format:check": "node scripts/format.js --check",
-    test: "node --test",
+    test: "node --test --test-concurrency=12",
   });
 });
 
