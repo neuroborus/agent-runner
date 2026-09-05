@@ -109,9 +109,9 @@ The pipeline owns these settings and defaults:
 
 ```text
 mode = independent
-maxFixRounds = 5
-maxDisputesPerFinding = 2
-maxSameFindingRounds = 3
+maxFixRounds = 20
+maxDisputesPerFinding = 5
+maxSameFindingRounds = 5
 stagnationWindowRounds = 3
 ```
 

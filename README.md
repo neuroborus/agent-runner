@@ -147,20 +147,20 @@ Pipeline settings use these defaults:
 | Pipeline         | Setting                  |       Default |
 | ---------------- | ------------------------ | ------------: |
 | `plan-authoring` | `mode`                   | `independent` |
-| `plan-authoring` | `maxRevisionRounds`      |            15 |
+| `plan-authoring` | `maxRevisionRounds`      |            20 |
 | `plan-authoring` | `stagnationWindowRounds` |             3 |
 | `plan-execution` | `mode`                   | `independent` |
-| `plan-execution` | `maxFixRoundsPerStep`    |             5 |
+| `plan-execution` | `maxFixRoundsPerStep`    |            20 |
 | `plan-execution` | `finalization`           |        `auto` |
-| `plan-execution` | `maxDisputesPerFinding`  |             2 |
-| `plan-execution` | `maxSameFindingRounds`   |             3 |
+| `plan-execution` | `maxDisputesPerFinding`  |             5 |
+| `plan-execution` | `maxSameFindingRounds`   |             5 |
 | `plan-execution` | `stagnationWindowRounds` |             3 |
 | `plan-execution` | `trustedChecks`          |          `[]` |
 | `polishing`      | `mode`                   | `independent` |
-| `polishing`      | `maxFixRounds`           |             5 |
+| `polishing`      | `maxFixRounds`           |            20 |
 | `polishing`      | `finalization`           |        `auto` |
-| `polishing`      | `maxDisputesPerFinding`  |             2 |
-| `polishing`      | `maxSameFindingRounds`   |             3 |
+| `polishing`      | `maxDisputesPerFinding`  |             5 |
+| `polishing`      | `maxSameFindingRounds`   |             5 |
 | `polishing`      | `stagnationWindowRounds` |             3 |
 | `polishing`      | `trustedChecks`          |          `[]` |
 

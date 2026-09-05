@@ -24,7 +24,7 @@
   "pipelines": {
     "plan-authoring": {
       "mode": "independent",
-      "maxRevisionRounds": 15,
+      "maxRevisionRounds": 20,
       "stagnationWindowRounds": 3,
       "roles": {
         "planner": {},
@@ -39,9 +39,9 @@
     "plan-execution": {
       "mode": "independent",
       "finalization": "auto",
-      "maxFixRoundsPerStep": 5,
-      "maxDisputesPerFinding": 2,
-      "maxSameFindingRounds": 3,
+      "maxFixRoundsPerStep": 20,
+      "maxDisputesPerFinding": 5,
+      "maxSameFindingRounds": 5,
       "stagnationWindowRounds": 3,
       "trustedChecks": [],
       "roles": {
@@ -58,9 +58,9 @@
     "polishing": {
       "mode": "independent",
       "finalization": "auto",
-      "maxFixRounds": 5,
-      "maxDisputesPerFinding": 2,
-      "maxSameFindingRounds": 3,
+      "maxFixRounds": 20,
+      "maxDisputesPerFinding": 5,
+      "maxSameFindingRounds": 5,
       "stagnationWindowRounds": 3,
       "trustedChecks": [],
       "roles": {

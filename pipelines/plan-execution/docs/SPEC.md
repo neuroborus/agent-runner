@@ -2235,9 +2235,9 @@ A commit hook failure or unexpected post-commit repository state must pause the 
 Defaults:
 
 ```text
-maxFixRoundsPerStep = 5
-maxDisputesPerFinding = 2
-maxSameFindingRounds = 3
+maxFixRoundsPerStep = 20
+maxDisputesPerFinding = 5
+maxSameFindingRounds = 5
 stagnationWindowRounds = 3
 ```
 

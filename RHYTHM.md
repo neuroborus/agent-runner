@@ -5,6 +5,15 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-09-05
+
+- **Default convergence budgets favor completing difficult corrections.** Plan
+  authoring permits 20 revisions, while plan execution and polishing permit 20
+  fix rounds, five repeated-finding rounds, and five disputes per finding by
+  default. The three-round stagnation window remains unchanged so architectural
+  non-convergence is still detected early; every budget remains configurable
+  and frozen into each new run.
+
 ## 2026-09-04
 
 - **Polishing finalizes only stable semantic candidates.** Independent Reviewer

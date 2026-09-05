@@ -88,9 +88,9 @@ const SETTINGS = Object.freeze({
       "must be auto, none, or a normalized repository-relative SKILL.md path",
     validate: isFinalizationPolicy,
   }),
-  maxFixRoundsPerStep: positiveIntegerSetting(5),
-  maxDisputesPerFinding: positiveIntegerSetting(2),
-  maxSameFindingRounds: positiveIntegerSetting(3),
+  maxFixRoundsPerStep: positiveIntegerSetting(20),
+  maxDisputesPerFinding: positiveIntegerSetting(5),
+  maxSameFindingRounds: positiveIntegerSetting(5),
   mode: Object.freeze({
     defaultValue: "independent",
     errorMessage: "must be independent or lazy",

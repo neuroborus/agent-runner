@@ -179,7 +179,7 @@ The V1 shape is:
       "mode": "independent",
       "finalization": "auto",
       "trustedChecks": ["service-tests"],
-      "maxFixRoundsPerStep": 5,
+      "maxFixRoundsPerStep": 20,
       "roles": {
         "worker": {
           "backend": "claude",

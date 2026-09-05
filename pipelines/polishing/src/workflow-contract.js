@@ -211,7 +211,7 @@ const MAX_STRUCTURED_RESULT_BYTES = 256 * 1024;
 export const MAX_DURABLE_RUN_BYTES = 960 * 1024;
 export const MAX_DIAGNOSTIC_ITEMS = 32;
 export const MAX_DISPUTE_HISTORY_BYTES = 64 * 1024;
-export const MAX_DISPUTES_PER_FINDING = 2;
+export const MAX_DISPUTES_PER_FINDING = 5;
 
 export function resolveActiveRoles(settings) {
   return settings?.mode === "lazy" ? LAZY_ROLES : ROLES;

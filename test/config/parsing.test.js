@@ -68,16 +68,16 @@ test("minimal configuration uses pipeline-owned setting defaults", () => {
   assert.deepEqual(configuration.profiles, {});
   assert.deepEqual(configuration.trustedCommands, {});
   assert.deepEqual(configuration.pipelines["plan-authoring"], {
-    maxRevisionRounds: 15,
+    maxRevisionRounds: 20,
     mode: "independent",
     stagnationWindowRounds: 3,
     roles: {},
   });
   assert.deepEqual(configuration.pipelines["plan-execution"], {
     finalization: "auto",
-    maxFixRoundsPerStep: 5,
-    maxDisputesPerFinding: 2,
-    maxSameFindingRounds: 3,
+    maxFixRoundsPerStep: 20,
+    maxDisputesPerFinding: 5,
+    maxSameFindingRounds: 5,
     mode: "independent",
     stagnationWindowRounds: 3,
     trustedChecks: [],
@@ -85,9 +85,9 @@ test("minimal configuration uses pipeline-owned setting defaults", () => {
   });
   assert.deepEqual(configuration.pipelines.polishing, {
     finalization: "auto",
-    maxFixRounds: 5,
-    maxDisputesPerFinding: 2,
-    maxSameFindingRounds: 3,
+    maxFixRounds: 20,
+    maxDisputesPerFinding: 5,
+    maxSameFindingRounds: 5,
     mode: "independent",
     stagnationWindowRounds: 3,
     trustedChecks: [],
