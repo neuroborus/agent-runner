@@ -895,7 +895,20 @@ Unsafe or ambiguous reconciliation pauses rather than discarding user work.
 
 ## Testing
 
-Pipeline tests use fake adapters and temporary repositories. Cover at least:
+Workflow policy tests use fake adapters with injected in-memory run-state and
+repository effects. Their repository double models content fingerprints,
+Git-control state, and handoff transitions deterministically while keeping task
+inputs and validation-path fixtures confined to isolated temporary directories.
+Shared builders are exposed only through `test/support/index.js`, and the
+workflow suite is split by contracts and migrations, bootstrap, convergence and
+review, recovery, and handoff.
+
+Real run-store and Git services remain mandatory where persistence or repository
+behavior is the subject. Keep focused cases for journals, interrupted recovery,
+index ownership, staging, and handoff serial within their integration files.
+Root state, Git, and cross-capability integration suites continue to own proof
+of atomic files, journals, leases, recovery, filesystem durability, snapshot
+semantics, and handoff behavior. Cover at least:
 
 - dirty and clean preflight;
 - staged, unstaged, deleted, and non-ignored untracked change membership;
