@@ -443,6 +443,9 @@ The runtime floor is Node.js `>=24 <25`; keep `package.json` engines aligned.
 
 - Use `node:test` and descriptive behavior names; avoid names such as `works`
   or `test1`.
+- Keep normal full-suite success output compact with Node's built-in `dot`
+  reporter. Preserve failed-test names, assertion diagnostics, and stacks in
+  that same run; do not rerun the suite solely to recover diagnostics.
 - Keep arrange, act, and assert phases readable without ceremonial comments.
 - Prioritize deterministic contract and pure transformation tests, then runtime
   orchestration and boundary integration tests.

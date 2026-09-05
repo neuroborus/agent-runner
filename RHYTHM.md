@@ -7,6 +7,12 @@ remain in the owning documentation.
 
 ## 2026-09-05
 
+- **Compact test output retains complete failure diagnostics.** The normal root
+  test command uses Node's built-in `dot` reporter while preserving automatic
+  discovery and the bounded concurrency of 8. Passing records no longer flood
+  finalization context, while failed-test names, assertion diagnostics, and
+  stacks remain available from the same run without a reporting dependency or
+  a diagnostic-only rerun.
 - **Workflow policy fixtures are lightweight while capability proofs stay
   real.** Plan-execution and polishing state-machine suites inject
   pipeline-owned in-memory effects, split along cohesive behavioral boundaries,
