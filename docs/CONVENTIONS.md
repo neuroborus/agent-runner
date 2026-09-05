@@ -446,6 +446,18 @@ The runtime floor is Node.js `>=24 <25`; keep `package.json` engines aligned.
 - Keep arrange, act, and assert phases readable without ceremonial comments.
 - Prioritize deterministic contract and pure transformation tests, then runtime
   orchestration and boundary integration tests.
+- Exercise workflow state-machine policy with pipeline-owned injected
+  lightweight effects. Use real state, clarification, Git, and durable
+  filesystem services only when their behavior is the subject of the test.
+- Keep focused real-service integration cases beside their owning pipeline;
+  root state, Git, and cross-capability suites own repository-wide proof of
+  atomic files, journals, leases, recovery, filesystem durability, snapshots,
+  commits, and handoffs.
+- Split oversized workflow suites only at cohesive behavioral boundaries and
+  expose support consumed from another directory through an intentional
+  `test/support/index.js`. Bound file-level parallelism explicitly, keep real
+  Git and durability cases serial within their files, and avoid timing-sensitive
+  assertions.
 - Keep cross-capability workflow coverage under `test/integration/`; keep
   capability-specific behavior tests beside their owning root test area.
 - Test public behavior and safety boundaries rather than private function shape.
