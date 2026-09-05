@@ -2502,7 +2502,21 @@ Use built-in `node:test`.
 
 Do not add Jest/Vitest solely for this project.
 
-Most tests must use fake agent adapters and temporary Git repositories. Normal tests must not consume model usage.
+Workflow policy tests use injected in-memory run-state, clarification, and
+repository effects. Their repository double models fingerprints and Git-control
+state deterministically while keeping task inputs and validation-path fixtures
+confined to isolated temporary directories. Shared builders are exposed only
+through `test/support/index.js`, and the workflow suite is split by contracts
+and migrations, clarification and bootstrap, convergence and finalization,
+recovery, and commit safety.
+
+Real Git remains mandatory where Git behavior is the subject. Keep those cases
+grouped in the commit-safety suite and the interrupted-staging recovery case;
+`node:test` runs their top-level cases serially within each file. Root state,
+Git, and cross-capability integration suites continue to own
+proof of atomic files, journals, leases, recovery, filesystem durability,
+snapshot semantics, commit verification, and handoff behavior. Normal tests
+must not consume model usage.
 
 At minimum cover:
 
