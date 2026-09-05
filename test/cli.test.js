@@ -28,10 +28,7 @@ function createSink() {
   };
 }
 
-function commandResult({
-  pipelineId = "plan-execution",
-  state = "DONE",
-} = {}) {
+function commandResult({ pipelineId = "plan-execution", state = "DONE" } = {}) {
   return {
     directoryPath: `/state/runs/${RUN_ID}`,
     run: {
@@ -50,7 +47,7 @@ function commandResult({
           pipelineId === "plan-execution" ? "/project/clarifications.md" : null,
         currentStep: state === "DONE" ? null : 2,
         additionalFixRounds: 0,
-        settings: { maxFixRoundsPerStep: 5 },
+        settings: { maxFixRoundsPerStep: 5, mode: "independent" },
         finalizationResult:
           state === "WAITING_FOR_USER" ? { status: "PASS" } : null,
         findings:
@@ -99,6 +96,16 @@ test("help describes the required commands", async () => {
   assert.match(stdout.read(), /plan-execution/);
   assert.match(stdout.read(), /polishing/);
   assert.match(stdout.read(), /--clarify/);
+  assert.match(stdout.read(), /--mode/);
+  assert.match(stdout.read(), /independent is default and recommended/u);
+  assert.match(stdout.read(), /more context and tokens/u);
+  assert.match(stdout.read(), /lazy is opt-in/u);
+  assert.match(stdout.read(), /no independent review/u);
+  assert.match(
+    stdout.read(),
+    /independent forks primary and review roles separately/u,
+  );
+  assert.match(stdout.read(), /lazy forks once into the primary role/u);
   assert.doesNotMatch(stdout.read(), /unexpected_issue_report|issue report/iu);
   assert.equal(stderr.read(), "");
 });
@@ -267,6 +274,7 @@ test("status dispatches and renders concise persisted state", async () => {
   assert.equal(exitCode, 0);
   assert.equal(requestedRunId, RUN_ID);
   assert.match(stdout.read(), new RegExp(`Run: ${RUN_ID}`, "u"));
+  assert.match(stdout.read(), /Mode: independent/u);
   assert.match(stdout.read(), /State: WAITING_FOR_USER/u);
   assert.match(stdout.read(), /Pause: fix_limit_reached/u);
   assert.match(stdout.read(), /Explanation: The current step reached/u);
@@ -394,6 +402,8 @@ test("run derives execution, role, and opaque source-session inputs", async () =
       "run-model",
       "--context-size",
       "200000",
+      "--mode",
+      "lazy",
       "--project-config",
       "/tmp/project/ignored/runner.json",
       "--fork-from",
@@ -429,6 +439,7 @@ test("run derives execution, role, and opaque source-session inputs", async () =
     model: "run-model",
     contextSize: "200000",
   });
+  assert.deepEqual(request.settingOverrides, { mode: "lazy" });
   assert.equal(
     request.projectConfigurationPath,
     "/tmp/project/ignored/runner.json",
@@ -439,6 +450,38 @@ test("run derives execution, role, and opaque source-session inputs", async () =
     profile: "claude-primary",
   });
   assert.equal(stderr.read(), "");
+});
+
+test("run rejects an invalid pipeline mode", async () => {
+  const stderr = createSink();
+  let invoked = false;
+
+  const exitCode = await main(
+    [
+      "run",
+      "plan-authoring",
+      "--project",
+      "/tmp/project",
+      "--task",
+      "/tmp/task",
+      "--mode",
+      "automatic",
+    ],
+    {
+      stdout: createSink().stream,
+      stderr: stderr.stream,
+      runner: fakeRunner({
+        async run() {
+          invoked = true;
+          return commandResult({ pipelineId: "plan-authoring" });
+        },
+      }),
+    },
+  );
+
+  assert.equal(exitCode, 1);
+  assert.equal(invoked, false);
+  assert.match(stderr.read(), /--mode must be independent or lazy/u);
 });
 
 test("fork profile requires a source session", async () => {
@@ -565,7 +608,7 @@ test("status explains a terminal forbidden-delegation diagnostic", async () => {
 });
 
 test("status renders input and fresh-run pause actions", async () => {
-  for (const { pause, state, expected } of [
+  for (const { pause, state, expected, alsoExpected, notExpected } of [
     {
       pause: {
         reason: "clarification_answers_required",
@@ -591,6 +634,35 @@ test("status renders input and fresh-run pause actions", async () => {
       state: {},
       expected: /Abandon this run and start a fresh run/u,
     },
+    {
+      pause: {
+        reason: "no_progress",
+        resumeState: "RESOLVE_FINDINGS",
+        evidence: ["PRIVATE_PAUSE_EVIDENCE"],
+      },
+      state: {
+        settings: { maxFixRoundsPerStep: 5, mode: "lazy" },
+        finalizationResult: {
+          status: "FAIL",
+          issues: [
+            {
+              id: "F4",
+              command: "PRIVATE_FINALIZATION_COMMAND",
+              problem: "PRIVATE_FINALIZATION_PROBLEM",
+              evidence: ["PRIVATE_FINALIZATION_EVIDENCE"],
+            },
+          ],
+        },
+        findings: [],
+        reviewedFingerprint: null,
+        validationMigrationPending: false,
+      },
+      expected:
+        /Resolve the reported finalization blockers, restore a clean baseline, prepare a plan for the remaining work, and start a fresh plan-execution run\./u,
+      alsoExpected: /Finalization blocker F4 remains unresolved\./u,
+      notExpected:
+        /PRIVATE_PAUSE_EVIDENCE|PRIVATE_FINALIZATION_COMMAND|PRIVATE_FINALIZATION_PROBLEM|PRIVATE_FINALIZATION_EVIDENCE/u,
+    },
   ]) {
     const stdout = createSink();
     const result = commandResult({ state: "WAITING_FOR_USER" });
@@ -609,6 +681,12 @@ test("status renders input and fresh-run pause actions", async () => {
       0,
     );
     assert.match(stdout.read(), expected);
+    if (alsoExpected !== undefined) {
+      assert.match(stdout.read(), alsoExpected);
+    }
+    if (notExpected !== undefined) {
+      assert.doesNotMatch(stdout.read(), notExpected);
+    }
   }
 });
 
@@ -640,8 +718,7 @@ test("detached resume rejects runtime skew with a distinct exit code", async () 
   const stderr = createSink();
   const exitCode = await main(["resume", "--run", RUN_ID], {
     environment: {
-      [DETACHED_RUNTIME_COMPATIBILITY_ENV]:
-        `${DETACHED_RUNTIME_COMPATIBILITY_TOKEN}-old`,
+      [DETACHED_RUNTIME_COMPATIBILITY_ENV]: `${DETACHED_RUNTIME_COMPATIBILITY_TOKEN}-old`,
     },
     stdout: createSink().stream,
     stderr: stderr.stream,

@@ -67,6 +67,7 @@ test("registry exposes explicit immutable pipeline descriptors", () => {
     );
     assert.ok(Object.isFrozen(pipeline));
     assert.ok(Object.isFrozen(pipeline.roles));
+    assert.equal(typeof pipeline.resolveActiveRoles, "function");
     assert.ok(Object.isFrozen(pipeline.settings));
     assert.ok(Object.isFrozen(pipeline.taskInputs));
     assert.ok(Object.isFrozen(pipeline.projections));
@@ -84,11 +85,27 @@ test("registry exposes explicit immutable pipeline descriptors", () => {
     for (const role of pipeline.roles) {
       assert.ok(pipeline.runOptions.includes(role));
     }
+    const defaultSettings = Object.freeze(
+      Object.fromEntries(
+        Object.entries(pipeline.settings).map(([name, definition]) => [
+          name,
+          definition.defaultValue,
+        ]),
+      ),
+    );
+    const activeRoles = pipeline.resolveActiveRoles(defaultSettings);
+    assert.equal(activeRoles, pipeline.roles);
+    assert.ok(Object.isFrozen(activeRoles));
     for (const setting of Object.values(pipeline.settings)) {
       assert.ok(Object.isFrozen(setting));
       assert.equal(typeof setting.errorMessage, "string");
       assert.ok(setting.validate(setting.defaultValue));
     }
+    assert.deepEqual(pipeline.settings.mode.values, ["independent", "lazy"]);
+    assert.equal(pipeline.settings.mode.defaultValue, "independent");
+    assert.equal(pipeline.settings.mode.recommendedValue, "independent");
+    assert.ok(Object.isFrozen(pipeline.settings.mode.values));
+    assert.ok(pipeline.runOptions.includes("mode"));
     for (const option of pipeline.requiredRunOptions) {
       assert.ok(pipeline.runOptions.includes(option));
     }
@@ -146,11 +163,7 @@ test("pipeline pause projections preserve bounded details and redact private fie
   assert.ok(Object.isFrozen(projected.evidence));
   assert.ok(Object.isFrozen(projected.nextActions));
 
-  for (const pipelineId of [
-    "plan-authoring",
-    "plan-execution",
-    "polishing",
-  ]) {
+  for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
     assert.deepEqual(
       getPipeline(pipelineId).projections.pause(
         pausedRun({
@@ -173,6 +186,146 @@ test("pipeline pause projections preserve bounded details and redact private fie
   }
 });
 
+test("plan-execution projects bounded finalization no-progress blockers", () => {
+  const pipeline = getPipeline("plan-execution");
+  const issues = [
+    {
+      id: "PRIVATE_ISSUE_ID",
+      command: "private invalid command",
+      problem: "private invalid problem",
+      evidence: ["private invalid evidence"],
+    },
+    ...Array.from({ length: 34 }, (_, index) => ({
+      id: `F${index + 1}`,
+      command: `private command ${index + 1}`,
+      problem: `private problem ${index + 1}`,
+      evidence: [`private issue evidence ${index + 1}`],
+      path: `private/path-${index + 1}`,
+    })),
+  ];
+  const run = pausedRun(
+    {
+      reason: "no_progress",
+      resumeState: "RESOLVE_FINDINGS",
+      evidence: ["private pause evidence"],
+      prompt: "private prompt",
+      transcript: "private transcript",
+    },
+    {
+      finalizationResult: { status: "FAIL", issues },
+      findings: [],
+      findingOverrides: [],
+      reviewedFingerprint: null,
+      settings: { mode: "lazy", maxFixRoundsPerStep: 5 },
+      validationMigrationPending: false,
+    },
+  );
+
+  const projected = pipeline.projections.pause(run);
+
+  assert.deepEqual(
+    projected.evidence,
+    Array.from(
+      { length: 32 },
+      (_, index) => `Finalization blocker F${index + 1} remains unresolved.`,
+    ),
+  );
+  assert.deepEqual(projected.nextActions, [
+    {
+      type: "start-new-run",
+      requirement: "resolved-finalization-blockers",
+    },
+  ]);
+  assert.deepEqual(
+    pipeline.projections.status({ ...run, taskPath: "/task" }).findings,
+    [],
+  );
+  assert.ok(Object.isFrozen(projected.evidence));
+  assert.ok(Object.isFrozen(projected.nextActions));
+  assert.ok(Object.isFrozen(projected.nextActions[0]));
+  assert.throws(
+    () =>
+      pipeline.validateResumeAction(run, {
+        type: "extra-fix-rounds",
+        amount: 1,
+      }),
+    /Additional fix rounds are not applicable/u,
+  );
+  assert.throws(
+    () =>
+      pipeline.validateResumeAction(run, {
+        type: "override-finding",
+        findingId: "R1",
+      }),
+    /Finding override is not applicable/u,
+  );
+  const serialized = JSON.stringify(projected);
+  assert.doesNotMatch(
+    serialized,
+    /PRIVATE_ISSUE_ID|private command|private problem|private issue evidence|private\/path|private pause evidence|private prompt|private transcript/u,
+  );
+});
+
+test("plan-execution preserves valid no-progress recovery and Reviewer actions", () => {
+  const pipeline = getPipeline("plan-execution");
+  const finalizationState = {
+    finalizationResult: {
+      status: "FAIL",
+      issues: [
+        {
+          id: "F1",
+          command: "private command",
+          problem: "private problem",
+          evidence: ["private evidence"],
+        },
+      ],
+    },
+    findings: [],
+    findingOverrides: [],
+    reviewedFingerprint: null,
+    settings: { mode: "lazy", maxFixRoundsPerStep: 5 },
+    validationMigrationPending: true,
+  };
+  assert.deepEqual(
+    pipeline.projections.pause(
+      pausedRun(
+        { reason: "no_progress", resumeState: "RESOLVE_FINDINGS" },
+        finalizationState,
+      ),
+    ).nextActions,
+    [{ type: "resume", action: null }],
+  );
+
+  const reviewerRun = pausedRun(
+    { reason: "no_progress", resumeState: "RESOLVE_FINDINGS" },
+    {
+      finalizationResult: { status: "PASS" },
+      findings: [{ id: "R1", problem: "Review remains incomplete." }],
+      findingOverrides: [],
+      reviewedFingerprint: "a".repeat(64),
+      settings: { mode: "independent", maxFixRoundsPerStep: 5 },
+      validationMigrationPending: false,
+    },
+  );
+  assert.deepEqual(pipeline.projections.pause(reviewerRun), {
+    reason: "no_progress",
+    code: null,
+    explanation: "The correction loop reached a bounded no-progress condition.",
+    evidence: [],
+    resumeState: "RESOLVE_FINDINGS",
+    nextActions: [
+      {
+        type: "resume",
+        action: { type: "override-finding", findingId: "R1" },
+      },
+    ],
+  });
+  assert.deepEqual(
+    pipeline.projections.status({ ...reviewerRun, taskPath: "/task" }).findings,
+    [{ id: "R1", summary: "Review remains incomplete." }],
+  );
+});
+
 test("every pipeline projects bounded adapter diagnostics", () => {
   for (const [pipelineId, explanation] of [
     ["plan-authoring", "Plan authoring failed."],
@@ -193,8 +346,7 @@ test("every pipeline projects bounded adapter diagnostics", () => {
       {
         reason: "internal_failure",
         code: "ERR_CODEX_ISOLATION",
-        explanation:
-          `${explanation} Adapter diagnostic: operation_multi_agent.`,
+        explanation: `${explanation} Adapter diagnostic: operation_multi_agent.`,
         evidence: [],
         resumeState: null,
         nextActions: [],
@@ -220,9 +372,7 @@ test("plan-execution pause projection distinguishes fresh-run requirements", () 
       explanation: "Commit 2 conflicts with the accepted clarification.",
       evidence: ["The plan requires the opposite behavior."],
       resumeState: null,
-      nextActions: [
-        { type: "start-new-run", requirement: "revised-plan" },
-      ],
+      nextActions: [{ type: "start-new-run", requirement: "revised-plan" }],
     },
   );
 
@@ -343,6 +493,7 @@ test("pipelines own their pipeline-specific run options", () => {
   assert.deepEqual(getPipeline("plan-authoring").runOptions, [
     "project",
     "task",
+    "mode",
     "planner",
     "reviewer",
     "arbiter",
@@ -350,6 +501,7 @@ test("pipelines own their pipeline-specific run options", () => {
   assert.deepEqual(getPipeline("plan-execution").runOptions, [
     "project",
     "task",
+    "mode",
     "worker",
     "reviewer",
     "arbiter",
@@ -357,6 +509,7 @@ test("pipelines own their pipeline-specific run options", () => {
   assert.deepEqual(getPipeline("polishing").runOptions, [
     "project",
     "task",
+    "mode",
     "worker",
     "reviewer",
     "arbiter",
@@ -393,7 +546,10 @@ test("pipelines own their pipeline-specific run options", () => {
     "project",
     "task",
   ]);
-  assert.equal(typeof getPipeline("polishing").workflow.createState, "function");
+  assert.equal(
+    typeof getPipeline("polishing").workflow.createState,
+    "function",
+  );
   assert.equal(typeof getPipeline("polishing").workflow.run, "function");
   assert.equal(
     typeof getPipeline("polishing").workflow.validateRun,

@@ -6,8 +6,13 @@
 - Resolve material ambiguity in a bounded clarification phase before work begins.
 - Author reviewed commit-by-commit coding plans with the `plan-authoring` pipeline.
 - Execute predefined coding plans one verified local commit at a time with the `plan-execution` pipeline.
-- Polish and independently review existing workspace changes without committing them with the `polishing` pipeline.
+- Polish, finalize, and apply the selected review gate to existing workspace
+  changes without committing them with the `polishing` pipeline.
 - Support Codex CLI and Claude Code as independent pipeline role backends.
+- Keep `independent` execution the default and recommended mode for genuine
+  semantic review despite its higher provider context and token use; expose
+  `lazy` only as an explicit lower-consumption choice without independent
+  review and never select it automatically.
 - Stay autonomous during normal execution and pause only for explicit escalation conditions.
 - Make workflow correctness, Git safety, and resumable state more important than convenience.
 - Keep the runtime a plain Node.js CLI rather than a general agent framework.
@@ -15,10 +20,18 @@
 
 ## Source Of Truth
 
-Read `docs/ARCHITECTURE.md` before changing repository boundaries or dependency
-direction. Read the affected pipeline specification under `pipelines/*/docs/`
-before changing workflow behavior, prompts, review resolution, or pipeline CLI
-contracts. `packages/commit-plan/README.md` owns the shared plan contract.
+Use `docs/README.md` as the document map and change gate. Read
+`docs/CONVENTIONS.md` for the intended architecture and repository-wide code
+conventions before changing tracked content. Read `docs/ARCHITECTURE.md` for the
+detailed current runtime contract before changing boundaries or dependency
+direction, and update it when the implementation changes. Read the affected
+pipeline specification under `pipelines/*/docs/` before changing workflow
+behavior, prompts, review resolution, or pipeline CLI contracts.
+Use the product-document rows in `docs/README.md` for current workflow meaning,
+business rules, operator guarantees, and accepted nuances. `RHYTHM.md` records
+meaningful implemented decisions and their rationale; it does not replace a
+current owning document. `packages/commit-plan/README.md` owns the shared plan
+contract.
 
 ## Working Agreements
 
@@ -28,9 +41,13 @@ contracts. `packages/commit-plan/README.md` owns the shared plan contract.
 - Use `node:test`; keep real Codex and Claude smoke tests opt-in.
 - Prefer small functional modules and split them only when they become meaningfully large.
 - Keep backend-specific flags and output normalization inside `src/agents/`.
-- Keep runner configuration loading and precedence in `src/config.js`; let
-  pipeline descriptors own their roles, settings, defaults, and persisted-run
-  validation.
+- Register each backend once in the frozen `src/agents/registry.js` descriptor
+  list; derive configuration, runner, source-session, failure, and MCP backend
+  behavior from it without provider branches in pipelines.
+- Keep runner configuration behind `src/config/index.js`; keep strict parsing,
+  confined file loading, trusted profiles, and resolution precedence private
+  to that capability. Let pipeline descriptors own their roles, settings,
+  defaults, and persisted-run validation.
 - Keep shared plan parsing and structural and subject validation in
   `packages/commit-plan/`. The plan-authoring Planner proposes exact commit
   subjects, deterministic code validates them, and plan execution consumes
@@ -49,6 +66,22 @@ contracts. `packages/commit-plan/README.md` owns the shared plan contract.
 
 All pipelines additionally require:
 
+- Own one `mode` setting with exactly `independent` and `lazy`; resolve a
+  missing value and every legacy run to `independent`, persist the resolved
+  value at creation, and never reload it on resume.
+- Validate configured role values deterministically, but in lazy mode resolve,
+  probe, persist, source-session-check, invoke, and publicly project only the
+  Planner or Worker. Preserve inactive Reviewer and Arbiter configuration for
+  a future independent run without exposing provider-private values.
+- Fork a deliberately supplied source session independently by primary and
+  review checkpoints in independent mode. In lazy mode fork it exactly once
+  into the logical primary role for the entire run, then continue the child or
+  reconstruct the same role without reforking the source.
+- In lazy mode alternate a writable primary-agent `CHECK_AND_FIX` turn with a
+  separate read-only `CLEAN_CONFIRM`. Advance only for structured `CLEAN`, no
+  read-only mutation, and the unchanged inspected fingerprint; route findings
+  back to fixing and keep the loop bounded without invoking Reviewer or
+  Arbiter.
 - Start with a pipeline-owned `CLARIFY` state whose agent turns are read-only.
 - Let the primary role return `READY`, structured material questions, or a
   pipeline-owned blocking outcome; do not ask questions that repository
@@ -68,14 +101,23 @@ All pipelines additionally require:
 
 `plan-execution` additionally requires:
 
-- Run Worker and Reviewer bootstrap independently and read-only.
+- In independent mode run Worker and Reviewer bootstrap independently and
+  read-only. In lazy mode use the Worker alone to establish the complete
+  validation inventory under the same deterministic rules.
 - Keep plan-compatibility, Reviewer, and Arbiter turns read-only and verify that
   they did not mutate the repository.
 - Allow only the Worker to create the planned local commit, and only in the one-shot `COMMIT` turn explicitly authorized by the runner after the gate passes.
 - Reject all other agent history/ref changes and verify that remote configuration remains unchanged across every agent turn.
 - Require the exact validated plan subject, reject bodies/footers, and reject `Co-authored-by` trailers.
-- Tie finalization and review to the same staging-independent content fingerprint and invalidate both after any content change.
-- Resolve every finding by fix, withdrawal, arbitration, or explicit recorded user override.
+- Converge independent candidate review or lazy check/fix plus candidate clean
+  confirmation before `FINALIZE`, then tie finalization and one distinct
+  read-only terminal confirmation to the same staging-independent content
+  fingerprint. Invalidate candidate, finalization, and confirmation evidence
+  after any content-changing repair; the terminal formatter is reviewed by the
+  final confirmation over its resulting fingerprint.
+- In independent mode resolve every Reviewer finding by fix, withdrawal,
+  arbitration, or explicit recorded user override. Route lazy confirmation
+  findings directly to fixing; they are never disputed or arbitrated.
 - Do not leave `CLARIFY` when clarification input conflicts with the validated plan; require a revised plan and new execution run.
 - If a product decision invalidates completed commits or the validated plan, require a revised plan and a new execution run; never rewrite completed commits automatically.
 - Pause when retry budgets are exhausted or repository reconciliation is unsafe.
@@ -92,47 +134,74 @@ All pipelines additionally require:
 
 `polishing` additionally requires:
 
-- Run Worker and Reviewer bootstrap independently and read-only.
-- Allow only Worker polishing, finalization, and finding-resolution turns to
-  change safe workspace content. No agent turn may change the index; the runner
-  alone stages the finalized and reviewed polishing handoff.
+- In independent mode run Worker and Reviewer bootstrap independently and
+  read-only. In lazy mode use the Worker alone to establish the complete
+  staging-independent inventory under the same deterministic rules.
+- Allow only Worker polishing, finalization, finding-resolution, and lazy
+  check/fix turns to change safe workspace content. No agent turn may change
+  the index; the runner alone stages the finalized and reviewed polishing
+  handoff.
 - Keep bootstrap, validation-migration, and finalization required-check
   inventories staging-independent. Translate applicable tracked-content checks
   to `HEAD` or explicit trees; reserve staged and index-relative inspection for
   `HANDOFF`.
 - Never request `local-commit`, create a commit, or change `HEAD`, refs, remotes,
   or Git identity.
-- Tie successful finalization and independent review to the same
-  staging-independent content fingerprint and invalidate both after content
-  changes.
+- Converge independent candidate review, or lazy check/fix plus candidate clean
+  confirmation, before `FINALIZE`. After finalization, require one distinct
+  read-only Reviewer or Worker terminal confirmation over the resulting content
+  and validation evidence before `HANDOFF`.
+- Invalidate candidate, finalization, and terminal-confirmation evidence after
+  content-changing repairs. Finalization may format the accepted candidate, but
+  the terminal confirmation and handoff must bind the resulting fingerprint.
 - Leave the finalized and reviewed workspace changes staged and uncommitted.
 
 ## Repository Map
 
-| Path | Ownership |
-| --- | --- |
-| `bin/agent-run.js` | Thin executable entry point |
-| `src/index.js` | Public root source boundary |
-| `src/cli.js` | Argument parsing and terminal-facing command dispatch |
-| `src/mcp.js` | STDIO MCP schemas, projections, waits, and detached dispatch |
-| `src/config.js` | Runner configuration loading, validation, and role resolution |
-| `src/clarifications.js` | Public clarification-service coordination |
-| `src/clarification-*.js` | Internal confined-file and editor helpers |
-| `src/pipeline-registry.js` | Explicit registry of built-in pipelines |
-| `src/runner.js` | High-level run, resume, and status orchestration |
-| `src/state.js` | Public run-store coordination and state-directory resolution |
-| `src/state-*.js` | Internal state file, journal, action, lease, and validation helpers |
-| `src/git.js` | Public Git-safety coordination |
-| `src/git-*.js` | Internal Git process, snapshot, and commit-verification helpers |
-| `src/agents/index.js` | Public agent-adapter directory boundary |
-| `src/agents/` | Codex and Claude adapter implementations |
-| `packages/commit-plan/` | Shared deterministic commit-plan contract |
-| `pipelines/plan-authoring/` | Plan-authoring workflow, prompts, tests, and specification |
-| `pipelines/plan-execution/` | Plan-execution workflow, prompts, tests, and specification |
-| `pipelines/polishing/` | Polishing workflow, prompts, tests, and specification |
-| `test/` | Root CLI, registry, adapter, and repository-boundary tests |
-| `docs/` | Cross-cutting architecture documentation |
-| `.agents/skills/` | Shared repository workflow skills |
+| Path                              | Ownership                                                            |
+| --------------------------------- | -------------------------------------------------------------------- |
+| `bin/agent-run.js`                | Thin executable entry point                                          |
+| `src/index.js`                    | Public root source boundary                                          |
+| `src/cli.js`                      | Argument parsing and terminal-facing command dispatch                |
+| `src/mcp/index.js`                | Public STDIO MCP protocol capability boundary                        |
+| `src/mcp/`                        | Private schemas, projections, waits, detached dispatch, reporting    |
+| `src/config/index.js`             | Public runner-configuration capability boundary                      |
+| `src/config/`                     | Private parsing, confined loading, profiles, and resolution          |
+| `src/clarifications/index.js`     | Public clarification-service boundary                                |
+| `src/clarifications/`             | Private coordination, confined transcript, and editor modules        |
+| `src/pipeline-registry.js`        | Explicit registry of built-in pipelines                              |
+| `src/runner/index.js`             | Public runner-orchestration capability boundary                      |
+| `src/runner/`                     | Private input, role/session, migration, and orchestration modules    |
+| `src/state/index.js`              | Public run-store capability boundary                                 |
+| `src/state/`                      | Private service, files, journals, actions, leases, and validation    |
+| `src/git/index.js`                | Public Git-safety capability boundary                                |
+| `src/git/`                        | Private service, command, content, commit, and handoff modules       |
+| `src/trusted-validation/index.js` | Public runner-trusted validation capability boundary                 |
+| `src/trusted-validation/`         | Private contracts, snapshots, sandboxing, and command execution      |
+| `src/agents/index.js`             | Public agent-adapter directory boundary                              |
+| `src/agents/registry.js`          | Frozen source-controlled provider descriptor registry                |
+| `src/agents/claude/index.js`      | Public Claude provider boundary                                      |
+| `src/agents/claude/`              | Private Claude adapter, commit, and native-sandbox implementation    |
+| `src/agents/codex/index.js`       | Public Codex provider boundary                                       |
+| `src/agents/codex/`               | Private Codex adapter, transport, commit, and storage implementation |
+| `src/agents/`                     | Shared agent contracts, registration, and provider implementations   |
+| `packages/commit-plan/`           | Shared deterministic commit-plan contract                            |
+| `pipelines/plan-authoring/`       | Plan-authoring workflow, prompts, tests, and specification           |
+| `pipelines/plan-execution/`       | Plan-execution workflow, prompts, tests, and specification           |
+| `pipelines/polishing/`            | Polishing workflow, prompts, tests, and specification                |
+| `test/agents/`                    | Provider boundaries and descriptor-registry behavior                 |
+| `test/clarifications/`            | Clarification-service behavior tests                                 |
+| `test/config/`                    | Configuration parsing, loading, and resolution tests                 |
+| `test/git/`                       | Git-safety behavior tests                                            |
+| `test/integration/`               | Cross-capability workflow integration tests                          |
+| `test/mcp/`                       | MCP control-plane and issue-reporting behavior tests                 |
+| `test/state/`                     | State persistence and safety behavior tests                          |
+| `test/source-boundaries.test.js`  | Source indexes and workspace dependency-direction regression         |
+| `test/`                           | Root CLI, registry, adapter, and repository-boundary tests           |
+| `docs/`                           | Cross-cutting architecture documentation                             |
+| `docs/product/`                   | Current product guarantees, workflow meaning, and accepted nuances   |
+| `RHYTHM.md`                       | Newest-first record of meaningful implemented repository decisions   |
+| `.agents/skills/`                 | Shared repository workflow skills                                    |
 
 `.claude/skills` is a symlink to `.agents/skills`. Edit the canonical skill
 files under `.agents/skills`; never create a second Claude-specific copy.
@@ -151,8 +220,8 @@ Inside an Agent Runner pipeline, the established inventory ends with the
 `HEAD`-relative content check. The runner-owned `COMMIT` or `HANDOFF` boundary
 performs the staged check after it alone stages the accepted content.
 
-The test suite imports every root and workspace source module and validates
-project skill frontmatter and interface metadata without depending on one agent
-backend's installation path.
+The test suite imports every root and workspace source module, validates
+canonical project skill frontmatter and content without requiring local
+provider interface metadata, and checks the central product-document map.
 
 Use the `finalization` skill for the complete handoff gate.

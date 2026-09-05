@@ -4,7 +4,7 @@ import { planAuthoringPipeline } from "@agent-runner/plan-authoring";
 import { planExecutionPipeline } from "@agent-runner/plan-execution";
 import { polishingPipeline } from "@agent-runner/polishing";
 
-import { RUNTIME_COMPATIBILITY } from "./state-validation.js";
+import { RUNTIME_COMPATIBILITY } from "./state/index.js";
 
 const PIPELINES = new Map();
 

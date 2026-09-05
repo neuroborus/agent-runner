@@ -1,13 +1,10 @@
 import { parseArgs } from "node:util";
 
 import packageMetadata from "../package.json" with { type: "json" };
-import {
-  DETACHED_RUNTIME_COMPATIBILITY_ENV,
-  serveMcp,
-} from "./mcp.js";
+import { DETACHED_RUNTIME_COMPATIBILITY_ENV, serveMcp } from "./mcp/index.js";
 import { getPipeline, listPipelines } from "./pipeline-registry.js";
-import { createRunner, parseSourceSession } from "./runner.js";
-import { RUNTIME_VERSION_SKEW_EXIT_CODE } from "./state.js";
+import { createRunner, parseSourceSession } from "./runner/index.js";
+import { RUNTIME_VERSION_SKEW_EXIT_CODE } from "./state/index.js";
 
 const COMMAND_OPTIONS = Object.freeze({
   resume: Object.freeze(["run", "extra-fix-rounds", "override-finding"]),
@@ -68,7 +65,7 @@ const PIPELINE_USAGE = PIPELINES.map(
 const USAGE = `Agent Runner
 
 Usage:
-  agent-run run <pipeline> --project <repo> --task <task-dir> [--clarify] [--profile <alias>] [--fork-from <backend>:<session-id>]
+  agent-run run <pipeline> --project <repo> --task <task-dir> [--mode <independent|lazy>] [--clarify] [--profile <alias>] [--fork-from <backend>:<session-id>]
   agent-run resume --run <run-id> [--extra-fix-rounds <count> | --override-finding <finding-id>]
   agent-run status --run <run-id>
   agent-run pipelines
@@ -79,7 +76,13 @@ ${PIPELINE_USAGE}
 
 Options:
       --clarify            Open the clarification editor before agent questions
-      --fork-from          Fork primary and review roles from a backend session
+      --mode               Select independent or lazy pipeline execution
+                           independent is default and recommended for genuinely
+                           independent review, but uses more context and tokens;
+                           lazy is opt-in, uses less, and has no independent review
+      --fork-from          Fork a compatible backend session into active roles
+                           independent forks primary and review roles separately;
+                           lazy forks once into the primary role
       --fork-profile       Trusted profile alias used by the source session
       --profile            Set the run-wide trusted profile alias
       --project-config     Load an explicit ignored project configuration
@@ -116,9 +119,13 @@ function pauseActionLine(runId, action) {
     return `  Respond to pending input ${action.requestId} through MCP, or edit the clarification artifact and resume.`;
   }
   if (action.type === "start-new-run") {
-    return action.requirement === "revised-plan"
-      ? "  Revise the plan and start a fresh plan-execution run."
-      : "  Abandon this run and start a fresh run from an uncontaminated worktree.";
+    if (action.requirement === "revised-plan") {
+      return "  Revise the plan and start a fresh plan-execution run.";
+    }
+    if (action.requirement === "resolved-finalization-blockers") {
+      return "  Resolve the reported finalization blockers, restore a clean baseline, prepare a plan for the remaining work, and start a fresh plan-execution run.";
+    }
+    return "  Abandon this run and start a fresh run from an uncontaminated worktree.";
   }
   if (action.action === null) {
     return `  Retry with: agent-run resume --run ${runId}`;
@@ -138,6 +145,7 @@ function runSummary({ directoryPath, run }) {
   const lines = [
     `Run: ${run.runId}`,
     `Pipeline: ${run.pipelineId}`,
+    `Mode: ${state.settings?.mode ?? pipeline.settings.mode.defaultValue}`,
     `State: ${state.workflowState}`,
   ];
   if (status.currentStep !== null) {
@@ -188,9 +196,7 @@ function runSummary({ directoryPath, run }) {
   if (reviewed !== null) {
     lines.push(`Reviewed fingerprint: ${reviewed}`);
   }
-  if (
-    status.completedCommits.length > 0
-  ) {
+  if (status.completedCommits.length > 0) {
     lines.push(
       `Commits: ${status.completedCommits.map(shortFingerprint).join(", ")}`,
     );
@@ -244,6 +250,22 @@ function executionOverrides(values) {
       ? {}
       : { contextSize: values["context-size"] }),
   });
+}
+
+function settingOverrides(pipeline, values) {
+  return Object.freeze(
+    Object.fromEntries(
+      Object.entries(pipeline.settings).flatMap(([name, definition]) => {
+        if (!pipeline.runOptions.includes(name) || values[name] === undefined) {
+          return [];
+        }
+        if (!definition.validate(values[name])) {
+          throw new Error(`--${name} ${definition.errorMessage}.`);
+        }
+        return [[name, values[name]]];
+      }),
+    ),
+  );
 }
 
 function resumeAction(values) {
@@ -383,9 +405,9 @@ export async function main(
   }
 
   if (command === "pipelines") {
-    const output = PIPELINES
-      .map((entry) => `${entry.id}\t${entry.description}`)
-      .join("\n");
+    const output = PIPELINES.map(
+      (entry) => `${entry.id}\t${entry.description}`,
+    ).join("\n");
     stdout.write(`${output}\n`);
     return 0;
   }
@@ -426,6 +448,7 @@ export async function main(
         projectConfigurationPath: values["project-config"],
         roleOverrides: roleOverrides(pipeline, values),
         executionOverrides: executionOverrides(values),
+        settingOverrides: settingOverrides(pipeline, values),
         sourceSession:
           parsedSource === null
             ? null

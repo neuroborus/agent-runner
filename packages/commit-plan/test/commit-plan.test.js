@@ -37,8 +37,7 @@ test("parses sequential commit steps and preserves opaque bodies", () => {
       {
         number: 2,
         subject: "test(market): cover repository",
-        body:
-          "\nKeep `## Commitments` and `### Commit 7: example` as body text.\n",
+        body: "\nKeep `## Commitments` and `### Commit 7: example` as body text.\n",
       },
     ],
   });
@@ -195,15 +194,11 @@ test("validates the complete serializable plan shape", () => {
       ],
     },
     {
-      steps: [
-        { number: 2, subject: "feat(core): add behavior", body: "" },
-      ],
+      steps: [{ number: 2, subject: "feat(core): add behavior", body: "" }],
     },
     { steps: [{ number: 1, subject: "invalid", body: "" }] },
     {
-      steps: [
-        { number: 1, subject: "feat(core): add behavior", body: null },
-      ],
+      steps: [{ number: 1, subject: "feat(core): add behavior", body: null }],
     },
     {
       steps: [

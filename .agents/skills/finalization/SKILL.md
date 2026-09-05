@@ -11,11 +11,24 @@ report only failures that cannot be resolved safely within the current scope.
 
 ## 1. Review Scope
 
-- Compare the change with `docs/ARCHITECTURE.md`, the affected pipeline
-  specifications, the shared plan contract, and the current request.
+- Use the change gate in `docs/README.md` to identify every owning document
+  affected by the change.
+- Compare the change with the intended architecture and repository-wide rules
+  in `docs/CONVENTIONS.md`, the detailed runtime contract in
+  `docs/ARCHITECTURE.md`, the affected pipeline specifications, the shared plan
+  contract, and the current request.
 - Keep the monorepo within its stated non-goals and avoid speculative abstractions.
 - Preserve unrelated user work and call out any overlap or uncertainty.
 - Verify that README, `AGENTS.md`, and project skills still match actual behavior.
+- Keep every tracked `docs/product/*.md` document represented exactly once in
+  `docs/README.md`, with a concise description of what it owns and when to read
+  it. Update the owning product document when its behavior changes, without
+  duplicating detailed pipeline or runtime contracts.
+- Add a newest-first `RHYTHM.md` entry when the change creates or revises a
+  durable product, convention, safety, provider, workflow-ownership, or
+  architectural decision. Mechanical moves and corrections need no entry.
+- Verify that the complete `docs/README.md` map and its links still match the
+  repository.
 - Verify that workspace dependencies point from the root runtime to pipelines and
   from pipelines to shared packages, never between pipelines.
 
@@ -37,16 +50,27 @@ report only failures that cannot be resolved safely within the current scope.
 - Verify that planned commit messages contain no `Co-authored-by` trailer and use the existing Git identity.
 - Verify that state remains outside the task and target repositories and is written atomically.
 - Verify that content fingerprints include changed tracked content, deletions, and non-ignored untracked content while ignoring staging placement.
-- Verify that every content change invalidates prior finalization and review results.
+- Verify that ordinary content changes invalidate candidate, finalization, and
+  terminal-confirmation evidence, while terminal formatting is covered by the
+  final confirmation over its resulting fingerprint.
 - Verify that unresolved findings, disputes, exhausted budgets, or unsafe Git state pause instead of advancing.
 
-## 3. Run Checks
+## 3. Format And Run Checks
 
-Run the repository gate:
+Run the writable repository formatter as the first operation of the terminal
+gate:
+
+```bash
+npm run format
+```
+
+Review its output as the content being finalized and subsequently confirmed.
+Then run the non-mutating repository gate and staging-independent Git
+whitespace check:
 
 ```bash
 npm run check
-git diff --check
+git diff --check HEAD
 ```
 
 Add or update tests in the same change when behavior changes. Prefer fake adapters

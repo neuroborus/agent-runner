@@ -19,11 +19,12 @@ import {
   createRunner,
   createRunStore,
   DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
+  getPipeline,
   parseRunnerConfiguration,
   RUN_STATE_SCHEMA_VERSION,
   RunnerError,
 } from "../src/index.js";
-import { preparePipelineMigration } from "../src/runner.js";
+import { preparePipelineMigration } from "../src/runner/index.js";
 
 const executeFile = promisify(execFile);
 const SOURCE_SESSION = "11111111-1111-4111-8111-111111111111";
@@ -68,6 +69,28 @@ function draft() {
 function approved() {
   return {
     status: "APPROVED",
+    findings: [],
+    question: "",
+    options: [],
+    whyBlocked: "",
+    evidence: [],
+  };
+}
+
+function unchangedPlan() {
+  return {
+    status: "UNCHANGED",
+    plan: "",
+    question: "",
+    options: [],
+    whyBlocked: "",
+    evidence: [],
+  };
+}
+
+function cleanPlan() {
+  return {
+    status: "CLEAN",
     findings: [],
     question: "",
     options: [],
@@ -121,6 +144,16 @@ function createAdapter({ fork = true, questionFirst = false } = {}) {
         request.prompt.includes("Write a concise commit-by-commit plan")
       ) {
         structured = draft();
+        sessionId ??= plannerSession();
+      } else if (request.prompt.includes("Return CLEAN only")) {
+        structured = cleanPlan();
+        sessionId ??= plannerSession();
+      } else if (
+        request.prompt.includes(
+          "If you find any problems, fix the plan idiomatically and minimally",
+        )
+      ) {
+        structured = unchangedPlan();
         sessionId ??= plannerSession();
       } else if (
         request.prompt.includes("Review the plan and verify that it is correct")
@@ -260,7 +293,9 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
           evidence: [],
         };
       } else if (
-        request.prompt.includes("Run the complete project finalization procedure")
+        request.prompt.includes(
+          "Run the complete project finalization procedure",
+        )
       ) {
         structured = {
           status: "PASS",
@@ -283,8 +318,18 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
           whyBlocked: "",
           evidence: [],
         };
+      } else if (request.prompt.includes("semantic candidate")) {
+        structured = {
+          status: "APPROVED",
+          findings: [],
+          question: "",
+          options: [],
+          whyBlocked: "",
+          evidence: [],
+        };
       } else if (
-        request.prompt.includes("Review the changes and verify") ||
+        request.prompt.includes("Confirm the finalized changes") ||
+        request.prompt.includes("Confirm the finalized change set") ||
         request.prompt.includes("Review the complete current change set")
       ) {
         structured = {
@@ -460,11 +505,7 @@ test("validates the canonical Git root before creating external state", async (t
 test("serializes execution and polishing runs for one temporary worktree", async (t) => {
   const fixture = await createFixture(t);
   const runStore = createRunStore({ stateRoot: fixture.stateRoot });
-  const runner = runnerFor(
-    fixture,
-    { codex: createAdapter() },
-    { runStore },
-  );
+  const runner = runnerFor(fixture, { codex: createAdapter() }, { runStore });
   const preparedRuns = await Promise.all(
     ["plan-execution", "polishing"].map((pipelineId) =>
       runner.create({
@@ -594,7 +635,8 @@ test("publishes blocking provider activity before every pipeline turn", async (t
       const runId = await Promise.race([
         started.promise,
         executing.then(
-          () => assert.fail("Pipeline completed before its first provider turn."),
+          () =>
+            assert.fail("Pipeline completed before its first provider turn."),
           (cause) => Promise.reject(cause),
         ),
       ]);
@@ -646,6 +688,7 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
   });
   assert.deepEqual(paused.run.pipelineState.settings, {
     maxRevisionRounds: 15,
+    mode: "independent",
     stagnationWindowRounds: 3,
   });
   assert.deepEqual(adapter.calls[0].session, {
@@ -672,12 +715,16 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
     action: null,
   });
 
-  assert.equal(beforeResume.run.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(
+    beforeResume.run.pipelineState.workflowState,
+    "WAITING_FOR_USER",
+  );
   assert.equal(completed.run.pipelineState.workflowState, "DONE");
   assert.equal(await readFile(join(fixture.taskPath, "plan.md"), "utf8"), PLAN);
   assert.deepEqual(completed.run.roles, paused.run.roles);
   assert.deepEqual(completed.run.pipelineState.settings, {
     maxRevisionRounds: 15,
+    mode: "independent",
     stagnationWindowRounds: 3,
   });
   assert.deepEqual(
@@ -739,10 +786,9 @@ test("migrates a legacy runtime envelope under the run lease before resume", asy
         actor === "runner" && kind === "migrated" && phase === "runtime",
     ),
   );
-  const events = (await readFile(
-    join(prepared.directoryPath, "events.jsonl"),
-    "utf8",
-  ))
+  const events = (
+    await readFile(join(prepared.directoryPath, "events.jsonl"), "utf8")
+  )
     .trimEnd()
     .split("\n")
     .map((line) => JSON.parse(line));
@@ -772,8 +818,7 @@ test("rejects a detached runtime mismatch before touching a durable run", async 
     runner.resume({
       runId: prepared.run.runId,
       action: null,
-      expectedRuntimeCompatibility:
-        `${DETACHED_RUNTIME_COMPATIBILITY_TOKEN}-other`,
+      expectedRuntimeCompatibility: `${DETACHED_RUNTIME_COMPATIBILITY_TOKEN}-other`,
     }),
     (error) =>
       error instanceof RunnerError &&
@@ -906,10 +951,22 @@ test("prepares a durable run and submits identified input before continuation", 
 
 test("resumes plan execution from its durable trusted-command snapshot", async (t) => {
   const fixture = await createFixture(t);
-  await writeFile(join(fixture.projectPath, ".gitignore"), "/LOCAL_ARTIFACTS/\n");
-  await writeFile(join(fixture.projectPath, "source.js"), "export const value = 1;\n");
+  await writeFile(
+    join(fixture.projectPath, ".gitignore"),
+    "/LOCAL_ARTIFACTS/\n",
+  );
+  await writeFile(
+    join(fixture.projectPath, "source.js"),
+    "export const value = 1;\n",
+  );
   await writeFile(join(fixture.taskPath, "plan.md"), PLAN);
-  await executeFile("git", ["-C", fixture.projectPath, "config", "user.name", "Test"]);
+  await executeFile("git", [
+    "-C",
+    fixture.projectPath,
+    "config",
+    "user.name",
+    "Test",
+  ]);
   await executeFile("git", [
     "-C",
     fixture.projectPath,
@@ -1074,10 +1131,9 @@ test("submits input previewed from a compatible legacy run", async (t) => {
     submitted.run.pause.inputResponse.transcriptHash,
     preview.responseHash,
   );
-  const events = (await readFile(
-    join(paused.directoryPath, "events.jsonl"),
-    "utf8",
-  ))
+  const events = (
+    await readFile(join(paused.directoryPath, "events.jsonl"), "utf8")
+  )
     .trimEnd()
     .split("\n")
     .map((line) => JSON.parse(line));
@@ -1235,6 +1291,88 @@ test("does not require an unused Arbiter backend", async (t) => {
   });
 });
 
+test("persists descriptor-selected roles and probes only required roles", async (t) => {
+  const fixture = await createFixture(t);
+  const adapter = createAdapter();
+  const runner = runnerFor(fixture, { codex: adapter });
+
+  const prepared = await runner.create({
+    pipelineId: "plan-authoring",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+    roleOverrides: {
+      planner: { model: "planner-model" },
+      reviewer: { model: "reviewer-model" },
+      arbiter: { backend: "claude" },
+    },
+    sourceSession: null,
+  });
+  const pipeline = getPipeline("plan-authoring");
+
+  assert.deepEqual(
+    Object.keys(prepared.run.roles),
+    pipeline.resolveActiveRoles(prepared.run.pipelineState.settings),
+  );
+  assert.deepEqual(adapter.probes, [
+    {
+      profile: "current",
+      model: "planner-model",
+      contextSize: "current",
+    },
+    {
+      profile: "current",
+      model: "reviewer-model",
+      contextSize: "current",
+    },
+  ]);
+  assert.equal(prepared.run.roles.arbiter.backend, "claude");
+});
+
+test("runs lazy plan authoring with only one Planner fork", async (t) => {
+  const fixture = await createFixture(t);
+  const adapter = createAdapter();
+  const runner = runnerFor(
+    fixture,
+    { codex: adapter },
+    {
+      configuration: {
+        ...RUNNER_CONFIGURATION,
+        pipelines: {
+          "plan-authoring": {
+            mode: "independent",
+            roles: {
+              reviewer: { backend: "claude", model: "reviewer-model" },
+              arbiter: { backend: "claude", model: "arbiter-model" },
+            },
+          },
+        },
+      },
+    },
+  );
+
+  const result = await runner.run({
+    pipelineId: "plan-authoring",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+    roleOverrides: {},
+    settingOverrides: { mode: "lazy" },
+    sourceSession: { backend: "codex", id: SOURCE_SESSION },
+  });
+
+  assert.equal(result.run.pipelineState.workflowState, "DONE");
+  assert.deepEqual(Object.keys(result.run.roles), ["planner"]);
+  assert.equal(result.run.pipelineState.settings.mode, "lazy");
+  assert.equal(adapter.probes.length, 1);
+  assert.equal(
+    adapter.calls.filter(({ session }) => session?.mode === "fork").length,
+    1,
+  );
+  assert.deepEqual(
+    result.run.sessionLineage.children.map(({ role }) => role),
+    ["planner"],
+  );
+});
+
 test("persists project overrides and ignores later configuration changes", async (t) => {
   const fixture = await createFixture(t);
   const adapter = createAdapter({ questionFirst: true });
@@ -1259,6 +1397,7 @@ test("persists project overrides and ignores later configuration changes", async
       defaultModel: "project-model",
       pipelines: {
         "plan-authoring": {
+          mode: "lazy",
           maxRevisionRounds: 4,
           roles: { reviewer: { contextSize: "200000" } },
         },
@@ -1279,11 +1418,7 @@ test("persists project overrides and ignores later configuration changes", async
       },
     },
   };
-  const runner = runnerFor(
-    fixture,
-    { codex: adapter },
-    { configuration },
-  );
+  const runner = runnerFor(fixture, { codex: adapter }, { configuration });
 
   const paused = await runner.run({
     pipelineId: "plan-authoring",
@@ -1291,12 +1426,14 @@ test("persists project overrides and ignores later configuration changes", async
     taskPath: fixture.taskPath,
     proactiveClarification: false,
     roleOverrides: { planner: { model: "cli-planner" } },
+    settingOverrides: { mode: "independent" },
     sourceSession: null,
   });
 
   assert.equal(paused.run.pipelineState.workflowState, "WAITING_FOR_USER");
   assert.deepEqual(paused.run.pipelineState.settings, {
     maxRevisionRounds: 4,
+    mode: "independent",
     stagnationWindowRounds: 3,
   });
   assert.equal(
@@ -1429,7 +1566,10 @@ test("dispatches plan execution through the root Git and state services", async 
   const fixture = await createFixture(t);
   await Promise.all([
     writeFile(join(fixture.projectPath, ".gitignore"), "/LOCAL_ARTIFACTS/\n"),
-    writeFile(join(fixture.projectPath, "source.js"), "export const value = 0;\n"),
+    writeFile(
+      join(fixture.projectPath, "source.js"),
+      "export const value = 0;\n",
+    ),
     writeFile(join(fixture.taskPath, "plan.md"), PLAN),
   ]);
   await executeFile("git", [
@@ -1524,10 +1664,7 @@ test("dispatches plan execution through the root Git and state services", async 
   );
 });
 
-for (const pauseReason of [
-  "local_artifacts_not_ignored",
-  "unsafe_git_state",
-]) {
+for (const pauseReason of ["local_artifacts_not_ignored", "unsafe_git_state"]) {
   test(`resumes polishing after ${pauseReason} preflight is corrected`, async (t) => {
     const fixture = await createFixture(t);
     const ignoreArtifacts = pauseReason === "unsafe_git_state";
@@ -1536,7 +1673,10 @@ for (const pauseReason of [
         join(fixture.projectPath, ".gitignore"),
         ignoreArtifacts ? "/LOCAL_ARTIFACTS/\n" : "/ignored/\n",
       ),
-      writeFile(join(fixture.projectPath, "source.js"), "export const value = 0;\n"),
+      writeFile(
+        join(fixture.projectPath, "source.js"),
+        "export const value = 0;\n",
+      ),
     ]);
     await executeFile("git", [
       "-C",

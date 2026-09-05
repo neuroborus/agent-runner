@@ -16,13 +16,13 @@ import { isAbsolute, join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
+import { createGitService } from "../src/git/index.js";
 import {
-  createGitService,
   createTrustedValidationService,
   createTrustedValidationSnapshot,
+  runExactCommand,
   validateTrustedValidationSnapshot,
-} from "../src/index.js";
-import { runExactCommand } from "../src/trusted-validation-execution.js";
+} from "../src/trusted-validation/index.js";
 
 const executeFile = promisify(execFile);
 
@@ -56,7 +56,13 @@ async function repository(t) {
   ]);
   await writeFile(join(projectPath, "tracked.txt"), "initial\n");
   await executeFile("git", ["-C", projectPath, "add", "."]);
-  await executeFile("git", ["-C", projectPath, "commit", "-qm", "test: fixture"]);
+  await executeFile("git", [
+    "-C",
+    projectPath,
+    "commit",
+    "-qm",
+    "test: fixture",
+  ]);
   return projectPath;
 }
 
@@ -72,6 +78,89 @@ function snapshot(alias, command, executable, argumentsList) {
     [alias],
   );
 }
+
+test("bounds each snapshot independently from the command catalog", () => {
+  const definitions = Object.fromEntries(
+    Array.from({ length: 256 }, (_, index) => [
+      `check-${index + 1}`,
+      {
+        command: `node validation-${index + 1}.js`,
+        executable: "node",
+        arguments: [`validation-${index + 1}.js`],
+      },
+    ]),
+  );
+  const aliases = Object.keys(definitions);
+
+  assert.equal(
+    createTrustedValidationSnapshot(definitions, aliases.slice(0, 32)).commands
+      .length,
+    32,
+  );
+  assert.throws(
+    () => createTrustedValidationSnapshot(definitions, aliases.slice(0, 33)),
+    /Trusted validation selection is invalid/u,
+  );
+});
+
+test("preserves line feeds in direct command arguments", () => {
+  const script = "first line\nsecond line";
+  const trusted = snapshot(
+    "multiline-check",
+    "python3 -c multiline-check",
+    "python3",
+    ["-c", script],
+  );
+
+  assert.equal(trusted.commands[0].arguments[1], script);
+  assert.deepEqual(validateTrustedValidationSnapshot(trusted), trusted);
+  assert.throws(
+    () =>
+      snapshot(
+        "multiline-command",
+        "python3\n-c multiline-command",
+        "python3",
+        ["-c", script],
+      ),
+    /command is invalid/u,
+  );
+  assert.throws(
+    () =>
+      snapshot(
+        "multiline-executable",
+        "python3 -c multiline-executable",
+        "python3\n-c",
+        ["-c", script],
+      ),
+    /executable is invalid/u,
+  );
+});
+
+test("rejects other control characters and line separators in direct arguments", () => {
+  const forbiddenCodePoints = [
+    ...Array.from({ length: 0x20 }, (_, codePoint) => codePoint),
+    ...Array.from({ length: 0x21 }, (_, index) => 0x7f + index),
+    0x2028,
+    0x2029,
+  ].filter((codePoint) => codePoint !== 0x0a);
+
+  for (const codePoint of forbiddenCodePoints) {
+    const character = String.fromCodePoint(codePoint);
+    const label = `U+${codePoint.toString(16).padStart(4, "0")}`;
+
+    assert.throws(
+      () =>
+        snapshot(
+          "invalid-control-check",
+          "python3 -c invalid-control-check",
+          "python3",
+          ["-c", `first line${character}second line`],
+        ),
+      /argument 2 is invalid/u,
+      label,
+    );
+  }
+});
 
 async function bindings(git, projectPath, trusted) {
   return {
@@ -245,8 +334,7 @@ test("isolates host-control and remote-write probes", async (t) => {
   });
   await assert.rejects(
     shadowed.preflight({ projectPath }),
-    (cause) =>
-      cause.code === "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE",
+    (cause) => cause.code === "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE",
   );
 });
 
@@ -434,6 +522,126 @@ test("terminates persistent descendants after successful trusted commands", asyn
     {
       cwd: projectPath,
       environment: process.env,
+      terminationGraceMs: 100,
+      timeoutMs: 1_000,
+    },
+  );
+
+  assert.deepEqual(result, {
+    status: "BLOCKED",
+    exitCode: null,
+    signal: null,
+    timedOut: false,
+    reason: "process-tree",
+  });
+  const childPid = Number.parseInt(await readFile(pidPath, "utf8"), 10);
+  assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
+});
+
+test("preserves a failed trusted command after descendants retire", async (t) => {
+  const projectPath = await repository(t);
+  const processPath = await mkdtemp(
+    join(tmpdir(), "agent-runner-failed-retiring-tree-"),
+  );
+  t.after(() => rm(processPath, { recursive: true, force: true }));
+  const pidPath = join(processPath, "child.pid");
+  const childSource = `
+    const { writeFileSync } = require("node:fs");
+    writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+    process.send("ready");
+    setTimeout(() => process.exit(0), 100);
+  `;
+  const parentSource = `
+    const { spawn } = require("node:child_process");
+    const { writeSync } = require("node:fs");
+    const child = spawn(process.execPath, ["--eval", ${JSON.stringify(childSource)}], {
+      stdio: ["ignore", "ignore", "ignore", "ipc"],
+    });
+    child.once("message", () => {
+      writeSync(3, Buffer.from([1]));
+      process.exit(7);
+    });
+    child.once("error", () => process.exit(1));
+  `;
+
+  const result = await runExactCommand(
+    {
+      executable: process.execPath,
+      arguments: ["--eval", parentSource],
+    },
+    {
+      cwd: projectPath,
+      environment: process.env,
+      readinessRequired: true,
+      terminationGraceMs: 500,
+      timeoutMs: 1_000,
+    },
+  );
+
+  assert.deepEqual(result, {
+    status: "FAIL",
+    exitCode: 7,
+    signal: null,
+    timedOut: false,
+    reason: "exit",
+  });
+  const childPid = Number.parseInt(await readFile(pidPath, "utf8"), 10);
+  assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
+});
+
+test("terminates persistent descendants after failed trusted commands", async (t) => {
+  const projectPath = await repository(t);
+  const processPath = await mkdtemp(
+    join(tmpdir(), "agent-runner-failed-leaked-tree-"),
+  );
+  const pidPath = join(processPath, "child.pid");
+  t.after(async () => {
+    try {
+      const childPid = Number.parseInt(await readFile(pidPath, "utf8"), 10);
+      try {
+        process.kill(childPid, "SIGKILL");
+      } catch (cause) {
+        if (cause?.code !== "ESRCH") {
+          throw cause;
+        }
+      }
+    } catch (cause) {
+      if (cause?.code !== "ENOENT") {
+        throw cause;
+      }
+    } finally {
+      await rm(processPath, { recursive: true, force: true });
+    }
+  });
+  const childSource = `
+    const { writeFileSync } = require("node:fs");
+    writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+    process.on("SIGTERM", () => {});
+    process.send("ready");
+    setInterval(() => {}, 1_000);
+  `;
+  const parentSource = `
+    const { spawn } = require("node:child_process");
+    const { writeSync } = require("node:fs");
+    const child = spawn(process.execPath, ["--eval", ${JSON.stringify(childSource)}], {
+      stdio: ["ignore", "ignore", "ignore", "ipc"],
+    });
+    child.once("message", () => {
+      writeSync(3, Buffer.from([1]));
+      process.exit(7);
+    });
+    child.once("error", () => process.exit(1));
+  `;
+
+  const result = await runExactCommand(
+    {
+      executable: process.execPath,
+      arguments: ["--eval", parentSource],
+    },
+    {
+      cwd: projectPath,
+      environment: process.env,
+      readinessRequired: true,
       terminationGraceMs: 100,
       timeoutMs: 1_000,
     },

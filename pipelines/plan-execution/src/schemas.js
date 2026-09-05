@@ -22,8 +22,7 @@ const PORTABLE_PLAIN_TEXT_PATTERN =
   "^[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$";
 const PORTABLE_REPOSITORY_PATH_PATTERN =
   "^[^\\\\/\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+(?:/[^\\\\/\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+)*$";
-const PORTABLE_NONEMPTY_SUMMARY_PATTERN =
-  "^[^\\u0000\\u2028\\u2029]+$";
+const PORTABLE_NONEMPTY_SUMMARY_PATTERN = "^[^\\u0000\\u2028\\u2029]+$";
 const TEXT = { type: "string", maxLength: MAX_TEXT_LENGTH };
 const SUMMARY = { type: "string", maxLength: MAX_SUMMARY_LENGTH };
 const TEXT_LIST = { type: "array", items: TEXT, maxItems: MAX_ITEMS };
@@ -350,20 +349,15 @@ export const BOOTSTRAP_RECONCILIATION_SCHEMA = deepFreeze(
       whyBlocked: EMPTY_TEXT,
       evidence: NONEMPTY_TEXT_LIST,
     }),
-    variant(
-      "status",
-      ["PLAN_REVISION_REQUIRED"],
-      RECONCILIATION_PROPERTIES,
-      {
-        summary: EMPTY_TEXT,
-        disagreement: EMPTY_TEXT,
-        reason: NONEMPTY_TEXT,
-        question: EMPTY_TEXT,
-        options: EMPTY_OPTIONS,
-        whyBlocked: EMPTY_TEXT,
-        evidence: NONEMPTY_TEXT_LIST,
-      },
-    ),
+    variant("status", ["PLAN_REVISION_REQUIRED"], RECONCILIATION_PROPERTIES, {
+      summary: EMPTY_TEXT,
+      disagreement: EMPTY_TEXT,
+      reason: NONEMPTY_TEXT,
+      question: EMPTY_TEXT,
+      options: EMPTY_OPTIONS,
+      whyBlocked: EMPTY_TEXT,
+      evidence: NONEMPTY_TEXT_LIST,
+    }),
     variant(
       "status",
       ["PRODUCT_DECISION_REQUIRED"],
@@ -390,19 +384,14 @@ export const BOOTSTRAP_ARBITRATION_SCHEMA = deepFreeze(
         ...EMPTY_DECISION_PROPERTIES,
       },
     ),
-    variant(
-      "direction",
-      ["PLAN_REVISION_REQUIRED"],
-      ARBITRATION_PROPERTIES,
-      {
-        summary: EMPTY_TEXT,
-        reason: NONEMPTY_TEXT,
-        question: EMPTY_TEXT,
-        options: EMPTY_OPTIONS,
-        whyBlocked: EMPTY_TEXT,
-        evidence: NONEMPTY_TEXT_LIST,
-      },
-    ),
+    variant("direction", ["PLAN_REVISION_REQUIRED"], ARBITRATION_PROPERTIES, {
+      summary: EMPTY_TEXT,
+      reason: NONEMPTY_TEXT,
+      question: EMPTY_TEXT,
+      options: EMPTY_OPTIONS,
+      whyBlocked: EMPTY_TEXT,
+      evidence: NONEMPTY_TEXT_LIST,
+    }),
     variant(
       "direction",
       ["PRODUCT_DECISION_REQUIRED"],
@@ -503,6 +492,99 @@ export const REVIEW_SCHEMA = deepFreeze({
     "findings",
     "validationChange",
     "validationEvidence",
+    "question",
+    "options",
+    "whyBlocked",
+    "evidence",
+  ],
+  additionalProperties: false,
+});
+
+export const CANDIDATE_REVIEW_SCHEMA = deepFreeze({
+  type: "object",
+  properties: {
+    status: {
+      type: "string",
+      enum: ["APPROVED", "FINDINGS", "PRODUCT_DECISION_REQUIRED"],
+    },
+    findings: { type: "array", items: REVIEW_FINDING },
+    ...DECISION_PROPERTIES,
+  },
+  required: [
+    "status",
+    "findings",
+    "question",
+    "options",
+    "whyBlocked",
+    "evidence",
+  ],
+  additionalProperties: false,
+});
+
+export const CHECK_AND_FIX_SCHEMA = deepFreeze({
+  type: "object",
+  properties: {
+    status: {
+      type: "string",
+      enum: ["CHANGED", "UNCHANGED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"],
+    },
+    summary: SUMMARY,
+    reason: TEXT,
+    ...DECISION_PROPERTIES,
+  },
+  required: [
+    "status",
+    "summary",
+    "reason",
+    "question",
+    "options",
+    "whyBlocked",
+    "evidence",
+  ],
+  additionalProperties: false,
+});
+
+export const CLEAN_CONFIRM_SCHEMA = deepFreeze({
+  type: "object",
+  properties: {
+    status: {
+      type: "string",
+      enum: ["CLEAN", "FINDINGS", "PRODUCT_DECISION_REQUIRED"],
+    },
+    findings: { type: "array", items: REVIEW_FINDING },
+    validationChange: {
+      type: "string",
+      enum: ["UNCHANGED", "ACCEPTED", "REJECTED"],
+    },
+    validationEvidence: TEXT_LIST,
+    ...DECISION_PROPERTIES,
+  },
+  required: [
+    "status",
+    "findings",
+    "validationChange",
+    "validationEvidence",
+    "question",
+    "options",
+    "whyBlocked",
+    "evidence",
+  ],
+  additionalProperties: false,
+});
+
+export const CANDIDATE_CLEAN_CONFIRM_SCHEMA = deepFreeze({
+  type: "object",
+  properties: {
+    status: {
+      type: "string",
+      enum: ["CLEAN", "FINDINGS", "PRODUCT_DECISION_REQUIRED"],
+    },
+    findings: { type: "array", items: REVIEW_FINDING },
+    ...DECISION_PROPERTIES,
+  },
+  required: [
+    "status",
+    "findings",
     "question",
     "options",
     "whyBlocked",

@@ -14,6 +14,8 @@ export const WORKFLOW_STATES = Object.freeze([
   "DRAFT",
   "REVIEW",
   "REVISE",
+  "CHECK_AND_FIX",
+  "CLEAN_CONFIRM",
   "VALIDATE",
   "WRITE_PLAN",
   "WAITING_FOR_USER",
@@ -36,6 +38,10 @@ const PIPELINE_STATE_FIELDS = new Set([
   "validationIssues",
   "blockerKind",
   "reviewApproved",
+  "cleanConfirmationFingerprint",
+  "lazySourceForkConsumed",
+  "lazyCorrections",
+  "pendingLazyCorrection",
   "lastCountedRevision",
   "blockedSinceArbitration",
   "arbitrationUsed",
@@ -67,6 +73,20 @@ const MAX_ITEMS = 32;
 const MAX_PRODUCT_DECISION_OPTIONS = 16;
 const MAX_STRUCTURED_RESULT_BYTES = 256 * 1024;
 const INVALID_OUTPUT_CODE = "ERR_INVALID_PLAN_AUTHORING_OUTPUT";
+const OUTPUT_DIAGNOSTIC_FIELDS = Object.freeze([
+  "role",
+  "phase",
+  "contract",
+  "field",
+  "constraint",
+]);
+const OUTPUT_DIAGNOSTIC_VALUE_PATTERN = /^[a-zA-Z0-9_.[\]-]{1,128}$/u;
+const LAZY_CORRECTION_FIELDS = Object.freeze([
+  "attempt",
+  "phase",
+  "draftFingerprint",
+  "diagnostics",
+]);
 const FAILURE_FIELDS = Object.freeze(["reason", "code"]);
 const ADAPTER_FAILURE_FIELDS = Object.freeze([
   ...FAILURE_FIELDS,
@@ -78,15 +98,41 @@ const BACKEND_RESUME_STATES = Object.freeze([
   "DRAFT",
   "REVIEW",
   "REVISE",
+  "CHECK_AND_FIX",
+  "CLEAN_CONFIRM",
 ]);
+const ROLES = Object.freeze(["planner", "reviewer", "arbiter"]);
+const LAZY_ROLES = Object.freeze(["planner"]);
 
 export const MAX_DIAGNOSTIC_ITEMS = MAX_ITEMS;
+export const LAZY_OUTPUT_RETRY_EXPLANATION =
+  "The bounded automatic lazy checkpoint correction remains invalid. Retry the same correction after the backend can satisfy the unchanged contract.";
+
+export function resolveActiveRoles(settings) {
+  return settings?.mode === "lazy" ? LAZY_ROLES : ROLES;
+}
 
 export class PlanAuthoringWorkflowError extends Error {
-  constructor(message, { cause, code = "ERR_PLAN_AUTHORING_WORKFLOW" } = {}) {
+  constructor(
+    message,
+    {
+      cause,
+      code = "ERR_PLAN_AUTHORING_WORKFLOW",
+      diagnostic,
+      diagnostics,
+    } = {},
+  ) {
     super(message, { cause });
     this.name = "PlanAuthoringWorkflowError";
     this.code = code;
+    if (diagnostic !== undefined) {
+      this.diagnostic = Object.freeze({ ...diagnostic });
+    }
+    if (diagnostics !== undefined) {
+      this.diagnostics = Object.freeze(
+        diagnostics.map((entry) => Object.freeze({ ...entry })),
+      );
+    }
   }
 }
 
@@ -108,8 +154,9 @@ function hasExactFields(value, fields) {
 export function workflowError(
   message,
   code = "ERR_INVALID_PLAN_AUTHORING_STATE",
+  diagnostic,
 ) {
-  return new PlanAuthoringWorkflowError(message, { code });
+  return new PlanAuthoringWorkflowError(message, { code, diagnostic });
 }
 
 export function sha256(value) {
@@ -129,8 +176,20 @@ function repositoryRelativePath(projectPath, path) {
   return relativePath.split(sep).join("/");
 }
 
-function outputError(message) {
-  return workflowError(message, INVALID_OUTPUT_CODE);
+function outputError(message, diagnostic) {
+  return workflowError(message, INVALID_OUTPUT_CODE, diagnostic);
+}
+
+export function isOutputDiagnostic(value) {
+  return (
+    isRecord(value) &&
+    Object.keys(value).length === OUTPUT_DIAGNOSTIC_FIELDS.length &&
+    OUTPUT_DIAGNOSTIC_FIELDS.every(
+      (field) =>
+        typeof value[field] === "string" &&
+        OUTPUT_DIAGNOSTIC_VALUE_PATTERN.test(value[field]),
+    )
+  );
 }
 
 function isFindingId(value) {
@@ -280,11 +339,9 @@ function normalizeProductDecision(payload) {
       MAX_TEXT_LENGTH,
       INVALID_OUTPUT_CODE,
     ),
-    evidence: normalizeTextList(
-      payload.evidence,
-      "product decision evidence",
-      { code: INVALID_OUTPUT_CODE },
-    ),
+    evidence: normalizeTextList(payload.evidence, "product decision evidence", {
+      code: INVALID_OUTPUT_CODE,
+    }),
   });
 }
 
@@ -357,6 +414,56 @@ export function normalizePlannerResult(payload) {
   return Object.freeze({ status: payload.status, plan: payload.plan });
 }
 
+export function normalizeCheckAndFixResult(payload, currentDraft) {
+  const statuses = ["CHANGED", "UNCHANGED", "PRODUCT_DECISION_REQUIRED"];
+  if (!isRecord(payload) || !statuses.includes(payload.status)) {
+    throw outputError("Planner returned an invalid plan check result.", {
+      field: "status",
+      constraint: "allowed-value",
+    });
+  }
+  assertStructuredResultSize(payload);
+  if (payload.status === "PRODUCT_DECISION_REQUIRED") {
+    if (payload.plan !== "") {
+      throw outputError("A product-decision result must not include a plan.", {
+        field: "plan",
+        constraint: "empty-for-product-decision",
+      });
+    }
+    return Object.freeze({
+      status: payload.status,
+      decision: normalizeProductDecision(payload),
+    });
+  }
+  if (!emptyDecision(payload)) {
+    throw outputError("Plan check contains inapplicable decision fields.", {
+      field: "question",
+      constraint: "empty-decision-fields",
+    });
+  }
+  if (payload.status === "UNCHANGED") {
+    if (payload.plan !== "") {
+      throw outputError("An unchanged plan check must not include a plan.", {
+        field: "plan",
+        constraint: "empty-for-unchanged",
+      });
+    }
+    return Object.freeze({ status: payload.status });
+  }
+  if (
+    typeof payload.plan !== "string" ||
+    payload.plan.trim().length === 0 ||
+    payload.plan.length > MAX_PLAN_LENGTH ||
+    payload.plan === currentDraft
+  ) {
+    throw outputError("A changed plan check must include a revised plan.", {
+      field: "plan",
+      constraint: "complete-revised-draft",
+    });
+  }
+  return Object.freeze({ status: payload.status, plan: payload.plan });
+}
+
 function normalizeFindings(value, code = INVALID_OUTPUT_CODE) {
   if (!Array.isArray(value) || value.length === 0 || value.length > MAX_ITEMS) {
     throw workflowError(
@@ -413,6 +520,51 @@ export function normalizeReviewResult(payload) {
   if (payload.status === "APPROVED") {
     if (!Array.isArray(payload.findings) || payload.findings.length !== 0) {
       throw outputError("An approved review must not include findings.");
+    }
+    return Object.freeze({
+      status: payload.status,
+      findings: Object.freeze([]),
+    });
+  }
+  return Object.freeze({
+    status: payload.status,
+    findings: normalizeFindings(payload.findings),
+  });
+}
+
+export function normalizeCleanConfirmationResult(payload) {
+  const statuses = ["CLEAN", "FINDINGS", "PRODUCT_DECISION_REQUIRED"];
+  if (!isRecord(payload) || !statuses.includes(payload.status)) {
+    throw outputError("Planner returned an invalid clean confirmation.", {
+      field: "status",
+      constraint: "allowed-value",
+    });
+  }
+  assertStructuredResultSize(payload);
+  if (payload.status === "PRODUCT_DECISION_REQUIRED") {
+    if (!Array.isArray(payload.findings) || payload.findings.length !== 0) {
+      throw outputError("A product decision must not include findings.", {
+        field: "findings",
+        constraint: "empty-for-product-decision",
+      });
+    }
+    return Object.freeze({
+      status: payload.status,
+      decision: normalizeProductDecision(payload),
+    });
+  }
+  if (!emptyDecision(payload)) {
+    throw outputError(
+      "Clean confirmation contains inapplicable decision fields.",
+      { field: "question", constraint: "empty-decision-fields" },
+    );
+  }
+  if (payload.status === "CLEAN") {
+    if (!Array.isArray(payload.findings) || payload.findings.length !== 0) {
+      throw outputError("A clean confirmation must not include findings.", {
+        field: "findings",
+        constraint: "empty-for-clean",
+      });
     }
     return Object.freeze({
       status: payload.status,
@@ -489,6 +641,68 @@ export function normalizeArbiterResult(payload, pipelineState) {
   });
 }
 
+function normalizeLazyCorrection(value) {
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, LAZY_CORRECTION_FIELDS) ||
+    value.attempt !== 1 ||
+    !["CHECK_AND_FIX", "CLEAN_CONFIRM"].includes(value.phase) ||
+    !HASH_PATTERN.test(value.draftFingerprint) ||
+    !Array.isArray(value.diagnostics) ||
+    value.diagnostics.length === 0 ||
+    value.diagnostics.length > MAX_DIAGNOSTIC_ITEMS
+  ) {
+    throw workflowError("Plan-authoring lazy correction is invalid.");
+  }
+  const expectedPhase =
+    value.phase === "CHECK_AND_FIX" ? "check-and-fix" : "clean-confirm";
+  const expectedContract =
+    value.phase === "CHECK_AND_FIX"
+      ? "lazy-check-and-fix"
+      : "lazy-clean-confirm";
+  const identities = new Set();
+  for (const diagnostic of value.diagnostics) {
+    if (
+      !isOutputDiagnostic(diagnostic) ||
+      diagnostic.role !== "planner" ||
+      diagnostic.phase !== expectedPhase ||
+      diagnostic.contract !== expectedContract
+    ) {
+      throw workflowError("Plan-authoring lazy correction is invalid.");
+    }
+    const identity = `${diagnostic.field}\0${diagnostic.constraint}`;
+    if (identities.has(identity)) {
+      throw workflowError("Plan-authoring lazy correction is invalid.");
+    }
+    identities.add(identity);
+  }
+  return value;
+}
+
+function sameLazyCorrectionScope(left, right) {
+  return (
+    left.attempt === right.attempt &&
+    left.phase === right.phase &&
+    left.draftFingerprint === right.draftFingerprint
+  );
+}
+
+function normalizeLazyCorrections(value) {
+  if (!Array.isArray(value) || value.length > MAX_DIAGNOSTIC_ITEMS) {
+    throw workflowError("Plan-authoring lazy corrections are invalid.");
+  }
+  const scopes = new Set();
+  for (const correction of value) {
+    normalizeLazyCorrection(correction);
+    const scope = `${correction.phase}\0${correction.draftFingerprint}`;
+    if (scopes.has(scope)) {
+      throw workflowError("Plan-authoring lazy corrections must be unique.");
+    }
+    scopes.add(scope);
+  }
+  return value;
+}
+
 export function normalizePipelineState(value) {
   if (!isRecord(value)) {
     throw workflowError("Plan-authoring state must be an object.");
@@ -510,6 +724,7 @@ export function normalizePipelineState(value) {
     "clarificationFrozen",
     "reviewApproved",
     "arbitrationUsed",
+    "lazySourceForkConsumed",
   ]) {
     if (typeof value[field] !== "boolean") {
       throw workflowError(`Plan-authoring state field ${field} is invalid.`);
@@ -576,16 +791,14 @@ export function normalizePipelineState(value) {
     throw workflowError("Plan-authoring pending edit is not applicable.");
   }
   if (
-    (!value.proactiveClarification &&
-      !value.proactiveClarificationComplete) ||
+    (!value.proactiveClarification && !value.proactiveClarificationComplete) ||
     (!value.proactiveClarificationComplete &&
       !["CLARIFY", "WAITING_FOR_USER", "FAILED"].includes(
         value.workflowState,
       )) ||
     (value.pendingEdit !== null &&
       (value.pendingEdit.action === "proactive-clarification") !==
-        (value.proactiveClarification &&
-          !value.proactiveClarificationComplete))
+        (value.proactiveClarification && !value.proactiveClarificationComplete))
   ) {
     throw workflowError(
       "Plan-authoring proactive clarification state is invalid.",
@@ -614,6 +827,48 @@ export function normalizePipelineState(value) {
   ) {
     throw workflowError("Plan-authoring draft fingerprint does not match.");
   }
+  if (
+    value.cleanConfirmationFingerprint !== null &&
+    (typeof value.cleanConfirmationFingerprint !== "string" ||
+      !HASH_PATTERN.test(value.cleanConfirmationFingerprint))
+  ) {
+    throw workflowError(
+      "Plan-authoring clean confirmation fingerprint is invalid.",
+    );
+  }
+  if (
+    value.cleanConfirmationFingerprint !== null &&
+    (value.settings?.mode !== "lazy" ||
+      value.cleanConfirmationFingerprint !== value.draftFingerprint ||
+      !value.reviewApproved)
+  ) {
+    throw workflowError(
+      "Plan-authoring clean confirmation fingerprint is not applicable.",
+    );
+  }
+  const lazyCorrections = normalizeLazyCorrections(value.lazyCorrections);
+  const pendingLazyCorrection =
+    value.pendingLazyCorrection === null
+      ? null
+      : normalizeLazyCorrection(value.pendingLazyCorrection);
+  if (
+    pendingLazyCorrection !== null &&
+    (!lazyCorrections.some((correction) =>
+      sameLazyCorrectionScope(correction, pendingLazyCorrection),
+    ) ||
+      value.settings?.mode !== "lazy" ||
+      value.draftFingerprint !== pendingLazyCorrection.draftFingerprint ||
+      ![pendingLazyCorrection.phase, "WAITING_FOR_USER", "FAILED"].includes(
+        value.workflowState,
+      ))
+  ) {
+    throw workflowError(
+      "Plan-authoring pending lazy correction is inconsistent.",
+    );
+  }
+  if (lazyCorrections.length !== 0 && value.settings?.mode !== "lazy") {
+    throw workflowError("Plan-authoring lazy corrections are not applicable.");
+  }
   if (value.canonicalPlan !== null) {
     let expectedCanonicalPlan;
     try {
@@ -631,17 +886,16 @@ export function normalizePipelineState(value) {
   if (value.blockerKind === "findings") {
     normalizeFindings(value.findings, "ERR_INVALID_PLAN_AUTHORING_STATE");
   } else if (value.findings.length !== 0) {
-    throw workflowError("Plan-authoring findings do not match the blocker kind.");
+    throw workflowError(
+      "Plan-authoring findings do not match the blocker kind.",
+    );
   }
   const validationIssues = normalizeTextList(
     value.validationIssues,
     "Plan-authoring validation issues",
     { allowEmpty: value.blockerKind !== "validation" },
   );
-  if (
-    value.blockerKind !== "validation" &&
-    validationIssues.length !== 0
-  ) {
+  if (value.blockerKind !== "validation" && validationIssues.length !== 0) {
     throw workflowError(
       "Plan-authoring validation issues do not match the blocker kind.",
     );
@@ -730,6 +984,7 @@ export function normalizePipelineState(value) {
     value.draft === null &&
     value.blockerKind === null &&
     !value.reviewApproved &&
+    value.cleanConfirmationFingerprint === null &&
     value.canonicalPlan === null &&
     value.planPath === null;
   if (
@@ -758,11 +1013,35 @@ export function normalizePipelineState(value) {
     throw workflowError("Plan-authoring revision state is inconsistent.");
   }
   if (
+    value.workflowState === "CHECK_AND_FIX" &&
+    (value.draft === null ||
+      value.reviewApproved ||
+      value.cleanConfirmationFingerprint !== null ||
+      value.canonicalPlan !== null)
+  ) {
+    throw workflowError("Plan-authoring check/fix state is inconsistent.");
+  }
+  if (
+    value.workflowState === "CLEAN_CONFIRM" &&
+    (value.draft === null ||
+      value.blockerKind !== null ||
+      value.reviewApproved ||
+      value.cleanConfirmationFingerprint !== null ||
+      value.canonicalPlan !== null)
+  ) {
+    throw workflowError(
+      "Plan-authoring clean confirmation state is inconsistent.",
+    );
+  }
+  if (
     value.workflowState === "VALIDATE" &&
     (value.draft === null ||
       value.blockerKind !== null ||
       !value.reviewApproved ||
-      value.canonicalPlan !== null)
+      value.canonicalPlan !== null ||
+      (value.settings.mode === "lazy"
+        ? value.cleanConfirmationFingerprint !== value.draftFingerprint
+        : value.cleanConfirmationFingerprint !== null))
   ) {
     throw workflowError("Plan-authoring validation state is inconsistent.");
   }
@@ -772,26 +1051,54 @@ export function normalizePipelineState(value) {
       value.blockerKind !== null ||
       !value.reviewApproved ||
       value.canonicalPlan === null ||
+      (value.settings.mode === "lazy"
+        ? value.cleanConfirmationFingerprint !== value.draftFingerprint
+        : value.cleanConfirmationFingerprint !== null) ||
       (value.workflowState === "DONE") !== (value.planPath !== null))
   ) {
     throw workflowError("Plan-authoring completion state is inconsistent.");
   }
   if (
-    !["CLARIFY", "WAITING_FOR_USER", "FAILED"].includes(
-      value.workflowState,
-    ) &&
+    !["CLARIFY", "WAITING_FOR_USER", "FAILED"].includes(value.workflowState) &&
     !value.preflightComplete
   ) {
     throw workflowError("Plan-authoring state has not completed preflight.");
   }
   if (
     (value.workflowState === "CLARIFY" && value.clarificationFrozen) ||
-    (["DRAFT", "REVIEW", "REVISE", "VALIDATE", "WRITE_PLAN", "DONE"].includes(
-      value.workflowState,
-    ) &&
+    ([
+      "DRAFT",
+      "REVIEW",
+      "REVISE",
+      "CHECK_AND_FIX",
+      "CLEAN_CONFIRM",
+      "VALIDATE",
+      "WRITE_PLAN",
+      "DONE",
+    ].includes(value.workflowState) &&
       !value.clarificationFrozen)
   ) {
     throw workflowError("Plan-authoring clarification state is inconsistent.");
+  }
+  if (
+    value.settings !== null &&
+    ((value.settings.mode === "lazy" &&
+      ["REVIEW", "REVISE"].includes(value.workflowState)) ||
+      (value.settings.mode === "independent" &&
+        ["CHECK_AND_FIX", "CLEAN_CONFIRM"].includes(value.workflowState)))
+  ) {
+    throw workflowError("Plan-authoring mode state is inconsistent.");
+  }
+  if (
+    value.settings?.mode === "lazy" &&
+    (value.arbitrationUsed || value.arbiterDirection !== null)
+  ) {
+    throw workflowError(
+      "Lazy plan authoring cannot contain arbitration state.",
+    );
+  }
+  if (value.lazySourceForkConsumed && value.settings?.mode !== "lazy") {
+    throw workflowError("Plan-authoring source-fork state is not applicable.");
   }
   if (
     value.arbiterDirection !== null &&
@@ -833,6 +1140,10 @@ export function createPlanAuthoringState({
     validationIssues: Object.freeze([]),
     blockerKind: null,
     reviewApproved: false,
+    cleanConfirmationFingerprint: null,
+    lazySourceForkConsumed: false,
+    lazyCorrections: Object.freeze([]),
+    pendingLazyCorrection: null,
     lastCountedRevision: 0,
     blockedSinceArbitration: 0,
     arbitrationUsed: false,
@@ -873,7 +1184,7 @@ export function assertRun(run) {
   if (
     !isRecord(run) ||
     run.pipelineId !== "plan-authoring" ||
-    run.pipelineStateVersion !== 1 ||
+    run.pipelineStateVersion !== 3 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -881,14 +1192,21 @@ export function assertRun(run) {
     !isAbsolute(run.taskPath) ||
     resolve(run.taskPath) !== run.taskPath ||
     !isRecord(run.roles) ||
-    Object.keys(run.roles).length !== 3 ||
     !isRecord(run.hashes) ||
     !isRecord(run.sessionLineage) ||
     !Array.isArray(run.sessionLineage.children)
   ) {
     throw workflowError("Plan-authoring run envelope is invalid.");
   }
-  for (const role of ["planner", "reviewer", "arbiter"]) {
+  const pipelineState = normalizePipelineState(run.pipelineState);
+  const activeRoles = resolveActiveRoles(pipelineState.settings);
+  if (
+    Object.keys(run.roles).length !== activeRoles.length ||
+    activeRoles.some((role) => !Object.hasOwn(run.roles, role))
+  ) {
+    throw workflowError("Plan-authoring roles are invalid.");
+  }
+  for (const role of activeRoles) {
     if (
       !isRecord(run.roles[role]) ||
       Object.keys(run.roles[role]).some(
@@ -930,7 +1248,7 @@ export function assertRun(run) {
   for (const child of run.sessionLineage.children) {
     if (
       !isRecord(child) ||
-      !["planner", "reviewer", "arbiter"].includes(child.role) ||
+      !activeRoles.includes(child.role) ||
       typeof child.sessionId !== "string" ||
       child.sessionId.length === 0 ||
       child.sessionId === run.sessionLineage.source ||
@@ -947,7 +1265,17 @@ export function assertRun(run) {
   if (new Set(childSessionIds).size !== childSessionIds.length) {
     throw workflowError("Plan-authoring child sessions must be unique.");
   }
-  const pipelineState = normalizePipelineState(run.pipelineState);
+  if (
+    (pipelineState.lazySourceForkConsumed &&
+      run.sessionLineage.source === null) ||
+    (pipelineState.settings?.mode === "lazy" &&
+      run.sessionLineage.source !== null &&
+      (run.sessionLineage.children.length > 0 ||
+        (run.activeTurn !== null && run.activeTurn !== undefined)) &&
+      !pipelineState.lazySourceForkConsumed)
+  ) {
+    throw workflowError("Plan-authoring source-fork lineage is invalid.");
+  }
   if (pipelineState.repositoryBaseline !== null) {
     const baselineProjectPath = pipelineState.repositoryBaseline.projectPath;
     if (
@@ -1005,10 +1333,7 @@ export function assertRun(run) {
     throw workflowError("Plan-authoring pause state is invalid.");
   }
   if (pipelineState.workflowState === "FAILED") {
-    const hasAdapterDiagnostic = Object.hasOwn(
-      run.pause,
-      "diagnosticClass",
-    );
+    const hasAdapterDiagnostic = Object.hasOwn(run.pause, "diagnosticClass");
     const fields = hasAdapterDiagnostic
       ? ADAPTER_FAILURE_FIELDS
       : FAILURE_FIELDS;
@@ -1019,9 +1344,7 @@ export function assertRun(run) {
       !/^[A-Z0-9_]{1,64}$/u.test(run.pause.code) ||
       (hasAdapterDiagnostic &&
         (typeof run.pause.diagnosticClass !== "string" ||
-          !ADAPTER_DIAGNOSTIC_CLASS_PATTERN.test(
-            run.pause.diagnosticClass,
-          )))
+          !ADAPTER_DIAGNOSTIC_CLASS_PATTERN.test(run.pause.diagnosticClass)))
     ) {
       throw workflowError("Plan-authoring adapter diagnostic is invalid.");
     }
@@ -1043,11 +1366,49 @@ export function assertRun(run) {
       throw workflowError("Plan-authoring pending edit pause is invalid.");
     }
     const hasResumeState = Object.hasOwn(run.pause, "resumeState");
+    if (run.pause.reason === "lazy_output_invalid") {
+      const expectedEvidence =
+        pipelineState.pendingLazyCorrection?.diagnostics.map(
+          ({ field, constraint }) =>
+            `Planner field ${field} violated ${constraint}.`,
+        ) ?? [];
+      if (
+        !hasExactFields(run.pause, [
+          "reason",
+          "code",
+          "explanation",
+          "evidence",
+          "resumeState",
+        ]) ||
+        run.pause.code !== "ERR_INVALID_PLAN_AUTHORING_OUTPUT" ||
+        run.pause.explanation !== LAZY_OUTPUT_RETRY_EXPLANATION ||
+        !Array.isArray(run.pause.evidence) ||
+        run.pause.evidence.length !== expectedEvidence.length ||
+        run.pause.evidence.some(
+          (entry, index) => entry !== expectedEvidence[index],
+        )
+      ) {
+        throw workflowError("Plan-authoring lazy output pause is invalid.");
+      }
+    }
+    const resumeStateMatchesMode =
+      !hasResumeState ||
+      (pipelineState.settings.mode === "lazy"
+        ? !["REVIEW", "REVISE"].includes(run.pause.resumeState)
+        : !["CHECK_AND_FIX", "CLEAN_CONFIRM"].includes(run.pause.resumeState));
+    const resumableRetry = [
+      "backend_unavailable",
+      "lazy_output_invalid",
+    ].includes(run.pause.reason);
     if (
-      (run.pause.reason === "backend_unavailable") !== hasResumeState ||
+      resumableRetry !== hasResumeState ||
       (hasResumeState &&
         (!pipelineState.preflightComplete ||
-          !BACKEND_RESUME_STATES.includes(run.pause.resumeState)))
+          !BACKEND_RESUME_STATES.includes(run.pause.resumeState))) ||
+      !resumeStateMatchesMode ||
+      (run.pause.reason === "lazy_output_invalid" &&
+        (pipelineState.pendingLazyCorrection === null ||
+          run.pause.resumeState !== pipelineState.pendingLazyCorrection.phase))
     ) {
       throw workflowError("Plan-authoring pause resume state is invalid.");
     }
@@ -1092,7 +1453,7 @@ export function assertRun(run) {
 }
 
 export function assertSettings(settings) {
-  const fields = ["maxRevisionRounds", "stagnationWindowRounds"];
+  const fields = ["maxRevisionRounds", "mode", "stagnationWindowRounds"];
   if (
     !isRecord(settings) ||
     Object.keys(settings).length !== fields.length ||
@@ -1100,14 +1461,17 @@ export function assertSettings(settings) {
   ) {
     throw workflowError("Plan-authoring settings are invalid.");
   }
-  for (const field of fields) {
+  if (!["independent", "lazy"].includes(settings.mode)) {
+    throw workflowError("Plan-authoring setting mode is invalid.");
+  }
+  for (const field of ["maxRevisionRounds", "stagnationWindowRounds"]) {
     if (!Number.isSafeInteger(settings[field]) || settings[field] < 1) {
       throw workflowError(`Plan-authoring setting ${field} is invalid.`);
     }
   }
 }
 
-export function assertRuntime(runtime) {
+export function assertRuntime(runtime, activeRoles = ROLES) {
   if (
     !isRecord(runtime) ||
     !isRecord(runtime.adapters) ||
@@ -1116,7 +1480,7 @@ export function assertRuntime(runtime) {
   ) {
     throw workflowError("Plan-authoring runtime is invalid.");
   }
-  for (const role of ["planner", "reviewer", "arbiter"]) {
+  for (const role of activeRoles) {
     if (typeof runtime.adapters[role]?.run !== "function") {
       throw workflowError(`Plan-authoring ${role} adapter is invalid.`);
     }
