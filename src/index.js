@@ -3,7 +3,7 @@ export {
   CLARIFICATION_TEMPLATE,
   ClarificationError,
   createClarificationService,
-} from "./clarifications.js";
+} from "./clarifications/index.js";
 export {
   CONFIG_FILENAME,
   CONFIG_SCHEMA_VERSION,
@@ -15,8 +15,8 @@ export {
   parseRunnerConfiguration,
   PROJECT_CONFIG_FILENAME,
   resolvePipelineConfiguration,
-} from "./config.js";
-export { createGitService, GitSafetyError } from "./git.js";
+} from "./config/index.js";
+export { createGitService, GitSafetyError } from "./git/index.js";
 export {
   createDetachedLauncher,
   createMcpControlPlane,
@@ -25,7 +25,7 @@ export {
   launchDetachedRun,
   MCP_INSTRUCTIONS,
   serveMcp,
-} from "./mcp.js";
+} from "./mcp/index.js";
 export {
   createDetachedRuntimeCompatibilityToken,
   DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
@@ -36,7 +36,7 @@ export {
   createRunner,
   parseSourceSession,
   RunnerError,
-} from "./runner.js";
+} from "./runner/index.js";
 export {
   createRunStore,
   resolveStateRoot,
@@ -45,10 +45,10 @@ export {
   RUNTIME_VERSION_SKEW_EXIT_CODE,
   RUN_STATE_SCHEMA_VERSION,
   RunStoreError,
-} from "./state.js";
+} from "./state/index.js";
 export {
   createTrustedValidationService,
   createTrustedValidationSnapshot,
   TrustedValidationError,
   validateTrustedValidationSnapshot,
-} from "./trusted-validation.js";
+} from "./trusted-validation/index.js";

@@ -1,4 +1,0 @@
-interface:
-  display_name: "Finalization"
-  short_description: "Validate, stage, and draft the commit message"
-  default_prompt: "Use $finalization to validate and stage the current Agent Runner changes."

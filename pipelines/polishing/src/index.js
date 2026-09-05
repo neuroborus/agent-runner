@@ -11,6 +11,7 @@ import {
   EMPTY_TRUSTED_VALIDATION,
   isFinalizationPolicy,
   MAX_DISPUTES_PER_FINDING,
+  resolveActiveRoles,
   sha256,
 } from "./workflow-contract.js";
 
@@ -19,7 +20,12 @@ export {
   BOOTSTRAP_CORRECTION_INSTRUCTIONS,
   BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
+  CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS,
+  CANDIDATE_REVIEW_INSTRUCTIONS,
+  CHECK_AND_FIX_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
+  CLEAN_CONFIRM_INSTRUCTIONS,
+  CONFIRMATION_CORRECTION_INSTRUCTIONS,
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
   FINALIZATION_CORRECTION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
@@ -27,10 +33,12 @@ export {
   finalizationGuidanceInstructions,
   FINDING_ARBITRATION_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
+  LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
   NO_DELEGATION_INSTRUCTIONS,
   POLISH_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
   REVIEW_INSTRUCTIONS,
+  REVIEW_CORRECTION_INSTRUCTIONS,
   STAGNATION_INSTRUCTIONS,
 } from "./prompts.js";
 export {
@@ -57,6 +65,12 @@ function positiveIntegerSetting(defaultValue, maximum = null) {
   });
 }
 
+const PIPELINE_MODES = Object.freeze(["independent", "lazy"]);
+
+function pipelineMode(value) {
+  return PIPELINE_MODES.includes(value);
+}
+
 function trustedCheckSelection(value) {
   return (
     Array.isArray(value) &&
@@ -69,7 +83,7 @@ function trustedCheckSelection(value) {
   );
 }
 
-const ROLES = Object.freeze(["worker", "reviewer", "arbiter"]);
+const ROLES = resolveActiveRoles();
 const SETTINGS = Object.freeze({
   finalization: Object.freeze({
     defaultValue: DEFAULT_FINALIZATION_POLICY,
@@ -78,11 +92,15 @@ const SETTINGS = Object.freeze({
     validate: isFinalizationPolicy,
   }),
   maxFixRounds: positiveIntegerSetting(5),
-  maxDisputesPerFinding: positiveIntegerSetting(
-    2,
-    MAX_DISPUTES_PER_FINDING,
-  ),
+  maxDisputesPerFinding: positiveIntegerSetting(2, MAX_DISPUTES_PER_FINDING),
   maxSameFindingRounds: positiveIntegerSetting(3),
+  mode: Object.freeze({
+    defaultValue: "independent",
+    errorMessage: "must be independent or lazy",
+    recommendedValue: "independent",
+    validate: pipelineMode,
+    values: PIPELINE_MODES,
+  }),
   stagnationWindowRounds: positiveIntegerSetting(3),
   trustedChecks: Object.freeze({
     defaultValue: Object.freeze([]),
@@ -100,10 +118,13 @@ const TASK_INPUTS = Object.freeze({
 });
 const RETRYABLE_PAUSE_REASONS = new Set([
   "backend_unavailable",
+  "confirmation_output_invalid",
   "environment_blocked",
   "finalization_cannot_pass",
   "finalization_skill_invalid",
   "finalization_skill_missing",
+  "lazy_output_invalid",
+  "review_output_invalid",
 ]);
 const RETRYABLE_PREFLIGHT_PAUSE_REASONS = new Set([
   "local_artifacts_not_ignored",
@@ -114,8 +135,11 @@ const RESUMABLE_WORKFLOW_STATES = new Set([
   "BOOTSTRAP",
   "POLISH",
   "FINALIZE",
+  "CHECK_AND_FIX",
+  "CLEAN_CONFIRM",
   "REVIEW",
   "RESOLVE_FINDINGS",
+  "CONFIRM",
 ]);
 const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   backend_unavailable: "The selected backend is temporarily unavailable.",
@@ -135,6 +159,12 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "The explicitly configured finalization skill is invalid.",
   finalization_skill_missing:
     "The explicitly configured finalization skill is missing.",
+  confirmation_output_invalid:
+    "The bounded automatic terminal-confirmation correction remains invalid.",
+  lazy_output_invalid:
+    "The bounded automatic lazy checkpoint correction remains invalid.",
+  review_output_invalid:
+    "The bounded automatic candidate-review correction remains invalid.",
   fix_limit_reached: "Polishing reached its configured fix limit.",
   internal_failure: "Polishing failed.",
   local_artifacts_not_ignored:
@@ -148,14 +178,12 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   read_only_agent_mutated_repository:
     "A read-only turn contaminated the repository; abandon this run and restart from an uncontaminated worktree.",
   task_input_changed: "A task input changed after the run began.",
-  task_input_overlaps_changes:
-    "A task input overlaps the writable change set.",
+  task_input_overlaps_changes: "A task input overlaps the writable change set.",
   unexpected_git_identity_change:
     "The effective Git identity changed during polishing.",
   unexpected_git_index_change:
     "The Git index changed during a content-only polishing turn.",
-  unexpected_git_ref_change:
-    "Git history or refs changed during polishing.",
+  unexpected_git_ref_change: "Git history or refs changed during polishing.",
   unexpected_remote_configuration_change:
     "Git remote configuration changed during polishing.",
   unsafe_git_state:
@@ -164,9 +192,12 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
 const PUBLIC_DETAIL_REASONS = new Set([
   "environment_blocked",
   "bootstrap_inventory_capacity_exhausted",
+  "confirmation_output_invalid",
   "finalization_cannot_pass",
   "finalization_skill_invalid",
   "finalization_skill_missing",
+  "lazy_output_invalid",
+  "review_output_invalid",
 ]);
 
 function publicCode(value) {
@@ -198,7 +229,18 @@ function publicExplanation(pause, fallback) {
     : fallback;
 }
 
-function publicEvidence(pause) {
+function publicEvidence(run) {
+  if (run.pause.reason === "lazy_output_invalid") {
+    return Object.freeze(
+      (run.pipelineState.pendingLazyCorrection?.diagnostics ?? [])
+        .map(
+          ({ field, constraint }) =>
+            `Worker field ${field} violated ${constraint}.`,
+        )
+        .slice(0, 32),
+    );
+  }
+  const pause = run.pause;
   return Object.freeze(
     PUBLIC_DETAIL_REASONS.has(pause.reason) && Array.isArray(pause.evidence)
       ? pause.evidence
@@ -278,9 +320,7 @@ function projectPause(run) {
           findingId: finding.id,
         });
         if (resumeActionApplies(run, override)) {
-          nextActions.push(
-            Object.freeze({ type: "resume", action: override }),
-          );
+          nextActions.push(Object.freeze({ type: "resume", action: override }));
         }
       }
     }
@@ -289,7 +329,7 @@ function projectPause(run) {
     reason,
     code: knownReason ? publicCode(run.pause.code) : null,
     explanation: publicExplanation(run.pause, explanation),
-    evidence: publicEvidence(run.pause),
+    evidence: publicEvidence(run),
     resumeState: publicResumeState(run),
     nextActions: Object.freeze(nextActions),
   });
@@ -332,11 +372,16 @@ function validateResumeAction(run, action) {
     }
     return;
   }
+  if (state.candidateMigrationPending && action === null) {
+    return;
+  }
   if (action?.type === "extra-fix-rounds") {
     const additionalFixRounds = state.additionalFixRounds + action.amount;
     if (
       run.pause?.reason !== "fix_limit_reached" ||
-      !["POLISH", "RESOLVE_FINDINGS"].includes(run.pause.resumeState) ||
+      !["POLISH", "CHECK_AND_FIX", "RESOLVE_FINDINGS"].includes(
+        run.pause.resumeState,
+      ) ||
       !Number.isSafeInteger(additionalFixRounds) ||
       !Number.isSafeInteger(state.settings.maxFixRounds + additionalFixRounds)
     ) {
@@ -346,9 +391,10 @@ function validateResumeAction(run, action) {
   }
   if (action?.type === "override-finding") {
     if (
+      state.settings?.mode === "lazy" ||
       !["fix_limit_reached", "no_progress"].includes(run.pause?.reason) ||
-      state.finalizationResult?.status !== "PASS" ||
-      state.reviewedFingerprint === null ||
+      (state.reviewedFingerprint === null &&
+        state.candidateReviewedFingerprint === null) ||
       !state.findings?.some(({ id }) => id === action.findingId)
     ) {
       throw new Error("Finding override is not applicable.");
@@ -446,9 +492,7 @@ export function migratePolishingStateV1(run) {
       : null,
     validationMigrationPending,
     finalizationResult,
-    finalizedFingerprint: keepLegacyGate
-      ? current.finalizedFingerprint
-      : null,
+    finalizedFingerprint: keepLegacyGate ? current.finalizedFingerprint : null,
     reviewResult:
       reviewedFingerprint === null
         ? null
@@ -490,8 +534,7 @@ function upgradedTrustedFinalization(result) {
         }),
       ),
     ),
-    trustedCommandFingerprint:
-      EMPTY_TRUSTED_VALIDATION.commandFingerprint,
+    trustedCommandFingerprint: EMPTY_TRUSTED_VALIDATION.commandFingerprint,
     trustedConfigurationFingerprint:
       EMPTY_TRUSTED_VALIDATION.configurationFingerprint,
   });
@@ -500,17 +543,13 @@ function upgradedTrustedFinalization(result) {
 export function migratePolishingStateV2(run) {
   const current = run.pipelineState;
   const prepared = current.resolvedSummary !== null;
-  const immutableTerminal = ["DONE", "FAILED"].includes(
-    current.workflowState,
-  );
+  const immutableTerminal = ["DONE", "FAILED"].includes(current.workflowState);
   const validationMigrationPending = prepared && !immutableTerminal;
   const paused = current.workflowState === "WAITING_FOR_USER";
   const rerunFinalization =
     validationMigrationPending &&
     !paused &&
-    ["FINALIZE", "REVIEW", "RESOLVE_FINDINGS"].includes(
-      current.workflowState,
-    );
+    ["FINALIZE", "REVIEW", "RESOLVE_FINDINGS"].includes(current.workflowState);
   const keepLegacyGate = immutableTerminal || paused;
   const reviewedFingerprint = keepLegacyGate
     ? current.reviewedFingerprint
@@ -536,9 +575,7 @@ export function migratePolishingStateV2(run) {
     finalizationResult: keepLegacyGate
       ? upgradedTrustedFinalization(current.finalizationResult)
       : null,
-    finalizedFingerprint: keepLegacyGate
-      ? current.finalizedFingerprint
-      : null,
+    finalizedFingerprint: keepLegacyGate ? current.finalizedFingerprint : null,
     reviewResult: keepLegacyGate ? current.reviewResult : null,
     reviewedFingerprint,
     findings: keepLegacyGate ? current.findings : Object.freeze([]),
@@ -562,9 +599,7 @@ export function migratePolishingStateV3(run) {
 
 export function migratePolishingStateV4(run) {
   const current = run.pipelineState;
-  const immutableTerminal = ["DONE", "FAILED"].includes(
-    current.workflowState,
-  );
+  const immutableTerminal = ["DONE", "FAILED"].includes(current.workflowState);
   const resumeState = run.pause?.resumeState;
   const checkpoint =
     current.workflowState === "WAITING_FOR_USER" &&
@@ -616,9 +651,7 @@ export function migratePolishingStateV4(run) {
   const paused = current.workflowState === "WAITING_FOR_USER";
   const rerunFinalization =
     !paused &&
-    ["FINALIZE", "REVIEW", "RESOLVE_FINDINGS"].includes(
-      current.workflowState,
-    );
+    ["FINALIZE", "REVIEW", "RESOLVE_FINDINGS"].includes(current.workflowState);
   const keepProvisionalGate = paused;
   return Object.freeze({
     ...current,
@@ -627,9 +660,7 @@ export function migratePolishingStateV4(run) {
     reviewerValidation: null,
     validationMigrationPending: true,
     validationMigrationDisagreement: null,
-    finalizationResult: keepProvisionalGate
-      ? current.finalizationResult
-      : null,
+    finalizationResult: keepProvisionalGate ? current.finalizationResult : null,
     finalizedFingerprint: keepProvisionalGate
       ? current.finalizedFingerprint
       : null,
@@ -654,9 +685,7 @@ export function migratePolishingStateV4(run) {
 
 export function migratePolishingStateV5(run) {
   const current = run.pipelineState;
-  const immutableTerminal = ["DONE", "FAILED"].includes(
-    current.workflowState,
-  );
+  const immutableTerminal = ["DONE", "FAILED"].includes(current.workflowState);
   const resumeState = run.pause?.resumeState;
   const checkpoint =
     current.workflowState === "WAITING_FOR_USER" &&
@@ -713,9 +742,7 @@ export function migratePolishingStateV5(run) {
   const paused = current.workflowState === "WAITING_FOR_USER";
   const rerunFinalization =
     !paused &&
-    ["FINALIZE", "REVIEW", "RESOLVE_FINDINGS"].includes(
-      current.workflowState,
-    );
+    ["FINALIZE", "REVIEW", "RESOLVE_FINDINGS"].includes(current.workflowState);
   const keepProvisionalGate = paused;
   return Object.freeze({
     ...current,
@@ -724,9 +751,7 @@ export function migratePolishingStateV5(run) {
     reviewerValidation: null,
     validationMigrationPending: true,
     validationMigrationDisagreement: null,
-    finalizationResult: keepProvisionalGate
-      ? current.finalizationResult
-      : null,
+    finalizationResult: keepProvisionalGate ? current.finalizationResult : null,
     finalizedFingerprint: keepProvisionalGate
       ? current.finalizedFingerprint
       : null,
@@ -757,9 +782,99 @@ export function migratePolishingStateV6(run) {
   });
 }
 
+export function migratePolishingStateV7(run) {
+  const current = run.pipelineState;
+  return Object.freeze({
+    ...current,
+    settings:
+      current.settings === null
+        ? null
+        : Object.freeze({ ...current.settings, mode: "independent" }),
+    cleanConfirmationFingerprint: null,
+    lazySourceForkConsumed: false,
+  });
+}
+
+export function migratePolishingStateV8(run) {
+  return Object.freeze({
+    ...run.pipelineState,
+    lazyCorrections: Object.freeze([]),
+    pendingLazyCorrection: null,
+  });
+}
+
+export function migratePolishingStateV9(run) {
+  const current = run.pipelineState;
+  const immutableTerminal = ["DONE", "FAILED"].includes(current.workflowState);
+  const handoff = current.workflowState === "HANDOFF";
+  const paused = current.workflowState === "WAITING_FOR_USER";
+  const effectiveCheckpoint = paused
+    ? (run.pause?.resumeState ?? current.pendingEdit?.suspendedState)
+    : current.workflowState;
+  const prepared =
+    current.preflightComplete && current.resolvedSummary !== null;
+  const needsCandidateMigration =
+    prepared &&
+    !immutableTerminal &&
+    !handoff &&
+    effectiveCheckpoint !== "POLISH";
+  const preservedFingerprint =
+    current.reviewedFingerprint ?? current.finalizedFingerprint;
+  const preserveAcceptedGate =
+    (immutableTerminal || handoff) && preservedFingerprint !== null;
+  return Object.freeze({
+    ...current,
+    workflowState:
+      needsCandidateMigration && !paused
+        ? current.settings?.mode === "lazy"
+          ? "CHECK_AND_FIX"
+          : "REVIEW"
+        : current.workflowState,
+    reviewCorrection: null,
+    pendingReviewCorrection: null,
+    confirmationCorrection: null,
+    pendingConfirmationCorrection: null,
+    candidateReviewResult: preserveAcceptedGate
+      ? Object.freeze({
+          status: "APPROVED",
+          findingIds: Object.freeze([]),
+          fingerprint: preservedFingerprint,
+        })
+      : null,
+    candidateReviewedFingerprint: preserveAcceptedGate
+      ? preservedFingerprint
+      : null,
+    candidateConfirmationFingerprint:
+      preserveAcceptedGate && current.settings?.mode === "lazy"
+        ? preservedFingerprint
+        : null,
+    candidateMigrationPending: needsCandidateMigration && paused,
+    ...(needsCandidateMigration
+      ? {
+          finalizationCorrection: null,
+          pendingFinalizationCorrection: null,
+          lazyCorrections: Object.freeze([]),
+          pendingLazyCorrection: null,
+          cleanConfirmationFingerprint: null,
+          finalizationResult: null,
+          finalizedFingerprint: null,
+          reviewResult: null,
+          reviewedFingerprint: null,
+          previousFindings:
+            current.findings.length === 0
+              ? current.previousFindings
+              : current.findings,
+          findings: Object.freeze([]),
+          pendingDisputes: Object.freeze([]),
+          reviewReconsideration: Object.freeze([]),
+        }
+      : {}),
+  });
+}
+
 export const polishingPipeline = Object.freeze({
   id: POLISHING_PIPELINE_ID,
-  stateVersion: 7,
+  stateVersion: 10,
   migrations: Object.freeze({
     1: migratePolishingStateV1,
     2: migratePolishingStateV2,
@@ -767,13 +882,18 @@ export const polishingPipeline = Object.freeze({
     4: migratePolishingStateV4,
     5: migratePolishingStateV5,
     6: migratePolishingStateV6,
+    7: migratePolishingStateV7,
+    8: migratePolishingStateV8,
+    9: migratePolishingStateV9,
   }),
   roles: ROLES,
+  resolveActiveRoles,
   settings: SETTINGS,
   taskInputs: TASK_INPUTS,
-  runOptions: Object.freeze(["project", "task", ...ROLES]),
+  runOptions: Object.freeze(["project", "task", "mode", ...ROLES]),
   requiredRunOptions: Object.freeze(["project", "task"]),
-  description: "Polish, review, and stage an existing dirty worktree without committing it.",
+  description:
+    "Polish, converge, finalize, confirm, and stage an existing dirty worktree without committing it.",
   projections: Object.freeze({
     clarification: projectClarification,
     pause: projectPause,

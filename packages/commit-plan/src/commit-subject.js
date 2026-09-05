@@ -19,11 +19,7 @@ const COMMIT_SUBJECT_PATTERN = new RegExp(
 );
 
 export class CommitPlanValidationError extends Error {
-  constructor(
-    message,
-    issues,
-    { code = "ERR_INVALID_COMMIT_PLAN" } = {},
-  ) {
+  constructor(message, issues, { code = "ERR_INVALID_COMMIT_PLAN" } = {}) {
     super(message);
     this.name = "CommitPlanValidationError";
     this.code = code;

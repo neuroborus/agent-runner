@@ -15,29 +15,52 @@ choice affects the shared plan contract.
 - `bin/agent-run.js`: keep the executable entry point thin.
 - `src/index.js`: expose the root source API to the executable and root tests.
 - `src/cli.js`: own argument parsing, validation, concise terminal output, and dispatch.
-- `src/mcp.js`: own STDIO MCP schemas, projections, revision waits, and detached dispatch without duplicating runner logic.
-- `src/config.js`: own runner-local configuration loading, strict validation, and role resolution precedence.
-- `src/clarifications.js`: expose and coordinate the clarification boundary.
-- `src/clarification-*.js`: keep its confined file and editor helpers internal
-  to the root clarification boundary.
+- `src/mcp/index.js`: expose the STDIO MCP protocol capability boundary.
+- `src/mcp/`: keep schemas, projections, revision waits, detached dispatch,
+  and issue reporting private to that boundary without duplicating runner logic.
+- `src/config/index.js`: expose the runner-configuration boundary.
+- `src/config/`: keep strict parsing, confined file loading, trusted profiles,
+  and resolution precedence private to that boundary.
+- `src/clarifications/index.js`: expose the clarification boundary.
+- `src/clarifications/`: keep coordination, confined transcript files, and
+  editor support private to that boundary.
 - `src/pipeline-registry.js`: own the explicit list of built-in pipelines; do not turn it into a plugin system.
-- `src/runner.js`: coordinate `run`, `resume`, and `status` without backend-specific flags.
-- `src/state.js`: expose and coordinate the run-store boundary.
-- `src/state-*.js`: keep its atomic file, write-ahead journal, action-intent,
-  execution-lease, and persisted-shape helpers internal to the root state boundary.
-- `src/git.js`: expose and coordinate the Git safety boundary.
-- `src/git-*.js`: keep Git process, snapshot, and commit-verification helpers
-  internal to the root Git boundary.
-- `src/agents/codex.js`: own Codex adapter coordination, probing, and
-  request/result normalization.
-- `src/agents/codex-*.js`: keep its app-server transport and constrained commit
-  helpers internal to the Codex adapter.
-- `src/agents/claude.js`: own Claude Code probing, command construction, and output normalization.
+- `src/runner/index.js`: expose the runner-orchestration boundary.
+- `src/runner/`: keep input normalization, role and session setup, pipeline
+  migration, and run and resume orchestration private to that boundary.
+- `src/state/index.js`: expose and coordinate the run-store boundary.
+- `src/state/`: keep service coordination, atomic files, write-ahead journals,
+  action intents, execution leases, and persisted-shape validation private to
+  that boundary.
+- `src/git/index.js`: expose and coordinate the Git safety boundary.
+- `src/git/`: keep service coordination, command execution, snapshots and
+  fingerprints, commit verification, and handoff support private to that boundary.
+- `src/trusted-validation/index.js`: expose the runner-trusted validation boundary.
+- `src/trusted-validation/`: keep contract normalization, snapshot handling,
+  sandbox construction, and exact-command execution owned by that boundary.
+- `src/agents/codex/index.js`: expose the Codex provider boundary.
+- `src/agents/codex/`: keep Codex processes, App Server transport, flags,
+  parsing, sessions, local commits, and workspace storage private to that provider.
+- `src/agents/claude/index.js`: expose the Claude provider boundary.
+- `src/agents/claude/`: keep Claude Code processes, flags, parsing, sessions,
+  local commits, and native sandbox behavior private to that provider.
 - `src/agents/index.js`: expose the agent-adapter directory API.
+- `src/agents/registry.js`: own the frozen source-controlled provider
+  descriptors used by configuration, runner construction, source checks,
+  failure normalization, and MCP backend schemas.
 - `packages/commit-plan/`: own deterministic plan parsing, serialization, and validation shared by multiple pipelines.
 - `pipelines/<id>/src/`: own that pipeline's states, transitions, prompts, roles, and descriptor.
 - `pipelines/<id>/test/`: test that pipeline's behavior with `node:test` and fake adapters.
 - `pipelines/<id>/docs/`: keep that pipeline's product and implementation specification.
+- `test/agents/`: test provider behavior through provider indexes.
+- `test/clarifications/`: test clarification-service behavior.
+- `test/config/`: test configuration parsing, loading, profiles, and resolution.
+- `test/git/`: test Git-safety behavior.
+- `test/integration/`: test cross-capability workflows.
+- `test/mcp/`: test MCP control-plane and issue-reporting behavior.
+- `test/state/`: test state persistence and safety behavior.
+- `test/source-boundaries.test.js`: enforce public source indexes and internal
+  workspace dependency direction.
 - `test/`: test root runtime behavior, workspace boundaries, adapters, and temporary Git repositories.
 - `docs/`: keep cross-cutting architecture requirements.
 
@@ -51,6 +74,8 @@ choice affects the shared plan contract.
 - Keep pipelines explicit and independently owned; do not introduce a generic workflow DSL or dynamic plugin loader.
 - Do not extract CLI, Git, state, agent adapters, or test helpers into packages until another real consumer needs them.
 - Keep the backend contract small and functional; contain CLI-specific details inside adapters.
+- Add a provider through one complete static descriptor; do not duplicate its
+  ID or branch on it in configuration, runner, MCP, or pipeline policy.
 - Keep the configuration envelope and precedence in the root runtime while
   pipeline descriptors own roles, settings, defaults, and persisted-run
   validators; load runtime defaults from the runner root, never from a target
@@ -74,6 +99,8 @@ choice affects the shared plan contract.
 - Is this logic runtime-wide, pipeline-specific, plan-contract-specific, backend-specific, Git-specific, or persistence-specific?
 - Does the change preserve the mandatory invariants in `AGENTS.md`, the architecture, and the affected pipeline specification?
 - Can the behavior be tested with a fake adapter or temporary repository?
+- Does one injected provider descriptor exercise every runtime consumer without
+  a provider-specific pipeline branch?
 - Is a new module or dependency solving a present problem rather than a hypothetical one?
 
 ## Checks

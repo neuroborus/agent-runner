@@ -6,8 +6,13 @@ import {
   BOOTSTRAP_CORRECTION_INSTRUCTIONS,
   BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
+  CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS,
+  CANDIDATE_REVIEW_INSTRUCTIONS,
+  CHECK_AND_FIX_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
+  CLEAN_CONFIRM_INSTRUCTIONS,
   COMMIT_INSTRUCTIONS,
+  CONFIRMATION_CORRECTION_INSTRUCTIONS,
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
   FINALIZATION_CORRECTION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
@@ -16,6 +21,7 @@ import {
   FINDING_ARBITRATION_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
   IMPLEMENTATION_INSTRUCTIONS,
+  LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
   PLAN_COMPATIBILITY_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
   REVIEW_CORRECTION_INSTRUCTIONS,
@@ -27,13 +33,22 @@ test("bootstrap instructions preserve independent evidence and arbitration", () 
   assert.match(BOOTSTRAP_INSTRUCTIONS, /schema's result object/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /Required-check IDs must be unique/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /Exact commands must be unique/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /canonical repository-relative file paths/u);
+  assert.match(
+    BOOTSTRAP_INSTRUCTIONS,
+    /canonical repository-relative file paths/u,
+  );
   assert.match(BOOTSTRAP_INSTRUCTIONS, /symlink alias/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /independently identify every required check/iu);
+  assert.match(
+    BOOTSTRAP_INSTRUCTIONS,
+    /independently identify every required check/iu,
+  );
   assert.match(BOOTSTRAP_INSTRUCTIONS, /validationInfrastructure/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /capacity of 64 items/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /CAPACITY_EXHAUSTED/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /keep the summary and required-check inventory staging-independent/u);
+  assert.match(
+    BOOTSTRAP_INSTRUCTIONS,
+    /keep the summary and required-check inventory staging-independent/u,
+  );
   assert.match(BOOTSTRAP_INSTRUCTIONS, /against HEAD or explicit trees/u);
   assert.match(
     BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
@@ -55,7 +70,10 @@ test("bootstrap instructions preserve independent evidence and arbitration", () 
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /complete replacement/u);
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /every violation/u);
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /diagnostic batch/u);
-  assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /ordinary clarification question/u);
+  assert.match(
+    BOOTSTRAP_CORRECTION_INSTRUCTIONS,
+    /ordinary clarification question/u,
+  );
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /PRODUCT_DECISION_REQUIRED/u);
   assert.match(
     BOOTSTRAP_CORRECTION_INSTRUCTIONS,
@@ -90,13 +108,21 @@ test("bootstrap instructions preserve independent evidence and arbitration", () 
     /repeated diagnostic or another invalid result after that finite allowance fails closed/u,
   );
   assert.match(REVIEW_CORRECTION_INSTRUCTIONS, /pending read-only correction/u);
-  assert.match(REVIEW_CORRECTION_INSTRUCTIONS, /same review schema/u);
+  assert.match(REVIEW_CORRECTION_INSTRUCTIONS, /same candidate-review schema/u);
   assert.match(
     REVIEW_CORRECTION_INSTRUCTIONS,
-    /Do not repeat or quote the rejected result, findings, commands, paths, provider output, prompt, or transcript/u,
+    /Do not repeat or quote the rejected result, findings, provider output, prompt, or transcript/u,
   );
   assert.match(
     REVIEW_CORRECTION_INSTRUCTIONS,
+    /still-invalid replacement pauses for an explicit retry/u,
+  );
+  assert.match(
+    CONFIRMATION_CORRECTION_INSTRUCTIONS,
+    /same confirmation schema/u,
+  );
+  assert.match(
+    CONFIRMATION_CORRECTION_INSTRUCTIONS,
     /still-invalid replacement pauses for an explicit retry/u,
   );
 });
@@ -158,9 +184,35 @@ Do not use it for technical choices, implementation difficulty, naming, or ordin
 For that outcome, provide question, whyBlocked, and evidence; options may be [].`,
   );
   assert.match(REVIEW_INSTRUCTIONS, /Do not modify the repository/u);
+  assert.match(REVIEW_INSTRUCTIONS, /distinct terminal confirmation/u);
   assert.match(REVIEW_INSTRUCTIONS, /reject omissions, skips, substitutions/u);
   assert.match(REVIEW_INSTRUCTIONS, /validationChange UNCHANGED/u);
   assert.match(REVIEW_INSTRUCTIONS, /ACCEPTED with validationEvidence/u);
+  assert.match(
+    CHECK_AND_FIX_INSTRUCTIONS,
+    /^Review the changes and verify that they are correct, idiomatic, minimal, and consistent with the project's conventions\. If you find any problems, fix them idiomatically and minimally, following the project's conventions\./u,
+  );
+  assert.match(CHECK_AND_FIX_INSTRUCTIONS, /For CHANGED, use only/u);
+  assert.doesNotMatch(CHECK_AND_FIX_INSTRUCTIONS, /REFINALIZE/u);
+  assert.match(
+    CANDIDATE_REVIEW_INSTRUCTIONS,
+    /complete current result as a semantic candidate/u,
+  );
+  assert.match(
+    CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS,
+    /^Review the candidate changes and verify/u,
+  );
+  assert.match(CLEAN_CONFIRM_INSTRUCTIONS, /^Confirm the finalized changes/u);
+  assert.match(CLEAN_CONFIRM_INSTRUCTIONS, /Do not modify the repository/u);
+  assert.match(CLEAN_CONFIRM_INSTRUCTIONS, /Return CLEAN only/u);
+  assert.match(
+    LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
+    /complete replacement result using the same checkpoint schema/u,
+  );
+  assert.match(
+    LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
+    /During CLEAN_CONFIRM, keep the repository read-only/u,
+  );
   assert.equal(
     FINDING_RESOLUTION_INSTRUCTIONS,
     `For each finding below, fix it idiomatically and minimally, following the project's conventions.
@@ -194,10 +246,7 @@ test("finalization and dispute prompts preserve their narrow roles", () => {
     FINALIZATION_INSTRUCTIONS,
     /defer staging, staged\/index-relative inspection, alternate-index workarounds/u,
   );
-  assert.match(
-    FINALIZATION_INSTRUCTIONS,
-    /against HEAD or explicit trees/u,
-  );
+  assert.match(FINALIZATION_INSTRUCTIONS, /against HEAD or explicit trees/u);
   assert.match(
     FINALIZATION_INSTRUCTIONS,
     /neither a validation blocker nor a skipped required check/u,

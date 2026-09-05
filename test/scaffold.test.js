@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { readdir, readFile, readlink } from "node:fs/promises";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import packageMetadata from "../package.json" with { type: "json" };
+
+const executeFile = promisify(execFile);
+const REPOSITORY_PATH = fileURLToPath(new URL("../", import.meta.url));
 
 const SOURCE_DIRECTORIES = [
   new URL("../src/", import.meta.url),
@@ -47,9 +53,7 @@ async function findJavaScriptModules(directoryUrl) {
 }
 
 function parseFrontmatter(document, skillPath) {
-  const match = /^---\r?\n(?<body>[\s\S]*?)\r?\n---(?:\r?\n|$)/u.exec(
-    document,
-  );
+  const match = /^---\r?\n(?<body>[\s\S]*?)\r?\n---(?:\r?\n|$)/u.exec(document);
   assert.ok(match, `${skillPath} must start with YAML frontmatter`);
 
   const fields = Object.create(null);
@@ -64,7 +68,10 @@ function parseFrontmatter(document, skillPath) {
     fields[field.groups.key] = field.groups.value;
   }
 
-  return fields;
+  return {
+    content: document.slice(match[0].length).trim(),
+    fields,
+  };
 }
 
 test("every root and workspace source module can be imported", async () => {
@@ -101,11 +108,12 @@ test("documented Node range matches package metadata", async () => {
 });
 
 test("workspace topology keeps pipelines independent", async () => {
-  const [commitPlan, planAuthoring, planExecution, polishing] = await Promise.all(
-    PACKAGE_METADATA_FILES.slice(1).map(async (metadataUrl) =>
-      JSON.parse(await readFile(metadataUrl, "utf8")),
-    ),
-  );
+  const [commitPlan, planAuthoring, planExecution, polishing] =
+    await Promise.all(
+      PACKAGE_METADATA_FILES.slice(1).map(async (metadataUrl) =>
+        JSON.parse(await readFile(metadataUrl, "utf8")),
+      ),
+    );
 
   assert.deepEqual(packageMetadata.workspaces, ["packages/*", "pipelines/*"]);
   assert.equal(packageMetadata.exports, "./src/index.js");
@@ -136,7 +144,7 @@ test("workspace topology keeps pipelines independent", async () => {
   assert.equal(polishing.dependencies, undefined);
 });
 
-test("project skills have valid metadata", async () => {
+test("canonical project skills have valid instructions", async () => {
   const entries = await readdir(SKILLS_DIRECTORY, { withFileTypes: true });
   const skillDirectories = entries.filter((entry) => entry.isDirectory());
 
@@ -149,7 +157,7 @@ test("project skills have valid metadata", async () => {
     const skillUrl = new URL(`${directory.name}/SKILL.md`, SKILLS_DIRECTORY);
     const skillPath = `.agents/skills/${directory.name}/SKILL.md`;
     const document = await readFile(skillUrl, "utf8");
-    const fields = parseFrontmatter(document, skillPath);
+    const { content, fields } = parseFrontmatter(document, skillPath);
 
     assert.deepEqual(
       Object.keys(fields).sort(),
@@ -160,27 +168,109 @@ test("project skills have valid metadata", async () => {
     assert.match(fields.name, /^[a-z0-9-]{1,63}$/u);
     assert.ok(fields.description.trim(), `${skillPath} needs a description`);
     assert.doesNotMatch(fields.description, /\bTODO\b/u);
-
-    const metadataUrl = new URL(
-      `${directory.name}/agents/openai.yaml`,
-      SKILLS_DIRECTORY,
+    assert.match(content, /^#\s+\S/mu, `${skillPath} needs a Markdown title`);
+    assert.doesNotMatch(
+      content,
+      /\bTODO\b/u,
+      `${skillPath} has unfinished content`,
     );
-    const metadata = await readFile(metadataUrl, "utf8");
-    assert.match(metadata, /^interface:\r?$/mu);
-    assert.match(metadata, new RegExp(`\\$${directory.name}\\b`, "u"));
+  }
+});
+
+test("product documentation map covers every versionable document once", async () => {
+  const [{ stdout }, documentMap] = await Promise.all([
+    executeFile(
+      "git",
+      [
+        "ls-files",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "--",
+        "docs/product",
+      ],
+      { cwd: REPOSITORY_PATH },
+    ),
+    readFile(new URL("../docs/README.md", import.meta.url), "utf8"),
+  ]);
+  const productDocuments = stdout
+    .split("\n")
+    .filter((path) => path.endsWith(".md"))
+    .sort();
+  const mappedDocuments = [
+    ...documentMap.matchAll(/\]\((product\/[^)]+\.md)\)/gu),
+  ]
+    .map((match) => `docs/${match[1]}`)
+    .sort();
+
+  assert.ok(
+    productDocuments.length > 0,
+    "at least one product document is required",
+  );
+  assert.deepEqual(mappedDocuments, productDocuments);
+
+  const mapLines = documentMap.split("\n");
+  for (const productDocument of productDocuments) {
+    const target = productDocument.slice("docs/".length);
+    const row = mapLines.find((line) => line.includes(`](${target})`));
+    assert.ok(row, `${productDocument} needs a document-map row`);
+
+    const columns = row
+      .split("|")
+      .slice(1, -1)
+      .map((column) => column.trim());
+    assert.equal(columns.length, 2, `${productDocument} needs two map columns`);
+    assert.match(
+      columns[1],
+      /\bread\b/iu,
+      `${productDocument} must say when to read it`,
+    );
+    assert.ok(
+      columns[1].length >= 20 && columns[1].length <= 240,
+      `${productDocument} needs a concise ownership description`,
+    );
+  }
+});
+
+test("skill interface YAML is ignored without hiding canonical skills", async () => {
+  const ignoredPaths = [
+    ".agents/skills/finalization/agents/openai.yaml",
+    ".agents/local/nested/agents/interface.yaml",
+  ];
+  const { stdout } = await executeFile(
+    "git",
+    ["check-ignore", "--no-index", "--", ...ignoredPaths],
+    { cwd: REPOSITORY_PATH },
+  );
+
+  assert.deepEqual(stdout.trim().split("\n"), ignoredPaths);
+
+  for (const visiblePath of [
+    ".agents/skills/finalization/SKILL.md",
+    ".agents/skills/finalization/agents/openai.yml",
+    ".agents/local.yaml",
+  ]) {
+    await assert.rejects(
+      executeFile(
+        "git",
+        ["check-ignore", "--no-index", "--quiet", "--", visiblePath],
+        { cwd: REPOSITORY_PATH },
+      ),
+      (error) => error.code === 1,
+      `${visiblePath} must remain visible to Git`,
+    );
   }
 });
 
 test("Claude reuses the canonical agent guidance and skills", async () => {
-  const claudeGuidance = await readFile(
+  const claudeGuidanceTarget = await readlink(
     new URL("../CLAUDE.md", import.meta.url),
-    "utf8",
   );
   const claudeSkillsTarget = await readlink(
     new URL("../.claude/skills", import.meta.url),
   );
 
-  assert.equal(claudeGuidance, "@AGENTS.md\n");
+  assert.equal(claudeGuidanceTarget, "AGENTS.md");
   assert.equal(claudeSkillsTarget, "../.agents/skills");
 });
 

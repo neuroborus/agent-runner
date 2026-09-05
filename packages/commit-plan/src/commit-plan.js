@@ -4,8 +4,7 @@ import {
 } from "./commit-subject.js";
 
 const DELIMITER_PATTERN = /^## Commit ([1-9][0-9]*): (.*)$/u;
-const DELIMITER_CANDIDATE_PATTERN =
-  /^##[ \t]+Commit(?:[ \t]|[0-9]|:|$)/mu;
+const DELIMITER_CANDIDATE_PATTERN = /^##[ \t]+Commit(?:[ \t]|[0-9]|:|$)/mu;
 const PLAN_FIELDS = new Set(["steps"]);
 const STEP_FIELDS = new Set(["number", "subject", "body"]);
 
@@ -31,9 +30,7 @@ function invalidPlan(issues) {
 
 function freezeCommitPlan(plan) {
   return Object.freeze({
-    steps: Object.freeze(
-      plan.steps.map((step) => Object.freeze({ ...step })),
-    ),
+    steps: Object.freeze(plan.steps.map((step) => Object.freeze({ ...step }))),
   });
 }
 
@@ -139,8 +136,7 @@ export function parseCommitPlan(source) {
 
   const plan = {
     steps: delimiters.map((delimiter, index) => {
-      const nextLineIndex =
-        delimiters[index + 1]?.lineIndex ?? lines.length;
+      const nextLineIndex = delimiters[index + 1]?.lineIndex ?? lines.length;
       return {
         number: delimiter.number,
         subject: delimiter.subject,

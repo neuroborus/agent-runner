@@ -6,7 +6,12 @@ import {
   BOOTSTRAP_CORRECTION_INSTRUCTIONS,
   BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
+  CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS,
+  CANDIDATE_REVIEW_INSTRUCTIONS,
+  CHECK_AND_FIX_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
+  CLEAN_CONFIRM_INSTRUCTIONS,
+  CONFIRMATION_CORRECTION_INSTRUCTIONS,
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
   FINALIZATION_CORRECTION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
@@ -14,16 +19,22 @@ import {
   finalizationGuidanceInstructions,
   FINDING_ARBITRATION_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
+  LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
   POLISH_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
   REVIEW_INSTRUCTIONS,
+  REVIEW_CORRECTION_INSTRUCTIONS,
   STAGNATION_INSTRUCTIONS,
 } from "../src/index.js";
 import {
   BOOTSTRAP_ARBITRATION_SCHEMA,
   BOOTSTRAP_RECONCILIATION_SCHEMA,
   BOOTSTRAP_SCHEMA,
+  CANDIDATE_CLEAN_CONFIRM_SCHEMA,
+  CANDIDATE_REVIEW_SCHEMA,
+  CHECK_AND_FIX_SCHEMA,
   CLARIFICATION_SCHEMA,
+  CLEAN_CONFIRM_SCHEMA,
   DISPUTE_RECONSIDERATION_SCHEMA,
   FINALIZATION_SCHEMA,
   FINDING_ARBITRATION_SCHEMA,
@@ -44,7 +55,10 @@ import {
 function assertStrictSchema(schema) {
   assert.equal(schema.type, "object");
   assert.equal(schema.additionalProperties, false);
-  assert.deepEqual([...schema.required].sort(), Object.keys(schema.properties).sort());
+  assert.deepEqual(
+    [...schema.required].sort(),
+    Object.keys(schema.properties).sort(),
+  );
   assert.ok(Object.isFrozen(schema));
 }
 
@@ -121,7 +135,10 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
     /modify repository content, staging, history, refs, remotes, or Git identity/u,
   );
   assert.match(FINALIZATION_CORRECTION_INSTRUCTIONS, /fails closed/u);
-  assert.match(BOOTSTRAP_RECONCILIATION_INSTRUCTIONS, /Do not force agreement/u);
+  assert.match(
+    BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
+    /Do not force agreement/u,
+  );
   assert.match(BOOTSTRAP_ARBITRATION_INSTRUCTIONS, /Do not modify/u);
   for (const instructions of [
     BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
@@ -160,6 +177,51 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
   assert.match(FINALIZATION_INSTRUCTIONS, /Do not weaken sandboxing/u);
   assert.match(REVIEW_INSTRUCTIONS, /Do not modify/u);
   assert.match(REVIEW_INSTRUCTIONS, /stable IDs/u);
+  assert.match(CANDIDATE_REVIEW_INSTRUCTIONS, /semantic candidate/u);
+  assert.match(CANDIDATE_REVIEW_INSTRUCTIONS, /Do not run.*finalization/u);
+  assert.match(REVIEW_CORRECTION_INSTRUCTIONS, /candidate-review/u);
+  assert.match(CONFIRMATION_CORRECTION_INSTRUCTIONS, /terminal-confirmation/u);
+  assert.match(
+    CHECK_AND_FIX_INSTRUCTIONS,
+    /correct, idiomatic, minimal, and consistent/u,
+  );
+  assert.match(CHECK_AND_FIX_INSTRUCTIONS, /For CHANGED, use only/u);
+  assert.match(
+    CHECK_AND_FIX_INSTRUCTIONS,
+    /no supplied candidate-confirmation finding remains/u,
+  );
+  assert.match(CHECK_AND_FIX_INSTRUCTIONS, /Do not stage, unstage, or commit/u);
+  assert.match(
+    CLEAN_CONFIRM_INSTRUCTIONS,
+    /correct, idiomatic, minimal, and consistent/u,
+  );
+  assert.match(CLEAN_CONFIRM_INSTRUCTIONS, /Do not modify the repository/u);
+  assert.match(
+    LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
+    /same checkpoint schema/u,
+  );
+  assert.match(
+    LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
+    /CHECK_AND_FIX correction remains workspace-writable/u,
+  );
+  assert.match(
+    LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
+    /CLEAN_CONFIRM correction remains repository-read-only/u,
+  );
+  assert.match(
+    LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
+    /must not change the index/u,
+  );
+  assert.match(
+    LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
+    /handoff evidence early/u,
+  );
+  assert.match(CLEAN_CONFIRM_INSTRUCTIONS, /Return CLEAN only/u);
+  assert.match(CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS, /Return CLEAN only/u);
+  assert.match(
+    CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS,
+    /Do not run the project finalization procedure/u,
+  );
   assert.match(FINDING_RESOLUTION_INSTRUCTIONS, /one batch/u);
   assert.match(FINDING_RESOLUTION_INSTRUCTIONS, /runner owns final staging/u);
   assert.match(
@@ -195,7 +257,11 @@ test("polishing schemas are strict, bounded, and deeply frozen", () => {
     BOOTSTRAP_RECONCILIATION_SCHEMA,
     BOOTSTRAP_ARBITRATION_SCHEMA,
     POLISH_SCHEMA,
+    CANDIDATE_REVIEW_SCHEMA,
+    CANDIDATE_CLEAN_CONFIRM_SCHEMA,
     FINALIZATION_SCHEMA,
+    CHECK_AND_FIX_SCHEMA,
+    CLEAN_CONFIRM_SCHEMA,
     REVIEW_SCHEMA,
     FINDING_RESOLUTION_SCHEMA,
     DISPUTE_RECONSIDERATION_SCHEMA,

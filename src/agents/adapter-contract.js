@@ -1,10 +1,6 @@
 import { dirname, isAbsolute, resolve } from "node:path";
 
-const ACCESS_MODES = new Set([
-  "read-only",
-  "workspace-write",
-  "local-commit",
-]);
+const ACCESS_MODES = new Set(["read-only", "workspace-write", "local-commit"]);
 const REQUEST_FIELDS = Object.freeze([
   "access",
   "authorizationId",
@@ -239,7 +235,9 @@ export function createAdapterContract({ AdapterError, backendName }) {
     }
     assertJsonValue(value);
     if (!isRecord(value) || value.type !== "object") {
-      throw schemaError(`${backendName} output schema must describe an object.`);
+      throw schemaError(
+        `${backendName} output schema must describe an object.`,
+      );
     }
     assertStrictObjectSchemas(value);
     const source = JSON.stringify(value);
@@ -300,11 +298,7 @@ export function createAdapterContract({ AdapterError, backendName }) {
       contextSize:
         value.contextSize === undefined || value.contextSize === "current"
           ? undefined
-          : assertString(
-              value.contextSize,
-              `${backendName} context size`,
-              64,
-            ),
+          : assertString(value.contextSize, `${backendName} context size`, 64),
       model:
         value.model === undefined || value.model === "current"
           ? undefined
