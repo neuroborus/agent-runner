@@ -322,7 +322,7 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ["bin/agent-run.js", "mcp"],
-    cwd: new URL("..", import.meta.url).pathname,
+    cwd: new URL("../..", import.meta.url).pathname,
     env: { ...process.env, XDG_STATE_HOME: paths.stateRoot },
     stderr: "pipe",
   });
@@ -517,7 +517,7 @@ test("reports unexpected issues from a detached worktree over fresh STDIO", asyn
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ["bin/agent-run.js", "mcp"],
-    cwd: new URL("..", import.meta.url).pathname,
+    cwd: new URL("../..", import.meta.url).pathname,
     env: { ...process.env, XDG_STATE_HOME: paths.stateRoot },
     stderr: "pipe",
   });

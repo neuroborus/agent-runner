@@ -263,18 +263,14 @@ test("skill interface YAML is ignored without hiding canonical skills", async ()
 });
 
 test("Claude reuses the canonical agent guidance and skills", async () => {
-  const claudeGuidance = await readFile(
+  const claudeGuidanceTarget = await readlink(
     new URL("../CLAUDE.md", import.meta.url),
-    "utf8",
   );
   const claudeSkillsTarget = await readlink(
     new URL("../.claude/skills", import.meta.url),
   );
 
-  assert.equal(
-    claudeGuidance,
-    "See [AGENTS.md](AGENTS.md) for repository instructions.\n",
-  );
+  assert.equal(claudeGuidanceTarget, "AGENTS.md");
   assert.equal(claudeSkillsTarget, "../.agents/skills");
 });
 
