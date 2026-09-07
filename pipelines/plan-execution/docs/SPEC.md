@@ -815,9 +815,12 @@ otherwise unclassified valid result or process failure is recoverable only for
 a read-only turn. Denied tool input,
 native result text, raw standard error, and process causes are discarded.
 
-An explicit Claude rate, quota, credit, or spend-limit rejection is recoverable
-backend unavailability, but the rejected turn itself is never retried through
-compaction, a fresh session, or provider fallback. Persist
+A Codex App Server `usageLimitExceeded` rejection or an explicit Claude rate,
+quota, credit, or spend-limit rejection is recoverable backend unavailability,
+but the rejected turn itself is never retried through compaction, a fresh
+session, or provider fallback. Provider adapters own native recognition and
+bounded diagnostic normalization; the pipeline consumes only the
+backend-neutral recoverable failure. Persist
 `backend_unavailable` with the resumable pipeline state, reconcile any prepared
 one-shot commit authorization, preserve safe workspace changes, and enter
 `WAITING_FOR_USER` after the single rejected invocation. Classified usage and
@@ -825,7 +828,7 @@ provider failures from non-commit writable turns use the same path only after
 workspace and repository-control reconciliation. Unknown writable process
 outcomes remain terminal. Resume reconstructs the complete request from durable
 state rather than requiring the failed native session. These rules add no new
-pipeline-state field or migration.
+pipeline-state field, provider branch, or migration.
 
 When a writable Worker turn cannot execute required validation because of
 sandbox, IPC, loopback, process-isolation, missing-service, permission, or a
@@ -2615,8 +2618,9 @@ At minimum cover:
     validation-infrastructure paths are batched before inventory acceptance
     with every producing field identified, while canonical existing files are
     accepted.
-52. Claude structured status and permission classification is finite and
-    redacted; allowlisted read-only failures reconstruct from durable state,
+52. Codex `usageLimitExceeded` and Claude structured status and permission
+    classification are finite and redacted; explicit usage exhaustion and
+    allowlisted Claude read-only failures reconstruct from durable state,
     classified writable usage/provider failures preserve reconciled changes,
     and forbidden, authentication, ambiguous writable, and one-shot outcomes
     remain fail closed.
@@ -2812,9 +2816,10 @@ Do not build:
     files; the runner derives the final stable union and assigns contiguous IDs,
     while invalid output receives at most one read-only diagnostic-batch
     correction per producing role, phase, and contract.
-32. Claude recovery persists no denied input or native provider text, retries
-    only finite allowlisted failures, and reconstructs the request from durable
-    runner state without making a native session authoritative.
+32. Provider usage-exhaustion recovery persists no denied input or native
+    provider text, never retries the rejected turn, and reconstructs the request
+    from durable runner state without making a native session authoritative;
+    other Claude recovery retries only finite allowlisted failures.
 33. Only runner-root configuration defines trusted host commands; selected
     commands execute outside agent turns as exact persisted vectors, and their
     bounded evidence cannot pass unless every fingerprint and repository guard

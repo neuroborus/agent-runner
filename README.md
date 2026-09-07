@@ -243,9 +243,11 @@ Worker turns may preserve partial content, but index drift is rejected; the
 runner owns the later staging handoff. Plan-execution recovery retains its
 pipeline-specific one-shot commit reconciliation.
 Interrupted local-commit turns are reconciled from Git state and never replayed.
-An explicit Claude rate, quota, credit, or spend-limit rejection pauses as
-`backend_unavailable`, with durable workflow state and safe workspace changes
-preserved for resume.
+For a Codex App Server `usageLimitExceeded` rejection or an explicit Claude
+rate, quota, credit, or spend-limit rejection, the rejected native turn is
+invoked once and the pipeline pauses as `backend_unavailable`. Durable workflow
+state and safe workspace changes are preserved, and resume reconstructs the
+pending request from runner state.
 
 ## Task Inputs
 

@@ -936,9 +936,12 @@ configuration failure. Structured provider recovery accepts only explicit
 transient HTTP statuses; non-transient client statuses and an `api_error`
 without a transient status fail closed with a fixed request-rejected error.
 
-An explicit Claude rate, quota, credit, or spend-limit rejection bypasses
-context recovery and provider fallback. Other allowlisted backend, capability,
-configuration, usage, and provider failures use the same durable pause path.
+Codex App Server `usageLimitExceeded` and explicit Claude rate, quota, credit,
+or spend-limit rejections bypass context recovery and provider fallback. Their
+adapters own native recognition and expose only bounded normalized diagnostics;
+pipelines consume the backend-neutral recoverable failure. Other allowlisted
+backend, capability, configuration, usage, and provider failures use the same
+durable pause path.
 An otherwise unclassified valid read-only result or process failure is
 recoverable only because the enforced read-only envelope and the pipeline's
 post-turn repository guard prove that it could not mutate the repository.

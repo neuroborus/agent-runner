@@ -2107,7 +2107,6 @@ test("classifies recognized terminal turn failures without retaining native deta
     ["sessionBudgetExceeded", "turn_session_budget_exceeded"],
     ["threadRollbackFailed", "turn_thread_rollback_failed"],
     ["unauthorized", "turn_unauthorized"],
-    ["usageLimitExceeded", "turn_usage_limit_exceeded"],
   ];
 
   for (const [codexErrorInfo, diagnosticClass] of variants) {
@@ -2141,6 +2140,99 @@ test("classifies recognized terminal turn failures without retaining native deta
         assert.doesNotMatch(retainedError, /httpStatusCode|turnKind/u);
         return true;
       });
+    });
+  }
+});
+
+test("reports usage exhaustion as recoverable without native retry", async (t) => {
+  for (const access of ["read-only", "local-commit"]) {
+    await t.test(access, async () => {
+      const sensitiveMarker = "DO_NOT_RETAIN_USAGE_LIMIT_DETAILS";
+      let turns = 0;
+      let adapterError;
+      const fixture = createFixture({
+        handle({ message }) {
+          if (message.method !== "turn/start") {
+            return undefined;
+          }
+          turns += 1;
+          return {
+            result: { turn: { id: "usage-limit-turn" } },
+            notification: failedTurn(
+              message.params.threadId,
+              "usage-limit-turn",
+              {
+                message: sensitiveMarker,
+                codexErrorInfo: "usageLimitExceeded",
+                additionalDetails: sensitiveMarker,
+              },
+            ),
+          };
+        },
+      });
+      const overrides =
+        access === "local-commit"
+          ? {
+              access,
+              authorizationId: "authorization-1",
+              commit: {
+                expectedHead: EXPECTED_HEAD,
+                message: "feat(test): create commit",
+              },
+            }
+          : { access };
+
+      await assert.rejects(fixture.adapter.run(request(overrides)), (error) => {
+        adapterError = error;
+        assert.ok(
+          hasDiagnostic(
+            "ERR_CODEX_USAGE_LIMIT",
+            "turn_usage_limit_exceeded",
+          )(error),
+        );
+        assert.equal(error.message, "Codex usage capacity is unavailable.");
+        assert.equal(error.recoverable, true);
+        assert.equal(error.ambiguous, false);
+        assert.equal(
+          error.effectStarted,
+          access === "local-commit" ? false : undefined,
+        );
+        assert.equal(error.cause, undefined);
+        assert.doesNotMatch(
+          JSON.stringify({ ...error, message: error.message }),
+          /DO_NOT_RETAIN/u,
+        );
+        return true;
+      });
+
+      const normalized = normalizeAdapterFailure("codex", adapterError);
+      assert.ok(normalized instanceof AgentBoundaryError);
+      assert.equal(normalized.message, "Agent backend turn failed.");
+      assert.equal(normalized.code, "ERR_CODEX_USAGE_LIMIT");
+      assert.equal(normalized.diagnosticClass, "turn_usage_limit_exceeded");
+      assert.equal(normalized.recoverable, true);
+      assert.equal(normalized.ambiguous, false);
+      assert.equal(
+        normalized.effectStarted,
+        access === "local-commit" ? false : undefined,
+      );
+      assert.equal(normalized.cause, undefined);
+      assert.doesNotMatch(
+        JSON.stringify({ ...normalized, message: normalized.message }),
+        /DO_NOT_RETAIN/u,
+      );
+      assert.equal(turns, 1);
+      assert.equal(fixture.processes.length, 1);
+      assert.equal(
+        fixture.processes
+          .flatMap(({ messages }) => messages)
+          .filter(({ method }) => method === "thread/compact/start").length,
+        0,
+      );
+      assert.equal(
+        fixture.executeCalls.filter(({ file }) => file === "git").length,
+        0,
+      );
     });
   }
 });

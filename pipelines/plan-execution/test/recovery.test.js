@@ -4,7 +4,11 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { planExecutionPipeline } from "../src/index.js";
-import { FINALIZATION_SCHEMA } from "../src/schemas.js";
+import {
+  CANDIDATE_CLEAN_CONFIRM_SCHEMA,
+  CHECK_AND_FIX_SCHEMA,
+  FINALIZATION_SCHEMA,
+} from "../src/schemas.js";
 import {
   PLAN,
   SOURCE_SESSION,
@@ -27,6 +31,7 @@ import {
   reviewApproved,
   reviewFindings,
   terminalConfirmation,
+  terminalLazyConfirmation,
 } from "./support/index.js";
 
 test("reconstructs an interrupted writable turn with partial content and staging", async (t) => {
@@ -701,6 +706,168 @@ test("reconstructs an ownerless lazy candidate confirmation without recounting",
   );
   assert.equal(confirmationCalls.length, 3);
   assert.equal(confirmationCalls[1].session, undefined);
+  assert.equal(
+    fixture.calls.worker.filter(({ session }) => session?.mode === "fork")
+      .length,
+    1,
+  );
+  assert.equal(fixture.calls.reviewer.length, 0);
+  assert.equal(fixture.calls.arbiter.length, 0);
+});
+
+test("resumes lazy CLEAN_CONFIRM after Codex usage exhaustion", async (t) => {
+  const plan = `## Commit 1: feat(test): add first behavior
+
+Implement the first behavior.
+
+## Commit 2: fix(test): add second behavior
+
+Implement the second behavior.`;
+  let secondStepCheckRounds = 0;
+  let usageLimitRejected = false;
+  let resumedConfirmation;
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    plan,
+    sourceSession: SOURCE_SESSION,
+    worker: [clarificationReady(), bootstrapReady("Worker")],
+    workWorker: [
+      implementationCompleted(),
+      checkAndFix(),
+      cleanConfirmation(),
+      finalizationPassed(),
+      terminalLazyConfirmation(cleanConfirmation()),
+      implementationCompleted(),
+      checkAndFix("CHANGED"),
+      checkAndFix("CHANGED"),
+      checkAndFix("CHANGED"),
+      checkAndFix(),
+      cleanConfirmation(),
+      finalizationPassed(),
+      terminalLazyConfirmation(cleanConfirmation()),
+    ],
+    async onRoleRun(role, request) {
+      if (
+        role !== "worker" ||
+        !request.prompt.includes("Current planned commit:\n## Commit 2:")
+      ) {
+        return;
+      }
+      if (request.schema === CHECK_AND_FIX_SCHEMA) {
+        secondStepCheckRounds += 1;
+        if (secondStepCheckRounds <= 3) {
+          await writeFile(
+            join(request.cwd, "pending-step-2.txt"),
+            `pending round ${secondStepCheckRounds}\n`,
+          );
+        }
+        return;
+      }
+      if (request.schema === CANDIDATE_CLEAN_CONFIRM_SCHEMA) {
+        if (!usageLimitRejected) {
+          usageLimitRejected = true;
+          const error = new Error("Codex usage capacity is unavailable.");
+          error.code = "ERR_CODEX_USAGE_LIMIT";
+          error.recoverable = true;
+          throw error;
+        }
+        resumedConfirmation = request;
+      }
+    },
+  });
+
+  const paused = await fixture.run();
+  const firstCompletedCommit = paused.pipelineState.completedCommits[0];
+
+  assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(paused.pipelineState.currentStep, 2);
+  assert.equal(paused.pause.reason, "backend_unavailable");
+  assert.equal(paused.pause.code, "ERR_CODEX_USAGE_LIMIT");
+  assert.equal(paused.pause.resumeState, "CLEAN_CONFIRM");
+  assert.deepEqual(paused.pipelineState.completedCommits, [
+    firstCompletedCommit,
+  ]);
+  assert.equal(
+    paused.pipelineState.repositoryBaseline.head,
+    firstCompletedCommit,
+  );
+  assert.equal(
+    await readFile(join(fixture.projectPath, "implementation-1.txt"), "utf8"),
+    "implemented step 1\n",
+  );
+  assert.equal(
+    await readFile(join(fixture.projectPath, "implementation-2.txt"), "utf8"),
+    "implemented step 2\n",
+  );
+  assert.equal(
+    await readFile(join(fixture.projectPath, "pending-step-2.txt"), "utf8"),
+    "pending round 3\n",
+  );
+  assert.equal(paused.counters.fixRounds, 4);
+  assert.equal(paused.counters.correctionRounds, 0);
+  assert.deepEqual(
+    fixture.transitions.findLast(
+      ({ patch }) => patch?.pause?.reason === "backend_unavailable",
+    ).patch.pause,
+    {
+      code: "ERR_CODEX_USAGE_LIMIT",
+      resumeState: "CLEAN_CONFIRM",
+      reason: "backend_unavailable",
+    },
+  );
+  const implementationCalls = () =>
+    fixture.calls.worker.filter(({ prompt }) =>
+      prompt.includes("Implement the changes"),
+    );
+  const secondStepCheckCalls = () =>
+    fixture.calls.worker.filter(
+      ({ prompt, schema }) =>
+        schema === CHECK_AND_FIX_SCHEMA &&
+        prompt.includes("Current planned commit:\n## Commit 2:"),
+    );
+  assert.equal(implementationCalls().length, 2);
+  assert.equal(secondStepCheckCalls().length, 4);
+  assert.equal(
+    fixture.calls.worker.filter(({ session }) => session?.mode === "fork")
+      .length,
+    1,
+  );
+  assert.equal(paused.pipelineState.lazySourceForkConsumed, true);
+  assert.equal(paused.sessionLineage.children.length, 1);
+  // Model disposal of the failed native child while retaining source-fork state.
+  Object.assign(fixture.currentRun, {
+    sessionLineage: { ...paused.sessionLineage, children: [] },
+  });
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.pipelineState.completedCommits.length, 2);
+  assert.equal(
+    completed.pipelineState.completedCommits[0],
+    firstCompletedCommit,
+  );
+  assert.equal(completed.counters.fixRounds, 4);
+  assert.equal(completed.counters.correctionRounds, 0);
+  assert.equal(implementationCalls().length, 2);
+  assert.equal(secondStepCheckCalls().length, 4);
+  assert.equal(
+    await readFile(join(fixture.projectPath, "implementation-1.txt"), "utf8"),
+    "implemented step 1\n",
+  );
+  assert.equal(
+    await readFile(join(fixture.projectPath, "implementation-2.txt"), "utf8"),
+    "implemented step 2\n",
+  );
+  assert.equal(
+    await readFile(join(fixture.projectPath, "pending-step-2.txt"), "utf8"),
+    "pending round 3\n",
+  );
+  assert.notEqual(resumedConfirmation, undefined);
+  assert.equal(resumedConfirmation.access, "read-only");
+  assert.equal(resumedConfirmation.session, undefined);
+  assert.equal(resumedConfirmation.prompt, resumedConfirmation.recoveryPrompt);
+  assert.match(resumedConfirmation.prompt, /## Commit 2:/u);
   assert.equal(
     fixture.calls.worker.filter(({ session }) => session?.mode === "fork")
       .length,
