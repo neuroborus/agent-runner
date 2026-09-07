@@ -4,6 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { planExecutionPipeline } from "../src/index.js";
+import { FINALIZATION_SCHEMA } from "../src/schemas.js";
 import {
   PLAN,
   SOURCE_SESSION,
@@ -25,6 +26,7 @@ import {
   resolution,
   reviewApproved,
   reviewFindings,
+  terminalConfirmation,
 } from "./support/index.js";
 
 test("reconstructs an interrupted writable turn with partial content and staging", async (t) => {
@@ -801,6 +803,55 @@ test("re-finalizes a partial correction after provider unavailability", async (t
       prompt.includes("Previous candidate findings for this step"),
     ).prompt,
     /Previous candidate findings for this step:[\s\S]*"id": "R1"/u,
+  );
+});
+
+test("invalidates retained finalization after content-changing interrupted terminal resolution", async (t) => {
+  let interruptResolution = true;
+  const fixture = await createFixture(t, {
+    workReviewer: [
+      reviewApproved(),
+      terminalConfirmation(reviewFindings("R1")),
+      reviewApproved(),
+      terminalConfirmation(reviewApproved()),
+    ],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      finalizationPassed(),
+    ],
+    async onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        request.prompt.includes("For each finding below") &&
+        interruptResolution
+      ) {
+        interruptResolution = false;
+        await writeFile(
+          join(request.cwd, "source.js"),
+          "export const value = 2;\n",
+        );
+        const error = new Error("Claude provider is unavailable.");
+        error.code = "ERR_CLAUDE_PROVIDER_UNAVAILABLE";
+        error.recoverable = true;
+        throw error;
+      }
+    },
+  });
+
+  const paused = await fixture.run();
+
+  assert.equal(paused.pause.reason, "backend_unavailable");
+  assert.equal(paused.pause.resumeState, "REVIEW");
+  assert.equal(paused.pipelineState.finalizationResult, null);
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
+      .length,
+    2,
   );
 });
 

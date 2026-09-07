@@ -7,6 +7,16 @@ remain in the owning documentation.
 
 ## 2026-09-05
 
+- **Unchanged terminal repairs retain fingerprint-bound finalization.** Plan
+  execution and polishing now clear candidate and confirmation attestations for
+  terminal findings while retaining a successful finalization record whose
+  content and validation-infrastructure fingerprints remain current. After
+  independent or lazy candidate convergence, an exact match retries the distinct
+  terminal confirmation directly; actual content or infrastructure changes,
+  correction-scope drift, content-changing recovery, and a new commit step still
+  force the complete gate to rerun. This removes redundant full-suite work
+  without weakening the fresh confirmation required immediately before commit
+  or handoff.
 - **Compact test output retains complete failure diagnostics.** The normal root
   test command uses Node's built-in `dot` reporter while preserving automatic
   discovery and the bounded concurrency of 8. Passing records no longer flood

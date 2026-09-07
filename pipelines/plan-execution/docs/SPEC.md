@@ -1794,6 +1794,18 @@ terminal-confirmation evidence. Formatting inside a newly entered `FINALIZE`
 turn instead establishes the content fingerprint that finalization and terminal
 confirmation must share.
 
+A terminal finding clears the candidate and terminal-confirmation attestations,
+but a successful finalization record remains provisionally reusable while its
+finalized content and validation-infrastructure fingerprints stay current. A
+declared `FIX` is not evidence of a repository mutation. After independent or
+lazy candidate convergence, the runner recomputes both fingerprints and enters
+`CONFIRM` directly only when they still match the retained record; otherwise it
+clears that record and re-enters `FINALIZE`. Actual content or infrastructure
+changes, provider correction-scope drift, content-changing interruption
+reconciliation, and advancement to the next commit step always invalidate the
+record. A fresh successful `CONFIRM` remains mandatory immediately before every
+`COMMIT`.
+
 If deterministic normalization rejects a Worker finalization result, collect
 all independently detectable violations from that candidate where practical,
 including every staging-dependent required command. Persist the version-8
@@ -1908,8 +1920,9 @@ Finding IDs must remain stable across re-review:
 The runner must not implement fuzzy semantic matching of findings in V1.
 
 When candidate review finishes successfully, persist its fingerprint and enter
-`FINALIZE`. When terminal confirmation finishes successfully, persist its
-separate reviewed fingerprint and enter `COMMIT`.
+`FINALIZE`, except that a still-current retained finalization record returns
+directly to `CONFIRM`. When terminal confirmation finishes successfully,
+persist its separate reviewed fingerprint and enter `COMMIT`.
 
 If the candidate schema or final `REVIEW_SCHEMA` provider reports the shared structured-output
 failure class, deterministic normalization rejects the result, or the
@@ -1924,10 +1937,12 @@ unchanged schema. Never rely on or continue the rejected native session.
 Before accepting the replacement, reapply input, repository, read-only, Git-
 control, content-fingerprint, validation-infrastructure-fingerprint, and
 applicable evidence guards. Preserve accepted finalization evidence only while
-a terminal-confirmation correction scope is unchanged. Content or control drift invalidates the
-correction scope and follows the existing safe reconciliation path. A valid
-replacement rejoins the ordinary approval, findings, validation-change, and
-product-decision routes.
+the applicable provider-correction scope is unchanged. Validation-
+infrastructure or correction-scope drift invalidates the finalization record
+and re-enters `FINALIZE`; content or control drift invalidates all dependent
+evidence and follows the existing safe reconciliation path. A valid replacement
+rejoins the ordinary approval, findings, validation-change, and product-decision
+routes.
 
 If a corrected candidate result remains invalid, pause at
 `review_output_invalid` with resume state `REVIEW`. If a corrected terminal
@@ -1972,9 +1987,11 @@ clean-confirmation correction never
 receives workspace-write authority.
 
 Concrete confirmation findings return directly to `CHECK_AND_FIX`; they are
-not disputes and cannot invoke Reviewer or Arbiter. Only a mutation-free
-candidate `CLEAN` result with an unchanged fingerprint enters `FINALIZE`. A
-passing finalization then enters the distinct read-only `CONFIRM` state, where
+not disputes and cannot invoke Reviewer or Arbiter. A mutation-free candidate
+`CLEAN` result with an unchanged fingerprint enters `FINALIZE`, or returns
+directly to `CONFIRM` when retained finalization evidence still matches the
+recomputed content and validation-infrastructure fingerprints. A passing
+finalization enters the distinct read-only `CONFIRM` state, where
 the Worker receives the established and finalized validation tuples and
 returns `CLEAN`, findings, or the narrow product-decision outcome together with
 `UNCHANGED` or task-authorized `ACCEPTED` validation change. Terminal findings
@@ -2024,7 +2041,9 @@ If the Worker agrees:
 1. fix all accepted findings in one fix round;
 2. return control;
 3. run complete candidate convergence again;
-4. run finalization and terminal confirmation again.
+4. rerun finalization when content or validation infrastructure changed;
+5. otherwise reuse matching successful finalization evidence;
+6. run one fresh terminal confirmation.
 
 When one resolution batch mixes `FIX` and `DISPUTE`, preserve the disputes
 through complete candidate re-review, then let the Reviewer reconsider them
@@ -2526,9 +2545,12 @@ At minimum cover:
 4. task directory located inside the repository without state pollution;
 5. independent read-only bootstrap;
 6. bootstrap mutation detection;
-7. successful implementation -> finalization -> review -> commit;
+7. successful implementation -> candidate review -> finalization -> terminal
+   confirmation -> commit;
 8. finalization failure -> fix -> retry;
-9. review finding -> fix -> re-finalize -> re-review;
+9. candidate or terminal finding -> fix -> candidate reconvergence -> matching
+   finalization reuse or changed-fingerprint re-finalization -> terminal
+   confirmation;
 10. dispute -> Reviewer withdraw;
 11. dispute -> Reviewer uphold -> Arbiter;
 12. fix/dispute/no-progress limits -> `WAITING_FOR_USER`;

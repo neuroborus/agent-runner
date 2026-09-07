@@ -14,6 +14,7 @@ import {
   SOURCE_SESSION,
   SETTINGS,
   bootstrapReady,
+  candidateApproved,
   candidateClean,
   checkAndFix,
   clarificationReady,
@@ -1100,6 +1101,57 @@ test("accounts for a content-changing interrupted correction before recovery", a
   assert.equal(resumed.pause.reason, "no_progress");
   assert.equal(resumed.counters.fixRounds, 1);
   assert.equal(resumed.counters.correctionRounds, 1);
+});
+
+test("invalidates retained finalization after content-changing interrupted terminal resolution", async (t) => {
+  let interrupted = false;
+  const fixture = await createFixture(t, {
+    reviewer: [
+      bootstrapReady("Reviewer"),
+      candidateApproved(),
+      reviewFindings("R1"),
+      candidateApproved(),
+      reviewApproved(),
+    ],
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationPassed(),
+      finalizationPassed(),
+    ],
+    async onRoleRun(role, request, _turn, { projectPath }) {
+      if (
+        role === "worker" &&
+        /Resolve every current blocker/u.test(request.prompt) &&
+        !interrupted
+      ) {
+        interrupted = true;
+        await writeFile(join(projectPath, "tracked.txt"), "interrupted fix\n");
+        const error = new Error("Claude provider is unavailable.");
+        error.code = "ERR_CLAUDE_PROVIDER_UNAVAILABLE";
+        error.recoverable = true;
+        throw error;
+      }
+    },
+  });
+
+  const interruptedRun = await fixture.run();
+
+  assert.equal(interruptedRun.pause.reason, "backend_unavailable");
+  assert.equal(interruptedRun.pause.resumeState, "REVIEW");
+  assert.equal(interruptedRun.pipelineState.finalizationResult, null);
+
+  await fixture.recover();
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
+      .length,
+    2,
+  );
 });
 
 test("clears a reconciled correction marker without replaying the turn", async (t) => {

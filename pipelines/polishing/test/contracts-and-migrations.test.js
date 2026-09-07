@@ -126,6 +126,48 @@ test("rejects incomplete or substituted finalization PASS evidence", () => {
   assert.equal(exact.validationInfrastructure[0], exactPath);
 });
 
+test("requires passing finalization for finalized-fingerprint finding scope", async (t) => {
+  let failedState;
+  const fixture = await createFixture(t, {
+    reviewer: [
+      bootstrapReady("Reviewer"),
+      candidateApproved(),
+      candidateApproved(),
+      reviewApproved(),
+    ],
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationFailed(),
+      resolution("FIX", "F1"),
+      finalizationPassed(),
+    ],
+  });
+
+  await fixture.run();
+  failedState = fixture.transitions.find(
+    ({ patch }) =>
+      patch.pipelineState.workflowState === "RESOLVE_FINDINGS" &&
+      patch.pipelineState.finalizationResult?.status === "FAIL",
+  )?.patch.pipelineState;
+  assert.notEqual(failedState, undefined);
+  const findings = reviewFindings("R1").findings;
+
+  assert.throws(
+    () =>
+      normalizePipelineState({
+        ...failedState,
+        candidateReviewResult: null,
+        candidateReviewedFingerprint: null,
+        findings,
+        previousFindings: findings,
+      }),
+    /review progress is inconsistent/u,
+  );
+});
+
 test("rejects mixed failed and blocked finalization before persistence", async (t) => {
   const requiredChecks = Object.freeze([
     ...REQUIRED_CHECKS,

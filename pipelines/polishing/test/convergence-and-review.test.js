@@ -194,6 +194,134 @@ test("routes lazy terminal findings through candidate convergence and finalizati
   assert.equal(result.pipelineState.findings.length, 0);
 });
 
+test("retains finalization evidence after unchanged lazy terminal resolution", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      polishingCompleted(),
+      { ...checkAndFix(), status: "INVALID" },
+      checkAndFix(),
+      candidateClean(),
+      finalizationPassed(),
+      cleanConfirmationFindings("R1"),
+      { ...checkAndFix(), status: "INVALID" },
+      checkAndFix(),
+      candidateClean(),
+      cleanConfirmation(),
+    ],
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === CHECK_AND_FIX_SCHEMA)
+      .length,
+    4,
+  );
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
+      .length,
+    1,
+  );
+  assert.equal(
+    fixture.calls.worker.filter(
+      ({ schema }) => schema === CANDIDATE_CLEAN_CONFIRM_SCHEMA,
+    ).length,
+    2,
+  );
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === CLEAN_CONFIRM_SCHEMA)
+      .length,
+    2,
+  );
+});
+
+test("pauses atomically when content drifts before lazy terminal confirmation", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      polishingCompleted(),
+      checkAndFix(),
+      candidateClean(),
+      finalizationPassed(),
+    ],
+  });
+  const transition = fixture.runtime.transition;
+  let drifted = false;
+  fixture.runtime.transition = async (patch, options) => {
+    const run = await transition(patch, options);
+    if (
+      !drifted &&
+      options.activity?.phase === "finalization" &&
+      options.activity.kind === "passed"
+    ) {
+      drifted = true;
+    }
+    return run;
+  };
+  const contentFingerprint = fixture.runtime.git.contentFingerprint;
+  fixture.runtime.git.contentFingerprint = (options) =>
+    drifted ? "d".repeat(64) : contentFingerprint(options);
+
+  const paused = await fixture.run();
+
+  assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(paused.pause.reason, "unsafe_git_state");
+  assert.equal(paused.pause.code, "ERR_CLEAN_CONFIRMATION_FINGERPRINT_CHANGED");
+  assert.equal(paused.pipelineState.finalizationResult, null);
+  assert.equal(paused.pipelineState.candidateReviewResult, null);
+});
+
+test("reruns finalization when validation infrastructure drifts during lazy reconvergence", async (t) => {
+  let candidateRounds = 0;
+  let drifted = false;
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      polishingCompleted(),
+      checkAndFix(),
+      candidateClean(),
+      finalizationPassed(),
+      cleanConfirmationFindings("R1"),
+      checkAndFix(),
+      candidateClean(),
+      finalizationPassed(),
+      cleanConfirmation("ACCEPTED"),
+    ],
+    onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        request.schema === CANDIDATE_CLEAN_CONFIRM_SCHEMA
+      ) {
+        candidateRounds += 1;
+        if (candidateRounds === 2) {
+          drifted = true;
+        }
+      }
+    },
+  });
+  const validationInfrastructureFingerprint =
+    fixture.runtime.git.validationInfrastructureFingerprint;
+  fixture.runtime.git.validationInfrastructureFingerprint = (options) =>
+    drifted ? "d".repeat(64) : validationInfrastructureFingerprint(options);
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
+      .length,
+    2,
+  );
+});
+
 test("corrects one invalid lazy candidate check before finalization", async (t) => {
   const fixture = await createFixture(t, {
     mode: "lazy",
@@ -1512,6 +1640,151 @@ test("routes independent terminal findings through candidate review and finaliza
   assert.equal(result.pipelineState.findings.length, 0);
 });
 
+test("retains finalization evidence after unchanged independent terminal resolution", async (t) => {
+  const fixture = await createFixture(t, {
+    reviewer: [
+      bootstrapReady("Reviewer"),
+      candidateApproved(),
+      reviewFindings("R1"),
+      candidateApproved(),
+      reviewApproved(),
+    ],
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationPassed(),
+      resolution("FIX", "R1"),
+    ],
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(
+    fixture.calls.reviewer.filter(
+      ({ schema }) => schema === CANDIDATE_REVIEW_SCHEMA,
+    ).length,
+    2,
+  );
+  assert.equal(
+    fixture.calls.reviewer.filter(({ schema }) => schema === REVIEW_SCHEMA)
+      .length,
+    2,
+  );
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
+      .length,
+    1,
+  );
+});
+
+test("reconverges persisted terminal findings before reusing finalization evidence", async (t) => {
+  const fixture = await createFixture(t, {
+    reviewer: [
+      bootstrapReady("Reviewer"),
+      candidateApproved(),
+      reviewFindings("R1"),
+      reconsideration("WITHDRAW", "R1"),
+      candidateApproved(),
+      reviewApproved(),
+    ],
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationPassed(),
+      resolution("DISPUTE", "R1"),
+    ],
+  });
+  let restoredLegacyEvidence = false;
+  const transition = fixture.runtime.transition;
+  fixture.runtime.transition = async (patch, options) => {
+    const next = await transition(patch, options);
+    if (
+      !restoredLegacyEvidence &&
+      options.activity?.phase === "confirmation" &&
+      options.activity.kind === "findings"
+    ) {
+      const fingerprint = next.pipelineState.finalizedFingerprint;
+      next.pipelineState.reviewResult = {
+        status: "FINDINGS",
+        validationChange: "UNCHANGED",
+        validationEvidence: [],
+        fingerprint,
+      };
+      next.pipelineState.reviewedFingerprint = fingerprint;
+      restoredLegacyEvidence = true;
+    }
+    return next;
+  };
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(restoredLegacyEvidence, true);
+  assert.equal(
+    fixture.calls.reviewer.filter(
+      ({ schema }) => schema === CANDIDATE_REVIEW_SCHEMA,
+    ).length,
+    2,
+  );
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
+      .length,
+    1,
+  );
+});
+
+test("reruns finalization when retained candidate-review correction scope drifts", async (t) => {
+  let drifted = false;
+  const fixture = await createFixture(t, {
+    reviewer: [
+      bootstrapReady("Reviewer"),
+      candidateApproved(),
+      reviewFindings("R1"),
+      { ...candidateApproved(), unexpected: "field" },
+      candidateApproved(),
+      reviewApproved("ACCEPTED"),
+    ],
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationPassed(),
+      resolution("FIX", "R1"),
+      finalizationPassed(),
+    ],
+    onRoleRun(role, request) {
+      if (
+        role === "reviewer" &&
+        request.schema === CANDIDATE_REVIEW_SCHEMA &&
+        request.prompt.includes("Pending correction diagnostic batch")
+      ) {
+        drifted = true;
+      }
+    },
+  });
+  const validationInfrastructureFingerprint =
+    fixture.runtime.git.validationInfrastructureFingerprint;
+  fixture.runtime.git.validationInfrastructureFingerprint = (options) =>
+    drifted ? "c".repeat(64) : validationInfrastructureFingerprint(options);
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
+      .length,
+    2,
+  );
+  assert.equal(result.pipelineState.reviewCorrection, null);
+  assert.equal(result.pipelineState.pendingReviewCorrection, null);
+});
+
 test("corrects terminal Reviewer output without rerunning finalization", async (t) => {
   const fixture = await createFixture(t, {
     reviewer: [
@@ -1545,6 +1818,56 @@ test("corrects terminal Reviewer output without rerunning finalization", async (
       .length,
     1,
   );
+});
+
+test("reruns finalization when terminal correction scope drifts", async (t) => {
+  let drifted = false;
+  const fixture = await createFixture(t, {
+    reviewer: [
+      bootstrapReady("Reviewer"),
+      candidateApproved(),
+      { ...reviewApproved(), unexpected: "field" },
+      reviewApproved(),
+      reviewApproved("ACCEPTED"),
+    ],
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationPassed(),
+      finalizationPassed(),
+    ],
+    onRoleRun(role, request) {
+      if (
+        role === "reviewer" &&
+        request.schema === REVIEW_SCHEMA &&
+        request.prompt.includes("Pending correction diagnostic batch")
+      ) {
+        drifted = true;
+      }
+    },
+  });
+  const validationInfrastructureFingerprint =
+    fixture.runtime.git.validationInfrastructureFingerprint;
+  fixture.runtime.git.validationInfrastructureFingerprint = (options) =>
+    drifted ? "c".repeat(64) : validationInfrastructureFingerprint(options);
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
+      .length,
+    2,
+  );
+  assert.equal(
+    fixture.calls.reviewer.filter(({ schema }) => schema === REVIEW_SCHEMA)
+      .length,
+    3,
+  );
+  assert.equal(result.pipelineState.confirmationCorrection, null);
+  assert.equal(result.pipelineState.pendingConfirmationCorrection, null);
 });
 
 test("fixes finalization failures in one batch and reruns the complete gate", async (t) => {

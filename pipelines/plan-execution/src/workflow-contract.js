@@ -3854,6 +3854,7 @@ export function normalizePipelineState(value) {
       (!finalizationResult.validationChanged &&
         !matchesEstablishedValidation) ||
       (finalizationResult.validationChanged &&
+        reviewResult !== null &&
         reviewedChange !== "ACCEPTED" &&
         matchesEstablishedValidation) ||
       (reviewedChange === "UNCHANGED" &&
@@ -4192,6 +4193,8 @@ export function normalizePipelineState(value) {
     (findings.length > 0 || pendingDisputes.length > 0) &&
     value.reviewedFingerprint === null &&
     value.candidateReviewedFingerprint === null &&
+    (finalizationResult?.status !== "PASS" ||
+      value.finalizedFingerprint === null) &&
     !deferredDisputes
   ) {
     throw workflowError("Plan-execution review progress is inconsistent.");
@@ -4395,7 +4398,7 @@ export function normalizePipelineState(value) {
   if (
     value.workflowState === "REVIEW" &&
     (lazy ||
-      finalizationResult !== null ||
+      (finalizationResult !== null && finalizationResult.status !== "PASS") ||
       reviewResult !== null ||
       value.reviewedFingerprint !== null)
   ) {
@@ -4404,7 +4407,7 @@ export function normalizePipelineState(value) {
   if (
     value.workflowState === "CHECK_AND_FIX" &&
     (!lazy ||
-      finalizationResult !== null ||
+      (finalizationResult !== null && finalizationResult.status !== "PASS") ||
       reviewResult !== null ||
       value.reviewedFingerprint !== null ||
       value.cleanConfirmationFingerprint !== null)
@@ -4414,7 +4417,7 @@ export function normalizePipelineState(value) {
   if (
     value.workflowState === "CLEAN_CONFIRM" &&
     (!lazy ||
-      finalizationResult !== null ||
+      (finalizationResult !== null && finalizationResult.status !== "PASS") ||
       reviewResult !== null ||
       value.reviewedFingerprint !== null ||
       findings.length !== 0 ||

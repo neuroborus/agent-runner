@@ -34,13 +34,15 @@ attesting finalization. All findings remain blocking until fixed, withdrawn,
 arbitrated, or explicitly overridden for the exact candidate fingerprint.
 After finalization passes, a separate Reviewer confirmation checks the finalized
 content and exact validation evidence. Confirmation findings return through
-candidate convergence, finalization, and confirmation again.
+candidate convergence. If the successful finalization record still matches the
+recomputed content and validation-infrastructure fingerprints, the workflow
+retries confirmation directly; otherwise it reruns finalization first.
 
 In lazy mode, writable check-and-fix and read-only candidate clean-confirmation
 turns converge before finalization. A passing finalization enters a distinct
 read-only terminal clean confirmation over the exact validation evidence. Only
 a clean result over unchanged fingerprints advances; findings return directly
-to the next check-and-fix pass.
+to the next check-and-fix pass and the same fingerprint-bound reuse decision.
 
 ## Evidence and fingerprints
 
@@ -49,6 +51,16 @@ binds it to the staging-independent content, validation-infrastructure,
 ordered-command, and trusted-configuration fingerprints. Skipped, weakened,
 replaced, unmatched, or stale evidence fails closed. Host attestations and user
 claims do not satisfy the gate.
+
+Terminal findings invalidate candidate and confirmation attestations, not an
+otherwise current successful finalization record. A declared fix does not prove
+that content changed. After candidate convergence, exact content and validation-
+infrastructure fingerprint matches permit a direct confirmation retry. Actual
+content or infrastructure changes, provider correction-scope drift, content-
+changing interruption recovery, and a new plan-execution commit step invalidate
+the record and require the complete finalization gate again. Every path still
+requires one fresh successful terminal confirmation immediately before commit
+or handoff.
 
 Plan execution constructs both passing and failing persisted evidence through
 one deterministic pipeline contract. The contract normalizes the Worker and

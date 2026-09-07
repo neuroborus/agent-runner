@@ -452,13 +452,19 @@ function validateResumeAction(run, action) {
         run.pause?.reason,
       ) ||
       (state.reviewedFingerprint === null &&
-        state.candidateReviewedFingerprint === null) ||
+        state.candidateReviewedFingerprint === null &&
+        (state.finalizationResult?.status !== "PASS" ||
+          state.finalizedFingerprint === null)) ||
       !state.findings?.some(({ id }) => id === action.findingId) ||
       state.findingOverrides.some(
         ({ findingId, fingerprint }) =>
           findingId === action.findingId &&
           fingerprint ===
-            (state.reviewedFingerprint ?? state.candidateReviewedFingerprint),
+            (state.reviewedFingerprint ??
+              state.candidateReviewedFingerprint ??
+              (state.finalizationResult?.status === "PASS"
+                ? state.finalizedFingerprint
+                : null)),
       )
     ) {
       throw new Error("Finding override is not applicable.");

@@ -394,7 +394,9 @@ function validateResumeAction(run, action) {
       state.settings?.mode === "lazy" ||
       !["fix_limit_reached", "no_progress"].includes(run.pause?.reason) ||
       (state.reviewedFingerprint === null &&
-        state.candidateReviewedFingerprint === null) ||
+        state.candidateReviewedFingerprint === null &&
+        (state.finalizationResult?.status !== "PASS" ||
+          state.finalizedFingerprint === null)) ||
       !state.findings?.some(({ id }) => id === action.findingId)
     ) {
       throw new Error("Finding override is not applicable.");

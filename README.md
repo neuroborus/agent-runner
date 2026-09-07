@@ -452,9 +452,10 @@ writable Worker `CHECK_AND_FIX` turn with a separate read-only candidate
 `CLEAN_CONFIRM`. The stable candidate then runs the dedicated finalization gate
 using the configured guidance policy and one distinct read-only terminal
 confirmation over the resulting content and validation fingerprints. Any
-content-changing repair returns through candidate convergence and the complete
-terminal gate. Lazy mode has no review dispute or Arbiter path. Remote state
-remains read-only.
+terminal finding returns through candidate convergence. Matching successful
+finalization evidence is reused for a fresh confirmation, while a content or
+validation-infrastructure change reruns the complete finalization gate. Lazy
+mode has no review dispute or Arbiter path. Remote state remains read-only.
 If an unexpected runner-owned invariant rejects a finalization transition,
 status retains a resumable `FINALIZE` checkpoint and exposes only a bounded
 diagnostic through both the CLI and MCP.
@@ -464,10 +465,11 @@ Independent candidate review, or lazy check/fix plus candidate clean
 confirmation, converges before full finalization. Finalization may format the
 accepted candidate; one distinct read-only Reviewer or Worker confirmation then
 binds the resulting content and exact validation evidence before `HANDOFF`.
-Confirmation findings and every content-changing repair return through
-candidate convergence and the complete terminal gate. Agent turns change
-content only; the runner then stages the complete confirmed change set and
-leaves it uncommitted for a separate commit workflow.
+Confirmation findings return through candidate convergence; matching
+successful finalization evidence is reused for a fresh confirmation, while a
+content or validation-infrastructure change reruns the complete finalization
+gate. Agent turns change content only; the runner then stages the complete
+confirmed change set and leaves it uncommitted for a separate commit workflow.
 Invalid lazy polishing checkpoints receive one fresh correction with the same
 schema and exact content and validation-infrastructure scope. Check/fix
 corrections remain content-writable and are reconciled and charged once;

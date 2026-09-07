@@ -129,6 +129,42 @@ test("rejects incomplete or substituted finalization PASS evidence", () => {
   assert.equal(exact.validationInfrastructure[0], exactPath);
 });
 
+test("requires passing finalization for finalized-fingerprint finding scope", async (t) => {
+  let failedState;
+  const fixture = await createFixture(t, {
+    workWorker: [
+      implementationCompleted(),
+      finalizationFailed("F1"),
+      resolution({ id: "F1", decision: "FIX" }),
+      finalizationPassed(),
+    ],
+    onTransition(run) {
+      if (
+        failedState === undefined &&
+        run.pipelineState.workflowState === "RESOLVE_FINDINGS" &&
+        run.pipelineState.finalizationResult?.status === "FAIL"
+      ) {
+        failedState = run.pipelineState;
+      }
+    },
+  });
+
+  await fixture.run();
+  const findings = reviewFindings("R1").findings;
+
+  assert.throws(
+    () =>
+      normalizePipelineState({
+        ...failedState,
+        candidateReviewResult: null,
+        candidateReviewedFingerprint: null,
+        findings,
+        previousFindings: findings,
+      }),
+    /review progress is inconsistent/u,
+  );
+});
+
 test("enforces exact bootstrap field sets without retaining unexpected values", () => {
   const sensitiveField = "DO_NOT_PERSIST_UNEXPECTED_FIELD";
   const sensitiveValue = "DO_NOT_PERSIST_UNEXPECTED_VALUE";

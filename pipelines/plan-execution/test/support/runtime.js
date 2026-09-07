@@ -1957,6 +1957,7 @@ async function createRevision55Fixture(
       ? finalization
       : { ...finalization, summary: refinalizationSummary };
   const outcomes = [];
+  let checkRound = 0;
   const failureRecovery = trustedOutcomes.includes("FAIL")
     ? [
         resolution({ id: "F1", decision: "FIX" }),
@@ -1983,6 +1984,7 @@ async function createRevision55Fixture(
       invalidProductionFinalization(),
       finalization,
       terminalLazyConfirmation(cleanConfirmationFindings("R1")),
+      checkAndFix("CHANGED"),
       checkAndFix(),
       cleanConfirmation(),
       refinalization,
@@ -1990,6 +1992,14 @@ async function createRevision55Fixture(
       ...(resumeFinalization ? [finalization] : []),
       terminalLazyConfirmation(cleanConfirmation()),
     ],
+    async onRoleRun(role, request) {
+      if (role === "worker" && request.schema === CHECK_AND_FIX_SCHEMA) {
+        checkRound += 1;
+        if (checkRound === 2) {
+          await writeFile(join(request.cwd, "terminal-fix.txt"), "fixed\n");
+        }
+      }
+    },
     onTrustedValidation(options) {
       const status = trustedOutcomes[outcomes.length];
       assert.notEqual(status, undefined);
