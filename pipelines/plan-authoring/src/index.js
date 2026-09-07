@@ -51,7 +51,7 @@ function pipelineMode(value) {
 
 const ROLES = resolveActiveRoles();
 const SETTINGS = Object.freeze({
-  maxRevisionRounds: positiveIntegerSetting(15),
+  maxRevisionRounds: positiveIntegerSetting(20),
   mode: Object.freeze({
     defaultValue: "independent",
     errorMessage: "must be independent or lazy",

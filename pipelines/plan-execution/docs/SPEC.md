@@ -815,9 +815,12 @@ otherwise unclassified valid result or process failure is recoverable only for
 a read-only turn. Denied tool input,
 native result text, raw standard error, and process causes are discarded.
 
-An explicit Claude rate, quota, credit, or spend-limit rejection is recoverable
-backend unavailability, but the rejected turn itself is never retried through
-compaction, a fresh session, or provider fallback. Persist
+A Codex App Server `usageLimitExceeded` rejection or an explicit Claude rate,
+quota, credit, or spend-limit rejection is recoverable backend unavailability,
+but the rejected turn itself is never retried through compaction, a fresh
+session, or provider fallback. Provider adapters own native recognition and
+bounded diagnostic normalization; the pipeline consumes only the
+backend-neutral recoverable failure. Persist
 `backend_unavailable` with the resumable pipeline state, reconcile any prepared
 one-shot commit authorization, preserve safe workspace changes, and enter
 `WAITING_FOR_USER` after the single rejected invocation. Classified usage and
@@ -825,7 +828,7 @@ provider failures from non-commit writable turns use the same path only after
 workspace and repository-control reconciliation. Unknown writable process
 outcomes remain terminal. Resume reconstructs the complete request from durable
 state rather than requiring the failed native session. These rules add no new
-pipeline-state field or migration.
+pipeline-state field, provider branch, or migration.
 
 When a writable Worker turn cannot execute required validation because of
 sandbox, IPC, loopback, process-isolation, missing-service, permission, or a
@@ -1794,6 +1797,18 @@ terminal-confirmation evidence. Formatting inside a newly entered `FINALIZE`
 turn instead establishes the content fingerprint that finalization and terminal
 confirmation must share.
 
+A terminal finding clears the candidate and terminal-confirmation attestations,
+but a successful finalization record remains provisionally reusable while its
+finalized content and validation-infrastructure fingerprints stay current. A
+declared `FIX` is not evidence of a repository mutation. After independent or
+lazy candidate convergence, the runner recomputes both fingerprints and enters
+`CONFIRM` directly only when they still match the retained record; otherwise it
+clears that record and re-enters `FINALIZE`. Actual content or infrastructure
+changes, provider correction-scope drift, content-changing interruption
+reconciliation, and advancement to the next commit step always invalidate the
+record. A fresh successful `CONFIRM` remains mandatory immediately before every
+`COMMIT`.
+
 If deterministic normalization rejects a Worker finalization result, collect
 all independently detectable violations from that candidate where practical,
 including every staging-dependent required command. Persist the version-8
@@ -1908,8 +1923,9 @@ Finding IDs must remain stable across re-review:
 The runner must not implement fuzzy semantic matching of findings in V1.
 
 When candidate review finishes successfully, persist its fingerprint and enter
-`FINALIZE`. When terminal confirmation finishes successfully, persist its
-separate reviewed fingerprint and enter `COMMIT`.
+`FINALIZE`, except that a still-current retained finalization record returns
+directly to `CONFIRM`. When terminal confirmation finishes successfully,
+persist its separate reviewed fingerprint and enter `COMMIT`.
 
 If the candidate schema or final `REVIEW_SCHEMA` provider reports the shared structured-output
 failure class, deterministic normalization rejects the result, or the
@@ -1924,10 +1940,12 @@ unchanged schema. Never rely on or continue the rejected native session.
 Before accepting the replacement, reapply input, repository, read-only, Git-
 control, content-fingerprint, validation-infrastructure-fingerprint, and
 applicable evidence guards. Preserve accepted finalization evidence only while
-a terminal-confirmation correction scope is unchanged. Content or control drift invalidates the
-correction scope and follows the existing safe reconciliation path. A valid
-replacement rejoins the ordinary approval, findings, validation-change, and
-product-decision routes.
+the applicable provider-correction scope is unchanged. Validation-
+infrastructure or correction-scope drift invalidates the finalization record
+and re-enters `FINALIZE`; content or control drift invalidates all dependent
+evidence and follows the existing safe reconciliation path. A valid replacement
+rejoins the ordinary approval, findings, validation-change, and product-decision
+routes.
 
 If a corrected candidate result remains invalid, pause at
 `review_output_invalid` with resume state `REVIEW`. If a corrected terminal
@@ -1972,9 +1990,11 @@ clean-confirmation correction never
 receives workspace-write authority.
 
 Concrete confirmation findings return directly to `CHECK_AND_FIX`; they are
-not disputes and cannot invoke Reviewer or Arbiter. Only a mutation-free
-candidate `CLEAN` result with an unchanged fingerprint enters `FINALIZE`. A
-passing finalization then enters the distinct read-only `CONFIRM` state, where
+not disputes and cannot invoke Reviewer or Arbiter. A mutation-free candidate
+`CLEAN` result with an unchanged fingerprint enters `FINALIZE`, or returns
+directly to `CONFIRM` when retained finalization evidence still matches the
+recomputed content and validation-infrastructure fingerprints. A passing
+finalization enters the distinct read-only `CONFIRM` state, where
 the Worker receives the established and finalized validation tuples and
 returns `CLEAN`, findings, or the narrow product-decision outcome together with
 `UNCHANGED` or task-authorized `ACCEPTED` validation change. Terminal findings
@@ -2024,7 +2044,9 @@ If the Worker agrees:
 1. fix all accepted findings in one fix round;
 2. return control;
 3. run complete candidate convergence again;
-4. run finalization and terminal confirmation again.
+4. rerun finalization when content or validation infrastructure changed;
+5. otherwise reuse matching successful finalization evidence;
+6. run one fresh terminal confirmation.
 
 When one resolution batch mixes `FIX` and `DISPUTE`, preserve the disputes
 through complete candidate re-review, then let the Reviewer reconsider them
@@ -2235,9 +2257,9 @@ A commit hook failure or unexpected post-commit repository state must pause the 
 Defaults:
 
 ```text
-maxFixRoundsPerStep = 5
-maxDisputesPerFinding = 2
-maxSameFindingRounds = 3
+maxFixRoundsPerStep = 20
+maxDisputesPerFinding = 5
+maxSameFindingRounds = 5
 stagnationWindowRounds = 3
 ```
 
@@ -2502,7 +2524,21 @@ Use built-in `node:test`.
 
 Do not add Jest/Vitest solely for this project.
 
-Most tests must use fake agent adapters and temporary Git repositories. Normal tests must not consume model usage.
+Workflow policy tests use injected in-memory run-state, clarification, and
+repository effects. Their repository double models fingerprints and Git-control
+state deterministically while keeping task inputs and validation-path fixtures
+confined to isolated temporary directories. Shared builders are exposed only
+through `test/support/index.js`, and the workflow suite is split by contracts
+and migrations, clarification and bootstrap, convergence and finalization,
+recovery, and commit safety.
+
+Real Git remains mandatory where Git behavior is the subject. Keep those cases
+grouped in the commit-safety suite and the interrupted-staging recovery case;
+`node:test` runs their top-level cases serially within each file. Root state,
+Git, and cross-capability integration suites continue to own
+proof of atomic files, journals, leases, recovery, filesystem durability,
+snapshot semantics, commit verification, and handoff behavior. Normal tests
+must not consume model usage.
 
 At minimum cover:
 
@@ -2512,9 +2548,12 @@ At minimum cover:
 4. task directory located inside the repository without state pollution;
 5. independent read-only bootstrap;
 6. bootstrap mutation detection;
-7. successful implementation -> finalization -> review -> commit;
+7. successful implementation -> candidate review -> finalization -> terminal
+   confirmation -> commit;
 8. finalization failure -> fix -> retry;
-9. review finding -> fix -> re-finalize -> re-review;
+9. candidate or terminal finding -> fix -> candidate reconvergence -> matching
+   finalization reuse or changed-fingerprint re-finalization -> terminal
+   confirmation;
 10. dispute -> Reviewer withdraw;
 11. dispute -> Reviewer uphold -> Arbiter;
 12. fix/dispute/no-progress limits -> `WAITING_FOR_USER`;
@@ -2579,8 +2618,9 @@ At minimum cover:
     validation-infrastructure paths are batched before inventory acceptance
     with every producing field identified, while canonical existing files are
     accepted.
-52. Claude structured status and permission classification is finite and
-    redacted; allowlisted read-only failures reconstruct from durable state,
+52. Codex `usageLimitExceeded` and Claude structured status and permission
+    classification are finite and redacted; explicit usage exhaustion and
+    allowlisted Claude read-only failures reconstruct from durable state,
     classified writable usage/provider failures preserve reconciled changes,
     and forbidden, authentication, ambiguous writable, and one-shot outcomes
     remain fail closed.
@@ -2776,9 +2816,10 @@ Do not build:
     files; the runner derives the final stable union and assigns contiguous IDs,
     while invalid output receives at most one read-only diagnostic-batch
     correction per producing role, phase, and contract.
-32. Claude recovery persists no denied input or native provider text, retries
-    only finite allowlisted failures, and reconstructs the request from durable
-    runner state without making a native session authoritative.
+32. Provider usage-exhaustion recovery persists no denied input or native
+    provider text, never retries the rejected turn, and reconstructs the request
+    from durable runner state without making a native session authoritative;
+    other Claude recovery retries only finite allowlisted failures.
 33. Only runner-root configuration defines trusted host commands; selected
     commands execute outside agent turns as exact persisted vectors, and their
     bounded evidence cannot pass unless every fingerprint and repository guard

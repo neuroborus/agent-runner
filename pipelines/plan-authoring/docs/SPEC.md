@@ -35,7 +35,7 @@ The pipeline descriptor declares the `planner`, `reviewer`, and on-demand
 
 ```text
 mode = independent
-maxRevisionRounds = 15
+maxRevisionRounds = 20
 stagnationWindowRounds = 3
 ```
 
@@ -455,7 +455,7 @@ blocked window pauses with `plan_revision_not_converging`; a second stagnation
 arbitration is forbidden. Lazy mode has no Arbiter and pauses at the first full
 blocked window with the same non-convergence reason.
 
-`maxRevisionRounds` defaults to `15`. When no further revision is authorized,
+`maxRevisionRounds` defaults to `20`. When no further revision is authorized,
 pause with `plan_revision_limit_reached` and do not write `plan.md`. Arbitration
 does not reset or bypass this limit, and lazy mode never treats budget
 exhaustion as a clean result.

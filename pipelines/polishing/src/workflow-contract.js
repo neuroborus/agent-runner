@@ -211,7 +211,7 @@ const MAX_STRUCTURED_RESULT_BYTES = 256 * 1024;
 export const MAX_DURABLE_RUN_BYTES = 960 * 1024;
 export const MAX_DIAGNOSTIC_ITEMS = 32;
 export const MAX_DISPUTE_HISTORY_BYTES = 64 * 1024;
-export const MAX_DISPUTES_PER_FINDING = 2;
+export const MAX_DISPUTES_PER_FINDING = 5;
 
 export function resolveActiveRoles(settings) {
   return settings?.mode === "lazy" ? LAZY_ROLES : ROLES;
@@ -3395,6 +3395,7 @@ export function normalizePipelineState(value) {
       (!finalizationResult.validationChanged &&
         !matchesEstablishedValidation) ||
       (finalizationResult.validationChanged &&
+        reviewResult !== null &&
         reviewedChange !== "ACCEPTED" &&
         matchesEstablishedValidation) ||
       (reviewedChange === "UNCHANGED" &&
@@ -3776,6 +3777,8 @@ export function normalizePipelineState(value) {
     (findings.length > 0 || pendingDisputes.length > 0) &&
     value.reviewedFingerprint === null &&
     value.candidateReviewedFingerprint === null &&
+    (finalizationResult?.status !== "PASS" ||
+      value.finalizedFingerprint === null) &&
     !deferredDisputes &&
     !(
       lazy &&
@@ -3959,7 +3962,7 @@ export function normalizePipelineState(value) {
   if (
     value.workflowState === "REVIEW" &&
     (lazy ||
-      finalizationResult !== null ||
+      (finalizationResult !== null && finalizationResult.status !== "PASS") ||
       reviewResult !== null ||
       value.reviewedFingerprint !== null)
   ) {
@@ -3968,7 +3971,7 @@ export function normalizePipelineState(value) {
   if (
     value.workflowState === "CHECK_AND_FIX" &&
     (!lazy ||
-      finalizationResult !== null ||
+      (finalizationResult !== null && finalizationResult.status !== "PASS") ||
       reviewResult !== null ||
       value.reviewedFingerprint !== null ||
       value.cleanConfirmationFingerprint !== null)
@@ -3978,7 +3981,7 @@ export function normalizePipelineState(value) {
   if (
     value.workflowState === "CLEAN_CONFIRM" &&
     (!lazy ||
-      finalizationResult !== null ||
+      (finalizationResult !== null && finalizationResult.status !== "PASS") ||
       reviewResult !== null ||
       value.reviewedFingerprint !== null ||
       findings.length !== 0 ||

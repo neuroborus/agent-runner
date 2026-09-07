@@ -5,6 +5,42 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-09-05
+
+- **Unchanged terminal repairs retain fingerprint-bound finalization.** Plan
+  execution and polishing now clear candidate and confirmation attestations for
+  terminal findings while retaining a successful finalization record whose
+  content and validation-infrastructure fingerprints remain current. After
+  independent or lazy candidate convergence, an exact match retries the distinct
+  terminal confirmation directly; actual content or infrastructure changes,
+  correction-scope drift, content-changing recovery, and a new commit step still
+  force the complete gate to rerun. This removes redundant full-suite work
+  without weakening the fresh confirmation required immediately before commit
+  or handoff.
+- **Compact test output retains complete failure diagnostics.** The normal root
+  test command uses Node's built-in `dot` reporter while preserving automatic
+  discovery and the bounded concurrency of 4. Passing records no longer flood
+  finalization context, while failed-test names, assertion diagnostics, and
+  stacks remain available from the same run without a reporting dependency or
+  a diagnostic-only rerun.
+- **Workflow policy fixtures are lightweight while capability proofs stay
+  real.** Plan-execution and polishing state-machine suites inject
+  pipeline-owned in-memory effects, split along cohesive behavioral boundaries,
+  and expose cross-directory builders only through `test/support/index.js`.
+  Focused Git and store integration cases remain serial within their files,
+  while root capability and cross-capability suites prove atomic state,
+  journals, leases, recovery, filesystem durability, snapshots, commits, and
+  handoffs. The root `node:test` command caps file concurrency at 4 to leave
+  headroom on the 16-CPU baseline machine after higher bounds exposed
+  intermittent contention; isolated suites still overlap without making the
+  complete gate depend on maximum host parallelism.
+- **Default convergence budgets favor completing difficult corrections.** Plan
+  authoring permits 20 revisions, while plan execution and polishing permit 20
+  fix rounds, five repeated-finding rounds, and five disputes per finding by
+  default. The three-round stagnation window remains unchanged so architectural
+  non-convergence is still detected early; every budget remains configurable
+  and frozen into each new run.
+
 ## 2026-09-04
 
 - **Polishing finalizes only stable semantic candidates.** Independent Reviewer

@@ -179,7 +179,7 @@ The V1 shape is:
       "mode": "independent",
       "finalization": "auto",
       "trustedChecks": ["service-tests"],
-      "maxFixRoundsPerStep": 5,
+      "maxFixRoundsPerStep": 20,
       "roles": {
         "worker": {
           "backend": "claude",
@@ -868,12 +868,20 @@ content fingerprint. In plan execution and polishing this first converges the
 candidate; `FINALIZE` follows, then a distinct read-only `CONFIRM` applies the
 validation-change decision to the finalized evidence.
 Findings return directly to `CHECK_AND_FIX`, never to dispute or arbitration.
-Every change invalidates fingerprint-bound evidence. Plan-authoring drafts stay
+Terminal findings clear candidate and confirmation attestations but retain a
+successful finalization record while its content and validation-infrastructure
+fingerprints remain current. After candidate convergence, the runner recomputes
+both fingerprints and retries `CONFIRM` directly on an exact match; otherwise it
+invalidates the record and returns to `FINALIZE`. Declared fixes do not stand in
+for observed repository mutation. Every actual content or validation-
+infrastructure change, provider correction-scope drift, content-changing
+interruption reconciliation, and plan-execution commit-step advancement
+invalidates finalization evidence. Plan-authoring drafts stay
 in external state and are deterministically validated only after confirmation;
-plan-execution and polishing terminal findings return through candidate
-convergence and complete finalization. Existing fix/revision, stable-finding,
-stagnation, and additional-round budgets bound the loop and never silently
-accept an unconfirmed result.
+plan-execution and polishing terminal findings always return through candidate
+convergence and one fresh terminal confirmation. Existing fix/revision, stable-
+finding, stagnation, and additional-round budgets bound the loop and never
+silently accept an unconfirmed result.
 
 Plan authoring owns lazy structured-output recovery at both checkpoints.
 Provider and deterministic contract failures become bounded diagnostics, then
@@ -904,7 +912,8 @@ and charges actual fix work once, invalidates stale gate evidence, and returns
 through candidate convergence. A candidate clean-confirmation correction
 remains read-only and retains the index, content, and
 validation-infrastructure guards. Terminal Reviewer and Worker corrections are
-separately scoped to finalized evidence and cannot rerun finalization. Repeated
+separately scoped to finalized evidence; scope drift invalidates that evidence
+and returns through finalization. Repeated
 invalid output pauses with bounded redacted diagnostics and an explicit null
 retry; neither a correction nor its recovery can stage, approve, or enter
 `HANDOFF` early.
@@ -927,9 +936,12 @@ configuration failure. Structured provider recovery accepts only explicit
 transient HTTP statuses; non-transient client statuses and an `api_error`
 without a transient status fail closed with a fixed request-rejected error.
 
-An explicit Claude rate, quota, credit, or spend-limit rejection bypasses
-context recovery and provider fallback. Other allowlisted backend, capability,
-configuration, usage, and provider failures use the same durable pause path.
+Codex App Server `usageLimitExceeded` and explicit Claude rate, quota, credit,
+or spend-limit rejections bypass context recovery and provider fallback. Their
+adapters own native recognition and expose only bounded normalized diagnostics;
+pipelines consume the backend-neutral recoverable failure. Other allowlisted
+backend, capability, configuration, usage, and provider failures use the same
+durable pause path.
 An otherwise unclassified valid read-only result or process failure is
 recoverable only because the enforced read-only envelope and the pipeline's
 post-turn repository guard prove that it could not mutate the repository.

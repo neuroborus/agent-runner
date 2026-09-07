@@ -687,7 +687,7 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
     contextSize: "current",
   });
   assert.deepEqual(paused.run.pipelineState.settings, {
-    maxRevisionRounds: 15,
+    maxRevisionRounds: 20,
     mode: "independent",
     stagnationWindowRounds: 3,
   });
@@ -723,7 +723,7 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
   assert.equal(await readFile(join(fixture.taskPath, "plan.md"), "utf8"), PLAN);
   assert.deepEqual(completed.run.roles, paused.run.roles);
   assert.deepEqual(completed.run.pipelineState.settings, {
-    maxRevisionRounds: 15,
+    maxRevisionRounds: 20,
     mode: "independent",
     stagnationWindowRounds: 3,
   });

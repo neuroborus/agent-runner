@@ -88,9 +88,9 @@ const SETTINGS = Object.freeze({
       "must be auto, none, or a normalized repository-relative SKILL.md path",
     validate: isFinalizationPolicy,
   }),
-  maxFixRoundsPerStep: positiveIntegerSetting(5),
-  maxDisputesPerFinding: positiveIntegerSetting(2),
-  maxSameFindingRounds: positiveIntegerSetting(3),
+  maxFixRoundsPerStep: positiveIntegerSetting(20),
+  maxDisputesPerFinding: positiveIntegerSetting(5),
+  maxSameFindingRounds: positiveIntegerSetting(5),
   mode: Object.freeze({
     defaultValue: "independent",
     errorMessage: "must be independent or lazy",
@@ -452,13 +452,19 @@ function validateResumeAction(run, action) {
         run.pause?.reason,
       ) ||
       (state.reviewedFingerprint === null &&
-        state.candidateReviewedFingerprint === null) ||
+        state.candidateReviewedFingerprint === null &&
+        (state.finalizationResult?.status !== "PASS" ||
+          state.finalizedFingerprint === null)) ||
       !state.findings?.some(({ id }) => id === action.findingId) ||
       state.findingOverrides.some(
         ({ findingId, fingerprint }) =>
           findingId === action.findingId &&
           fingerprint ===
-            (state.reviewedFingerprint ?? state.candidateReviewedFingerprint),
+            (state.reviewedFingerprint ??
+              state.candidateReviewedFingerprint ??
+              (state.finalizationResult?.status === "PASS"
+                ? state.finalizedFingerprint
+                : null)),
       )
     ) {
       throw new Error("Finding override is not applicable.");

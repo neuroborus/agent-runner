@@ -109,9 +109,9 @@ The pipeline owns these settings and defaults:
 
 ```text
 mode = independent
-maxFixRounds = 5
-maxDisputesPerFinding = 2
-maxSameFindingRounds = 3
+maxFixRounds = 20
+maxDisputesPerFinding = 5
+maxSameFindingRounds = 5
 stagnationWindowRounds = 3
 ```
 
@@ -492,6 +492,16 @@ Arbiter. A content-changing fix invalidates candidate, finalization, and
 terminal-confirmation evidence and returns through mode-specific candidate
 convergence before the complete finalization gate runs again.
 
+Terminal findings clear candidate and terminal-confirmation attestations while
+retaining a successful finalization record provisionally. After mode-specific
+candidate convergence, the runner recomputes the finalized content and
+validation-infrastructure fingerprints. Exact matches return directly to
+`CONFIRM`; a mismatch invalidates the record and re-enters `FINALIZE`. A
+declared fix without a proven repository mutation does not invalidate evidence.
+Actual content or infrastructure changes, provider correction-scope drift, and
+content-changing interruption reconciliation always do. One fresh successful
+terminal confirmation remains required immediately before `HANDOFF`.
+
 #### Independent review and findings
 
 In independent mode, an independent read-only Reviewer first checks the stable
@@ -512,12 +522,13 @@ bound to the finalized content fingerprint. Approval enters `HANDOFF` directly;
 findings are non-confirming and return to resolution.
 
 The Worker resolves all current blockers in one batch by `FIX` or evidence-based
-`DISPUTE`. Fixes return through candidate review, full finalization, and terminal
-confirmation. The Reviewer reconsiders disputes as `WITHDRAW` or `UPHOLD`. An
-unresolved dispute reaches a fresh read-only Arbiter after the configured
-budget. Every finding must be fixed, withdrawn, arbitrated, or explicitly
-overridden by the user for the exact candidate or terminal fingerprint that
-reported it.
+`DISPUTE`. Fixes return through candidate review and then either reuse matching
+successful finalization evidence or rerun the complete finalization gate before
+terminal confirmation. The Reviewer reconsiders disputes as `WITHDRAW` or
+`UPHOLD`. An unresolved dispute reaches a fresh read-only Arbiter after the
+configured budget. Every finding must be fixed, withdrawn, arbitrated, or
+explicitly overridden by the user for the exact candidate or terminal
+fingerprint that reported it.
 
 If required validation is externally blocked during finding resolution, the
 Worker returns `BLOCKED` with no decisions and bounded reason and evidence. A
@@ -555,7 +566,9 @@ explicitly forbidding edits and requiring structured `CLEAN` or concrete
 findings. A status/content mismatch is invalid output, repository mutation is
 rejected, and fingerprint drift pauses without advancing. Findings return
 directly to `CHECK_AND_FIX`; they are not disputes and cannot invoke Reviewer or
-Arbiter. Only mutation-free `CLEAN` accepts the candidate and enters `FINALIZE`.
+Arbiter. Mutation-free `CLEAN` accepts the candidate and enters `FINALIZE`, or
+returns directly to `CONFIRM` when retained finalization evidence still matches
+the recomputed fingerprints.
 
 After finalization passes, `CONFIRM` runs one distinct read-only Worker clean
 confirmation over the finalized content and exact validation evidence. This
@@ -564,7 +577,8 @@ independent terminal Reviewer. Only mutation-free `CLEAN` with unchanged
 fingerprints and `UNCHANGED` or task-authorized `ACCEPTED` validation change
 records the reviewed and terminal clean-confirmation fingerprints and enters
 `HANDOFF`. Terminal findings return directly to `CHECK_AND_FIX` and require
-candidate confirmation, finalization, and terminal confirmation again. Existing
+candidate confirmation plus a fresh terminal confirmation; finalization reruns
+only when the retained evidence no longer matches. Existing
 fix, stable-finding, stagnation, and additional-round budgets bound the loop;
 exhaustion never accepts a non-clean result.
 
@@ -592,7 +606,9 @@ effect, recounting work, staging, or advancing to `HANDOFF`.
 Independent candidate review and both terminal-confirmation variants own
 separate one-attempt correction records scoped to their candidate or finalized
 fingerprints. Candidate corrections cannot accept validation evidence, and
-terminal corrections cannot rerun finalization or reuse a candidate approval.
+terminal corrections cannot themselves provide finalization or reuse a
+candidate approval. Correction-scope drift invalidates the retained
+finalization record and routes through `FINALIZE`.
 Repeated invalid output pauses at the exact `REVIEW` or `CONFIRM` checkpoint
 with bounded diagnostics and an explicit null retry.
 
@@ -895,7 +911,20 @@ Unsafe or ambiguous reconciliation pauses rather than discarding user work.
 
 ## Testing
 
-Pipeline tests use fake adapters and temporary repositories. Cover at least:
+Workflow policy tests use fake adapters with injected in-memory run-state and
+repository effects. Their repository double models content fingerprints,
+Git-control state, and handoff transitions deterministically while keeping task
+inputs and validation-path fixtures confined to isolated temporary directories.
+Shared builders are exposed only through `test/support/index.js`, and the
+workflow suite is split by contracts and migrations, bootstrap, convergence and
+review, recovery, and handoff.
+
+Real run-store and Git services remain mandatory where persistence or repository
+behavior is the subject. Keep focused cases for journals, interrupted recovery,
+index ownership, staging, and handoff serial within their integration files.
+Root state, Git, and cross-capability integration suites continue to own proof
+of atomic files, journals, leases, recovery, filesystem durability, snapshot
+semantics, and handoff behavior. Cover at least:
 
 - dirty and clean preflight;
 - staged, unstaged, deleted, and non-ignored untracked change membership;
@@ -945,9 +974,9 @@ Pipeline tests use fake adapters and temporary repositories. Cover at least:
   overrides, and complete gate invalidation;
 - lazy changed and unchanged check/fix passes, candidate clean confirmation
   before finalization, distinct terminal clean confirmation, findings from both
-  confirmations routed to fixing, required full reconvergence and
-  re-finalization, mutation and fingerprint rejection, bounded no-progress, and
-  additional fix rounds;
+  confirmations routed to fixing, required full reconvergence, matching-
+  evidence reuse, change-triggered re-finalization, mutation and fingerprint
+  rejection, bounded no-progress, and additional fix rounds;
 - provider and deterministic lazy-checkpoint correction, repeated-invalid
   exhaustion and null retry, public redaction, fresh sessions, writable content
   and index reconciliation, exact-once budgets, fingerprint drift, gate and

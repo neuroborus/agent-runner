@@ -147,20 +147,20 @@ Pipeline settings use these defaults:
 | Pipeline         | Setting                  |       Default |
 | ---------------- | ------------------------ | ------------: |
 | `plan-authoring` | `mode`                   | `independent` |
-| `plan-authoring` | `maxRevisionRounds`      |            15 |
+| `plan-authoring` | `maxRevisionRounds`      |            20 |
 | `plan-authoring` | `stagnationWindowRounds` |             3 |
 | `plan-execution` | `mode`                   | `independent` |
-| `plan-execution` | `maxFixRoundsPerStep`    |             5 |
+| `plan-execution` | `maxFixRoundsPerStep`    |            20 |
 | `plan-execution` | `finalization`           |        `auto` |
-| `plan-execution` | `maxDisputesPerFinding`  |             2 |
-| `plan-execution` | `maxSameFindingRounds`   |             3 |
+| `plan-execution` | `maxDisputesPerFinding`  |             5 |
+| `plan-execution` | `maxSameFindingRounds`   |             5 |
 | `plan-execution` | `stagnationWindowRounds` |             3 |
 | `plan-execution` | `trustedChecks`          |          `[]` |
 | `polishing`      | `mode`                   | `independent` |
-| `polishing`      | `maxFixRounds`           |             5 |
+| `polishing`      | `maxFixRounds`           |            20 |
 | `polishing`      | `finalization`           |        `auto` |
-| `polishing`      | `maxDisputesPerFinding`  |             2 |
-| `polishing`      | `maxSameFindingRounds`   |             3 |
+| `polishing`      | `maxDisputesPerFinding`  |             5 |
+| `polishing`      | `maxSameFindingRounds`   |             5 |
 | `polishing`      | `stagnationWindowRounds` |             3 |
 | `polishing`      | `trustedChecks`          |          `[]` |
 
@@ -243,9 +243,11 @@ Worker turns may preserve partial content, but index drift is rejected; the
 runner owns the later staging handoff. Plan-execution recovery retains its
 pipeline-specific one-shot commit reconciliation.
 Interrupted local-commit turns are reconciled from Git state and never replayed.
-An explicit Claude rate, quota, credit, or spend-limit rejection pauses as
-`backend_unavailable`, with durable workflow state and safe workspace changes
-preserved for resume.
+For a Codex App Server `usageLimitExceeded` rejection or an explicit Claude
+rate, quota, credit, or spend-limit rejection, the rejected native turn is
+invoked once and the pipeline pauses as `backend_unavailable`. Durable workflow
+state and safe workspace changes are preserved, and resume reconstructs the
+pending request from runner state.
 
 ## Task Inputs
 
@@ -452,9 +454,10 @@ writable Worker `CHECK_AND_FIX` turn with a separate read-only candidate
 `CLEAN_CONFIRM`. The stable candidate then runs the dedicated finalization gate
 using the configured guidance policy and one distinct read-only terminal
 confirmation over the resulting content and validation fingerprints. Any
-content-changing repair returns through candidate convergence and the complete
-terminal gate. Lazy mode has no review dispute or Arbiter path. Remote state
-remains read-only.
+terminal finding returns through candidate convergence. Matching successful
+finalization evidence is reused for a fresh confirmation, while a content or
+validation-infrastructure change reruns the complete finalization gate. Lazy
+mode has no review dispute or Arbiter path. Remote state remains read-only.
 If an unexpected runner-owned invariant rejects a finalization transition,
 status retains a resumable `FINALIZE` checkpoint and exposes only a bounded
 diagnostic through both the CLI and MCP.
@@ -464,10 +467,11 @@ Independent candidate review, or lazy check/fix plus candidate clean
 confirmation, converges before full finalization. Finalization may format the
 accepted candidate; one distinct read-only Reviewer or Worker confirmation then
 binds the resulting content and exact validation evidence before `HANDOFF`.
-Confirmation findings and every content-changing repair return through
-candidate convergence and the complete terminal gate. Agent turns change
-content only; the runner then stages the complete confirmed change set and
-leaves it uncommitted for a separate commit workflow.
+Confirmation findings return through candidate convergence; matching
+successful finalization evidence is reused for a fresh confirmation, while a
+content or validation-infrastructure change reruns the complete finalization
+gate. Agent turns change content only; the runner then stages the complete
+confirmed change set and leaves it uncommitted for a separate commit workflow.
 Invalid lazy polishing checkpoints receive one fresh correction with the same
 schema and exact content and validation-infrastructure scope. Check/fix
 corrections remain content-writable and are reconciled and charged once;

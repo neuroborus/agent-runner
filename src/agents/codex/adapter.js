@@ -935,9 +935,17 @@ async function runTurn(
     });
   }
   if (turn.status !== "completed") {
+    const diagnosticClass = terminalTurnDiagnosticClass(turn);
+    if (diagnosticClass === TERMINAL_TURN_DIAGNOSTICS.usageLimitExceeded) {
+      throw new CodexAdapterError("Codex usage capacity is unavailable.", {
+        code: "ERR_CODEX_USAGE_LIMIT",
+        diagnosticClass,
+        recoverable: true,
+      });
+    }
     throw new CodexAdapterError("Codex turn failed.", {
       code: "ERR_CODEX_TURN_FAILED",
-      diagnosticClass: terminalTurnDiagnosticClass(turn),
+      diagnosticClass,
     });
   }
   return turn;
@@ -1458,6 +1466,12 @@ export function createCodexAdapter(options = {}) {
         cause instanceof CodexAdapterError
       ) {
         cause.effectStarted = false;
+        throw cause;
+      }
+      if (
+        cause instanceof CodexAdapterError &&
+        cause.code === "ERR_CODEX_USAGE_LIMIT"
+      ) {
         throw cause;
       }
       if (

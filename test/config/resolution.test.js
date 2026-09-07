@@ -57,8 +57,8 @@ test("role resolution applies CLI, role, runner, and native defaults", () => {
   assert.deepEqual(resolved.settings, {
     finalization: "auto",
     maxFixRoundsPerStep: 8,
-    maxDisputesPerFinding: 2,
-    maxSameFindingRounds: 3,
+    maxDisputesPerFinding: 5,
+    maxSameFindingRounds: 5,
     mode: "independent",
     stagnationWindowRounds: 3,
     trustedChecks: [],
