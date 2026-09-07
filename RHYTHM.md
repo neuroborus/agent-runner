@@ -19,7 +19,7 @@ remain in the owning documentation.
   or handoff.
 - **Compact test output retains complete failure diagnostics.** The normal root
   test command uses Node's built-in `dot` reporter while preserving automatic
-  discovery and the bounded concurrency of 8. Passing records no longer flood
+  discovery and the bounded concurrency of 4. Passing records no longer flood
   finalization context, while failed-test names, assertion diagnostics, and
   stacks remain available from the same run without a reporting dependency or
   a diagnostic-only rerun.
@@ -30,7 +30,7 @@ remain in the owning documentation.
   Focused Git and store integration cases remain serial within their files,
   while root capability and cross-capability suites prove atomic state,
   journals, leases, recovery, filesystem durability, snapshots, commits, and
-  handoffs. The root `node:test` command caps file concurrency at 8 to leave
+  handoffs. The root `node:test` command caps file concurrency at 4 to leave
   headroom on the 16-CPU baseline machine after higher bounds exposed
   intermittent contention; isolated suites still overlap without making the
   complete gate depend on maximum host parallelism.
