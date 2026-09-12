@@ -1,5 +1,14 @@
 import { constants } from "node:fs";
-import { lstat, mkdir, open, realpath, rename, unlink } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  open,
+  realpath,
+  rename,
+  rm,
+  unlink,
+} from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 
 import {
@@ -9,7 +18,7 @@ import {
   unsafePath,
   validateContent,
 } from "./content.js";
-import { FILE_IDENTITY_FIELDS } from "./contract.js";
+import { FILE_IDENTITY_FIELDS, isWithin } from "./contract.js";
 
 const READ_FLAGS =
   constants.O_RDONLY |
@@ -272,10 +281,46 @@ export async function openLocalDirectory(
         await parent.handle.sync();
         await verify();
       },
+      async removeOwnedDirectory() {
+        await verify();
+        if (!parent || directories.length < 2) throw unsafePath();
+        const ancestor = directories.at(-2);
+        await rm(join(ancestor.anchor, basename(parent.path)), {
+          recursive: true,
+          force: true,
+        });
+      },
     };
   } catch (cause) {
     await close();
     if (cause instanceof GuidanceError) throw cause;
     throw unsafePath(cause);
+  }
+}
+
+export async function withEditCopy(projectPath, content, temporaryRoot, edit) {
+  const root = await realpath(temporaryRoot);
+  if (isWithin(projectPath, root)) throw unsafePath();
+  const path = join(
+    await mkdtemp(join(root, "agent-runner-guidance-edit-")),
+    "rules.md",
+  );
+  let directory;
+  try {
+    directory = await openLocalDirectory(root, path);
+    await directory.writeTemporary("rules.md", content, async () => {});
+    return await edit(path, async () => {
+      const document = await directory.read();
+      if (document.hash === null) throw unsafePath();
+      return document.content;
+    });
+  } finally {
+    if (directory) {
+      try {
+        await directory.removeOwnedDirectory();
+      } finally {
+        await directory.close();
+      }
+    }
   }
 }

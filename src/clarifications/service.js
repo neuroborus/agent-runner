@@ -1,7 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
 
-import { defaultLaunchEditor, editorCandidates } from "./editor.js";
+import {
+  defaultLaunchEditor,
+  editorCandidates,
+  EditorError,
+  openConfiguredEditor,
+} from "../editor.js";
 import {
   CLARIFICATION_TEMPLATE,
   ClarificationError,
@@ -686,30 +691,23 @@ export function createClarificationService(options = {}) {
 
     record.status = "editing";
     try {
-      for (const command of candidates) {
-        try {
-          await launchEditor(command, normalized.transcriptPath);
-        } catch (cause) {
-          if (
-            cause instanceof ClarificationError &&
-            !["ERR_EDITOR_UNAVAILABLE", "ERR_INVALID_EDITOR_COMMAND"].includes(
-              cause.code,
-            )
-          ) {
-            throw cause;
-          }
-          if (
-            !(cause instanceof ClarificationError) &&
-            cause?.code !== "ENOENT"
-          ) {
-            throw cause;
-          }
-          continue;
-        }
+      const outcome = await openConfiguredEditor(normalized.transcriptPath, {
+        env,
+        launchEditor,
+      });
+      if (outcome !== null) {
         record.status = "closed";
         const result = await acceptEdit(normalized, { consumePendingEdit });
         return Object.freeze({ status: "COMPLETED", result });
       }
+    } catch (cause) {
+      if (cause instanceof EditorError) {
+        throw new ClarificationError(cause.message, {
+          cause,
+          code: cause.code,
+        });
+      }
+      throw cause;
     } finally {
       if (record.status === "editing") {
         record.status = "ready";

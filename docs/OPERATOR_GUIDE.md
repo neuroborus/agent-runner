@@ -247,3 +247,21 @@ A stale edit requires rereading and reconciling the entire current document.
 The common guide is never replaced by a local update. Completed idempotent
 retries return their recorded receipt even after later edits; that receipt
 describes the earlier operation, not a fresh read of current guidance.
+
+Read and edit through the CLI:
+
+```bash
+agent-run guidance --project /path/to/project
+agent-run guidance edit --project /path/to/project
+agent-run guidance edit --project /path/to/project --project-config LOCAL_ARTIFACTS/custom.json
+```
+
+Editing opens a private temporary copy outside the project in `$VISUAL`, with
+`$EDITOR` as fallback only when the preferred editor cannot launch. Configure
+a graphical editor's wait option so it closes only after the edit is complete.
+A failed or signalled editor cannot publish. A successful close still checks
+the original destination, configuration, local hash, content safety, and
+execution ownership before atomic replacement. An unchanged close is a checked
+no-op and leaves a missing local file absent. If a concurrent update makes the
+edit stale, reread and reconcile the document before editing again. Temporary
+copies are cleaned up after the command.

@@ -78,6 +78,105 @@ function fakeRunner(overrides = {}) {
   };
 }
 
+test("guidance prints the complete shared rendering without constructing a pipeline runner", async () => {
+  const stdout = createSink();
+  const stderr = createSink();
+  const environment = { VISUAL: "preferred" };
+  const content =
+    "# Common\n\nComplete guide.\n\n# Local\n\nComplete additions.\n";
+  const exitCode = await main(
+    [
+      "guidance",
+      "--project",
+      "/project",
+      "--project-config",
+      "LOCAL_ARTIFACTS/custom.json",
+    ],
+    {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      environment,
+      createCommandRunner: () => assert.fail("must not construct a runner"),
+      createCommandGuidance(options) {
+        assert.deepEqual(options, { env: environment });
+        return {
+          async read(input) {
+            assert.deepEqual(input, {
+              projectPath: "/project",
+              projectConfigurationPath: "LOCAL_ARTIFACTS/custom.json",
+            });
+            return { combinedContent: content };
+          },
+        };
+      },
+    },
+  );
+  assert.equal(exitCode, 0);
+  assert.equal(stdout.read(), content);
+  assert.equal(stderr.read(), "");
+});
+
+test("guidance edit reports whole-document updates and unchanged closes", async () => {
+  for (const updated of [true, false]) {
+    const stdout = createSink();
+    const stderr = createSink();
+    const exitCode = await main(["guidance", "edit", "--project", "/project"], {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      createCommandRunner: () => assert.fail("must not construct a runner"),
+      guidance: {
+        async edit(input) {
+          assert.deepEqual(input, { projectPath: "/project" });
+          return { updated };
+        },
+      },
+    });
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout.read(),
+      updated ? "Local guidance updated.\n" : "Local guidance unchanged.\n",
+    );
+    assert.equal(stderr.read(), "");
+  }
+});
+
+test("guidance rejects unsupported actions, extra arguments, duplicate selectors, and run options", async () => {
+  for (const args of [
+    ["guidance"],
+    ["guidance", "edit"],
+    ["guidance", "add", "--project", "/project"],
+    ["guidance", "edit", "extra", "--project", "/project"],
+    ["guidance", "--project", "/project", "--project", "/other"],
+    [
+      "guidance",
+      "--project",
+      "/project",
+      "--project-config",
+      "a",
+      "--project-config",
+      "b",
+    ],
+    ["guidance", "--project", "/project", "--mode", "lazy"],
+    ["guidance", "--project", "/project", "--run", RUN_ID],
+    ["guidance", "--project", "/project", "--task", "/task"],
+  ]) {
+    const stdout = createSink();
+    const stderr = createSink();
+    assert.equal(
+      await main(args, {
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        createCommandRunner: () => assert.fail("must not construct a runner"),
+        createCommandGuidance: () =>
+          assert.fail("must not dispatch invalid input"),
+      }),
+      1,
+    );
+    assert.equal(stdout.read(), "");
+    assert.notEqual(stderr.read(), "");
+  }
+});
+
 test("help describes the required commands", async () => {
   const stdout = createSink();
   const stderr = createSink();
@@ -92,6 +191,8 @@ test("help describes the required commands", async () => {
   assert.match(stdout.read(), /agent-run resume --run/);
   assert.match(stdout.read(), /agent-run status --run/);
   assert.match(stdout.read(), /agent-run mcp/);
+  assert.match(stdout.read(), /agent-run guidance --project/);
+  assert.match(stdout.read(), /agent-run guidance edit --project/);
   assert.match(stdout.read(), /plan-authoring/);
   assert.match(stdout.read(), /plan-execution/);
   assert.match(stdout.read(), /polishing/);

@@ -272,3 +272,25 @@ test("operator guidance stays outside pipeline roles and run reconstruction", as
     ["GuidanceError", "MAX_GUIDANCE_BYTES", "createGuidanceService"].sort(),
   );
 });
+
+test("shared editor mechanics stay in root capabilities and outside MCP and pipelines", async () => {
+  const { imports } = await sourceImports();
+  const editorPath = join(ROOT, "src/editor.js");
+  const consumers = [];
+  for (const { importer, specifier } of imports) {
+    if (
+      specifier.startsWith(".") &&
+      resolve(dirname(importer), specifier) === editorPath
+    )
+      consumers.push(relative(ROOT, importer));
+  }
+  assert.deepEqual(consumers.sort(), [
+    "src/clarifications/service.js",
+    "src/guidance/service.js",
+    "src/index.js",
+  ]);
+  const root = await import("../src/index.js");
+  const editor = await import("../src/editor.js");
+  assert.equal(root.openConfiguredEditor, editor.openConfiguredEditor);
+  assert.equal(root.EditorError, editor.EditorError);
+});

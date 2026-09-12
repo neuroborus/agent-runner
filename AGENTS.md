@@ -163,12 +163,13 @@ All pipelines additionally require:
 | `bin/agent-run.js`                | Thin executable entry point                                          |
 | `src/index.js`                    | Public root source boundary                                          |
 | `src/cli.js`                      | Argument parsing and terminal-facing command dispatch                |
+| `src/editor.js`                   | Shared shell-free editor selection, launch, and exit outcomes        |
 | `src/mcp/index.js`                | Public STDIO MCP protocol capability boundary                        |
 | `src/mcp/`                        | Private schemas, projections, waits, detached dispatch, reporting    |
 | `src/config/index.js`             | Public runner-configuration capability boundary                      |
 | `src/config/`                     | Private parsing, confined loading, profiles, and resolution          |
 | `src/clarifications/index.js`     | Public clarification-service boundary                                |
-| `src/clarifications/`             | Private coordination, confined transcript, and editor modules        |
+| `src/clarifications/`             | Private authorization coordination and confined transcript files     |
 | `src/pipeline-registry.js`        | Explicit registry of built-in pipelines                              |
 | `src/runner/index.js`             | Public runner-orchestration capability boundary                      |
 | `src/runner/`                     | Private input, role/session, migration, and orchestration modules    |

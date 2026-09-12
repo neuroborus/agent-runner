@@ -7,6 +7,14 @@ remain in the owning documentation.
 
 ## 2026-09-12
 
+- **CLI guidance editing shares launch mechanics without sharing exit policy.**
+  The CLI reads combined guidance or edits the complete local Markdown through
+  a private external copy. Publication retains the original destination,
+  configuration, and content hash, so even an unchanged close rejects stale
+  edits. Shell-free editor selection and launch now have one root owner;
+  guidance requires a successful close while clarification still consumes
+  authorization whenever a launched editor closes.
+
 - **Operator guidance has one common owner and a confined local extension.**
   The installed operator guide covers preparation, supervision, recovery,
   validation, and completion across CLI and MCP. The shared root capability

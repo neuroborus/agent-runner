@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {
+import filesystem, {
   access,
   appendFile,
   link,
@@ -13,6 +13,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -96,6 +97,83 @@ test("rejects invalid run-store options", async (t) => {
       error instanceof RunStoreError &&
       error.code === "ERR_INVALID_RUN_STORE_OPTIONS",
   );
+});
+
+test("state resolution accepts appearing directories while rejecting links and files", async (t) => {
+  for (const kind of ["root", "ancestor", "symlink", "dangling-link", "file"]) {
+    await t.test(kind, async (t) => {
+      const { projectPath, taskPath, workspace } = await createFixture(t);
+      const parentPath = join(workspace, "concurrent");
+      const stateRoot = join(parentPath, "state");
+      const linkTarget = join(workspace, "link-target");
+      const appearingPath = kind === "ancestor" ? parentPath : stateRoot;
+      const nativeRealpath = filesystem.realpath;
+      let appeared = false;
+      const mockedRealpath = t.mock.method(
+        filesystem,
+        "realpath",
+        async (path, ...options) => {
+          try {
+            return await nativeRealpath(path, ...options);
+          } catch (cause) {
+            if (
+              cause?.code === "ENOENT" &&
+              path === appearingPath &&
+              !appeared
+            ) {
+              // Reproduce another creator winning between realpath and lstat.
+              appeared = true;
+              await mkdir(parentPath, { recursive: true });
+              if (kind === "root") await mkdir(stateRoot);
+              if (kind === "symlink") {
+                await mkdir(linkTarget);
+                await symlink(linkTarget, stateRoot);
+              }
+              if (kind === "dangling-link")
+                await symlink(linkTarget, stateRoot);
+              if (kind === "file")
+                await writeFile(stateRoot, "Not a directory.");
+            }
+            throw cause;
+          }
+        },
+      );
+      syncBuiltinESMExports();
+      try {
+        const store = createRunStore({ stateRoot });
+        if (kind === "root" || kind === "ancestor") {
+          const created = await store.createRun(
+            runInput(projectPath, taskPath),
+          );
+          t.after(() => created.lease.release().catch(() => {}));
+          assert.equal(
+            created.directoryPath,
+            join(stateRoot, "runs", created.state.runId),
+          );
+          assert.deepEqual(
+            await store.loadRun(created.state.runId),
+            created.state,
+          );
+        } else {
+          await assert.rejects(
+            store.createRun(runInput(projectPath, taskPath)),
+            {
+              code: "ERR_UNSAFE_STATE_ROOT",
+            },
+          );
+          await assert.rejects(access(join(linkTarget, "runs")), {
+            code: "ENOENT",
+          });
+          if (kind === "dangling-link")
+            await assert.rejects(access(linkTarget), { code: "ENOENT" });
+        }
+        assert.equal(appeared, true);
+      } finally {
+        mockedRealpath.mock.restore();
+        syncBuiltinESMExports();
+      }
+    });
+  }
 });
 
 test("guidance publication shares execution ownership and releases it on failure", async (t) => {

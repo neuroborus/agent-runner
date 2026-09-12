@@ -1,4 +1,5 @@
 export { main } from "./cli.js";
+export { EditorError, openConfiguredEditor } from "./editor.js";
 export {
   CLARIFICATION_TEMPLATE,
   ClarificationError,

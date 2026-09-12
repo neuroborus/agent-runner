@@ -1,12 +1,14 @@
 import { parseArgs } from "node:util";
 
 import packageMetadata from "../package.json" with { type: "json" };
+import { createGuidanceService } from "./guidance/index.js";
 import { DETACHED_RUNTIME_COMPATIBILITY_ENV, serveMcp } from "./mcp/index.js";
 import { getPipeline, listPipelines } from "./pipeline-registry.js";
 import { createRunner, parseSourceSession } from "./runner/index.js";
 import { RUNTIME_VERSION_SKEW_EXIT_CODE } from "./state/index.js";
 
 const COMMAND_OPTIONS = Object.freeze({
+  guidance: Object.freeze(["project", "project-config"]),
   resume: Object.freeze(["run", "extra-fix-rounds", "override-finding"]),
   status: Object.freeze(["run"]),
   pipelines: Object.freeze([]),
@@ -22,6 +24,7 @@ const COMMON_RUN_OPTIONS = Object.freeze([
   "project-config",
 ]);
 const REQUIRED_COMMAND_OPTIONS = Object.freeze({
+  guidance: Object.freeze(["project"]),
   resume: Object.freeze(["run"]),
   status: Object.freeze(["run"]),
   pipelines: Object.freeze([]),
@@ -68,6 +71,8 @@ Usage:
   agent-run run <pipeline> --project <repo> --task <task-dir> [--mode <independent|lazy>] [--clarify] [--profile <alias>] [--fork-from <backend>:<session-id>]
   agent-run resume --run <run-id> [--extra-fix-rounds <count> | --override-finding <finding-id>]
   agent-run status --run <run-id>
+  agent-run guidance --project <repo> [--project-config <path>]
+  agent-run guidance edit --project <repo> [--project-config <path>]
   agent-run pipelines
   agent-run mcp
 
@@ -298,6 +303,8 @@ export async function main(
     stderr = process.stderr,
     runner,
     createCommandRunner = createRunner,
+    guidance,
+    createCommandGuidance = createGuidanceService,
     startMcp = serveMcp,
     environment = process.env,
   } = {},
@@ -308,6 +315,7 @@ export async function main(
       args,
       allowPositionals: true,
       strict: true,
+      tokens: true,
       options: OPTIONS,
     });
   } catch (error) {
@@ -346,7 +354,7 @@ export async function main(
     return 1;
   }
 
-  const maximumPositionals = command === "run" ? 2 : 1;
+  const maximumPositionals = ["run", "guidance"].includes(command) ? 2 : 1;
   if (positionals.length > maximumPositionals) {
     stderr.write(
       `Unexpected argument: ${positionals[maximumPositionals]}\n\n${USAGE}`,
@@ -358,6 +366,23 @@ export async function main(
   let supportedOptions = COMMAND_OPTIONS[command];
   let requiredOptions = REQUIRED_COMMAND_OPTIONS[command];
   let commandLabel = command;
+
+  if (command === "guidance") {
+    if (positionals[1] !== undefined && positionals[1] !== "edit") {
+      stderr.write(`Unknown guidance action: ${positionals[1]}\n\n${USAGE}`);
+      return 1;
+    }
+    const seen = new Set();
+    for (const token of parsed.tokens.filter(
+      (token) => token.kind === "option",
+    )) {
+      if (seen.has(token.name)) {
+        stderr.write(`Option '--${token.name}' may be supplied only once.\n`);
+        return 1;
+      }
+      seen.add(token.name);
+    }
+  }
 
   if (command === "run") {
     const pipelineId = positionals[1];
@@ -422,6 +447,31 @@ export async function main(
   }
 
   try {
+    if (command === "guidance") {
+      const service = guidance ?? createCommandGuidance({ env: environment });
+      const input = {
+        projectPath: values.project,
+        ...(values["project-config"] === undefined
+          ? {}
+          : { projectConfigurationPath: values["project-config"] }),
+      };
+      if (positionals[1] === "edit") {
+        const receipt = await service.edit(input);
+        stdout.write(
+          receipt.updated
+            ? "Local guidance updated.\n"
+            : "Local guidance unchanged.\n",
+        );
+      } else {
+        const { combinedContent } = await service.read(input);
+        stdout.write(
+          combinedContent.endsWith("\n")
+            ? combinedContent
+            : `${combinedContent}\n`,
+        );
+      }
+      return 0;
+    }
     const commandRunner =
       runner ??
       createCommandRunner({
