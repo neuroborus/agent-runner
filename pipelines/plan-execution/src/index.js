@@ -11,6 +11,10 @@ import {
   assertRun as validateRun,
   DEFAULT_FINALIZATION_POLICY,
   EMPTY_TRUSTED_VALIDATION,
+  MAX_SEMANTIC_FINALIZATION_RETRIES,
+  createFinalizationRecovery,
+  finalizationFeedbackFindings,
+  findingFingerprint,
   isFinalizationPolicy,
   resolveActiveRoles,
   sha256,
@@ -122,6 +126,7 @@ const RETRYABLE_PAUSE_REASONS = new Set([
   "finalization_skill_invalid",
   "finalization_skill_missing",
   "finalization_transition_invalid",
+  "finalization_evidence_rejected",
   "local_artifacts_not_ignored",
   "lazy_output_invalid",
   "review_output_invalid",
@@ -165,6 +170,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "The explicitly configured finalization skill is invalid.",
   finalization_skill_missing:
     "The explicitly configured finalization skill is missing.",
+  finalization_evidence_rejected:
+    "Terminal confirmation exhausted semantic finalization retries; correct evidence and explicitly retry complete finalization.",
   finalization_transition_invalid:
     "The runner could not persist validated finalization evidence.",
   fix_limit_reached: "The current step reached its configured fix limit.",
@@ -202,6 +209,7 @@ const PUBLIC_DETAIL_REASONS = new Set([
   "finalization_skill_invalid",
   "finalization_skill_missing",
   "finalization_transition_invalid",
+  "finalization_evidence_rejected",
   "plan_revision_required",
   "lazy_output_invalid",
   "review_output_invalid",
@@ -296,6 +304,17 @@ function resumeActionApplies(run, action) {
   }
 }
 
+function publicFindings(state) {
+  return [
+    ...new Map(
+      [
+        ...(Array.isArray(state.findings) ? state.findings : []),
+        ...finalizationFeedbackFindings(state),
+      ].map((finding) => [finding.id, finding]),
+    ).values(),
+  ];
+}
+
 function projectPause(run) {
   if (run.pause === null) {
     return null;
@@ -349,9 +368,7 @@ function projectPause(run) {
           Object.freeze({ type: "resume", action: extraFixRounds }),
         );
       }
-      for (const finding of Array.isArray(run.pipelineState.findings)
-        ? run.pipelineState.findings
-        : []) {
+      for (const finding of publicFindings(run.pipelineState)) {
         const override = Object.freeze({
           type: "override-finding",
           findingId: finding.id,
@@ -393,11 +410,9 @@ function projectStatus(run) {
     currentStep: state.currentStep,
     planPath: state.planPath ?? join(run.taskPath, "plan.md"),
     findings: Object.freeze(
-      Array.isArray(state.findings)
-        ? state.findings.map(({ id, problem }) =>
-            Object.freeze({ id, summary: problem }),
-          )
-        : [],
+      publicFindings(state).map(({ id, problem }) =>
+        Object.freeze({ id, summary: problem }),
+      ),
     ),
     completedCommits: Object.freeze(
       Array.isArray(state.completedCommits) ? [...state.completedCommits] : [],
@@ -418,6 +433,24 @@ function validateResumeAction(run, action) {
       throw new Error("A pending input edit does not accept a resume action.");
     }
     return;
+  }
+  if (
+    action === null &&
+    run.pause?.reason === "finalization_evidence_rejected"
+  ) {
+    const recovery = state.finalizationRecovery;
+    if (
+      run.pause.resumeState === "FINALIZE" &&
+      recovery.required &&
+      !recovery.pending &&
+      recovery.attempts ===
+        MAX_SEMANTIC_FINALIZATION_RETRIES + recovery.additionalAttempts &&
+      Number.isSafeInteger(
+        recovery.additionalAttempts + MAX_SEMANTIC_FINALIZATION_RETRIES + 1,
+      )
+    )
+      return;
+    throw new Error("Semantic finalization retry is not applicable.");
   }
   if (
     action === null &&
@@ -448,23 +481,20 @@ function validateResumeAction(run, action) {
   if (action?.type === "override-finding") {
     if (
       state.settings?.mode === "lazy" ||
-      !["fix_limit_reached", "no_progress", "dispute_limit_reached"].includes(
-        run.pause?.reason,
+      ![
+        "fix_limit_reached",
+        "no_progress",
+        "dispute_limit_reached",
+        "finalization_evidence_rejected",
+      ].includes(run.pause?.reason) ||
+      findingFingerprint(state) === null ||
+      ![...state.findings, ...finalizationFeedbackFindings(state)].some(
+        ({ id }) => id === action.findingId,
       ) ||
-      (state.reviewedFingerprint === null &&
-        state.candidateReviewedFingerprint === null &&
-        (state.finalizationResult?.status !== "PASS" ||
-          state.finalizedFingerprint === null)) ||
-      !state.findings?.some(({ id }) => id === action.findingId) ||
       state.findingOverrides.some(
         ({ findingId, fingerprint }) =>
           findingId === action.findingId &&
-          fingerprint ===
-            (state.reviewedFingerprint ??
-              state.candidateReviewedFingerprint ??
-              (state.finalizationResult?.status === "PASS"
-                ? state.finalizedFingerprint
-                : null)),
+          fingerprint === findingFingerprint(state),
       )
     ) {
       throw new Error("Finding override is not applicable.");
@@ -487,6 +517,7 @@ function validateResumeAction(run, action) {
             "finalization_skill_invalid",
             "finalization_skill_missing",
             "finalization_transition_invalid",
+            "finalization_evidence_rejected",
             "lazy_output_invalid",
             "review_output_invalid",
           ].includes(run.pause?.reason) &&
@@ -1056,9 +1087,16 @@ export function migratePlanExecutionStateV13(run) {
   });
 }
 
+export function migratePlanExecutionStateV14(run) {
+  return Object.freeze({
+    ...run.pipelineState,
+    finalizationRecovery: createFinalizationRecovery(),
+  });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
-  stateVersion: 14,
+  stateVersion: 15,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1073,6 +1111,7 @@ export const planExecutionPipeline = Object.freeze({
     11: migratePlanExecutionStateV11,
     12: migratePlanExecutionStateV12,
     13: migratePlanExecutionStateV13,
+    14: migratePlanExecutionStateV14,
   }),
   roles: ROLES,
   resolveActiveRoles,

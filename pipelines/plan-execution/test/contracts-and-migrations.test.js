@@ -703,7 +703,7 @@ test("migrates version-3 execution state with no consumed bootstrap corrections"
   assert.deepEqual(migrated.bootstrapCorrections, []);
   assert.equal(migrated.pendingBootstrapCorrection, null);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(planExecutionPipeline.stateVersion, 14);
+  assert.equal(planExecutionPipeline.stateVersion, 15);
 });
 
 test("selects Worker-only lazy mode and migrates version 11 to independent", () => {
@@ -909,6 +909,7 @@ test("normalizes strict lazy convergence results", () => {
     findings: [],
     validationChange: "UNCHANGED",
     validationEvidence: [],
+    finalizationFindingIds: [],
   });
   assert.equal(CHECK_AND_FIX_SCHEMA.additionalProperties, false);
   assert.equal(CLEAN_CONFIRM_SCHEMA.additionalProperties, false);

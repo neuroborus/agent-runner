@@ -23,6 +23,7 @@ import {
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
   FINALIZATION_CORRECTION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
+  FINALIZATION_RECOVERY_INSTRUCTIONS,
   finalizationBootstrapInstructions,
   finalizationGuidanceInstructions,
   FINDING_ARBITRATION_INSTRUCTIONS,
@@ -61,12 +62,16 @@ import {
   MAX_DIAGNOSTIC_ITEMS,
   MAX_FINALIZATION_CORRECTION_ATTEMPTS,
   MAX_PLAN_LENGTH,
+  MAX_SEMANTIC_FINALIZATION_RETRIES,
   MAX_VALIDATION_ITEMS,
   PlanExecutionWorkflowError,
   WORKFLOW_STATES,
   assertRun,
   assertRuntime,
   assertSettings,
+  createFinalizationRecovery,
+  finalizationFeedbackFindings,
+  findingFingerprint,
   createPersistedFinalizationEvidence,
   createPlanExecutionState,
   isRecord,
@@ -613,7 +618,7 @@ function normalizeConfirmationRoleOutput(
           },
         ]
       : []),
-    ...(!validationChanged && result.validationChange !== "UNCHANGED"
+    ...(!validationChanged && result.validationChange === "ACCEPTED"
       ? [
           {
             field: "validationChange",
@@ -806,6 +811,23 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       publicActivity,
     } = {},
   ) {
+    if (nextPipelineState.currentStep !== state().currentStep) {
+      nextPipelineState = {
+        ...nextPipelineState,
+        finalizationRecovery: createFinalizationRecovery(),
+      };
+    } else if (
+      nextPipelineState.repositoryBaseline?.contentFingerprint !==
+      state().repositoryBaseline?.contentFingerprint
+    ) {
+      nextPipelineState = {
+        ...nextPipelineState,
+        finalizationRecovery: {
+          ...nextPipelineState.finalizationRecovery,
+          feedback: null,
+        },
+      };
+    }
     const patch = {
       counters: nextCounters,
       hashes: nextHashes,
@@ -1788,6 +1810,11 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           compatibilityCheckRequired: false,
           currentStep: bootstrapDecision ? null : current.currentStep,
           implementationDirection: null,
+          finalizationRecovery: {
+            ...current.finalizationRecovery,
+            pending: false,
+            feedback: null,
+          },
           finalizationResult: null,
           finalizedFingerprint: null,
           reviewCorrection: null,
@@ -2633,6 +2660,170 @@ ${JSON.stringify(
     );
   }
 
+  function terminalDisputes(findings, current) {
+    return findings.flatMap(({ id }) => {
+      const latest = latestDispute(id);
+      return latest?.direction === "UPHOLD" &&
+        latest.attempt === current.disputeCounts[id] &&
+        current.disputeCounts[id] >= current.settings.maxDisputesPerFinding &&
+        !current.findingArbitrations.some(({ findingId }) => findingId === id)
+        ? [
+            {
+              findingId: id,
+              reason: latest.workerReason,
+              evidence: latest.workerEvidence,
+            },
+          ]
+        : [];
+    });
+  }
+
+  async function routeFinalizationRejection(result, fingerprint) {
+    const current = state();
+    if (
+      result.validationChange !== "REJECTED" ||
+      (current.settings.mode !== "lazy" &&
+        validationRejectionIsOverridden(result.findings, fingerprint))
+    ) {
+      return false;
+    }
+    const findings = result.findings.filter(
+      ({ id }) =>
+        current.settings.mode === "lazy" ||
+        !findingOverrideApplies(id, fingerprint),
+    );
+    const evidenceIds = result.finalizationFindingIds.filter((id) =>
+      findings.some((finding) => finding.id === id),
+    );
+    const contentFindings = findings.filter(
+      ({ id }) => !evidenceIds.includes(id),
+    );
+    const pure = contentFindings.length === 0;
+    const feedback = {
+      contentFingerprint: fingerprint,
+      validationInfrastructureFingerprint:
+        await validationInfrastructureFingerprint(
+          current.validationInfrastructure,
+        ),
+      findings,
+      finalizationFindingIds: evidenceIds,
+    };
+    const progress = pure
+      ? null
+      : correctionUpdate({
+          fingerprint,
+          finalizationIssueIds: [],
+          findingIds: contentFindings.map(({ id }) => id),
+        });
+    await transition(
+      {
+        ...current,
+        ...(pure ? clearedTerminalGate() : clearedCandidateAndTerminalGate()),
+        workflowState: pure
+          ? "FINALIZE"
+          : current.settings.mode === "lazy"
+            ? "CHECK_AND_FIX"
+            : "RESOLVE_FINDINGS",
+        finalizationRecovery: {
+          ...current.finalizationRecovery,
+          required: true,
+          pending: false,
+          feedback,
+        },
+        findings: contentFindings,
+        previousFindings: result.findings,
+        pendingDisputes:
+          pure || current.settings.mode === "lazy"
+            ? []
+            : terminalDisputes(contentFindings, current),
+        reviewReconsideration: [],
+        pendingCorrection: false,
+        ...(pure
+          ? {}
+          : {
+              correctionHistory: progress.history,
+              sameFindingRounds: progress.sameFindingRounds,
+              blockedSinceStagnation: progress.blockedSinceStagnation,
+              reviewerStep:
+                current.settings.mode === "lazy"
+                  ? current.reviewerStep
+                  : current.currentStep,
+            }),
+      },
+      {
+        nextCounters: progress?.counters ?? counters(),
+        publicActivity: activity(
+          "runner",
+          "finalization",
+          "evidence-rejected",
+          pure
+            ? "Terminal validation evidence rejected; repeat complete finalization."
+            : "Terminal validation evidence invalidated; resolve content findings before fresh finalization.",
+        ),
+      },
+    );
+    return true;
+  }
+
+  async function prepareFinalizationRecovery() {
+    let recovery = state().finalizationRecovery;
+    if (!recovery.required) return true;
+    if (
+      recovery.feedback !== null &&
+      (recovery.feedback.contentFingerprint !== (await contentFingerprint()) ||
+        recovery.feedback.validationInfrastructureFingerprint !==
+          (await validationInfrastructureFingerprint(
+            state().validationInfrastructure,
+          )))
+    ) {
+      recovery = { ...recovery, feedback: null };
+      await transition({ ...state(), finalizationRecovery: recovery });
+    }
+    if (recovery.pending) return true;
+    if (
+      recovery.attempts >=
+      MAX_SEMANTIC_FINALIZATION_RETRIES + recovery.additionalAttempts
+    ) {
+      await pause("finalization_evidence_rejected", {
+        explanation:
+          "Terminal confirmation repeatedly rejected finalization evidence. Correct the reported evidence without weakening the established inventory, then explicitly retry complete finalization.",
+        evidence: finalizationFeedbackFindings(state()).map(
+          ({ id }) => `Finalization evidence finding ${id} remains unresolved.`,
+        ),
+        resumeState: "FINALIZE",
+      });
+      return false;
+    }
+    await transition(
+      {
+        ...state(),
+        finalizationRecovery: {
+          ...recovery,
+          attempts: recovery.attempts + 1,
+          pending: true,
+        },
+      },
+      {
+        publicActivity: activity(
+          "runner",
+          "finalization",
+          "evidence-retry",
+          "Reserved one semantic finalization recovery attempt.",
+        ),
+      },
+    );
+    return true;
+  }
+
+  function completedFinalizationRecovery() {
+    return {
+      ...state().finalizationRecovery,
+      required: false,
+      pending: false,
+      feedback: null,
+    };
+  }
+
   function disputeNeedsArbitration(dispute) {
     const count = state().disputeCounts[dispute.findingId] ?? 0;
     const latest = latestDispute(dispute.findingId);
@@ -2970,6 +3161,36 @@ The runner will derive validation inventories from the independently accepted ro
 
   async function applyResumeAction() {
     if (resumeAction === null) {
+      if (
+        state().workflowState === "WAITING_FOR_USER" &&
+        currentRun.pause.reason === "finalization_evidence_rejected"
+      ) {
+        if (
+          (await readCurrentInputs()) === null ||
+          !(await verifyPersistedRepository())
+        )
+          return false;
+        const recovery = state().finalizationRecovery;
+        await transition(
+          {
+            ...state(),
+            workflowState: "FINALIZE",
+            finalizationRecovery: {
+              ...recovery,
+              additionalAttempts: recovery.additionalAttempts + 1,
+            },
+          },
+          {
+            pause: null,
+            publicActivity: activity(
+              "runner",
+              "finalization",
+              "evidence-retry-authorized",
+              "One additional semantic finalization attempt explicitly authorized.",
+            ),
+          },
+        );
+      }
       return true;
     }
     if (
@@ -3023,35 +3244,45 @@ The runner will derive validation inventories from the independently accepted ro
     }
     if (
       state().settings.mode === "lazy" ||
-      !["fix_limit_reached", "no_progress", "dispute_limit_reached"].includes(
-        currentRun.pause.reason,
-      ) ||
-      (state().reviewedFingerprint === null &&
-        state().candidateReviewedFingerprint === null &&
-        (state().finalizationResult?.status !== "PASS" ||
-          state().finalizedFingerprint === null))
+      ![
+        "fix_limit_reached",
+        "no_progress",
+        "dispute_limit_reached",
+        "finalization_evidence_rejected",
+      ].includes(currentRun.pause.reason) ||
+      findingFingerprint(state()) === null
     ) {
       throw workflowError("Finding override is not applicable.");
     }
-    const findingFingerprint =
-      state().reviewedFingerprint ??
-      state().candidateReviewedFingerprint ??
-      (state().finalizationResult?.status === "PASS"
-        ? state().finalizedFingerprint
-        : null);
-    const finding = state().findings.find(
-      ({ id }) => id === resumeAction.findingId,
-    );
+    const fingerprint = findingFingerprint(state());
+    const recovery = state().finalizationRecovery;
+    const finding = [
+      ...state().findings,
+      ...finalizationFeedbackFindings(state()),
+    ].find(({ id }) => id === resumeAction.findingId);
     if (
       finding === undefined ||
-      (await contentFingerprint()) !== findingFingerprint ||
-      findingOverrideApplies(resumeAction.findingId, findingFingerprint)
+      (await contentFingerprint()) !== fingerprint ||
+      findingOverrideApplies(resumeAction.findingId, fingerprint)
     ) {
       throw workflowError("Finding override is stale or inapplicable.");
     }
     const findings = state().findings.filter(
       ({ id }) => id !== resumeAction.findingId,
     );
+    const feedback =
+      recovery.feedback === null
+        ? null
+        : {
+            ...recovery.feedback,
+            findings: recovery.feedback.findings.filter(
+              ({ id }) => id !== resumeAction.findingId,
+            ),
+            finalizationFindingIds:
+              recovery.feedback.finalizationFindingIds.filter(
+                (id) => id !== resumeAction.findingId,
+              ),
+          };
     const pendingDisputes = state().pendingDisputes.filter(
       ({ findingId }) => findingId !== resumeAction.findingId,
     );
@@ -3059,11 +3290,45 @@ The runner will derive validation inventories from the independently accepted ro
       ...state().findingOverrides,
       {
         findingId: resumeAction.findingId,
-        fingerprint: findingFingerprint,
+        fingerprint,
       },
     ].slice(-MAX_DIAGNOSTIC_ITEMS);
     const blockersResolved =
       findings.length === 0 && pendingDisputes.length === 0;
+    if (currentRun.pause.reason === "finalization_evidence_rejected") {
+      const resolved = feedback.finalizationFindingIds.length === 0;
+      await transition(
+        {
+          ...state(),
+          findingOverrides,
+          workflowState: resolved ? "FINALIZE" : "WAITING_FOR_USER",
+          finalizationRecovery: {
+            ...recovery,
+            feedback,
+            additionalAttempts:
+              recovery.additionalAttempts + (resolved ? 1 : 0),
+          },
+        },
+        {
+          pause: resolved
+            ? null
+            : {
+                ...currentRun.pause,
+                evidence: feedback.finalizationFindingIds.map(
+                  (id) =>
+                    `Finalization evidence finding ${id} remains unresolved.`,
+                ),
+              },
+          publicActivity: activity(
+            "runner",
+            "finalization",
+            "finding-overridden",
+            `Finalization finding ${resumeAction.findingId} explicitly overridden; replacement evidence is still required.`,
+          ),
+        },
+      );
+      return resolved;
+    }
     await transition(
       {
         ...state(),
@@ -3075,6 +3340,7 @@ The runner will derive validation inventories from the independently accepted ro
           (id) => id !== resumeAction.findingId,
         ),
         findingOverrides,
+        finalizationRecovery: { ...recovery, feedback },
       },
       {
         pause: null,
@@ -3177,6 +3443,7 @@ ${step.body}${
   }
 
   async function runFinalizationTurn() {
+    if (!(await prepareFinalizationRecovery())) return false;
     const step = planStep();
     let persistedCorrection = state().pendingFinalizationCorrection;
     const beforeFingerprint =
@@ -3219,6 +3486,10 @@ ${step.body}${
 
 ${finalizationGuidanceInstructions(selectedGuidance)}
 
+${establishedValidationPrompt(state())}
+
+${state().finalizationRecovery.required ? FINALIZATION_RECOVERY_INSTRUCTIONS + "\n\nAccepted evidence findings:\n" + JSON.stringify(finalizationFeedbackFindings(state())) : ""}
+
 ${trustedValidationInstructions()}
 
 ${evidence}
@@ -3256,6 +3527,48 @@ ${
             context,
             "Finalization",
           );
+          if (
+            state().finalizationRecovery.required &&
+            ![
+              "SKILL_MISSING",
+              "SKILL_INVALID",
+              "PRODUCT_DECISION_REQUIRED",
+            ].includes(result.status)
+          ) {
+            const diagnostics = [];
+            if (
+              state().requiredChecks.some(
+                (check) =>
+                  !result.requiredChecks.some(
+                    (candidate) =>
+                      candidate.id === check.id &&
+                      candidate.command === check.command,
+                  ),
+              )
+            ) {
+              diagnostics.push({
+                field: "requiredChecks",
+                constraint: "preserves-established-checks",
+              });
+            }
+            if (
+              state().validationInfrastructure.some(
+                (path) => !result.validationInfrastructure.includes(path),
+              )
+            ) {
+              diagnostics.push({
+                field: "validationInfrastructure",
+                constraint: "preserves-established-infrastructure",
+              });
+            }
+            if (diagnostics.length !== 0) {
+              throw invalidRoleOutputBatch(
+                "Finalization recovery cannot weaken the established inventory.",
+                context,
+                diagnostics,
+              );
+            }
+          }
           if (
             selectedGuidance.skillPath === null &&
             ["SKILL_MISSING", "SKILL_INVALID"].includes(result.status)
@@ -3568,6 +3881,7 @@ ${
             ...state(),
             workflowState: "RESOLVE_FINDINGS",
             finalizationResult,
+            finalizationRecovery: completedFinalizationRecovery(),
             finalizedFingerprint: null,
             confirmationCorrection: null,
             pendingConfirmationCorrection: null,
@@ -3603,6 +3917,7 @@ ${
           ...state(),
           workflowState: "CONFIRM",
           finalizationResult,
+          finalizationRecovery: completedFinalizationRecovery(),
           finalizedFingerprint: fingerprint,
           confirmationCorrection: null,
           pendingConfirmationCorrection: null,
@@ -3628,7 +3943,7 @@ ${
     return true;
   }
 
-  function confirmationValidationPrompt(current) {
+  function establishedValidationPrompt(current) {
     return `Established validation tuple:
 ${JSON.stringify(
   {
@@ -3642,7 +3957,11 @@ ${JSON.stringify(
   },
   null,
   2,
-)}
+)}`;
+  }
+
+  function confirmationValidationPrompt(current) {
+    return `${establishedValidationPrompt(current)}
 
 Candidate validation tuple and finalization evidence:
 ${JSON.stringify(current.finalizationResult, null, 2)}`;
@@ -4161,6 +4480,8 @@ ${JSON.stringify(state().previousFindings, null, 2)}${
         if (result.status === "PRODUCT_DECISION_REQUIRED") {
           return productDecision(result.decision, "IMPLEMENT");
         }
+        if (await routeFinalizationRejection(result, confirmedFingerprint))
+          return true;
         const reviewResult = {
           status: result.status === "CLEAN" ? "APPROVED" : "FINDINGS",
           validationChange: result.validationChange,
@@ -4624,25 +4945,9 @@ Current planned commit:
 
 ${step.body}
 
-Established validation tuple:
-${JSON.stringify(
-  {
-    requiredChecks: current.requiredChecks,
-    validationInfrastructure: current.validationInfrastructure,
-    validationInfrastructureFingerprint:
-      current.validationInfrastructureFingerprint,
-    trustedCommandFingerprint: current.trustedValidation.commandFingerprint,
-    trustedConfigurationFingerprint:
-      current.trustedValidation.configurationFingerprint,
-  },
-  null,
-  2,
-)}
+${confirmationValidationPrompt(current)}
 
-Candidate validation tuple and finalization evidence:
-${JSON.stringify(current.finalizationResult, null, 2)}
-
-The Reviewer must return ACCEPTED only when any validation inventory or infrastructure change is authorized by this planned commit and remains complete; return REJECTED with a finding for evasive, omitted, substituted, or weakened validation. Return UNCHANGED only when finalizationResult.validationChanged is false.
+The Reviewer must return ACCEPTED only when any validation inventory or infrastructure change is authorized by this planned commit and remains complete; return REJECTED with a finding for evasive, omitted, substituted, or weakened validation evidence, even when inventories are unchanged. Return UNCHANGED only when finalizationResult.validationChanged is false and the validation evidence is sufficient.
 
 Previous findings for this step:
 ${JSON.stringify(current.previousFindings, null, 2)}${
@@ -4776,6 +5081,8 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
       await pauseForReviewScopeDrift("ERR_REVIEW_CONTENT_FINGERPRINT_CHANGED");
       return false;
     }
+    if (await routeFinalizationRejection(result, reviewedFingerprint))
+      return true;
     const reviewResult = {
       status: result.status,
       validationChange: result.validationChange,
@@ -4794,21 +5101,7 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
         finalizationIssueIds: [],
         findingIds: findings.map(({ id }) => id),
       });
-      const pendingDisputes = findings.flatMap(({ id }) => {
-        const latest = latestDispute(id);
-        return latest?.direction === "UPHOLD" &&
-          latest.attempt === current.disputeCounts[id] &&
-          current.disputeCounts[id] >= current.settings.maxDisputesPerFinding &&
-          !current.findingArbitrations.some(({ findingId }) => findingId === id)
-          ? [
-              {
-                findingId: id,
-                reason: latest.workerReason,
-                evidence: latest.workerEvidence,
-              },
-            ]
-          : [];
-      });
+      const pendingDisputes = terminalDisputes(findings, current);
       await transition(
         {
           ...state(),

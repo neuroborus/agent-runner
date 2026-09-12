@@ -474,10 +474,16 @@ convergence. Independent mode uses Reviewer passes; lazy mode alternates a
 writable Worker `CHECK_AND_FIX` turn with a separate read-only candidate
 `CLEAN_CONFIRM`. The stable candidate then runs the dedicated finalization gate
 using the configured guidance policy and one distinct read-only terminal
-confirmation over the resulting content and validation fingerprints. Any
-terminal finding returns through candidate convergence. Matching successful
-finalization evidence is reused for a fresh confirmation, while a content or
-validation-infrastructure change reruns the complete finalization gate. Lazy
+confirmation over the resulting content and validation fingerprints. Content
+findings return through candidate convergence. Terminal rejection of validation
+evidence invalidates finalization immediately; pure evidence findings rerun
+complete finalization directly without code fixing. Mixed findings resolve
+content first, then require replacement finalization. Two automatic semantic
+retries per step are durable across interruption and provider unavailability;
+exhaustion pauses as `finalization_evidence_rejected` at `FINALIZE`, where an
+explicit retry grants one additional attempt. Matching successful evidence from
+ordinary non-rejection findings remains reusable for a fresh confirmation;
+content or validation-infrastructure drift reruns the complete gate. Lazy
 mode has no review dispute or Arbiter path. Remote state remains read-only.
 If an unexpected runner-owned invariant rejects a finalization transition,
 status retains a resumable `FINALIZE` checkpoint and exposes only a bounded

@@ -815,6 +815,29 @@ invalidated and routed to safe mode-specific candidate convergence. Retained
 legacy terminal-Reviewer correction diagnostics are translated into the new
 terminal-confirmation namespace on immutable paths.
 
+Plan execution state version 15 adds bounded semantic finalization recovery.
+Terminal roles share rejection routing: after the exact whole-result override
+gate, `REJECTED` invalidates finalization immediately. The structured
+`finalizationFindingIds` subset separates evidence-only findings from content
+repairs. Pure rejection preserves candidate approval and re-enters `FINALIZE`
+without code-fix accounting; mixed rejection resolves content first and still
+requires replacement finalization. The complete deterministic gate preserves
+established check IDs/commands and infrastructure entries, and fresh confirmation
+binds the resulting fingerprint. Ordinary non-rejection reuse is unchanged.
+Evidence rejection remains valid when inventories are unchanged; equality of
+the inventory cannot substitute for sufficient check evidence.
+
+The version-14 migration initializes metadata without interpreting missing
+provider output or replaying workflow/effect history. Two semantic retries per
+step are reserved durably before invocation. Pending attempts survive
+interruption and unavailable providers without recounting; fingerprint drift
+clears feedback without restoring allowance. Exhaustion exposes
+`finalization_evidence_rejected` at `FINALIZE` with one explicit additional
+attempt per null retry. Independent overrides use the saved terminal content
+fingerprint; closing recovery feedback still requires replacement finalization
+and fresh confirmation. Only bounded validated findings and control metadata
+are retained. This policy remains owned by plan execution.
+
 Polishing state version 3 adopts the same resolved trusted-validation snapshot,
 per-check executor provenance, and fingerprint-bound evidence tuple. Its
 version-2 migration selects empty legacy trust, preserves safe workspace
@@ -983,8 +1006,8 @@ Advancement requires `CLEAN`, no repository mutation, and the exact inspected
 content fingerprint. In plan execution and polishing this first converges the
 candidate; `FINALIZE` follows, then a distinct read-only `CONFIRM` applies the
 validation-change decision to the finalized evidence.
-Findings return directly to `CHECK_AND_FIX`, never to dispute or arbitration.
-Terminal findings clear candidate and confirmation attestations but retain a
+Content findings return directly to `CHECK_AND_FIX`, never to dispute or arbitration.
+Ordinary terminal findings clear candidate and confirmation attestations but retain a
 successful finalization record while its content and validation-infrastructure
 fingerprints remain current. After candidate convergence, the runner recomputes
 both fingerprints and retries `CONFIRM` directly on an exact match; otherwise it
@@ -994,8 +1017,10 @@ infrastructure change, provider correction-scope drift, content-changing
 interruption reconciliation, and plan-execution commit-step advancement
 invalidates finalization evidence. Plan-authoring drafts stay
 in external state and are deterministically validated only after confirmation;
-plan-execution and polishing terminal findings always return through candidate
-convergence and one fresh terminal confirmation. Existing fix/revision, stable-
+polishing terminal findings return through candidate convergence and one fresh
+terminal confirmation. Plan execution instead routes pure validation-evidence
+rejection directly to bounded replacement finalization; mixed rejection still
+returns through candidate convergence. Existing fix/revision, stable-
 finding, stagnation, and additional-round budgets bound the loop and never
 silently accept an unconfirmed result.
 
@@ -1092,7 +1117,8 @@ the independent read-only terminal Reviewer, or the lazy read-only terminal clea
 accepts that the task or current plan step authorizes the complete change for
 the same content fingerprint. The confirming turn receives both the established
 and candidate tuples, so acceptance cannot depend on a prior native session.
-Rejection remains a finding. Commands and repository-relative infrastructure
+Plan-execution rejection invalidates evidence and uses its bounded semantic
+recovery route; polishing rejection remains a finding. Commands and repository-relative infrastructure
 paths are validated and compared without rewriting interior whitespace.
 Host-reported results and user attestations are outside this trust boundary.
 Plan execution builds both passing and failing persisted finalization evidence

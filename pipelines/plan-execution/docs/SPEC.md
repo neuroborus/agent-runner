@@ -1797,7 +1797,8 @@ terminal-confirmation evidence. Formatting inside a newly entered `FINALIZE`
 turn instead establishes the content fingerprint that finalization and terminal
 confirmation must share.
 
-A terminal finding clears the candidate and terminal-confirmation attestations,
+An ordinary terminal finding without validation-evidence rejection clears the
+candidate and terminal-confirmation attestations,
 but a successful finalization record remains provisionally reusable while its
 finalized content and validation-infrastructure fingerprints stay current. A
 declared `FIX` is not evidence of a repository mutation. After independent or
@@ -1808,6 +1809,70 @@ changes, provider correction-scope drift, content-changing interruption
 reconciliation, and advancement to the next commit step always invalidate the
 record. A fresh successful `CONFIRM` remains mandatory immediately before every
 `COMMIT`.
+
+Terminal `validationChange: REJECTED` has a separate recovery route shared by
+both terminal roles. First honor the existing whole-result override gate for
+all findings at the exact terminal content fingerprint. Otherwise immediately
+invalidate finalization and confirmation evidence, including mixed rejections.
+The required `finalizationFindingIds` array is a unique subset of at most 32
+reported finding IDs identifying evidence-only concerns requiring no repository
+edit. It must be empty outside a rejected terminal result; mixed concerns must
+be separate findings. Candidate-review schemas do not carry this field, and
+routing never classifies prose.
+Evidence may be rejected even when the inventories and infrastructure are
+unchanged. Such a rejection uses semantic recovery, not malformed-output
+correction; inventory equality alone does not establish sufficient check evidence.
+
+After exact applicable overrides, a pure evidence rejection preserves candidate
+acceptance and returns directly to `FINALIZE` with bounded accepted findings.
+It does not run candidate convergence or code check/fix, charge fix/correction
+rounds, or update stable-finding/stagnation history. A mixed rejection routes
+only content findings through ordinary mode-specific resolution and candidate
+convergence, then requires fresh finalization even if content stays unchanged.
+Neither withdrawal nor a later override can restore the invalidated PASS.
+Ordinary non-rejection findings retain the existing reuse rule above.
+
+Recovery invokes the complete finalization procedure with its ordinary
+formatting permissions, canonical infrastructure inspection, ordered check
+results, runner-trusted execution, and final evidence construction. A replacement
+must retain every established exact check ID/command and infrastructure entry;
+feedback cannot authorize an omission, substitution, removal, or weakening.
+Every finalization request includes the saved established validation tuple,
+including session-independent reconstruction after interruption.
+Malformed replacement output follows the existing separate read-only correction
+budget. A valid replacement and one fresh terminal confirmation must bind the
+same resulting content and validation fingerprints before `COMMIT`.
+
+Pipeline state version 15 adds `finalizationRecovery`, containing consumed
+`attempts`, explicit `additionalAttempts`, `required` and `pending` flags, and
+nullable bounded `feedback`. Feedback retains only normalized findings, their
+evidence-only ID subset, the terminal content fingerprint, and the current
+established-infrastructure fingerprint. It never retains a rejected finalization
+record, provider output, or transcript. The version-14 migration initializes
+empty metadata without inferring lost rejection output, moving the workflow,
+changing persisted mode, or replaying completed or consumed commit effects.
+
+Two automatic semantic retries are available per step, independently of
+malformed-output and code-fix budgets. Before invocation, persist the consumed
+attempt and pending marker. Interruption, provider unavailability, and external
+validation blockage resume that pending attempt without recounting it. Content
+or infrastructure scope drift discards stale feedback without replenishing the
+step allowance. Content repair still returns through candidate convergence;
+formatting within finalization retains its usual permissions and fingerprint
+rules. Accepted replacement finalization clears pending recovery and feedback,
+while the consumed allowance remains until the step ends.
+A blocking product decision retires the pending attempt and its feedback before
+returning through plan compatibility and implementation; it does not restore
+consumed allowance or remove the replacement-finalization requirement.
+
+Exhaustion pauses as `finalization_evidence_rejected`, with `FINALIZE` as the
+resume checkpoint, bounded actionable CLI/MCP evidence, and an explicit null
+retry granting exactly one additional attempt. Independent-mode overrides use
+the saved terminal content fingerprint, which may differ from candidate
+approval after formatting. Partial overrides leave other feedback blocking;
+resolving all recovery feedback authorizes one replacement attempt and still
+requires complete finalization and fresh confirmation. Lazy mode exposes no
+finding overrides. No retry grants commit authority.
 
 If deterministic normalization rejects a Worker finalization result, collect
 all independently detectable violations from that candidate where practical,
@@ -1879,12 +1944,14 @@ It reviews:
 - unintended scope expansion;
 - project conventions.
 
-After the candidate is accepted, `FINALIZE` runs once for that stable content.
+After the candidate is accepted, `FINALIZE` runs the complete procedure for
+that stable content; semantic evidence recovery may require replacement runs.
 The separate read-only `CONFIRM` turn then compares the established and candidate check inventories,
 infrastructure file sets, runner-computed fingerprints, and exact per-check
 evidence. The fresh review request carries both complete tuples rather than
-depending on earlier session context. An unchanged gate is recorded as
-`UNCHANGED`. Any change must be
+depending on earlier session context. An unchanged gate with sufficient evidence
+is recorded as `UNCHANGED`; insufficient evidence requires `REJECTED` even when
+the gate inventory is unchanged. Any change must be
 explicitly `ACCEPTED` as authorized by the current plan step or `REJECTED` with
 a finding. The decision and its bounded evidence are bound to the same content
 fingerprint as terminal confirmation. Exactly one successful confirmation
@@ -1997,8 +2064,9 @@ recomputed content and validation-infrastructure fingerprints. A passing
 finalization enters the distinct read-only `CONFIRM` state, where
 the Worker receives the established and finalized validation tuples and
 returns `CLEAN`, findings, or the narrow product-decision outcome together with
-`UNCHANGED` or task-authorized `ACCEPTED` validation change. Terminal findings
-return to `CHECK_AND_FIX`; exactly one successful terminal clean confirmation
+`UNCHANGED` or task-authorized `ACCEPTED` validation change. Ordinary terminal findings
+return to `CHECK_AND_FIX`; pure evidence rejection uses the separate finalization
+recovery route, and mixed rejection sends only content findings to fixing; exactly one successful terminal clean confirmation
 records the reviewed and terminal-clean fingerprints and enters `COMMIT`. The loop consumes the existing fix, stable-
 finding, stagnation, and additional-fix-round budgets. Exhaustion pauses at the
 applicable checkpoint and never treats a non-clean result as accepted.
@@ -2045,7 +2113,7 @@ If the Worker agrees:
 2. return control;
 3. run complete candidate convergence again;
 4. rerun finalization when content or validation infrastructure changed;
-5. otherwise reuse matching successful finalization evidence;
+5. otherwise reuse matching, non-rejected successful finalization evidence;
 6. run one fresh terminal confirmation.
 
 When one resolution batch mixes `FIX` and `DISPUTE`, preserve the disputes
@@ -2155,7 +2223,7 @@ finalization == PASS
 open findings == 0
 current content fingerprint == finalized fingerprint
 current content fingerprint == reviewed fingerprint
-review validation change == UNCHANGED or ACCEPTED
+review validation change == UNCHANGED or ACCEPTED, or independent exact whole-result override
 independent: unresolved disputes == 0 and pending arbitration == false
 lazy: clean confirmation fingerprint == current content fingerprint
 HEAD == expected HEAD
@@ -2287,7 +2355,7 @@ the Reviewer's favor leaves the finding blocking and requires a fix or explicit
 user override; it does not permit another dispute of the same reviewed finding.
 
 Lazy mode never invokes Reviewer or Arbiter and therefore has no dispute
-budget. Confirmation findings return to `CHECK_AND_FIX`; the existing fix,
+budget. Content confirmation findings return to `CHECK_AND_FIX`; the existing fix,
 stable-finding, and stagnation counters remain bounded, and
 `--extra-fix-rounds` extends only the fix allowance without resetting history.
 
@@ -2319,6 +2387,7 @@ no_progress
 finalization_skill_missing
 finalization_skill_invalid
 finalization_cannot_pass
+finalization_evidence_rejected
 lazy_output_invalid
 review_output_invalid
 read_only_agent_mutated_repository
@@ -2701,7 +2770,7 @@ At minimum cover:
 73. lazy no-progress, stable-finding, fix, and additional-round behavior remains
     bounded without weakening exact commits, trusted checks, fingerprints, Git
     controls, product decisions, or no-coauthor/no-push rules.
-74. every supported legacy version migrates through state version 14 to
+74. every supported legacy version migrates through state version 15 to
     `independent` without reviving terminal runs or replaying completed or
     pending commit effects.
 75. lazy provider and deterministic contract failures receive one scoped
@@ -2709,6 +2778,13 @@ At minimum cover:
     once, clean correction remains read-only and fingerprint-bound, pending
     work survives interruption, and repeated invalid output resumes only by an
     explicit null retry with redacted diagnostics.
+
+76. pure and mixed validation-evidence rejection in both modes invalidates stale
+    finalization, preserves exact inventory checks and effect gating, and uses
+    bounded durable semantic retries without code-fix accounting for pure recovery.
+77. terminal-fingerprint overrides, including formatter drift and partial
+    overrides, never restore invalidated evidence; interruption and unavailable
+    providers preserve pending attempts, while explicit retries grant only one.
 
 Real Codex/Claude smoke tests should be opt-in integration tests.
 

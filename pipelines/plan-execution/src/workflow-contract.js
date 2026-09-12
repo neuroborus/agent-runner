@@ -56,6 +56,7 @@ const PIPELINE_STATE_FIELDS = new Set([
   "pendingBootstrapCorrection",
   "finalizationCorrections",
   "pendingFinalizationCorrection",
+  "finalizationRecovery",
   "reviewCorrection",
   "pendingReviewCorrection",
   "confirmationCorrection",
@@ -185,6 +186,7 @@ const REVIEW_RESULT_FIELDS = Object.freeze([
   "findings",
   "validationChange",
   "validationEvidence",
+  "finalizationFindingIds",
   "question",
   "options",
   "whyBlocked",
@@ -331,6 +333,7 @@ const PAUSE_RESUME_STATES = Object.freeze({
   finalization_skill_invalid: Object.freeze(["FINALIZE"]),
   finalization_skill_missing: Object.freeze(["FINALIZE"]),
   finalization_transition_invalid: Object.freeze(["FINALIZE"]),
+  finalization_evidence_rejected: Object.freeze(["FINALIZE"]),
   fix_limit_reached: Object.freeze([
     "IMPLEMENT",
     "CHECK_AND_FIX",
@@ -2023,6 +2026,150 @@ export function normalizeFinalizationResult(
   });
 }
 
+export const MAX_SEMANTIC_FINALIZATION_RETRIES = 2;
+
+export function createFinalizationRecovery() {
+  return Object.freeze({
+    attempts: 0,
+    additionalAttempts: 0,
+    required: false,
+    pending: false,
+    feedback: null,
+  });
+}
+
+export function findingFingerprint(state) {
+  return (
+    state.finalizationRecovery?.feedback?.contentFingerprint ??
+    state.reviewedFingerprint ??
+    state.candidateReviewedFingerprint ??
+    (state.finalizationResult?.status === "PASS"
+      ? state.finalizedFingerprint
+      : null)
+  );
+}
+
+export function finalizationFeedbackFindings(state) {
+  const feedback = state.finalizationRecovery?.feedback ?? null;
+  return feedback === null
+    ? []
+    : feedback.findings.filter(({ id }) =>
+        feedback.finalizationFindingIds.includes(id),
+      );
+}
+
+function normalizeFinalizationFindingIds(
+  value,
+  findings,
+  rejected,
+  code = INVALID_OUTPUT_CODE,
+) {
+  if (
+    !Array.isArray(value) ||
+    value.length > MAX_ITEMS ||
+    new Set(value).size !== value.length ||
+    value.some(
+      (id) =>
+        !REVIEW_FINDING_ID_PATTERN.test(id) ||
+        !findings.some((finding) => finding.id === id),
+    ) ||
+    (!rejected && value.length !== 0)
+  ) {
+    const message =
+      "Finalization finding IDs must be a unique evidence-only subset of rejected terminal findings.";
+    if (code === INVALID_OUTPUT_CODE) {
+      throw outputError(
+        message,
+        outputConstraint(
+          "finalizationFindingIds",
+          "unique-rejected-finding-subset",
+        ),
+      );
+    }
+    throw workflowError(message, code);
+  }
+  return Object.freeze([...value]);
+}
+
+function normalizeFinalizationRecovery(value, state) {
+  assertExactFields(
+    value,
+    ["attempts", "additionalAttempts", "required", "pending", "feedback"],
+    "Finalization recovery",
+  );
+  if (
+    !Number.isSafeInteger(value.attempts) ||
+    value.attempts < 0 ||
+    !Number.isSafeInteger(value.additionalAttempts) ||
+    value.additionalAttempts < 0 ||
+    !Number.isSafeInteger(
+      value.additionalAttempts + MAX_SEMANTIC_FINALIZATION_RETRIES,
+    ) ||
+    value.attempts >
+      value.additionalAttempts + MAX_SEMANTIC_FINALIZATION_RETRIES ||
+    (value.additionalAttempts > 0 &&
+      (value.attempts < MAX_SEMANTIC_FINALIZATION_RETRIES ||
+        value.attempts <
+          MAX_SEMANTIC_FINALIZATION_RETRIES + value.additionalAttempts - 1 ||
+        (!value.required &&
+          value.attempts !==
+            MAX_SEMANTIC_FINALIZATION_RETRIES + value.additionalAttempts))) ||
+    typeof value.required !== "boolean" ||
+    typeof value.pending !== "boolean" ||
+    (value.pending &&
+      (!value.required ||
+        value.attempts === 0 ||
+        !["FINALIZE", "WAITING_FOR_USER", "FAILED"].includes(
+          state.workflowState,
+        ))) ||
+    (!value.required && value.feedback !== null) ||
+    (value.required &&
+      (state.finalizationResult !== null ||
+        state.reviewResult !== null ||
+        state.finalizedFingerprint !== null ||
+        state.reviewedFingerprint !== null)) ||
+    (state.currentStep === null &&
+      !isDeepStrictEqual(value, createFinalizationRecovery()))
+  ) {
+    throw workflowError(
+      "Plan-execution finalization recovery is inconsistent.",
+    );
+  }
+  if (value.feedback !== null) {
+    const feedback = value.feedback;
+    assertExactFields(
+      feedback,
+      [
+        "contentFingerprint",
+        "validationInfrastructureFingerprint",
+        "findings",
+        "finalizationFindingIds",
+      ],
+      "Finalization feedback",
+    );
+    if (
+      !HASH_PATTERN.test(feedback.contentFingerprint) ||
+      !HASH_PATTERN.test(feedback.validationInfrastructureFingerprint)
+    ) {
+      throw workflowError("Finalization feedback scope is invalid.");
+    }
+    const findings = normalizeReviewFindings(
+      feedback.findings,
+      "ERR_INVALID_PLAN_EXECUTION_STATE",
+    );
+    if (!isDeepStrictEqual(findings, feedback.findings)) {
+      throw workflowError("Finalization feedback findings must be normalized.");
+    }
+    normalizeFinalizationFindingIds(
+      feedback.finalizationFindingIds,
+      findings,
+      true,
+      "ERR_INVALID_PLAN_EXECUTION_STATE",
+    );
+  }
+  return value;
+}
+
 export function normalizeReviewResult(payload, previousFindings = []) {
   if (!isRecord(payload)) {
     throw outputError(
@@ -2055,6 +2202,14 @@ export function normalizeReviewResult(payload, previousFindings = []) {
             outputConstraint(
               "validationChange",
               "unchanged-for-product-decision",
+            ),
+          ]
+        : []),
+      ...(!emptyArray(payload.finalizationFindingIds)
+        ? [
+            outputConstraint(
+              "finalizationFindingIds",
+              "empty-for-product-decision",
             ),
           ]
         : []),
@@ -2162,6 +2317,11 @@ export function normalizeReviewResult(payload, previousFindings = []) {
     findings,
     validationChange: payload.validationChange,
     validationEvidence,
+    finalizationFindingIds: normalizeFinalizationFindingIds(
+      payload.finalizationFindingIds,
+      findings,
+      payload.validationChange === "REJECTED",
+    ),
   });
 }
 
@@ -3593,6 +3753,10 @@ export function normalizePipelineState(value) {
       "Plan-execution pending bootstrap correction is inconsistent.",
     );
   }
+  const finalizationRecovery = normalizeFinalizationRecovery(
+    value.finalizationRecovery,
+    value,
+  );
   const finalizationCorrections = normalizeFinalizationCorrections(
     value.finalizationCorrections,
     planSteps,
@@ -3859,10 +4023,9 @@ export function normalizePipelineState(value) {
         matchesEstablishedValidation) ||
       (reviewedChange === "UNCHANGED" &&
         finalizationResult.validationChanged) ||
-      (["ACCEPTED", "REJECTED"].includes(reviewedChange) &&
+      (reviewedChange === "ACCEPTED" &&
         !finalizationResult.validationChanged) ||
-      (reviewedChange === "ACCEPTED" && !matchesEstablishedValidation) ||
-      (reviewedChange === "REJECTED" && matchesEstablishedValidation)
+      (reviewedChange === "ACCEPTED" && !matchesEstablishedValidation)
     ) {
       throw workflowError(
         "Plan-execution validation-change evidence is inconsistent.",
@@ -4195,7 +4358,8 @@ export function normalizePipelineState(value) {
     value.candidateReviewedFingerprint === null &&
     (finalizationResult?.status !== "PASS" ||
       value.finalizedFingerprint === null) &&
-    !deferredDisputes
+    !deferredDisputes &&
+    finalizationRecovery.feedback === null
   ) {
     throw workflowError("Plan-execution review progress is inconsistent.");
   }
@@ -4537,6 +4701,7 @@ export function createPlanExecutionState({
       pendingBootstrapCorrection: null,
       finalizationCorrections: Object.freeze([]),
       pendingFinalizationCorrection: null,
+      finalizationRecovery: createFinalizationRecovery(),
       reviewCorrection: null,
       pendingReviewCorrection: null,
       confirmationCorrection: null,
@@ -4628,7 +4793,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 14 ||
+    run.pipelineStateVersion !== 15 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -4815,6 +4980,18 @@ export function assertRun(run) {
     throw workflowError("Plan-execution adapter diagnostic is invalid.");
   }
   assertInputPause(run, state);
+  if (
+    run.pause?.reason === "finalization_evidence_rejected" &&
+    (!state.finalizationRecovery.required ||
+      state.finalizationRecovery.pending ||
+      state.finalizationRecovery.attempts !==
+        MAX_SEMANTIC_FINALIZATION_RETRIES +
+          state.finalizationRecovery.additionalAttempts)
+  ) {
+    throw workflowError(
+      "Semantic finalization pause has no exhausted recovery allowance.",
+    );
+  }
   if (state.workflowState === "WAITING_FOR_USER") {
     const expectedReason = EDIT_PAUSE_REASONS[state.pendingEdit?.action];
     const hasAuthorizationId = Object.hasOwn(run.pause, "authorizationId");
@@ -4846,6 +5023,7 @@ export function assertRun(run) {
           "finalization_skill_invalid",
           "finalization_skill_missing",
           "finalization_transition_invalid",
+          "finalization_evidence_rejected",
           "lazy_output_invalid",
           "review_output_invalid",
         ].includes(run.pause.reason)) ||

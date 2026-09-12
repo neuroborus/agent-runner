@@ -365,6 +365,9 @@ function createBackend(
           findings: [],
           validationChange: "UNCHANGED",
           validationEvidence: [],
+          ...(request.prompt.includes("Confirm the finalized changes")
+            ? { finalizationFindingIds: [] }
+            : {}),
           question: "",
           options: [],
           whyBlocked: "",
