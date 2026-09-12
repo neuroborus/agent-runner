@@ -310,9 +310,26 @@ agent-run run plan-execution --project /path/to/repository --task /path/to/task
 agent-run run polishing --project /path/to/repository --task /path/to/task
 agent-run resume --run <run-id>
 agent-run status --run <run-id>
+agent-run guidance --project /path/to/repository
+agent-run guidance edit --project /path/to/repository
 agent-run pipelines
 agent-run mcp
 ```
+
+`guidance` prints the complete common operator guide and local additions.
+`guidance edit` opens the entire local Markdown in `$VISUAL`, then `$EDITOR`
+if the preferred editor cannot launch. Both commands accept
+`--project-config <path>` using the same configuration rules as a new run.
+For editors that launch a separate window, configure their wait flag so the
+command remains open until editing is complete.
+
+Edits use a private temporary copy outside the project. A successful editor
+exit validates and atomically publishes the result only if the original local
+hash, destination, configuration, and execution ownership still permit it.
+An unchanged close is a checked no-op, including when no local file exists.
+An empty edited document removes all additions. Editor failure, unsafe content,
+or a concurrent change preserves the local document; reread and reconcile a
+stale edit. These commands do not create a pipeline run.
 
 Run-wide preferences use `--profile`, `--model`, and `--context-size`.
 Role-specific values use derived flags such as `--worker-profile`,
@@ -683,7 +700,6 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   │   │   └── workspace-storage.js
 │   │   └── index.js
 │   ├── clarifications/
-│   │   ├── editor.js
 │   │   ├── files.js
 │   │   ├── index.js
 │   │   └── service.js
@@ -694,6 +710,7 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   │   ├── parsing.js
 │   │   ├── profiles.js
 │   │   └── resolution.js
+│   ├── editor.js
 │   ├── git/
 │   │   ├── command.js
 │   │   ├── commit.js
@@ -754,8 +771,10 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   │   ├── polishing-handoff.test.js
 │   │   └── repository-safety.test.js
 │   ├── guidance/
+│   │   ├── cli.test.js
 │   │   ├── content-and-safety.test.js
 │   │   ├── documentation.test.js
+│   │   ├── editing.test.js
 │   │   ├── publication.test.js
 │   │   └── support/
 │   ├── integration/

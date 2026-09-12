@@ -95,6 +95,13 @@ publication, and the canonical-worktree lease. Stale concurrent edits fail;
 completed retries return their original receipt even after subsequent edits.
 Empty content means no additions. The common guide is never replaced.
 
+CLI operators use `agent-run guidance --project <repo>` to read both documents
+and `agent-run guidance edit --project <repo>` to edit the entire local document.
+Both accept `--project-config <path>`. Editing uses a private external copy in
+`$VISUAL` or `$EDITOR`; failed or signalled closes preserve local guidance.
+Unchanged closes still recheck safety and concurrency, and leave a missing
+local document absent. No pipeline run is constructed for either command.
+
 Record stable project operating lessons here after execution releases ownership.
 Task requirements belong in task context or tracked project documents, universal
 rules in the common guide, and genuine Runner defects in deliberate issue

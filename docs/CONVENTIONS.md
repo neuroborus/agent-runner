@@ -180,6 +180,8 @@ Keep a cross-cutting effect in the root capability that owns its lifecycle:
   clarifications;
 - operator document composition and confined local publication belong to
   guidance, using state-owned actions and leases;
+- shell-free editor launch and candidate selection belong to `src/editor.js`;
+  clarification authorization and guidance publication retain their own exit policy;
 - allowlists and host execution belong to trusted validation;
 - provider processes and native sandboxes belong to agents.
 

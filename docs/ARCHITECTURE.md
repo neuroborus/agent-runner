@@ -413,6 +413,26 @@ retries return the recorded bounded receipt (`projectPath`, `localPath`,
 `localHash`, `updated`) without reapplying the old hash comparison or reloading
 configuration. Receipts describe their operation, not the current document.
 
+The CLI dispatches `guidance` and `guidance edit` directly to this capability
+with project/configuration selectors; it never constructs a pipeline runner.
+The capability's `edit` method reads and pins the complete original selection,
+opens an owner-only temporary document outside the project, and validates the
+entire result after the editor closes. It uses the same confined file access
+and shared writer, retaining the original destination and configuration hash
+through the publication boundary. Even unchanged content must pass current
+path, hash, configuration, and execution-ownership checks. A missing document
+left unchanged remains absent, with a null-hash no-op receipt; explicit empty
+replacement still creates an empty document. Temporary copies are removed
+through their pinned parent directory, without following substituted links.
+
+`src/editor.js` owns shared shell-free command parsing, `$VISUAL`/`$EDITOR`
+selection, launch fallback, and exit/signal outcomes. Only an unavailable or
+unparseable editor command permits fallback. Guidance rejects a nonzero or
+signalled close and never publishes that edit. Clarification retains its
+existing policy: any launched editor close consumes its one-shot authorization,
+even after a nonzero exit or signal. Authorization, document safety, and
+publication remain in their owning capabilities. MCP never opens an editor.
+
 Local guidance is supervisor context only: it is absent from role prompts, run
 state, and resume configuration. Guidance never constructs a pipeline run,
 changes ignore rules, replaces the common guide, mutates Git control state,

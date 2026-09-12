@@ -47,6 +47,10 @@ test("the mapped common guide preserves supervision and recovery contracts witho
   assert.match(guide, /uncontaminated worktree/u);
   assert.match(guide, /Never weaken tests/u);
   assert.match(guide, /cannot weaken common safety/u);
+  assert.match(guide, /agent-run guidance --project/u);
+  assert.match(guide, /agent-run guidance edit --project/u);
+  assert.match(guide, /failed or signalled editor cannot publish/u);
+  assert.match(readme, /guidance edit/u);
   assert.doesNotMatch(
     guide,
     /FASQON|fasqon|BOOSTY|neuroborus|TaskStop|squarefi|utila|Co-authored-by:|\/home\/|~\/Desktop/u,

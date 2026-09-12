@@ -121,7 +121,10 @@ async function canonicalPotentialPath(path) {
         throw cause;
       }
       try {
-        await lstat(currentPath);
+        const metadata = await lstat(currentPath);
+        // Another creator may have made this directory after realpath failed.
+        // Resolve it again so containment still uses its canonical path.
+        if (metadata.isDirectory()) continue;
         throw new RunStoreError(
           "State path cannot resolve through a dangling link.",
           {
