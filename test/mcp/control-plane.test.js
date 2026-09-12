@@ -357,6 +357,8 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
   );
   const { tools } = await client.listTools();
   assert.deepEqual(tools.map((tool) => tool.name).sort(), [
+    "guidance_read",
+    "guidance_update",
     "pipelines_list",
     "run_activity",
     "run_respond",

@@ -102,6 +102,19 @@ Both accept `--project-config <path>`. Editing uses a private external copy in
 Unchanged closes still recheck safety and concurrency, and leave a missing
 local document absent. No pipeline run is constructed for either command.
 
+MCP supervisors call `guidance_read` once before first managing a run for each
+project, including when issue reporting is disabled. It returns the complete
+combined guide, separate common and local documents, resolved paths, and
+`localHash`. Both guidance tools accept `projectPath` and optional
+`projectConfigurationPath`. `guidance_update` replaces the whole local document
+using full `localContent`, nullable `expectedHash`, and an `idempotencyKey`.
+Null requires an absent file; an existing empty file has a hash. MCP never
+opens an editor. Replacement is local, potentially destructive, and idempotent;
+its bounded receipt contains paths, the resulting hash, and an `updated` flag.
+Retry the same logical mutation with identical arguments and key after a lost
+response. Completed receipt replay preserves later edits and is not a fresh
+read. A stale edit requires rereading, reconciliation, and a new mutation key.
+
 Record stable project operating lessons here after execution releases ownership.
 Task requirements belong in task context or tracked project documents, universal
 rules in the common guide, and genuine Runner defects in deliberate issue

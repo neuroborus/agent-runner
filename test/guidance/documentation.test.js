@@ -31,6 +31,8 @@ test("the mapped common guide preserves supervision and recovery contracts witho
     "run_wait",
     "run_activity",
     "unexpected_issue_report",
+    "guidance_read",
+    "guidance_update",
     "artifactRoot",
     "SHA-256",
     "chain-of-thought",
@@ -51,6 +53,13 @@ test("the mapped common guide preserves supervision and recovery contracts witho
   assert.match(guide, /agent-run guidance edit --project/u);
   assert.match(guide, /failed or signalled editor cannot publish/u);
   assert.match(readme, /guidance edit/u);
+  for (const document of [guide, readme, architecture, operator]) {
+    assert.match(document, /guidance_read/u);
+    assert.match(document, /guidance_update/u);
+    assert.match(document, /expectedHash/u);
+    assert.match(document, /idempotencyKey/u);
+    assert.match(document, /issue reporting is disabled/u);
+  }
   assert.doesNotMatch(
     guide,
     /FASQON|fasqon|BOOSTY|neuroborus|TaskStop|squarefi|utila|Co-authored-by:|\/home\/|~\/Desktop/u,
