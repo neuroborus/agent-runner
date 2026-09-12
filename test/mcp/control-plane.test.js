@@ -60,6 +60,29 @@ async function childNodeStdoutIsAvailable() {
   }
 }
 
+async function requireChildNodeStdout(
+  t,
+  { probe = childNodeStdoutIsAvailable, argumentsList = process.execArgv } = {},
+) {
+  if (await probe()) {
+    return true;
+  }
+  // Explicit selection must establish coverage rather than pass through a skip.
+  if (
+    argumentsList.some(
+      (argument) =>
+        argument === "--test-name-pattern" ||
+        argument.startsWith("--test-name-pattern="),
+    )
+  ) {
+    assert.fail(
+      "Explicitly selected STDIO tests require nested Node stdout; skipping is not permitted.",
+    );
+  }
+  t.skip("Nested Node stdout is unavailable in this environment.");
+  return false;
+}
+
 async function workspace(t, prefix = "agent-runner-mcp-") {
   const root = await mkdtemp(join(tmpdir(), prefix));
   const projectPath = join(root, "project");
@@ -313,9 +336,54 @@ test("projects descriptor-owned pipeline mode guidance", async () => {
   }
 });
 
+test("broad STDIO discovery may skip when child stdout is unavailable", async () => {
+  const skipped = [];
+  assert.equal(
+    await requireChildNodeStdout(
+      { skip: (reason) => skipped.push(reason) },
+      { probe: async () => false, argumentsList: [] },
+    ),
+    false,
+  );
+  assert.deepEqual(skipped, [
+    "Nested Node stdout is unavailable in this environment.",
+  ]);
+});
+
+test("explicitly selected STDIO checks cannot pass through an unavailable probe", async () => {
+  for (const argumentsList of [
+    ["--test-name-pattern=protocol-clean|detached worktree"],
+    ["--test-name-pattern", "protocol-clean|detached worktree"],
+  ]) {
+    await assert.rejects(
+      requireChildNodeStdout(
+        { skip: () => assert.fail("A selected test must not be skipped.") },
+        { probe: async () => false, argumentsList },
+      ),
+      {
+        code: "ERR_ASSERTION",
+        message:
+          "Explicitly selected STDIO tests require nested Node stdout; skipping is not permitted.",
+      },
+    );
+  }
+});
+
+test("available child stdout permits selected STDIO assertions to run", async () => {
+  assert.equal(
+    await requireChildNodeStdout(
+      { skip: () => assert.fail("An available test must not be skipped.") },
+      {
+        probe: async () => true,
+        argumentsList: ["--test-name-pattern=protocol-clean|detached worktree"],
+      },
+    ),
+    true,
+  );
+});
+
 test("serves protocol-clean STDIO discovery through the official SDK", async (t) => {
-  if (!(await childNodeStdoutIsAvailable())) {
-    t.skip("Nested Node stdout is unavailable in this environment.");
+  if (!(await requireChildNodeStdout(t))) {
     return;
   }
   const paths = await workspace(t, "agent-runner-mcp-protocol-");
@@ -456,8 +524,7 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
 });
 
 test("reports unexpected issues from a detached worktree over fresh STDIO", async (t) => {
-  if (!(await childNodeStdoutIsAvailable())) {
-    t.skip("Nested Node stdout is unavailable in this environment.");
+  if (!(await requireChildNodeStdout(t))) {
     return;
   }
   const paths = await workspace(t, "agent-runner-mcp-detached-report-");
@@ -1425,6 +1492,7 @@ test("resumes only an action valid for the persisted pause", async (t) => {
       additionalFixRounds: 0,
       finalizationResult: { status: "PASS" },
       findings: [{ id: "R1", problem: "Review is incomplete." }],
+      findingOverrides: [],
       reviewedFingerprint: "a".repeat(64),
       settings: { maxFixRounds: 5 },
     },

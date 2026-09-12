@@ -319,7 +319,7 @@ test("migrates version-2 state with empty trust and invalidates its active gate"
   assert.deepEqual(migrated.settings.trustedChecks, []);
   assert.deepEqual(migrated.trustedValidation.commands, []);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(polishingPipeline.stateVersion, 10);
+  assert.equal(polishingPipeline.stateVersion, 11);
 });
 
 test("migrates version-3 state with no consumed bootstrap corrections", () => {
@@ -615,6 +615,7 @@ test("normalizes strict lazy polishing convergence results", () => {
     status: "CLEAN",
     findings: [],
     validationChange: "UNCHANGED",
+    finalizationFindingIds: [],
     validationEvidence: [],
   });
   assert.deepEqual(

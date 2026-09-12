@@ -69,10 +69,11 @@ transition, both CLI and MCP status expose the same bounded diagnostic and an
 explicit retry from the retained `FINALIZE` checkpoint. Rejected finalization
 evidence and native process output do not enter the pause record.
 
-Plan execution pauses as `finalization_evidence_rejected` at `FINALIZE` after
-two automatic semantic retries per step. CLI and MCP expose bounded finding
-identities and an explicit null retry for exactly one additional complete
-finalization attempt. Applicable independent-mode finding overrides remain tied
+Plan execution and polishing pause as `finalization_evidence_rejected` at
+`FINALIZE` after two automatic semantic retries per execution step or polishing
+run. CLI and MCP expose bounded finding identities and an explicit null retry
+for exactly one additional complete finalization attempt. Applicable
+independent-mode finding overrides remain tied
 to the terminal content fingerprint; closing feedback still requires replacement
 finalization and fresh confirmation. Provider availability or interruption
 resumes an already pending attempt without charging another retry.

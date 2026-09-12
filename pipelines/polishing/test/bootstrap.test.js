@@ -832,6 +832,7 @@ test("invalidates dependent work before product-decision bootstrap re-entry", as
         status: "PRODUCT_DECISION_REQUIRED",
         findings: [],
         validationChange: "UNCHANGED",
+        finalizationFindingIds: [],
         validationEvidence: [],
       }),
       bootstrapReady("Reviewer"),

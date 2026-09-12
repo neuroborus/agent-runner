@@ -62,7 +62,8 @@ the record and require the complete finalization gate again. Every path still
 requires one fresh successful terminal confirmation immediately before commit
 or handoff.
 
-Plan execution treats terminal rejection of validation evidence separately.
+Plan execution and polishing treat terminal rejection of validation evidence
+separately.
 Unless every reported finding already has an applicable exact-terminal-fingerprint
 user override, rejection immediately invalidates finalization and confirmation.
 A bounded structured finding-ID subset identifies evidence-only concerns; prose
@@ -73,12 +74,11 @@ check evidence still requires replacement finalization under the same retry budg
 Mixed rejection resolves content through normal convergence before replacement
 finalization. Recovery cannot omit, substitute, remove, or weaken established
 checks or infrastructure entries, and always requires fresh terminal confirmation.
-Ordinary non-rejection evidence reuse and polishing's current routing remain as
-specified above.
+Ordinary non-rejection evidence reuse remains as specified above.
 
-Two automatic semantic retries per execution step are durable and separate from
-malformed-output and code-fix budgets. Pending retries survive interruption or
-provider unavailability without recounting. Scope drift clears feedback without
+Two automatic semantic retries per execution step or polishing run are durable
+and separate from malformed-output and code-fix budgets. Pending retries survive
+interruption or provider unavailability without recounting. Scope drift clears feedback without
 restoring allowance. Exhaustion pauses specifically for rejected finalization
 evidence; an explicit retry authorizes one additional attempt. Independent
 recovery overrides bind the saved terminal fingerprint, including formatter

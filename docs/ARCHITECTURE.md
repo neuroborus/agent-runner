@@ -836,7 +836,8 @@ clears feedback without restoring allowance. Exhaustion exposes
 attempt per null retry. Independent overrides use the saved terminal content
 fingerprint; closing recovery feedback still requires replacement finalization
 and fresh confirmation. Only bounded validated findings and control metadata
-are retained. This policy remains owned by plan execution.
+are retained. Each pipeline owns its recovery policy independently; polishing
+adopts the same contract with a per-run allowance in state version 11.
 
 Polishing state version 3 adopts the same resolved trusted-validation snapshot,
 per-check executor provenance, and fingerprint-bound evidence tuple. Its
@@ -912,6 +913,19 @@ fingerprints, and bounded correction diagnostics are distinct. The version-9
 migration invalidates unprovable active gate evidence and routes it through safe
 mode-specific candidate convergence, defers the same repair for paused runs,
 and preserves `HANDOFF`, `DONE`, and `FAILED` without replaying staging.
+
+Polishing state version 11 adds the same bounded semantic finalization recovery
+as plan execution, with two automatic attempts per polishing run. Both terminal
+roles share deterministic pure/mixed rejection routing within polishing. Exact
+terminal-fingerprint overrides are checked first; otherwise rejected evidence is
+invalidated immediately and replacement finalization plus fresh confirmation
+must pass before runner-owned `HANDOFF`. Pending attempts survive interruption
+and environment/provider blockage without recounting. Scope drift clears feedback
+without restoring allowance; explicit retry after exhaustion grants one additional
+attempt. The version-10 migration initializes metadata without moving checkpoints,
+inferring old rejection output, or replaying pending or completed staging effects.
+The existing polishing malformed-output correction budget and index restrictions
+remain unchanged.
 
 Common run-envelope version 3 adds `activeTurn`, either `null` or the current
 bounded `{ role, phase }`. Version-1 and version-2 runs project it as `null`
@@ -1016,13 +1030,12 @@ for observed repository mutation. Every actual content or validation-
 infrastructure change, provider correction-scope drift, content-changing
 interruption reconciliation, and plan-execution commit-step advancement
 invalidates finalization evidence. Plan-authoring drafts stay
-in external state and are deterministically validated only after confirmation;
-polishing terminal findings return through candidate convergence and one fresh
-terminal confirmation. Plan execution instead routes pure validation-evidence
-rejection directly to bounded replacement finalization; mixed rejection still
-returns through candidate convergence. Existing fix/revision, stable-
-finding, stagnation, and additional-round budgets bound the loop and never
-silently accept an unconfirmed result.
+in external state and are deterministically validated only after confirmation.
+Plan execution and polishing route pure validation-evidence rejection directly
+to bounded replacement finalization; mixed rejection returns through candidate
+convergence before fresh finalization. Both require a fresh terminal confirmation.
+Existing fix/revision, stable-finding, stagnation, and additional-round budgets
+bound the loop and never silently accept an unconfirmed result.
 
 Plan authoring owns lazy structured-output recovery at both checkpoints.
 Provider and deterministic contract failures become bounded diagnostics, then
@@ -1117,8 +1130,8 @@ the independent read-only terminal Reviewer, or the lazy read-only terminal clea
 accepts that the task or current plan step authorizes the complete change for
 the same content fingerprint. The confirming turn receives both the established
 and candidate tuples, so acceptance cannot depend on a prior native session.
-Plan-execution rejection invalidates evidence and uses its bounded semantic
-recovery route; polishing rejection remains a finding. Commands and repository-relative infrastructure
+Both pipelines invalidate rejected evidence and use their independently owned
+bounded semantic recovery routes. Commands and repository-relative infrastructure
 paths are validated and compared without rewriting interior whitespace.
 Host-reported results and user attestations are outside this trust boundary.
 Plan execution builds both passing and failing persisted finalization evidence
@@ -1207,7 +1220,7 @@ fingerprints. This service does not broaden any agent turn's sandbox and
 introduces no daemon or shell DSL.
 
 Before plan execution or polishing accepts a producing role's bootstrap or
-legacy validation-migration inventory, and before plan execution fingerprints
+legacy validation-migration inventory, and before either pipeline fingerprints
 finalization evidence, the root Git boundary verifies every
 validation-infrastructure entry is an existing regular file whose canonical
 repository-relative path exactly matches the proposed path. Missing files,

@@ -337,7 +337,8 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
           findings: [],
           validationChange: "UNCHANGED",
           validationEvidence: [],
-          ...(request.prompt.includes("Confirm the finalized changes")
+          ...(request.prompt.includes("Confirm the finalized changes") ||
+          request.prompt.includes("Confirm the finalized change set")
             ? { finalizationFindingIds: [] }
             : {}),
           question: "",
