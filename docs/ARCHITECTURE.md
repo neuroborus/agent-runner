@@ -25,6 +25,7 @@ dependency before an actual import needs it.
 - Versioned runner configuration loading, validation, and role resolution.
 - Run IDs, atomic state, append-only events, resume, and status.
 - Clarification files, editor invocation, transcript updates, and input hashes.
+- Common operator guidance, complete local additions, and safe durable replacement.
 - Frozen provider registration plus adapter execution and access-mode
   enforcement.
 - Git snapshots, content fingerprints, read-only guards, remote/identity guards,
@@ -344,6 +345,79 @@ read-only repository mutation never projects acceptance of contaminated or
 hybrid changes. This is a read-only projection of existing durable state and
 does not change the root or pipeline state versions.
 
+## Operator Guidance
+
+`docs/OPERATOR_GUIDE.md` is the installed, canonical CLI/MCP operating procedure.
+It distinguishes expected pauses, genuine unexpected defects, and stable
+project lessons. Operators follow current actions and resume resumable work
+without taking it over. Valid dirty work from a genuinely non-resumable run may
+enter polishing after ownership ends and inputs are reconciled, preserving
+contamination safeguards and the uncommitted outcome.
+
+The guidance capability lives under `src/guidance/` behind its public `index.js`.
+Private content, contract, file, and service modules own composition, configuration
+selection, confined access, and durable replacement. Its factory is deliberately
+exported from `src/index.js`; transports consume the same capability rather
+than duplicating policy. No pipeline depends on it.
+
+`createGuidanceService().read({ projectPath, projectConfigurationPath? })` loads
+the common guide from the installed runner and uses public configuration and
+Git services to resolve `<artifactRoot>/agent-runner/rules.md`. Its result
+contains canonical project/local/configuration paths, complete `commonContent`
+and `localContent`, `combinedContent`, and `localHash`. Rendering separates the
+documents and states that local additions cannot weaken common safety or
+product contracts. Missing local content is an empty string with a null hash;
+an existing document, including an empty one, has a SHA-256 hash. Reading
+creates neither local artifacts nor external state.
+
+Both documents have a 64 KiB UTF-8 byte limit. Reads and replacements reject
+invalid encoding, unsafe control characters, and recognizable credential or
+provider-transcript formats without echoing or partially redacting content.
+Operators remain responsible for excluding sensitive material that cannot be
+recognized deterministically. Local paths must be ignored, untracked, confined,
+and disjoint from project configuration and protected control paths. Missing
+destinations receive the same safety inspection. Symlinks, hard links,
+non-regular files, and unsafe ancestors fail closed.
+
+The public `update` method accepts the same selectors plus complete
+`localContent`, nullable `expectedHash`, and `idempotencyKey`. It validates the
+external-state boundary before intent or lease writes, rejecting state and
+project trees that contain one another. It binds the key to
+canonical arguments and a content hash, and reserves the destination and a hash
+of resolved configuration. The existing action store accepts the narrow
+`guidance_update` kind. Context and receipts contain paths, hashes, publication
+phases, and filesystem identity, never document bodies. The state service's
+`withGuidanceLease` holds the canonical-worktree lease with an opaque operation
+owner, excluding mutating execution and other guidance writers across processes.
+A contender receives a conflict and may retry its same incomplete intent after
+ownership is released.
+
+Filesystem access is relative to pinned directory descriptors using
+`/proc/self/fd` or `/dev/fd`; unavailable descriptor access fails closed.
+Directory identities and lexical confinement are rechecked around effects so
+ancestor replacement cannot redirect reads, writes, publication, or cleanup.
+Atomic rename publishes an owner-only, synchronized temporary file in the
+destination directory; that temporary path must also be ignored. Publication
+rechecks configuration, path safety, execution ownership, the expected hash,
+and inspected file identities.
+
+An intent records reserved, writing, prepared, and published phases. Temporary
+inode provenance is persisted before writing, and complete file identity before
+rename. Recovery removes a proven partial temporary write or recognizes its
+own renamed inode. It never adopts another writer's identical bytes or
+overwrites an intervening edit. An unproven temporary file left before
+provenance was recorded is neither adopted nor deleted; retry reserves a fresh
+name. Changed configuration cannot redirect incomplete publication. A durable
+published record completes its receipt without replaying the effect. Completed
+retries return the recorded bounded receipt (`projectPath`, `localPath`,
+`localHash`, `updated`) without reapplying the old hash comparison or reloading
+configuration. Receipts describe their operation, not the current document.
+
+Local guidance is supervisor context only: it is absent from role prompts, run
+state, and resume configuration. Guidance never constructs a pipeline run,
+changes ignore rules, replaces the common guide, mutates Git control state,
+or performs finalization or commit work.
+
 ## MCP Control Plane
 
 `agent-run mcp` exposes the same static pipeline registry and runner through the
@@ -449,8 +523,9 @@ authentication, or a daemon.
 
 The root runtime persists runs under `$XDG_STATE_HOME/agent-runner/`, falling
 back to `~/.local/state/agent-runner/`. A run is addressed by an opaque ID and
-stored beneath `runs/<run-id>/`; preflight rejects a state root inside the
-canonical project or task directory.
+stored beneath `runs/<run-id>/`. Preflight requires the canonical state tree
+to be disjoint from both the project and task trees: neither may contain the
+other.
 
 MCP action intents and receipts live under `actions/<hashed-key>/` in the same
 external root. The opaque key itself is not persisted. Action records are

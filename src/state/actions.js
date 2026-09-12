@@ -23,6 +23,7 @@ const TOOLS = new Set([
   "run_respond",
   "run_resume",
   "unexpected_issue_report",
+  "guidance_update",
 ]);
 const LEASE_FIELDS = new Set(["token", "pid", "hostname", "acquiredAt"]);
 const ACTION_FIELDS = new Set([

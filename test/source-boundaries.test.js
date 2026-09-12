@@ -238,3 +238,37 @@ test("pipeline source does not branch on registered provider IDs", async () => {
     );
   }
 });
+
+test("operator guidance stays outside pipeline roles and run reconstruction", async () => {
+  const { files, imports } = await sourceImports();
+  for (const { importer, specifier } of imports) {
+    if (!specifier.includes("guidance/")) continue;
+    const path = relative(ROOT, importer);
+    assert.ok(
+      path === "src/index.js" ||
+        path === "src/cli.js" ||
+        path.startsWith("src/mcp/") ||
+        path.startsWith("src/guidance/"),
+      path,
+    );
+  }
+  for (const path of files.filter(
+    (path) =>
+      isWithin(join(ROOT, "pipelines"), path) ||
+      isWithin(join(ROOT, "src/runner"), path),
+  )) {
+    const source = await readFile(path, "utf8");
+    assert.doesNotMatch(
+      source,
+      /OPERATOR_GUIDE\.md|agent-runner\/rules\.md|guidance_read|createGuidanceService/u,
+      relative(ROOT, path),
+    );
+  }
+  const root = await import("../src/index.js");
+  const guidance = await import("../src/guidance/index.js");
+  assert.equal(root.createGuidanceService, guidance.createGuidanceService);
+  assert.deepEqual(
+    Object.keys(guidance).sort(),
+    ["GuidanceError", "MAX_GUIDANCE_BYTES", "createGuidanceService"].sort(),
+  );
+});

@@ -5,6 +5,12 @@ same durable runner. Operators start a named pipeline, observe its run ID and
 public activity, answer bounded pending input, and resume explicit pauses. The
 product does not require a daemon or network service.
 
+The shared [operator guide](../OPERATOR_GUIDE.md) owns the practical procedure
+for preparing, supervising, recovering, and completing work through either
+transport. A pause is not completion: follow its current `nextActions`, resolve
+only the permitted cause, and resume the same run when resumable. Do not finish,
+validate, rewrite, discard, or commit resumable work manually.
+
 ## Configuration
 
 Runner-root configuration is the only source of trusted profile
@@ -74,3 +80,29 @@ that contradicts the documented runner contract. Expected pauses, invalid
 input, configured limits, and environmental blockers are not unexpected
 issues. Reports contain only caller-supplied bounded Markdown; the runner does
 not attach logs or secrets automatically.
+
+## Project-local operating guidance
+
+The shared guidance capability composes the installed operator guide and the
+entire optional `<artifactRoot>/agent-runner/rules.md`, using current new-run
+configuration resolution. Clear boundaries state that local additions may
+specialize project operation but cannot weaken common safety or product
+contracts. Missing local content is valid and reading never creates it.
+
+Local guidance is a complete, bounded, non-sensitive Markdown document. Whole
+replacement uses an expected content hash, an idempotency key, atomic
+publication, and the canonical-worktree lease. Stale concurrent edits fail;
+completed retries return their original receipt even after subsequent edits.
+Empty content means no additions. The common guide is never replaced.
+
+Record stable project operating lessons here after execution releases ownership.
+Task requirements belong in task context or tracked project documents, universal
+rules in the common guide, and genuine Runner defects in deliberate issue
+reports. Guidance belongs only to the supervisor: pipeline roles do not receive
+it, and runs neither persist nor reload it.
+
+Valid dirty work left by a genuinely non-resumable run may be recovered through
+polishing after ownership is gone and inputs are reconciled. Plan execution
+still requires a clean worktree; polishing still stages without committing.
+Contaminated or unsafe mixed content requires an uncontaminated worktree,
+not adoption by a different pipeline.

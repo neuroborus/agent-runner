@@ -45,10 +45,29 @@ recovery. Clarification writes occur only through a persisted one-shot editor
 or MCP authorization. Repository-local artifacts must be confined, ignored,
 and non-overlapping with protected inputs.
 
-Authoritative run state is external to both repository and task. Atomic files,
+Authoritative run state is external to both repository and task. These trees
+must be disjoint: neither the project nor task may contain or be contained by
+the state root. Atomic files,
 write-ahead events, owner-token leases, canonical paths, link checks, and
 bounded schemas make interruption recoverable without trusting a half-written
 file or a surviving native session.
+
+Local operating guidance uses the same new-run configuration and Git safety
+boundaries. Its target and temporary files must be ignored, untracked, confined,
+and separate from configuration and protected control paths. Linked, unsafe,
+non-regular, malformed, or oversized documents fail closed, including unsafe
+absent destinations. Reading does not create files. Both common and local
+documents are bounded; document bodies never enter action metadata or errors.
+
+Guidance replacement holds the canonical-worktree lease, excluding active
+execution and competing publishers. It compares the expected hash inside the
+publication boundary and atomically replaces only the local file. Pinned
+directory descriptors prevent ancestor replacement from redirecting filesystem
+effects. Durable temporary-file identity distinguishes an interrupted
+publication from another writer's identical content; retries preserve later
+edits and cannot redirect through changed configuration. A completed receipt
+is replayed without repeating publication. Local additions cannot weaken
+common contracts and never enter role prompts or run state.
 
 ## Effect reconciliation
 

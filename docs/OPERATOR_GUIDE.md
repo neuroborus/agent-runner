@@ -1,0 +1,249 @@
+# Agent Runner Operator Guide
+
+Use this procedure when supervising Agent Runner through the CLI or its local
+STDIO MCP server. The [product documents](README.md) own the current guarantees;
+the pipeline specifications own exact workflow and recovery contracts.
+
+## 1. Choose the work and its owner
+
+Choose one pipeline for the intended outcome:
+
+| Pipeline         | Starting point                             | Successful result                                                    |
+| ---------------- | ------------------------------------------ | -------------------------------------------------------------------- |
+| `plan-authoring` | A task and optional context                | A reviewed, validated `plan.md`; no implementation or commit         |
+| `plan-execution` | A clean worktree and validated commit plan | One verified local commit per planned step                           |
+| `polishing`      | An existing non-empty local change set     | The complete finalized and reviewed changes staged, without a commit |
+
+`independent` is the default and recommended mode: separate primary and review
+roles provide independent semantic review, using more provider context and
+tokens. `lazy` is an explicit opt-in choice with lower consumption and no
+independent review. It uses the primary role's bounded check/fix and separate
+read-only clean confirmations. Never choose lazy automatically to save tokens.
+
+Give a worktree one owner. Plan execution and polishing enforce a canonical
+worktree lease, including across CLI and MCP. While a run owns execution, do
+not mutate its repository, Git state, frozen inputs, configuration, local
+guidance, or finalization guidance. Do not switch branches, stash, reset,
+rewrite history, edit checks, or run another mutating workflow there. Read-only
+inspection is appropriate; inspect another base without changing this checkout.
+An execution lease ending does not authorize interference with resumable work.
+
+## 2. Prepare against the actual base
+
+Read the project's instructions, owning specifications, and relevant code.
+Verify that the intended base contains the files, symbols, and behavior named
+in the task. Recompute baselines, checksums, inventories, and acceptance
+assumptions against that base. Do not copy measurements from a previous task,
+another checkout, or a stale branch. Prefer explicit behavior and invariants
+to incidental counts; verify any required counts and path lists locally.
+
+Use pipeline discovery (`agent-run pipelines` or `pipelines_list`) to confirm
+inputs and settings. Reconcile the task, context, plan, and existing
+clarifications before starting. Put requirements and acceptance criteria in
+task inputs or tracked project documentation, with commands clearly identified
+as required checks or background examples. Ambiguous commands in prose can
+produce a different inventory from the one you intended.
+
+Plan execution consumes the validated subjects and commit boundaries unchanged.
+A decision that conflicts with the plan requires a revised plan and a new
+execution run. Do not edit a frozen clarification transcript to override it,
+rewrite completed commits, or reuse a plan whose steps are already implemented.
+Prepare a new plan for the remaining work when required.
+
+Runner-root configuration defines trusted profiles and command vectors. An
+ignored, untracked project configuration may select those aliases and safe
+settings. The default project configuration is
+`LOCAL_ARTIFACTS/agent-runner.json`; an explicit project configuration must be
+confined to the project. `artifactRoot` defaults to `LOCAL_ARTIFACTS`.
+Repository-local artifacts must already be ignored. The runner never changes
+ignore rules automatically. Keep authoritative state in a separate tree from
+the project and task directories; neither may contain the other.
+
+Select compatible role backends and profiles before starting. Leave the source
+session unset unless the user deliberately chooses to fork a compatible current
+session after being offered a fresh start. Use only a known trusted source
+profile, or `current` inheritance if it is unknown. Keep session IDs opaque;
+never inspect provider-private storage or invent an ID. Prefer a fresh start
+for long, mixed-topic, or uncertain context. Independent mode forks source
+context separately into primary and review checkpoints; lazy mode forks it
+once into the primary role. Durable recovery does not require native sessions
+to survive.
+
+## 3. Establish executable validation
+
+Before starting, verify each required command in its owning environment and in
+the exact form that will be executed. Its exit status must express the intended
+pass/fail rule. Check availability of dependencies, generated prerequisites,
+services, and any expected baseline failures. A check must detect a regression,
+not merely pass the existing base. Distinguish checks applicable throughout the
+plan from step-specific acceptance criteria.
+
+Bootstrap establishes one complete, staging-independent inventory. Keep its
+exact commands, stable check IDs, order, and validation-infrastructure paths.
+Do not duplicate it in competing lists, renumber it, omit checks, substitute an
+equivalent command, or add infrastructure paths because they seem relevant.
+Infrastructure describes what controls validation; it is not a second list of
+acceptance criteria or every file whose contents are being checked.
+
+Use checks over workspace content, `HEAD`, or explicit trees where applicable.
+Staged/index-relative checks and staging completeness belong to the runner's
+commit or handoff boundary. Do not build an alternate index or hide a dependency
+on staging or changing commit history inside a script. Git inspection is not
+universally forbidden: the relevant distinction is which content and boundary
+the command actually checks.
+
+Commands requiring unavailable sandbox capabilities, IPC, sockets, or host
+services may need runner-trusted execution. Only runner-root configuration can
+define an exact executable and argument vector. Select its alias separately
+for every applicable pipeline; selecting it for plan execution does not select
+it for polishing. The selection defaults to empty and is frozen for each run.
+Trusted checks retain isolation and mutation guards; they do not grant broader
+agent permissions or accept user-attested results.
+
+Never weaken tests, assertions, discovery, scripts, formatter/linter settings,
+or validation infrastructure merely to make a check pass. Fix the in-scope
+implementation. A legitimate infrastructure change must be explicitly within
+the task and current planned step and accepted by terminal confirmation.
+An environment blocker requires the permitted recovery action, not relaxed
+sandboxing, an invented command, a new baseline, or fabricated success.
+
+## 4. Start, clarify, and observe
+
+Start the selected pipeline with its project and task directory, for example:
+
+```bash
+agent-run run plan-execution --project /path/to/project --task /path/to/task
+agent-run status --run <run-id>
+```
+
+Every pipeline starts with read-only `CLARIFY`. Answer material questions from
+explicit user context; otherwise obtain the user's decision. An empty
+clarification document and an authorized editor close without changes are
+valid. CLI uses a persisted editor authorization; MCP uses structured pending
+input and never opens an editor. Only the identified authorization permits
+clarification changes. Once clarification closes, inputs are frozen and hashed;
+ordinary follow-up questions are prohibited. A later product decision is an
+exception only when progress is impossible without a genuinely unresolved
+material requirement, not an implementation preference or review finding.
+
+Through MCP, retain the durable run ID and the original idempotency key for
+each mutation. Retry an uncertain mutation with the same arguments and key.
+A new key represents a new mutation and cannot recover the original receipt.
+Use `run_wait` for one event-driven wait over the desired interval. Use
+`run_activity` only for deliberate current or historical inspection, with its
+cursor. Do not poll status, activity, or waits at a fixed cadence.
+
+A timeout, wait cancellation, or MCP disconnect ends only that wait. Detached
+work continues. Inspect the returned execution state to distinguish a live
+owner, an interrupted turn, and idle work. An ownerless interrupted turn may
+accept action-free resume at the exact revision; it is not permission to start
+a second owner. Follow the current public state and actions.
+
+## 5. Recover a pause without taking over the work
+
+**A pause is not completion.** Read its reason, bounded evidence, pending input,
+and current `nextActions`. When the run is resumable, resolve only the permitted
+cause and resume that same run. Do not manually finish, validate, rewrite,
+discard, or commit its resumable work. Do not mutate frozen inputs or
+configuration to change what a resumed run will do; resume uses its durable
+snapshot.
+
+| Current action  | Operator procedure                                                                                                                                                                                                                                |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `respond`       | Answer the identified pending request with its exact revision and request ID through MCP, or use the runner-authorized clarification edit and CLI resume. Do not answer a consumed request again.                                                 |
+| `resume`        | Apply only the offered retry or explicit action: for example restore provider/service availability, grant the offered extra fix budget, or authorize one applicable finding override. Resume the same run; preserve prior counters and decisions. |
+| `start-new-run` | Follow the stated prerequisite: revise the plan, reconcile finalization blockers, or obtain an uncontaminated worktree. This action does not authorize retrying the stopped workflow or silently accepting its changes.                           |
+
+For an ordinary CLI retry, use `agent-run resume --run <run-id>` only when the
+current action permits it. MCP responses and resumes require the current
+revision and an idempotency key. An override applies only to its named finding
+and exact reviewed content, not to other findings or future repairs. Lazy
+confirmation findings return to fixing and are not arbitrated.
+
+Classify by current actions rather than an error-name shortcut. Provider usage
+exhaustion and environment limitations may be resumable; exhausted budgets,
+unsafe reconciliation, changed inputs, or ambiguous effects have their own
+bounded recovery rules. Do not erase locks, patch state files, reset stagnation
+history, or assume every `no_progress` pause has the same recovery path.
+
+If a genuinely non-resumable run leaves valid dirty work, first establish that
+execution ownership is gone and reconcile inputs and the stopped run's
+requirements. Then use **polishing** to finalize and review that existing
+change set. Do not start plan execution on a dirty tree or discard useful work
+merely to pass its clean-tree preflight. Polishing stages the accepted result
+and never commits; any subsequent operator commit requires separate authority.
+If further planned implementation remains, prepare the appropriate clean base
+and revised remaining plan before starting execution.
+
+This fallback never legitimizes contamination. A read-only role mutation or
+unsafe mixed change set requires an uncontaminated worktree and explicit
+reconciliation, not adoption through another pipeline. Preserve unexpected
+user work; the runner does not roll it back automatically.
+
+## 6. Recognize the actual completion boundary
+
+Candidate convergence precedes finalization. Finalization follows the selected
+repository skill or the complete repository-derived fallback, runs writable
+formatting before the established non-mutating checks, and records direct
+evidence for every check. A separate read-only terminal confirmation inspects
+the resulting content and validation evidence. Formatter output is part of
+what must be confirmed.
+
+Content-changing repairs invalidate earlier acceptance evidence and require
+the complete gate again. An unchanged successful finalization may be reused
+only under the runner's exact content and infrastructure fingerprint rules;
+there must still be a fresh successful terminal confirmation. An operator's
+manual validation result does not replace this evidence.
+
+For plan execution, only the runner-authorized Worker commit effect stages,
+checks staged hygiene, and creates the exact subject-only planned local commit.
+No body, footer, authorship trailer, identity change, or remote write is allowed.
+For polishing, only the runner's `HANDOFF` stages and verifies the complete
+accepted change set; `HEAD` stays unchanged. Wait for `DONE` and its verified
+outcome, not merely a successful agent message or passing tests. Never replay
+an ambiguous commit or handoff manually.
+
+## 7. Report defects and maintain useful local guidance
+
+Keep these outcomes separate:
+
+- **Expected runner pause or invalid input:** follow its current actions and
+  correct only the permitted cause. Limits and environmental blockers are not
+  automatically Runner defects.
+- **Genuine unexpected Runner defect:** deliberately use the optional MCP
+  `unexpected_issue_report` only after concluding that behavior contradicts
+  the documented contract. Supply bounded English Markdown describing the
+  expected and actual behavior and why it is unexpected. Do not attach raw
+  logs, provider output, prompts, credentials, or transcripts. The server does
+  not gather them automatically. Retry an uncertain report with its original
+  key; reporting does not resume or repair the run.
+- **Stable project operating lesson:** consolidate it into local guidance when
+  no execution owns the project. A universal product rule belongs in the common
+  guide; a task or product requirement belongs in task context or tracked
+  project documentation.
+
+The canonical common guide is shipped with Agent Runner. Optional project-local
+Markdown lives at `<artifactRoot>/agent-runner/rules.md`, using the same current
+configuration resolution as a new run. The shared guidance capability returns
+both complete documents with explicit boundaries and precedence. Local
+additions may specialize project operation but cannot weaken common safety or
+product contracts. They guide the supervising operator only: they are not
+injected into Planner, Worker, Reviewer, or Arbiter prompts, persisted in run
+state, or reloaded by active runs.
+
+Keep local additions short, non-sensitive, and operator-authored. Exclude
+secrets, credentials, raw provider output, transcripts, and chain-of-thought.
+Reads do not create missing files or directories. Unsafe, linked, tracked,
+non-ignored, overlapping, malformed, or oversized targets are rejected.
+Each document is bounded to 64 KiB of valid UTF-8 with safe text characters.
+Recognizable credential and transcript formats are rejected; this is not a
+guarantee that arbitrary prose is free of secrets.
+
+Edit additions as a whole document: rewrite, consolidate, or remove obsolete
+lessons. Empty content means no local additions. A missing file has a null
+hash; an existing empty file has its own SHA-256 hash. Replacement compares
+the previously read hash inside the publication boundary and is atomic.
+A stale edit requires rereading and reconciling the entire current document.
+The common guide is never replaced by a local update. Completed idempotent
+retries return their recorded receipt even after later edits; that receipt
+describes the earlier operation, not a fresh read of current guidance.
