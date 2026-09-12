@@ -434,6 +434,9 @@ enter `HANDOFF` directly. A failure becomes blocking findings for Worker
 resolution. Unavailable explicit guidance or a blocked finalization procedure
 pauses.
 
+Before evidence is fingerprinted, the runner inspects every candidate
+validation-infrastructure path as an existing canonical regular repository file.
+An invalid path uses the existing bounded read-only finalization correction.
 Every non-availability result repeats the complete inventory actually used and
 contains exactly one ordered result with bounded direct evidence for every
 required check. Agent-executed checks must pass; omissions, skips, exclusions,
@@ -492,8 +495,9 @@ Arbiter. A content-changing fix invalidates candidate, finalization, and
 terminal-confirmation evidence and returns through mode-specific candidate
 convergence before the complete finalization gate runs again.
 
-Terminal findings clear candidate and terminal-confirmation attestations while
-retaining a successful finalization record provisionally. After mode-specific
+Ordinary terminal findings without validation-evidence rejection clear candidate
+and terminal-confirmation attestations while retaining a successful finalization
+record provisionally. After mode-specific
 candidate convergence, the runner recomputes the finalized content and
 validation-infrastructure fingerprints. Exact matches return directly to
 `CONFIRM`; a mismatch invalidates the record and re-enters `FINALIZE`. A
@@ -501,6 +505,71 @@ declared fix without a proven repository mutation does not invalidate evidence.
 Actual content or infrastructure changes, provider correction-scope drift, and
 content-changing interruption reconciliation always do. One fresh successful
 terminal confirmation remains required immediately before `HANDOFF`.
+
+Terminal `validationChange: REJECTED` has a separate recovery route shared by
+both terminal roles. First honor the existing whole-result override gate for
+all findings at the exact terminal content fingerprint. Otherwise immediately
+invalidate finalization and confirmation evidence, including mixed rejections.
+The required `finalizationFindingIds` array is a unique subset of at most 32
+reported finding IDs identifying evidence-only concerns requiring no repository
+edit. It must be empty outside a rejected terminal result; mixed concerns must
+be separate findings. Candidate-review schemas do not carry this field, and
+routing never classifies prose.
+Evidence may be rejected even when the inventories and infrastructure are
+unchanged. Such a rejection uses semantic recovery, not malformed-output
+correction; inventory equality alone does not establish sufficient check evidence.
+
+After exact applicable overrides, a pure evidence rejection preserves candidate
+acceptance and returns directly to `FINALIZE` with bounded accepted findings.
+It does not run candidate convergence or code check/fix, charge fix/correction
+rounds, or update stable-finding/stagnation history. A mixed rejection routes
+only content findings through ordinary mode-specific resolution and candidate
+convergence, then requires fresh finalization even if content stays unchanged.
+Neither withdrawal nor a later override can restore the invalidated PASS.
+Ordinary non-rejection findings retain the existing reuse rule above.
+
+Recovery invokes the complete finalization procedure with its ordinary
+formatting permissions, canonical infrastructure inspection, ordered check
+results, runner-trusted execution, and final evidence construction. A replacement
+must retain every established exact check ID/command and infrastructure entry;
+feedback cannot authorize an omission, substitution, removal, or weakening.
+Every finalization request includes the saved established validation tuple,
+including session-independent reconstruction after interruption.
+Malformed replacement output follows the existing separate read-only correction
+budget. A valid replacement and one fresh terminal confirmation must bind the
+same resulting content and validation fingerprints before `HANDOFF`.
+
+Pipeline state version 11 adds `finalizationRecovery`, containing consumed
+`attempts`, explicit `additionalAttempts`, `required` and `pending` flags, and
+nullable bounded `feedback`. Feedback retains only normalized findings, their
+evidence-only ID subset, the terminal content fingerprint, and the current
+established-infrastructure fingerprint. It never retains a rejected finalization
+record, provider output, or transcript. The version-10 migration initializes
+empty metadata without inferring lost rejection output, moving the workflow,
+changing persisted mode, or replaying pending or completed handoff effects.
+
+Two automatic semantic retries are available per polishing run, independently of
+malformed-output and code-fix budgets. Before invocation, persist the consumed
+attempt and pending marker. Interruption, provider unavailability, and external
+validation blockage resume that pending attempt without recounting it. Content
+or infrastructure scope drift discards stale feedback without replenishing the
+run allowance. Content repair still returns through candidate convergence;
+formatting within finalization retains its usual permissions and fingerprint
+rules. Accepted replacement finalization clears pending recovery and feedback,
+while the consumed allowance remains until the run ends.
+A blocking product decision retires the pending attempt and its feedback before
+returning through bootstrap and polishing; it does not restore
+consumed allowance or remove the replacement-finalization requirement.
+
+Exhaustion pauses as `finalization_evidence_rejected`, with `FINALIZE` as the
+resume checkpoint, bounded actionable CLI/MCP evidence, and an explicit null
+retry granting exactly one additional attempt. Independent-mode overrides use
+the saved terminal content fingerprint, which may differ from candidate
+approval after formatting. Partial overrides leave other feedback blocking;
+resolving all recovery feedback authorizes one replacement attempt and still
+requires complete finalization and fresh confirmation. Lazy mode exposes no
+finding overrides. No retry grants index-write or commit authority; runner-owned
+`HANDOFF` alone stages the accepted content.
 
 #### Independent review and findings
 
@@ -519,7 +588,8 @@ request is reconstructed from durable state rather than depending on the
 candidate-review session. It records `UNCHANGED`, explicitly `ACCEPTED` for a
 complete task-authorized validation change, or `REJECTED` with a finding, all
 bound to the finalized content fingerprint. Approval enters `HANDOFF` directly;
-findings are non-confirming and return to resolution.
+ordinary findings return to resolution, while evidence rejection follows the
+shared terminal recovery route above.
 
 The Worker resolves all current blockers in one batch by `FIX` or evidence-based
 `DISPUTE`. Fixes return through candidate review and then either reuse matching
@@ -576,7 +646,7 @@ terminal result supplies the same validation-change decision required from the
 independent terminal Reviewer. Only mutation-free `CLEAN` with unchanged
 fingerprints and `UNCHANGED` or task-authorized `ACCEPTED` validation change
 records the reviewed and terminal clean-confirmation fingerprints and enters
-`HANDOFF`. Terminal findings return directly to `CHECK_AND_FIX` and require
+`HANDOFF`. Ordinary terminal findings return directly to `CHECK_AND_FIX` and require
 candidate confirmation plus a fresh terminal confirmation; finalization reruns
 only when the retained evidence no longer matches. Existing
 fix, stable-finding, stagnation, and additional-round budgets bound the loop;
@@ -883,6 +953,14 @@ unprovable active finalization and review evidence; and routes active work to
 on safe resume. Existing `HANDOFF`, `DONE`, and `FAILED` gates are shape-upgraded
 without replaying role turns, finalization, staging, or a completed handoff.
 
+Pipeline state version 11 adds the bounded `finalizationRecovery` record described
+above. The version-10 migration initializes empty recovery metadata without
+moving active or terminal checkpoints, changing mode or counters, inferring
+missing rejection output, or replaying role turns or pending/completed handoff
+effects. Recovery-state validation rejects unknown fields, inconsistent attempt
+allowances and pending markers, malformed feedback, and retained finalization
+or confirmation evidence while replacement finalization is required.
+
 MCP uses the common STDIO tools, persists idempotency intents before mutation
 and receipts before returning, and launches detached continuation under the
 same lease rules. A worktree conflict leaves the durable run and incomplete
@@ -990,7 +1068,7 @@ semantics, and handoff behavior. Cover at least:
   plan-execution runs, detached MCP retry, and same-host stale recovery;
 - compatible legacy migration, incompatible reader and detached-child
   rejection, and disconnects that leave durable state unchanged;
-- every supported legacy version migrating through state version 10 to safe
+- every supported legacy version migrating through state version 11 to safe
   candidate convergence while preserving paused and terminal runs without
   replaying `HANDOFF`;
 - sandbox, IPC, loopback, process-isolation, missing-service, and permission
@@ -1013,6 +1091,13 @@ semantics, and handoff behavior. Cover at least:
 Root tests cover workspace imports and metadata, static registration,
 configuration, runner behavior, CLI/MCP projections, applicable resume actions,
 idempotent detached continuation, and regressions for existing pipelines.
+
+Additional terminal-recovery coverage includes both modes, evidence-only and
+mixed rejection, unchanged-inventory insufficiency, exact replacement inventory,
+separate malformed-output budgets, durable retry reservation and exhaustion,
+provider and interruption recovery, scope drift, formatter-bound whole and
+partial overrides, safe CLI/MCP projections, strict version-10 migration, and
+handoff blocked until replacement finalization and fresh confirmation pass.
 
 ## Non-Goals
 

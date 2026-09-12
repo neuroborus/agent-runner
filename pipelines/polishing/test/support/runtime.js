@@ -39,6 +39,7 @@ import {
   migratePolishingStateV7,
   migratePolishingStateV8,
   migratePolishingStateV9,
+  migratePolishingStateV10,
   runPolishing,
 } from "../../src/index.js";
 import {
@@ -259,7 +260,9 @@ function migrateVersionOneState(state) {
   const versionNine = migratePolishingStateV8({
     pipelineState: versionEight,
   });
-  return migratePolishingStateV9({ pipelineState: versionNine });
+  return migratePolishingStateV10({
+    pipelineState: migratePolishingStateV9({ pipelineState: versionNine }),
+  });
 }
 
 function hash(value) {
@@ -420,6 +423,7 @@ function candidateFindings(...ids) {
   const {
     validationChange: _change,
     validationEvidence: _evidence,
+    finalizationFindingIds: _finalizationFindingIds,
     ...result
   } = reviewFindingBatch(ids);
   return result;
@@ -430,6 +434,7 @@ function cleanConfirmation(validationChange = "UNCHANGED") {
     status: "CLEAN",
     findings: [],
     validationChange,
+    finalizationFindingIds: [],
     validationEvidence:
       validationChange === "UNCHANGED"
         ? []
@@ -492,6 +497,7 @@ function reviewApproved(validationChange = "UNCHANGED") {
     status: "APPROVED",
     findings: [],
     validationChange,
+    finalizationFindingIds: [],
     validationEvidence:
       validationChange === "UNCHANGED"
         ? []
@@ -600,6 +606,7 @@ function reviewFindingBatch(ids) {
       suggestedAction: "Remove the unnecessary line.",
     })),
     validationChange: "UNCHANGED",
+    finalizationFindingIds: [],
     validationEvidence: [],
     ...emptyDecision(),
   };
@@ -953,6 +960,7 @@ async function createFixture(
     const {
       validationChange: _validationChange,
       validationEvidence: _validationEvidence,
+      finalizationFindingIds: _finalizationFindingIds,
       ...candidate
     } = result;
     return {
@@ -1074,7 +1082,7 @@ async function createFixture(
     store = createRunStore({ stateRoot });
     const created = await store.createRun({
       pipelineId: "polishing",
-      pipelineStateVersion: 10,
+      pipelineStateVersion: 11,
       projectPath,
       taskPath,
       roles,
@@ -1097,7 +1105,7 @@ async function createFixture(
       revision: 1,
       runId: "run-1",
       pipelineId: "polishing",
-      pipelineStateVersion: 10,
+      pipelineStateVersion: 11,
       projectPath,
       taskPath,
       roles,

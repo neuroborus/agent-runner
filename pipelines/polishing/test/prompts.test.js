@@ -15,6 +15,7 @@ import {
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
   FINALIZATION_CORRECTION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
+  FINALIZATION_RECOVERY_INSTRUCTIONS,
   finalizationBootstrapInstructions,
   finalizationGuidanceInstructions,
   FINDING_ARBITRATION_INSTRUCTIONS,
@@ -270,4 +271,41 @@ test("polishing schemas are strict, bounded, and deeply frozen", () => {
   ]) {
     assertSchemaBounds(schema);
   }
+});
+
+test("terminal recovery instructions distinguish evidence from content without weakening the gate", () => {
+  for (const prompt of [REVIEW_INSTRUCTIONS, CLEAN_CONFIRM_INSTRUCTIONS]) {
+    assert.match(prompt, /finalizationFindingIds as the unique subset/u);
+    assert.match(prompt, /requiring no repository edit/u);
+    assert.match(prompt, /Split mixed evidence and content concerns/u);
+    assert.match(
+      prompt,
+      /Evidence rejection is valid even when inventories are unchanged/u,
+    );
+  }
+  for (const schema of [REVIEW_SCHEMA, CLEAN_CONFIRM_SCHEMA]) {
+    assert.ok(schema.required.includes("finalizationFindingIds"));
+    assert.equal(schema.properties.finalizationFindingIds.maxItems, MAX_ITEMS);
+  }
+  for (const schema of [
+    CANDIDATE_REVIEW_SCHEMA,
+    CANDIDATE_CLEAN_CONFIRM_SCHEMA,
+  ]) {
+    assert.equal(
+      Object.hasOwn(schema.properties, "finalizationFindingIds"),
+      false,
+    );
+  }
+  assert.match(
+    FINALIZATION_RECOVERY_INSTRUCTIONS,
+    /complete project finalization procedure again/u,
+  );
+  assert.match(
+    FINALIZATION_RECOVERY_INSTRUCTIONS,
+    /never authorize omitting, substituting, removing, or weakening/u,
+  );
+  assert.match(
+    FINALIZATION_RECOVERY_INSTRUCTIONS,
+    /do not reuse the rejected PASS/u,
+  );
 });

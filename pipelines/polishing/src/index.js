@@ -9,6 +9,10 @@ import {
   assertRun as validateRun,
   DEFAULT_FINALIZATION_POLICY,
   EMPTY_TRUSTED_VALIDATION,
+  MAX_SEMANTIC_FINALIZATION_RETRIES,
+  createFinalizationRecovery,
+  finalizationFeedbackFindings,
+  findingFingerprint,
   isFinalizationPolicy,
   MAX_DISPUTES_PER_FINDING,
   resolveActiveRoles,
@@ -29,6 +33,7 @@ export {
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
   FINALIZATION_CORRECTION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
+  FINALIZATION_RECOVERY_INSTRUCTIONS,
   finalizationBootstrapInstructions,
   finalizationGuidanceInstructions,
   FINDING_ARBITRATION_INSTRUCTIONS,
@@ -121,6 +126,7 @@ const RETRYABLE_PAUSE_REASONS = new Set([
   "confirmation_output_invalid",
   "environment_blocked",
   "finalization_cannot_pass",
+  "finalization_evidence_rejected",
   "finalization_skill_invalid",
   "finalization_skill_missing",
   "lazy_output_invalid",
@@ -153,6 +159,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "The execution clarification artifact changed outside an authorized editor window.",
   environment_blocked:
     "Required validation is blocked by the execution environment.",
+  finalization_evidence_rejected:
+    "Terminal confirmation exhausted semantic finalization retries; correct evidence and explicitly retry complete finalization.",
   finalization_cannot_pass:
     "The current finalization procedure cannot establish a passing gate.",
   finalization_skill_invalid:
@@ -194,6 +202,7 @@ const PUBLIC_DETAIL_REASONS = new Set([
   "bootstrap_inventory_capacity_exhausted",
   "confirmation_output_invalid",
   "finalization_cannot_pass",
+  "finalization_evidence_rejected",
   "finalization_skill_invalid",
   "finalization_skill_missing",
   "lazy_output_invalid",
@@ -264,6 +273,17 @@ function resumeActionApplies(run, action) {
   }
 }
 
+function publicFindings(state) {
+  return [
+    ...new Map(
+      [
+        ...(Array.isArray(state.findings) ? state.findings : []),
+        ...finalizationFeedbackFindings(state),
+      ].map((finding) => [finding.id, finding]),
+    ).values(),
+  ];
+}
+
 function projectPause(run) {
   if (run.pause === null) {
     return null;
@@ -312,9 +332,7 @@ function projectPause(run) {
           Object.freeze({ type: "resume", action: extraFixRounds }),
         );
       }
-      for (const finding of Array.isArray(run.pipelineState.findings)
-        ? run.pipelineState.findings
-        : []) {
+      for (const finding of publicFindings(run.pipelineState)) {
         const override = Object.freeze({
           type: "override-finding",
           findingId: finding.id,
@@ -348,11 +366,9 @@ function projectStatus(run) {
     currentStep: null,
     planPath: null,
     findings: Object.freeze(
-      Array.isArray(state.findings)
-        ? state.findings.map(({ id, problem }) =>
-            Object.freeze({ id, summary: problem }),
-          )
-        : [],
+      publicFindings(state).map(({ id, problem }) =>
+        Object.freeze({ id, summary: problem }),
+      ),
     ),
     completedCommits: Object.freeze([]),
     stagnationDirection: state.stagnationDirection?.direction ?? null,
@@ -371,6 +387,24 @@ function validateResumeAction(run, action) {
       throw new Error("A pending input edit does not accept a resume action.");
     }
     return;
+  }
+  if (
+    action === null &&
+    run.pause?.reason === "finalization_evidence_rejected"
+  ) {
+    const recovery = state.finalizationRecovery;
+    if (
+      run.pause.resumeState === "FINALIZE" &&
+      recovery.required &&
+      !recovery.pending &&
+      recovery.attempts ===
+        MAX_SEMANTIC_FINALIZATION_RETRIES + recovery.additionalAttempts &&
+      Number.isSafeInteger(
+        recovery.additionalAttempts + MAX_SEMANTIC_FINALIZATION_RETRIES + 1,
+      )
+    )
+      return;
+    throw new Error("Semantic finalization retry is not applicable.");
   }
   if (state.candidateMigrationPending && action === null) {
     return;
@@ -392,12 +426,20 @@ function validateResumeAction(run, action) {
   if (action?.type === "override-finding") {
     if (
       state.settings?.mode === "lazy" ||
-      !["fix_limit_reached", "no_progress"].includes(run.pause?.reason) ||
-      (state.reviewedFingerprint === null &&
-        state.candidateReviewedFingerprint === null &&
-        (state.finalizationResult?.status !== "PASS" ||
-          state.finalizedFingerprint === null)) ||
-      !state.findings?.some(({ id }) => id === action.findingId)
+      ![
+        "fix_limit_reached",
+        "no_progress",
+        "finalization_evidence_rejected",
+      ].includes(run.pause?.reason) ||
+      findingFingerprint(state) === null ||
+      ![...state.findings, ...finalizationFeedbackFindings(state)].some(
+        ({ id }) => id === action.findingId,
+      ) ||
+      state.findingOverrides.some(
+        ({ findingId, fingerprint }) =>
+          findingId === action.findingId &&
+          fingerprint === findingFingerprint(state),
+      )
     ) {
       throw new Error("Finding override is not applicable.");
     }
@@ -874,9 +916,16 @@ export function migratePolishingStateV9(run) {
   });
 }
 
+export function migratePolishingStateV10(run) {
+  return Object.freeze({
+    ...run.pipelineState,
+    finalizationRecovery: createFinalizationRecovery(),
+  });
+}
+
 export const polishingPipeline = Object.freeze({
   id: POLISHING_PIPELINE_ID,
-  stateVersion: 10,
+  stateVersion: 11,
   migrations: Object.freeze({
     1: migratePolishingStateV1,
     2: migratePolishingStateV2,
@@ -887,6 +936,7 @@ export const polishingPipeline = Object.freeze({
     7: migratePolishingStateV7,
     8: migratePolishingStateV8,
     9: migratePolishingStateV9,
+    10: migratePolishingStateV10,
   }),
   roles: ROLES,
   resolveActiveRoles,

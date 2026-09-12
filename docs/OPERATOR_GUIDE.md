@@ -189,12 +189,13 @@ evidence for every check. A separate read-only terminal confirmation inspects
 the resulting content and validation evidence. Formatter output is part of
 what must be confirmed.
 
-In plan execution, terminal validation-evidence rejection invalidates the
-finalization result. Pure evidence findings return directly to complete
-finalization; mixed findings require content convergence first. After two
-automatic semantic retries per step, `finalization_evidence_rejected` exposes an
-explicit retry at `FINALIZE` for one additional attempt. Pending attempts survive
-interruption without another charge. Follow the projected action; neither
+In plan execution and polishing, terminal validation-evidence rejection
+invalidates the finalization result. Pure evidence findings return directly to
+complete finalization; mixed findings require content convergence first. After two
+automatic semantic retries per execution step or polishing run,
+`finalization_evidence_rejected` exposes an explicit retry at `FINALIZE` for one
+additional attempt. Pending attempts survive interruption without another charge.
+Follow the projected action; neither
 feedback nor an override can restore rejected evidence or weaken the inventory.
 
 Content-changing repairs invalidate earlier acceptance evidence and require

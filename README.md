@@ -417,8 +417,8 @@ ID, pipeline state-schema version, and an explicit runtime compatibility tuple
 independent from the package version. Compatible legacy state is migrated by
 the owning pipeline under the per-run lease; incompatible readers return a
 specific version-skew error while preserving the run. The mode-aware pipeline
-versions are plan-authoring version 3, plan-execution version 14, and polishing
-version 10. Their ordered migrations resolve every supported legacy run to
+versions are plan-authoring version 3, plan-execution version 15, and polishing
+version 11. Their ordered migrations resolve every supported legacy run to
 `independent` without moving terminal workflows or replaying role turns,
 commits, or handoffs. Complete write-ahead events precede atomic state
 replacement; recovery repairs a lagging state file and derived progress.
@@ -489,7 +489,12 @@ If an unexpected runner-owned invariant rejects a finalization transition,
 status retains a resumable `FINALIZE` checkpoint and exposes only a bounded
 diagnostic through both the CLI and MCP.
 
-Polishing follows the same mode-specific, fingerprint-bound ordering.
+Polishing follows the same mode-specific, fingerprint-bound ordering and
+terminal evidence-rejection recovery, with two automatic semantic retries per
+run. Pure evidence rejection preserves candidate acceptance; mixed findings
+converge content before replacement finalization. Exhaustion exposes the same
+explicit additional-attempt action, and recovery never grants an agent index
+access or replays a completed handoff.
 Independent candidate review, or lazy check/fix plus candidate clean
 confirmation, converges before full finalization. Finalization may format the
 accepted candidate; one distinct read-only Reviewer or Worker confirmation then
