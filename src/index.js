@@ -18,6 +18,11 @@ export {
 } from "./config/index.js";
 export { createGitService, GitSafetyError } from "./git/index.js";
 export {
+  createGuidanceService,
+  GuidanceError,
+  MAX_GUIDANCE_BYTES,
+} from "./guidance/index.js";
+export {
   createDetachedLauncher,
   createMcpControlPlane,
   createMcpServer,

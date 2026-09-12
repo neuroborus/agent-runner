@@ -89,6 +89,7 @@ function createBackend(
     failAuthoringClarification = false,
     failExecutionClarification = false,
     implementationGate = null,
+    polishingGate = null,
     rejectSource = false,
   } = {},
 ) {
@@ -303,6 +304,10 @@ function createBackend(
       } else if (
         request.prompt.includes("Polish the existing local repository changes")
       ) {
+        if (polishingGate !== null) {
+          polishingGate.entered.resolve();
+          await polishingGate.release.promise;
+        }
         structured = {
           status: "COMPLETED",
           summary:
@@ -962,10 +967,15 @@ test("runs registered workflows through recoverable MCP controls", async (t) => 
     entered: deferred(),
     release: deferred(),
   };
+  const polishingGate = {
+    entered: deferred(),
+    release: deferred(),
+  };
   const codex = createBackend("codex", {
     authoringQuestion: true,
     failExecutionClarification: true,
     implementationGate,
+    polishingGate,
   });
   const { runner, runStore } = runtime(
     paths,
@@ -975,6 +985,7 @@ test("runs registered workflows through recoverable MCP controls", async (t) => 
   const pipelineProcess = detached(runner);
   t.after(async () => {
     implementationGate.release.resolve();
+    polishingGate.release.resolve();
     try {
       await pipelineProcess.settle();
     } finally {
@@ -997,7 +1008,7 @@ test("runs registered workflows through recoverable MCP controls", async (t) => 
     roleOverrides: {},
     sourceSession: null,
   });
-  const authoringPause = await control.runWait(
+  await control.runWait(
     {
       runId: authored.runId,
       cursor: 0,
@@ -1011,6 +1022,8 @@ test("runs registered workflows through recoverable MCP controls", async (t) => 
       },
     },
   );
+  await pipelineProcess.settle();
+  const authoringPause = await control.runStatus({ runId: authored.runId });
   assert.equal(authoringPause.status, "WAITING_FOR_USER");
   assert.equal(authoringPause.pendingInput.questions[0].id, "q1");
   assert.equal(
@@ -1036,12 +1049,14 @@ test("runs registered workflows through recoverable MCP controls", async (t) => 
     expectedRevision: authoringPause.revision,
     answers: [{ questionId: "q1", answer: "Expose the value directly." }],
   });
-  const authoringDone = await control.runWait({
+  await control.runWait({
     runId: authored.runId,
     cursor: authoringPause.activityCursor,
     timeoutMs: 5_000,
     progress: false,
   });
+  await pipelineProcess.settle();
+  const authoringDone = await control.runStatus({ runId: authored.runId });
   assert.equal(authoringDone.status, "DONE");
   assert.match(
     await readFile(join(paths.taskPath, "clarifications.md"), "utf8"),
@@ -1061,12 +1076,14 @@ test("runs registered workflows through recoverable MCP controls", async (t) => 
     roleOverrides: {},
     sourceSession: null,
   });
-  const executionPause = await control.runWait({
+  await control.runWait({
     runId: execution.runId,
     cursor: 0,
     timeoutMs: 5_000,
     progress: false,
   });
+  await pipelineProcess.settle();
+  const executionPause = await control.runStatus({ runId: execution.runId });
   assert.equal(executionPause.status, "WAITING_FOR_USER");
   assert.deepEqual(executionPause.pause, {
     reason: "backend_unavailable",
@@ -1170,13 +1187,25 @@ test("runs registered workflows through recoverable MCP controls", async (t) => 
     }),
     polishing,
   );
-  const polishingDone = await afterDisconnect.runWait({
+  await within(
+    polishingGate.entered.promise,
+    30_000,
+    "Polishing did not reach the Worker turn.",
+  );
+  const polishingWait = await afterDisconnect.runWait({
     runId: polishing.runId,
     cursor: 0,
-    timeoutMs: 5_000,
+    timeoutMs: 10,
     progress: false,
   });
+  assert.equal(polishingWait.timedOut, true);
+  assert.notEqual(polishingWait.status, "DONE");
+  polishingGate.release.resolve();
   await pipelineProcess.settle();
+  // A timed-out wait remains a snapshot even after detached execution settles.
+  const polishingDone = await afterDisconnect.runStatus({
+    runId: polishing.runId,
+  });
   assert.equal(
     polishingDone.status,
     "DONE",

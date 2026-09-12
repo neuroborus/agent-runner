@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-09-12
+
+- **Operator guidance has one common owner and a confined local extension.**
+  The installed operator guide covers preparation, supervision, recovery,
+  validation, and completion across CLI and MCP. The shared root capability
+  composes it with the complete optional project-local document, preserving
+  common safety precedence and keeping additions outside pipeline roles and
+  durable runs. Hash-checked replacement holds canonical-worktree ownership
+  and uses atomic publication with durable temporary-file provenance. This
+  prevents stale edits, duplicate effects, and incorrect adoption of another
+  writer's identical content after interruption.
+
 ## 2026-09-05
 
 - **Unchanged terminal repairs retain fingerprint-bound finalization.** Plan

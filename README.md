@@ -11,6 +11,10 @@ Start with the [`docs` map and change gate](docs/README.md). Architecture is
 documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), and each pipeline
 owns its specification under its workspace.
 
+Read the [operator guide](docs/OPERATOR_GUIDE.md) for the complete CLI/MCP
+supervision procedure, pause recovery, validation boundaries, and safe
+project-local operating guidance.
+
 ## Core Guarantees
 
 - Pipelines own their roles, inputs, prompts, state machines, and output policy.
@@ -697,6 +701,12 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   │   ├── handoff.js
 │   │   ├── index.js
 │   │   └── service.js
+│   ├── guidance/
+│   │   ├── content.js
+│   │   ├── contract.js
+│   │   ├── files.js
+│   │   ├── index.js
+│   │   └── service.js
 │   ├── index.js
 │   ├── mcp/
 │   │   ├── index.js
@@ -743,6 +753,11 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   │   ├── local-commit.test.js
 │   │   ├── polishing-handoff.test.js
 │   │   └── repository-safety.test.js
+│   ├── guidance/
+│   │   ├── content-and-safety.test.js
+│   │   ├── documentation.test.js
+│   │   ├── publication.test.js
+│   │   └── support/
 │   ├── integration/
 │   │   └── workflows.test.js
 │   ├── mcp/
@@ -756,6 +771,7 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   ├── product/
 │   ├── ARCHITECTURE.md
 │   ├── CONVENTIONS.md
+│   ├── OPERATOR_GUIDE.md
 │   └── README.md
 ├── .agents/skills/
 ├── AGENTS.md

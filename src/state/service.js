@@ -120,6 +120,17 @@ async function canonicalPotentialPath(path) {
       if (cause?.code !== "ENOENT") {
         throw cause;
       }
+      try {
+        await lstat(currentPath);
+        throw new RunStoreError(
+          "State path cannot resolve through a dangling link.",
+          {
+            code: "ERR_UNSAFE_STATE_ROOT",
+          },
+        );
+      } catch (inspectionCause) {
+        if (inspectionCause?.code !== "ENOENT") throw inspectionCause;
+      }
       const parentPath = dirname(currentPath);
       if (parentPath === currentPath) {
         throw cause;
@@ -130,14 +141,17 @@ async function canonicalPotentialPath(path) {
   }
 }
 
-function assertStateRootOutside(stateRoot, projectPath, taskPath) {
+function assertDisjointStateRoot(stateRoot, projectPath, taskPath) {
   for (const [boundaryPath, name] of [
     [projectPath, "project"],
     [taskPath, "task directory"],
   ]) {
-    if (isWithin(boundaryPath, stateRoot)) {
+    if (
+      isWithin(boundaryPath, stateRoot) ||
+      isWithin(stateRoot, boundaryPath)
+    ) {
       throw new RunStoreError(
-        `State root must remain outside the ${name}: ${stateRoot}.`,
+        `State root and ${name} must remain disjoint: ${stateRoot}.`,
         { code: "ERR_UNSAFE_STATE_ROOT" },
       );
     }
@@ -334,13 +348,13 @@ export function createRunStore({
       canonicalDirectory(projectPath, "Project path"),
       canonicalPotentialPath(requestedStateRoot),
     ]);
-    assertStateRootOutside(
+    assertDisjointStateRoot(
       potentialStateRoot,
       canonicalProjectPath,
       canonicalProjectPath,
     );
     const { rootPath } = await ensureRoot();
-    assertStateRootOutside(
+    assertDisjointStateRoot(
       rootPath,
       canonicalProjectPath,
       canonicalProjectPath,
@@ -403,10 +417,10 @@ export function createRunStore({
       canonicalDirectory(input.taskPath, "Task path"),
       canonicalPotentialPath(requestedStateRoot),
     ]);
-    assertStateRootOutside(potentialStateRoot, projectPath, taskPath);
+    assertDisjointStateRoot(potentialStateRoot, projectPath, taskPath);
 
     const { rootPath, runsPath } = await ensureRoot();
-    assertStateRootOutside(rootPath, projectPath, taskPath);
+    assertDisjointStateRoot(rootPath, projectPath, taskPath);
 
     let runId = input.runId;
     let runDirectory;
@@ -516,7 +530,7 @@ export function createRunStore({
       canonicalDirectory(taskPath, "Task path"),
       canonicalPotentialPath(requestedStateRoot),
     ]);
-    assertStateRootOutside(potentialStateRoot, project, task);
+    assertDisjointStateRoot(potentialStateRoot, project, task);
     return Object.freeze({ projectPath: project, taskPath: task });
   }
 
@@ -537,7 +551,7 @@ export function createRunStore({
 
   async function loadSnapshot(runDirectory, runId) {
     const snapshot = await journal.loadSnapshot(runDirectory, runId);
-    assertStateRootOutside(
+    assertDisjointStateRoot(
       runDirectory,
       snapshot.state.projectPath,
       snapshot.state.taskPath,
@@ -576,6 +590,24 @@ export function createRunStore({
     assertRunId(runId);
     const worktreeDirectory = await getWorktreeLeaseDirectory(projectPath);
     return worktreeLeases.owner(worktreeDirectory, runId);
+  }
+
+  async function withGuidanceLease(projectPath, operation) {
+    if (typeof operation !== "function") {
+      throw new RunStoreError("Guidance publication requires an operation.", {
+        code: "ERR_INVALID_RUN_STORE_OPTIONS",
+      });
+    }
+    await validateStateBoundary({ projectPath, taskPath: projectPath });
+    const lease = await acquireWorktreeLease(projectPath, randomUUID());
+    const assertOwnership = () =>
+      worktreeLeases.runExclusive(lease, async () => {});
+    try {
+      await assertOwnership();
+      return await operation(assertOwnership);
+    } finally {
+      await lease.release();
+    }
   }
 
   async function waitForRunChange(
@@ -959,6 +991,7 @@ export function createRunStore({
     waitForRunChange,
     worktreeIsLeased,
     worktreeLeaseOwner,
+    withGuidanceLease,
     writeRunArtifact,
   });
 }

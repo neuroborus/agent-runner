@@ -98,6 +98,90 @@ test("rejects invalid run-store options", async (t) => {
   );
 });
 
+test("guidance publication shares execution ownership and releases it on failure", async (t) => {
+  const fixture = await createFixture(t);
+  const { projectPath, store, created } = fixture;
+  await assert.rejects(
+    store.withGuidanceLease(projectPath, async (assertOwnership) => {
+      await assertOwnership();
+      await assert.rejects(
+        store.acquireWorktreeLease(projectPath, created.state.runId),
+        { code: "ERR_WORKTREE_LEASED" },
+      );
+      await assert.rejects(
+        store.withGuidanceLease(projectPath, async () => {}),
+        { code: "ERR_WORKTREE_LEASED" },
+      );
+      throw new Error("Publication interrupted.");
+    }),
+    /Publication interrupted/u,
+  );
+  const lease = await store.acquireWorktreeLease(
+    projectPath,
+    created.state.runId,
+  );
+  await lease.release();
+});
+
+test("state boundaries reject containing project or task trees before initialization", async (t) => {
+  const workspace = await mkdtemp(
+    join(tmpdir(), "agent-runner-state-overlap-"),
+  );
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  const stateRoot = join(workspace, "state");
+  const nested = join(stateRoot, "actions");
+  const outside = join(workspace, "outside");
+  await mkdir(nested, { recursive: true });
+  await mkdir(outside);
+  const store = createRunStore({ stateRoot });
+  for (const [projectPath, taskPath] of [
+    [nested, outside],
+    [outside, nested],
+  ]) {
+    await assert.rejects(
+      store.validateStateBoundary({ projectPath, taskPath }),
+      { code: "ERR_UNSAFE_STATE_ROOT" },
+    );
+    await assert.rejects(store.createRun(runInput(projectPath, taskPath)), {
+      code: "ERR_UNSAFE_STATE_ROOT",
+    });
+  }
+  await assert.rejects(
+    store.withGuidanceLease(nested, async () => {}),
+    {
+      code: "ERR_UNSAFE_STATE_ROOT",
+    },
+  );
+  assert.deepEqual(await readdir(stateRoot), ["actions"]);
+  assert.deepEqual(await readdir(nested), []);
+});
+
+test("guidance action intents preserve metadata and replay bounded receipts", async (t) => {
+  const { store } = await createFixture(t);
+  const identity = {
+    key: "guidance-test-key",
+    tool: "guidance_update",
+    arguments: { localContentHash: "a".repeat(64), expectedHash: null },
+    context: { phase: "reserved" },
+  };
+  const action = await store.beginAction(identity);
+  const result = { localHash: "a".repeat(64), updated: true };
+  try {
+    assert.equal(action.record.status, "intent");
+    await action.complete(result);
+  } finally {
+    await action.release();
+  }
+  assert.deepEqual((await store.readAction(identity)).result, result);
+  await assert.rejects(
+    store.readAction({
+      ...identity,
+      arguments: { localContentHash: "b".repeat(64), expectedHash: null },
+    }),
+    { code: "ERR_MCP_IDEMPOTENCY_CONFLICT" },
+  );
+});
+
 test("writes only confined run artifacts with atomic replacement", async (t) => {
   const { created, store, workspace } = await createFixture(t);
   const artifactPath = await store.writeRunArtifact(
