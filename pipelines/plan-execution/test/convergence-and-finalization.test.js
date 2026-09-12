@@ -967,36 +967,12 @@ test("routes corrected terminal confirmation findings, validation changes, and p
         implementationCompleted(),
         finalizationPassed(),
         resolution({ id: "R1", decision: "DISPUTE" }),
+        finalizationPassed(),
       ],
     });
-    let restoredLegacyEvidence = false;
-    const transition = fixture.runtime.transition;
-    fixture.runtime.transition = async (patch, options) => {
-      const next = await transition(patch, options);
-      if (
-        !restoredLegacyEvidence &&
-        options.activity?.phase === "confirmation" &&
-        options.activity.kind === "findings"
-      ) {
-        const fingerprint = next.pipelineState.finalizedFingerprint;
-        next.pipelineState.reviewResult = {
-          status: "FINDINGS",
-          validationChange: "REJECTED",
-          validationEvidence: [
-            "The candidate validation infrastructure change is not authorized.",
-          ],
-          fingerprint,
-        };
-        next.pipelineState.reviewedFingerprint = fingerprint;
-        restoredLegacyEvidence = true;
-      }
-      return next;
-    };
-
     const completed = await fixture.run();
 
     assert.equal(completed.pipelineState.workflowState, "DONE");
-    assert.equal(restoredLegacyEvidence, true);
     assert.equal(
       fixture.calls.reviewer.filter(
         ({ schema }) => schema === CANDIDATE_REVIEW_SCHEMA,
@@ -1012,7 +988,13 @@ test("routes corrected terminal confirmation findings, validation changes, and p
     assert.equal(reReview.pendingConfirmationCorrection, null);
     assert.equal(reReview.reviewResult, null);
     assert.equal(reReview.reviewedFingerprint, null);
-    assert.equal(reReview.finalizationResult.status, "PASS");
+    assert.equal(reReview.finalizationResult, null);
+    assert.equal(
+      fixture.calls.worker.filter(
+        ({ schema }) => schema === FINALIZATION_SCHEMA,
+      ).length,
+      2,
+    );
     assert.equal(
       fixture.transitions.filter(
         ({ options }) => options.activity?.kind === "confirmation-correction",
@@ -2263,17 +2245,16 @@ test("routes lazy confirmation findings directly back to Worker fixing", async (
   );
 });
 
-test("retains corrected finalization evidence when terminal resolution is unchanged", async (t) => {
-  const omittedInventoryFinding = {
+test("retains corrected finalization evidence for an ordinary unchanged terminal finding", async (t) => {
+  const ordinaryFinding = {
     ...cleanConfirmationFindings("R1"),
     findings: [
       {
         id: "R1",
         file: "package.json",
-        problem: "The finalization inventory omitted an established test file.",
-        reason:
-          "The reported validation fingerprint does not cover the complete inventory.",
-        suggestedAction: "Rerun finalization with the complete inventory.",
+        problem: "The implementation needs a second assessment.",
+        reason: "The current behavior may already satisfy the requirement.",
+        suggestedAction: "Reassess the implementation against the requirement.",
       },
     ],
   };
@@ -2286,7 +2267,7 @@ test("retains corrected finalization evidence when terminal resolution is unchan
       checkAndFix(),
       cleanConfirmation(),
       finalizationPassed(),
-      terminalLazyConfirmation(omittedInventoryFinding),
+      terminalLazyConfirmation(ordinaryFinding),
       { ...checkAndFix(), unexpected: "rejected" },
       checkAndFix(),
       cleanConfirmation(),
@@ -3592,7 +3573,7 @@ test("overrides one current finding only for its reviewed fingerprint", async (t
   ]);
 });
 
-test("resolves a sole rejected validation change through its exact override", async (t) => {
+test("requires replacement finalization before resolving a rejected validation change through its exact override", async (t) => {
   const changedInfrastructure = ["package.json", "source.js"];
   const changedFinalization = {
     ...finalizationPassed(),
@@ -3610,6 +3591,7 @@ test("resolves a sole rejected validation change through its exact override", as
       resolution({ id: "R1", decision: "FIX" }),
       changedFinalization,
       resolution({ id: "R1", decision: "FIX" }),
+      changedFinalization,
     ],
   });
 
@@ -3626,6 +3608,11 @@ test("resolves a sole rejected validation change through its exact override", as
   );
 
   assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
+      .length,
+    3,
+  );
   assert.equal(completed.pipelineState.reviewResult.status, "FINDINGS");
   assert.equal(
     completed.pipelineState.reviewResult.validationChange,

@@ -7,6 +7,18 @@ remain in the owning documentation.
 
 ## 2026-09-12
 
+- **Plan execution repairs rejected finalization evidence at its owner.**
+  Terminal evidence-only findings now return directly to complete finalization,
+  preserving candidate acceptance and avoiding unchanged code-fix cycles. Mixed
+  findings immediately invalidate evidence and converge content before a fresh
+  gate. Two durable semantic retries per step are separate from malformed-output
+  and code-fix budgets; pending attempts survive interruption, and exhaustion
+  offers an explicit finalization retry. Terminal-fingerprint overrides cannot
+  revive an invalidated PASS. Unchanged inventories still require sufficient
+  evidence and do not prevent semantic rejection. The new state migration retains
+  only bounded validated findings and control metadata while preserving
+  commit-effect safety.
+
 - **MCP supervision shares guidance and publication with the CLI.** Two thin
   tools read the complete common and local guide or replace the local document
   with an expected hash and idempotency key. The shared capability owns safety,

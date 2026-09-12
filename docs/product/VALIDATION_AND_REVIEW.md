@@ -33,7 +33,7 @@ In independent mode, the Reviewer first checks the complete candidate without
 attesting finalization. All findings remain blocking until fixed, withdrawn,
 arbitrated, or explicitly overridden for the exact candidate fingerprint.
 After finalization passes, a separate Reviewer confirmation checks the finalized
-content and exact validation evidence. Confirmation findings return through
+content and exact validation evidence. Content confirmation findings return through
 candidate convergence. If the successful finalization record still matches the
 recomputed content and validation-infrastructure fingerprints, the workflow
 retries confirmation directly; otherwise it reruns finalization first.
@@ -41,7 +41,7 @@ retries confirmation directly; otherwise it reruns finalization first.
 In lazy mode, writable check-and-fix and read-only candidate clean-confirmation
 turns converge before finalization. A passing finalization enters a distinct
 read-only terminal clean confirmation over the exact validation evidence. Only
-a clean result over unchanged fingerprints advances; findings return directly
+a clean result over unchanged fingerprints advances; ordinary findings return directly
 to the next check-and-fix pass and the same fingerprint-bound reuse decision.
 
 ## Evidence and fingerprints
@@ -52,8 +52,8 @@ ordered-command, and trusted-configuration fingerprints. Skipped, weakened,
 replaced, unmatched, or stale evidence fails closed. Host attestations and user
 claims do not satisfy the gate.
 
-Terminal findings invalidate candidate and confirmation attestations, not an
-otherwise current successful finalization record. A declared fix does not prove
+Ordinary terminal findings invalidate candidate and confirmation attestations,
+not an otherwise current successful finalization record. A declared fix does not prove
 that content changed. After candidate convergence, exact content and validation-
 infrastructure fingerprint matches permit a direct confirmation retry. Actual
 content or infrastructure changes, provider correction-scope drift, content-
@@ -61,6 +61,29 @@ changing interruption recovery, and a new plan-execution commit step invalidate
 the record and require the complete finalization gate again. Every path still
 requires one fresh successful terminal confirmation immediately before commit
 or handoff.
+
+Plan execution treats terminal rejection of validation evidence separately.
+Unless every reported finding already has an applicable exact-terminal-fingerprint
+user override, rejection immediately invalidates finalization and confirmation.
+A bounded structured finding-ID subset identifies evidence-only concerns; prose
+does not decide routing. Pure evidence rejection preserves candidate acceptance
+and reruns complete finalization without code-fix or no-progress accounting.
+Unchanged validation inventories do not prevent evidence rejection; insufficient
+check evidence still requires replacement finalization under the same retry budget.
+Mixed rejection resolves content through normal convergence before replacement
+finalization. Recovery cannot omit, substitute, remove, or weaken established
+checks or infrastructure entries, and always requires fresh terminal confirmation.
+Ordinary non-rejection evidence reuse and polishing's current routing remain as
+specified above.
+
+Two automatic semantic retries per execution step are durable and separate from
+malformed-output and code-fix budgets. Pending retries survive interruption or
+provider unavailability without recounting. Scope drift clears feedback without
+restoring allowance. Exhaustion pauses specifically for rejected finalization
+evidence; an explicit retry authorizes one additional attempt. Independent
+recovery overrides bind the saved terminal fingerprint, including formatter
+changes, and cannot revive invalidated evidence. Only validated bounded findings
+and control metadata are retained.
 
 Plan execution constructs both passing and failing persisted evidence through
 one deterministic pipeline contract. The contract normalizes the Worker and
