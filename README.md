@@ -532,6 +532,8 @@ The MCP process starts from the pinned local installation. The server uses a
 local STDIO transport with stdout reserved for protocol messages. It
 exposes:
 
+- `guidance_read`
+- `guidance_update`
 - `pipelines_list`
 - `run_start`
 - `run_status`
@@ -540,6 +542,27 @@ exposes:
 - `run_respond`
 - `run_resume`
 - `unexpected_issue_report` when runner-local issue reporting is enabled
+
+Call `guidance_read` once before first managing a run for each project, using
+`projectPath` and optional `projectConfigurationPath`. It returns the complete
+`commonContent`, `localContent`, and `combinedContent`, plus the resolved paths
+and `localHash` needed for editing. The startup reminder remains present when
+issue reporting is disabled.
+
+After execution releases ownership, use `guidance_update` to replace the entire
+local Markdown with a stable project operating lesson. Supply the same project
+selectors, full `localContent`, `expectedHash` from the read's `localHash`, and
+a unique `idempotencyKey`. A null hash requires an absent file; empty content
+means no local additions. MCP never opens an editor or replaces the common
+guide. Keep task requirements in task context or tracked project documentation
+and secrets, transcripts, and raw provider output out of local guidance.
+
+Retry an interrupted update with the same key and arguments. A completed retry
+returns its recorded `projectPath`, `localPath`, `localHash`, and `updated`
+receipt without overwriting later CLI or MCP edits. For a stale edit, reread,
+reconcile the entire document, and submit a new mutation with a new key. See
+the [operator guide](docs/OPERATOR_GUIDE.md#7-report-defects-and-maintain-useful-local-guidance)
+for a complete replacement example and common safety precedence.
 
 Use `pipelines_list` to discover the registry, then start with `run_start` and a
 unique opaque idempotency key. It persists the run, returns a durable `runId`,
@@ -781,6 +804,7 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   │   └── workflows.test.js
 │   ├── mcp/
 │   │   ├── control-plane.test.js
+│   │   ├── guidance.test.js
 │   │   └── issue-reporting.test.js
 │   ├── state/
 │   │   ├── persistence.test.js

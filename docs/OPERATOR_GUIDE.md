@@ -265,3 +265,29 @@ execution ownership before atomic replacement. An unchanged close is a checked
 no-op and leaves a missing local file absent. If a concurrent update makes the
 edit stale, reread and reconcile the document before editing again. Temporary
 copies are cleaned up after the command.
+
+Through MCP, call `guidance_read` once before first managing a run for each
+project, even when issue reporting is disabled. Supply `projectPath` and, when
+needed, `projectConfigurationPath`. Read the returned `combinedContent`; retain
+`localContent`, `localHash`, and the resolved paths when preparing an edit.
+MCP never opens an editor. After execution releases ownership, send the complete
+replacement to `guidance_update`, for example when the local file was absent:
+
+```json
+{
+  "projectPath": "/path/to/project",
+  "localContent": "# Local additions\n\nRun service checks in the documented development container.\n",
+  "expectedHash": null,
+  "idempotencyKey": "<unique-opaque-key>"
+}
+```
+
+For an existing document, pass its exact `localHash` as `expectedHash` and keep
+the same configuration selector used to read it. Empty `localContent` removes
+all additions by publishing an empty document. Keep the key and arguments for
+retry after a disconnect or interrupted response; never give the same logical
+mutation a new key. The bounded receipt contains `projectPath`, `localPath`,
+`localHash`, and `updated`. If the edit is stale, reread and reconcile the whole
+document, then submit that new mutation with a new key. Keep only stable project
+lessons; task requirements, universal product rules, and defect reports belong
+in their respective sources described above.

@@ -7,6 +7,13 @@ remain in the owning documentation.
 
 ## 2026-09-12
 
+- **MCP supervision shares guidance and publication with the CLI.** Two thin
+  tools read the complete common and local guide or replace the local document
+  with an expected hash and idempotency key. The shared capability owns safety,
+  concurrency, and interruption recovery, so receipt retries preserve later
+  edits from either transport. A single startup reminder applies even when
+  issue reporting is disabled; guidance remains supervisor context only.
+
 - **CLI guidance editing shares launch mechanics without sharing exit policy.**
   The CLI reads combined guidance or edits the complete local Markdown through
   a private external copy. Publication retains the original destination,

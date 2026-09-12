@@ -12,6 +12,10 @@ import { createClarificationService } from "../clarifications/index.js";
 import { loadRunnerConfiguration } from "../config/index.js";
 import { createGitService } from "../git/index.js";
 import {
+  createGuidanceService,
+  MAX_GUIDANCE_BYTES,
+} from "../guidance/index.js";
+import {
   DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
   getPipeline,
   listPipelines,
@@ -38,7 +42,10 @@ export const DETACHED_RUNTIME_COMPATIBILITY_ENV =
 
 const RUN_INSTRUCTIONS = `Use run_start to start a durable pipeline, then use one run_wait call for the desired waiting interval. Use run_activity only for explicit or historical reads; do not poll status, activity, or wait at a fixed cadence. independent is the default and recommended mode because it provides genuinely independent semantic review, but it uses more provider context and tokens. lazy is opt-in, reduces consumption, and does not provide independent review; never select it automatically to save tokens. Leave sourceSession unset unless the user deliberately chooses to fork a compatible current native session after being offered a fresh start. Offer its known trusted profile with the fork choice; when the profile is unknown, offer only current profile inheritance and never guess an alias. In independent mode the primary and review roles fork the complete source context independently; in lazy mode the primary role forks it once. Recommend a fresh start for a long, multi-topic, or uncertain source session. Keep native session IDs opaque; never inspect provider-private storage or infer or fabricate an ID. Answer pending input from explicit user context when sufficient; otherwise ask the user. Never invent a material product decision.`;
 const ISSUE_REPORTING_INSTRUCTIONS = `Use unexpected_issue_report only when you, as the supervising client agent, explicitly conclude that Agent Runner behaved genuinely unexpectedly or contrary to its documented contract. Expected completion, exhausted configured budgets, usage limits, expected user pauses, documented environment blockers, and invalid user or configuration input are not reportable issues. Supply concise English Markdown deliberately; the server never collects or attaches logs, transcripts, prompts, environment values, credentials, secrets, or other diagnostics automatically.`;
-export const MCP_INSTRUCTIONS = `${RUN_INSTRUCTIONS} ${ISSUE_REPORTING_INSTRUCTIONS}`;
+const GUIDANCE_INSTRUCTIONS =
+  "Call guidance_read once before first managing a run for each project and follow the combined operator guide.";
+const SUPERVISION_INSTRUCTIONS = `${GUIDANCE_INSTRUCTIONS} ${RUN_INSTRUCTIONS}`;
+export const MCP_INSTRUCTIONS = `${SUPERVISION_INSTRUCTIONS} ${ISSUE_REPORTING_INSTRUCTIONS}`;
 
 function boundedSingleLine(maximumLength) {
   return z
@@ -67,6 +74,30 @@ const pipelineMode = z
 const idempotencyKey = boundedSingleLine(1_024).describe(
   "Opaque key unique to this logical mutation.",
 );
+const guidanceReadSchema = z
+  .object({
+    projectPath: boundedSingleLine(4_096),
+    projectConfigurationPath: boundedSingleLine(4_096).optional(),
+  })
+  .strict();
+const guidanceUpdateSchema = guidanceReadSchema
+  .extend({
+    idempotencyKey,
+    localContent: z
+      .string()
+      .max(MAX_GUIDANCE_BYTES)
+      .describe(
+        "The complete non-sensitive operator-authored local Markdown, at most 64 KiB in UTF-8. Empty content removes all local additions.",
+      ),
+    expectedHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/u)
+      .nullable()
+      .describe(
+        "The localHash from guidance_read; null requires the local file to be absent.",
+      ),
+  })
+  .strict();
 const resumeAction = z.discriminatedUnion("type", [
   z
     .object({
@@ -416,6 +447,15 @@ export function createMcpControlPlane(options = {}) {
   const detachedCompatibilityToken =
     options.detachedCompatibilityToken ?? DETACHED_RUNTIME_COMPATIBILITY_TOKEN;
   const runStore = options.runStore ?? createRunStore();
+  let guidance = options.guidance;
+  function guidanceService() {
+    guidance ??= createGuidanceService({
+      runStore,
+      loadConfiguration:
+        options.loadConfiguration ?? (() => loadRunnerConfiguration(providers)),
+    });
+    return guidance;
+  }
   const runner =
     options.runner ??
     createRunner({
@@ -899,6 +939,8 @@ export function createMcpControlPlane(options = {}) {
   }
 
   return Object.freeze({
+    guidanceRead: (input) => guidanceService().read(input),
+    guidanceUpdate: (input) => guidanceService().update(input),
     pipelinesList,
     runActivity,
     runRespond,
@@ -921,7 +963,9 @@ export function createMcpServer(options = {}) {
   const server = new McpServer(
     { name: "agent-runner", version: packageMetadata.version },
     {
-      instructions: issueReportingEnabled ? MCP_INSTRUCTIONS : RUN_INSTRUCTIONS,
+      instructions: issueReportingEnabled
+        ? MCP_INSTRUCTIONS
+        : SUPERVISION_INSTRUCTIONS,
     },
   );
   const readOnly = {
@@ -941,6 +985,26 @@ export function createMcpServer(options = {}) {
     destructiveHint: false,
   };
 
+  server.registerTool(
+    "guidance_read",
+    {
+      description:
+        "Read the complete common operator guide, local additions, and local editing metadata for a project.",
+      inputSchema: guidanceReadSchema,
+      annotations: readOnly,
+    },
+    async (input) => result(await control.guidanceRead(input)),
+  );
+  server.registerTool(
+    "guidance_update",
+    {
+      description:
+        "Replace the complete local operator Markdown using its expected hash. Never replaces the common guide. Retry the same logical mutation with the same idempotency key and arguments.",
+      inputSchema: guidanceUpdateSchema,
+      annotations: mutating,
+    },
+    async (input) => result(await control.guidanceUpdate(input)),
+  );
   server.registerTool(
     "pipelines_list",
     {

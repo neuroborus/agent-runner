@@ -260,7 +260,7 @@ test("operator guidance stays outside pipeline roles and run reconstruction", as
     const source = await readFile(path, "utf8");
     assert.doesNotMatch(
       source,
-      /OPERATOR_GUIDE\.md|agent-runner\/rules\.md|guidance_read|createGuidanceService/u,
+      /OPERATOR_GUIDE\.md|agent-runner\/rules\.md|guidance_(?:read|update)|createGuidanceService/u,
       relative(ROOT, path),
     );
   }

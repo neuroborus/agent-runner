@@ -443,12 +443,33 @@ or performs finalization or commit work.
 `agent-run mcp` exposes the same static pipeline registry and runner through the
 official Node MCP SDK over STDIO only. The private `src/mcp/service.js` module
 owns the seven pipeline-control tools: `pipelines_list`, `run_start`, `run_status`,
-`run_activity`, `run_wait`, `run_respond`, and `run_resume`, plus the
+`run_activity`, `run_wait`, `run_respond`, and `run_resume`, the shared-capability
+tools `guidance_read` and `guidance_update`, and the
 conditionally registered MCP-only `unexpected_issue_report`. It contains
 transport schemas and concise projections, not a second workflow
 implementation. The private `src/mcp/reporting.js` module owns the narrow local
 publication service. Standard output belongs exclusively to MCP; bounded
 protocol diagnostics go to standard error without prompts or model transcripts.
+
+One compact startup instruction asks the supervisor to call `guidance_read`
+once before first managing a run for each project. It remains present when
+issue reporting is disabled; tool descriptions do not repeat the guide.
+Both strict guidance schemas accept `projectPath` and optional
+`projectConfigurationPath`. Reading returns complete common and local content,
+combined rendering, resolved paths, and the nullable local hash. Replacement
+also requires complete `localContent`, nullable `expectedHash`, and an
+`idempotencyKey`, returning only the bounded publication receipt. An empty
+document removes local additions. Reading is annotated read-only; replacement
+is destructive, idempotent, and local.
+
+MCP delegates both calls directly to `src/guidance/index.js`, sharing the
+control plane's run store and current configuration loader. That capability
+owns file safety, byte and content validation, composition, worktree exclusion,
+action intents, interrupted-publication recovery, and receipts. MCP neither
+opens an editor nor adds another action wrapper. Completed retries replay the
+recorded receipt without overwriting later CLI or MCP edits; stale edits require
+a fresh read, reconciliation, and a new mutation key. Guidance remains outside
+role prompts, run state, and resume configuration.
 
 Unexpected-issue reporting remains deliberate and caller-initiated. Its tool
 description and server instructions limit it to a supervising client agent
@@ -473,7 +494,7 @@ or overwriting an existing path.
 Mutating MCP calls require an opaque idempotency key. The state layer hashes the
 key, binds it to the tool and canonical arguments, and durably records an action
 intent before mutation and a receipt before returning. An exact retry returns
-the receipt; reuse with different arguments fails. An incomplete intent is
+the receipt; reuse with different arguments fails. An incomplete run intent is
 reconciled against the reserved run ID, current revision, submitted transcript
 hash, and execution lease before work is launched again.
 
