@@ -259,8 +259,14 @@ does not trigger provider retries or output correction. Pipeline validation
 still enforces constraints such as unique finalization finding IDs when the
 provider-compatible schema cannot express them.
 
-Codex `turn_other` failures use at most one fresh reconstruction for ordinary
-non-commit turns, with the complete durable recovery request and observed
+Codex recognizes bounded structured non-transient HTTP client errors even when
+the native failure is marked `other`. HTTP 400 `invalid_request_error` /
+`invalid_json_schema` is terminal `ERR_CODEX_TURN_FAILED` with
+`turn_bad_request`; it does not trigger provider retries, output correction,
+or `backend_unavailable`. Native error details are discarded.
+
+Opaque Codex `turn_other` failures use at most one fresh reconstruction for
+ordinary non-commit turns, with the complete durable recovery request and observed
 workspace. A repeated failure pauses as `backend_unavailable` at the safe
 checkpoint; restore provider availability and resume the same run. Native
 error details are discarded, source forks are never replaced by fresh context,

@@ -111,6 +111,28 @@ function failedTurn(threadId, turnId, error, items = []) {
   };
 }
 
+function httpClientErrorMessage({
+  status = "400 Bad Request",
+  type = "invalid_request_error",
+  code = "invalid_json_schema",
+  pretty = false,
+} = {}) {
+  const body = JSON.stringify(
+    {
+      error: {
+        message:
+          "DO_NOT_RETAIN_NATIVE_MESSAGE: finalizationFindingIds uses unsupported uniqueItems.",
+        type,
+        param: "DO_NOT_RETAIN_SCHEMA_PATH",
+        code,
+      },
+    },
+    null,
+    pretty ? 2 : undefined,
+  );
+  return `unexpected status ${status}: ${pretty ? `\n${body}\n` : body}`;
+}
+
 function isolatedConfiguration() {
   return {
     features: {
@@ -1132,6 +1154,7 @@ test("rejects substitution of an explicit model", async (t) => {
                 status === "completed"
                   ? completedTurn(message.params.threadId, turnId)
                   : failedTurn(message.params.threadId, turnId, {
+                      message: httpClientErrorMessage(),
                       codexErrorInfo: "other",
                     }),
               ],
@@ -2306,6 +2329,7 @@ test("rejects invalid terminal turn statuses without recovery", async (t) => {
             }
             const turnId = "invalid-status-turn";
             const notification = failedTurn(message.params.threadId, turnId, {
+              message: httpClientErrorMessage(),
               codexErrorInfo: "other",
             });
             notification.params.turn.status = status;
@@ -2388,7 +2412,10 @@ test("classifies recognized terminal turn failures without retaining native deta
           return {
             result: { turn: { id: "failed-turn" } },
             notification: failedTurn(message.params.threadId, "failed-turn", {
-              message: "DO_NOT_RETAIN_NATIVE_MESSAGE",
+              message:
+                diagnosticClass === "turn_other"
+                  ? "DO_NOT_RETAIN_NATIVE_MESSAGE"
+                  : httpClientErrorMessage(),
               codexErrorInfo,
               additionalDetails: "DO_NOT_RETAIN_ADDITIONAL_DETAILS",
             }),
@@ -2414,6 +2441,215 @@ test("classifies recognized terminal turn failures without retaining native deta
         fixture.processes.length,
         diagnosticClass === "turn_other" ? 2 : 1,
       );
+    });
+  }
+});
+
+test("rejects structured HTTP client failures marked other without provider recovery", async (t) => {
+  for (const [status, type, code] of [
+    ["400 Bad Request", "invalid_request_error", "invalid_json_schema"],
+    ["400", "invalid_request_error", null],
+    ["401 Unauthorized", "authentication_error", "invalid_api_key"],
+    ["403 Forbidden", "permission_error", null],
+    ["404 Not Found", "invalid_request_error", "model_not_found"],
+    ["422 Unprocessable Entity", "invalid_request_error", "invalid_value"],
+  ]) {
+    for (const access of ["read-only", "workspace-write", "local-commit"]) {
+      await t.test(`${status}/${access}`, async () => {
+        const fixture = createFixture({
+          version: "0.154.0",
+          handle({ message }) {
+            if (message.method !== "turn/start") {
+              return undefined;
+            }
+            return {
+              result: { turn: { id: "rejected-turn" } },
+              notification: failedTurn(
+                message.params.threadId,
+                "rejected-turn",
+                {
+                  message:
+                    httpClientErrorMessage({
+                      status,
+                      type,
+                      code,
+                      pretty: access === "workspace-write",
+                    }) +
+                    (access === "read-only"
+                      ? ""
+                      : ", url: https://example.test/DO_NOT_RETAIN_URL, cf-ray: DO_NOT_RETAIN_RAY, request id: DO_NOT_RETAIN_REQUEST_ID"),
+                  codexErrorInfo:
+                    access === "read-only" ? "other" : { other: null },
+                  additionalDetails: "DO_NOT_RETAIN_ADDITIONAL_DETAILS",
+                },
+              ),
+            };
+          },
+        });
+
+        await assert.rejects(
+          fixture.adapter.run(
+            request({
+              access,
+              prompt: "DO_NOT_RETAIN_PROMPT",
+              recoveryPrompt: "DO_NOT_RETAIN_RECOVERY_PROMPT",
+              session: { mode: "continue", id: "previous-thread" },
+              ...(access === "local-commit"
+                ? {
+                    authorizationId: "authorization-1",
+                    commit: {
+                      expectedHead: EXPECTED_HEAD,
+                      message: "feat(test): create commit",
+                    },
+                  }
+                : {}),
+            }),
+          ),
+          (error) => {
+            assert.ok(
+              hasDiagnostic("ERR_CODEX_TURN_FAILED", "turn_bad_request")(error),
+            );
+            assert.equal(error.message, "Codex turn failed.");
+            for (const failure of [
+              error,
+              normalizeAdapterFailure("codex", error),
+            ]) {
+              assert.equal(failure.recoverable, false);
+              assert.equal(failure.ambiguous, false);
+              assert.equal(failure.failureClass, undefined);
+              assert.equal(
+                failure.effectStarted,
+                access === "local-commit" ? false : undefined,
+              );
+              assert.equal(failure.cause, undefined);
+              assert.doesNotMatch(
+                JSON.stringify({ ...failure, message: failure.message }),
+                /DO_NOT_RETAIN|uniqueItems|invalid_json_schema/u,
+              );
+            }
+            return true;
+          },
+        );
+        assert.equal(fixture.processes.length, 1);
+        assert.deepEqual(
+          fixture.processes[0].messages
+            .filter(
+              ({ method }) =>
+                method.startsWith("thread/") || method === "turn/start",
+            )
+            .map(({ method }) => method),
+          ["thread/resume", "turn/start"],
+        );
+        assert.equal(
+          fixture.executeCalls.filter(({ file }) => file === "git").length,
+          0,
+        );
+      });
+    }
+  }
+});
+
+test("keeps malformed, ambiguous, and transient HTTP lookalikes on bounded opaque recovery", async (t) => {
+  const message = httpClientErrorMessage();
+  const variants = [
+    ["unstructured", "HTTP 400 invalid_request_error invalid_json_schema"],
+    ["quoted failure", `The transcript reported: ${message}`],
+    ["missing status", message.slice(message.indexOf("{"))],
+    ["wrong reason", message.replace("Bad Request", "Internal Server Error")],
+    ["invalid status", message.replace("400", "0400")],
+    ["invalid JSON", message.slice(0, -1)],
+    ["trailing JSON", `${message} {}`],
+    ["unknown suffix", `${message}, unexpected status 503: {}`],
+    ["duplicate suffix", `${message}, request id: one, request id: two`],
+    [
+      "missing envelope",
+      'unexpected status 400 Bad Request: {"type":"invalid_request_error"}',
+    ],
+    ["null envelope", 'unexpected status 400 Bad Request: {"error":null}'],
+    ["array envelope", 'unexpected status 400 Bad Request: {"error":[]}'],
+    ["extra envelope", message.replace('{"error":', '{"status":503,"error":')],
+    [
+      "duplicate envelope",
+      message.replace('{"error":', '{"error":null,"error":'),
+    ],
+    ["missing type", message.replace('"type":"invalid_request_error",', "")],
+    [
+      "non-string message",
+      message.replace(/"message":"[^"]*"/u, '"message":null'),
+    ],
+    [
+      "nested param",
+      message.replace(
+        '"param":"DO_NOT_RETAIN_SCHEMA_PATH"',
+        '"param":{"status":503}',
+      ),
+    ],
+    [
+      "duplicate type",
+      message.replace('"type":', '"type":"server_error","type":'),
+    ],
+    [
+      "escaped duplicate",
+      message.replace('"type":', '"ty\\u0070e":"server_error","type":'),
+    ],
+    ["unknown type", httpClientErrorMessage({ type: "server_error" })],
+    ["unknown code", httpClientErrorMessage({ code: "unrecognized" })],
+    ["non-string code", httpClientErrorMessage({ code: 400 })],
+    ["quota code", httpClientErrorMessage({ code: "insufficient_quota" })],
+    ["rate code", httpClientErrorMessage({ code: "rate_limit_exceeded" })],
+    [
+      "context code",
+      httpClientErrorMessage({ code: "context_length_exceeded" }),
+    ],
+    [
+      "oversized",
+      message.replace("DO_NOT_RETAIN_NATIVE_MESSAGE", "x".repeat(16_384)),
+    ],
+    [
+      "oversized UTF-8",
+      message.replace("DO_NOT_RETAIN_NATIVE_MESSAGE", "€".repeat(6_000)),
+    ],
+    ...[408, 409, 425, 429, 500, 502, 503, 504].map((status) => [
+      `transient ${status}`,
+      httpClientErrorMessage({ status: String(status) }),
+    ]),
+  ];
+  for (const [name, nativeMessage] of variants) {
+    await t.test(name, async () => {
+      const fixture = createFixture({
+        handle({ message }) {
+          if (message.method !== "turn/start") {
+            return undefined;
+          }
+          return {
+            result: { turn: { id: "opaque-turn" } },
+            notification: failedTurn(message.params.threadId, "opaque-turn", {
+              message: nativeMessage,
+              codexErrorInfo: "other",
+              additionalDetails: httpClientErrorMessage(),
+            }),
+          };
+        },
+      });
+      await assert.rejects(fixture.adapter.run(request()), (error) => {
+        assert.ok(hasDiagnostic("ERR_CODEX_TURN_FAILED", "turn_other")(error));
+        assert.equal(error.recoverable, true);
+        assert.equal(error.cause, undefined);
+        assert.doesNotMatch(
+          JSON.stringify({ ...error, message: error.message }),
+          /DO_NOT_RETAIN|unexpected status/u,
+        );
+        return true;
+      });
+      assert.equal(fixture.processes.length, 2);
+      const methods = fixture.processes.flatMap(({ messages }) =>
+        messages.map(({ method }) => method),
+      );
+      assert.equal(
+        methods.filter((method) => method === "turn/start").length,
+        2,
+      );
+      assert.equal(methods.includes("thread/compact/start"), false);
     });
   }
 });
@@ -2597,56 +2833,67 @@ test("propagates a second opaque or terminal turn failure without another retry"
   }
 });
 
-test("opaque turn failures cannot hide forbidden operations", async (t) => {
-  for (const [item, code, diagnosticClass] of [
-    [
-      { type: "subAgentActivity", kind: "spawned" },
-      "ERR_CODEX_ISOLATION",
-      "operation_multi_agent",
-    ],
-    [
-      {
-        type: "commandExecution",
-        command: "git push origin main",
-        status: "completed",
-      },
-      "ERR_CODEX_REMOTE_WRITE_ATTEMPT",
-      "operation_remote_write",
-    ],
-    [
-      { type: "fileChange", changes: [], status: "completed" },
-      "ERR_CODEX_READ_ONLY_POLICY",
-      "operation_read_only_write",
-    ],
-    [null, "ERR_CODEX_PROTOCOL", undefined],
+test("other turn failures cannot hide forbidden operations", async (t) => {
+  for (const nativeMessage of [
+    "DO_NOT_RETAIN_NATIVE_MESSAGE",
+    httpClientErrorMessage(),
   ]) {
-    await t.test(diagnosticClass ?? code, async () => {
-      const fixture = createFixture({
-        handle({ message, processIndex }) {
-          if (message.method !== "turn/start" || processIndex !== 0) {
-            return undefined;
-          }
-          const notification = failedTurn(
-            message.params.threadId,
-            "failed-turn",
-            {
-              message: "DO_NOT_RETAIN_NATIVE_MESSAGE",
-              codexErrorInfo: "other",
-            },
-            [item],
-          );
-          return { result: { turn: { id: "failed-turn" } }, notification };
+    for (const [item, code, diagnosticClass] of [
+      [
+        { type: "subAgentActivity", kind: "spawned" },
+        "ERR_CODEX_ISOLATION",
+        "operation_multi_agent",
+      ],
+      [
+        {
+          type: "commandExecution",
+          command: "git push origin main",
+          status: "completed",
         },
-      });
-      await assert.rejects(fixture.adapter.run(request()), (error) => {
-        assert.ok(hasDiagnostic(code, diagnosticClass)(error));
-        assert.equal(error.recoverable, false);
-        assert.equal(error.cause, undefined);
-        assert.doesNotMatch(JSON.stringify(error), /DO_NOT_RETAIN|git push/u);
-        return true;
-      });
-      assert.equal(fixture.processes.length, 1);
-    });
+        "ERR_CODEX_REMOTE_WRITE_ATTEMPT",
+        "operation_remote_write",
+      ],
+      [
+        { type: "fileChange", changes: [], status: "completed" },
+        "ERR_CODEX_READ_ONLY_POLICY",
+        "operation_read_only_write",
+      ],
+      [null, "ERR_CODEX_PROTOCOL", undefined],
+    ]) {
+      await t.test(
+        `${diagnosticClass ?? code}/${nativeMessage.startsWith("unexpected") ? "structured" : "opaque"}`,
+        async () => {
+          const fixture = createFixture({
+            handle({ message, processIndex }) {
+              if (message.method !== "turn/start" || processIndex !== 0) {
+                return undefined;
+              }
+              const notification = failedTurn(
+                message.params.threadId,
+                "failed-turn",
+                {
+                  message: nativeMessage,
+                  codexErrorInfo: "other",
+                },
+                [item],
+              );
+              return { result: { turn: { id: "failed-turn" } }, notification };
+            },
+          });
+          await assert.rejects(fixture.adapter.run(request()), (error) => {
+            assert.ok(hasDiagnostic(code, diagnosticClass)(error));
+            assert.equal(error.recoverable, false);
+            assert.equal(error.cause, undefined);
+            assert.doesNotMatch(
+              JSON.stringify(error),
+              /DO_NOT_RETAIN|git push/u,
+            );
+            return true;
+          });
+          assert.equal(fixture.processes.length, 1);
+        },
+      );
+    }
   }
 });
 

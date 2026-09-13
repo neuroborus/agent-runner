@@ -166,6 +166,16 @@ unsafe reconciliation, changed inputs, or ambiguous effects have their own
 bounded recovery rules. Do not erase locks, patch state files, reset stagnation
 history, or assume every `no_progress` pause has the same recovery path.
 
+Codex `ERR_INVALID_CODEX_SCHEMA` is a terminal local request error, and
+`ERR_CODEX_TURN_FAILED` with `turn_bad_request` is a terminal provider request
+rejection. A recognized structured HTTP 400 schema rejection has the latter
+classification even if Codex labels it `other`. These failures do not enter
+provider-availability or output-correction recovery; follow the stopped run's
+actions and correct the request defect before starting again. A genuinely
+opaque `turn_other` retains one fresh reconstruction for eligible non-commit
+turns and then the existing `backend_unavailable` pause. Native error payloads
+and transcripts are not diagnostic evidence to collect or attach.
+
 If a genuinely non-resumable run leaves valid dirty work, first establish that
 execution ownership is gone and reconcile inputs and the stopped run's
 requirements. Then use **polishing** to finalize and review that existing
