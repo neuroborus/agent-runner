@@ -18,6 +18,7 @@ import {
 import {
   assertRun,
   normalizeCandidateReviewResult,
+  normalizeCleanConfirmationResult,
   normalizeReviewResult,
 } from "../src/workflow-contract.js";
 import {
@@ -447,23 +448,30 @@ test("recovery rejects omitted checks and substituted infrastructure through the
 
 test("terminal evidence classification is structured, bounded, and absent from candidate review", () => {
   const valid = rejected({ mixed: true });
-  assert.deepEqual(normalizeReviewResult(valid).finalizationFindingIds, ["R1"]);
-  for (const finalizationFindingIds of [
-    ["R1", "R1"],
-    ["R404"],
-    Array(33).fill("R1"),
-    null,
+  for (const normalize of [
+    normalizeReviewResult,
+    normalizeCleanConfirmationResult,
   ]) {
-    assert.throws(() =>
-      normalizeReviewResult({ ...valid, finalizationFindingIds }),
-    );
+    assert.deepEqual(normalize(valid).finalizationFindingIds, ["R1"]);
+    for (const finalizationFindingIds of [
+      ["R1", "R1"],
+      ["R404"],
+      Array(33).fill("R1"),
+      null,
+    ]) {
+      assert.throws(() => normalize({ ...valid, finalizationFindingIds }));
+    }
+    assert.throws(() => normalize({ ...valid, validationChange: "UNCHANGED" }));
   }
-  assert.throws(() =>
-    normalizeReviewResult({ ...valid, validationChange: "UNCHANGED" }),
-  );
   assert.throws(() =>
     normalizeReviewResult({
       ...reviewApproved(),
+      finalizationFindingIds: ["R1"],
+    }),
+  );
+  assert.throws(() =>
+    normalizeCleanConfirmationResult({
+      ...cleanConfirmation(),
       finalizationFindingIds: ["R1"],
     }),
   );

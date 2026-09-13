@@ -938,6 +938,20 @@ approval policy: never
 ```
 
 Use Codex structured output / JSON Schema support for machine-actionable responses.
+Before any provider activity in an adapter `run`, validate the effective output
+schema, including the adapter-owned local-commit readiness schema. Keep the
+Codex keyword allowlist and structural compatibility checks inside that adapter;
+retain shared strict-object, JSON-value, size, and depth validation. Inspect only
+schema positions, including nested properties, array items, `anyOf` branches,
+and `$defs`; property names and `enum`/`const` data are not schema keywords.
+Reject unsupported keywords such as `uniqueItems`, boolean or tuple schemas,
+root `anyOf`, malformed patterns, regex lookaround or backreferences, and
+invalid or external references locally with terminal
+`ERR_INVALID_CODEX_SCHEMA`. Such rejection starts no provider turn or recovery
+attempt and is not a structured-output correction or backend availability
+failure. Supported local references may be recursive.
+Resolve URI-fragment and JSON Pointer escapes before requiring a schema target;
+malformed escapes are rejected without retaining native parsing errors.
 
 Validate every explicit model with `model/list` and reject any reported model
 reroute. Fresh turns use `thread/start`; continuation uses `thread/resume`; and
@@ -1819,6 +1833,9 @@ reported finding IDs identifying evidence-only concerns requiring no repository
 edit. It must be empty outside a rejected terminal result; mixed concerns must
 be separate findings. Candidate-review schemas do not carry this field, and
 routing never classifies prose.
+Both terminal response schemas omit the provider-unsupported `uniqueItems`
+keyword. Deterministic Reviewer and Worker terminal normalizers enforce
+uniqueness, bounds, membership, and the rejected-result restriction unchanged.
 Evidence may be rejected even when the inventories and infrastructure are
 unchanged. Such a rejection uses semantic recovery, not malformed-output
 correction; inventory equality alone does not establish sufficient check evidence.

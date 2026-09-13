@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-09-13
 
+- **Codex rejects incompatible response schemas before provider activity.**
+  A Codex-owned keyword and structural compatibility gate now validates the
+  effective schema, including local-commit readiness, before probing or starting
+  a turn. Invalid declarations fail terminally without provider recovery or
+  output correction. Plan-execution terminal schemas no longer use unsupported
+  `uniqueItems`; both runtime normalizers retain deterministic uniqueness,
+  bounds, membership, and rejected-result validation. Schema traversal preserves
+  literal data and property names, and provider restrictions stay inside Codex.
+
 - **Opaque Codex turn failures use bounded provider recovery.** `turn_other`
   now enters the existing single fresh reconstruction for non-commit requests
   outside source forks. The complete durable request preserves valid workspace

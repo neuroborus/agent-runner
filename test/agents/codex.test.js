@@ -7,6 +7,9 @@ import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
 
 import packageMetadata from "../../package.json" with { type: "json" };
+import * as planAuthoringSchemas from "../../pipelines/plan-authoring/src/schemas.js";
+import * as planExecutionSchemas from "../../pipelines/plan-execution/src/schemas.js";
+import * as polishingSchemas from "../../pipelines/polishing/src/schemas.js";
 import {
   CODEX_BACKEND_ID,
   CodexAdapterError,
@@ -1392,6 +1395,210 @@ test("validates strict schemas and structured output", async () => {
       STRUCTURED_OUTPUT_FAILURE_CLASS,
     ),
   );
+});
+
+test("rejects incompatible schemas before provider activity or recovery", async (t) => {
+  const array = { type: "array", items: { type: "string" } };
+  const object = (value) => ({
+    type: "object",
+    properties: { value },
+    required: ["value"],
+    additionalProperties: false,
+  });
+  const variants = [
+    ["nested uniqueItems", object({ ...array, uniqueItems: true })],
+    ["false uniqueItems", object({ ...array, uniqueItems: false })],
+    [
+      "items uniqueItems",
+      object({ ...array, items: { ...array, uniqueItems: true } }),
+    ],
+    [
+      "anyOf uniqueItems",
+      object({ anyOf: [{ ...array, uniqueItems: true }, { type: "null" }] }),
+    ],
+    [
+      "definition uniqueItems",
+      {
+        ...object({ $ref: "#/$defs/value" }),
+        $defs: { value: { ...array, uniqueItems: true } },
+      },
+    ],
+    ...[
+      "allOf",
+      "oneOf",
+      "not",
+      "if",
+      "then",
+      "else",
+      "dependentRequired",
+      "dependentSchemas",
+      "patternProperties",
+      "contains",
+      "prefixItems",
+      "default",
+      "unknownKeyword",
+    ].map((keyword) => [keyword, object({ type: "string", [keyword]: [] })]),
+    ["boolean schema", object(true)],
+    ["tuple items", object({ ...array, items: [{ type: "string" }] })],
+    ["missing items", object({ type: "array" })],
+    ["unknown type", object({ type: "date" })],
+    ["empty types", object({ type: [] })],
+    ["duplicate types", object({ type: ["string", "string"] })],
+    ["empty anyOf", object({ anyOf: [] })],
+    ["malformed anyOf", object({ anyOf: { type: "string" } })],
+    ["root anyOf", { ...object({ type: "string" }), anyOf: [STRICT_SCHEMA] }],
+    ["unsupported format", object({ type: "string", format: "uri" })],
+    ...["[", "(?=a)a", "(?!a)b", "(?<=a)b", "(?<!a)b", "(a)\\1"].map(
+      (pattern) => [
+        `unsupported pattern ${pattern}`,
+        object({ type: "string", pattern }),
+      ],
+    ),
+    ["malformed array bound", object({ ...array, maxItems: "32" })],
+    ["negative string bound", object({ type: "string", minLength: -1 })],
+    ["external reference", object({ $ref: "https://example.invalid/schema" })],
+    ["missing reference", object({ $ref: "#/$defs/missing" })],
+    ...["broken%", "broken%FF"].map((name) => [
+      `malformed reference escape ${name}`,
+      {
+        ...object({ $ref: `#/$defs/${name}` }),
+        $defs: { [name]: { type: "string" } },
+      },
+    ]),
+    [
+      "literal reference",
+      object({ $ref: "#/properties/value/const", const: { type: "string" } }),
+    ],
+    ...["REVIEW_SCHEMA", "CLEAN_CONFIRM_SCHEMA"].map((name) => {
+      const schema = structuredClone(planExecutionSchemas[name]);
+      schema.properties.finalizationFindingIds.uniqueItems = true;
+      return [name, schema];
+    }),
+  ];
+  for (const [name, schema] of variants) {
+    await t.test(name, async () => {
+      for (const access of ["read-only", "workspace-write"]) {
+        const fixture = createFixture();
+        await assert.rejects(
+          fixture.adapter.run(
+            request({
+              access,
+              schema,
+              session: { mode: "continue", id: "previous-thread" },
+            }),
+          ),
+          (error) => {
+            assert.ok(hasCode("ERR_INVALID_CODEX_SCHEMA")(error));
+            assert.equal(error.recoverable, false);
+            assert.equal(error.failureClass, undefined);
+            assert.equal(error.cause, undefined);
+            return true;
+          },
+        );
+        assert.deepEqual(fixture.executeCalls, []);
+        assert.deepEqual(fixture.processes, []);
+        assert.deepEqual(fixture.workspaceStorages, []);
+      }
+    });
+  }
+});
+
+test("sends compatible schemas without interpreting property names or literal data as keywords", async () => {
+  const schema = {
+    type: "object",
+    properties: {
+      uniqueItems: { type: "string", pattern: "^[()?=]+\\\\1$" },
+      properties: { enum: [{ type: "object", uniqueItems: true, oneOf: [] }] },
+      allOf: { const: { type: "object", uniqueItems: true } },
+      nested: {
+        anyOf: [{ $ref: "#/$defs/unique~1Items~0%20value" }, { type: "null" }],
+      },
+      count: {
+        type: ["number", "null"],
+        minimum: 0,
+        maximum: 10,
+        multipleOf: 0.5,
+      },
+      date: {
+        type: "string",
+        format: "date",
+        description: "uniqueItems is literal text",
+      },
+    },
+    required: ["uniqueItems", "properties", "allOf", "nested", "count", "date"],
+    additionalProperties: false,
+    $defs: {
+      "unique/Items~ value": { $ref: "#/$defs/uniqueItems" },
+      uniqueItems: {
+        type: "object",
+        properties: {
+          children: {
+            type: "array",
+            items: { $ref: "#/$defs/uniqueItems" },
+            minItems: 0,
+            maxItems: 3,
+          },
+        },
+        required: ["children"],
+        additionalProperties: false,
+      },
+    },
+  };
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method !== "turn/start") {
+        return undefined;
+      }
+      assert.deepEqual(message.params.outputSchema, schema);
+      return {
+        result: { turn: { id: "schema-turn" } },
+        notification: completedTurn(
+          message.params.threadId,
+          "schema-turn",
+          "{}",
+        ),
+      };
+    },
+  });
+  await fixture.adapter.run(request({ schema }));
+  assert.equal(fixture.processes.length, 1);
+});
+
+test("accepts every Runner-owned pipeline response schema", async (t) => {
+  for (const [pipeline, schemas] of Object.entries({
+    "plan-authoring": planAuthoringSchemas,
+    "plan-execution": planExecutionSchemas,
+    polishing: polishingSchemas,
+  })) {
+    for (const [name, schema] of Object.entries(schemas)) {
+      await t.test(`${pipeline}/${name}`, async () => {
+        const fixture = createFixture({
+          handle({ message }) {
+            if (message.method !== "turn/start") {
+              return undefined;
+            }
+            assert.deepEqual(message.params.outputSchema, schema);
+            return {
+              result: { turn: { id: "schema-turn" } },
+              notification: completedTurn(
+                message.params.threadId,
+                "schema-turn",
+                "{}",
+              ),
+            };
+          },
+        });
+        await fixture.adapter.run(request({ schema }));
+        assert.equal(fixture.processes.length, 1);
+        assert.equal(
+          fixture.processes[0].messages.filter(
+            ({ method }) => method === "turn/start",
+          ).length,
+          1,
+        );
+      });
+    }
+  }
 });
 
 test("falls back to a fresh session when continuation is unavailable", async () => {

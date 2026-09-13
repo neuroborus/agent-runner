@@ -253,6 +253,12 @@ invoked once and the pipeline pauses as `backend_unavailable`. Durable workflow
 state and safe workspace changes are preserved, and resume reconstructs the
 pending request from runner state.
 
+Codex rejects incompatible response schemas locally with
+`ERR_INVALID_CODEX_SCHEMA` before provider activity. This terminal input error
+does not trigger provider retries or output correction. Pipeline validation
+still enforces constraints such as unique finalization finding IDs when the
+provider-compatible schema cannot express them.
+
 Codex `turn_other` failures use at most one fresh reconstruction for ordinary
 non-commit turns, with the complete durable recovery request and observed
 workspace. A repeated failure pauses as `backend_unavailable` at the safe
