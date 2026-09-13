@@ -240,6 +240,7 @@ const SAFE_TURN_ITEM_TYPES = new Set([
   "userMessage",
 ]);
 const TERMINAL_ITEM_STATUSES = new Set(["completed", "declined", "failed"]);
+const TERMINAL_TURN_STATUSES = new Set(["completed", "failed", "interrupted"]);
 
 export function normalizeCodexDiagnosticClass(value) {
   return CODEX_DIAGNOSTIC_CLASSES.has(value) ? value : undefined;
@@ -751,7 +752,7 @@ function assertCompletedTurnEnvelope(value, threadId, turnId) {
     value.turn.id.length === 0 ||
     (turnId !== undefined && value.turn.id !== turnId) ||
     !Array.isArray(value.turn.items) ||
-    typeof value.turn.status !== "string"
+    !TERMINAL_TURN_STATUSES.has(value.turn.status)
   ) {
     throw invalidCompletedTurn();
   }
@@ -927,6 +928,15 @@ async function runTurn(
       );
     }
   }
+  if (
+    request.model !== undefined &&
+    client.receivedNotification("model/rerouted")
+  ) {
+    throw new CodexAdapterError(
+      `Codex substituted the requested model: ${request.model}.`,
+      { code: "ERR_CODEX_MODEL_REROUTED" },
+    );
+  }
   if (turn.status === "interrupted") {
     throw new CodexAdapterError("Codex turn was interrupted.", {
       ambiguous: true,
@@ -943,9 +953,15 @@ async function runTurn(
         recoverable: true,
       });
     }
+    const recoverable = diagnosticClass === TERMINAL_TURN_DIAGNOSTICS.other;
+    if (recoverable) {
+      // Recovery cannot hide explicit policy or protocol violations.
+      auditItems(turn.items, request);
+    }
     throw new CodexAdapterError("Codex turn failed.", {
       code: "ERR_CODEX_TURN_FAILED",
       diagnosticClass,
+      recoverable,
     });
   }
   return turn;
@@ -1406,15 +1422,6 @@ export function createCodexAdapter(options = {}) {
           turnPrompt(request, "compact"),
           workspaceStorage,
         );
-        if (
-          request.model !== undefined &&
-          client.receivedNotification("model/rerouted")
-        ) {
-          throw new CodexAdapterError(
-            `Codex substituted the requested model: ${request.model}.`,
-            { code: "ERR_CODEX_MODEL_REROUTED" },
-          );
-        }
         result = normalizeResult(turn, request, threadId);
       } catch (cause) {
         operationFailed = true;

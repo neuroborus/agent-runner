@@ -1096,17 +1096,34 @@ adapters own native recognition and expose only bounded normalized diagnostics;
 pipelines consume the backend-neutral recoverable failure. Other allowlisted
 backend, capability, configuration, usage, and provider failures use the same
 durable pause path.
+
+Codex App Server `other` failures retain only the fixed
+`ERR_CODEX_TURN_FAILED` code, `turn_other` diagnostic, and safe control fields.
+The adapter classifies them as opaque recoverable failures without retaining
+native messages, variant payloads, additional details, or process causes.
+Completion notifications and hydrated turns accept only `completed`, `failed`,
+and `interrupted` statuses before failure classification. For these failures,
+the existing item audit and explicit-model reroute guard still
+reject policy and protocol violations before recovery. For non-commit requests
+outside a source fork, the existing recovery path attempts one fresh session
+with the complete `recoveryPrompt` and observed workspace.
+The failure itself does not request compaction, and the second attempt's
+failure propagates unchanged without another reconstruction. Source forks
+remain ineligible for fresh fallback. Local-commit readiness failures exit
+before retry with `effectStarted: false`; executor outcomes remain on their
+verification-only path and are never replayed.
+
 An otherwise unclassified valid read-only result or process failure is
 recoverable only because the enforced read-only envelope and the pipeline's
 post-turn repository guard prove that it could not mutate the repository.
 Unknown writable process outcomes remain terminal after reconciliation;
 classified usage and provider failures may pause only after safe workspace
-changes and control state have been reconciled. The rejected turn is invoked
-once, then the owning pipeline persists `backend_unavailable`, its resumable
-workflow state, reconciled one-shot authorization state, and any safe workspace
-changes before entering `WAITING_FOR_USER`. Resume reconstructs the same
-durable request after availability returns. No new persisted field or state
-version is required.
+changes and control state have been reconciled. After the adapter's applicable
+retry policy is exhausted, the owning pipeline persists `backend_unavailable`,
+the exact resumable workflow checkpoint, reconciled one-shot authorization
+state, and any safe workspace changes before entering `WAITING_FOR_USER`.
+Resume reconstructs the same durable request after availability returns. No new
+persisted field or state version is required.
 
 A Worker that cannot execute required validation because of sandbox, IPC,
 loopback, process-isolation, missing-service, permission, or comparable external

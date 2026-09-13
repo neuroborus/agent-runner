@@ -253,6 +253,13 @@ invoked once and the pipeline pauses as `backend_unavailable`. Durable workflow
 state and safe workspace changes are preserved, and resume reconstructs the
 pending request from runner state.
 
+Codex `turn_other` failures use at most one fresh reconstruction for ordinary
+non-commit turns, with the complete durable recovery request and observed
+workspace. A repeated failure pauses as `backend_unavailable` at the safe
+checkpoint; restore provider availability and resume the same run. Native
+error details are discarded, source forks are never replaced by fresh context,
+and local-commit turns never use this retry or replay a commit effect.
+
 ## Task Inputs
 
 Plan authoring accepts:
