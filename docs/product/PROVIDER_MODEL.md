@@ -74,6 +74,14 @@ closed. Allowlisted backend, capability, configuration, usage, provider, and
 source-session availability failures may enter a durable pause only after the
 runner proves the repository is safe.
 
+Codex validates response-schema compatibility locally before provider activity,
+including its own local-commit readiness schema. Unsupported declarations such
+as `uniqueItems` fail with terminal `ERR_INVALID_CODEX_SCHEMA`, without a
+provider turn, retry, or output-correction attempt. Provider-compatible schema
+declarations do not replace deterministic pipeline validation: both
+plan-execution terminal roles still reject duplicate finalization finding IDs,
+out-of-bounds or non-member IDs, and IDs outside rejected terminal results.
+
 Codex `turn_other` is an opaque recoverable provider failure. An ordinary
 non-commit request uses the existing single fresh reconstruction from its
 complete persisted recovery context and the observed workspace, provided no

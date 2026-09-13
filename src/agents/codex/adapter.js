@@ -17,6 +17,7 @@ import {
   executeCodexLocalCommit,
   probeCodexLocalCommit,
 } from "./local-commit.js";
+import { assertCodexSchema } from "./schema.js";
 import {
   assertCodexWorkspaceStorage,
   createCodexWorkspaceStorage,
@@ -1444,6 +1445,7 @@ export function createCodexAdapter(options = {}) {
   async function run(value) {
     const request = normalizeRequest(value);
     try {
+      assertCodexSchema(outputSchemaFor(request), CodexAdapterError);
       await assertCapabilities(request);
     } catch (cause) {
       if (

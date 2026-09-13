@@ -90,6 +90,17 @@ The Codex provider lives under `src/agents/codex/` behind its provider
 `index.js`. The root agent boundary imports only that index; the adapter, App
 Server transport, local-commit executor, and workspace storage remain private
 siblings that own Codex processes, protocols, flags, parsing, and sessions.
+The private Codex `schema.js` validates the effective response schema before
+any provider activity in `run`, including local-commit readiness. Its recursive
+keyword allowlist and structural checks supplement the shared JSON,
+strict-object, size, and depth checks without imposing Codex restrictions on
+other adapters. It traverses schema positions rather than property names or
+literal data, permits resolved local recursive references, and rejects
+unsupported declarations with terminal `ERR_INVALID_CODEX_SCHEMA` before
+probing, spawning, or recovery. This input-contract error is neither backend
+unavailability nor malformed-output correction. Pipeline-owned normalizers
+remain authoritative for semantic constraints such as terminal finding-ID
+uniqueness that the portable response schemas cannot express.
 
 The root `src/agents/index.js` is the only agent API consumed outside the agent
 capability. Its private `registry.js` defines one frozen, source-controlled
