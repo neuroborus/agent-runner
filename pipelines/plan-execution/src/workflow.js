@@ -678,6 +678,14 @@ ${summary}
 Phase ownership: the established required-check inventory is input only to FINALIZE. Staging, staged/index-relative inspection, alternate-index workarounds, staged handoff, and commit-message drafting belong only to COMMIT.`;
   }
 
+  function prefinalizationTrustedCommands() {
+    const commands = state().trustedValidation.commands.map(
+      ({ command }) => command,
+    );
+    return `Exact runner-trusted commands reserved for FINALIZE:
+${JSON.stringify(commands)}`;
+  }
+
   function trustedValidationInstructions() {
     const commands = state().trustedValidation.commands.map(
       ({ alias, command, identity }) => ({ alias, command, identity }),
@@ -3379,6 +3387,8 @@ The runner will derive validation inventories from the independently accepted ro
       IMPLEMENTATION_SCHEMA,
       (evidence) => `${IMPLEMENTATION_INSTRUCTIONS}
 
+${prefinalizationTrustedCommands()}
+
 ${evidence}
 
 Current planned commit:
@@ -4097,6 +4107,8 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
           "worker",
           CHECK_AND_FIX_SCHEMA,
           (evidence) => `${CHECK_AND_FIX_INSTRUCTIONS}
+
+${prefinalizationTrustedCommands()}
 
 ${evidence}
 
@@ -5565,6 +5577,8 @@ ${JSON.stringify(
       "worker",
       FINDING_RESOLUTION_SCHEMA,
       (evidence) => `${FINDING_RESOLUTION_INSTRUCTIONS}
+
+${prefinalizationTrustedCommands()}
 
 Finalization failures must be fixed and cannot be disputed. A finding already upheld by the Arbiter must be fixed.${
         budgetExhausted

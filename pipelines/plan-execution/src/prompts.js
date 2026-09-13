@@ -65,15 +65,18 @@ Use only the bounded accepted findings below as correction feedback. They never 
 export const FINALIZATION_CORRECTION_INSTRUCTIONS = `Your previous structured finalization result was rejected by deterministic validation. Make the requested bounded read-only correction and return a complete replacement result using the same finalization schema.
 Correct every violation in the identified diagnostic batch using current repository evidence. Re-execute only corrected staging-independent checks as needed to produce complete direct evidence. Do not execute a rejected command, run staging-dependent validation, repeat or quote the rejected result, ask an ordinary clarification question, or modify repository content, staging, history, refs, remotes, or Git identity. Preserve the exceptional PRODUCT_DECISION_REQUIRED outcome and its required product-decision fields when its existing criteria are met. A second correction is available only for a wholly new diagnostic batch; a repeated diagnostic or another invalid result after that finite allowance fails closed.`;
 
+const PREFINALIZATION_VALIDATION_INSTRUCTIONS = `The established required-check inventory is input only to the dedicated FINALIZE gate. Do not execute or attest it in this turn.
+Selected runner-trusted commands must never execute inside an agent turn. Their agent-sandbox limitations must not cause BLOCKED or prevent applicable content repairs and semantic review; the runner executes their persisted exact vectors during FINALIZE.`;
+
 export const IMPLEMENTATION_INSTRUCTIONS = `Implement the changes described in the following planned commit. Keep the implementation idiomatic and minimal, and follow the project's conventions.
 
 Work only on this planned commit.
 Do not run the project finalization procedure or perform generic commit preparation in this turn. Those belong to the dedicated FINALIZE and COMMIT phases.
-The established required-check inventory is input only to the dedicated FINALIZE gate. Do not execute it in this turn.
+${PREFINALIZATION_VALIDATION_INSTRUCTIONS}
 Do not create a commit in this turn.
 Before returning, perform a concise self-review.
 For COMPLETED, put all results in summary; set reason, question, and whyBlocked to "", and options and evidence to [].
-For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or comparable external constraints. Set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
+For BLOCKED, use only for external environment constraints affecting work not delegated to a selected runner-trusted command. Set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
 For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-decision fields.
 
 Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
@@ -105,9 +108,10 @@ Otherwise, return only the approval decision and actionable findings using the p
 export const CHECK_AND_FIX_INSTRUCTIONS = `Review the changes and verify that they are correct, idiomatic, minimal, and consistent with the project's conventions. If you find any problems, fix them idiomatically and minimally, following the project's conventions.
 
 Review the complete current result as a semantic candidate. Do not run the project finalization procedure, attest finalization evidence, or perform generic commit preparation; those remain owned by FINALIZE, CONFIRM, and COMMIT. Do not create a commit.
+${PREFINALIZATION_VALIDATION_INSTRUCTIONS}
 For CHANGED, use only when you changed repository content; provide summary and set reason, question, and whyBlocked to "", and options and evidence to [].
 For UNCHANGED, use only when you found no problem and changed no repository content; provide summary and set reason, question, and whyBlocked to "", and options and evidence to [].
-For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or a comparable external constraint. Set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
+For BLOCKED, use only for external environment constraints affecting work not delegated to a selected runner-trusted command. Set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
 For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-decision fields.
 Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
 ${PRODUCT_DECISION_INSTRUCTIONS}`;
@@ -145,10 +149,10 @@ export const FINDING_RESOLUTION_INSTRUCTIONS = `For each finding below, fix it i
 If a finding is incorrect, dispute it with concise evidence instead of changing the code.
 
 Do not run the project finalization procedure or perform generic commit preparation in this turn. Those belong to the dedicated FINALIZE and COMMIT phases.
-The established required-check inventory is input only to the dedicated FINALIZE gate. Do not execute it in this turn.
+${PREFINALIZATION_VALIDATION_INSTRUCTIONS}
 Do not create a commit in this turn.
 For RESOLVED, return exactly one decision per blocker; every decision requires reason; DISPUTE requires evidence, while FIX evidence may be []. Set top-level reason, question, and whyBlocked to "", and options and evidence to [].
-For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or comparable external constraints. Set decisions and options to []; provide reason and evidence; set question and whyBlocked to "".
+For BLOCKED, use only for external environment constraints affecting work not delegated to a selected runner-trusted command. Set decisions and options to []; provide reason and evidence; set question and whyBlocked to "".
 For PRODUCT_DECISION_REQUIRED, set decisions to [] and reason to ""; use the product-decision fields.
 Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
 ${PRODUCT_DECISION_INSTRUCTIONS}

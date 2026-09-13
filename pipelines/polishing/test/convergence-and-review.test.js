@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -11,6 +11,7 @@ import {
   CLEAN_CONFIRM_SCHEMA,
   FINALIZATION_SCHEMA,
   FINDING_RESOLUTION_SCHEMA,
+  POLISH_SCHEMA,
   REVIEW_SCHEMA,
 } from "../src/schemas.js";
 import {
@@ -2489,3 +2490,213 @@ test("requires Reviewer acceptance for task-authorized validation changes", asyn
     /"validationInfrastructureFingerprint": "[a-f0-9]{64}"/u,
   );
 });
+
+for (const mode of ["independent", "lazy"]) {
+  for (const selected of [false, true]) {
+    test(`defers trusted validation through ${mode} repairs with selection ${selected}`, async (t) => {
+      const command = 'npm  run test:service -- --label="exact value"';
+      const snapshot = trustedValidationSnapshot("private-selection", command);
+      const requiredChecks = [
+        ...REQUIRED_CHECKS,
+        ...(selected ? [{ id: "C2", command }] : []),
+      ];
+      const bootstrap = (role) => ({ ...bootstrapReady(role), requiredChecks });
+      const finalization = {
+        ...finalizationPassed(),
+        requiredChecks,
+        checks: [
+          ...checkResults("PASS"),
+          ...(selected
+            ? [
+                {
+                  checkId: "C2",
+                  command,
+                  status: "NOT_RUN",
+                  evidence: ["Reserved for the runner."],
+                },
+              ]
+            : []),
+        ],
+      };
+      const finalizations = selected
+        ? [finalization, finalization]
+        : [finalizationFailed("F1"), finalization];
+      let trustedCalls = 0;
+      let checkRounds = 0;
+      const inspected = [];
+      const fixture = await createFixture(t, {
+        mode,
+        ...(selected ? { trustedValidation: snapshot } : {}),
+        settings: {
+          ...SETTINGS,
+          trustedChecks: selected ? ["private-selection"] : [],
+        },
+        reviewer: [
+          bootstrap("Reviewer"),
+          candidateApproved(),
+          candidateApproved(),
+          reviewApproved(),
+        ],
+        worker: [
+          clarificationReady(),
+          bootstrap("Worker"),
+          ...(mode === "independent" ? [reconciliationResolved()] : []),
+          polishingCompleted(),
+          ...(mode === "lazy" ? [candidateClean()] : []),
+          finalizations[0],
+          resolution("FIX", "F1"),
+          ...(mode === "lazy" ? [candidateClean()] : []),
+          finalizations[1],
+          ...(mode === "lazy" ? [cleanConfirmation()] : []),
+        ],
+        onTrustedValidation(options) {
+          trustedCalls += 1;
+          assert.equal(
+            fixture.currentRun.pipelineState.workflowState,
+            "FINALIZE",
+          );
+          assert.equal(fixture.currentRun.activeTurn, null);
+          assert.deepEqual(options.snapshot, snapshot);
+          return {
+            ...options.bindings,
+            commandIdentity: options.commandIdentity,
+            status: trustedCalls === 1 ? "FAIL" : "PASS",
+            exitCode: trustedCalls === 1 ? 1 : 0,
+            signal: null,
+            timedOut: false,
+            evidence: ["The runner executed the selected check."],
+          };
+        },
+      });
+      const runWorker = fixture.runtime.adapters.worker.run;
+      fixture.runtime.adapters.worker.run = async (request) => {
+        const phase = new Map([
+          [POLISH_SCHEMA, "primary"],
+          [CHECK_AND_FIX_SCHEMA, "check"],
+          [FINDING_RESOLUTION_SCHEMA, "resolution"],
+        ]).get(request.schema);
+        if (phase === undefined) return runWorker(request);
+        inspected.push({ phase, request });
+        const projection =
+          /Exact runner-trusted commands reserved for FINALIZE:\n([^\n]+)/u;
+        const delegated = JSON.parse(
+          projection.exec(request.prompt)?.[1] ?? "[]",
+        );
+        if (
+          selected &&
+          (!delegated.includes(command) ||
+            !request.prompt.includes(
+              "agent-sandbox limitations must not cause BLOCKED",
+            ))
+        ) {
+          return {
+            sessionId: request.session?.id ?? "blocked-worker",
+            structured: {
+              status: "BLOCKED",
+              ...(phase === "resolution" ? { decisions: [] } : { summary: "" }),
+              reason:
+                "The selected check needs an unavailable sandbox service.",
+              question: "",
+              whyBlocked: "",
+              options: [],
+              evidence: [
+                "The agent sandbox cannot execute the selected command.",
+              ],
+            },
+          };
+        }
+        for (const prompt of [request.prompt, request.recoveryPrompt]) {
+          assert.deepEqual(
+            JSON.parse(projection.exec(prompt)?.[1]),
+            selected ? [command] : [],
+          );
+          assert.equal(
+            prompt.split("Exact runner-trusted commands reserved for FINALIZE:")
+              .length,
+            2,
+          );
+          assert.doesNotMatch(
+            prompt,
+            /NOT_RUN|Include every listed command|requiredChecks|validationInfrastructure|private-selection|"executable"|"arguments"/u,
+          );
+          assert.ok(!prompt.includes(snapshot.commands[0].identity));
+          assert.ok(!prompt.includes(snapshot.configurationFingerprint));
+        }
+        if (phase === "check") {
+          checkRounds += 1;
+          fixture.calls.worker.push(request);
+          const result =
+            checkRounds === 1
+              ? { ...checkAndFix(), rejected: "correct this result" }
+              : checkAndFix(checkRounds === 2 ? "CHANGED" : "UNCHANGED");
+          if (checkRounds === 2) {
+            assert.equal(request.session, undefined);
+            assert.match(
+              request.prompt,
+              /previous structured lazy checkpoint result was rejected/u,
+            );
+            await writeFile(
+              join(request.cwd, "delegated-check.txt"),
+              "repaired despite sandbox limits\n",
+            );
+          }
+          return {
+            structured: result,
+            sessionId: request.session?.id ?? "corrected-worker",
+          };
+        }
+        await writeFile(
+          join(request.cwd, `delegated-${phase}.txt`),
+          "repaired despite sandbox limits\n",
+        );
+        return runWorker(request);
+      };
+
+      const result = await fixture.run();
+
+      assert.equal(result.pipelineState.workflowState, "DONE");
+      assert.equal(trustedCalls, selected ? 2 : 0);
+      for (const phase of [
+        "primary",
+        "resolution",
+        ...(mode === "lazy" ? ["check"] : []),
+      ]) {
+        assert.equal(
+          await readFile(
+            join(fixture.projectPath, `delegated-${phase}.txt`),
+            "utf8",
+          ),
+          "repaired despite sandbox limits\n",
+        );
+      }
+      assert.equal(
+        fixture.calls.worker.filter(
+          ({ schema }) => schema === FINALIZATION_SCHEMA,
+        ).length,
+        2,
+      );
+      assert.ok(inspected.some(({ phase }) => phase === "primary"));
+      assert.ok(
+        inspected.some(
+          ({ phase, request }) =>
+            phase === "resolution" && request.session?.mode === "continue",
+        ),
+      );
+      assert.ok(
+        inspected.some(
+          ({ request }) => request.prompt === request.recoveryPrompt,
+        ),
+      );
+      assert.ok(
+        inspected.some(
+          ({ request }) => request.prompt !== request.recoveryPrompt,
+        ),
+      );
+      if (mode === "lazy") {
+        assert.equal(checkRounds, 4);
+        assert.equal(fixture.calls.reviewer.length, 0);
+        assert.equal(fixture.calls.arbiter.length, 0);
+      }
+    });
+  }
+}

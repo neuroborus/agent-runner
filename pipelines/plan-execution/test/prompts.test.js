@@ -169,11 +169,12 @@ test("work instructions preserve their concise mandatory cores", () => {
 
 Work only on this planned commit.
 Do not run the project finalization procedure or perform generic commit preparation in this turn. Those belong to the dedicated FINALIZE and COMMIT phases.
-The established required-check inventory is input only to the dedicated FINALIZE gate. Do not execute it in this turn.
+The established required-check inventory is input only to the dedicated FINALIZE gate. Do not execute or attest it in this turn.
+Selected runner-trusted commands must never execute inside an agent turn. Their agent-sandbox limitations must not cause BLOCKED or prevent applicable content repairs and semantic review; the runner executes their persisted exact vectors during FINALIZE.
 Do not create a commit in this turn.
 Before returning, perform a concise self-review.
 For COMPLETED, put all results in summary; set reason, question, and whyBlocked to "", and options and evidence to [].
-For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or comparable external constraints. Set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
+For BLOCKED, use only for external environment constraints affecting work not delegated to a selected runner-trusted command. Set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
 For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-decision fields.
 
 Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
@@ -219,10 +220,11 @@ For that outcome, provide question, whyBlocked, and evidence; options may be [].
 If a finding is incorrect, dispute it with concise evidence instead of changing the code.
 
 Do not run the project finalization procedure or perform generic commit preparation in this turn. Those belong to the dedicated FINALIZE and COMMIT phases.
-The established required-check inventory is input only to the dedicated FINALIZE gate. Do not execute it in this turn.
+The established required-check inventory is input only to the dedicated FINALIZE gate. Do not execute or attest it in this turn.
+Selected runner-trusted commands must never execute inside an agent turn. Their agent-sandbox limitations must not cause BLOCKED or prevent applicable content repairs and semantic review; the runner executes their persisted exact vectors during FINALIZE.
 Do not create a commit in this turn.
 For RESOLVED, return exactly one decision per blocker; every decision requires reason; DISPUTE requires evidence, while FIX evidence may be []. Set top-level reason, question, and whyBlocked to "", and options and evidence to [].
-For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or comparable external constraints. Set decisions and options to []; provide reason and evidence; set question and whyBlocked to "".
+For BLOCKED, use only for external environment constraints affecting work not delegated to a selected runner-trusted command. Set decisions and options to []; provide reason and evidence; set question and whyBlocked to "".
 For PRODUCT_DECISION_REQUIRED, set decisions to [] and reason to ""; use the product-decision fields.
 Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
 Do not ask questions after clarification closes.
@@ -343,4 +345,28 @@ For RECONSIDER_FINDINGS, provide one or more unique current Reviewer findingIds;
 For PLAN_REVISION_REQUIRED, set findingIds and options to [], and question and whyBlocked to ""; provide reason and evidence.
 For PRODUCT_DECISION_REQUIRED, set findingIds to [] and reason to ""; use the product-decision fields.`,
   );
+});
+
+test("writable candidate instructions defer checks without suppressing unrelated blockers", () => {
+  for (const instructions of [
+    IMPLEMENTATION_INSTRUCTIONS,
+    CHECK_AND_FIX_INSTRUCTIONS,
+    FINDING_RESOLUTION_INSTRUCTIONS,
+  ]) {
+    assert.match(instructions, /Do not execute or attest it in this turn/u);
+    assert.match(instructions, /must never execute inside an agent turn/u);
+    assert.match(instructions, /must not cause BLOCKED/u);
+    assert.match(
+      instructions,
+      /applicable content repairs and semantic review/u,
+    );
+    assert.match(
+      instructions,
+      /work not delegated to a selected runner-trusted command/u,
+    );
+    assert.doesNotMatch(
+      instructions,
+      /NOT_RUN|requiredChecks|validationInfrastructure/u,
+    );
+  }
 });

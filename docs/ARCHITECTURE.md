@@ -1181,9 +1181,12 @@ state, and any safe workspace changes before entering `WAITING_FOR_USER`.
 Resume reconstructs the same durable request after availability returns. No new
 persisted field or state version is required.
 
-A Worker that cannot execute required validation because of sandbox, IPC,
-loopback, process-isolation, missing-service, permission, or comparable external
-constraints returns a bounded structured blocker. Plan execution and polishing
+A Worker returns a bounded structured blocker when sandbox, IPC, loopback,
+process-isolation, missing-service, permission, or comparable external
+constraints prevent work not delegated to an exact selected runner-trusted
+command. A selected command's agent-sandbox limitation alone cannot block
+applicable content repairs or semantic review; another command's selection
+does not suppress a genuine blocker. Plan execution and polishing
 persist `environment_blocked` rather than treating that condition as a code
 failure, preserve safe workspace content, and invalidate any stale
 fingerprint-bound candidate, finalization, and confirmation evidence. A
@@ -1253,9 +1256,21 @@ verifies unchanged content and Git controls, a nonempty complete staged set,
 no unstaged or non-ignored untracked remnants, and staged whitespace hygiene
 before the pipeline can enter `DONE`.
 
+Both pipelines project only exact command text from persisted
+`trustedValidation.commands` into implementation or polishing, lazy
+`CHECK_AND_FIX`, and finding-resolution prompts. The existing snapshot bounds
+limit the projection; an empty selection produces an empty array. Complete,
+continued, reconstructed, and correction requests all carry it without
+configuration reloads, provider settings, executable vectors, or a repeated
+validation inventory. Established required-check execution and attestation
+remain exclusive to `FINALIZE`. Selected trusted commands never execute inside
+agent turns, and their agent-sandbox limitations do not prevent applicable
+repairs and semantic review. Bootstrap inventory-reporting and finalization
+`NOT_RUN` instructions stay in their existing contexts.
+
 A selected runner-trusted command is the only exception to agent-side check
-execution. The runner-derived bootstrap inventory must contain its exact
-configured command.
+execution during finalization. The runner-derived bootstrap inventory must
+contain its exact configured command.
 The finalization agent returns `NOT_RUN` only for those selected entries; after
 the agent turn reconciles, the root executor replaces each placeholder by
 running the exact persisted executable/argument vector directly without a

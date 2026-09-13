@@ -100,6 +100,15 @@ it for polishing. The selection defaults to empty and is frozen for each run.
 Trusted checks retain isolation and mutation guards; they do not grant broader
 agent permissions or accept user-attested results.
 
+Writable implementation, polishing, lazy check/fix, and finding-resolution turns
+receive only the persisted exact selected command text, including after resume
+or reconstruction. Established required-check execution and attestation belong
+to `FINALIZE`; selected trusted commands must never execute inside agent turns.
+Their agent-sandbox limitations alone must not pause repairs or semantic review.
+A constraint affecting nondelegated work still uses the environment-blocker
+recovery path, even when another command is selected. Runner-trusted execution
+can itself report an environment blocker during `FINALIZE`.
+
 Never weaken tests, assertions, discovery, scripts, formatter/linter settings,
 or validation infrastructure merely to make a check pass. Fix the in-scope
 implementation. A legitimate infrastructure change must be explicitly within
