@@ -46,6 +46,15 @@ to the next check-and-fix pass and the same fingerprint-bound reuse decision.
 
 ## Evidence and fingerprints
 
+Recovery of a legacy failed terminal confirmation requires durable provenance
+for actual mode-specific candidate acceptance and passing finalization.
+Migration may preserve that provenance but cannot create acceptance from a
+terminal snapshot. The runner validates intervening transitions and fingerprint
+lineage, including finalization formatting and legitimate unchanged evidence
+reuse. Recovery resumes only confirmation after revalidating the retained
+gate; it neither replays finalization nor treats its result as candidate
+approval. A fresh successful read-only confirmation remains mandatory.
+
 Accepted finalization records one ordered result for every required check and
 binds it to the staging-independent content, validation-infrastructure,
 ordered-command, and trusted-configuration fingerprints. Skipped, weakened,

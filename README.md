@@ -463,6 +463,19 @@ or read-only mutation without replaying an accepted effect or counting a round
 twice. The one-time source-fork marker prevents reconstruction from forking the
 source again.
 
+Legacy plan-execution failures at terminal `CONFIRM` can also offer action-free
+resume in either mode. Status shows that action only when the durable journal
+proves candidate acceptance, passing finalization, and the exact opaque
+`ERR_CODEX_TURN_FAILED` / `turn_other` failure. Run
+`agent-run resume --run <run-id>`, or submit MCP `run_resume` with the current
+revision, a null action, and an idempotency key. Recovery revalidates inputs,
+Git safety, content, infrastructure, and retained check evidence before
+confirmation; it preserves completed commits and counters and replays no
+implementation, finalization, or consumed commit effect. A proven
+`pendingCorrection: true` accounting marker is retained. Missing or inconsistent
+history, migration-only acceptance, and genuinely pending work fail closed.
+See the [operator guide](docs/OPERATOR_GUIDE.md) for recovery boundaries.
+
 Plan execution and polishing accept one applicable resume action at a time:
 
 ```bash

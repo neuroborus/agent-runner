@@ -2102,6 +2102,55 @@ records the reviewed and terminal-clean fingerprints and enters `COMMIT`. The lo
 finding, stagnation, and additional-fix-round budgets. Exhaustion pauses at the
 applicable checkpoint and never treats a non-clean result as accepted.
 
+### Legacy terminal-confirmation recovery
+
+A legacy `FAILED` run with the exact `internal_failure` pause,
+`ERR_CODEX_TURN_FAILED` code, and `turn_other` diagnostic may expose one
+action-free retry. Eligibility requires the authoritative, continuous
+write-ahead journal, not merely the terminal snapshot. The journal must prove
+an actual mode-specific candidate transition: independent candidate review
+acceptance, or an unchanged lazy `CHECK_AND_FIX` followed by accepted candidate
+`CLEAN_CONFIRM`. It must also prove passing finalization and the failed
+read-only terminal `CONFIRM` turn for the same step. Complete current state,
+check, trust, override, accounting, and effect contracts still apply.
+
+Explicit supported migrations may preserve this proof, including across
+restart, but cannot create it. In particular, the version-13 migration's
+preserved terminal candidate tuple is not evidence of candidate acceptance.
+Missing, discontinuous, inconsistent, altered, or migration-only provenance
+grants no retry. Candidate repairs invalidate proof; permitted formatting
+inside finalization establishes its resulting fingerprint. An otherwise
+unchanged passing finalization record may retain its original provenance
+through the existing candidate-reconvergence and evidence-reuse route.
+
+`pendingCorrection: true` can be an accounting marker: a content-changing fix
+has already been charged, and unchanged check/fix, candidate acceptance, and
+finalization preserve that marker to avoid charging it twice. Recovery permits
+that proven marker, without clearing it or changing counters, only when no
+findings, disputes, directions, concrete correction payloads, migration
+obligations, pending effects, or other conflicting work remain. The same gates
+apply when the marker is false.
+
+Status projects eligibility without acquiring execution ownership or rewriting
+state. Execution recomputes proof under the normal run-then-worktree leases,
+revalidates canonical inputs and artifact confinement, frozen hashes and plan,
+repository/Git controls, finalized content, and canonical validation
+infrastructure, and checks the complete retained finalization evidence.
+Rejected recovery invokes no provider and uses existing safety outcomes.
+An exact-revision write-ahead transition enters `CONFIRM` with a retained
+read-only request, making interruption reconstructible without reforking the
+source. It preserves completed commits, counters, settings, trust selection,
+lineage, and valid evidence. Neither implementation nor finalization nor a
+consumed commit effect is replayed. Repeated recoverable provider failure pauses
+at `backend_unavailable` with `CONFIRM` as its resume target; successful fresh
+confirmation reaches the ordinary one-shot commit gate.
+
+CLI and MCP use the same descriptor eligibility and bounded projection. MCP
+also dispatches eligible failed runs with a null action, retaining exact
+revisions, compatibility checks, durable intents and receipts, idempotent
+retries, detached ownership, and wait-only cancellation. Private journal
+history and provider diagnostics never enter that projection.
+
 ### 13.4 Resolve findings
 
 The Worker receives all currently open blockers together. Independent review

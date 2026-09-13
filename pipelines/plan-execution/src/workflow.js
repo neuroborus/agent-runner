@@ -7,6 +7,7 @@ import {
   serializeCommitPlan,
 } from "@agent-runner/commit-plan";
 
+import { canRecoverLegacyConfirmation } from "./legacy-confirmation-recovery.js";
 import {
   AGENT_GUIDANCE_SCOPE_INSTRUCTIONS,
   BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
@@ -656,6 +657,7 @@ export async function runPlanExecution({ action, run, runtime, settings }) {
   let currentRun = run;
   let interruptedTurn = run.activeTurn;
   let interruptedRepositoryReconciled = false;
+  let legacyRecoveryPersistence = false;
 
   function state() {
     return normalizePipelineState(currentRun.pipelineState);
@@ -809,6 +811,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       nextHashes = currentRun.hashes,
       pause = currentRun.pause,
       publicActivity,
+      expectedRevision,
+      nextActiveTurn,
     } = {},
   ) {
     if (nextPipelineState.currentStep !== state().currentStep) {
@@ -833,9 +837,13 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       hashes: nextHashes,
       pause,
       pipelineState: nextPipelineState,
+      ...(nextActiveTurn === undefined ? {} : { activeTurn: nextActiveTurn }),
     };
     assertRun({ ...currentRun, ...patch });
-    currentRun = await runtime.transition(patch, { activity: publicActivity });
+    currentRun = await runtime.transition(patch, {
+      activity: publicActivity,
+      expectedRevision,
+    });
     assertRun(currentRun);
     return currentRun;
   }
@@ -6055,6 +6063,59 @@ ${step.subject}`),
   }
 
   try {
+    if (resumeAction === null && canRecoverLegacyConfirmation(currentRun)) {
+      const recoveryRevision = currentRun.revision;
+      const current = state();
+      const checked = await runtime.git.preflight({
+        projectPath: currentRun.projectPath,
+        allowedPaths: [current.clarificationPath],
+        requiredIgnoredPaths: [current.clarificationPath],
+        requireClean: false,
+        requireIdentity: true,
+      });
+      if (checked.snapshot.projectPath !== currentRun.projectPath) {
+        return pause("unsafe_git_state", { code: "ERR_RUN_PATH_CHANGED" });
+      }
+      if (
+        (await readCurrentInputs()) === null ||
+        !(await verifyPersistedRepository())
+      )
+        return currentRun;
+      if ((await contentFingerprint()) !== current.finalizedFingerprint) {
+        return pause("unsafe_git_state", {
+          code: "ERR_REVIEW_CONTENT_FINGERPRINT_CHANGED",
+        });
+      }
+      if (
+        (await validationInfrastructureFingerprint(
+          current.finalizationResult.validationInfrastructure,
+        )) !== current.finalizationResult.validationInfrastructureFingerprint
+      ) {
+        return pause("unsafe_git_state", {
+          code: "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED",
+        });
+      }
+      legacyRecoveryPersistence = true;
+      await transition(
+        { ...current, workflowState: "CONFIRM" },
+        {
+          pause: null,
+          expectedRevision: recoveryRevision,
+          nextActiveTurn: activeTurn(
+            current.settings.mode === "lazy" ? "worker" : "reviewer",
+            "CONFIRM",
+          ),
+          publicActivity: activity(
+            "runner",
+            "confirmation",
+            "recovered",
+            "Journal-proven legacy terminal confirmation recovered after safety revalidation.",
+          ),
+        },
+      );
+      legacyRecoveryPersistence = false;
+      interruptedTurn = currentRun.activeTurn;
+    }
     if (state().settings === null) {
       await transition({ ...state(), settings }, { pause: null });
     }
@@ -6417,6 +6478,19 @@ ${evidence}`,
       );
     }
   } catch (cause) {
+    if (legacyRecoveryPersistence || cause?.code === "ERR_RUN_REVISION_CHANGED")
+      throw cause;
+    if (
+      canRecoverLegacyConfirmation(currentRun) &&
+      (GIT_PREFLIGHT_CODES.has(cause?.code) ||
+        [
+          "ERR_REPOSITORY_ARTIFACT_NOT_IGNORED",
+          "ERR_UNSAFE_REPOSITORY_PATH",
+          "ERR_UNSUPPORTED_GIT_PATH",
+        ].includes(cause?.code))
+    ) {
+      return pause("unsafe_git_state", { code: cause.code });
+    }
     const preflightComplete = state().preflightComplete;
     const causePath = cause?.path ?? cause?.cause?.path;
     const filesystemDrift =

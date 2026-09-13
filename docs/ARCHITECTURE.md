@@ -573,6 +573,37 @@ authentication, or a daemon.
 
 ## External Run State
 
+The state service's internal `loadRunHistory` operation returns the run and
+complete validated events from one authoritative snapshot. It shares journal
+continuity, size, migration-envelope, and snapshot-consistency checks with
+ordinary reads and preserves lock-free, non-repairing status semantics.
+Recovery still repairs incomplete tails and lagging snapshots only under the
+run lease. Optional expected-revision transitions reject stale evidence before
+appending anything.
+
+The runner supplies this private history to a pipeline's optional
+`prepareRecovery` descriptor operation. Plan execution binds legacy terminal
+confirmation eligibility to the inspected run object and revision; no history
+or recovery authorization is serialized into public run data. Status may
+project supported migrations in memory, while execution first persists the
+existing migration chain and obtains fresh history under both execution
+leases. Plan-execution resume revalidates canonical project and task boundaries
+inside the worktree lease, including restart after a durable recovery transition.
+Pipeline policy validates actual candidate/finalization transitions and their
+intervening fingerprint lineage. A migrated terminal snapshot alone
+cannot establish acceptance. The exact legacy opaque failure can then enter
+`CONFIRM` through a revision-checked write-ahead transition carrying the
+read-only active request. Existing interrupted-turn reconstruction handles a
+crash at any persistence boundary without repeating a source fork or earlier
+work. Non-actionable `pendingCorrection` accounting is retained with its
+counters; concrete pending work and effects remain disqualifying.
+
+The descriptor shares that eligibility with CLI/MCP projections and resume
+action validation. MCP's detached launcher admits the proven failed state
+without changing stale-revision, ownership, compatibility, or receipt rules.
+The owning [execution specification](../pipelines/plan-execution/docs/SPEC.md)
+defines eligibility and revalidation; the state layer owns all journal I/O.
+
 The root runtime persists runs under `$XDG_STATE_HOME/agent-runner/`, falling
 back to `~/.local/state/agent-runner/`. A run is addressed by an opaque ID and
 stored beneath `runs/<run-id>/`. Preflight requires the canonical state tree

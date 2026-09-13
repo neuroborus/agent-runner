@@ -18,6 +18,7 @@ import {
   migratePlanExecutionStateV13,
   planExecutionPipeline,
 } from "../src/index.js";
+
 import {
   BOOTSTRAP_ARBITRATION_SCHEMA,
   BOOTSTRAP_RECONCILIATION_SCHEMA,
@@ -51,6 +52,7 @@ import {
   clarificationReady,
   cleanConfirmation,
   createFixture,
+  createLegacyRecoveryFixture,
   finalizationBlocked,
   finalizationFailed,
   finalizationPassed,
@@ -2302,4 +2304,130 @@ test("rejects inconsistent persisted workflow state", async (t) => {
       (error) => error.code === "ERR_INVALID_PLAN_EXECUTION_STATE",
     );
   });
+});
+
+test("legacy confirmation migrations preserve journal proof but cannot synthesize acceptance", async (t) => {
+  const fixture = await createLegacyRecoveryFixture(t, { steps: 1 });
+  await fixture.rewrite(({ events }) => {
+    for (const event of events) {
+      event.state.pipelineStateVersion = 14;
+      delete event.state.pipelineState.finalizationRecovery;
+    }
+  });
+  const oldBytes = await fixture.bytes();
+  assert.deepEqual(await fixture.recoveryAction(), [
+    { type: "resume", action: null },
+  ]);
+  assert.deepEqual(await fixture.bytes(), oldBytes);
+  fixture.failAgain();
+  const { run } = await fixture.openRunner().resume({ runId: fixture.runId });
+  assert.equal(run.pause.reason, "backend_unavailable");
+  const history = await fixture.history();
+  assert.equal(
+    history.events.filter(({ activity }) => activity?.kind === "migrated")
+      .length,
+    1,
+  );
+  assert.equal(history.events[0].state.pipelineStateVersion, 14);
+  assert.equal(
+    (await fixture.openRunner().resume({ runId: fixture.runId })).run
+      .pipelineState.workflowState,
+    "DONE",
+  );
+
+  const unproven = structuredClone(fixture.failed);
+  unproven.pipelineStateVersion = 13;
+  for (const field of [
+    "candidateReviewResult",
+    "candidateReviewedFingerprint",
+    "candidateConfirmationFingerprint",
+    "candidateMigrationPending",
+    "confirmationCorrection",
+    "pendingConfirmationCorrection",
+    "finalizationRecovery",
+  ]) {
+    delete unproven.pipelineState[field];
+  }
+  unproven.revision = 1;
+  unproven.updatedAt = unproven.createdAt;
+  const projected = {
+    ...unproven,
+    pipelineStateVersion: 15,
+    pipelineState: {
+      ...migratePlanExecutionStateV13(unproven),
+      finalizationRecovery: {
+        attempts: 0,
+        additionalAttempts: 0,
+        required: false,
+        pending: false,
+        feedback: null,
+      },
+    },
+  };
+  assert.equal(
+    projected.pipelineState.candidateReviewResult.status,
+    "APPROVED",
+  );
+  planExecutionPipeline.prepareRecovery(projected, {
+    run: unproven,
+    events: [
+      {
+        runId: unproven.runId,
+        revision: 1,
+        state: unproven,
+        activity: null,
+      },
+    ],
+  });
+  assert.throws(() =>
+    planExecutionPipeline.validateResumeAction(projected, null),
+  );
+});
+
+test("legacy confirmation proof crosses an authentic intervening migration and rejects hidden changes", async (t) => {
+  const fixture = await createLegacyRecoveryFixture(t, {
+    steps: 1,
+    format: true,
+  });
+  await fixture.rewrite(({ events }) => {
+    const accepted = events.findIndex(
+      ({ activity }) =>
+        activity?.phase === "clean-confirm" && activity.kind === "clean",
+    );
+    const migration = structuredClone(events[accepted]);
+    migration.activity = {
+      actor: "runner",
+      phase: "runtime",
+      kind: "migrated",
+      message: "Migrated fixture state.",
+    };
+    for (const event of events.slice(0, accepted + 1)) {
+      event.state.pipelineStateVersion = 14;
+      delete event.state.pipelineState.finalizationRecovery;
+    }
+    events.splice(accepted + 1, 0, migration);
+    events.forEach((event, index) => {
+      event.revision = index + 1;
+      event.state.revision = index + 1;
+    });
+  });
+  assert.deepEqual(await fixture.recoveryAction(), [
+    { type: "resume", action: null },
+  ]);
+  await fixture.rewrite(({ events }) => {
+    events.find(
+      ({ activity }) => activity?.kind === "migrated",
+    ).state.counters.fixRounds += 1;
+  });
+  assert.deepEqual(await fixture.recoveryAction(), []);
+  await fixture.rewrite(({ events }) => {
+    events.find(
+      ({ activity }) => activity?.kind === "migrated",
+    ).state.counters.fixRounds -= 1;
+  });
+  assert.equal(
+    (await fixture.openRunner().resume({ runId: fixture.runId })).run
+      .pipelineState.workflowState,
+    "DONE",
+  );
 });
