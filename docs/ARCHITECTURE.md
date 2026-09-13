@@ -1108,16 +1108,30 @@ pipelines consume the backend-neutral recoverable failure. Other allowlisted
 backend, capability, configuration, usage, and provider failures use the same
 durable pause path.
 
-Codex App Server `other` failures retain only the fixed
-`ERR_CODEX_TURN_FAILED` code, `turn_other` diagnostic, and safe control fields.
-The adapter classifies them as opaque recoverable failures without retaining
-native messages, variant payloads, additional details, or process causes.
+Codex App Server `other` failures use bounded native HTTP error recognition
+before opaque recovery. A complete `unexpected status` wrapper with an
+allowlisted non-transient client status and a parsed JSON `error` envelope
+becomes terminal `ERR_CODEX_TURN_FAILED` / `turn_bad_request`, with the fixed
+message `Codex turn failed.` and `recoverable: false`. This includes HTTP 400
+`invalid_request_error` / `invalid_json_schema`; it starts no compaction, fresh
+retry, backend-availability pause, or output correction.
+Recognition is limited to 16 KiB, statuses 400, 401, 403, 404, 405, 413, 415, and
+422, and a shallow envelope with scalar `message`, `type`, `param`, and `code`
+fields. The type must identify an invalid request, or authentication/permission
+failure at status 401/403 respectively. Optional non-null codes must be in the
+adapter's finite client-error allowlist. Optional native URL, CF ray, and request
+ID suffixes are discarded. Unknown codes, malformed JSON, duplicate fields or
+metadata, inconsistent status text, oversized evidence, transient statuses,
+and prose lookalikes remain opaque; additional details and variant payloads
+are never alternative classification sources.
+Opaque failures retain `turn_other` and the existing recoverable flag. Neither
+path retains native messages, variant payloads, additional details, or causes.
 Completion notifications and hydrated turns accept only `completed`, `failed`,
 and `interrupted` statuses before failure classification. For these failures,
 the existing item audit and explicit-model reroute guard still
-reject policy and protocol violations before recovery. For non-commit requests
-outside a source fork, the existing recovery path attempts one fresh session
-with the complete `recoveryPrompt` and observed workspace.
+reject policy and protocol violations before classification or recovery. For
+opaque non-commit failures outside a source fork, the existing recovery path
+attempts one fresh session with the complete `recoveryPrompt` and observed workspace.
 The failure itself does not request compaction, and the second attempt's
 failure propagates unchanged without another reconstruction. Source forks
 remain ineligible for fresh fallback. Local-commit readiness failures exit

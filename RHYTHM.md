@@ -7,6 +7,16 @@ remain in the owning documentation.
 
 ## 2026-09-13
 
+- **Structured Codex client errors are terminal even under `other`.** Bounded
+  recognition of a native HTTP wrapper and JSON error envelope distinguishes
+  non-transient request rejection, including HTTP 400 `invalid_json_schema`,
+  from opaque provider failure. Only the fixed `turn_bad_request` diagnostic
+  survives; the request is not compacted, retried, or sent to output correction.
+  Malformed, ambiguous, oversized, and transient evidence retains existing
+  bounded opaque recovery. Item auditing, model selection, source-fork and
+  local-commit exclusions, and redaction remain intact without new pipeline
+  branches or state migrations.
+
 - **Codex rejects incompatible response schemas before provider activity.**
   A Codex-owned keyword and structural compatibility gate now validates the
   effective schema, including local-commit readiness, before probing or starting

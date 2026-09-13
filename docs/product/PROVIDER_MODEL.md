@@ -82,8 +82,16 @@ declarations do not replace deterministic pipeline validation: both
 plan-execution terminal roles still reject duplicate finalization finding IDs,
 out-of-bounds or non-member IDs, and IDs outside rejected terminal results.
 
-Codex `turn_other` is an opaque recoverable provider failure. An ordinary
-non-commit request uses the existing single fresh reconstruction from its
+Codex refines native `other` failures only when bounded, validated HTTP status
+and structured error-envelope evidence identify a non-transient client error.
+For example, HTTP 400 `invalid_request_error` / `invalid_json_schema` becomes
+terminal `ERR_CODEX_TURN_FAILED` with `turn_bad_request`, a fixed message, and
+no provider retry, availability pause, or output correction. Raw error text,
+payloads, and additional details are discarded after classification. Malformed,
+oversized, ambiguous, or transient-status evidence does not become a bad request.
+
+The remaining Codex `turn_other` is an opaque recoverable provider failure. An
+ordinary non-commit request uses the existing single fresh reconstruction from its
 complete persisted recovery context and the observed workspace, provided no
 explicit policy or protocol violation was reported. A second failure returns
 to the pipeline without another adapter retry; a repeated

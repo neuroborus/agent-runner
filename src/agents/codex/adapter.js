@@ -63,6 +63,26 @@ const TERMINAL_TURN_DIAGNOSTICS = Object.freeze({
   unauthorized: "turn_unauthorized",
   usageLimitExceeded: "turn_usage_limit_exceeded",
 });
+const MAX_HTTP_ERROR_BYTES = 16_384;
+const CLIENT_ERROR_STATUSES = new Map([
+  [400, "Bad Request"],
+  [401, "Unauthorized"],
+  [403, "Forbidden"],
+  [404, "Not Found"],
+  [405, "Method Not Allowed"],
+  [413, "Payload Too Large"],
+  [415, "Unsupported Media Type"],
+  [422, "Unprocessable Entity"],
+]);
+const CLIENT_ERROR_CODES = new Set([
+  "invalid_api_key",
+  "invalid_json_schema",
+  "invalid_parameter",
+  "invalid_value",
+  "missing_required_parameter",
+  "model_not_found",
+  "unsupported_parameter",
+]);
 const CODEX_DIAGNOSTIC_CLASSES = new Set([
   ...Object.values(CAPABILITY_DIAGNOSTICS),
   ...Object.values(TERMINAL_TURN_DIAGNOSTICS),
@@ -733,6 +753,78 @@ function terminalTurnDiagnosticClass(turn) {
     : undefined;
 }
 
+function hasStructuredClientError(message) {
+  if (
+    typeof message !== "string" ||
+    message.length > MAX_HTTP_ERROR_BYTES ||
+    Buffer.byteLength(message, "utf8") > MAX_HTTP_ERROR_BYTES
+  ) {
+    return false;
+  }
+  // Recognize the native HTTP wrapper, never a status mentioned in prose,
+  // additionalDetails, or an arbitrary codexErrorInfo payload.
+  const match =
+    /^unexpected status ([0-9]{3})(?: ([A-Za-z ]+))?: [\t\r\n ]*(\{[\s\S]*\})[\t\r\n ]*((?:, (?:url|cf-ray|request id): [^,\s{}]+)*)$/u.exec(
+      message,
+    );
+  if (match === null) {
+    return false;
+  }
+  const [, statusText, reason, body, metadata] = match;
+  const status = Number(statusText);
+  if (
+    !CLIENT_ERROR_STATUSES.has(status) ||
+    (reason !== undefined && reason !== CLIENT_ERROR_STATUSES.get(status))
+  ) {
+    return false;
+  }
+  const metadataKeys = [...metadata.matchAll(/, ([^:]+):/gu)].map(
+    (entry) => entry[1],
+  );
+  if (new Set(metadataKeys).size !== metadataKeys.length) {
+    return false;
+  }
+  let envelope;
+  try {
+    envelope = JSON.parse(body);
+  } catch {
+    return false;
+  }
+  if (
+    !isRecord(envelope) ||
+    Object.keys(envelope).length !== 1 ||
+    !isRecord(envelope.error)
+  ) {
+    return false;
+  }
+  const error = envelope.error;
+  const keys = Object.keys(error);
+  if (
+    keys.some((key) => !["message", "type", "param", "code"].includes(key)) ||
+    typeof error.message !== "string" ||
+    !(
+      error.type === "invalid_request_error" ||
+      (status === 401 && error.type === "authentication_error") ||
+      (status === 403 && error.type === "permission_error")
+    ) ||
+    (error.param !== undefined &&
+      error.param !== null &&
+      typeof error.param !== "string") ||
+    (error.code !== undefined &&
+      error.code !== null &&
+      !CLIENT_ERROR_CODES.has(error.code))
+  ) {
+    return false;
+  }
+  // This envelope is shallow and all values are scalar. Count JSON keys while
+  // consuming whole strings to reject duplicates, including escaped names,
+  // which JSON.parse would otherwise silently overwrite.
+  const keyCount = [...body.matchAll(/"(?:[^"\\]|\\.)*"\s*(:)?/gsu)].filter(
+    (entry) => entry[1] !== undefined,
+  ).length;
+  return keyCount === keys.length + 1;
+}
+
 function hasFullItemsView(turn) {
   return turn.itemsView === undefined || turn.itemsView === "full";
 }
@@ -946,7 +1038,7 @@ async function runTurn(
     });
   }
   if (turn.status !== "completed") {
-    const diagnosticClass = terminalTurnDiagnosticClass(turn);
+    let diagnosticClass = terminalTurnDiagnosticClass(turn);
     if (diagnosticClass === TERMINAL_TURN_DIAGNOSTICS.usageLimitExceeded) {
       throw new CodexAdapterError("Codex usage capacity is unavailable.", {
         code: "ERR_CODEX_USAGE_LIMIT",
@@ -954,15 +1046,17 @@ async function runTurn(
         recoverable: true,
       });
     }
-    const recoverable = diagnosticClass === TERMINAL_TURN_DIAGNOSTICS.other;
-    if (recoverable) {
-      // Recovery cannot hide explicit policy or protocol violations.
+    if (diagnosticClass === TERMINAL_TURN_DIAGNOSTICS.other) {
+      // Classification and recovery cannot hide policy or protocol violations.
       auditItems(turn.items, request);
+      if (hasStructuredClientError(turn.error.message)) {
+        diagnosticClass = TERMINAL_TURN_DIAGNOSTICS.badRequest;
+      }
     }
     throw new CodexAdapterError("Codex turn failed.", {
       code: "ERR_CODEX_TURN_FAILED",
       diagnosticClass,
-      recoverable,
+      recoverable: diagnosticClass === TERMINAL_TURN_DIAGNOSTICS.other,
     });
   }
   return turn;

@@ -49,6 +49,85 @@ function exhaustedCodexTurnFailure() {
   );
 }
 
+test("local Codex schema and structured bad-request failures stay terminal at CONFIRM", async (t) => {
+  for (const mode of ["independent", "lazy"]) {
+    for (const [code, diagnosticClass] of [
+      ["ERR_INVALID_CODEX_SCHEMA", undefined],
+      ["ERR_CODEX_TURN_FAILED", "turn_bad_request"],
+    ]) {
+      await t.test(`${mode}/${code}`, async (t) => {
+        let failures = 0;
+        const fixture = await createFixture(t, {
+          mode,
+          workWorker: [
+            implementationCompleted(),
+            checkAndFix(),
+            cleanConfirmation(),
+            finalizationPassed(),
+          ],
+          onRoleRun(_role, request) {
+            if (
+              [REVIEW_SCHEMA, CLEAN_CONFIRM_SCHEMA].includes(request.schema)
+            ) {
+              failures += 1;
+              throw normalizeAdapterFailure(
+                "codex",
+                Object.assign(new Error("DO_NOT_RETAIN_NATIVE_MESSAGE"), {
+                  code,
+                  diagnosticClass,
+                  recoverable: false,
+                  additionalDetails: "DO_NOT_RETAIN_ADDITIONAL_DETAILS",
+                }),
+              );
+            }
+          },
+        });
+
+        await assert.rejects(fixture.run(), (error) => {
+          assert.equal(error.code, code);
+          assert.equal(error.diagnosticClass, diagnosticClass);
+          assert.equal(error.recoverable, false);
+          assert.equal(error.failureClass, undefined);
+          assert.equal(error.cause, undefined);
+          return true;
+        });
+        assert.equal(failures, 1);
+        assert.equal(fixture.currentRun.pipelineState.workflowState, "FAILED");
+        assert.deepEqual(fixture.currentRun.pause, {
+          reason: "internal_failure",
+          code,
+          ...(diagnosticClass === undefined ? {} : { diagnosticClass }),
+        });
+        assert.equal(fixture.currentRun.activeTurn, null);
+        assert.equal(fixture.currentRun.counters.correctionRounds, 0);
+        assert.equal(fixture.currentRun.pipelineState.pendingCommit, null);
+        assert.equal(
+          fixture.calls.worker.filter(({ access }) => access === "local-commit")
+            .length,
+          0,
+        );
+        assert.equal(
+          fixture.calls.worker.filter(
+            ({ schema }) => schema === FINALIZATION_SCHEMA,
+          ).length,
+          1,
+        );
+        assert.doesNotMatch(
+          JSON.stringify({
+            run: fixture.currentRun,
+            transitions: fixture.transitions,
+          }),
+          /DO_NOT_RETAIN|backend_unavailable|provider-structured-output/u,
+        );
+        if (mode === "lazy") {
+          assert.equal(fixture.calls.reviewer.length, 0);
+          assert.equal(fixture.calls.arbiter.length, 0);
+        }
+      });
+    }
+  }
+});
+
 test("repeated opaque Codex failures pause at terminal CONFIRM without replaying finalized work", async (t) => {
   for (const mode of ["independent", "lazy"]) {
     await t.test(mode, async (t) => {

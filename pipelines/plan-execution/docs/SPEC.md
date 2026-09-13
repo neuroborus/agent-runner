@@ -922,6 +922,20 @@ message, HTTP status and other variant data, additional details, provider
 response, prompt, and transcript. Unknown variants add no diagnostic class.
 Keep context-exhaustion compaction and interruption handling on their existing
 dedicated paths.
+For valid terminal `other` errors, audit items and reject explicit model reroutes
+before refining their classification. Bounded recognition of a non-transient
+HTTP client status plus a structured error envelope, including HTTP 400
+`invalid_request_error` / `invalid_json_schema`, produces terminal
+`ERR_CODEX_TURN_FAILED` with `turn_bad_request`, the fixed message
+`Codex turn failed.`, and `recoverable: false`. In both modes this bypasses
+compaction, fresh retry, `backend_unavailable`, and output-correction recovery.
+Malformed, oversized, ambiguous, and transient-status evidence remains opaque
+`turn_other`: eligible non-commit turns outside source forks reconstruct once
+from the complete durable request, then propagate the next failure unchanged.
+Local-commit readiness failures remain pre-effect rejections and never replay
+the executor. Recognition and redaction belong to the adapter as specified in
+[`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md); no pipeline branch or
+state migration is needed.
 
 Worker:
 

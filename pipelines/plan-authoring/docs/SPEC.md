@@ -366,6 +366,14 @@ First, forked, fresh, and context-invalidated turns receive that complete
 durable context. A compatible role continuation receives only its current
 instruction and state delta; the complete prompt remains attached for adapter
 recovery after unavailable continuation or failed compaction.
+Codex locally rejects incompatible response schemas with terminal
+`ERR_INVALID_CODEX_SCHEMA`. A valid native `other` failure with bounded,
+structured non-transient HTTP client evidence becomes terminal
+`ERR_CODEX_TURN_FAILED` / `turn_bad_request`. Neither is an output-correction or
+backend-availability failure. Opaque `turn_other` retains one fresh
+reconstruction outside source forks before the next failure propagates.
+Policy, protocol, and model-reroute guards take precedence, and native error
+details are discarded; the adapter owns recognition and recovery.
 Claude classifies structured permission, HTTP status, result subtype, and
 terminal-reason fields before bounded native-text matching. Only finite
 allowlisted backend, capability, configuration, usage, provider, expected-tool
