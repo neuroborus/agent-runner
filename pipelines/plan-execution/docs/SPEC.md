@@ -830,10 +830,11 @@ outcomes remain terminal. Resume reconstructs the complete request from durable
 state rather than requiring the failed native session. These rules add no new
 pipeline-state field, provider branch, or migration.
 
-When a writable Worker turn cannot execute required validation because of
-sandbox, IPC, loopback, process-isolation, missing-service, permission, or a
-comparable external constraint, it returns structured `BLOCKED` with bounded
-reason and evidence. The pipeline persists `environment_blocked`; it does not
+When sandbox, IPC, loopback, process-isolation, missing-service, permission,
+or comparable external constraints prevent nondelegated work, a writable
+Worker turn returns structured `BLOCKED` with bounded reason and evidence.
+A selected runner-trusted command's agent-sandbox limitation alone does not
+block content repairs or semantic review; its execution belongs to `FINALIZE`. The pipeline persists `environment_blocked`; it does not
 turn the external constraint into a code finding or weaken the sandbox,
 network, process, or host temporary-directory boundary. Safe content remains in
 the workspace. A content-changing finding-resolution turn invalidates stale
@@ -1685,10 +1686,24 @@ actions belong to the dedicated `FINALIZE` and `COMMIT` phases.
 The established required-check inventory is input only to `FINALIZE`; it is not
 included as phase-local implementation work.
 
-If required validation cannot run because of an external environment
-constraint, the Worker returns `BLOCKED` with bounded reason and evidence. The
-runner preserves safe implementation content and pauses with
-`environment_blocked` at the `IMPLEMENT` checkpoint.
+Implementation, lazy `CHECK_AND_FIX`, and finding-resolution prompts receive
+only the exact command text selected in persisted `trustedValidation.commands`.
+This bounded projection is present in complete, continued, reconstructed, and
+correction requests, including an empty array when no commands are selected.
+It neither reloads configuration nor repeats executable vectors, provider
+settings, or the complete validation inventory. Bootstrap inventory-reporting
+and finalization `NOT_RUN` instructions remain in their owning contexts.
+
+Established required-check execution and attestation belong exclusively to
+`FINALIZE`. Selected runner-trusted commands never execute inside an agent
+turn. Their agent-sandbox limitations must not cause `BLOCKED` or prevent
+applicable content repairs and semantic review; the runner executes the
+persisted exact vectors during `FINALIZE`.
+
+External environment constraints affecting work not delegated to an exact
+selected command still produce `BLOCKED` with bounded reason and evidence,
+even when another command is selected. The runner preserves safe implementation
+content and pauses with `environment_blocked` at `IMPLEMENT`.
 
 The Worker must not create a Git commit during implementation, finalization, or
 finding resolution. Commit creation is allowed only in the dedicated,
@@ -2062,8 +2077,9 @@ persisted or published.
 #### Lazy check/fix and clean confirmation
 
 In lazy mode, implementation enters `CHECK_AND_FIX`, never `REVIEW`. The Worker
-receives the whole current commit result and mandatory candidate-review core
-without finalization evidence. This is a workspace-write turn: every
+receives the whole current commit result, the bounded trusted-command projection
+specified for implementation, and mandatory candidate-review core without
+finalization evidence. This is a workspace-write turn: every
 problem it identifies must be fixed immediately, idiomatically, minimally, and
 within the current planned commit. Its strict result reports whether content
 changed, remained unchanged, is externally blocked, or reaches the narrowly
@@ -2177,9 +2193,11 @@ or:
 DISPUTE
 ```
 
-If required validation is externally unavailable during the resolution turn,
-the Worker may instead return `BLOCKED` with no decisions and bounded reason and
-evidence. When the turn changed content, the runner preserves the partial fix,
+If an external environment constraint prevents nondelegated work during
+resolution, the Worker may instead return `BLOCKED` with no decisions and
+bounded reason and evidence. A selected trusted command's agent-sandbox
+limitation alone cannot block repairs; execution remains owned by `FINALIZE`.
+When the turn changed content, the runner preserves the partial fix,
 invalidates prior candidate, finalization, and confirmation evidence, and
 resumes at `REVIEW` or `CHECK_AND_FIX` according to mode.
 When content is unchanged, it preserves the current blockers and resumes at
@@ -2505,7 +2523,8 @@ the validated rationale and evidence but offers only revision of `plan.md` and
 a fresh execution run. `read_only_agent_mutated_repository` explains that the
 run is contaminated and offers only a fresh run from an uncontaminated
 worktree; it never accepts hybrid changes. `environment_blocked` preserves why
-validation is blocked, its bounded evidence, and the exact retry checkpoint.
+nondelegated work or finalization is blocked, its bounded evidence, and the
+exact retry checkpoint.
 For a finalization-backed `no_progress` pause, the descriptor derives immutable
 bounded evidence solely from the active validated `F`-prefixed finalization
 issue IDs. Commands, problems, issue evidence, paths, raw provider output,
@@ -2748,8 +2767,12 @@ At minimum cover:
     and a fresh MCP process can retry the unchanged durable run and incomplete
     intent with the exact idempotency key.
 46. sandbox, IPC, loopback, process-isolation, missing-service, and permission
-    validation blockers pause as `environment_blocked`, preserve safe content,
-    and resume from the correct fingerprint-aware checkpoint.
+    blockers affecting nondelegated work pause as `environment_blocked`, preserve
+    safe content, and resume from the correct fingerprint-aware checkpoint.
+    Selected-command limitations do not block repairs or candidate convergence
+    in either mode. Every affected writable checkpoint, continued/reconstructed
+    request, and lazy correction carries only persisted exact command text,
+    including empty selections, while trusted execution remains in `FINALIZE`.
 47. pre-effect local-commit policy and provider rejections renew only after the
     adapter proof and no-commit Git verification, while executor ambiguity and
     interrupted verification never replay the consumed authorization.
@@ -2965,8 +2988,10 @@ Do not build:
 27. `CLARIFY` never closes while clarification input conflicts with the validated plan.
 28. A product decision invalidates dependent work, and a plan-changing answer requires a revised validated plan.
 29. The runner never creates a repository-local clarification artifact unless its resolved path is ignored.
-30. External validation constraints pause as `environment_blocked`; they never
-    become code failures or justify weakening the execution boundary.
+30. Environment constraints affecting nondelegated work or runner-trusted
+    execution in `FINALIZE` pause as `environment_blocked`; they never become
+    code failures or justify weakening the execution boundary. Selected-command
+    agent-sandbox limitations alone cannot block pre-finalization repairs.
 31. Bootstrap role inventories use unique check IDs, unique normalized exact
     commands, and unique existing canonical repository-relative validation
     files; the runner derives the final stable union and assigns contiguous IDs,

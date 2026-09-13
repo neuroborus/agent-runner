@@ -659,6 +659,14 @@ export async function runPolishing({ action, run, runtime, settings }) {
     );
   }
 
+  function prefinalizationTrustedCommands() {
+    const commands = state().trustedValidation.commands.map(
+      ({ command }) => command,
+    );
+    return `Exact runner-trusted commands reserved for FINALIZE:
+${JSON.stringify(commands)}`;
+  }
+
   function trustedValidationInstructions() {
     const commands = state().trustedValidation.commands.map(
       ({ alias, command, identity }) => ({ alias, command, identity }),
@@ -3263,6 +3271,8 @@ The runner will derive validation inventories from the independently accepted ro
       POLISH_SCHEMA,
       (evidence) => `${POLISH_INSTRUCTIONS}
 
+${prefinalizationTrustedCommands()}
+
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
 ${evidence}${
@@ -3931,6 +3941,8 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
           "worker",
           CHECK_AND_FIX_SCHEMA,
           (evidence) => `${CHECK_AND_FIX_INSTRUCTIONS}
+
+${prefinalizationTrustedCommands()}
 
 ${evidence}
 
@@ -5282,7 +5294,9 @@ ${JSON.stringify(
     const turn = await runRole(
       "worker",
       FINDING_RESOLUTION_SCHEMA,
-      (evidence) => `${FINDING_RESOLUTION_INSTRUCTIONS}${
+      (evidence) => `${FINDING_RESOLUTION_INSTRUCTIONS}
+
+${prefinalizationTrustedCommands()}${
         budgetExhausted
           ? "\nThe fix budget is exhausted: do not modify the repository and return DISPUTE only where valid; a required FIX will pause for additional budget."
           : ""

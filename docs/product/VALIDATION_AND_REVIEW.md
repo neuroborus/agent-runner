@@ -105,7 +105,15 @@ configuration, or the inventory, terminal confirmation must explicitly accept
 that complete change. An evasive or unauthorized change is a finding.
 
 Runner-trusted checks are a narrow exception for commands that an agent sandbox
-cannot safely execute. The runner executes only the exact persisted executable
+cannot safely execute. Before finalization, writable roles receive the exact
+selected command text from the persisted run, including on continuation,
+reconstruction, and correction. They defer established required-check execution
+and attestation to `FINALIZE`, continue applicable content repairs and semantic
+review, and never execute selected commands inside agent turns. Selected-command
+sandbox limitations alone cannot block that work. The context is bounded and
+does not repeat the complete inventory or expose unrelated configuration.
+
+During `FINALIZE`, the runner executes only the exact persisted executable
 and argument vector in its isolated service, retains bounded status rather than
 native output, and rejects repository or control-state mutation. This mechanism
 does not broaden an agent turn's permissions.
@@ -114,8 +122,10 @@ does not broaden an agent turn's permissions.
 
 A legitimate nonzero check result is a finalization failure and returns to
 Worker correction. An external sandbox, process, service, IPC, loopback, or
-permission limitation is an environment blocker. The workflow preserves safe
-content and pauses at the precise resumable checkpoint; it does not weaken a
+permission limitation affecting nondelegated work is an environment blocker,
+even when another command is selected for trusted execution. The trusted
+executor's own environment constraints can still block `FINALIZE`. The workflow
+preserves safe content and pauses at the precise resumable checkpoint; it does not weaken a
 check or grant broader access to manufacture a pass.
 
 Candidate-review and terminal-confirmation corrections are distinct, bounded,

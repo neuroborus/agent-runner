@@ -289,11 +289,12 @@ not an environment blocker or a transparent retry. Native messages, prompts,
 commands, provider responses, transcripts, credentials, and process causes are
 discarded.
 
-A writable Worker turn that cannot execute required validation because of
-sandbox, IPC, loopback, process-isolation, missing-service, permission, or a
-comparable external constraint returns structured `BLOCKED` with bounded reason
-and evidence. The pipeline persists `environment_blocked`, preserves safe
-workspace content, and never weakens sandbox, network, process, or host
+A writable Worker turn returns structured `BLOCKED` with bounded reason and
+evidence when sandbox, IPC, loopback, process-isolation, missing-service,
+permission, or comparable external constraints prevent work not delegated to
+an exact selected runner-trusted command. Selecting another command does not
+suppress a genuine blocker. The pipeline persists `environment_blocked`,
+preserves safe workspace content, and never weakens sandbox, network, process, or host
 temporary-directory boundaries to make validation pass.
 
 The pipeline stores concise summaries as external run artifacts:
@@ -411,9 +412,23 @@ Compatible continuation turns inherit this responsibility from their native
 session without repeating it. A violation follows the ordinary finding-and-fix
 path and never reopens user questions.
 
-An external validation blocker pauses at `POLISH` without discarding safe
-Worker changes. Any stale candidate, finalization, and terminal-confirmation
-results are invalidated before the pause.
+Polishing, lazy `CHECK_AND_FIX`, and finding-resolution prompts receive only
+the exact command text selected in persisted `trustedValidation.commands`.
+The bounded projection accompanies complete, continued, reconstructed, and
+correction requests and is an empty array for an empty selection. It does not
+reload configuration, expose executable vectors or provider settings, or repeat
+the complete validation inventory. Inventory-reporting and `NOT_RUN`
+instructions remain in their existing bootstrap and finalization contexts.
+
+Established required-check execution and attestation belong exclusively to
+`FINALIZE`. Selected runner-trusted commands never execute inside agent turns.
+Their agent-sandbox limitations must not cause `BLOCKED` or prevent applicable
+content repairs and semantic review; the runner executes the persisted exact
+vectors during `FINALIZE`.
+
+An external environment constraint affecting nondelegated work pauses at
+`POLISH` without discarding safe Worker changes. Any stale candidate,
+finalization, and terminal-confirmation results are invalidated before the pause.
 
 ### Finalize
 
@@ -608,8 +623,10 @@ configured budget. Every finding must be fixed, withdrawn, arbitrated, or
 explicitly overridden by the user for the exact candidate or terminal
 fingerprint that reported it.
 
-If required validation is externally blocked during finding resolution, the
-Worker returns `BLOCKED` with no decisions and bounded reason and evidence. A
+If an external environment constraint blocks nondelegated work during finding
+resolution, the Worker returns `BLOCKED` with no decisions and bounded reason
+and evidence. A selected trusted command's agent-sandbox limitation alone
+cannot block repairs; execution remains owned by `FINALIZE`. A
 content-changing partial fix is preserved, invalidates all three gates, and
 resumes at `REVIEW`; an unchanged turn retains its blockers and resumes at
 `RESOLVE_FINDINGS`.
@@ -624,8 +641,8 @@ another complete blocked window pauses.
 
 In lazy mode, polishing enters writable `CHECK_AND_FIX` before finalization and
 never invokes Reviewer or Arbiter. The Worker receives the entire current
-result, established validation inventory, prior candidate or terminal findings,
-and this mandatory review core:
+result, the bounded trusted-command projection specified for polishing, prior
+candidate or terminal findings, and this mandatory review core:
 
 ```text
 Review the changes and verify that they are correct, idiomatic, minimal, and consistent with the project's conventions. If you find any problems, fix them idiomatically and minimally, following the project's conventions.
@@ -782,8 +799,8 @@ identified questions stay in the root pending-input projection. Input response,
 safe null retry, one concrete valid extra-fix round, and exact finding overrides
 continue to use the existing resume validation. A read-only repository mutation
 instead instructs the user to abandon the contaminated run and start fresh from
-an uncontaminated worktree. `environment_blocked` retains why validation is
-blocked and the precise `POLISH`, `REVIEW`, `FINALIZE`, `CHECK_AND_FIX`, or
+an uncontaminated worktree. `environment_blocked` retains why nondelegated work
+or finalization is blocked and the precise `POLISH`, `REVIEW`, `FINALIZE`, `CHECK_AND_FIX`, or
 `RESOLVE_FINDINGS` retry checkpoint. This read-only projection does not itself
 change the pipeline state version. The runner-owned handoff is represented by
 pipeline state version 5.
@@ -1080,8 +1097,13 @@ semantics, and handoff behavior. Cover at least:
   candidate convergence while preserving paused and terminal runs without
   replaying `HANDOFF`;
 - sandbox, IPC, loopback, process-isolation, missing-service, and permission
-  validation blockers across polishing, finalization, and finding resolution,
-  including fingerprint-aware preservation and resume;
+  blockers for nondelegated work, including fingerprint-aware preservation
+  and resume while another command is selected for trusted execution;
+- delegated repairs and candidate convergence in both modes, with persisted
+  exact command text in every affected writable checkpoint, continued and
+  reconstructed requests, and lazy corrections; empty selections and exact
+  matching without unrelated configuration or repeated inventories; trusted
+  execution only during `FINALIZE`;
 - successful, blocked, failed, non-allowlisted, fingerprint-drifting, mutating,
   and resumed runner-trusted checks with the durable selected snapshot;
 - finite redacted Claude failure classification, durable read-only request

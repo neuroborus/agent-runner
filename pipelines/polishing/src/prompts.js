@@ -51,12 +51,16 @@ Use only the bounded accepted findings below as correction feedback. They never 
 export const FINALIZATION_CORRECTION_INSTRUCTIONS = `Your previous structured finalization result was rejected by deterministic validation. Make one read-only correction and return a complete replacement result using the same finalization schema.
 Correct only the identified contract violation using current repository evidence. Re-execute only corrected staging-independent checks as needed to produce complete direct evidence. Do not execute the rejected command, run staging-dependent validation, repeat or quote the rejected result, ask an ordinary clarification question, or modify repository content, staging, history, refs, remotes, or Git identity. Preserve the exceptional PRODUCT_DECISION_REQUIRED outcome and its required product-decision fields when its existing criteria are met. A repeated invalid result fails closed.`;
 
+const PREFINALIZATION_VALIDATION_INSTRUCTIONS = `The established required-check inventory is input only to the dedicated FINALIZE gate. Do not execute or attest it in this turn.
+Selected runner-trusted commands must never execute inside an agent turn. Their agent-sandbox limitations must not cause BLOCKED or prevent applicable content repairs and semantic review; the runner executes their persisted exact vectors during FINALIZE.`;
+
 export const POLISH_INSTRUCTIONS = `Polish the existing local repository changes into a correct, idiomatic, minimal result that satisfies the task and follows the target project's conventions.
 
 You may modify safe workspace content when correctness requires it. Do not stage or unstage changes or alter the Git index or other Git metadata. Do not create a commit, change HEAD or refs, alter remotes or Git identity, or perform a remote write. The runner alone stages the finalized and reviewed content during handoff. Preserve unrelated work. Before returning, perform a concise self-review.
-The established required-check inventory is input only to the dedicated FINALIZE gate. Do not execute it in this turn or perform generic commit preparation.
+${PREFINALIZATION_VALIDATION_INSTRUCTIONS}
+Do not perform generic commit preparation.
 For COMPLETED, provide summary; set reason, question, and whyBlocked to "", and options and evidence to [].
-For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or comparable external constraints. Set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
+For BLOCKED, use only for external environment constraints affecting work not delegated to a selected runner-trusted command. Set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
 For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-decision fields.
 Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.`;
 
@@ -113,9 +117,10 @@ export const CHECK_AND_FIX_INSTRUCTIONS = `Review the changes and verify that th
 
 Review the complete current result as a semantic candidate. Do not run the project finalization procedure, attest finalization evidence, or perform generic handoff preparation; those remain owned by FINALIZE, CONFIRM, and HANDOFF. Do not stage, unstage, or commit.
 When candidate-confirmation findings are supplied, resolve them before reporting UNCHANGED; use UNCHANGED only when no supplied candidate-confirmation finding remains.
+${PREFINALIZATION_VALIDATION_INSTRUCTIONS}
 For CHANGED, use only when you changed repository content; provide summary and set reason, question, and whyBlocked to "", and options and evidence to [].
 For UNCHANGED, use only when you found no problem and changed no repository content; provide summary and set reason, question, and whyBlocked to "", and options and evidence to [].
-For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or a comparable external constraint. Set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
+For BLOCKED, use only for external environment constraints affecting work not delegated to a selected runner-trusted command. Set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
 For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-decision fields.
 Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
 ${PRODUCT_DECISION_INSTRUCTIONS}`;
@@ -151,9 +156,10 @@ Correct every identified field-and-constraint violation from current repository 
 
 export const FINDING_RESOLUTION_INSTRUCTIONS = `Resolve every current blocker in one batch. Fix each valid blocker idiomatically and minimally. Dispute an incorrect Reviewer finding only with concise evidence. Modify safe workspace content only; do not stage or unstage changes or alter the Git index. The runner owns final staging after finalization and review.
 
-Do not run the project finalization procedure, execute the established required-check inventory, perform generic commit preparation, or create a commit. Those actions remain owned by FINALIZE or HANDOFF as applicable. Finalization failures must be fixed and cannot be disputed. A finding already upheld by the Arbiter must be fixed.
+Do not run the project finalization procedure, perform generic commit preparation, or create a commit. Those actions remain owned by FINALIZE or HANDOFF as applicable. Finalization failures must be fixed and cannot be disputed. A finding already upheld by the Arbiter must be fixed.
+${PREFINALIZATION_VALIDATION_INSTRUCTIONS}
 For RESOLVED, return exactly one decision per blocker; every decision requires reason; DISPUTE requires evidence, while FIX evidence may be []. Set top-level reason, question, and whyBlocked to "", and options and evidence to [].
-For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or comparable external constraints. Set decisions and options to []; provide reason and evidence; set question and whyBlocked to "".
+For BLOCKED, use only for external environment constraints affecting work not delegated to a selected runner-trusted command. Set decisions and options to []; provide reason and evidence; set question and whyBlocked to "".
 For PRODUCT_DECISION_REQUIRED, set decisions to [] and reason to ""; use the product-decision fields.
 Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.`;
 

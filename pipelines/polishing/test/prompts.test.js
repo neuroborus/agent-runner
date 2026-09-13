@@ -167,7 +167,7 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
   assert.match(POLISH_INSTRUCTIONS, /runner alone stages/u);
   assert.match(POLISH_INSTRUCTIONS, /Do not stage or unstage/u);
   assert.match(POLISH_INSTRUCTIONS, /self-review/u);
-  assert.match(POLISH_INSTRUCTIONS, /sandbox, IPC, loopback/u);
+  assert.match(POLISH_INSTRUCTIONS, /external environment constraints/u);
   assert.match(POLISH_INSTRUCTIONS, /required-check inventory is input only/u);
   assert.match(FINALIZATION_INSTRUCTIONS, /finalization procedure/u);
   assert.match(FINALIZATION_INSTRUCTIONS, /Do not.*stage/u);
@@ -308,4 +308,28 @@ test("terminal recovery instructions distinguish evidence from content without w
     FINALIZATION_RECOVERY_INSTRUCTIONS,
     /do not reuse the rejected PASS/u,
   );
+});
+
+test("writable candidate instructions defer checks without suppressing unrelated blockers", () => {
+  for (const instructions of [
+    POLISH_INSTRUCTIONS,
+    CHECK_AND_FIX_INSTRUCTIONS,
+    FINDING_RESOLUTION_INSTRUCTIONS,
+  ]) {
+    assert.match(instructions, /Do not execute or attest it in this turn/u);
+    assert.match(instructions, /must never execute inside an agent turn/u);
+    assert.match(instructions, /must not cause BLOCKED/u);
+    assert.match(
+      instructions,
+      /applicable content repairs and semantic review/u,
+    );
+    assert.match(
+      instructions,
+      /work not delegated to a selected runner-trusted command/u,
+    );
+    assert.doesNotMatch(
+      instructions,
+      /NOT_RUN|requiredChecks|validationInfrastructure/u,
+    );
+  }
 });

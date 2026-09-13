@@ -7,6 +7,16 @@ remain in the owning documentation.
 
 ## 2026-09-13
 
+- **Writable turns defer selected trusted checks without deferring repairs.**
+  Plan execution and polishing project only persisted exact command text into
+  implementation, polishing, lazy check/fix, and finding-resolution requests,
+  including continuation, reconstruction, and correction. Established check
+  execution and attestation remain exclusive to finalization. Selected-command
+  sandbox limitations cannot block applicable repairs or semantic review;
+  nondelegated environment blockers preserve the existing safe-content and
+  resume paths. No configuration reload, external attestation, or broader
+  agent permission is introduced.
+
 - **Legacy confirmation recovery requires journal provenance.** Failed opaque
   terminal confirmations can resume directly after mode-specific candidate
   acceptance, passing finalization, and complete safety revalidation are
