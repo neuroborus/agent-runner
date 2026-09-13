@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import { PROVIDER_REGISTRY } from "../agents/index.js";
 import { createClarificationService } from "../clarifications/index.js";
@@ -209,8 +210,11 @@ export function createRunner(options = {}) {
         await publish(activity, next);
         return next;
       },
-      async transition(patch, { activity } = {}) {
-        const next = await runStore.transitionRun(lease, patch, { activity });
+      async transition(patch, { activity, expectedRevision } = {}) {
+        const next = await runStore.transitionRun(lease, patch, {
+          activity,
+          expectedRevision,
+        });
         await publish(activity, next);
         return next;
       },
@@ -234,6 +238,15 @@ export function createRunner(options = {}) {
       );
     }
     pipelineForRun(run, pipeline);
+    if (pipeline.prepareRecovery !== undefined && runStore.loadRunHistory) {
+      const history = await runStore.loadRunHistory(run.runId);
+      if (!isDeepStrictEqual(history.run, run)) {
+        throw new RunnerError("Run changed before recovery inspection.", {
+          code: "ERR_RUN_REVISION_CHANGED",
+        });
+      }
+      pipeline.prepareRecovery(run, history);
+    }
     const settings = run.pipelineState.settings;
     if (!isRecord(settings)) {
       throw new RunnerError(`Run ${run.runId} has no resolved settings.`, {
@@ -296,6 +309,19 @@ export function createRunner(options = {}) {
     });
   }
 
+  async function validatePersistedBoundary(run) {
+    const boundary = await validateBoundary(run);
+    if (
+      boundary.projectPath !== run.projectPath ||
+      boundary.taskPath !== run.taskPath
+    ) {
+      throw new RunnerError(
+        `Run ${run.runId} canonical project or task path changed.`,
+        { code: "ERR_RUN_PATH_CHANGED" },
+      );
+    }
+  }
+
   async function result(run) {
     return Object.freeze({
       directoryPath: await runStore.getRunDirectory(run.runId),
@@ -312,16 +338,7 @@ export function createRunner(options = {}) {
     const prepared = pipelineForRun(storedRun, undefined, {
       allowMigration: true,
     });
-    const boundary = await validateBoundary(storedRun);
-    if (
-      boundary.projectPath !== storedRun.projectPath ||
-      boundary.taskPath !== storedRun.taskPath
-    ) {
-      throw new RunnerError(
-        `Run ${runId} canonical project or task path changed.`,
-        { code: "ERR_RUN_PATH_CHANGED" },
-      );
-    }
+    await validatePersistedBoundary(storedRun);
     validatePreparedRun?.(prepared.run);
     const runtimeMigrationRequired =
       storedRun.schemaVersion !== RUN_STATE_SCHEMA_VERSION ||
@@ -508,13 +525,6 @@ export function createRunner(options = {}) {
         normalized.runId,
       );
       if (
-        (recovered.pipelineState.trustedValidation?.commands.length ?? 0) > 0
-      ) {
-        await trustedValidation.preflight({
-          projectPath: recovered.projectPath,
-        });
-      }
-      if (
         recovered.pipelineState.workflowState === "WAITING_FOR_USER" ||
         normalized.action !== null
       ) {
@@ -528,9 +538,18 @@ export function createRunner(options = {}) {
         }
       }
       return await result(
-        await withWorktreeLease(recovered, () =>
-          execute(pipeline, recovered, lease, normalized.action),
-        ),
+        await withWorktreeLease(recovered, async () => {
+          if (
+            (recovered.pipelineState.trustedValidation?.commands.length ?? 0) >
+            0
+          ) {
+            await trustedValidation.preflight({
+              projectPath: recovered.projectPath,
+            });
+          }
+          await validatePersistedBoundary(recovered);
+          return execute(pipeline, recovered, lease, normalized.action);
+        }),
       );
     } finally {
       await lease.release();
@@ -539,10 +558,13 @@ export function createRunner(options = {}) {
 
   async function status(runId) {
     assertNonEmptyString(runId, "runId");
-    const storedRun = await runStore.loadRun(runId);
-    const { run } = pipelineForRun(storedRun, undefined, {
+    const history = runStore.loadRunHistory
+      ? await runStore.loadRunHistory(runId)
+      : { run: await runStore.loadRun(runId), events: [] };
+    const { pipeline, run } = pipelineForRun(history.run, undefined, {
       allowMigration: true,
     });
+    pipeline.prepareRecovery?.(run, history);
     return result(run);
   }
 

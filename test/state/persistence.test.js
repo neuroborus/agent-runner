@@ -688,3 +688,49 @@ test("repairs only a partial final event and rejects invalid durable state", asy
       error instanceof RunStoreError && error.code === "ERR_INVALID_RUN_STATE",
   );
 });
+
+test("loads revision-bound private history without repairing files and rejects stale transitions", async (t) => {
+  const { created, store } = await createFixture(t);
+  const next = await store.transitionRun(created.lease, {
+    counters: { fixRounds: 1 },
+  });
+  const statePath = join(created.directoryPath, "state.json");
+  const eventsPath = join(created.directoryPath, "events.jsonl");
+  await writeFile(statePath, JSON.stringify(created.state));
+  await appendFile(eventsPath, '{"partial":');
+  const before = await Promise.all([
+    readFile(statePath, "utf8"),
+    readFile(eventsPath, "utf8"),
+  ]);
+  const history = await store.loadRunHistory(created.state.runId);
+  assert.deepEqual(history.run, next);
+  assert.equal(history.events.length, 2);
+  assert.deepEqual(history.events.at(-1).state, history.run);
+  assert.ok(Object.isFrozen(history.events[0].state.pipelineState));
+  await assert.rejects(
+    store.transitionRun(
+      created.lease,
+      { counters: { fixRounds: 2 } },
+      {
+        expectedRevision: created.state.revision,
+      },
+    ),
+    { code: "ERR_RUN_REVISION_CHANGED" },
+  );
+  assert.deepEqual(
+    await Promise.all([
+      readFile(statePath, "utf8"),
+      readFile(eventsPath, "utf8"),
+    ]),
+    before,
+  );
+  await store.transitionRun(
+    created.lease,
+    { counters: { fixRounds: 2 } },
+    { expectedRevision: next.revision },
+  );
+  assert.equal(
+    (await store.loadRunHistory(created.state.runId)).run.revision,
+    3,
+  );
+});

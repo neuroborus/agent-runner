@@ -243,6 +243,8 @@ test("isolates host-control and remote-write probes", async (t) => {
     ["--eval", "process.exit(0)"],
   );
   let execution;
+  const launcherPath = "/runner-owned/bwrap";
+  const launcherChecks = [];
   const service = createTrustedValidationService({
     environment: {
       ...process.env,
@@ -254,6 +256,17 @@ test("isolates host-control and remote-write probes", async (t) => {
       SSH_AUTH_SOCK: "/tmp/do-not-expose-agent.sock",
     },
     git,
+    // This test inspects construction only; installed launchers are host state.
+    resolveLauncher(executable) {
+      assert.equal(executable, null);
+      return launcherPath;
+    },
+    verifyLauncher(path, cwd) {
+      assert.equal(path, launcherPath);
+      assert.equal(cwd, projectPath);
+      launcherChecks.push(path);
+      return path;
+    },
     async runCommand(command, options) {
       execution = { command, options };
       return {
@@ -276,6 +289,8 @@ test("isolates host-control and remote-write probes", async (t) => {
   });
 
   assert.equal(result.status, "PASS");
+  assert.deepEqual(launcherChecks, [launcherPath, launcherPath]);
+  assert.equal(execution.command.executable, launcherPath);
   assert.equal(isAbsolute(execution.command.executable), true);
   assert.notEqual(execution.command.executable, fakeLauncher);
   assert.notEqual(execution.command.executable, "bwrap");
@@ -336,6 +351,47 @@ test("isolates host-control and remote-write probes", async (t) => {
     shadowed.preflight({ projectPath }),
     (cause) => cause.code === "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE",
   );
+});
+
+test("rejects a changed trusted launcher before executing its command", async (t) => {
+  const projectPath = await repository(t);
+  const git = createGitService();
+  const trusted = snapshot(
+    "launcher-check",
+    "node launcher validation",
+    process.execPath,
+    ["--eval", "process.exit(0)"],
+  );
+  let verified = false;
+  const service = createTrustedValidationService({
+    git,
+    resolveLauncher: () => "/runner-owned/bwrap",
+    verifyLauncher(path) {
+      if (verified) {
+        throw Object.assign(new Error("Launcher changed."), {
+          code: "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE",
+        });
+      }
+      verified = true;
+      return path;
+    },
+    runCommand() {
+      assert.fail("A changed launcher must not execute a command.");
+    },
+  });
+  await service.preflight({ projectPath });
+
+  const result = await service.execute({
+    bindings: await bindings(git, projectPath, trusted),
+    commandIdentity: trusted.commands[0].identity,
+    projectPath,
+    snapshot: trusted,
+  });
+
+  assert.equal(result.status, "BLOCKED");
+  assert.deepEqual(result.evidence, [
+    "Runner-trusted command launcher-check could not start in the required isolated executor.",
+  ]);
 });
 
 test("distinguishes isolation setup denial from command failure", async (t) => {

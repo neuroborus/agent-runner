@@ -7,6 +7,17 @@ remain in the owning documentation.
 
 ## 2026-09-13
 
+- **Legacy confirmation recovery requires journal provenance.** Failed opaque
+  terminal confirmations can resume directly after mode-specific candidate
+  acceptance, passing finalization, and complete safety revalidation are
+  proven under the normal leases. State owns continuous history; the pipeline
+  owns proof and shares revision-bound eligibility across CLI and MCP.
+  Migration-derived terminal tuples cannot manufacture acceptance. A true
+  correction marker survives an already charged fix through unchanged lazy
+  checking and finalization, so recovery preserves it when no concrete work
+  remains. Durable reconstruction, unchanged evidence, completed commits,
+  idempotent receipts, and detached ownership prevent replay or recounting.
+
 - **Structured Codex client errors are terminal even under `other`.** Bounded
   recognition of a native HTTP wrapper and JSON error envelope distinguishes
   non-transient request rejection, including HTTP 400 `invalid_json_schema`,

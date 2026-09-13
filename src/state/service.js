@@ -567,6 +567,14 @@ export function createRunStore({
     return deepFreeze((await loadSnapshot(runDirectory, runId)).state);
   }
 
+  // Internal runtime evidence: the run and complete validated journal come
+  // from one authoritative snapshot. Public projections must not return events.
+  async function loadRunHistory(runId) {
+    const runDirectory = await getRunDirectory(runId);
+    const snapshot = await loadSnapshot(runDirectory, runId);
+    return deepFreeze({ run: snapshot.state, events: snapshot.events });
+  }
+
   async function runIsLeased(runId) {
     const runDirectory = await getRunDirectory(runId);
     return runLeases.isLeased(runDirectory, runId);
@@ -766,7 +774,19 @@ export function createRunStore({
     });
   }
 
-  async function transitionRun(lease, patch, { activity } = {}) {
+  async function transitionRun(
+    lease,
+    patch,
+    { activity, expectedRevision } = {},
+  ) {
+    if (
+      expectedRevision !== undefined &&
+      (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1)
+    ) {
+      throw new RunStoreError("Expected run revision is invalid.", {
+        code: "ERR_RUN_REVISION_CHANGED",
+      });
+    }
     const normalizedPatch = normalizeTransitionPatch(patch);
     const normalizedActivity = normalizePublicActivity(activity);
     if (
@@ -781,6 +801,14 @@ export function createRunStore({
 
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
+      if (
+        expectedRevision !== undefined &&
+        snapshot.state.revision !== expectedRevision
+      ) {
+        throw new RunStoreError("Run changed before transition.", {
+          code: "ERR_RUN_REVISION_CHANGED",
+        });
+      }
       if (
         normalizedActivity === null &&
         Object.entries(normalizedPatch).every(([field, value]) =>
@@ -981,6 +1009,7 @@ export function createRunStore({
     getRunDirectory,
     finishAgentTurn,
     loadRun,
+    loadRunHistory,
     migrateRun,
     readPublicActivity,
     readAction: actions.read,

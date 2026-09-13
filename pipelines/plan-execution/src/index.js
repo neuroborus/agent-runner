@@ -1,6 +1,10 @@
 import { join } from "node:path";
 
 import {
+  canRecoverLegacyConfirmation,
+  prepareLegacyConfirmationRecovery,
+} from "./legacy-confirmation-recovery.js";
+import {
   createPlanExecutionState,
   MAX_CLARIFICATION_ROUNDS,
   PlanExecutionWorkflowError,
@@ -329,6 +333,19 @@ function projectPause(run) {
     ? PUBLIC_PAUSE_EXPLANATIONS[reason]
     : "No public diagnostic is available for this pause.";
   const nextActions = [];
+  if (canRecoverLegacyConfirmation(run)) {
+    return Object.freeze({
+      reason: "internal_failure",
+      code: "ERR_CODEX_TURN_FAILED",
+      explanation:
+        "Journal-proven legacy terminal confirmation can be retried after safety revalidation.",
+      evidence: Object.freeze([]),
+      resumeState: "CONFIRM",
+      nextActions: Object.freeze([
+        Object.freeze({ type: "resume", action: null }),
+      ]),
+    });
+  }
   if (
     run.pipelineState.workflowState === "WAITING_FOR_USER" &&
     run.pause.inputRequest !== undefined &&
@@ -424,6 +441,7 @@ function projectStatus(run) {
 }
 
 function validateResumeAction(run, action) {
+  if (action === null && canRecoverLegacyConfirmation(run)) return;
   const state = run.pipelineState;
   if (state.workflowState !== "WAITING_FOR_USER") {
     throw new Error("Only a persisted paused run can be resumed.");
@@ -1127,6 +1145,21 @@ export const planExecutionPipeline = Object.freeze({
     status: projectStatus,
   }),
   validateResumeAction,
+  prepareRecovery(run, history) {
+    prepareLegacyConfirmationRecovery(run, history, (historicalRun) => {
+      let current = historicalRun;
+      while (current.pipelineStateVersion < 15) {
+        const migration =
+          planExecutionPipeline.migrations[current.pipelineStateVersion];
+        current = {
+          ...current,
+          pipelineState: migration(current),
+          pipelineStateVersion: current.pipelineStateVersion + 1,
+        };
+      }
+      return current;
+    });
+  },
   workflow: Object.freeze({
     createState: createPlanExecutionState,
     run: runPlanExecution,

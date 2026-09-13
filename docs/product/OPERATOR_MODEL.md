@@ -56,6 +56,16 @@ the same checkout concurrently. Status and activity reads remain lock-free.
 
 ## Pauses, resume, and observability
 
+Legacy opaque plan-execution failures during terminal confirmation can expose
+an action-free retry in either mode when durable history proves acceptance and
+finalization. CLI and MCP share that eligibility; status remains lock-free and
+does not reopen the run. Execution rechecks proof and safety under the normal
+leases before resuming confirmation. It preserves completed commits, settings,
+lineage, evidence, and accounting. A true correction marker may represent an
+already charged fix rather than pending work; operators must not edit it.
+Absent or inconsistent provenance grants no retry, and MCP retains its exact
+revision, durable receipt, idempotency, and detached ownership guarantees.
+
 Normal work is autonomous. The runner pauses for identified clarification or a
 material product decision, provider unavailability, an external validation
 blocker, exhausted correction budgets, version skew, unsafe Git state, or an

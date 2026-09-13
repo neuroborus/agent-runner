@@ -71,6 +71,16 @@ common contracts and never enter role prompts or run state.
 
 ## Effect reconciliation
 
+Legacy terminal-confirmation recovery is gated by complete journal provenance,
+current inputs and Git controls, unchanged finalized content, and valid
+validation infrastructure and check evidence. Missing, discontinuous,
+inconsistent, or migration-only proof fails closed. Recovery preserves an
+already charged correction marker only when no concrete correction, findings,
+disputes, directions, migration obligations, or effects remain. It never
+replays a consumed commit authorization or previously completed work. The
+recovery transition is revision-bound and write-ahead, and private history
+does not cross public CLI or MCP projections.
+
 Intent is durable before any commit, handoff, editor, or MCP mutation. If a
 process stops after an effect may have started, recovery inspects the observed
 state before acting. A consumed commit authorization stays on a verification-

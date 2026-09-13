@@ -16,6 +16,7 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
+import { createLegacyRecoveryFixture } from "../../pipelines/plan-execution/test/support/index.js";
 import {
   createClarificationService,
   createDetachedRuntimeCompatibilityToken,
@@ -45,6 +46,137 @@ const SIXTH_RUN_ID = "66666666-6666-4666-8666-666666666666";
 const SEVENTH_RUN_ID = "77777777-7777-4777-8777-777777777777";
 const RESPONSE_HASH = "a".repeat(64);
 const executeFile = promisify(execFile);
+
+test("MCP legacy recovery keeps exact revisions, idempotent receipts, and detached ownership", async (t) => {
+  const fixture = await createLegacyRecoveryFixture(t, { steps: 1 });
+  let launches = 0;
+  let continuation;
+  const controlOptions = {
+    runner: fixture.openRunner(),
+    runStore: fixture.store,
+    launchRun(runId, action, options) {
+      launches += 1;
+      assert.equal(
+        options.expectedRuntimeCompatibility,
+        DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
+      );
+      continuation = fixture.openRunner().resume({ runId, action });
+      continuation.then(
+        () => options.onExit(0),
+        () => options.onExit(1),
+      );
+    },
+  };
+  const control = createMcpControlPlane(controlOptions);
+  const status = await control.runStatus({ runId: fixture.runId });
+  assert.equal(status.status, "FAILED");
+  assert.equal(status.pause.resumeState, "CONFIRM");
+  assert.deepEqual(status.pause.nextActions, [
+    { type: "resume", action: null },
+  ]);
+  assert.doesNotMatch(
+    JSON.stringify(status),
+    /PRIVATE_LEGACY_PROVIDER_PAYLOAD|events|candidateReviewResult/u,
+  );
+  const request = {
+    runId: fixture.runId,
+    expectedRevision: fixture.failed.revision,
+    action: null,
+    idempotencyKey: "legacy-recovery",
+  };
+  await assert.rejects(
+    control.runResume({
+      ...request,
+      expectedRevision: request.expectedRevision - 1,
+      idempotencyKey: "stale-legacy",
+    }),
+    /stale/u,
+  );
+  await assert.rejects(
+    control.runResume({
+      ...request,
+      action: { type: "extra-fix-rounds", amount: 1 },
+      idempotencyKey: "invalid-legacy",
+    }),
+    /paused/u,
+  );
+  const competing = await fixture.store.acquireWorktreeLease(
+    fixture.projectPath,
+    SECOND_RUN_ID,
+  );
+  try {
+    await assert.rejects(control.runResume(request), {
+      code: "ERR_WORKTREE_LEASED",
+    });
+  } finally {
+    await competing.release();
+  }
+  assert.equal(launches, 0);
+  const receipt = await control.runResume(request);
+  assert.deepEqual(receipt, { runId: fixture.runId });
+  assert.deepEqual(await control.runResume(request), receipt);
+  await continuation;
+  assert.deepEqual(
+    await createMcpControlPlane(controlOptions).runResume(request),
+    receipt,
+  );
+  await assert.rejects(
+    control.runResume({
+      ...request,
+      expectedRevision: request.expectedRevision + 1,
+    }),
+    /idempotency|different|match/iu,
+  );
+  assert.equal(launches, 1);
+});
+
+test("MCP legacy recovery repairs an interrupted receipt without another dispatch", async (t) => {
+  const fixture = await createLegacyRecoveryFixture(t, { steps: 1 });
+  const receiptFailure = new Error("Simulated receipt interruption");
+  let failReceipt = true;
+  let launches = 0;
+  let continuation;
+  const store = {
+    ...fixture.store,
+    async beginAction(...args) {
+      const action = await fixture.store.beginAction(...args);
+      return {
+        ...action,
+        async complete(receipt) {
+          if (failReceipt) {
+            failReceipt = false;
+            throw receiptFailure;
+          }
+          return action.complete(receipt);
+        },
+      };
+    },
+  };
+  const options = {
+    runStore: store,
+    runner: fixture.openRunner(),
+    launchRun(runId, action) {
+      launches += 1;
+      continuation = fixture.openRunner().resume({ runId, action });
+      continuation.catch(() => {});
+    },
+  };
+  const request = {
+    runId: fixture.runId,
+    expectedRevision: fixture.failed.revision,
+    action: null,
+    idempotencyKey: "interrupted-legacy-receipt",
+  };
+  await assert.rejects(
+    createMcpControlPlane(options).runResume(request),
+    (cause) => cause === receiptFailure,
+  );
+  await continuation;
+  assert.deepEqual(await createMcpControlPlane(options).runResume(request), {
+    runId: fixture.runId,
+  });
+  assert.equal(launches, 1);
+});
 
 async function childNodeStdoutIsAvailable() {
   const marker = "agent-runner-child-stdio-probe";

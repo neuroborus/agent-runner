@@ -13,6 +13,7 @@ import { isAbsolute, join, relative, sep } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
+import { createLegacyRecoveryFixture } from "../../pipelines/plan-execution/test/support/index.js";
 import {
   createClarificationService,
   createGitService,
@@ -24,6 +25,104 @@ import {
 } from "../../src/index.js";
 
 const executeFile = promisify(execFile);
+
+test("CLI legacy confirmation resume reaches the ordinary commit gate", async (t) => {
+  const fixture = await createLegacyRecoveryFixture(t, {
+    mode: "independent",
+    pendingCorrection: false,
+    steps: 1,
+  });
+  const stdout = sink();
+  const stderr = sink();
+  const before = fixture.calls.length;
+  assert.equal(
+    await main(["resume", "--run", fixture.runId], {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      runner: fixture.openRunner(),
+    }),
+    0,
+  );
+  assert.equal(fixture.calls.length - before, 2);
+  assert.equal(
+    (await fixture.store.loadRun(fixture.runId)).pipelineState.workflowState,
+    "DONE",
+  );
+  assert.doesNotMatch(
+    stdout.value() + stderr.value(),
+    /PRIVATE_LEGACY_PROVIDER_PAYLOAD/u,
+  );
+});
+
+test("legacy recovery shares CLI and MCP actions and survives a disconnected wait", async (t) => {
+  const entered = deferred();
+  const release = deferred();
+  let hold = false;
+  const fixture = await createLegacyRecoveryFixture(t, {
+    steps: 1,
+    onConfirmation: async () => {
+      if (hold) {
+        entered.resolve();
+        await release.promise;
+      }
+    },
+  });
+  const stdout = sink();
+  const stderr = sink();
+  const runner = fixture.openRunner();
+  const exitCode = await main(["status", "--run", fixture.runId], {
+    stdout: stdout.stream,
+    stderr: stderr.stream,
+    createCommandRunner: () => runner,
+  });
+  assert.equal(exitCode, 0);
+  assert.match(stdout.value(), /CONFIRM/u);
+  assert.match(stdout.value(), /resume/u);
+  const process = detached(fixture.openRunner());
+  const control = createMcpControlPlane({
+    runStore: fixture.store,
+    runner,
+    launchRun: process.launchRun,
+  });
+  const before = await control.runStatus({ runId: fixture.runId });
+  assert.equal(before.pause.resumeState, "CONFIRM");
+  hold = true;
+  try {
+    await control.runResume({
+      runId: fixture.runId,
+      expectedRevision: before.revision,
+      action: null,
+      idempotencyKey: "legacy-disconnect",
+    });
+    await entered.promise;
+    const running = await control.runStatus({ runId: fixture.runId });
+    const cancellation = new AbortController();
+    const wait = control.runWait(
+      {
+        runId: fixture.runId,
+        cursor: running.revision,
+        timeoutMs: 10_000,
+        progress: false,
+      },
+      { signal: cancellation.signal },
+    );
+    cancellation.abort();
+    await assert.rejects(wait, { name: "AbortError" });
+    assert.equal(await fixture.store.runIsLeased(fixture.runId), true);
+  } finally {
+    release.resolve();
+    await process.settle();
+  }
+  const done = await createMcpControlPlane({
+    runStore: fixture.openStore(),
+    runner: fixture.openRunner(),
+  }).runStatus({ runId: fixture.runId });
+  assert.equal(done.status, "DONE");
+  assert.equal(
+    fixture.calls.filter(({ access }) => access === "local-commit").length,
+    1,
+  );
+});
 const TWO_STEP_PLAN = `## Commit 1: feat(feature): add value
 
 Add the requested value.

@@ -160,6 +160,17 @@ revision and an idempotency key. An override applies only to its named finding
 and exact reviewed content, not to other findings or future repairs. Lazy
 confirmation findings return to fixing and are not arbitrated.
 
+A legacy plan-execution `FAILED` run may now offer a null `resume` action with
+`CONFIRM` as its target after an opaque `ERR_CODEX_TURN_FAILED` / `turn_other`
+failure. Follow that offered action through CLI or MCP. The runner proves the
+accepted candidate and passing finalization from durable history and rechecks
+inputs, content, validation infrastructure, and Git safety before retrying
+confirmation. It preserves completed commits and accounting, including a
+proven non-actionable `pendingCorrection` marker. Do not clear the marker or
+edit the journal. Missing provenance or conflicting work grants no recovery
+action; a matching error name or migrated snapshot alone is insufficient.
+Repeated provider unavailability pauses at the same confirmation checkpoint.
+
 Classify by current actions rather than an error-name shortcut. Provider usage
 exhaustion and environment limitations may be resumable; exhausted budgets,
 unsafe reconciliation, changed inputs, or ambiguous effects have their own

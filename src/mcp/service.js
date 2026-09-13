@@ -508,8 +508,16 @@ export function createMcpControlPlane(options = {}) {
     let dispatchStarted = false;
     while (true) {
       const run = (await runner.status(runIdValue)).run;
+      const recoverableFailure =
+        run.pipelineState.workflowState === "FAILED" &&
+        getPipeline(run.pipelineId)
+          .projections.pause(run)
+          ?.nextActions.some(
+            (next) => next.type === "resume" && next.action === null,
+          );
       if (
-        ["DONE", "FAILED"].includes(run.pipelineState.workflowState) ||
+        run.pipelineState.workflowState === "DONE" ||
+        (run.pipelineState.workflowState === "FAILED" && !recoverableFailure) ||
         (!allowWaiting &&
           run.pipelineState.workflowState === "WAITING_FOR_USER") ||
         run.revision > baselineRevision
