@@ -92,7 +92,7 @@ function completedTurn(threadId, turnId, output = "done", items = []) {
   };
 }
 
-function failedTurn(threadId, turnId, error) {
+function failedTurn(threadId, turnId, error, items = []) {
   return {
     method: "turn/completed",
     params: {
@@ -102,7 +102,7 @@ function failedTurn(threadId, turnId, error) {
         itemsView: "full",
         status: "failed",
         error,
-        items: [],
+        items,
       },
     },
   };
@@ -1106,39 +1106,48 @@ test("rejects an incorrect workspace shell-environment projection", async () => 
   );
 });
 
-test("rejects substitution of an explicit model", async () => {
-  const fixture = createFixture({
-    handle({ message }) {
-      if (message.method === "turn/start") {
-        const turnId = "rerouted-turn";
-        return {
-          result: { turn: { id: turnId } },
-          notification: [
-            {
-              method: "model/rerouted",
-              params: {
-                threadId: message.params.threadId,
-                turnId,
-                fromModel: "gpt-test",
-                toModel: "gpt-other",
-                reason: "test",
-              },
-            },
-            completedTurn(message.params.threadId, turnId),
-          ],
-        };
-      }
-      return undefined;
-    },
-  });
+test("rejects substitution of an explicit model", async (t) => {
+  for (const status of ["completed", "failed"]) {
+    await t.test(status, async () => {
+      const fixture = createFixture({
+        handle({ message }) {
+          if (message.method === "turn/start") {
+            const turnId = "rerouted-turn";
+            return {
+              result: { turn: { id: turnId } },
+              notification: [
+                {
+                  method: "model/rerouted",
+                  params: {
+                    threadId: message.params.threadId,
+                    turnId,
+                    fromModel: "gpt-test",
+                    toModel: "gpt-other",
+                    reason: "test",
+                  },
+                },
+                status === "completed"
+                  ? completedTurn(message.params.threadId, turnId)
+                  : failedTurn(message.params.threadId, turnId, {
+                      codexErrorInfo: "other",
+                    }),
+              ],
+            };
+          }
+          return undefined;
+        },
+      });
 
-  await assert.rejects(
-    fixture.adapter.run(
-      request({ access: "workspace-write", model: "gpt-test" }),
-    ),
-    hasCode("ERR_CODEX_MODEL_REROUTED"),
-  );
-  assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
+      await assert.rejects(
+        fixture.adapter.run(
+          request({ access: "workspace-write", model: "gpt-test" }),
+        ),
+        hasCode("ERR_CODEX_MODEL_REROUTED"),
+      );
+      assert.equal(fixture.processes.length, 1);
+      assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
+    });
+  }
 });
 
 test("fails before starting a thread when isolation is incomplete", async () => {
@@ -2075,6 +2084,59 @@ test("never replays when a partial completed turn cannot be hydrated", async () 
   assert.equal(fixture.processes.length, 1);
 });
 
+test("rejects invalid terminal turn statuses without recovery", async (t) => {
+  for (const status of ["inProgress", "not-a-terminal-status"]) {
+    for (const hydrated of [false, true]) {
+      const source = hydrated ? "hydrated" : "notification";
+      await t.test(`${status}/${source}`, async () => {
+        const fixture = createFixture({
+          handle({ message }) {
+            if (
+              message.method !== "turn/start" &&
+              !(hydrated && message.method === "thread/read")
+            ) {
+              return undefined;
+            }
+            const turnId = "invalid-status-turn";
+            const notification = failedTurn(message.params.threadId, turnId, {
+              codexErrorInfo: "other",
+            });
+            notification.params.turn.status = status;
+            if (message.method === "thread/read") {
+              return {
+                result: {
+                  thread: {
+                    id: message.params.threadId,
+                    turns: [notification.params.turn],
+                  },
+                },
+              };
+            }
+            if (hydrated) {
+              notification.params.turn.status = "failed";
+              notification.params.turn.itemsView = "summary";
+            }
+            return { result: { turn: { id: turnId } }, notification };
+          },
+        });
+
+        await assert.rejects(fixture.adapter.run(request()), (error) => {
+          assert.ok(hasCode("ERR_CODEX_PROTOCOL")(error));
+          assert.equal(error.recoverable, false);
+          return true;
+        });
+        assert.equal(fixture.processes.length, 1);
+        assert.equal(
+          fixture.processes[0].messages.filter(
+            ({ method }) => method === "turn/start",
+          ).length,
+          1,
+        );
+      });
+    }
+  }
+});
+
 test("classifies recognized terminal turn failures without retaining native details", async (t) => {
   const variants = [
     [
@@ -2131,6 +2193,7 @@ test("classifies recognized terminal turn failures without retaining native deta
         assert.ok(
           hasDiagnostic("ERR_CODEX_TURN_FAILED", diagnosticClass)(error),
         );
+        assert.equal(error.recoverable, diagnosticClass === "turn_other");
         assert.equal(error.cause, undefined);
         const retainedError = JSON.stringify({
           ...error,
@@ -2140,7 +2203,333 @@ test("classifies recognized terminal turn failures without retaining native deta
         assert.doesNotMatch(retainedError, /httpStatusCode|turnKind/u);
         return true;
       });
+      assert.equal(
+        fixture.processes.length,
+        diagnosticClass === "turn_other" ? 2 : 1,
+      );
     });
+  }
+});
+
+test("reconstructs opaque turn failures once from the complete recovery prompt", async (t) => {
+  for (const access of ["read-only", "workspace-write"]) {
+    for (const mode of ["fresh", "continue"]) {
+      for (const recoveryPrompt of [undefined, "Complete durable context."]) {
+        await t.test(
+          `${access}/${mode}/${recoveryPrompt ?? "fallback"}`,
+          async () => {
+            const fixture = createFixture({
+              handle({ message, processIndex }) {
+                if (message.method !== "turn/start" || processIndex !== 0) {
+                  return undefined;
+                }
+                return {
+                  result: { turn: { id: "opaque-turn" } },
+                  notification: failedTurn(
+                    message.params.threadId,
+                    "opaque-turn",
+                    {
+                      message: "DO_NOT_RETAIN_NATIVE_MESSAGE",
+                      codexErrorInfo: "other",
+                      additionalDetails: "DO_NOT_RETAIN_ADDITIONAL_DETAILS",
+                    },
+                    [
+                      {
+                        type: "commandExecution",
+                        command: "git diff HEAD",
+                        status: "failed",
+                      },
+                      ...(access === "workspace-write"
+                        ? [
+                            {
+                              type: "fileChange",
+                              changes: [],
+                              status: "completed",
+                            },
+                          ]
+                        : []),
+                    ],
+                  ),
+                };
+              },
+            });
+            const result = await fixture.adapter.run(
+              request({
+                access,
+                prompt: "Short current request.",
+                ...(recoveryPrompt === undefined ? {} : { recoveryPrompt }),
+                ...(mode === "continue"
+                  ? { session: { mode, id: "previous-thread" } }
+                  : {}),
+              }),
+            );
+
+            assert.equal(result.sessionId, "thread-1");
+            assert.equal(result.output, "done");
+            assert.equal(fixture.processes.length, 2);
+            assert.deepEqual(
+              fixture.processes.map(({ messages }) =>
+                messages
+                  .filter(({ method }) => method.startsWith("thread/"))
+                  .map(({ method }) => method),
+              ),
+              [
+                [mode === "continue" ? "thread/resume" : "thread/start"],
+                ["thread/start"],
+              ],
+            );
+            const turns = fixture.processes.flatMap(({ messages }) =>
+              messages.filter(({ method }) => method === "turn/start"),
+            );
+            assert.equal(turns.length, 2);
+            assert.equal(
+              turns[0].params.input[0].text,
+              "Short current request.",
+            );
+            assert.equal(
+              turns[1].params.input[0].text,
+              "The previous Codex session could not continue. Reconstruct context from " +
+                "this durable request and the observed current workspace. Preserve valid " +
+                "progress and do not repeat completed work.\n\n" +
+                (recoveryPrompt ?? "Short current request."),
+            );
+            assert.doesNotMatch(JSON.stringify(result), /DO_NOT_RETAIN/u);
+            assert.doesNotMatch(JSON.stringify(turns[1]), /DO_NOT_RETAIN/u);
+            if (access === "workspace-write") {
+              assert.deepEqual(
+                fixture.workspaceStorages.map(
+                  ({ cleanupCalls }) => cleanupCalls,
+                ),
+                [1, 1],
+              );
+              assert.equal(
+                fixture.workspaceStorages[1].previousCleanupCalls,
+                1,
+              );
+            }
+          },
+        );
+      }
+    }
+  }
+});
+
+test("propagates a second opaque or terminal turn failure without another retry", async (t) => {
+  for (const access of ["read-only", "workspace-write"]) {
+    for (const mode of ["fresh", "continue"]) {
+      for (const secondVariant of ["other", "unauthorized"]) {
+        await t.test(`${access}/${mode}/${secondVariant}`, async () => {
+          const fixture = createFixture({
+            handle({ message, processIndex }) {
+              if (message.method !== "turn/start") {
+                return undefined;
+              }
+              return {
+                result: { turn: { id: "failed-turn" } },
+                notification: failedTurn(
+                  message.params.threadId,
+                  "failed-turn",
+                  {
+                    message: "DO_NOT_RETAIN_NATIVE_MESSAGE",
+                    codexErrorInfo: {
+                      [processIndex === 0 ? "other" : secondVariant]:
+                        "DO_NOT_RETAIN_VARIANT_DETAILS",
+                    },
+                    additionalDetails: "DO_NOT_RETAIN_ADDITIONAL_DETAILS",
+                  },
+                ),
+              };
+            },
+          });
+
+          await assert.rejects(
+            fixture.adapter.run(
+              request({
+                access,
+                ...(mode === "continue"
+                  ? { session: { mode, id: "previous-thread" } }
+                  : {}),
+              }),
+            ),
+            (error) => {
+              assert.ok(
+                hasDiagnostic(
+                  "ERR_CODEX_TURN_FAILED",
+                  `turn_${secondVariant}`,
+                )(error),
+              );
+              assert.equal(error.message, "Codex turn failed.");
+              for (const failure of [
+                error,
+                normalizeAdapterFailure("codex", error),
+              ]) {
+                assert.equal(failure.recoverable, secondVariant === "other");
+                assert.equal(failure.ambiguous, false);
+                assert.equal(failure.effectStarted, undefined);
+                assert.equal(failure.cause, undefined);
+                assert.doesNotMatch(
+                  JSON.stringify({ ...failure, message: failure.message }),
+                  /DO_NOT_RETAIN/u,
+                );
+              }
+              return true;
+            },
+          );
+          assert.equal(fixture.processes.length, 2);
+          const methods = fixture.processes.flatMap(({ messages }) =>
+            messages.map(({ method }) => method),
+          );
+          assert.equal(
+            methods.filter((method) => method === "turn/start").length,
+            2,
+          );
+          assert.equal(methods.includes("thread/compact/start"), false);
+        });
+      }
+    }
+  }
+});
+
+test("opaque turn failures cannot hide forbidden operations", async (t) => {
+  for (const [item, code, diagnosticClass] of [
+    [
+      { type: "subAgentActivity", kind: "spawned" },
+      "ERR_CODEX_ISOLATION",
+      "operation_multi_agent",
+    ],
+    [
+      {
+        type: "commandExecution",
+        command: "git push origin main",
+        status: "completed",
+      },
+      "ERR_CODEX_REMOTE_WRITE_ATTEMPT",
+      "operation_remote_write",
+    ],
+    [
+      { type: "fileChange", changes: [], status: "completed" },
+      "ERR_CODEX_READ_ONLY_POLICY",
+      "operation_read_only_write",
+    ],
+    [null, "ERR_CODEX_PROTOCOL", undefined],
+  ]) {
+    await t.test(diagnosticClass ?? code, async () => {
+      const fixture = createFixture({
+        handle({ message, processIndex }) {
+          if (message.method !== "turn/start" || processIndex !== 0) {
+            return undefined;
+          }
+          const notification = failedTurn(
+            message.params.threadId,
+            "failed-turn",
+            {
+              message: "DO_NOT_RETAIN_NATIVE_MESSAGE",
+              codexErrorInfo: "other",
+            },
+            [item],
+          );
+          return { result: { turn: { id: "failed-turn" } }, notification };
+        },
+      });
+      await assert.rejects(fixture.adapter.run(request()), (error) => {
+        assert.ok(hasDiagnostic(code, diagnosticClass)(error));
+        assert.equal(error.recoverable, false);
+        assert.equal(error.cause, undefined);
+        assert.doesNotMatch(JSON.stringify(error), /DO_NOT_RETAIN|git push/u);
+        return true;
+      });
+      assert.equal(fixture.processes.length, 1);
+    });
+  }
+});
+
+test("never replaces a source fork or replays a local commit after an opaque turn failure", async (t) => {
+  for (const access of ["read-only", "workspace-write", "local-commit"]) {
+    const modes =
+      access === "local-commit" ? ["fresh", "continue", "fork"] : ["fork"];
+    for (const mode of modes) {
+      await t.test(`${access}/${mode}`, async () => {
+        const fixture = createFixture({
+          handle({ message }) {
+            if (message.method !== "turn/start") {
+              return undefined;
+            }
+            return {
+              result: { turn: { id: "failed-turn" } },
+              notification: failedTurn(message.params.threadId, "failed-turn", {
+                message: "DO_NOT_RETAIN_NATIVE_MESSAGE",
+                codexErrorInfo: "other",
+              }),
+            };
+          },
+        });
+        await assert.rejects(
+          fixture.adapter.run(
+            request({
+              access,
+              ...(mode === "fresh"
+                ? {}
+                : { session: { mode, id: "source-thread" } }),
+              ...(access === "local-commit"
+                ? {
+                    authorizationId: "authorization-1",
+                    commit: {
+                      expectedHead: EXPECTED_HEAD,
+                      message: "feat(test): create commit",
+                    },
+                  }
+                : {}),
+            }),
+          ),
+          (error) => {
+            assert.ok(
+              hasDiagnostic("ERR_CODEX_TURN_FAILED", "turn_other")(error),
+            );
+            for (const failure of [
+              error,
+              normalizeAdapterFailure("codex", error),
+            ]) {
+              assert.equal(failure.recoverable, true);
+              assert.equal(
+                failure.effectStarted,
+                access === "local-commit" ? false : undefined,
+              );
+              assert.equal(failure.cause, undefined);
+              assert.doesNotMatch(
+                JSON.stringify({ ...failure, message: failure.message }),
+                /DO_NOT_RETAIN/u,
+              );
+            }
+            return true;
+          },
+        );
+        assert.equal(fixture.processes.length, 1);
+        assert.deepEqual(
+          fixture.processes[0].messages
+            .filter(
+              ({ method }) =>
+                method.startsWith("thread/") || method === "turn/start",
+            )
+            .map(({ method }) => method),
+          [
+            mode === "fresh"
+              ? "thread/start"
+              : `thread/${mode === "continue" ? "resume" : "fork"}`,
+            "turn/start",
+          ],
+        );
+        assert.equal(
+          fixture.executeCalls.filter(({ file }) => file === "git").length,
+          0,
+        );
+        assert.equal(
+          fixture.executeCalls.filter(
+            ({ argumentsList }) => argumentsList[0] === "sandbox",
+          ).length,
+          1,
+        );
+      });
+    }
   }
 });
 
@@ -2258,6 +2647,7 @@ test("discards unknown terminal turn classifications", async () => {
 
   await assert.rejects(fixture.adapter.run(request()), (error) => {
     assert.ok(hasCode("ERR_CODEX_TURN_FAILED")(error));
+    assert.equal(error.recoverable, false);
     assert.equal(error.diagnosticClass, undefined);
     assert.equal(error.cause, undefined);
     assert.doesNotMatch(

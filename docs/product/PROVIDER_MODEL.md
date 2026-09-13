@@ -74,6 +74,17 @@ closed. Allowlisted backend, capability, configuration, usage, provider, and
 source-session availability failures may enter a durable pause only after the
 runner proves the repository is safe.
 
+Codex `turn_other` is an opaque recoverable provider failure. An ordinary
+non-commit request uses the existing single fresh reconstruction from its
+complete persisted recovery context and the observed workspace, provided no
+explicit policy or protocol violation was reported. A second failure returns
+to the pipeline without another adapter retry; a repeated
+`turn_other` pauses as `backend_unavailable` at the safe checkpoint. A source
+fork is never replaced by fresh context. Local-commit turns bypass this retry:
+a rejected readiness turn reports that the executor never started, and any
+uncertain commit effect remains subject to verification without replay. Native
+error details are discarded.
+
 Explicit rate, quota, credit, or spend-limit failures are not hidden behind
 context compaction or provider fallback. A resumable failure records only its
 bounded normalized class and checkpoint. Resume reconstructs the same logical

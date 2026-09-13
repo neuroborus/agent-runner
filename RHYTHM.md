@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-09-13
+
+- **Opaque Codex turn failures use bounded provider recovery.** `turn_other`
+  now enters the existing single fresh reconstruction for non-commit requests
+  outside source forks. The complete durable request preserves valid workspace
+  progress; a repeated failure pauses at the safe checkpoint as
+  `backend_unavailable` after repository reconciliation. Only fixed diagnostics
+  and safe control fields survive. Local-commit readiness failures retain their
+  pre-effect exit, and uncertain commit effects remain verification-only.
+  Explicit policy, protocol, and model-selection violations still fail closed
+  before recovery.
+
 ## 2026-09-12
 
 - **Plan execution and polishing repair rejected finalization evidence.**
