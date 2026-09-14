@@ -799,7 +799,15 @@ cannot prove that detached descendants stopped. Unavailable ordinary namespace
 support fails before execution. Session-mode discovery combines session
 membership and verified live ancestry with a per-launch inherited ownership
 token, including same-user descendants that create another session or PID
-namespace. Inaccessible or malformed process evidence is unverifiable, and
+namespace. Complete ancestry that reaches an unrelated host process remains an
+independent reason to disregard an inaccessible candidate regardless of launch
+timing. After durable registration and before provider work, an initial-host
+session launch snapshots stable PID/boot/start identities. Exact matching
+against that baseline is used only when ancestry is inconclusive, especially
+for an unchanged pre-existing process reparented to PID 1. New, reused, changed,
+owned, malformed, and otherwise unproven candidates remain unverifiable;
+recovery has no launch baseline and retains only the ancestry proof. Other
+incomplete process evidence is unverifiable, and
 surviving descendants after bounded TERM/KILL retirement fail closed. Reusing
 the enclosing trusted
 namespace neither retries without containment nor widens its policy; its

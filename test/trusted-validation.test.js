@@ -16,6 +16,7 @@ import { isAbsolute, join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
+import { readProcessIdentity } from "../src/agents/index.js";
 import { createGitService } from "../src/git/index.js";
 import {
   createTrustedValidationService,
@@ -596,14 +597,16 @@ test("terminates persistent descendants after successful trusted commands", asyn
 test("supervised trusted commands preserve readiness, exit status, and descendant rejection", async (t) => {
   const projectPath = await repository(t);
   const recorded = [];
+  const recordedIdentities = new Map();
   let registrationSideEffect;
   const options = {
     cwd: projectPath,
     environment: process.env,
     timeoutMs: 4000,
     terminationGraceMs: 100,
-    onProcess: async (pid) => {
+    onProcess: async (pid, proof) => {
       recorded.push(pid);
+      if (pid !== null) recordedIdentities.set(pid, proof.processIdentity);
       if (pid !== null) registrationSideEffect?.();
     },
   };
@@ -645,13 +648,19 @@ test("supervised trusted commands preserve readiness, exit status, and descendan
   neighbor.kill("SIGKILL");
   await neighborClosed;
 
-  const detachedPidPath = join(projectPath, "detached.pid");
-  let detachedPid;
-  t.after(() => {
-    if (detachedPid === undefined) return;
-    try {
-      process.kill(detachedPid, "SIGKILL");
-    } catch {}
+  const detachedIdentityPath = join(projectPath, "detached-identity.json");
+  let detachedIdentity;
+  t.after(async () => {
+    if (detachedIdentity === undefined) return;
+    const currentIdentity = await readProcessIdentity(detachedIdentity.pid);
+    if (
+      currentIdentity?.bootId === detachedIdentity.bootId &&
+      currentIdentity.startTicks === detachedIdentity.startTicks
+    ) {
+      try {
+        process.kill(detachedIdentity.pid, "SIGKILL");
+      } catch {}
+    }
   });
   for (const command of [
     {
@@ -671,7 +680,7 @@ test("supervised trusted commands preserve readiness, exit status, and descendan
       arguments: [
         "-e",
         "const { spawn } = require('node:child_process'); " +
-          "const { writeFileSync } = require('node:fs'); " +
+          "const { readFileSync, writeFileSync } = require('node:fs'); " +
           "function launch(attempt = 0) { " +
           "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], " +
           "{ detached: true, stdio: 'ignore' }); " +
@@ -679,8 +688,12 @@ test("supervised trusted commands preserve readiness, exit status, and descendan
           "if (cause.code === 'EAGAIN' && attempt < 20) " +
           "setTimeout(() => launch(attempt + 1), 25); " +
           "else process.exitCode = 1; }); " +
-          "child.once('spawn', () => { child.unref(); " +
-          `writeFileSync(${JSON.stringify(detachedPidPath)}, String(child.pid)); }); } launch();`,
+          "child.once('spawn', () => { " +
+          "const stat = readFileSync('/proc/' + child.pid + '/stat', 'utf8'); " +
+          "const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\\s+/); " +
+          `writeFileSync(${JSON.stringify(detachedIdentityPath)}, JSON.stringify({ ` +
+          "pid: child.pid, bootId: readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(), " +
+          "startTicks: fields[19] })); child.unref(); }); } launch();",
       ],
     },
   ]) {
@@ -696,14 +709,18 @@ test("supervised trusted commands preserve readiness, exit status, and descendan
     });
     assert.equal(recorded.length, recordedBefore + 2);
     assert.equal(recorded.at(-1), null);
-    assert.throws(() => process.kill(recorded.at(-2), 0), { code: "ESRCH" });
+    const supervisorPid = recorded.at(-2);
+    assert.notDeepEqual(
+      await readProcessIdentity(supervisorPid),
+      recordedIdentities.get(supervisorPid),
+    );
     if (detached) {
-      detachedPid = Number.parseInt(
-        await readFile(detachedPidPath, "utf8"),
-        10,
+      detachedIdentity = JSON.parse(
+        await readFile(detachedIdentityPath, "utf8"),
       );
-      assert.throws(() => process.kill(detachedPid, 0), { code: "ESRCH" });
-      detachedPid = undefined;
+      const { pid, ...processIdentity } = detachedIdentity;
+      assert.notDeepEqual(await readProcessIdentity(pid), processIdentity);
+      detachedIdentity = undefined;
     }
   }
   const signaled = await runExactCommand(

@@ -1539,6 +1539,8 @@ export function createCodexAdapter(options = {}) {
       } catch (cause) {
         throw processError("Cannot start Codex app-server.", cause);
       }
+      const ownedCompletion = child.ownedCompletion;
+      ownedCompletion?.catch(() => {});
       const client = createCodexAppServerClient(
         child,
         CodexAdapterError,
@@ -1583,7 +1585,7 @@ export function createCodexAdapter(options = {}) {
             throw cause;
           }
         } finally {
-          await child.ownedCompletion;
+          await ownedCompletion;
         }
       }
       return result;
