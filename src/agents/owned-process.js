@@ -43,7 +43,56 @@ let target;
 let settled = false;
 let outcome;
 let ownerToken = initialToken;
+let processBaseline;
 let retentionTimer;
+function processStartTicks(stat) {
+  const separator = stat.lastIndexOf(")");
+  if (separator < 0) return null;
+  const fields = stat.slice(separator + 2).trim().split(/\s+/);
+  return fields.length >= 20 && /^(?:0|[1-9]\d{0,31})$/.test(fields[19])
+    ? fields[19]
+    : null;
+}
+function normalizedProcessBaseline(value) {
+  if (!Array.isArray(value)) return null;
+  const baseline = new Map();
+  for (const entry of value) {
+    if (
+      !Array.isArray(entry) ||
+      entry.length !== 2 ||
+      !/^[1-9]\d*$/.test(entry[0]) ||
+      !Number.isSafeInteger(Number(entry[0])) ||
+      typeof entry[1]?.bootId !== "string" ||
+      !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(
+        entry[1].bootId,
+      ) ||
+      typeof entry[1]?.startTicks !== "string" ||
+      !/^(?:0|[1-9]\d{0,31})$/.test(entry[1].startTicks) ||
+      baseline.has(entry[0])
+    ) return null;
+    baseline.set(entry[0], entry[1]);
+  }
+  return baseline;
+}
+function matchesProcessBaseline(pid) {
+  const identity = processBaseline?.get(String(pid));
+  if (identity === undefined) return false;
+  try {
+    const bootId = require("node:fs")
+      .readFileSync("/proc/sys/kernel/random/boot_id", "utf8")
+      .trim();
+    const currentStartTicks = processStartTicks(
+      require("node:fs").readFileSync("/proc/" + pid + "/stat", "utf8"),
+    );
+    return (
+      currentStartTicks !== null &&
+      identity.bootId === bootId &&
+      identity.startTicks === currentStartTicks
+    );
+  } catch {
+    return false;
+  }
+}
 function processUid(pid) {
   const status = require("node:fs").readFileSync(
     "/proc/" + pid + "/status",
@@ -117,6 +166,9 @@ function ownedMembers() {
         ) {
           throw new Error("invalid process session");
         }
+        if (processStartTicks(stat) === null) {
+          throw new Error("invalid process identity");
+        }
         parentPid = Number(fields[1]);
         if (fields[3] === session) {
           members.push(Number(name));
@@ -144,7 +196,8 @@ function ownedMembers() {
             members.push(Number(name));
             continue;
           }
-          if (parentPid !== 1 && ancestry !== null) continue;
+          if (parentPid !== 1 && ancestry === "unrelated") continue;
+          if (matchesProcessBaseline(name)) continue;
         }
         return null;
       }
@@ -260,6 +313,8 @@ process.on("message", (message) => {
   if (typeof message.ownerToken !== "string" || message.ownerToken.length !== 64) {
     process.exit(126);
   }
+  processBaseline = normalizedProcessBaseline(message.processBaseline);
+  if (mode === "session" && processBaseline === null) process.exit(126);
   ownerToken = message.ownerToken;
   const stdio = [0, 1, 2];
   for (let index = 0; index < extra; index += 1) stdio.push(index + 4);
@@ -461,6 +516,77 @@ function processUid(pid, read = readFileSync) {
   return match.slice(1).map(Number);
 }
 
+function processStartTicks(stat) {
+  const separator = stat.lastIndexOf(")");
+  if (separator < 0) return null;
+  const fields = stat
+    .slice(separator + 2)
+    .trim()
+    .split(/\s+/u);
+  return fields.length >= 20 && /^(?:0|[1-9]\d{0,31})$/u.test(fields[19])
+    ? fields[19]
+    : null;
+}
+
+function captureProcessBaseline({
+  list = readdirSync,
+  read = readFileSync,
+} = {}) {
+  let bootId;
+  let names;
+  try {
+    bootId = read("/proc/sys/kernel/random/boot_id", "utf8").trim();
+    names = list("/proc");
+  } catch (cause) {
+    throw ownedError(
+      "Owned-process launch baseline is unavailable.",
+      "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+      cause,
+    );
+  }
+  if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(bootId)) {
+    throw ownedError(
+      "Owned-process launch baseline is unavailable.",
+      "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    );
+  }
+  const baseline = new Map();
+  for (const name of names) {
+    if (!/^\d+$/u.test(name)) continue;
+    try {
+      const startTicks = processStartTicks(read(`/proc/${name}/stat`, "utf8"));
+      if (startTicks !== null) baseline.set(name, { bootId, startTicks });
+    } catch (cause) {
+      if (!["EACCES", "ENOENT", "EPERM", "ESRCH"].includes(cause?.code)) {
+        throw ownedError(
+          "Owned-process launch baseline is unavailable.",
+          "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+          cause,
+        );
+      }
+    }
+  }
+  return baseline;
+}
+
+function matchesProcessBaseline(pid, baseline, read) {
+  const identity = baseline?.get(String(pid));
+  if (identity === undefined) return false;
+  try {
+    const currentStartTicks = processStartTicks(
+      read(`/proc/${pid}/stat`, "utf8"),
+    );
+    return (
+      currentStartTicks !== null &&
+      identity.bootId ===
+        read("/proc/sys/kernel/random/boot_id", "utf8").trim() &&
+      identity.startTicks === currentStartTicks
+    );
+  } catch {
+    return false;
+  }
+}
+
 function inspectOwnedAncestry(
   parentPid,
   sessionId,
@@ -512,6 +638,7 @@ export function inspectOwnedSessionProcesses(
   sessionId,
   ownerToken,
   {
+    baseline = null,
     getuid = () => process.getuid(),
     includeSession = true,
     list = readdirSync,
@@ -538,6 +665,7 @@ export function inspectOwnedSessionProcesses(
           !/^\d+$/u.test(fields[3])
         )
           return null;
+        if (processStartTicks(stat) === null) return null;
         parentPid = Number(fields[1]);
         if (includeSession && fields[3] === String(sessionId)) {
           members.push(pid);
@@ -581,7 +709,8 @@ export function inspectOwnedSessionProcesses(
             members.push(pid);
             continue;
           }
-          if (parentPid !== 1 && ancestry !== null) continue;
+          if (parentPid !== 1 && ancestry === "unrelated") continue;
+          if (matchesProcessBaseline(pid, baseline, read)) continue;
         }
         return null;
       }
@@ -592,8 +721,10 @@ export function inspectOwnedSessionProcesses(
   }
 }
 
-function signalSession(sessionId, ownerToken, signal) {
-  const members = inspectOwnedSessionProcesses(sessionId, ownerToken);
+function signalSession(sessionId, ownerToken, signal, baseline) {
+  const members = inspectOwnedSessionProcesses(sessionId, ownerToken, {
+    baseline,
+  });
   if (members === null) {
     throw ownedError(
       "Owned process descendants are unverifiable.",
@@ -727,6 +858,7 @@ export function resolveOwnedProcessLauncher(
         SUPERVISOR_SOURCE,
         "namespace",
       ],
+      hostSession: false,
       isolatedNamespace: true,
     };
   }
@@ -747,6 +879,7 @@ export function resolveOwnedProcessLauncher(
   return {
     file: process.execPath,
     arguments: ["-e", SUPERVISOR_SOURCE, "session"],
+    hostSession: providerCanUseHostSession,
     isolatedNamespace: false,
   };
 }
@@ -771,16 +904,20 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
     );
   }
   const {
+    captureBaseline = captureProcessBaseline,
     descendantGraceMs = DEFAULT_DESCENDANT_GRACE_MS,
     onProcess,
     ownershipMode = "ordinary",
+    resolveLauncher = resolveOwnedProcessLauncher,
     signal,
     stdio: requestedStdio,
     ...spawnOptions
   } = options;
   if (
+    typeof captureBaseline !== "function" ||
     typeof onProcess !== "function" ||
     !OWNERSHIP_MODES.has(ownershipMode) ||
+    typeof resolveLauncher !== "function" ||
     !Number.isSafeInteger(descendantGraceMs) ||
     descendantGraceMs < 0
   ) {
@@ -793,7 +930,7 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
   const stdio = normalizedStdio(requestedStdio);
   const extra = Math.max(0, stdio.length - 3);
   const cwd = spawnOptions.cwd ?? process.cwd();
-  const launcher = resolveOwnedProcessLauncher(cwd, {
+  const launcher = resolveLauncher(cwd, {
     ownershipMode,
   });
   let ownerToken = randomUUID();
@@ -821,10 +958,12 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
   let rejectCompletion;
   const killChild = child.kill.bind(child);
   let containmentFailure = null;
+  let processBaseline = null;
+  let startRequested = false;
   const kill = (signal) => {
     if (!launcher.isolatedNamespace) {
       try {
-        signalSession(child.pid, ownerToken, signal);
+        signalSession(child.pid, ownerToken, signal, processBaseline);
       } catch (cause) {
         containmentFailure ??= cause;
         return false;
@@ -835,7 +974,9 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
   child.kill = (signal = "SIGTERM") => {
     if (child.exitCode !== null || child.signalCode !== null) return false;
     terminationRequested = true;
-    if (child.connected) {
+    if (!startRequested) {
+      killChild(signal);
+    } else if (child.connected) {
       try {
         child.send({ type: "terminate", signal }, (cause) => {
           if (cause !== null && cause !== undefined) kill(signal);
@@ -848,7 +989,8 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
     }
     if (terminationTimer === undefined) {
       terminationTimer = setTimeout(() => {
-        kill("SIGKILL");
+        if (startRequested) kill("SIGKILL");
+        else killChild("SIGKILL");
       }, descendantGraceMs);
       terminationTimer.unref();
       terminationFailureTimer = setTimeout(
@@ -892,10 +1034,13 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
         !launcher.isolatedNamespace &&
         registered &&
         supervision === null &&
+        startRequested &&
         terminationRequested &&
         containmentFailure === null
       ) {
-        const members = inspectOwnedSessionProcesses(child.pid, ownerToken);
+        const members = inspectOwnedSessionProcesses(child.pid, ownerToken, {
+          baseline: processBaseline,
+        });
         if (members === null) {
           containmentFailure = ownedError(
             "Owned process descendants are unverifiable.",
@@ -906,6 +1051,7 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
         }
       }
       const safelyStopped =
+        (registered && !startRequested) ||
         launcher.isolatedNamespace ||
         (supervision?.inspectionComplete === true &&
           supervision.descendantsActive !== true) ||
@@ -1020,11 +1166,22 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
         await onProcess(child.ownedPid, proof);
         registered = true;
         ownerToken = ownedProcessToken(child.ownedPid, processIdentity);
+        if (launcher.hostSession) {
+          processBaseline = captureBaseline();
+        }
         if (closed) return;
+        startRequested = true;
         activeProcesses.set(child.ownedPid, child);
-        child.send({ type: "start", ownerToken }, (cause) => {
-          if (cause !== null && cause !== undefined) child.kill("SIGKILL");
-        });
+        child.send(
+          {
+            type: "start",
+            ownerToken,
+            processBaseline: [...(processBaseline?.entries() ?? [])],
+          },
+          (cause) => {
+            if (cause !== null && cause !== undefined) child.kill("SIGKILL");
+          },
+        );
       })();
       try {
         await registration;

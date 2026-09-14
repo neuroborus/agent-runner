@@ -13,8 +13,12 @@ remain in the owning documentation.
   cached full nesting probe fails, those executions alone may use token-backed
   session ownership on the initial host namespace. Live ancestry and a token
   derived from the persisted PID/boot/start proof find provider descendants
-  across sessions and nested namespaces, including after owner loss, while
-  incomplete inspection and bounded-cleanup failures remain fail closed.
+  across sessions and nested namespaces, including after owner loss. Complete
+  unrelated ancestry remains an independent exclusion proof. A stable
+  pre-launch PID/boot/start baseline is the narrower fallback for an unchanged
+  inaccessible host process whose ancestry is inconclusive; new, reused,
+  changed, owned, and otherwise unproven processes and bounded-cleanup failures
+  remain fail closed.
 
 - **Resolved project configuration is protected input.** The same confined
   read that parses a project file now pins its canonical location, content,

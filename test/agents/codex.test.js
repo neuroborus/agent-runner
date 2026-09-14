@@ -187,6 +187,7 @@ function createFixture({
   executeHandle,
   handle,
   help = HELP,
+  ownedCompletionFailure,
   spawnError = false,
   storageCleanupError = false,
   storagePreparationError = false,
@@ -407,10 +408,29 @@ function createFixture({
       close();
       return true;
     };
+    if (ownedCompletionFailure !== undefined) {
+      const completionState = {
+        observed: false,
+        observedBeforeRejection: false,
+      };
+      child.ownedCompletion = Promise.resolve()
+        .then(() => options.onProcess(987_654))
+        .then(async () => {
+          await options.onProcess(null);
+          completionState.observedBeforeRejection = completionState.observed;
+          throw ownedCompletionFailure;
+        });
+      child.ownedCompletion.catch = function observe(...argumentsList) {
+        completionState.observed = true;
+        return Promise.prototype.catch.apply(this, argumentsList);
+      };
+      child.ownedCompletionState = completionState;
+    }
     processes.push({
       file,
       argumentsList,
       messages,
+      ownedCompletionState: child.ownedCompletionState,
       options,
       workspaceStorage,
     });
@@ -452,6 +472,30 @@ test("marks only Codex native-sandbox executions as provider-owned", async () =>
   );
   assert.equal(discovery.options.ownershipMode, undefined);
 });
+
+test(
+  "observes early owned completion failure and preserves teardown",
+  { timeout: 5_000 },
+  async () => {
+    const failure = Object.assign(new Error("owned completion failed"), {
+      code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    });
+    const fixture = createFixture({ ownedCompletionFailure: failure });
+    const registrations = [];
+
+    await assert.rejects(
+      fixture.adapter.run(
+        request({ onProcess: async (pid) => registrations.push(pid) }),
+      ),
+      (cause) => cause === failure,
+    );
+    assert.equal(
+      fixture.processes[0].ownedCompletionState.observedBeforeRejection,
+      true,
+    );
+    assert.deepEqual(registrations, [987_654, null]);
+  },
+);
 
 test("creates and cleans owner-confined Codex workspace storage", async (t) => {
   const parentPath = await mkdtemp(
