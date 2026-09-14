@@ -1,0 +1,234 @@
+import { isDeepStrictEqual } from "node:util";
+
+import {
+  assertRunId,
+  deepFreeze,
+  normalizeRunState,
+  normalizeTransitionPatch,
+  RUNTIME_COMPATIBILITY,
+  RUN_STATE_SCHEMA_VERSION,
+  RunStoreError,
+  stopIsPending,
+} from "./validation.js";
+
+const KINDS = new Map([
+  ["pause_requested", "run_pause"],
+  ["cancel_requested", "run_cancel"],
+]);
+const TERMINAL_STATES = new Set(["DONE", "FAILED", "CANCELED"]);
+
+function reject(message, code) {
+  throw new RunStoreError(message, { code });
+}
+
+function receipt(runId, request) {
+  return {
+    runId,
+    requestId: request.requestId,
+    kind: request.kind,
+    expectedRevision: request.expectedRevision,
+    revision: request.acceptedRevision,
+  };
+}
+
+export function createStopService({
+  actions,
+  getRunDirectory,
+  loadSnapshot,
+  journal,
+  mutate,
+  runLeases,
+  timestamp,
+}) {
+  async function request(input) {
+    if (
+      input === null ||
+      typeof input !== "object" ||
+      Array.isArray(input) ||
+      Object.keys(input).length !== 4 ||
+      Object.keys(input).some(
+        (field) =>
+          !["runId", "kind", "expectedRevision", "idempotencyKey"].includes(
+            field,
+          ),
+      ) ||
+      !KINDS.has(input.kind) ||
+      !Number.isSafeInteger(input.expectedRevision) ||
+      input.expectedRevision < 1
+    ) {
+      reject("Operator stop request is invalid.", "ERR_INVALID_STOP_REQUEST");
+    }
+    const { runId, kind, expectedRevision, idempotencyKey } = input;
+    assertRunId(runId);
+    const directory = await getRunDirectory(runId);
+    await loadSnapshot(directory, runId);
+    const action = await actions.begin({
+      key: idempotencyKey,
+      tool: KINDS.get(kind),
+      arguments: { runId, expectedRevision },
+      context: { runId },
+    });
+    try {
+      if (action.record.status === "completed")
+        return deepFreeze(structuredClone(action.record.result));
+      const result = await mutate(directory, async () => {
+        const snapshot = await loadSnapshot(directory, runId);
+        const requestId = action.record.keyHash;
+        // The journal proves acceptance even if receipt publication was interrupted,
+        // a competing cancellation won, or the pipeline has since terminated.
+        const accepted = snapshot.events.find(
+          (event) =>
+            event.state.stopRequest?.requestId === requestId &&
+            event.state.stopRequest.acceptedRevision === event.revision,
+        );
+        if (accepted !== undefined)
+          return receipt(runId, accepted.state.stopRequest);
+        const current = snapshot.state;
+        if (
+          TERMINAL_STATES.has(current.pipelineState.workflowState) ||
+          (current.stopRequest?.kind === "cancel_requested" &&
+            !stopIsPending(current))
+        ) {
+          reject(
+            "Terminal runs do not accept new stop requests.",
+            "ERR_RUN_TERMINAL",
+          );
+        }
+        const supersedes =
+          stopIsPending(current) &&
+          kind === "cancel_requested" &&
+          current.stopRequest.kind === "pause_requested" &&
+          [current.revision, current.stopRequest.expectedRevision].includes(
+            expectedRevision,
+          );
+        if (current.revision !== expectedRevision && !supersedes) {
+          reject("Operator stop revision is stale.", "ERR_STALE_RUN_REVISION");
+        }
+        if (stopIsPending(current) && !supersedes) {
+          reject(
+            "An operator stop is already pending; retry its original request.",
+            "ERR_STOP_PENDING",
+          );
+        }
+        const stopRequest = {
+          requestId,
+          kind,
+          expectedRevision,
+          acceptedRevision: current.revision + 1,
+          requestedAt: timestamp(current.updatedAt),
+          checkpoint: supersedes
+            ? current.stopRequest.checkpoint
+            : {
+                revision: current.revision,
+                workflowState: current.pipelineState.workflowState,
+                activeTurn: current.activeTurn,
+                resumeAction: null,
+              },
+          reconciledRevision: null,
+        };
+        const next = normalizeRunState(
+          {
+            ...current,
+            schemaVersion: RUN_STATE_SCHEMA_VERSION,
+            runtimeCompatibility: RUNTIME_COMPATIBILITY,
+            revision: stopRequest.acceptedRevision,
+            updatedAt: stopRequest.requestedAt,
+            stopRequest,
+          },
+          runId,
+        );
+        const migrating = current.schemaVersion !== RUN_STATE_SCHEMA_VERSION;
+        await journal.appendTransition(directory, next, snapshot, {
+          actor: "runner",
+          phase: migrating ? "runtime" : "stop",
+          kind: migrating
+            ? "migrated"
+            : kind === "pause_requested"
+              ? "pause-requested"
+              : "cancel-requested",
+          message:
+            kind === "pause_requested"
+              ? "Operator pause requested; reconciliation is required."
+              : "Operator cancellation requested; reconciliation is required.",
+        });
+        return receipt(runId, stopRequest);
+      });
+      await action.complete(result);
+      return deepFreeze(result);
+    } finally {
+      await action.release();
+    }
+  }
+
+  // Only the execution owner calls this after runner/Git reconciliation. The
+  // state boundary neither signals a process nor performs a repository effect.
+  async function complete(lease, { requestId, patch }) {
+    const normalizedPatch = normalizeTransitionPatch(patch);
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
+      const snapshot = await loadSnapshot(runDirectory, record.runId);
+      const current = snapshot.state;
+      if (
+        current.stopRequest?.requestId === requestId &&
+        !stopIsPending(current) &&
+        Object.entries(normalizedPatch).every(([field, value]) =>
+          isDeepStrictEqual(current[field], value),
+        )
+      ) {
+        return deepFreeze(current);
+      }
+      if (
+        !stopIsPending(current) ||
+        current.stopRequest.requestId !== requestId
+      ) {
+        reject(
+          "Stop reconciliation no longer matches the pending request.",
+          "ERR_STOP_REQUEST_CHANGED",
+        );
+      }
+      const canceled = current.stopRequest.kind === "cancel_requested";
+      if (
+        normalizedPatch.pipelineState?.workflowState !==
+          (canceled ? "CANCELED" : "WAITING_FOR_USER") ||
+        (!canceled && normalizedPatch.pause?.reason !== "operator_paused")
+      ) {
+        reject(
+          "Stop reconciliation must record the requested outcome.",
+          "ERR_INVALID_STOP_RECONCILIATION",
+        );
+      }
+      const next = normalizeRunState(
+        {
+          ...current,
+          ...normalizedPatch,
+          activeTurn: null,
+          stopRequest: {
+            ...current.stopRequest,
+            reconciledRevision: current.revision + 1,
+          },
+          revision: current.revision + 1,
+          updatedAt: timestamp(current.updatedAt),
+        },
+        record.runId,
+      );
+      await journal.appendTransition(runDirectory, next, snapshot, {
+        actor: "runner",
+        phase: "stop",
+        kind: "reconciled",
+        message: canceled
+          ? "Operator cancellation reconciled."
+          : "Operator pause reconciled.",
+      });
+      return deepFreeze(next);
+    });
+  }
+
+  async function checkpoint(runId) {
+    const snapshot = await loadSnapshot(await getRunDirectory(runId), runId);
+    const revision = snapshot.state.stopRequest?.checkpoint.revision;
+    return revision === undefined
+      ? null
+      : deepFreeze(snapshot.events[revision - 1].state);
+  }
+
+  return Object.freeze({ request, complete, checkpoint });
+}

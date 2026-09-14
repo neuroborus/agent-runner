@@ -59,6 +59,19 @@ remain in the owning documentation.
 
 ## 2026-09-12
 
+- **Operator stops have durable state ownership before process control.**
+  The common envelope records bounded pause/cancel requests, immutable
+  acceptance receipts, and references to exact suspended journal checkpoints.
+  A short mutation boundary serializes acceptance with execution-owned writes and
+  release without creating another execution owner or locking status reads.
+  Cancellation wins competing requests from the same inspected revision, and
+  recovery can reconstruct a lost receipt after a later cancellation or
+  terminal transition. Pending stops retain held worktree exclusion across
+  owner loss until same-run reconciliation. Lease identities now include boot
+  and process-start evidence where available; legacy or inaccessible identities
+  remain conservative. These state capabilities separate request durability
+  from runner-owned signalling and Git reconciliation.
+
 - **Plan execution and polishing repair rejected finalization evidence.**
   Terminal evidence-only findings now return directly to complete finalization,
   preserving candidate acceptance and avoiding unchanged code-fix cycles. Mixed

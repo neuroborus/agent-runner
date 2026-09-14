@@ -52,6 +52,18 @@ write-ahead events, owner-token leases, canonical paths, link checks, and
 bounded schemas make interruption recoverable without trusting a half-written
 file or a surviving native session.
 
+Operator-stop acceptance has its own short state mutation boundary, separate
+from execution ownership. A durable request preserves the exact suspended
+journal checkpoint and existing blockers; cancellation cannot be downgraded.
+While reconciliation is pending, ordinary state writes and release of held
+execution/worktree leases fail closed. Even after owner loss, another run
+cannot reclaim that worktree until the original run records reconciliation.
+Boot and process-start identity distinguish a recorded owner from a reused PID;
+unverifiable owners remain conservative exclusion barriers. An acceptance
+receipt may be recovered or replayed after later transitions without executing
+work or changing a terminal outcome. The state protocol itself performs no
+process signalling or repository effect.
+
 Local operating guidance uses the same new-run configuration and Git safety
 boundaries. Its target and temporary files must be ignored, untracked, confined,
 and separate from configuration and protected control paths. Linked, unsafe,
