@@ -472,6 +472,29 @@ test("pipeline pause projections expose only applicable response and resume acti
     ).nextActions,
     [],
   );
+
+  for (const projectPause of [authoringPause, executionPause, polishingPause]) {
+    assert.deepEqual(
+      projectPause(
+        pausedRun(
+          {
+            reason: "project_configuration_changed",
+            code: "ERR_PROJECT_CONFIGURATION_CHANGED",
+          },
+          { pendingEdit: { id: "superseded-edit" } },
+        ),
+      ),
+      {
+        reason: "project_configuration_changed",
+        code: "ERR_PROJECT_CONFIGURATION_CHANGED",
+        explanation:
+          "The resolved project configuration changed; this run cannot continue.",
+        evidence: [],
+        resumeState: null,
+        nextActions: [],
+      },
+    );
+  }
 });
 
 test("pipelines own their pipeline-specific run options", () => {

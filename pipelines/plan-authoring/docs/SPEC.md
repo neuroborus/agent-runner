@@ -63,6 +63,11 @@ objects are validated, but lazy mode resolves, probes, persists, and invokes
 only the Planner. Reviewer and Arbiter configuration remains untouched for a
 later independent run and is not exposed through lazy-run state. Resolved roles
 and settings are persisted and not reloaded on resume.
+When a project configuration supplied those values, the root runner persists
+its protection record and checks it before recovery and around every provider
+turn. Drift produces the non-resumable `project_configuration_changed` safety
+pause before this pipeline can continue. Complete and recovery role envelopes
+explicitly prohibit modifying the resolved project configuration.
 
 On Linux, every Claude role that performs a read-only turn requires the
 adapter's fixed, model-free exact-policy proof in addition to its CLI and native

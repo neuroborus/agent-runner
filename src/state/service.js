@@ -46,6 +46,7 @@ const CREATE_RUN_FIELDS = new Set([
   "pipelineStateVersion",
   "projectPath",
   "taskPath",
+  "projectConfigurationProtection",
   "roles",
   "counters",
   "hashes",
@@ -534,6 +535,10 @@ export function createRunStore({
           runtimeCompatibility: RUNTIME_COMPATIBILITY,
           projectPath,
           taskPath,
+          projectConfigurationProtection:
+            input.projectConfigurationProtection === undefined
+              ? null
+              : input.projectConfigurationProtection,
           roles: input.roles,
           counters: input.counters === undefined ? {} : input.counters,
           hashes: input.hashes === undefined ? {} : input.hashes,

@@ -31,6 +31,7 @@ const IMMUTABLE_STATE_FIELDS = [
   "pipelineId",
   "projectPath",
   "taskPath",
+  "projectConfigurationProtection",
   "roles",
   "createdAt",
 ];
@@ -79,7 +80,7 @@ function normalizeEvent(value, runId, lineNumber) {
     if (
       Number.isSafeInteger(value.schemaVersion) &&
       value.schemaVersion > 0 &&
-      ![1, 2, 3, 4, RUN_STATE_SCHEMA_VERSION].includes(value.schemaVersion)
+      ![1, 2, 3, 4, 5, RUN_STATE_SCHEMA_VERSION].includes(value.schemaVersion)
     ) {
       throw new RunStoreError(
         `Unsupported event.schemaVersion: ${String(value.schemaVersion)}; ` +

@@ -2400,7 +2400,7 @@ test("runs lazy plan authoring with only one Planner fork", async (t) => {
   );
 });
 
-test("persists project overrides and ignores later configuration changes", async (t) => {
+test("persists project overrides and blocks later configuration changes", async (t) => {
   const fixture = await createFixture(t);
   const adapter = createAdapter({ questionFirst: true });
   const projectConfigurationDirectory = join(
@@ -2479,6 +2479,14 @@ test("persists project overrides and ignores later configuration changes", async
     model: "project-model",
     contextSize: "200000",
   });
+  assert.equal(
+    paused.run.projectConfigurationProtection.path,
+    projectConfigurationPath,
+  );
+  assert.match(
+    paused.run.projectConfigurationProtection.contentHash,
+    /^[a-f0-9]{64}$/u,
+  );
   const preparedPolishing = await runner.create({
     pipelineId: "polishing",
     projectPath: fixture.projectPath,
@@ -2504,12 +2512,176 @@ test("persists project overrides and ignores later configuration changes", async
     action: null,
   });
 
-  assert.equal(completed.run.pipelineState.workflowState, "DONE");
+  assert.equal(completed.run.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.deepEqual(completed.run.pause, {
+    reason: "project_configuration_changed",
+    code: "ERR_PROJECT_CONFIGURATION_CHANGED",
+  });
+  assert.equal(
+    (await runner.status(completed.run.runId)).run.pause.reason,
+    "project_configuration_changed",
+  );
   assert.deepEqual(completed.run.roles, paused.run.roles);
   assert.deepEqual(
     completed.run.pipelineState.settings,
     paused.run.pipelineState.settings,
   );
+});
+
+test("configuration drift cannot revive a canceled run", async (t) => {
+  const fixture = await createFixture(t);
+  const configurationDirectory = join(fixture.projectPath, "LOCAL_ARTIFACTS");
+  const configurationPath = join(configurationDirectory, "agent-runner.json");
+  await mkdir(configurationDirectory);
+  await Promise.all([
+    writeFile(join(fixture.projectPath, ".gitignore"), "/LOCAL_ARTIFACTS/\n"),
+    writeFile(configurationPath, '{"schemaVersion":1}\n'),
+  ]);
+  const runner = runnerFor(fixture, { codex: createAdapter() });
+  const created = await runner.create({
+    pipelineId: "plan-authoring",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    sourceSession: null,
+  });
+  await runner.requestOperatorStop({
+    runId: created.run.runId,
+    kind: "cancel_requested",
+    expectedRevision: created.run.revision,
+    idempotencyKey: "cancel-before-configuration-drift",
+  });
+  const canceled = await runner.resume({
+    runId: created.run.runId,
+    action: null,
+  });
+  assert.equal(canceled.run.pipelineState.workflowState, "CANCELED");
+
+  await writeFile(
+    configurationPath,
+    '{"schemaVersion":1,"artifactRoot":"changed"}\n',
+  );
+  await assert.rejects(
+    runner.resume({ runId: created.run.runId, action: null }),
+    { code: "ERR_RUN_CANCELED" },
+  );
+  const unchanged = await runner.status(created.run.runId);
+  assert.equal(unchanged.run.pipelineState.workflowState, "CANCELED");
+  assert.equal(unchanged.run.revision, canceled.run.revision);
+});
+
+test("guards project configuration after every pipeline provider turn", async (t) => {
+  for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
+    await t.test(pipelineId, async (t) => {
+      const fixture = await operatorFixture(t, pipelineId);
+      const configurationDirectory = join(
+        fixture.projectPath,
+        "LOCAL_ARTIFACTS",
+      );
+      const configurationPath = join(
+        configurationDirectory,
+        "agent-runner.json",
+      );
+      await mkdir(configurationDirectory, { recursive: true });
+      await writeFile(configurationPath, '{"schemaVersion":1}\n');
+      const delegate =
+        pipelineId === "plan-authoring"
+          ? createAdapter()
+          : createExecutionAdapter();
+      let calls = 0;
+      const runner = runnerFor(fixture, {
+        codex: {
+          ...delegate,
+          async run(request) {
+            calls += 1;
+            const response = await delegate.run(request);
+            await writeFile(
+              configurationPath,
+              '{"schemaVersion":1,"artifactRoot":"changed"}\n',
+            );
+            return response;
+          },
+        },
+      });
+
+      const result = await runner.run({
+        pipelineId,
+        projectPath: fixture.projectPath,
+        taskPath: fixture.taskPath,
+        proactiveClarification: false,
+        roleOverrides: {},
+        sourceSession: null,
+      });
+
+      assert.equal(calls, 1);
+      assert.equal(result.run.pipelineState.workflowState, "WAITING_FOR_USER");
+      assert.deepEqual(result.run.pause, {
+        reason: "project_configuration_changed",
+        code: "ERR_PROJECT_CONFIGURATION_CHANGED",
+      });
+    });
+  }
+});
+
+test("retains protected-configuration drift through stop reconciliation", async (t) => {
+  const fixture = await operatorFixture(t, "plan-authoring");
+  const configurationDirectory = join(fixture.projectPath, "LOCAL_ARTIFACTS");
+  const configurationPath = join(configurationDirectory, "agent-runner.json");
+  await mkdir(configurationDirectory, { recursive: true });
+  await writeFile(configurationPath, '{"schemaVersion":1}\n');
+  const entered = Promise.withResolvers();
+  const store = createRunStore({ stateRoot: fixture.stateRoot });
+  const runner = runnerFor(
+    fixture,
+    {
+      codex: {
+        ...createAdapter(),
+        async run(request) {
+          entered.resolve();
+          return new Promise((resolve, reject) => {
+            request.signal.addEventListener(
+              "abort",
+              () => reject(request.signal.reason),
+              { once: true },
+            );
+          });
+        },
+      },
+    },
+    { runStore: store },
+  );
+  const active = runner.run({
+    pipelineId: "plan-authoring",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    sourceSession: null,
+  });
+  await entered.promise;
+  await writeFile(
+    configurationPath,
+    '{"schemaVersion":1,"artifactRoot":"changed"}\n',
+  );
+  const [runId] = await readdir(join(fixture.stateRoot, "runs"));
+  const current = (await runner.status(runId)).run;
+  await runner.requestOperatorStop({
+    runId: current.runId,
+    kind: "pause_requested",
+    expectedRevision: current.revision,
+    idempotencyKey: "configuration-stop",
+  });
+
+  const stopped = (await active).run;
+  assert.equal(stopped.pause.reason, "operator_paused");
+  assert.deepEqual(stopped.pause.operatorResume.pause, {
+    reason: "project_configuration_changed",
+    code: "ERR_PROJECT_CONFIGURATION_CHANGED",
+  });
+  assert.equal(stopped.pause.operatorResume.workflowState, "WAITING_FOR_USER");
+  const resumed = await runner.resume({ runId: stopped.runId, action: null });
+  assert.equal(resumed.run.pause.reason, "project_configuration_changed");
 });
 
 test("never reads an Agent Runner configuration file in the target repository", async (t) => {

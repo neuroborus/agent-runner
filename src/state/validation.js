@@ -1,8 +1,8 @@
-import { isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 import { isAdapterDiagnosticClass } from "../agents/index.js";
 
-export const RUN_STATE_SCHEMA_VERSION = 5;
+export const RUN_STATE_SCHEMA_VERSION = 6;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
   runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
@@ -20,6 +20,7 @@ const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   2,
   3,
   4,
+  5,
   RUN_STATE_SCHEMA_VERSION,
 ]);
 
@@ -37,6 +38,7 @@ const STATE_FIELDS = new Set([
   "runtimeCompatibility",
   "projectPath",
   "taskPath",
+  "projectConfigurationProtection",
   "roles",
   "counters",
   "hashes",
@@ -78,6 +80,23 @@ const RUNTIME_COMPATIBILITY_FIELDS = new Set([
   "runnerVersion",
   "runStateVersion",
 ]);
+const PROJECT_CONFIGURATION_PROTECTION_FIELDS = new Set([
+  "schemaVersion",
+  "path",
+  "projectPath",
+  "relativePath",
+  "contentHash",
+  "identity",
+  "ancestors",
+]);
+const FILE_IDENTITY_FIELDS = new Set([
+  "device",
+  "inode",
+  "size",
+  "modifiedNs",
+  "changedNs",
+]);
+const ANCESTOR_IDENTITY_FIELDS = new Set(["path", "device", "inode"]);
 const MAX_STATE_BYTES = 1024 * 1024;
 const MAX_JSON_DEPTH = 20;
 const MAX_COLLECTION_LENGTH = 10_000;
@@ -408,6 +427,101 @@ function normalizeRuntimeCompatibility(value, schemaVersion) {
   return { ...value };
 }
 
+function decimalIdentity(value, path) {
+  if (typeof value !== "string" || !/^(?:0|[1-9][0-9]*)$/u.test(value)) {
+    fail(`${path} must be a decimal identity.`);
+  }
+  return value;
+}
+
+function normalizeProjectConfigurationProtection(value, state) {
+  if ((value === undefined && state.schemaVersion < 6) || value === null) {
+    return null;
+  }
+  assertRecord(value, "run.projectConfigurationProtection");
+  rejectUnknownFields(
+    value,
+    PROJECT_CONFIGURATION_PROTECTION_FIELDS,
+    "run.projectConfigurationProtection",
+  );
+  if (
+    Object.keys(value).length !==
+      PROJECT_CONFIGURATION_PROTECTION_FIELDS.size ||
+    value.schemaVersion !== 1 ||
+    value.projectPath !== state.projectPath ||
+    typeof value.path !== "string" ||
+    !isAbsolute(value.path) ||
+    resolve(value.path) !== value.path ||
+    typeof value.relativePath !== "string" ||
+    value.relativePath.length === 0 ||
+    value.relativePath.includes("\\") ||
+    resolve(state.projectPath, value.relativePath) !== value.path ||
+    relative(state.projectPath, value.path).split(sep).join("/") !==
+      value.relativePath ||
+    typeof value.contentHash !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(value.contentHash)
+  ) {
+    fail("run.projectConfigurationProtection is invalid.");
+  }
+  assertRecord(value.identity, "run.projectConfigurationProtection.identity");
+  rejectUnknownFields(
+    value.identity,
+    FILE_IDENTITY_FIELDS,
+    "run.projectConfigurationProtection.identity",
+  );
+  if (Object.keys(value.identity).length !== FILE_IDENTITY_FIELDS.size) {
+    fail("run.projectConfigurationProtection.identity is invalid.");
+  }
+  const identity = Object.fromEntries(
+    [...FILE_IDENTITY_FIELDS].map((field) => [
+      field,
+      decimalIdentity(
+        value.identity[field],
+        `run.projectConfigurationProtection.identity.${field}`,
+      ),
+    ]),
+  );
+  if (!Array.isArray(value.ancestors) || value.ancestors.length === 0) {
+    fail("run.projectConfigurationProtection.ancestors is invalid.");
+  }
+  const expectedPaths = [];
+  for (let current = dirname(value.path); ; current = dirname(current)) {
+    expectedPaths.unshift(current);
+    if (current === state.projectPath) break;
+    if (current === dirname(current)) {
+      fail("run.projectConfigurationProtection.ancestors is invalid.");
+    }
+  }
+  if (value.ancestors.length !== expectedPaths.length) {
+    fail("run.projectConfigurationProtection.ancestors is invalid.");
+  }
+  const ancestors = value.ancestors.map((ancestor, index) => {
+    const path = `run.projectConfigurationProtection.ancestors[${index}]`;
+    assertRecord(ancestor, path);
+    rejectUnknownFields(ancestor, ANCESTOR_IDENTITY_FIELDS, path);
+    if (
+      Object.keys(ancestor).length !== ANCESTOR_IDENTITY_FIELDS.size ||
+      ancestor.path !== expectedPaths[index]
+    ) {
+      fail(`${path} is invalid.`);
+    }
+    return {
+      path: ancestor.path,
+      device: decimalIdentity(ancestor.device, `${path}.device`),
+      inode: decimalIdentity(ancestor.inode, `${path}.inode`),
+    };
+  });
+  return {
+    schemaVersion: 1,
+    path: value.path,
+    projectPath: value.projectPath,
+    relativePath: value.relativePath,
+    contentHash: value.contentHash,
+    identity,
+    ancestors,
+  };
+}
+
 export function assertRunId(runId) {
   if (typeof runId !== "string" || !RUN_ID_PATTERN.test(runId)) {
     fail("Run ID is invalid.", "ERR_INVALID_RUN_ID");
@@ -723,6 +837,10 @@ export function normalizeRunState(value, expectedRunId) {
     ),
     projectPath: value.projectPath,
     taskPath: value.taskPath,
+    projectConfigurationProtection: normalizeProjectConfigurationProtection(
+      value.projectConfigurationProtection,
+      value,
+    ),
     roles: normalizeRoles(value.roles),
     counters: cloneRecord(value.counters, "run.counters"),
     hashes: cloneRecord(value.hashes, "run.hashes"),

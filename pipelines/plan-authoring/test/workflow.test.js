@@ -775,6 +775,10 @@ test("converges a lazy plan with one source fork and no review roles", async (t)
     fixture.calls.planner[0].prompt,
     /\.agents.*unless the user's task explicitly requires them.*not a user question/u,
   );
+  assert.match(
+    fixture.calls.planner[0].prompt,
+    /Do not modify the resolved project configuration during a run/u,
+  );
   const compactCall = fixture.calls.planner.find(
     ({ prompt, recoveryPrompt }) => prompt !== recoveryPrompt,
   );
@@ -783,6 +787,10 @@ test("converges a lazy plan with one source fork and no review roles", async (t)
   assert.match(
     compactCall.recoveryPrompt,
     /\.agents.*unless the user's task explicitly requires them.*not a user question/u,
+  );
+  assert.match(
+    compactCall.recoveryPrompt,
+    /Do not modify the resolved project configuration during a run/u,
   );
   assert.match(
     fixture.calls.planner[2].prompt,

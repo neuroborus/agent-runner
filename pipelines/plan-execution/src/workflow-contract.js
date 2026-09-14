@@ -5031,15 +5031,25 @@ export function assertRun(run) {
     );
   }
   if (state.workflowState === "WAITING_FOR_USER") {
+    const configurationChanged =
+      run.pause.reason === "project_configuration_changed";
+    if (
+      configurationChanged &&
+      (!hasExactFields(run.pause, ["reason", "code"]) ||
+        run.pause.code !== "ERR_PROJECT_CONFIGURATION_CHANGED")
+    ) {
+      throw workflowError("Plan-execution configuration pause is invalid.");
+    }
     const expectedReason = EDIT_PAUSE_REASONS[state.pendingEdit?.action];
     const hasAuthorizationId = Object.hasOwn(run.pause, "authorizationId");
     if (
-      (state.pendingEdit === null &&
+      !configurationChanged &&
+      ((state.pendingEdit === null &&
         (hasAuthorizationId ||
           Object.values(EDIT_PAUSE_REASONS).includes(run.pause.reason))) ||
-      (state.pendingEdit !== null &&
-        (run.pause.authorizationId !== state.pendingEdit.id ||
-          run.pause.reason !== expectedReason))
+        (state.pendingEdit !== null &&
+          (run.pause.authorizationId !== state.pendingEdit.id ||
+            run.pause.reason !== expectedReason)))
     ) {
       throw workflowError("Plan-execution pending edit pause is invalid.");
     }

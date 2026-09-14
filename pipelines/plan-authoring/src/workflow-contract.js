@@ -1389,6 +1389,15 @@ export function assertRun(run) {
   }
   assertInputPause(run, pipelineState);
   if (pipelineState.workflowState === "WAITING_FOR_USER") {
+    const configurationChanged =
+      run.pause.reason === "project_configuration_changed";
+    if (
+      configurationChanged &&
+      (!hasExactFields(run.pause, ["reason", "code"]) ||
+        run.pause.code !== "ERR_PROJECT_CONFIGURATION_CHANGED")
+    ) {
+      throw workflowError("Plan-authoring configuration pause is invalid.");
+    }
     const expectedReason = {
       "clarification-answers": "clarification_answers_required",
       "product-decision": "product_decision_required",
@@ -1396,10 +1405,11 @@ export function assertRun(run) {
     }[pipelineState.pendingEdit?.action];
     const hasAuthorizationId = Object.hasOwn(run.pause, "authorizationId");
     if (
-      (pipelineState.pendingEdit === null && hasAuthorizationId) ||
-      (pipelineState.pendingEdit !== null &&
-        (run.pause.authorizationId !== pipelineState.pendingEdit.id ||
-          run.pause.reason !== expectedReason))
+      !configurationChanged &&
+      ((pipelineState.pendingEdit === null && hasAuthorizationId) ||
+        (pipelineState.pendingEdit !== null &&
+          (run.pause.authorizationId !== pipelineState.pendingEdit.id ||
+            run.pause.reason !== expectedReason)))
     ) {
       throw workflowError("Plan-authoring pending edit pause is invalid.");
     }

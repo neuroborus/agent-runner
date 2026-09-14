@@ -1779,6 +1779,9 @@ ${findingPrompt(pipelineState())}`,
       );
     }
   } catch (cause) {
+    if (cause?.code === "ERR_PROJECT_CONFIGURATION_CHANGED") {
+      throw cause;
+    }
     const preflightComplete = pipelineState().preflightComplete;
     const causePath = cause?.path ?? cause?.cause?.path;
     const filesystemDrift =

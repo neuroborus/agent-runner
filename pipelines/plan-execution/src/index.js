@@ -194,6 +194,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "Optional proactive execution clarification input is pending.",
   product_decision_required:
     "A material product decision is required before execution can continue.",
+  project_configuration_changed:
+    "The resolved project configuration changed; this run cannot continue.",
   read_only_agent_mutated_repository:
     "A read-only turn contaminated the repository; abandon this run and restart from an uncontaminated worktree.",
   review_output_invalid:
@@ -464,6 +466,9 @@ function projectStatus(run) {
 }
 
 function validateResumeAction(run, action) {
+  if (run.pause?.reason === "project_configuration_changed") {
+    throw new Error("A run with changed project configuration cannot resume.");
+  }
   if (
     run.pause?.reason === "operator_paused" &&
     run.pipelineState.workflowState === "WAITING_FOR_USER" &&

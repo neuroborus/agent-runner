@@ -152,6 +152,13 @@ independent run and are not exposed through lazy state. The resolved active
 roles, settings, and artifact root are persisted. In independent mode the
 Arbiter backend is probed when first needed; lazy mode never probes Reviewer or
 Arbiter.
+When a project configuration supplied those values, the root runner persists
+its protection record and checks it before recovery, around every provider
+turn, and before trusted execution, handoff, or stop reconciliation. Drift
+produces the non-resumable `project_configuration_changed` safety pause;
+already begun handoff effects remain verification-only. Complete and recovery
+role envelopes explicitly prohibit modifying the resolved project
+configuration.
 
 ## Clarification
 

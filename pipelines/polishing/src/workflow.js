@@ -5886,6 +5886,9 @@ ${evidence}`,
       );
     }
   } catch (cause) {
+    if (cause?.code === "ERR_PROJECT_CONFIGURATION_CHANGED") {
+      throw cause;
+    }
     if (
       operatorStop &&
       cause?.code === "ERR_INTERRUPTED_REPOSITORY_CONTROL_CHANGED"

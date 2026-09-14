@@ -273,6 +273,41 @@ test("operator guidance stays outside pipeline roles and run reconstruction", as
   );
 });
 
+test("project configuration protection stays behind the config index and runner", async () => {
+  const { imports } = await sourceImports();
+  const configFiles = join(ROOT, "src/config/files.js");
+  const consumers = imports
+    .filter(
+      ({ importer, specifier }) =>
+        specifier.startsWith(".") &&
+        resolve(dirname(importer), specifier) === configFiles,
+    )
+    .map(({ importer }) => relative(ROOT, importer));
+  assert.deepEqual(consumers, ["src/config/index.js"]);
+
+  const runnerSource = await readFile(
+    join(ROOT, "src/runner/service.js"),
+    "utf8",
+  );
+  assert.match(
+    runnerSource,
+    /assertProjectConfigurationProtected[\s\S]*from "\.\.\/config\/index\.js"/u,
+  );
+  for (const pipeline of ["plan-authoring", "plan-execution", "polishing"]) {
+    const sources = await walk(
+      join(ROOT, "pipelines", pipeline, "src"),
+      (path) => extname(path) === ".js",
+    );
+    for (const path of sources) {
+      assert.doesNotMatch(
+        await readFile(path, "utf8"),
+        /projectConfigurationProtection|assertProjectConfigurationProtected/u,
+        relative(ROOT, path),
+      );
+    }
+  }
+});
+
 test("shared editor mechanics stay in root capabilities and outside MCP and pipelines", async () => {
   const { imports } = await sourceImports();
   const editorPath = join(ROOT, "src/editor.js");
