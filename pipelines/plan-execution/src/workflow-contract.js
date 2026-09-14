@@ -127,7 +127,7 @@ export const MAX_TEXT_LENGTH = 4_000;
 export const MAX_SUMMARY_LENGTH = 20_000;
 export const MAX_PLAN_LENGTH = 100_000;
 export const MAX_ITEMS = 32;
-export const MAX_BOOTSTRAP_ITEMS = MAX_ITEMS * 2;
+export const MAX_BOOTSTRAP_ITEMS = 256;
 export const MAX_VALIDATION_ITEMS = MAX_BOOTSTRAP_ITEMS * 2;
 export const MAX_OPTIONS = 16;
 export const MAX_DIAGNOSTIC_ITEMS = 32;
@@ -4831,7 +4831,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 15 ||
+    run.pipelineStateVersion !== 16 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||

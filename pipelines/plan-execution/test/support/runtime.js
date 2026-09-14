@@ -33,6 +33,7 @@ import {
   migratePlanExecutionStateV12,
   migratePlanExecutionStateV13,
   migratePlanExecutionStateV14,
+  migratePlanExecutionStateV15,
   planExecutionPipeline,
   runPlanExecution,
 } from "../../src/index.js";
@@ -240,9 +241,11 @@ function migrateVersionOneState(state) {
   const versionThirteen = migratePlanExecutionStateV12({
     pipelineState: versionTwelve,
   });
-  return migratePlanExecutionStateV14({
-    pipelineState: migratePlanExecutionStateV13({
-      pipelineState: versionThirteen,
+  return migratePlanExecutionStateV15({
+    pipelineState: migratePlanExecutionStateV14({
+      pipelineState: migratePlanExecutionStateV13({
+        pipelineState: versionThirteen,
+      }),
     }),
   });
 }
@@ -1530,7 +1533,7 @@ async function createFixture(
     revision: 1,
     runId,
     pipelineId: "plan-execution",
-    pipelineStateVersion: 15,
+    pipelineStateVersion: 16,
     projectPath,
     taskPath,
     roles: Object.fromEntries(
@@ -1906,7 +1909,7 @@ async function createFixture(
   ) {
     currentRun = {
       ...currentRun,
-      pipelineStateVersion: 15,
+      pipelineStateVersion: 16,
       pipelineState,
       pause,
       revision: currentRun.revision + 1,
