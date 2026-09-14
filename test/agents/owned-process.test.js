@@ -33,6 +33,17 @@ test("read-only launcher mounts still protect namespace-root paths", () => {
   );
 });
 
+test("owned processes can write to /dev/null", async () => {
+  const child = spawnOwnedProcess(
+    process.execPath,
+    ["-e", 'require("node:fs").writeFileSync("/dev/null", "owned process");'],
+    { onProcess: async () => {} },
+  );
+
+  const { outcome } = await child.ownedCompletion;
+  assert.deepEqual(outcome, { type: "close", exitCode: 0, signal: null });
+});
+
 test("retires an inert supervisor before reporting failed registration", async () => {
   const failure = Object.assign(new Error("registration failed"), {
     code: "ERR_TEST_REGISTRATION",

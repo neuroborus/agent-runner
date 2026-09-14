@@ -380,6 +380,8 @@ function resolveLauncher(cwd) {
         "--bind",
         "/",
         "/",
+        "--dev",
+        "/dev",
         "--proc",
         "/proc",
         "--chdir",
