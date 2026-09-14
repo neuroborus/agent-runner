@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -14,6 +15,10 @@ import test from "node:test";
 import { promisify } from "node:util";
 
 import { createLegacyRecoveryFixture } from "../../pipelines/plan-execution/test/support/index.js";
+import {
+  createTrustedValidationService,
+  createTrustedValidationSnapshot,
+} from "../../src/trusted-validation/index.js";
 import {
   createClarificationService,
   createGitService,
@@ -1417,4 +1422,421 @@ test("runs registered workflows through recoverable MCP controls", async (t) => 
     await gitOutput(paths.projectPath, ["status", "--porcelain"]),
     "M  src/base.js",
   );
+});
+
+async function projectCommandScenario(t, pipelineId, hooks = {}) {
+  const paths = await fixture(t);
+  if (pipelineId === "polishing") {
+    await writeFile(
+      join(paths.projectPath, "src/base.js"),
+      "export const base = 2;\n",
+    );
+  }
+  const configurationPath = join(
+    paths.projectPath,
+    "LOCAL_ARTIFACTS/agent-runner.json",
+  );
+  const definition = {
+    command: "node project-only validation",
+    executable: process.execPath,
+    arguments: ["--eval", "process.exit(0)", "argument with spaces"],
+  };
+  const projectConfiguration = {
+    schemaVersion: 1,
+    trustedCommands: { "project-check": definition },
+    pipelines: { [pipelineId]: { trustedChecks: ["project-check"] } },
+  };
+  await mkdir(join(paths.projectPath, "LOCAL_ARTIFACTS"));
+  await writeFile(configurationPath, JSON.stringify(projectConfiguration));
+  const expected = createTrustedValidationSnapshot(
+    projectConfiguration.trustedCommands,
+    ["project-check"],
+  );
+  const requiredChecks = [
+    { id: "C1", command: "git diff --check HEAD" },
+    { id: "C2", command: definition.command },
+  ];
+  const runStore = createRunStore({ stateRoot: paths.stateRoot });
+  const git = createGitService();
+  const calls = [];
+  const executions = [];
+  let handoffs = 0;
+  let loads = 0;
+  let runId;
+  let rootConfiguration = { schemaVersion: 1, defaultBackend: "codex" };
+  const backend = createBackend("codex");
+  const adapters = {
+    codex: {
+      ...backend,
+      async run(request) {
+        const durable = await runStore.loadRun(runId);
+        assert.deepEqual(durable.pipelineState.trustedValidation, expected);
+        assert.equal(
+          durable.projectConfigurationProtection.path,
+          configurationPath,
+        );
+        calls.push(request);
+        await hooks.beforeTurn?.(request, durable, {
+          configurationPath,
+          projectConfiguration,
+        });
+        const response = await backend.run(request);
+        const result = response.structured.result ?? response.structured;
+        if (result.requiredChecks !== undefined) {
+          result.requiredChecks = requiredChecks;
+          if (result.checks !== undefined) {
+            result.checks.push({
+              checkId: "C2",
+              command: definition.command,
+              status: "NOT_RUN",
+              evidence: [
+                "Reserved for the runner's selected project-check vector.",
+              ],
+            });
+          }
+        }
+        if (
+          request.prompt.includes("Implement the changes described") ||
+          request.prompt.includes(
+            "Polish the existing local repository changes",
+          )
+        ) {
+          assert.match(
+            request.prompt,
+            /Selected runner-trusted commands must never execute inside an agent turn/u,
+          );
+          assert.ok(request.prompt.includes(definition.command));
+        }
+        return response;
+      },
+    },
+  };
+  const trustedValidation = createTrustedValidationService({
+    git,
+    environment: {
+      ...process.env,
+      GH_TOKEN: "PRIVATE_CREDENTIAL",
+      SSH_AUTH_SOCK: "/private/agent.sock",
+    },
+    // Inspect the real sandbox construction; no host launcher or process runs.
+    resolveLauncher: () => "/usr/bin/bwrap",
+    verifyLauncher: (path) => path,
+    async runCommand(command, options) {
+      executions.push(command);
+      assert.ok(
+        calls
+          .at(-1)
+          .prompt.includes("Run the complete project finalization procedure"),
+      );
+      assert.equal(command.executable, "/usr/bin/bwrap");
+      assert.deepEqual(command.arguments.slice(-4), [
+        definition.executable,
+        ...definition.arguments,
+      ]);
+      for (const flag of [
+        "--unshare-net",
+        "--unshare-pid",
+        "--cap-drop",
+        "--ro-bind",
+        "--tmpfs",
+      ]) {
+        assert.ok(command.arguments.includes(flag), flag);
+      }
+      assert.equal(command.arguments.includes("--bind"), false);
+      assert.equal(options.environment.GH_TOKEN, undefined);
+      assert.equal(options.environment.SSH_AUTH_SOCK, undefined);
+      assert.equal(options.environment.GIT_SSH_COMMAND, "/bin/false");
+      assert.equal(options.environment.GIT_CONFIG_GLOBAL, "/dev/null");
+      assert.equal(options.readinessRequired, true);
+      await hooks.execute?.(paths);
+      return {
+        status: "PASS",
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        reason: "exit",
+        stdout: "PRIVATE_EXECUTOR_OUTPUT",
+        stderr: "PRIVATE_EXECUTOR_OUTPUT",
+      };
+    },
+  });
+  let runner;
+  function openRunner() {
+    runner = createRunner({
+      adapters,
+      runStore,
+      clarifications: createClarificationService({ interactive: false }),
+      git: {
+        ...git,
+        async stagePolishingHandoff(options) {
+          handoffs += 1;
+          const result = await git.stagePolishingHandoff(options);
+          await hooks.afterHandoff?.(runner, await runStore.loadRun(runId));
+          return result;
+        },
+      },
+      loadConfiguration: async () => {
+        loads += 1;
+        return parseRunnerConfiguration(JSON.stringify(rootConfiguration));
+      },
+      trustedValidation,
+    });
+    return runner;
+  }
+  const prepared = await openRunner().create({
+    pipelineId,
+    projectPath: paths.projectPath,
+    taskPath: paths.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    sourceSession: null,
+  });
+  runId = prepared.run.runId;
+  assert.deepEqual(prepared.run.pipelineState.trustedValidation, expected);
+  assert.equal(calls.length, 0);
+  assert.equal(executions.length, 0);
+  return {
+    ...paths,
+    configurationPath,
+    runId,
+    runStore,
+    expected,
+    calls,
+    executions,
+    resume: () => runner.resume({ runId, action: null }),
+    reopen() {
+      rootConfiguration = {
+        schemaVersion: 1,
+        defaultBackend: "claude",
+        trustedCommands: {
+          replacement: { command: "false", executable: "false", arguments: [] },
+        },
+        pipelines: { [pipelineId]: { trustedChecks: ["replacement"] } },
+      };
+      return openRunner();
+    },
+    get loads() {
+      return loads;
+    },
+    get handoffs() {
+      return handoffs;
+    },
+  };
+}
+
+for (const pipelineId of ["plan-execution", "polishing"]) {
+  test(`project command snapshots survive interruption and complete ${pipelineId}`, async (t) => {
+    let interrupted = false;
+    const scenario = await projectCommandScenario(t, pipelineId, {
+      beforeTurn(request) {
+        if (
+          !interrupted &&
+          request.prompt.includes(
+            "Run the complete project finalization procedure",
+          )
+        ) {
+          interrupted = true;
+          const error = new Error("Temporary provider interruption.");
+          error.recoverable = true;
+          throw error;
+        }
+      },
+    });
+    const initialHead = await gitOutput(scenario.projectPath, [
+      "rev-parse",
+      "HEAD",
+    ]);
+    const paused = (await scenario.resume()).run;
+    assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+    assert.equal(paused.pause.resumeState, "FINALIZE");
+    assert.equal(scenario.executions.length, 0);
+    assert.deepEqual(paused.pipelineState.trustedValidation, scenario.expected);
+    scenario.reopen();
+    const completed = (await scenario.resume()).run;
+    assert.equal(completed.pipelineState.workflowState, "DONE");
+    assert.equal(scenario.loads, 1);
+    assert.deepEqual(
+      completed.pipelineState.trustedValidation,
+      scenario.expected,
+    );
+    assert.equal(
+      scenario.executions.length,
+      pipelineId === "plan-execution" ? 2 : 1,
+    );
+    assert.equal(scenario.handoffs, pipelineId === "polishing" ? 1 : 0);
+    assert.equal(
+      scenario.calls.filter(({ access }) => access === "local-commit").length,
+      pipelineId === "plan-execution" ? 2 : 0,
+    );
+    if (pipelineId === "plan-execution") {
+      assert.equal(completed.pipelineState.completedCommits.length, 2);
+    } else {
+      assert.equal(
+        await gitOutput(scenario.projectPath, ["rev-parse", "HEAD"]),
+        initialHead,
+      );
+    }
+    const evidence = completed.pipelineState.finalizationResult.checks.find(
+      ({ checkId }) => checkId === "C2",
+    );
+    assert.equal(evidence.executor, "runner");
+    assert.equal(
+      evidence.commandIdentity,
+      scenario.expected.commands[0].identity,
+    );
+    const durable = await readFile(
+      join(scenario.stateRoot, "runs", scenario.runId, "events.jsonl"),
+      "utf8",
+    );
+    assert.doesNotMatch(durable, /PRIVATE_EXECUTOR_OUTPUT|PRIVATE_CREDENTIAL/u);
+    const turns = scenario.calls.length;
+    const executions = scenario.executions.length;
+    await scenario.resume();
+    assert.equal(scenario.calls.length, turns);
+    assert.equal(scenario.executions.length, executions);
+  });
+
+  for (const access of ["read-only", "workspace-write"]) {
+    for (const mutation of ["content", "replacement"]) {
+      test(`project command guard blocks ${pipelineId} ${access} ${mutation}`, async (t) => {
+        let mutated = false;
+        const scenario = await projectCommandScenario(t, pipelineId, {
+          async beforeTurn(
+            request,
+            durable,
+            { configurationPath, projectConfiguration },
+          ) {
+            if (mutated || request.access !== access) return;
+            mutated = true;
+            if (mutation === "replacement") {
+              const replacement = `${configurationPath}.replacement`;
+              await writeFile(
+                replacement,
+                JSON.stringify(projectConfiguration),
+              );
+              await rename(replacement, configurationPath);
+            } else {
+              await writeFile(
+                configurationPath,
+                JSON.stringify({
+                  ...projectConfiguration,
+                  trustedCommands: {},
+                }),
+              );
+            }
+          },
+        });
+        const initialHead = await gitOutput(scenario.projectPath, [
+          "rev-parse",
+          "HEAD",
+        ]);
+        const blocked = (await scenario.resume()).run;
+        assert.equal(mutated, true);
+        assert.equal(blocked.pause.reason, "project_configuration_changed");
+        assert.deepEqual(
+          blocked.pipelineState.trustedValidation,
+          scenario.expected,
+        );
+        const calls = scenario.calls.length;
+        await scenario.resume();
+        assert.equal(scenario.calls.length, calls);
+        assert.equal(scenario.executions.length, 0);
+        assert.equal(scenario.handoffs, 0);
+        assert.equal(
+          await gitOutput(scenario.projectPath, ["rev-parse", "HEAD"]),
+          initialHead,
+        );
+        assert.equal(
+          scenario.calls.some(({ access }) => access === "local-commit"),
+          false,
+        );
+      });
+    }
+  }
+
+  test(`project command execution retains Git mutation guards in ${pipelineId}`, async (t) => {
+    const scenario = await projectCommandScenario(t, pipelineId, {
+      execute: (paths) =>
+        writeFile(
+          join(paths.projectPath, "src/base.js"),
+          "unauthorized validation write\n",
+        ),
+    });
+    const initialHead = await gitOutput(scenario.projectPath, [
+      "rev-parse",
+      "HEAD",
+    ]);
+    const blocked = (await scenario.resume()).run;
+    assert.equal(blocked.pipelineState.workflowState, "WAITING_FOR_USER");
+    assert.equal(blocked.pause.reason, "unsafe_git_state");
+    assert.equal(scenario.executions.length, 1);
+    assert.equal(scenario.handoffs, 0);
+    assert.equal(
+      scenario.calls.some(({ access }) => access === "local-commit"),
+      false,
+    );
+    assert.equal(
+      await gitOutput(scenario.projectPath, ["rev-parse", "HEAD"]),
+      initialHead,
+    );
+  });
+}
+
+test("project command drift preserves an already verified commit", async (t) => {
+  let preserved;
+  const scenario = await projectCommandScenario(t, "plan-execution", {
+    async beforeTurn(request, durable, { configurationPath }) {
+      if (durable.pipelineState.completedCommits.length !== 1 || preserved)
+        return;
+      preserved = durable.pipelineState.completedCommits;
+      await writeFile(configurationPath, '{"schemaVersion":1}\n');
+    },
+  });
+  const blocked = (await scenario.resume()).run;
+  assert.equal(blocked.pause.reason, "project_configuration_changed");
+  assert.equal(preserved.length, 1);
+  assert.deepEqual(blocked.pipelineState.completedCommits, preserved);
+  const head = await gitOutput(scenario.projectPath, ["rev-parse", "HEAD"]);
+  const turns = scenario.calls.length;
+  await scenario.resume();
+  assert.deepEqual(
+    (await scenario.runStore.loadRun(scenario.runId)).pipelineState
+      .completedCommits,
+    preserved,
+  );
+  assert.equal(scenario.calls.length, turns);
+  assert.equal(
+    await gitOutput(scenario.projectPath, ["rev-parse", "HEAD"]),
+    head,
+  );
+});
+
+test("project command drift preserves completed polishing handoff evidence", async (t) => {
+  const scenario = await projectCommandScenario(t, "polishing", {
+    async afterHandoff(runner, run) {
+      await runner.requestOperatorStop({
+        runId: run.runId,
+        kind: "pause_requested",
+        expectedRevision: run.revision,
+        idempotencyKey: "project-command-handoff",
+      });
+    },
+  });
+  const paused = (await scenario.resume()).run;
+  assert.equal(paused.pause.reason, "operator_paused");
+  assert.equal(paused.pause.operatorResume.workflowState, "DONE");
+  const baseline = paused.pipelineState.repositoryBaseline;
+  const finalization = paused.pipelineState.finalizationResult;
+  const reviewedFingerprint = paused.pipelineState.reviewedFingerprint;
+  assert.ok(finalization);
+  assert.equal(reviewedFingerprint, paused.pipelineState.finalizedFingerprint);
+  const turns = scenario.calls.length;
+  await writeFile(scenario.configurationPath, '{"schemaVersion":1}\n');
+  const blocked = (await scenario.resume()).run;
+  assert.equal(blocked.pause.reason, "project_configuration_changed");
+  assert.deepEqual(blocked.pipelineState.repositoryBaseline, baseline);
+  assert.deepEqual(blocked.pipelineState.finalizationResult, finalization);
+  assert.equal(blocked.pipelineState.reviewedFingerprint, reviewedFingerprint);
+  assert.equal(scenario.calls.length, turns);
+  assert.equal(scenario.handoffs, 1);
 });
