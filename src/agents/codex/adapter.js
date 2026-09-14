@@ -1540,7 +1540,13 @@ export function createCodexAdapter(options = {}) {
         throw processError("Cannot start Codex app-server.", cause);
       }
       const ownedCompletion = child.ownedCompletion;
-      ownedCompletion?.catch(() => {});
+      const ownedFailureSignal =
+        ownedCompletion === undefined
+          ? undefined
+          : new Promise((_, reject) => {
+              ownedCompletion.catch(reject);
+            });
+      ownedFailureSignal?.catch(() => {});
       const client = createCodexAppServerClient(
         child,
         CodexAdapterError,
@@ -1549,31 +1555,36 @@ export function createCodexAdapter(options = {}) {
       let result;
       let operationFailed = false;
       try {
-        await client.request("initialize", {
-          clientInfo: {
-            name: "agent_runner",
-            title: "Agent Runner",
-            version: packageMetadata.version,
-          },
-          capabilities: null,
-        });
-        client.notify("initialized", {});
-        assertIsolatedConfiguration(
-          await client.request("config/read", { includeLayers: false }),
-          launch.mcpServerNames,
-          workspaceStorage?.shellEnvironment ?? EMPTY_SHELL_ENVIRONMENT,
-        );
-        await validateModel(client, request.model);
-        const threadId = await selectThread(client, request, fresh);
-        const turn = await runTurn(
-          client,
-          request,
-          threadId,
-          turnPrompt(request, recovery),
-          turnPrompt(request, "compact"),
-          workspaceStorage,
-        );
-        result = normalizeResult(turn, request, threadId);
+        const protocolOperation = (async () => {
+          await client.request("initialize", {
+            clientInfo: {
+              name: "agent_runner",
+              title: "Agent Runner",
+              version: packageMetadata.version,
+            },
+            capabilities: null,
+          });
+          client.notify("initialized", {});
+          assertIsolatedConfiguration(
+            await client.request("config/read", { includeLayers: false }),
+            launch.mcpServerNames,
+            workspaceStorage?.shellEnvironment ?? EMPTY_SHELL_ENVIRONMENT,
+          );
+          await validateModel(client, request.model);
+          const threadId = await selectThread(client, request, fresh);
+          const turn = await runTurn(
+            client,
+            request,
+            threadId,
+            turnPrompt(request, recovery),
+            turnPrompt(request, "compact"),
+            workspaceStorage,
+          );
+          return normalizeResult(turn, request, threadId);
+        })();
+        result = await (ownedFailureSignal === undefined
+          ? protocolOperation
+          : Promise.race([protocolOperation, ownedFailureSignal]));
       } catch (cause) {
         operationFailed = true;
         throw cause;

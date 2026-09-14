@@ -100,6 +100,11 @@ recovery verifies parent-death teardown without signalling host PIDs.
 For session ownership, the persisted PID/boot/start proof reconstructs the
 token used to detect survivors after supervisor loss without signalling them.
 Unverifiable ownership or surviving descendants retains exclusion.
+Codex observes owned-process failure independently of App Server protocol
+completion. A retained containment boundary may keep protocol pipes open, but
+the ownership failure still triggers bounded adapter cleanup and propagates as
+the primary error through client teardown; successful process completion never
+replaces the required protocol result.
 Reconciliation preserves safe partial
 workspace content without staging or rollback and retains read-only mutation,
 index, history/ref, remote, identity, and input findings as blockers.

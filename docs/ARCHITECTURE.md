@@ -1226,6 +1226,13 @@ unchanged, ambient `TMPDIR` and host `/tmp` remain excluded, and command network
 access remains denied. In-session compaction retains the attempt's root. Every
 successful, failed, or freshly recovered attempt validates and removes its root
 before returning or retrying, and unsafe preparation or cleanup fails closed.
+Codex observes owned-process completion as soon as the App Server starts and
+races only its rejection against the complete protocol operation. An ownership
+failure therefore starts bounded client and workspace cleanup promptly and
+retains precedence over client-cleanup failures, even when containment
+deliberately keeps protocol pipes open. Successful owned completion does not
+satisfy a protocol request; the adapter still requires the complete App Server
+result.
 Read-only and local-commit storage remain independently isolated. Both adapters
 advertise `gitMetadataWriteBlocked`; the runner, not an agent turn, owns effects
 that require the index.

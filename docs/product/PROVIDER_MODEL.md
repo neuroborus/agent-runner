@@ -81,6 +81,10 @@ trusted-validation namespace retains the distinct owned-session path when
 that sandbox denies nested namespace creation; the enclosing namespace still
 contains otherwise detached descendants. Cancellation or runner loss
 retires the owned containment before reconciliation can release ownership.
+Codex races App Server work against owned-completion rejection so an ownership
+failure cannot remain hidden behind an open protocol request. It preserves the
+original ownership failure through bounded cleanup; successful ownership
+completion still requires the protocol operation to produce its result.
 Unavailable containment fails before provider execution. Every fresh
 or recovery attempt checks the abort signal. A constrained commit that may already have begun stays
 on the verification-only path; a proven pre-effect interruption retains that
