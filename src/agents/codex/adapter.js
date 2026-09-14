@@ -1478,14 +1478,19 @@ export function createCodexAdapter(options = {}) {
         codexBinary,
         cwd: request.cwd,
         env: commandEnvironment,
-        execute: (file, args, executionOptions) =>
-          request.onProcess === undefined
-            ? execute(file, args, executionOptions)
-            : executeOwnedProcess(file, args, {
-                ...executionOptions,
-                signal: request.signal,
-                onProcess: request.onProcess,
-              }),
+        execute: (file, args, executionOptions) => {
+          const options =
+            request.onProcess === undefined
+              ? executionOptions
+              : {
+                  ...executionOptions,
+                  signal: request.signal,
+                  onProcess: request.onProcess,
+                };
+          return request.onProcess !== undefined && execute === executeFile
+            ? executeOwnedProcess(file, args, options)
+            : execute(file, args, options);
+        },
         beforeEffect: () => {
           request.signal?.throwIfAborted();
           effectStarted = true;
@@ -1523,9 +1528,13 @@ export function createCodexAdapter(options = {}) {
           cwd: request.cwd,
           env: processEnvironment,
           stdio: ["pipe", "pipe", "pipe"],
-          ...(launchProcess === spawnOwnedProcess
-            ? { signal: request.signal, onProcess: request.onProcess }
-            : {}),
+          ...(request.onProcess === undefined
+            ? {}
+            : {
+                signal: request.signal,
+                onProcess: request.onProcess,
+                ownershipMode: "native-sandbox-provider",
+              }),
         });
       } catch (cause) {
         throw processError("Cannot start Codex app-server.", cause);

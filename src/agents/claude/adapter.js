@@ -1213,7 +1213,10 @@ export function createClaudeAdapter(options = {}) {
         ...(request.signal === undefined ? {} : { signal: request.signal }),
         ...(request.onProcess === undefined
           ? {}
-          : { onProcess: request.onProcess }),
+          : {
+              onProcess: request.onProcess,
+              ownershipMode: "native-sandbox-provider",
+            }),
       });
     } catch (cause) {
       request.signal?.throwIfAborted();
@@ -1313,14 +1316,19 @@ export function createClaudeAdapter(options = {}) {
         bubblewrapBinary: BUBBLEWRAP_BINARY,
         cwd: request.cwd,
         env: commandEnvironment,
-        execute: (file, args, executionOptions) =>
-          request.onProcess === undefined
-            ? execute(file, args, executionOptions)
-            : executeOwnedProcess(file, args, {
-                ...executionOptions,
-                signal: request.signal,
-                onProcess: request.onProcess,
-              }),
+        execute: (file, args, executionOptions) => {
+          const options =
+            request.onProcess === undefined
+              ? executionOptions
+              : {
+                  ...executionOptions,
+                  signal: request.signal,
+                  onProcess: request.onProcess,
+                };
+          return request.onProcess !== undefined && execute === executeFile
+            ? executeOwnedProcess(file, args, options)
+            : execute(file, args, options);
+        },
         beforeEffect: () => {
           request.signal?.throwIfAborted();
           effectStarted = true;

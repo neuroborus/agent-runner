@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-09-14
 
+- **Owned supervision preserves provider-native sandbox nesting.** Ordinary
+  commands retain private PID namespace ownership. Provider adapters explicitly
+  identify only executions that create their mandatory native sandbox; after a
+  cached full nesting probe fails, those executions alone may use token-backed
+  session ownership on the initial host namespace. Live ancestry and a token
+  derived from the persisted PID/boot/start proof find provider descendants
+  across sessions and nested namespaces, including after owner loss, while
+  incomplete inspection and bounded-cleanup failures remain fail closed.
+
 - **Resolved project configuration is protected input.** The same confined
   read that parses a project file now pins its canonical location, content,
   file identity, and real ancestor identities in the durable run envelope.

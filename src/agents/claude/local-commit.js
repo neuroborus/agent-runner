@@ -206,6 +206,7 @@ export async function executeClaudeLocalCommit({
       encoding: "utf8",
       env,
       maxBuffer: MAX_COMMIT_OUTPUT_BYTES,
+      ownershipMode: "native-sandbox-provider",
     },
   );
 }
