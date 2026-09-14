@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-09-14
 
+- **Trusted command catalogs can be project-local.** Safe project configuration
+  uses the existing exact-vector validator. Normalized catalogs merge root then
+  project, deduplicate identical same-name definitions, and reject conflicts
+  even when unselected. The merged catalog retains the 256-definition bound and
+  each selection the 32-command bound. Project-only selections use the existing
+  immutable snapshot before agent work, with unchanged identities, resume, and
+  protected-input guards. Profile implementations and execution sandbox policy
+  remain runner-owned; command definitions grant no additional host authority.
+
 - **Commit size is an authoring heuristic.** The persisted
   `preferredCommitLineLimit` defaults to 900 anticipated additions plus deletions,
   including tests and documentation. Planner and review prompts prefer cohesive

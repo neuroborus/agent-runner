@@ -279,10 +279,10 @@ Arbiter still probed on demand; lazy mode activates only the Worker.
 Role objects under `pipelines.plan-execution.roles` in the runner's
 `.agent-runner.json` or its safe project overlay may provide optional string
 `backend`, trusted `profile`, backend-specific `model`, and decimal
-`contextSize` selections. The project file may only select aliases defined by
-runner-root configuration; it cannot define profile implementations,
-credentials, binaries, or environment values. Role-specific CLI/MCP values
-take precedence over run-wide values, project values, runner values, and
+`contextSize` selections. Project profile selections reference aliases defined
+by runner-root configuration; the project cannot define profile implementations,
+credentials, provider binaries, or environment values. Role-specific CLI/MCP
+values take precedence over run-wide values, project values, runner values, and
 built-in `current`. A trusted profile pins
 its backend; conflicting explicit backend selection is invalid. `current`
 omits the corresponding native override and uses the effective source-session,
@@ -318,14 +318,20 @@ role envelopes explicitly prohibit modifying the resolved project
 configuration.
 
 The descriptor also owns `trustedChecks`, an ordered list of unique lowercase
-aliases that defaults to `[]`. Only runner-root `trustedCommands`
-configuration may define an alias, its exact inventory command, and its
-executable/argument vector. A safe project overlay may select runner-defined
-aliases through `trustedChecks`, but cannot define or alter binaries,
-arguments, environment values, aliases, or host commands. Before agent work,
+aliases that defaults to `[]`. Root and safe project `trustedCommands`
+configuration use the same exact-vector validator for each alias, inventory
+command, executable, and argument vector. Normalized catalogs merge root then
+project in stable order, deduplicate identical same-name definitions, and reject
+conflicts even when unselected. The merged catalog permits at most 256
+definitions and each selection at most 32 aliases. Project `trustedChecks`
+replaces the root selection and may reference root or project aliases; selection
+order is preserved. Definitions cannot add environment, credentials,
+shell-string substitutes, or broader host authority. Profile implementations
+remain runner-owned. Before agent work,
 the root persists every resolved vector and alias, deterministic command
 identities, an ordered command fingerprint, and a trusted-configuration
-fingerprint. Resume uses that durable snapshot without reloading configuration.
+fingerprint. Resume uses that durable snapshot without reloading configuration;
+later project configuration edits trigger the existing protected-input guard.
 
 Codex and Claude do **not** both need to be installed for every run. Independent
 mode preflight validates the selected Worker and Reviewer; the Arbiter backend
@@ -2849,7 +2855,8 @@ At minimum cover:
     classified writable usage/provider failures preserve reconciled changes,
     and forbidden, authentication, ambiguous writable, and one-shot outcomes
     remain fail closed.
-53. runner-only trusted command definitions, project alias selection, durable
+53. merged root/project trusted catalogs, deduplication, conflicts, 256-definition
+    and 32-selection bounds, project-only alias selection, durable
     snapshot resume, exact-vector execution, bounded redaction, fingerprint
     drift, exact lexical round trips, and non-allowlisted substitutions fail
     closed.
@@ -3061,7 +3068,8 @@ Do not build:
     provider text, never retries the rejected turn, and reconstructs the request
     from durable runner state without making a native session authoritative;
     other Claude recovery retries only finite allowlisted failures.
-33. Only runner-root configuration defines trusted host commands; selected
+33. Root and safe project configuration define exact trusted command vectors
+    without additional environment, credential, or host-authority fields; selected
     commands execute outside agent turns as exact persisted vectors, and their
     bounded evidence cannot pass unless every fingerprint and repository guard
     remains unchanged. The isolated executor denies remote writes and ambient

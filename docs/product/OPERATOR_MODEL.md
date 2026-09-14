@@ -14,10 +14,14 @@ validate, rewrite, discard, or commit resumable work manually.
 ## Configuration
 
 Runner-root configuration is the only source of trusted profile
-implementations and trusted command vectors. An ignored project configuration
-may select safe aliases, role preferences, pipeline settings, and an artifact
-root, but it cannot add executables, credentials, environment values, or new
-host authority. CLI and MCP overrides have the documented highest precedence.
+implementations. Root and safe ignored project configuration may define exact
+trusted command vectors. Catalogs merge root then project, deduplicate identical
+same-name definitions, and reject conflicts even when unselected. The merged
+catalog permits 256 definitions; each pipeline may select at most 32 root or
+project aliases. Project configuration may also select role preferences,
+pipeline settings, and an artifact root, but cannot add provider binaries,
+credentials, environment values, or new host authority. CLI and MCP overrides
+have the documented highest precedence.
 
 Resolved active roles, settings, artifact root, trusted commands, and optional
 source-session lineage are frozen into a new run. Resume uses that snapshot and

@@ -1,4 +1,5 @@
 import { posix } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import { PROVIDER_REGISTRY } from "../agents/index.js";
 import { listPipelines } from "../pipeline-registry.js";
@@ -28,8 +29,7 @@ const TOP_LEVEL_FIELDS = new Set([
 ]);
 const PROJECT_TOP_LEVEL_FIELDS = new Set(
   [...TOP_LEVEL_FIELDS].filter(
-    (field) =>
-      !["issueReporting", "profiles", "trustedCommands"].includes(field),
+    (field) => !["issueReporting", "profiles"].includes(field),
   ),
 );
 const ROLE_FIELDS = new Set(["backend", "contextSize", "model", "profile"]);
@@ -131,13 +131,33 @@ function normalizeProfile(name, value, providers) {
   }
 }
 
-function normalizeTrustedCommands(value) {
-  assertRecord(value, "configuration.trustedCommands");
+function normalizeTrustedCommands(
+  value,
+  path = "configuration.trustedCommands",
+) {
+  assertRecord(value, path);
   try {
     return normalizeTrustedValidationDefinitions(value);
   } catch (cause) {
     throw new ConfigurationError(cause.message, { cause });
   }
+}
+
+export function mergeTrustedCommands(rootCommands, projectCommands = {}) {
+  const merged = { ...rootCommands };
+  for (const [alias, command] of Object.entries(projectCommands)) {
+    if (Object.hasOwn(merged, alias)) {
+      if (!isDeepStrictEqual(merged[alias], command)) {
+        throw new ConfigurationError(
+          `Project trusted command ${alias} conflicts with runner configuration.`,
+          { code: "ERR_TRUSTED_COMMAND_CONFLICT" },
+        );
+      }
+    } else {
+      merged[alias] = command;
+    }
+  }
+  return normalizeTrustedCommands(merged);
 }
 
 function assertKnownTrustedSelection(settings, trustedCommands, path) {
@@ -416,6 +436,16 @@ export function normalizeProjectConfiguration(
       ),
     ),
   };
+  if (input.trustedCommands !== undefined) {
+    normalized.trustedCommands = normalizeTrustedCommands(
+      input.trustedCommands,
+      `${rootPath}.trustedCommands`,
+    );
+  }
+  const trustedCommands = mergeTrustedCommands(
+    runnerConfiguration.trustedCommands,
+    normalized.trustedCommands,
+  );
   for (const field of [
     "artifactRoot",
     "defaultBackend",
@@ -455,7 +485,7 @@ export function normalizeProjectConfiguration(
     if (settings !== undefined) {
       assertKnownTrustedSelection(
         settings,
-        runnerConfiguration.trustedCommands,
+        trustedCommands,
         `${rootPath}.pipelines.${pipeline.id}`,
       );
     }

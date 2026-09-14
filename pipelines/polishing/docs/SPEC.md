@@ -130,22 +130,28 @@ fallback directly. Any other valid value is a normalized repository-relative
 path ending in `SKILL.md` and requires that exact skill.
 
 `trustedChecks` is an array of unique runner-trusted command aliases and
-defaults to empty. Runner-root configuration alone defines each alias's exact
-inventory command and executable/argument vector. An ignored project
-configuration may replace the alias selection but cannot define or alter an
-alias, binary, argument, environment value, or host command. The root resolves
+defaults to empty. Root and safe project `trustedCommands` catalogs use the same
+exact-vector validator for each alias's inventory command, executable, and
+arguments. Normalized catalogs merge root then project in stable order;
+identical same-name definitions deduplicate and conflicts reject even when
+unselected. The merged catalog permits at most 256 definitions and a selection
+at most 32 aliases. Project settings may replace the selection with root or
+project aliases in the selected order. Definitions reject shell-string
+substitutes and environment, credential, or host-authority fields. The root resolves
 the complete selection and fingerprints it before agent work; resume uses the
-persisted snapshot without reloading configuration.
+persisted snapshot without reloading configuration. Later project configuration
+edits trigger the existing protected-input guard.
 
 Settings are stored in pipeline state at run creation and are not reloaded on
 resume. The root may load safe project overrides from an ignored
 `LOCAL_ARTIFACTS/agent-runner.json` or an explicitly selected confined ignored
 path. CLI/MCP execution selections win over project values, which win over
-runner-root values. A project file may select only runner-trusted profile
-aliases and safe role, setting, and repository-relative artifact-root values;
-it cannot define profile implementations, credentials, binaries, or environment
-values. Explicit CLI/MCP pipeline-setting overrides win over project values,
-runner values, and descriptor defaults. All configured roles are validated,
+runner-root values. Alongside trusted command catalogs, a project file may select
+runner-trusted profile aliases and safe role, setting, and repository-relative
+artifact-root values; it cannot define profile implementations, credentials,
+provider binaries, or environment values. Explicit CLI/MCP pipeline-setting
+overrides win over project values, runner values, and descriptor defaults.
+All configured roles are validated,
 but only active roles are resolved, probed, persisted, source-session checked,
 or invoked. Inactive values stay in the configuration source for a later
 independent run and are not exposed through lazy state. The resolved active

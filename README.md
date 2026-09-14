@@ -214,11 +214,15 @@ the dedicated fingerprint-bound finalization turn.
 
 Required checks that need loopback listeners, Docker, a local database, or a
 comparable host service may be delegated to the runner's trusted validation
-executor. The runner-root catalog accepts at most 256 aliases; each pipeline
-run may select at most 32 of them. Exact direct arguments may contain line
-feeds for multiline scripts; other control characters remain invalid. Only the
-runner-root configuration may define an alias, its exact inventory command, and
-its executable/argument vector:
+executor. Runner-root and safe project configuration may each define
+`trustedCommands` using exact inventory commands and executable/argument
+vectors. Catalogs merge in root-then-project order: identical same-name
+definitions deduplicate, while conflicting definitions reject configuration
+even when unselected. The merged catalog accepts at most 256 aliases; each
+pipeline run may select at most 32, preserving selection order in the snapshot.
+Trusted commands execute in finalization's required-check inventory order.
+Exact direct arguments may contain line feeds for multiline scripts; other control
+characters remain invalid. This example works in either configuration source:
 
 ```json
 {
@@ -238,12 +242,16 @@ its executable/argument vector:
 }
 ```
 
-An ignored project configuration may select `service-tests` through the same
-pipeline setting. Runner configuration owns its command, vector, environment,
-and executable. Selection resolves to a durable fingerprinted snapshot before
-agent work, and resume uses that snapshot. The runner executes the vector
-directly. Before agent work, it resolves bubblewrap from fixed system locations
-to a canonical absolute executable protected by system-owned file and parent
+An ignored project configuration may select root or project aliases through
+the same pipeline setting, replacing that pipeline's root selection. The tracked
+configuration example demonstrates `repository-check` in both writable pipelines.
+Definitions cannot contain shell-string substitutes, environment or credential
+fields, or extra host authority; profile implementations remain runner-owned.
+Selection resolves to a durable fingerprinted snapshot before agent work, and
+resume uses that snapshot. Later project configuration changes trigger the
+protected-input guard. The runner owns the execution environment and executes
+the vector directly. Before agent work, it resolves bubblewrap from fixed system
+locations to a canonical absolute executable protected by system-owned file and parent
 permissions. The pinned path is reverified on resume and execution. Its network
 namespace has a minimal read-only system and repository view, private runtime
 and temporary storage, a hidden user home, and a finite non-credential

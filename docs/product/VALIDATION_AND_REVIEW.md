@@ -105,7 +105,14 @@ configuration, or the inventory, terminal confirmation must explicitly accept
 that complete change. An evasive or unauthorized change is a finding.
 
 Runner-trusted checks are a narrow exception for commands that an agent sandbox
-cannot safely execute. Before finalization, writable roles receive the exact
+cannot safely execute. Root and safe project catalogs use the same exact-vector
+validation, merge root then project, deduplicate identical same-name definitions,
+and reject conflicts. The merged catalog is bounded to 256 definitions and each
+selection to 32 aliases. Project selections may use project-only aliases.
+Vectors, identities, and fingerprints are frozen before agent work and reused
+unchanged on resume; later project configuration edits retain the protected-input
+guard. Profile implementations and sandbox policy remain runner-owned.
+Before finalization, writable roles receive the exact
 selected command text from the persisted run, including on continuation,
 reconstruction, and correction. They defer established required-check execution
 and attestation to `FINALIZE`, continue applicable content repairs and semantic

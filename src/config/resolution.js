@@ -8,6 +8,7 @@ import {
   assertSelection,
   ConfigurationError,
   CURRENT,
+  mergeTrustedCommands,
   normalizeConfiguration,
   normalizeProjectConfiguration,
   normalizeRole,
@@ -281,7 +282,10 @@ export function resolvePipelineConfiguration(
   if (Object.hasOwn(settings, "trustedChecks")) {
     try {
       trustedValidation = createTrustedValidationSnapshot(
-        normalizedConfiguration.trustedCommands,
+        mergeTrustedCommands(
+          normalizedConfiguration.trustedCommands,
+          normalizedProjectConfiguration?.trustedCommands,
+        ),
         settings.trustedChecks,
       );
     } catch (cause) {
