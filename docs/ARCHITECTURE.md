@@ -625,9 +625,15 @@ same path, while key reuse with different arguments fails.
 Canonical-worktree leases live under
 `worktrees/<sha256(canonical-worktree-path)>/` in that external root. The hash
 keeps filesystem-safe bounded keys while the owner record contains only the
-run ID, an opaque token, process ID, hostname, and acquisition time. Empty key
-directories may remain after release; ownership exists only while `.lease` is
-present.
+run ID, an opaque token, process ID, hostname, acquisition time, and nullable
+process identity. Version-2 lease records pin Linux boot identity and process
+start ticks when available. A live reused PID is a replaced owner, not proof
+that the recorded execution survives. Foreign-host, legacy live, and otherwise
+unverifiable owners remain conservative exclusion barriers. Legacy records are
+read without rewriting them; successful acquisition publishes the current
+lease format. Empty key directories may remain after release. Ownership uses
+`.lease`; a pending stop also retains an interrupted `.lease-reclaiming`
+reservation until reconciliation permits its release.
 
 Run, canonical-worktree, reclaiming, and MCP action leases share one durable
 no-replace publication primitive. It writes and syncs the complete JSON record
@@ -637,9 +643,74 @@ the directory before acquisition returns. A lock-free reader therefore treats
 an unpublished lease as absent and parses only a complete record. If it meets
 the bounded internal link between publication and cleanup, including after an
 interrupted publisher, it removes only the matching same-directory temporary
-link to restore the isolated final file; unrecognized or persistent hard links
-remain unsafe. Exclusive contention, stale-owner recovery, and release all use
+link to restore the isolated final file. Bounded retries cover replacement
+publication between inspection and opening; each read still requires an
+isolated regular file, and unrecognized or persistent hard links remain unsafe.
+Exclusive contention, stale-owner recovery, and release all use
 the published record and continue to verify its opaque owner token.
+
+### State-owned operator stop protocol
+
+The common envelope version 4 adds a nullable bounded `stopRequest`. The state
+service's `requestOperatorStop` accepts exactly a run ID, `pause_requested` or
+`cancel_requested`, an inspected `expectedRevision`, and an `idempotencyKey`.
+It persists a version-2 action intent, appends the complete acceptance event,
+and publishes an acceptance receipt before returning. This capability does not
+signal processes, reconcile Git, or expose CLI/MCP commands; those operations
+belong to runner and transport integration.
+
+Short, recoverable `.mutation-<uuid>` claims serialize requests with
+execution-owned journal writes and lease release. Each contender durably
+publishes a choosing claim before selecting its ordered ticket; it waits for
+choosing peers and lower ticket/identity pairs. Dead claims have unique paths,
+so recovery cannot unlink a newer owner at a reused lock pathname. Claims and
+contention retries are bounded, and unverifiable owners continue to exclude
+mutation. Action-lease reclamation uses the same boundary, which does not grant
+another execution lease. Worktree owners without a pipeline run, such as
+guidance publishers, use claims in the worktree lease directory. Status and
+activity reads remain lock-free.
+The acceptance record contains the hashed request identity, request kind,
+inspected and accepted revisions, request time, nullable reconciled revision,
+and a suspended checkpoint. That checkpoint records the workflow state, active
+turn, null resume action, and the exact earlier journal revision. Reading that
+revision recovers the complete frozen state, including existing pause blockers
+and pending input, without duplicating a potentially large pipeline payload.
+
+Only nonterminal runs accept fresh requests. A cancellation may supersede a
+pending pause using either its original inspected revision or the current
+revision; it retains the original checkpoint. Other stale requests fail, as do
+new competing requests that cannot supersede the pending stop. Exact retries
+return their original receipt. If receipt publication was interrupted, the
+acceptance event reconstructs it even after cancellation superseded a pause or
+the run terminated. Receipt replay neither advances the run nor executes work.
+Version-1 action records remain readable; incomplete actions upgrade when
+written, and completed receipts replay without migration writes.
+
+Pending requests prevent ordinary state advancement, new provider-turn
+records, session/artifact writes, and release of held run/worktree ownership.
+A dead owner's existing worktree lease remains excluded from other runs while
+the request is pending; only recovery of the same run can reclaim it.
+Reclamation, including stale-marker recovery, rechecks the stop under the
+original run's mutation boundary before replacing ownership. A crash leaving
+only a reclaiming record retains that reservation until a replacement lease
+exists, restricted to the same run while a stop is pending; failed
+replacement publication restores the previous lease when possible.
+`inspectRunLeaseOwner` exposes private identity and finite
+live/dead/replaced/unverifiable classification for runner use; unverifiable
+owners are not eligible signalling targets.
+
+Only the execution lease holder can call `completeOperatorStop`, after the
+runner has reconciled the interrupted access contract and any begun effects.
+That operation atomically records `WAITING_FOR_USER`/`operator_paused` or
+`CANCELED`, clears active-turn activity, and marks reconciliation complete.
+It does no repository work. The journal retains the suspended checkpoint and
+prohibits cancellation downgrade or revival. Identical completion retries do
+not add another transition. Lease release becomes possible only after this
+durable accounting. Version-1 through version-3 run envelopes project a null
+request without read-side writes; stop acceptance can upgrade only the common
+envelope in its acceptance event while preserving pipeline state and history.
+
+### Common envelope and pipeline migrations
 
 `state.json` contains the common versioned envelope: monotonic revision,
 pipeline ID and state version, an explicit runtime-compatibility tuple,
@@ -648,8 +719,8 @@ lineage, nullable bounded active provider role/phase, timestamps, and opaque
 pipeline-owned state, including its resolved settings from the initial
 revision. The compatibility generation is maintained independently from the
 package version, which is not a persistence contract.
-The root validates JSON shape and size without interpreting workflow roles or
-outcomes.
+The root validates JSON shape, size, and the common terminal/stop lifecycle;
+pipeline-specific roles and outcomes remain opaque to the state capability.
 Session lineage records an optional source-session reference, its resolved
 trusted profile when known, and every direct child role/session ID with its
 accepted-input and pipeline-checkpoint context key. Legacy role records missing

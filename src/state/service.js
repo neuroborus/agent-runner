@@ -9,7 +9,11 @@ import { createActionStore } from "./actions.js";
 import { atomicWriteFile, resolveRunArtifactPath } from "./files.js";
 import { createStateJournal } from "./journal.js";
 import { createLeaseManager } from "./lease.js";
+import { createMutationBoundary } from "./mutation.js";
+import { readProcessIdentity } from "./process-owner.js";
+import { createStopService } from "./stops.js";
 import {
+  assertRunCanAdvance,
   assertRunId,
   deepFreeze,
   normalizeChildSession,
@@ -21,6 +25,7 @@ import {
   RUNTIME_VERSION_SKEW_EXIT_CODE,
   RUN_STATE_SCHEMA_VERSION,
   RunStoreError,
+  stopIsPending,
 } from "./validation.js";
 
 export {
@@ -205,6 +210,7 @@ export function createRunStore({
   hostName = hostname(),
   processId = process.pid,
   processIsAlive = defaultProcessIsAlive,
+  processIdentity = readProcessIdentity,
   leaseStaleMs = DEFAULT_LEASE_STALE_MS,
   onLeasePublicationBoundary = async () => {},
   onTransitionBoundary = async () => {},
@@ -219,6 +225,7 @@ export function createRunStore({
     typeof runIdFactory !== "function" ||
     typeof leaseTokenFactory !== "function" ||
     typeof processIsAlive !== "function" ||
+    typeof processIdentity !== "function" ||
     typeof onLeasePublicationBoundary !== "function" ||
     typeof onTransitionBoundary !== "function" ||
     typeof hostName !== "string" ||
@@ -264,17 +271,66 @@ export function createRunStore({
   }
 
   const journal = createStateJournal({ onTransitionBoundary });
+  const mutate = createMutationBoundary({
+    hostName,
+    processId,
+    processIsAlive,
+    processIdentity,
+    onPublicationBoundary: onLeasePublicationBoundary,
+  });
+  async function withRunMutation(record, operation, leaseDirectory) {
+    let directory;
+    try {
+      directory = await getRunDirectory(record.runId);
+    } catch (cause) {
+      if (cause?.code !== "ERR_RUN_NOT_FOUND") throw cause;
+      // Guidance owners have no run; serialize their writes in the lease directory.
+      directory = leaseDirectory;
+    }
+    return mutate(directory, operation);
+  }
+  async function beforeRelease(record) {
+    let run;
+    try {
+      run = await loadRun(record.runId);
+    } catch (cause) {
+      if (cause?.code === "ERR_RUN_NOT_FOUND") return;
+      throw cause;
+    }
+    if (stopIsPending(run)) {
+      throw new RunStoreError(
+        "Stop reconciliation must finish before releasing ownership.",
+        {
+          code: "ERR_STOP_RECONCILIATION_REQUIRED",
+        },
+      );
+    }
+  }
   const runLeases = createLeaseManager({
+    withMutation: withRunMutation,
+    beforeRelease,
     currentDate,
     hostName,
     processId,
     processIsAlive,
+    processIdentity,
     onPublicationBoundary: onLeasePublicationBoundary,
     staleMs: leaseStaleMs,
     timestamp,
     tokenFactory: leaseTokenFactory,
   });
   const worktreeLeases = createLeaseManager({
+    withMutation: withRunMutation,
+    beforeRelease,
+    async canReclaim(record, requestingRunId) {
+      if (record.runId === requestingRunId) return true;
+      try {
+        return !stopIsPending(await loadRun(record.runId));
+      } catch (cause) {
+        if (cause?.code === "ERR_RUN_NOT_FOUND") return true;
+        throw cause;
+      }
+    },
     activeLeaseDescription: "Worktree lease",
     conflictCode: "ERR_WORKTREE_LEASED",
     currentDate,
@@ -284,6 +340,7 @@ export function createRunStore({
     leaseSubject: (runId) => `Run ${runId}'s Git worktree`,
     processId,
     processIsAlive,
+    processIdentity,
     onPublicationBoundary: onLeasePublicationBoundary,
     reclaimingLeaseDescription: "Reclaiming worktree lease",
     requireMatchingRunId: false,
@@ -296,6 +353,7 @@ export function createRunStore({
     hostName,
     processId,
     processIsAlive,
+    processIdentity,
     onPublicationBoundary: onLeasePublicationBoundary,
     stateRoot: requestedStateRoot,
     tokenFactory: leaseTokenFactory,
@@ -482,6 +540,7 @@ export function createRunStore({
               input.childSessions === undefined ? [] : input.childSessions,
           },
           activeTurn: null,
+          stopRequest: null,
           pipelineState:
             input.pipelineState === undefined ? {} : input.pipelineState,
           createdAt,
@@ -577,7 +636,10 @@ export function createRunStore({
 
   async function runIsLeased(runId) {
     const runDirectory = await getRunDirectory(runId);
-    return runLeases.isLeased(runDirectory, runId);
+    return (
+      stopIsPending((await loadSnapshot(runDirectory, runId)).state) ||
+      runLeases.isLeased(runDirectory, runId)
+    );
   }
 
   async function runLeaseOwnerIsLive(runId) {
@@ -801,6 +863,7 @@ export function createRunStore({
 
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
+      assertRunCanAdvance(snapshot.state);
       if (
         expectedRevision !== undefined &&
         snapshot.state.revision !== expectedRevision
@@ -873,6 +936,7 @@ export function createRunStore({
     }
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
+      assertRunCanAdvance(snapshot.state);
       if (!isDeepStrictEqual(snapshot.state.activeTurn, normalized)) {
         throw new RunStoreError("Active agent turn does not match.", {
           code: "ERR_INVALID_AGENT_TURN",
@@ -898,6 +962,7 @@ export function createRunStore({
 
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
+      assertRunCanAdvance(snapshot.state);
       if (
         snapshot.state.sessionLineage.children.some(
           (child) => child.sessionId === normalizedChild.sessionId,
@@ -944,7 +1009,10 @@ export function createRunStore({
       );
     }
 
-    return runLeases.runExclusive(lease, async ({ runDirectory }) => {
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
+      assertRunCanAdvance(
+        (await loadSnapshot(runDirectory, record.runId)).state,
+      );
       const artifactPath = await resolveRunArtifactPath(
         runDirectory,
         relativePath,
@@ -1000,7 +1068,23 @@ export function createRunStore({
     return deepFreeze({ activities, cursor });
   }
 
+  const stops = createStopService({
+    actions,
+    getRunDirectory,
+    loadSnapshot,
+    journal,
+    mutate,
+    runLeases,
+    timestamp,
+  });
+  async function inspectRunLeaseOwner(runId) {
+    return runLeases.inspect(await getRunDirectory(runId), runId);
+  }
   return Object.freeze({
+    requestOperatorStop: stops.request,
+    completeOperatorStop: stops.complete,
+    loadStopCheckpoint: stops.checkpoint,
+    inspectRunLeaseOwner,
     beginAction: actions.begin,
     rootPath: requestedStateRoot,
     acquireRunLease,

@@ -2,7 +2,7 @@ import { isAbsolute, resolve } from "node:path";
 
 import { isAdapterDiagnosticClass } from "../agents/index.js";
 
-export const RUN_STATE_SCHEMA_VERSION = 3;
+export const RUN_STATE_SCHEMA_VERSION = 4;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
   runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
@@ -18,6 +18,7 @@ const ACTIVITY_RUN_STATE_SCHEMA_VERSION = 3;
 const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   LEGACY_RUN_STATE_SCHEMA_VERSION,
   2,
+  3,
   RUN_STATE_SCHEMA_VERSION,
 ]);
 
@@ -41,6 +42,7 @@ const STATE_FIELDS = new Set([
   "pause",
   "sessionLineage",
   "activeTurn",
+  "stopRequest",
   "pipelineState",
   "createdAt",
   "updatedAt",
@@ -480,6 +482,99 @@ function normalizeActiveTurn(value, schemaVersion = RUN_STATE_SCHEMA_VERSION) {
   };
 }
 
+function normalizeStopRequest(value, state) {
+  if (value === undefined && state.schemaVersion < 4) return null;
+  if (value === null) return null;
+  if (state.schemaVersion < 4)
+    fail("Legacy state cannot contain a stop request.");
+  assertRecord(value, "run.stopRequest");
+  const fields = new Set([
+    "requestId",
+    "kind",
+    "expectedRevision",
+    "acceptedRevision",
+    "requestedAt",
+    "checkpoint",
+    "reconciledRevision",
+  ]);
+  rejectUnknownFields(value, fields, "run.stopRequest");
+  if (
+    Object.keys(value).length !== fields.size ||
+    !["pause_requested", "cancel_requested"].includes(value.kind) ||
+    !Number.isSafeInteger(value.expectedRevision) ||
+    value.expectedRevision < 1 ||
+    !Number.isSafeInteger(value.acceptedRevision) ||
+    value.acceptedRevision <= value.expectedRevision ||
+    value.acceptedRevision > state.revision ||
+    (value.reconciledRevision !== null &&
+      (!Number.isSafeInteger(value.reconciledRevision) ||
+        value.reconciledRevision <= value.acceptedRevision ||
+        value.reconciledRevision > state.revision))
+  ) {
+    fail("run.stopRequest is invalid.");
+  }
+  assertContextKey(value.requestId, "run.stopRequest.requestId");
+  normalizeTimestamp(value.requestedAt, "run.stopRequest.requestedAt");
+  if (
+    value.requestedAt < state.createdAt ||
+    value.requestedAt > state.updatedAt
+  )
+    fail("Stop request timestamp is invalid.");
+  if (
+    value.kind === "cancel_requested" &&
+    value.reconciledRevision !== null &&
+    state.pipelineState?.workflowState !== "CANCELED"
+  )
+    fail("Reconciled cancellation must remain terminal.");
+  const checkpoint = value.checkpoint;
+  assertRecord(checkpoint, "run.stopRequest.checkpoint");
+  rejectUnknownFields(
+    checkpoint,
+    new Set(["revision", "workflowState", "activeTurn", "resumeAction"]),
+    "run.stopRequest.checkpoint",
+  );
+  if (
+    Object.keys(checkpoint).length !== 4 ||
+    !Number.isSafeInteger(checkpoint.revision) ||
+    checkpoint.revision < 1 ||
+    checkpoint.revision > value.expectedRevision ||
+    typeof checkpoint.workflowState !== "string" ||
+    !/^[A-Z][A-Z_]{0,63}$/u.test(checkpoint.workflowState) ||
+    checkpoint.resumeAction !== null
+  )
+    fail("Stop checkpoint is invalid.");
+  return {
+    ...value,
+    checkpoint: {
+      ...checkpoint,
+      activeTurn: normalizeActiveTurn(checkpoint.activeTurn),
+    },
+  };
+}
+
+export function stopIsPending(state) {
+  return (
+    state.stopRequest != null && state.stopRequest.reconciledRevision === null
+  );
+}
+
+export function assertRunCanAdvance(state) {
+  if (stopIsPending(state)) {
+    throw new RunStoreError(
+      "Operator stop must be reconciled before further work.",
+      { code: "ERR_STOP_RECONCILIATION_REQUIRED" },
+    );
+  }
+  if (
+    state.pipelineState.workflowState === "CANCELED" ||
+    state.stopRequest?.kind === "cancel_requested"
+  ) {
+    throw new RunStoreError("A canceled run cannot advance.", {
+      code: "ERR_RUN_CANCELED",
+    });
+  }
+}
+
 export function normalizeRunState(value, expectedRunId) {
   assertRecord(value, "run");
   rejectUnknownFields(value, STATE_FIELDS, "run");
@@ -548,6 +643,7 @@ export function normalizeRunState(value, expectedRunId) {
     pause,
     sessionLineage: normalizeSessionLineage(value.sessionLineage),
     activeTurn: normalizeActiveTurn(value.activeTurn, value.schemaVersion),
+    stopRequest: normalizeStopRequest(value.stopRequest, value),
     pipelineState: cloneRecord(value.pipelineState, "run.pipelineState"),
     createdAt,
     updatedAt,

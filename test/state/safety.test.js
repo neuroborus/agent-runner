@@ -418,6 +418,45 @@ test("publishes a complete run lease before contention can observe it", async (t
   );
 });
 
+test("retries lease publication that races its initial file inspection", async (t) => {
+  const { created, store } = await createFixture(t);
+  const leasePath = join(created.directoryPath, ".lease");
+  const temporaryPath = join(
+    created.directoryPath,
+    `..lease.publish.${process.pid}.11111111-1111-4111-8111-111111111111.tmp`,
+  );
+  await writeFile(temporaryPath, await readFile(leasePath));
+  const nativeLstat = filesystem.lstat;
+  let armed = true;
+  const mockedLstat = t.mock.method(
+    filesystem,
+    "lstat",
+    async (path, ...options) => {
+      const metadata = await nativeLstat(path, ...options);
+      if (armed && path === leasePath) {
+        armed = false;
+        await rm(leasePath);
+        await link(temporaryPath, leasePath);
+      }
+      return metadata;
+    },
+  );
+  syncBuiltinESMExports();
+  t.after(() => {
+    mockedLstat.mock.restore();
+    syncBuiltinESMExports();
+  });
+  assert.equal(await store.runIsLeased(created.state.runId), true);
+  assert.equal((await lstat(leasePath)).nlink, 1);
+  await assert.rejects(access(temporaryPath), { code: "ENOENT" });
+  const unsafeLink = join(created.directoryPath, "unexpected-lease-link");
+  await link(leasePath, unsafeLink);
+  await assert.rejects(store.runIsLeased(created.state.runId), {
+    code: "ERR_UNSAFE_STATE_FILE",
+  });
+  await rm(unsafeLink);
+});
+
 test("serializes ownership by canonical worktree without locking status", async (t) => {
   const { created, projectPath, stateRoot, store, workspace } =
     await createFixture(t);
@@ -857,6 +896,7 @@ test("grants one owner during concurrent stale recovery", async (t) => {
   for (const { reason } of rejected) {
     assert.ok(
       reason instanceof RunStoreError && reason.code === "ERR_RUN_LEASED",
+      reason,
     );
   }
   await acquired[0].value.release();
