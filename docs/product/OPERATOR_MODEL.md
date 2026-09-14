@@ -26,9 +26,10 @@ default mode; choosing `lazy` is always an explicit operator decision.
 
 ## CLI and MCP control
 
-The CLI provides run, resume, status, pipeline discovery, and MCP server
-commands. MCP exposes the same static pipeline registry through STDIO and keeps
-standard output exclusively for protocol traffic. It never launches an editor;
+The CLI provides run, resume, pause, cancel, status, pipeline discovery, and
+MCP server commands. MCP exposes matching `run_pause` and `run_cancel` actions
+alongside the same static pipeline registry through STDIO and keeps standard
+output exclusively for protocol traffic. It never launches an editor;
 pending clarification and product-decision input is represented as a structured
 request with a revision and stable request ID.
 
@@ -61,13 +62,19 @@ retains the frozen run and its reconciled checkpoint; its null resume action
 restores any existing blocker before ordinary work can continue. Cancellation
 produces inspectable terminal `CANCELED` state and cannot be resumed. Safe
 partial workspace changes and task artifacts remain available in either case.
-These service operations do not themselves register CLI or MCP commands.
+CLI shorthand captures one status revision and key, while explicit CLI and MCP
+requests require both values for repeatable automation. Exact retries replay
+their durable receipt; stale requests are never refreshed implicitly.
 
 Stop requests are durable before owned execution is interrupted. Activity
 reports stopping, repository reconciliation, and the resulting state, while
 leases remain held until accounting completes. If a commit or handoff already
 began, verification records the observed effect without undoing or replaying it.
 Retained safety blockers remain visible through the bounded pause projection.
+An ownerless accepted request starts detached same-run reconciliation, and a
+client disconnect cancels only its wait. Public status and waits expose the
+pending kind and accepted revision without the request identity or checkpoint;
+cancellation is a terminal wait result and older intents cannot revive it.
 
 Legacy opaque plan-execution failures during terminal confirmation can expose
 an action-free retry in either mode when durable history proves acceptance and

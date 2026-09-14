@@ -33,6 +33,7 @@ function commandResult({ pipelineId = "plan-execution", state = "DONE" } = {}) {
     directoryPath: `/state/runs/${RUN_ID}`,
     run: {
       runId: RUN_ID,
+      revision: 7,
       pipelineId,
       taskPath: "/task",
       pause:
@@ -73,6 +74,15 @@ function fakeRunner(overrides = {}) {
     },
     async status() {
       return commandResult();
+    },
+    async requestOperatorStop(input) {
+      return {
+        runId: input.runId,
+        requestId: "a".repeat(64),
+        kind: input.kind,
+        expectedRevision: input.expectedRevision,
+        revision: input.expectedRevision + 1,
+      };
     },
     ...overrides,
   };
@@ -189,6 +199,8 @@ test("help describes the required commands", async () => {
   assert.equal(exitCode, 0);
   assert.match(stdout.read(), /agent-run run <pipeline> --project/);
   assert.match(stdout.read(), /agent-run resume --run/);
+  assert.match(stdout.read(), /agent-run pause --run/);
+  assert.match(stdout.read(), /agent-run cancel --run/);
   assert.match(stdout.read(), /agent-run status --run/);
   assert.match(stdout.read(), /agent-run mcp/);
   assert.match(stdout.read(), /agent-run guidance --project/);
@@ -209,6 +221,121 @@ test("help describes the required commands", async () => {
   assert.match(stdout.read(), /lazy forks once into the primary role/u);
   assert.doesNotMatch(stdout.read(), /unexpected_issue_report|issue report/iu);
   assert.equal(stderr.read(), "");
+});
+
+test("pause and cancel capture one revision and idempotency key for CLI shorthand", async () => {
+  for (const command of ["pause", "cancel"]) {
+    const stdout = createSink();
+    const stderr = createSink();
+    const calls = [];
+    let statusCalls = 0;
+    let keyCalls = 0;
+    const exitCode = await main([command, "--run", RUN_ID], {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      idempotencyKeyFactory() {
+        keyCalls += 1;
+        return `${command}-key`;
+      },
+      runner: fakeRunner({
+        async status() {
+          statusCalls += 1;
+          return commandResult();
+        },
+        async requestOperatorStop(input) {
+          calls.push(input);
+          return {
+            runId: RUN_ID,
+            requestId: "a".repeat(64),
+            kind: input.kind,
+            expectedRevision: input.expectedRevision,
+            revision: 8,
+          };
+        },
+      }),
+    });
+    assert.equal(exitCode, 0);
+    assert.equal(statusCalls, 1);
+    assert.equal(keyCalls, 1);
+    assert.deepEqual(calls, [
+      {
+        runId: RUN_ID,
+        kind: command === "pause" ? "pause_requested" : "cancel_requested",
+        expectedRevision: 7,
+        idempotencyKey: `${command}-key`,
+      },
+    ]);
+    assert.match(stdout.read(), /requested.*revision 8/iu);
+    assert.equal(stderr.read(), "");
+  }
+});
+
+test("pause and cancel preserve explicit automation identities without refreshing stale requests", async () => {
+  let statusCalls = 0;
+  let request;
+  const stderr = createSink();
+  const runner = fakeRunner({
+    async status() {
+      statusCalls += 1;
+      return commandResult();
+    },
+    async requestOperatorStop(input) {
+      request = input;
+      throw new Error("Operator stop revision is stale.");
+    },
+  });
+  assert.equal(
+    await main(
+      [
+        "cancel",
+        "--run",
+        RUN_ID,
+        "--expected-revision",
+        "4",
+        "--idempotency-key",
+        "repeatable-cancel",
+      ],
+      { stdout: createSink().stream, stderr: stderr.stream, runner },
+    ),
+    1,
+  );
+  assert.equal(statusCalls, 0);
+  assert.deepEqual(request, {
+    runId: RUN_ID,
+    kind: "cancel_requested",
+    expectedRevision: 4,
+    idempotencyKey: "repeatable-cancel",
+  });
+  assert.match(stderr.read(), /stale/u);
+});
+
+test("pause and cancel require a complete valid explicit identity", async () => {
+  for (const args of [
+    ["pause", "--run", RUN_ID, "--expected-revision", "4"],
+    ["pause", "--run", RUN_ID, "--idempotency-key", "key"],
+    [
+      "cancel",
+      "--run",
+      RUN_ID,
+      "--expected-revision",
+      "0",
+      "--idempotency-key",
+      "key",
+    ],
+  ]) {
+    const stderr = createSink();
+    assert.equal(
+      await main(args, {
+        stdout: createSink().stream,
+        stderr: stderr.stream,
+        runner: fakeRunner({
+          requestOperatorStop: () => assert.fail("must not dispatch"),
+        }),
+      }),
+      1,
+    );
+    assert.notEqual(stderr.read(), "");
+  }
 });
 
 test("mcp dispatches the STDIO server without constructing a runner", async () => {
@@ -367,7 +494,12 @@ test("status dispatches and renders concise persisted state", async () => {
     runner: fakeRunner({
       async status(runId) {
         requestedRunId = runId;
-        return commandResult({ state: "WAITING_FOR_USER" });
+        const result = commandResult({ state: "WAITING_FOR_USER" });
+        result.run.stopRequest = {
+          kind: "pause_requested",
+          reconciledRevision: null,
+        };
+        return result;
       },
     }),
   });
@@ -377,6 +509,7 @@ test("status dispatches and renders concise persisted state", async () => {
   assert.match(stdout.read(), new RegExp(`Run: ${RUN_ID}`, "u"));
   assert.match(stdout.read(), /Mode: independent/u);
   assert.match(stdout.read(), /State: WAITING_FOR_USER/u);
+  assert.match(stdout.read(), /Stop pending: pause/u);
   assert.match(stdout.read(), /Pause: fix_limit_reached/u);
   assert.match(stdout.read(), /Explanation: The current step reached/u);
   assert.match(stdout.read(), /--extra-fix-rounds 1/u);

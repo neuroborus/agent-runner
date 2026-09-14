@@ -123,6 +123,93 @@ test("legacy recovery shares CLI and MCP actions and survives a disconnected wai
     1,
   );
 });
+
+test("MCP pause and cancellation reconcile through the shared active runner", async (t) => {
+  for (const action of ["pause", "cancel"]) {
+    const paths = await fixture(t);
+    const implementationGate = {
+      entered: deferred(),
+      release: deferred(),
+    };
+    const codex = createBackend("codex", { implementationGate });
+    const { runner, runStore } = runtime(
+      paths,
+      { codex },
+      { schemaVersion: 1, defaultBackend: "codex" },
+    );
+    const activeRun = runner.run({
+      pipelineId: "plan-execution",
+      projectPath: paths.projectPath,
+      taskPath: paths.taskPath,
+      roleOverrides: {},
+      sourceSession: null,
+    });
+    await within(
+      implementationGate.entered.promise,
+      30_000,
+      "Execution did not reach implementation.",
+    );
+
+    const control = createMcpControlPlane({ runner, runStore });
+    const running = await onlyRun(runStore);
+    const input = {
+      runId: running.runId,
+      expectedRevision: running.revision,
+      idempotencyKey: `integration-${action}`,
+    };
+    const requestStop =
+      action === "pause" ? control.runPause : control.runCancel;
+    const receipt = await requestStop(input);
+    assert.equal(receipt.kind, `${action}_requested`);
+    assert.deepEqual(
+      (await control.runStatus({ runId: running.runId })).pendingStop,
+      { kind: `${action}_requested`, revision: receipt.revision },
+    );
+    assert.ok(
+      (
+        await control.runActivity({
+          runId: running.runId,
+          cursor: running.revision,
+          limit: 10,
+        })
+      ).activities.some(({ kind }) => kind === `${action}-requested`),
+    );
+
+    implementationGate.release.resolve();
+    const stopped = await within(
+      activeRun,
+      30_000,
+      `Execution did not reconcile the ${action}.`,
+    );
+    assert.deepEqual(await requestStop(input), receipt);
+    const projected = await control.runWait({
+      runId: running.runId,
+      cursor: 0,
+      timeoutMs: 0,
+      progress: false,
+    });
+    assert.equal(projected.pendingStop, null);
+    if (action === "pause") {
+      assert.equal(stopped.run.pipelineState.workflowState, "WAITING_FOR_USER");
+      assert.equal(stopped.run.pause.reason, "operator_paused");
+      assert.equal(projected.pause.reason, "operator_paused");
+      assert.deepEqual(projected.pause.nextActions, [
+        { type: "resume", action: null },
+      ]);
+    } else {
+      assert.equal(stopped.run.pipelineState.workflowState, "CANCELED");
+      assert.equal(projected.status, "CANCELED");
+      await assert.rejects(
+        control.runResume({
+          runId: running.runId,
+          expectedRevision: projected.revision,
+          action: null,
+          idempotencyKey: "revive-canceled",
+        }),
+      );
+    }
+  }
+});
 const TWO_STEP_PLAN = `## Commit 1: feat(feature): add value
 
 Add the requested value.

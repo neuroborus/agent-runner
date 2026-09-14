@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
 
 import packageMetadata from "../package.json" with { type: "json" };
@@ -9,6 +10,8 @@ import { RUNTIME_VERSION_SKEW_EXIT_CODE } from "./state/index.js";
 
 const COMMAND_OPTIONS = Object.freeze({
   guidance: Object.freeze(["project", "project-config"]),
+  pause: Object.freeze(["run", "expected-revision", "idempotency-key"]),
+  cancel: Object.freeze(["run", "expected-revision", "idempotency-key"]),
   resume: Object.freeze(["run", "extra-fix-rounds", "override-finding"]),
   status: Object.freeze(["run"]),
   pipelines: Object.freeze([]),
@@ -25,6 +28,8 @@ const COMMON_RUN_OPTIONS = Object.freeze([
 ]);
 const REQUIRED_COMMAND_OPTIONS = Object.freeze({
   guidance: Object.freeze(["project"]),
+  pause: Object.freeze(["run"]),
+  cancel: Object.freeze(["run"]),
   resume: Object.freeze(["run"]),
   status: Object.freeze(["run"]),
   pipelines: Object.freeze([]),
@@ -47,6 +52,8 @@ const OPTIONS = Object.freeze({
   help: { type: "boolean", short: "h" },
   version: { type: "boolean", short: "v" },
   run: { type: "string" },
+  "expected-revision": { type: "string" },
+  "idempotency-key": { type: "string" },
   "extra-fix-rounds": { type: "string" },
   "override-finding": { type: "string" },
   "fork-from": { type: "string" },
@@ -70,6 +77,8 @@ const USAGE = `Agent Runner
 Usage:
   agent-run run <pipeline> --project <repo> --task <task-dir> [--mode <independent|lazy>] [--clarify] [--profile <alias>] [--fork-from <backend>:<session-id>]
   agent-run resume --run <run-id> [--extra-fix-rounds <count> | --override-finding <finding-id>]
+  agent-run pause --run <run-id> [--expected-revision <revision> --idempotency-key <key>]
+  agent-run cancel --run <run-id> [--expected-revision <revision> --idempotency-key <key>]
   agent-run status --run <run-id>
   agent-run guidance --project <repo> [--project-config <path>]
   agent-run guidance edit --project <repo> [--project-config <path>]
@@ -99,6 +108,8 @@ Options:
       --<role>-context-size Override a role decimal token context size
       --extra-fix-rounds   Grant a positive additional fix budget on resume
       --override-finding   Override one applicable open finding on resume
+      --expected-revision  Bind an explicit pause or cancel request revision
+      --idempotency-key    Bind an explicit pause or cancel retry identity
   -h, --help               Show this help
   -v, --version            Show version
 `;
@@ -155,6 +166,11 @@ function runSummary({ directoryPath, run }) {
   ];
   if (status.currentStep !== null) {
     lines.push(`Step: ${status.currentStep}`);
+  }
+  if (run.stopRequest?.reconciledRevision === null) {
+    lines.push(
+      `Stop pending: ${run.stopRequest.kind === "cancel_requested" ? "cancel" : "pause"}`,
+    );
   }
   if (pause !== null) {
     lines.push(`Pause: ${pause.reason}`);
@@ -215,6 +231,25 @@ function workflowExitCode(run) {
     return 2;
   }
   return run.pipelineState.workflowState === "FAILED" ? 1 : 0;
+}
+
+function explicitStopIdentity(values) {
+  const revision = values["expected-revision"];
+  const key = values["idempotency-key"];
+  if ((revision === undefined) !== (key === undefined)) {
+    throw new Error(
+      "Use --expected-revision and --idempotency-key together, or omit both.",
+    );
+  }
+  if (revision === undefined) return null;
+  if (!/^[1-9][0-9]*$/u.test(revision)) {
+    throw new Error("--expected-revision must be a positive integer.");
+  }
+  const expectedRevision = Number(revision);
+  if (!Number.isSafeInteger(expectedRevision)) {
+    throw new Error("--expected-revision is too large.");
+  }
+  return { expectedRevision, idempotencyKey: key };
 }
 
 function roleOverrides(pipeline, values) {
@@ -307,6 +342,7 @@ export async function main(
     createCommandGuidance = createGuidanceService,
     startMcp = serveMcp,
     environment = process.env,
+    idempotencyKeyFactory = randomUUID,
   } = {},
 ) {
   let parsed;
@@ -525,6 +561,22 @@ export async function main(
       });
       stdout.write(runSummary(result));
       return workflowExitCode(result.run);
+    }
+    if (["pause", "cancel"].includes(command)) {
+      const explicit = explicitStopIdentity(values);
+      const identity = explicit ?? {
+        expectedRevision: (await commandRunner.status(values.run)).run.revision,
+        idempotencyKey: idempotencyKeyFactory(),
+      };
+      const receipt = await commandRunner.requestOperatorStop({
+        runId: values.run,
+        kind: command === "pause" ? "pause_requested" : "cancel_requested",
+        ...identity,
+      });
+      stdout.write(
+        `${command === "pause" ? "Pause" : "Cancellation"} requested for run ${receipt.runId} at revision ${receipt.revision}.\n`,
+      );
+      return 0;
     }
     const result = await commandRunner.status(values.run);
     stdout.write(runSummary(result));
