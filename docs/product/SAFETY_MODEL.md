@@ -45,6 +45,16 @@ recovery. Clarification writes occur only through a persisted one-shot editor
 or MCP authorization. Repository-local artifacts must be confined, ignored,
 and non-overlapping with protected inputs.
 
+An optional project configuration is protected input for the lifetime of its
+run. Its parsed values and versioned protection evidence come from the same
+confined read and pin content, file identity, and real ancestor directories.
+The runner checks that evidence around provider turns and before recovery,
+trusted validation, commit, handoff, and stop reconciliation. Removal,
+replacement even with identical bytes, content drift, links, or ancestor
+redirection fails closed as one bounded provider-neutral safety pause. The
+runner never restores the file or derives missing evidence for a legacy run,
+and begun irreversible effects remain verification-only.
+
 Authoritative run state is external to both repository and task. These trees
 must be disjoint: neither the project nor task may contain or be contained by
 the state root. Atomic files,

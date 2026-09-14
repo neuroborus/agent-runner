@@ -108,10 +108,18 @@ test("clarifies and bootstraps through independent source-session forks", async 
     fixture.calls.worker[1].prompt,
     /\.agents.*current plan step explicitly require them.*not a user question/u,
   );
+  assert.match(
+    fixture.calls.worker[1].prompt,
+    /Do not modify the resolved project configuration during a run/u,
+  );
   assert.doesNotMatch(fixture.calls.worker[2].prompt, /\.agents/u);
   assert.match(
     fixture.calls.worker[2].recoveryPrompt,
     /\.agents.*current plan step explicitly require them.*not a user question/u,
+  );
+  assert.match(
+    fixture.calls.worker[2].recoveryPrompt,
+    /Do not modify the resolved project configuration during a run/u,
   );
   assert.deepEqual(fixture.calls.reviewer[0].session, {
     mode: "fork",

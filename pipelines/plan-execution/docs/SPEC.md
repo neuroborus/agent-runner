@@ -309,6 +309,13 @@ resolved, probed, persisted, source-session checked, or invoked. Inactive
 configured values remain in the configuration source for a later independent
 run and are not exposed through lazy state. Resolved roles, settings, and
 `artifactRoot` are persisted and never reloaded on resume.
+When a project configuration supplied those values, the root runner persists
+its protection record and checks it before recovery, around every provider
+turn, and before trusted execution, commit, or stop reconciliation. Drift
+produces the non-resumable `project_configuration_changed` safety pause;
+already begun commit effects remain verification-only. Complete and recovery
+role envelopes explicitly prohibit modifying the resolved project
+configuration.
 
 The descriptor also owns `trustedChecks`, an ordered list of unique lowercase
 aliases that defaults to `[]`. Only runner-root `trustedCommands`

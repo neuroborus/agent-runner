@@ -6,6 +6,7 @@ import { isDeepStrictEqual } from "node:util";
 import { PROVIDER_REGISTRY, terminateOwnedProcess } from "../agents/index.js";
 import { createClarificationService } from "../clarifications/index.js";
 import {
+  assertProjectConfigurationProtected,
   loadProjectConfiguration,
   loadRunnerConfiguration,
   resolvePipelineConfiguration,
@@ -177,7 +178,57 @@ export function createRunner(options = {}) {
     );
   }
 
-  function runtimeFor(pipeline, lease, run, selectedAdapters, monitor) {
+  async function guardProjectConfiguration(run) {
+    await assertProjectConfigurationProtected({
+      inspectPath: (input) => git.inspectPath(input),
+      projectPath: run.projectPath,
+      protection: run.projectConfigurationProtection,
+    });
+  }
+
+  async function pauseForProjectConfiguration(run, lease) {
+    if (run.pause?.reason === "project_configuration_changed") return run;
+    const activity = {
+      actor: "runner",
+      phase: "configuration",
+      kind: "changed",
+      message: "Resolved project configuration changed; execution stopped.",
+    };
+    const next = await runStore.transitionRun(
+      lease,
+      {
+        pipelineState: {
+          ...run.pipelineState,
+          workflowState: "WAITING_FOR_USER",
+        },
+        pause: {
+          reason: "project_configuration_changed",
+          code: "ERR_PROJECT_CONFIGURATION_CHANGED",
+        },
+        activeTurn: null,
+      },
+      { activity },
+    );
+    await publish(activity, next);
+    return next;
+  }
+
+  function runtimeFor(
+    pipeline,
+    lease,
+    run,
+    selectedAdapters,
+    monitor,
+    onConfigurationFailure = () => {},
+  ) {
+    async function checkConfiguration() {
+      try {
+        await guardProjectConfiguration(run);
+      } catch (cause) {
+        onConfigurationFailure(cause);
+        throw cause;
+      }
+    }
     return Object.freeze({
       adapters:
         monitor === undefined
@@ -190,8 +241,17 @@ export function createRunner(options = {}) {
                     await monitor.check();
                     return adapter.probe();
                   },
-                  run: (request) =>
-                    monitor.invoke((value) => adapter.run(value), request),
+                  async run(request) {
+                    await checkConfiguration();
+                    try {
+                      return await monitor.invoke(
+                        (value) => adapter.run(value),
+                        request,
+                      );
+                    } finally {
+                      await checkConfiguration();
+                    }
+                  },
                 },
               ]),
             ),
@@ -203,15 +263,18 @@ export function createRunner(options = {}) {
               ...git,
               stagePolishingHandoff: async (value) => {
                 await monitor.check();
+                await checkConfiguration();
                 return git.stagePolishingHandoff(value);
               },
               prepareCommit: async (value) => {
                 await monitor.check();
+                await checkConfiguration();
                 return git.prepareCommit(value);
               },
               consumeCommit: async (...args) => {
                 try {
                   await monitor.check();
+                  await checkConfiguration();
                   return await git.consumeCommit(...args);
                 } catch (cause) {
                   monitor.rejectBeforeCommit(cause);
@@ -223,12 +286,17 @@ export function createRunner(options = {}) {
         monitor === undefined
           ? trustedValidation
           : {
-              preflight: (value) => trustedValidation.preflight(value),
-              execute: (request) =>
-                monitor.invoke(
+              preflight: async (value) => {
+                await checkConfiguration();
+                return trustedValidation.preflight(value);
+              },
+              execute: async (request) => {
+                await checkConfiguration();
+                return monitor.invoke(
                   (value) => trustedValidation.execute(value),
                   request,
-                ),
+                );
+              },
             },
       readInputs: ({ taskPath }) => readInputs(pipeline, taskPath),
       async startAgentTurn(activeTurn, { pipelineState } = {}) {
@@ -302,6 +370,21 @@ export function createRunner(options = {}) {
       );
     }
     pipelineForRun(run, pipeline);
+    let configurationFailure = null;
+    try {
+      await guardProjectConfiguration(run);
+    } catch (cause) {
+      if (cause?.code !== "ERR_PROJECT_CONFIGURATION_CHANGED") throw cause;
+      configurationFailure = cause;
+    }
+    if (
+      configurationFailure !== null &&
+      !stopPending(run) &&
+      run.activeTurn === null &&
+      run.executionProcess === null
+    ) {
+      return pauseForProjectConfiguration(run, lease);
+    }
     if (pipeline.prepareRecovery !== undefined && runStore.loadRunHistory) {
       const history = await runStore.loadRunHistory(run.runId);
       if (!isDeepStrictEqual(history.run, run)) {
@@ -327,6 +410,7 @@ export function createRunner(options = {}) {
         runStore,
         runtime: baseRuntime,
         publish,
+        configurationFailure,
       });
     // Recover an orphaned supervised process before examining or replaying work.
     if (run.executionProcess !== null) {
@@ -335,6 +419,19 @@ export function createRunner(options = {}) {
         runStore.inspectExecutionProcess(run.runId),
       );
       run = await runStore.recordExecutionProcess(lease, null);
+      try {
+        await guardProjectConfiguration(run);
+      } catch (cause) {
+        if (cause?.code !== "ERR_PROJECT_CONFIGURATION_CHANGED") throw cause;
+        configurationFailure = cause;
+      }
+      if (
+        configurationFailure !== null &&
+        !stopPending(run) &&
+        run.activeTurn === null
+      ) {
+        return pauseForProjectConfiguration(run, lease);
+      }
     }
     const monitor = createStopMonitor({
       runId: run.runId,
@@ -349,30 +446,60 @@ export function createRunner(options = {}) {
         action,
         run,
         settings,
-        runtime: runtimeFor(pipeline, lease, run, selected, monitor),
+        runtime: runtimeFor(
+          pipeline,
+          lease,
+          run,
+          selected,
+          monitor,
+          (cause) => {
+            if (cause?.code === "ERR_PROJECT_CONFIGURATION_CHANGED") {
+              configurationFailure = cause;
+            }
+          },
+        ),
       });
     } catch (cause) {
-      if (!stopPending(await runStore.loadRun(run.runId))) throw cause;
+      if (cause?.code === "ERR_PROJECT_CONFIGURATION_CHANGED") {
+        configurationFailure = cause;
+      } else if (!stopPending(await runStore.loadRun(run.runId))) {
+        throw cause;
+      }
     } finally {
       await monitor.close();
     }
     const latest = await runStore.loadRun(run.runId);
-    return stopPending(latest)
-      ? reconcileOperatorStop({
-          run: latest,
-          pipeline,
-          lease,
-          runStore,
-          runtime: baseRuntime,
-          publish,
-          preEffectRejection: monitor.preEffectRejection,
-        })
-      : completed;
+    if (stopPending(latest)) {
+      return reconcileOperatorStop({
+        run: latest,
+        pipeline,
+        lease,
+        runStore,
+        runtime: baseRuntime,
+        publish,
+        preEffectRejection: monitor.preEffectRejection,
+        configurationFailure,
+      });
+    }
+    if (
+      configurationFailure !== null &&
+      latest.pipelineState.workflowState !== "CANCELED"
+    ) {
+      return pauseForProjectConfiguration(latest, lease);
+    }
+    return completed;
   }
 
   async function reconcilePendingStop(lease, runId) {
     const current = await runStore.loadRun(runId);
     const { pipeline } = pipelineForRun(current);
+    let configurationFailure = null;
+    try {
+      await guardProjectConfiguration(current);
+    } catch (cause) {
+      if (cause?.code !== "ERR_PROJECT_CONFIGURATION_CHANGED") throw cause;
+      configurationFailure = cause;
+    }
     return reconcileOperatorStop({
       run: current,
       pipeline,
@@ -385,6 +512,7 @@ export function createRunner(options = {}) {
         current,
         roleAdapters(current, adapters, providers),
       ),
+      configurationFailure,
     });
   }
 
@@ -490,6 +618,34 @@ export function createRunner(options = {}) {
     { validatePreparedRun } = {},
   ) {
     const storedRun = await runStore.loadRun(runId);
+    let configurationChanged = false;
+    if (storedRun.pipelineState.workflowState !== "CANCELED") {
+      try {
+        await guardProjectConfiguration(storedRun);
+      } catch (cause) {
+        if (cause?.code !== "ERR_PROJECT_CONFIGURATION_CHANGED") throw cause;
+        configurationChanged = true;
+      }
+      if (
+        configurationChanged &&
+        !stopPending(storedRun) &&
+        storedRun.activeTurn === null &&
+        storedRun.executionProcess === null
+      ) {
+        const pipeline = getPipeline(storedRun.pipelineId);
+        if (pipeline === undefined) {
+          throw new RunnerError(`Unknown pipeline: ${storedRun.pipelineId}.`, {
+            code: "ERR_UNKNOWN_PIPELINE",
+          });
+        }
+        return Object.freeze({
+          pipeline,
+          run: await pauseForProjectConfiguration(storedRun, lease),
+          configurationBlocked: true,
+          configurationChanged: true,
+        });
+      }
+    }
     const prepared = pipelineForRun(storedRun, undefined, {
       allowMigration: true,
     });
@@ -527,7 +683,12 @@ export function createRunner(options = {}) {
       run = await runStore.recoverRun(lease);
     }
     pipelineForRun(run, prepared.pipeline);
-    return Object.freeze({ pipeline: prepared.pipeline, run });
+    return Object.freeze({
+      pipeline: prepared.pipeline,
+      run,
+      configurationBlocked: false,
+      configurationChanged,
+    });
   }
 
   async function prepare(input, options = {}) {
@@ -621,6 +782,7 @@ export function createRunner(options = {}) {
       pipelineStateVersion: pipeline.stateVersion,
       projectPath,
       taskPath,
+      projectConfigurationProtection: projectConfiguration?.protection ?? null,
       roles: resolved.roles,
       sourceSession: normalized.sourceSession?.id ?? null,
       sourceProfile: resolved.sourceProfile,
@@ -670,17 +832,30 @@ export function createRunner(options = {}) {
   }
 
   async function resumeLeased(normalized, lease) {
-    const { pipeline, run: loaded } = await recoverCompatibleRun(
-      lease,
-      normalized.runId,
-    );
+    const {
+      pipeline,
+      run: loaded,
+      configurationBlocked,
+      configurationChanged,
+    } = await recoverCompatibleRun(lease, normalized.runId);
+    if (configurationBlocked) return loaded;
     let recovered = loaded;
+    if (recovered.pause?.reason === "project_configuration_changed") {
+      return recovered;
+    }
     if (recovered.pipelineState.workflowState === "CANCELED") {
       throw new RunnerError("Canceled runs cannot resume.", {
         code: "ERR_RUN_CANCELED",
       });
     }
     if (stopPending(recovered)) {
+      return withWorktreeLease(
+        recovered,
+        () => execute(pipeline, recovered, lease),
+        lease,
+      );
+    }
+    if (configurationChanged) {
       return withWorktreeLease(
         recovered,
         () => execute(pipeline, recovered, lease),
@@ -750,6 +925,7 @@ export function createRunner(options = {}) {
         if (
           (recovered.pipelineState.trustedValidation?.commands.length ?? 0) > 0
         ) {
+          await guardProjectConfiguration(recovered);
           await trustedValidation.preflight({
             projectPath: recovered.projectPath,
           });
@@ -807,11 +983,18 @@ export function createRunner(options = {}) {
     const lease = await runStore.acquireRunLease(normalized.runId);
     try {
       let answers;
-      const { run } = await recoverCompatibleRun(lease, normalized.runId, {
-        validatePreparedRun(preparedRun) {
-          answers = orderedInputAnswers(preparedRun, normalized);
-        },
-      });
+      const { run, configurationBlocked, configurationChanged } =
+        await recoverCompatibleRun(lease, normalized.runId, {
+          validatePreparedRun(preparedRun) {
+            answers = orderedInputAnswers(preparedRun, normalized);
+          },
+        });
+      if (configurationBlocked || configurationChanged) {
+        throw new RunnerError(
+          "The resolved project configuration changed during the run.",
+          { code: "ERR_PROJECT_CONFIGURATION_CHANGED" },
+        );
+      }
       if (stopPending(run) || run.pipelineState.workflowState === "CANCELED") {
         throw new RunnerError("Stopped runs cannot accept input mutations.", {
           code: "ERR_STOP_RECONCILIATION_REQUIRED",

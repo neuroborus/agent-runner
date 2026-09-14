@@ -118,6 +118,15 @@ Its accepted fields select runner-trusted aliases, execution preferences,
 pipeline settings, and the artifact root. Agent Runner expects an existing
 ignored, untracked, confined regular file.
 
+For a run that uses this file, Agent Runner persists its canonical path,
+content hash, file identity, and real-directory ancestry before agent work.
+The runner checks that record around provider turns and before recovery,
+trusted validation, commit, handoff, and stop reconciliation. Removal, content
+drift, replacement, hard links, symbolic links, or redirected ancestors pause
+the run as `project_configuration_changed`; restoring similar content does not
+authorize that run to continue. Legacy runs with no protection record remain
+compatible and do not infer one from current files.
+
 For execution preferences, CLI/MCP role values win over CLI/MCP run-wide
 values, then project-role and project-wide values, runner-role and runner-wide
 values, and finally built-in `current`. Explicit CLI/MCP pipeline-setting

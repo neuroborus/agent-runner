@@ -106,6 +106,7 @@ test("resolves the external state root and creates a complete run", async (t) =>
   assert.equal(created.state.revision, 1);
   assert.equal(created.state.projectPath, projectPath);
   assert.equal(created.state.taskPath, taskPath);
+  assert.equal(created.state.projectConfigurationProtection, null);
   assert.deepEqual(created.state.sessionLineage, {
     source: "codex:source-session",
     sourceProfile: null,
@@ -312,6 +313,7 @@ test("migrates a legacy run envelope as one leased journal transition", async (t
   legacyState.schemaVersion = 1;
   delete legacyState.runtimeCompatibility;
   delete legacyState.activeTurn;
+  delete legacyState.projectConfigurationProtection;
   const legacyEvent = JSON.parse((await readFile(eventsPath, "utf8")).trim());
   legacyEvent.schemaVersion = 1;
   legacyEvent.state = legacyState;
@@ -325,6 +327,7 @@ test("migrates a legacy run envelope as one leased journal transition", async (t
   const legacyRun = await store.loadRun(created.state.runId);
   assert.equal(legacyRun.schemaVersion, 1);
   assert.equal(legacyRun.runtimeCompatibility, null);
+  assert.equal(legacyRun.projectConfigurationProtection, null);
   assert.equal(await readFile(statePath, "utf8"), legacyStateSource);
   assert.equal(await readFile(eventsPath, "utf8"), legacyEventSource);
 
@@ -350,6 +353,7 @@ test("migrates a legacy run envelope as one leased journal transition", async (t
   assert.equal(migrated.schemaVersion, RUN_STATE_SCHEMA_VERSION);
   assert.equal(migrated.revision, 2);
   assert.deepEqual(migrated.runtimeCompatibility, RUNTIME_COMPATIBILITY);
+  assert.equal(migrated.projectConfigurationProtection, null);
   assert.deepEqual(await resumedStore.loadRun(created.state.runId), migrated);
   const events = (await readFile(eventsPath, "utf8"))
     .trimEnd()

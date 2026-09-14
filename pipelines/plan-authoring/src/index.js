@@ -85,6 +85,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   plan_revision_not_converging:
     "Plan revision did not converge within the bounded correction window.",
   proactive_clarification: "Optional proactive clarification input is pending.",
+  project_configuration_changed:
+    "The resolved project configuration changed; this run cannot continue.",
   product_decision_required:
     "A material product decision is required before planning can continue.",
   read_only_mutation:
@@ -228,6 +230,9 @@ function projectStatus(run) {
 }
 
 function validateResumeAction(run, action) {
+  if (run.pause?.reason === "project_configuration_changed") {
+    throw new Error("A run with changed project configuration cannot resume.");
+  }
   if (
     run.pause?.reason === "operator_paused" &&
     run.pipelineState.workflowState === "WAITING_FOR_USER" &&

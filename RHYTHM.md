@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-09-14
 
+- **Resolved project configuration is protected input.** The same confined
+  read that parses a project file now pins its canonical location, content,
+  file identity, and real ancestor identities in the durable run envelope.
+  Runner-owned checks surround provider turns and guard recovery, trusted
+  validation, commit, handoff, and stop reconciliation. Any drift produces one
+  bounded non-resumable safety pause without restoring the file or fabricating
+  evidence for legacy runs; begun irreversible effects remain
+  verification-only.
+
 - **Pause and cancellation are durable controls across CLI and MCP.** CLI
   shorthand captures one inspected revision and fresh idempotency key, while
   repeatable CLI automation and the `run_pause` and `run_cancel` MCP tools bind

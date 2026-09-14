@@ -6020,6 +6020,8 @@ ${step.subject}`),
     const completedCommits = [...current.completedCommits, verified.head];
     const stepCount = parseCommitPlan(current.canonicalPlan).steps.length;
     const done = current.currentStep === stepCount;
+    const configurationChanged =
+      agentError?.code === "ERR_PROJECT_CONFIGURATION_CHANGED";
     const nextStepState = done
       ? {}
       : {
@@ -6054,7 +6056,11 @@ ${step.subject}`),
       {
         ...state(),
         ...nextStepState,
-        workflowState: done ? "DONE" : "IMPLEMENT",
+        workflowState: configurationChanged
+          ? "WAITING_FOR_USER"
+          : done
+            ? "DONE"
+            : "IMPLEMENT",
         validationMigrationPending: done
           ? false
           : current.validationMigrationPending,
@@ -6073,6 +6079,14 @@ ${step.subject}`),
         completedCommits,
       },
       {
+        ...(configurationChanged
+          ? {
+              pause: {
+                reason: "project_configuration_changed",
+                code: "ERR_PROJECT_CONFIGURATION_CHANGED",
+              },
+            }
+          : {}),
         nextCounters: done
           ? counters()
           : {
@@ -6081,14 +6095,16 @@ ${step.subject}`),
               correctionRounds: 0,
             },
         publicActivity: activity(
-          "worker",
+          configurationChanged ? "runner" : "worker",
           "commit",
-          "created",
-          `Commit ${current.currentStep} created: ${verified.head}.`,
+          configurationChanged ? "configuration-changed" : "created",
+          configurationChanged
+            ? `Commit ${current.currentStep} was verified before project configuration drift stopped the run.`
+            : `Commit ${current.currentStep} created: ${verified.head}.`,
         ),
       },
     );
-    return true;
+    return !configurationChanged;
   }
 
   try {
@@ -6594,6 +6610,9 @@ ${evidence}`,
   } catch (cause) {
     if (legacyRecoveryPersistence || cause?.code === "ERR_RUN_REVISION_CHANGED")
       throw cause;
+    if (cause?.code === "ERR_PROJECT_CONFIGURATION_CHANGED") {
+      throw cause;
+    }
     if (
       canRecoverLegacyConfirmation(currentRun) &&
       (GIT_PREFLIGHT_CODES.has(cause?.code) ||

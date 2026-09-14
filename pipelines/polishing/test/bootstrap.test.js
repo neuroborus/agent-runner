@@ -481,10 +481,18 @@ test("prepares a dirty worktree through independent source-session bootstraps", 
     fixture.calls.worker[1].prompt,
     /\.agents.*unless the user's task explicitly requires them.*not a user question/u,
   );
+  assert.match(
+    fixture.calls.worker[1].prompt,
+    /Do not modify the resolved project configuration during a run/u,
+  );
   assert.doesNotMatch(fixture.calls.worker[2].prompt, /\.agents/u);
   assert.match(
     fixture.calls.worker[2].recoveryPrompt,
     /\.agents.*unless the user's task explicitly requires them.*not a user question/u,
+  );
+  assert.match(
+    fixture.calls.worker[2].recoveryPrompt,
+    /Do not modify the resolved project configuration during a run/u,
   );
   assert.deepEqual(fixture.calls.worker[3].session, {
     mode: "fork",

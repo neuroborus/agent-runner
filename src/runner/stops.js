@@ -203,6 +203,7 @@ export async function reconcileOperatorStop({
   runtime,
   publish,
   preEffectRejection = null,
+  configurationFailure = null,
 }) {
   let current = await runStore.loadRun(run.runId);
   if (!stopPending(current)) return current;
@@ -234,11 +235,21 @@ export async function reconcileOperatorStop({
   reconciled ??= simulated.current();
   current = await runStore.loadRun(run.runId);
   const canceled = current.stopRequest.kind === "cancel_requested";
-  const checkpoint = {
-    workflowState: reconciled.pipelineState.workflowState,
-    pause: reconciled.pause,
-    activeTurn: reconciled.activeTurn,
-  };
+  const checkpoint =
+    configurationFailure === null
+      ? {
+          workflowState: reconciled.pipelineState.workflowState,
+          pause: reconciled.pause,
+          activeTurn: reconciled.activeTurn,
+        }
+      : {
+          workflowState: "WAITING_FOR_USER",
+          pause: {
+            reason: "project_configuration_changed",
+            code: "ERR_PROJECT_CONFIGURATION_CHANGED",
+          },
+          activeTurn: null,
+        };
   const outcomeActivity = {
     actor: "runner",
     phase: "stop",

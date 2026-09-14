@@ -158,6 +158,15 @@ environment values. Tracked, non-ignored, missing explicit, traversing, and
 symbolic-link paths are rejected without creating a file or changing ignore
 rules.
 
+The confined read that supplies parsed project values also produces a
+versioned protection record. It pins the canonical project and file paths,
+repository-relative location, SHA-256 content hash, device/inode and bounded
+file metadata, plus device/inode evidence for every real directory from the
+project root to the file's parent. The initial read and every later inspection
+use a bounded no-follow descriptor and compare path, descriptor, and ancestor
+identity before and after reading. A project configuration must have one hard
+link.
+
 The V1 shape is:
 
 ```json
@@ -288,6 +297,9 @@ project configuration, applies run-wide, role-specific, and accepted
 pipeline-setting overrides, asks the descriptor for the active roles, and
 persists those resolved roles, the resolved settings, artifact root, and
 optional source-session reference and profile before pipeline work begins.
+Common run-envelope version 6 persists the optional project-configuration
+protection record. Older runs normalize the absent field to `null`; migration
+never fabricates evidence by inspecting a current file.
 `run` then holds the new run's per-run lease while invoking its statically
 registered workflow. Plan execution and polishing additionally hold one external lease
 keyed by the canonical Git worktree before any workflow-owned mutation. The
@@ -295,6 +307,17 @@ runner always acquires the per-run lease first and releases the worktree lease
 first. `resume` recovers the durable event history and reconstructs the same
 runtime from persisted state without reloading either configuration source or
 requiring a live native session. `status` remains lock-free.
+
+The root runner, rather than a pipeline or provider, checks a non-null
+protection record before recovery and stop reconciliation, immediately before
+and after every provider turn, and before trusted execution, commit
+authorization/consumption, and handoff. Removal, content drift, same-content
+replacement, hard or symbolic links, changed ignored/tracked status, or
+ancestor substitution produces only `ERR_PROJECT_CONFIGURATION_CHANGED` and
+the bounded non-resumable `project_configuration_changed` pause. It does not
+restore or replace the file. If an irreversible commit or handoff effect has
+already begun, its existing verification-only accounting remains authoritative
+before further execution is blocked.
 
 `artifactRoot` defaults to `LOCAL_ARTIFACTS`. Plan execution and polishing use
 it only for runner-owned repository-local artifacts beneath

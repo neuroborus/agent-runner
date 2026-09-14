@@ -176,6 +176,40 @@ test("accepts a verified commit after an interrupted adapter result", async (t) 
   );
 });
 
+test("accounts for a verified commit before retaining configuration drift", async (t) => {
+  const fixture = await createRealGitFixture(t, {
+    async onCommitRun(request) {
+      await executeFile("git", ["-C", request.cwd, "add", "-A"]);
+      await executeFile("git", [
+        "-C",
+        request.cwd,
+        "commit",
+        "-qm",
+        request.commit.message,
+      ]);
+      const error = new Error("Project configuration changed after commit.");
+      error.code = "ERR_PROJECT_CONFIGURATION_CHANGED";
+      throw error;
+    },
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.deepEqual(result.pause, {
+    reason: "project_configuration_changed",
+    code: "ERR_PROJECT_CONFIGURATION_CHANGED",
+  });
+  assert.equal(result.pipelineState.currentStep, null);
+  assert.equal(result.pipelineState.pendingCommit, null);
+  assert.equal(result.pipelineState.completedCommits.length, 1);
+  assert.equal(
+    fixture.calls.worker.filter(({ access }) => access === "local-commit")
+      .length,
+    1,
+  );
+});
+
 test("renews a policy-rejected commit authorization after Git proves no effect", async (t) => {
   let rejectCommit = true;
   const fixture = await createFixture(t, {
