@@ -814,6 +814,16 @@ namespace neither retries without containment nor widens its policy; its
 namespace init remains responsible for otherwise detached descendants.
 Ordinary processes never receive the initial-host session fallback.
 
+Completion-time descendant inspection retries transiently incomplete evidence
+against one non-resetting descendant-grace deadline. Complete evidence resumes
+the ordinary success or bounded TERM/KILL path; uncertainty at the deadline
+retains the existing fail-closed error and durable ownership exclusion. After
+reporting that persistent containment failure, the parent unreferences the
+already-detached supervisor handle and IPC channel without disconnecting it,
+signalling an unverified process, or clearing registration. Provider protocol
+resources may then close and the run owner may exit while the supervisor keeps
+containment available for deterministic recovery.
+
 The runner service accepts revision-bound `requestOperatorStop` requests and
 monitors durable revisions while executing. An accepted request aborts only
 the owned provider or trusted execution and publishes stopping activity.

@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readlinkSync, realpathSync } from "node:fs";
-import { dirname } from "node:path";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import test from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   assertOwnedProcessLauncherProtected,
@@ -15,6 +19,62 @@ import {
 
 const INITIAL_PID_NAMESPACE = "pid:[4026531836]";
 const BOOT_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+const OWNED_PROCESS_MODULE = fileURLToPath(
+  new URL("../../src/agents/index.js", import.meta.url),
+);
+
+function hostSessionLauncher(cwd, { ownershipMode }) {
+  return resolveOwnedProcessLauncher(cwd, {
+    bubblewrap: process.execPath,
+    cache: new Map(),
+    namespaceId: INITIAL_PID_NAMESPACE,
+    ownershipMode,
+    probe: () => ({ status: 1 }),
+  });
+}
+
+async function inspectionSequenceEnvironment(t, sequence) {
+  const directory = await mkdtemp(join(tmpdir(), "owned-process-inspection-"));
+  t.after(() => rm(directory, { force: true, recursive: true }));
+  const preloadPath = join(directory, "inspection-sequence.cjs");
+  await writeFile(
+    preloadPath,
+    `if (process.argv[1] === "session") {
+  const fs = require("node:fs");
+  const original = fs.readdirSync;
+  const sequence = ${JSON.stringify(sequence)};
+  let index = 0;
+  fs.readdirSync = function readdirSync(path, ...argumentsList) {
+    if (path === "/proc") {
+      const observation = sequence[Math.min(index, sequence.length - 1)];
+      index += 1;
+      if (observation === "incomplete") {
+        throw Object.assign(new Error("transient procfs inspection"), {
+          code: "EACCES",
+        });
+      }
+    }
+    return Reflect.apply(original, this, [path, ...argumentsList]);
+  };
+}
+`,
+  );
+  return {
+    ...process.env,
+    NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${preloadPath}`]
+      .filter(Boolean)
+      .join(" "),
+  };
+}
+
+function detachedDescendantCommand() {
+  return `const { spawn } = require("node:child_process");
+const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+  detached: true,
+  stdio: "ignore",
+});
+child.unref();`;
+}
 
 function processStat(pid, parentPid, sessionId, startTicks = "1234") {
   const fields = Array(20).fill("0");
@@ -342,6 +402,170 @@ test("rejects inaccessible new processes and retains inaccessible owned ones", (
     [101],
   );
 });
+
+test(
+  "recovers from a transient incomplete completion inspection",
+  { timeout: 5_000 },
+  async (t) => {
+    const registrations = [];
+    const child = spawnOwnedProcess(
+      process.execPath,
+      ["-e", detachedDescendantCommand()],
+      {
+        descendantGraceMs: 50,
+        env: await inspectionSequenceEnvironment(t, [
+          "complete",
+          "incomplete",
+          "complete",
+        ]),
+        onProcess: async (pid) => registrations.push(pid),
+        ownershipMode: "native-sandbox-provider",
+        resolveLauncher: hostSessionLauncher,
+      },
+    );
+
+    const result = await child.ownedCompletion;
+    assert.equal(result.descendantsStopped, true);
+    assert.equal(Number.isSafeInteger(registrations[0]), true);
+    assert.equal(registrations.at(-1), null);
+  },
+);
+
+test(
+  "bounds persistent incomplete inspection and retains registration",
+  { timeout: 5_000 },
+  async (t) => {
+    const registrations = [];
+    let registeredIdentity;
+    const child = spawnOwnedProcess(
+      process.execPath,
+      ["-e", "process.exit(0)"],
+      {
+        descendantGraceMs: 50,
+        env: await inspectionSequenceEnvironment(t, ["incomplete"]),
+        onProcess: async (pid, proof) => {
+          registrations.push(pid);
+          if (pid !== null) registeredIdentity = proof.processIdentity;
+        },
+        ownershipMode: "native-sandbox-provider",
+        resolveLauncher: hostSessionLauncher,
+        stdio: "ignore",
+      },
+    );
+    t.after(async () => {
+      const currentIdentity = await readProcessIdentity(child.pid);
+      if (
+        registeredIdentity !== undefined &&
+        currentIdentity?.bootId === registeredIdentity.bootId &&
+        currentIdentity.startTicks === registeredIdentity.startTicks
+      ) {
+        try {
+          process.kill(child.pid, "SIGKILL");
+        } catch {}
+      }
+    });
+    const startedAt = Date.now();
+
+    await assert.rejects(child.ownedCompletion, {
+      code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    });
+    const elapsed = Date.now() - startedAt;
+    assert.ok(elapsed >= 40, `inspection failed after only ${elapsed}ms`);
+    assert.ok(elapsed < 1_000, `inspection remained pending for ${elapsed}ms`);
+    assert.deepEqual(registrations, [child.ownedPid]);
+    assert.equal(child.ownedContainmentRetained, true);
+    assert.doesNotThrow(() => process.kill(child.pid, 0));
+  },
+);
+
+test(
+  "retained containment does not keep the run owner alive",
+  { timeout: 5_000 },
+  async (t) => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "owned-process-owner-exit-"),
+    );
+    t.after(() => rm(directory, { force: true, recursive: true }));
+    const ownerPath = join(directory, "owner.mjs");
+    const registrationPath = join(directory, "registration.txt");
+    const failurePath = join(directory, "failure.txt");
+    const environment = await inspectionSequenceEnvironment(t, ["incomplete"]);
+    await writeFile(
+      ownerPath,
+      `import { writeFile } from "node:fs/promises";
+const { resolveOwnedProcessLauncher, spawnOwnedProcess } = await import(process.argv[2]);
+const child = spawnOwnedProcess(process.execPath, ["-e", "process.exit(0)"], {
+  descendantGraceMs: 50,
+  env: process.env,
+  onProcess: async (pid, proof) => {
+    if (pid !== null) {
+      await writeFile(
+        process.argv[3],
+        JSON.stringify({ pid, processIdentity: proof.processIdentity }),
+      );
+    }
+  },
+  ownershipMode: "native-sandbox-provider",
+  resolveLauncher(cwd, { ownershipMode }) {
+    return resolveOwnedProcessLauncher(cwd, {
+      bubblewrap: process.execPath,
+      cache: new Map(),
+      namespaceId: ${JSON.stringify(INITIAL_PID_NAMESPACE)},
+      ownershipMode,
+      probe: () => ({ status: 1 }),
+    });
+  },
+  stdio: "ignore",
+});
+try {
+  await child.ownedCompletion;
+} catch (cause) {
+  await writeFile(process.argv[4], cause.code);
+}
+`,
+    );
+    const owner = spawn(
+      process.execPath,
+      [
+        ownerPath,
+        pathToFileURL(OWNED_PROCESS_MODULE).href,
+        registrationPath,
+        failurePath,
+      ],
+      { env: environment, stdio: "ignore" },
+    );
+    const exitCode = await new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("run owner did not exit within its bound")),
+        2_000,
+      );
+      owner.once("error", reject);
+      owner.once("exit", (code) => {
+        clearTimeout(timer);
+        resolve(code);
+      });
+    });
+    const registration = JSON.parse(await readFile(registrationPath, "utf8"));
+    t.after(async () => {
+      const currentIdentity = await readProcessIdentity(registration.pid);
+      if (
+        currentIdentity?.bootId === registration.processIdentity.bootId &&
+        currentIdentity.startTicks === registration.processIdentity.startTicks
+      ) {
+        try {
+          process.kill(registration.pid, "SIGKILL");
+        } catch {}
+      }
+    });
+
+    assert.equal(exitCode, 0);
+    assert.equal(
+      await readFile(failurePath, "utf8"),
+      "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    );
+    assert.doesNotThrow(() => process.kill(registration.pid, 0));
+  },
+);
 
 test(
   "cleans detached descendants and supports cancellation",

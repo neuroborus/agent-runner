@@ -1590,7 +1590,9 @@ export function createCodexAdapter(options = {}) {
         throw cause;
       } finally {
         try {
-          await client.close();
+          await client.close({
+            retainProcess: child.ownedContainmentRetained === true,
+          });
         } catch (cause) {
           if (!operationFailed) {
             throw cause;

@@ -100,6 +100,13 @@ recovery verifies parent-death teardown without signalling host PIDs.
 For session ownership, the persisted PID/boot/start proof reconstructs the
 token used to detect survivors after supervisor loss without signalling them.
 Unverifiable ownership or surviving descendants retains exclusion.
+Transiently incomplete completion inspection is retried only within one
+non-resetting descendant-grace deadline. Persistent uncertainty keeps the same
+fail-closed error and durable exclusion, but the parent unreferences the
+detached supervisor and its IPC channel after the failure is reported. It does
+not disconnect containment, signal an unverified process, or clear ownership;
+the run owner can close protocol resources and exit while later recovery keeps
+using the durable proof.
 Codex observes owned-process failure independently of App Server protocol
 completion. A retained containment boundary may keep protocol pipes open, but
 the ownership failure still triggers bounded adapter cleanup and propagates as

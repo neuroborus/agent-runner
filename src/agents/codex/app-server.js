@@ -254,7 +254,7 @@ export function createCodexAppServerClient(child, AdapterError, signal) {
     });
   }
 
-  async function close() {
+  async function close({ retainProcess = false } = {}) {
     if (closing) {
       return closed;
     }
@@ -268,6 +268,13 @@ export function createCodexAppServerClient(child, AdapterError, signal) {
         cause,
         code: "ERR_CODEX_PROCESS_EXITED",
       });
+    }
+    if (retainProcess) {
+      signal?.removeEventListener("abort", abort);
+      child.stdin.destroy();
+      child.stdout.destroy();
+      child.stderr.destroy();
+      return;
     }
     if (streamError === undefined && (await waitForExit(1_000))) {
       return;

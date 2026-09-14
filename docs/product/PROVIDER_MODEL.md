@@ -81,6 +81,11 @@ trusted-validation namespace retains the distinct owned-session path when
 that sandbox denies nested namespace creation; the enclosing namespace still
 contains otherwise detached descendants. Cancellation or runner loss
 retires the owned containment before reconciliation can release ownership.
+Completion retries incomplete descendant evidence only within one fixed
+descendant-grace deadline. Persistent uncertainty retains containment and its
+durable registration, while the parent unreferences the detached supervisor
+and IPC channel so closing provider protocol resources can let the run owner
+exit without signalling unverified work.
 Codex races App Server work against owned-completion rejection so an ownership
 failure cannot remain hidden behind an open protocol request. It preserves the
 original ownership failure through bounded cleanup; successful ownership
