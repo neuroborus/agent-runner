@@ -238,8 +238,14 @@ ${JSON.stringify(
 )}`;
 }
 
-export async function runPlanAuthoring({ run, runtime, settings }) {
+export async function runPlanAuthoring({
+  run,
+  runtime,
+  settings,
+  operatorStop = false,
+}) {
   assertRun(run);
+  if (run.pipelineState.workflowState === "CANCELED") return run;
   assertRuntime(runtime, Object.keys(run.roles));
   if (!run.pipelineState.preflightComplete) {
     assertSettings(settings);
@@ -1112,6 +1118,19 @@ ${JSON.stringify(
   }
 
   try {
+    if (operatorStop) {
+      if (pipelineState().repositoryBaseline !== null) {
+        await runtime.git.reconcileInterrupted(
+          pipelineState().repositoryBaseline,
+          {
+            allowWorkspaceChanges: false,
+            allowIndexChanges: false,
+          },
+        );
+        if (pipelineState().pendingEdit === null) await readCurrentInputs();
+      }
+      return currentRun;
+    }
     if (!(await recoverInterruptedTurn())) {
       return currentRun;
     }

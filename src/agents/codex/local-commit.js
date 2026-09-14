@@ -153,6 +153,7 @@ export async function executeCodexLocalCommit({
   execute,
   expectedHead,
   message,
+  beforeEffect = () => {},
 }) {
   const gitResult = await execute(
     "git",
@@ -181,6 +182,7 @@ export async function executeCodexLocalCommit({
   ) {
     throw new Error("Git returned an invalid directory.");
   }
+  await beforeEffect();
   await execute(
     codexBinary,
     sandboxArguments(cwd, gitDirectories, [

@@ -13,6 +13,8 @@ const REQUEST_FIELDS = Object.freeze([
   "recoveryPrompt",
   "schema",
   "session",
+  "signal",
+  "onProcess",
 ]);
 const EXECUTION_FIELDS = Object.freeze(["contextSize", "model", "profile"]);
 const SESSION_FIELDS = Object.freeze(["id", "mode"]);
@@ -313,6 +315,12 @@ export function createAdapterContract({ AdapterError, backendName }) {
   function normalizeRequest(value) {
     assertFields(value, REQUEST_FIELDS, `${backendName} request`);
     if (
+      (value.signal !== undefined && !(value.signal instanceof AbortSignal)) ||
+      (value.onProcess !== undefined && typeof value.onProcess !== "function")
+    ) {
+      throw optionsError("Execution cancellation boundary is invalid.");
+    }
+    if (
       typeof value.cwd !== "string" ||
       !isAbsolute(value.cwd) ||
       isFilesystemRoot(value.cwd) ||
@@ -341,6 +349,8 @@ export function createAdapterContract({ AdapterError, backendName }) {
             ),
       schema: normalizeSchema(value.schema),
       session: normalizeSession(value.session),
+      ...(value.signal === undefined ? {} : { signal: value.signal }),
+      ...(value.onProcess === undefined ? {} : { onProcess: value.onProcess }),
     };
     if (value.access === "local-commit") {
       if (normalized.schema !== undefined) {

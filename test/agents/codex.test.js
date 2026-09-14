@@ -2190,6 +2190,39 @@ test("does not invoke the commit executor when Codex is not ready", async () => 
   );
 });
 
+test("preserves immutable and primitive abort reasons before local commit execution", async () => {
+  for (const reason of [
+    Object.freeze(new Error("Operator pause")),
+    "Operator cancel",
+  ]) {
+    const fixture = createFixture();
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          access: "local-commit",
+          authorizationId: "authorization-1",
+          commit: {
+            expectedHead: EXPECTED_HEAD,
+            message: "feat(test): create commit",
+          },
+          signal: AbortSignal.abort(reason),
+        }),
+      ),
+      (error) => {
+        assert.ok(error instanceof CodexAdapterError);
+        assert.equal(error.effectStarted, false);
+        assert.equal(error.cause, reason);
+        return true;
+      },
+    );
+    assert.equal(fixture.processes.length, 0);
+    assert.equal(
+      fixture.executeCalls.filter(({ file }) => file === "git").length,
+      0,
+    );
+  }
+});
+
 test("never replays an interrupted local-commit turn", async () => {
   let turns = 0;
   const fixture = createFixture({

@@ -511,8 +511,15 @@ function normalizeConfirmationRoleOutput(
   return result;
 }
 
-export async function runPolishing({ action, run, runtime, settings }) {
+export async function runPolishing({
+  action,
+  run,
+  runtime,
+  settings,
+  operatorStop = false,
+}) {
   assertRun(run);
+  if (run.pipelineState.workflowState === "CANCELED") return run;
   assertRuntime(runtime, Object.keys(run.roles));
   const resumeAction = normalizeResumeAction(action);
   if (run.pipelineState.settings === null) {
@@ -2616,13 +2623,20 @@ ${JSON.stringify(
     return true;
   }
 
-  async function runHandoff() {
+  async function runHandoff(verificationOnly = false) {
     const current = state();
-    const repositoryBaseline = await runtime.git.stagePolishingHandoff({
+    const handoffOptions = {
       expectedSnapshot: current.repositoryBaseline,
       finalizedFingerprint: current.finalizedFingerprint,
       reviewedFingerprint: current.reviewedFingerprint,
-    });
+    };
+    const inspected = verificationOnly
+      ? await runtime.git.inspectPolishingHandoff(handoffOptions)
+      : null;
+    if (inspected?.status === "untouched") return false;
+    const repositoryBaseline = verificationOnly
+      ? inspected.snapshot
+      : await runtime.git.stagePolishingHandoff(handoffOptions);
     await transition(
       {
         ...current,
@@ -5473,6 +5487,79 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
 
   assertResumeActionApplicable();
   try {
+    if (operatorStop) {
+      if (state().workflowState === "HANDOFF") {
+        await runHandoff(true);
+        return currentRun;
+      }
+      if (state().repositoryBaseline !== null) {
+        const current = state();
+        const writable =
+          interruptedTurn !== null &&
+          interruptedTurnIsWritable(interruptedTurn);
+        const inspected = await runtime.git.reconcileInterrupted(
+          current.repositoryBaseline,
+          {
+            allowWorkspaceChanges: writable,
+            allowIndexChanges: false,
+          },
+        );
+        if (
+          current.pendingEdit === null &&
+          (await readCurrentInputs()) === null
+        )
+          return currentRun;
+        if (
+          inspected.contentFingerprint !==
+          current.repositoryBaseline.contentFingerprint
+        ) {
+          const fixing = ["check-and-fix", "resolve-findings"].includes(
+            interruptedTurn?.phase,
+          );
+          const samePhase =
+            current.workflowState === "POLISH" ||
+            current.workflowState === "CHECK_AND_FIX";
+          const workflowState = samePhase
+            ? current.workflowState
+            : current.settings.mode === "lazy"
+              ? "CHECK_AND_FIX"
+              : "REVIEW";
+          const alreadyCharged =
+            interruptedTurn?.phase === "check-and-fix"
+              ? current.pendingLazyCorrection?.fixRoundCharged === true
+              : current.pendingCorrection;
+          await transition(
+            {
+              ...current,
+              ...clearedCandidateAndTerminalGate(),
+              workflowState,
+              repositoryBaseline: inspected,
+              ...(interruptedTurn?.phase === "check-and-fix"
+                ? markPendingLazyCorrectionCharged(current)
+                : {}),
+              previousFindings: current.findings.length
+                ? current.findings
+                : current.previousFindings,
+              findings: [],
+              reviewReconsideration: [],
+              pendingCorrection: fixing || current.pendingCorrection,
+            },
+            {
+              nextCounters: {
+                ...counters(),
+                fixRounds:
+                  counters().fixRounds + (fixing && !alreadyCharged ? 1 : 0),
+              },
+            },
+          );
+          if (!samePhase) {
+            currentRun = await runtime.finishAgentTurn(interruptedTurn);
+            interruptedTurn = null;
+          }
+        }
+      }
+      return currentRun;
+    }
     if (!(await recoverInterruptedTurn())) {
       return currentRun;
     }
@@ -5799,6 +5886,12 @@ ${evidence}`,
       );
     }
   } catch (cause) {
+    if (
+      operatorStop &&
+      cause?.code === "ERR_INTERRUPTED_REPOSITORY_CONTROL_CHANGED"
+    ) {
+      return pause(interruptedControlChange(cause), { code: cause.code });
+    }
     if (cause?.code === "ERR_READ_ONLY_REPOSITORY_CHANGED") {
       return pause("read_only_agent_mutated_repository", {
         code: cause.code,

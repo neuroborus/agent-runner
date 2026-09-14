@@ -64,6 +64,28 @@ receipt may be recovered or replayed after later transitions without executing
 work or changing a terminal outcome. The state protocol itself performs no
 process signalling or repository effect.
 
+The runner connects that protocol to an owned-process abort boundary. Provider
+and trusted-command processes wait for durable registration before executing;
+runner loss closes their private control pipe and starts bounded cleanup.
+Private PID namespaces contain detached and reparented descendants. Nested
+runner tests inside the trusted-validation namespace use an owned session only
+when that enclosing sandbox denies another PID namespace; the enclosing
+namespace remains the ultimate containment boundary. The runner records the
+owned supervisor identity and verifies its death before clearing ownership;
+the outer launcher's exit or an empty process group is insufficient.
+Live shutdown signals only through the owned child handle/control channel;
+recovery verifies parent-death teardown without signalling host PIDs.
+Unverifiable ownership or surviving descendants retains exclusion.
+Reconciliation preserves safe partial
+workspace content without staging or rollback and retains read-only mutation,
+index, history/ref, remote, identity, and input findings as blockers.
+
+A stop racing a consumed commit or handoff runs verification only. The final
+stop event records an observed completed effect and its progress once. An
+operator pause preserves the reconciled checkpoint and existing blockers;
+cancellation is terminal. Neither outcome authorizes replaying an effect,
+restoring contaminated content, or adopting replacement configuration.
+
 Local operating guidance uses the same new-run configuration and Git safety
 boundaries. Its target and temporary files must be ignored, untracked, confined,
 and separate from configuration and protected control paths. Linked, unsafe,

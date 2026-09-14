@@ -57,6 +57,12 @@ export {
 } from "./codex/index.js";
 export { STRUCTURED_OUTPUT_FAILURE_CLASS };
 export {
+  assertOwnedProcessLauncherProtected,
+  spawnOwnedProcess,
+  terminateOwnedProcess,
+} from "./owned-process.js";
+export { readProcessIdentity } from "./process-containment.js";
+export {
   createProviderRegistry,
   PROVIDER_REGISTRY,
   ProviderRegistryError,

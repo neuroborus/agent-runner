@@ -44,6 +44,7 @@ const TRANSITION_STATE_FIELDS = [
   "hashes",
   "pause",
   "activeTurn",
+  "executionProcess",
   "stopRequest",
   "pipelineState",
 ];
@@ -78,7 +79,7 @@ function normalizeEvent(value, runId, lineNumber) {
     if (
       Number.isSafeInteger(value.schemaVersion) &&
       value.schemaVersion > 0 &&
-      ![1, 2, 3, RUN_STATE_SCHEMA_VERSION].includes(value.schemaVersion)
+      ![1, 2, 3, 4, RUN_STATE_SCHEMA_VERSION].includes(value.schemaVersion)
     ) {
       throw new RunStoreError(
         `Unsupported event.schemaVersion: ${String(value.schemaVersion)}; ` +
@@ -266,6 +267,7 @@ function assertStopContinuity(events, index, migrating) {
       "pipelineState",
       "pause",
       "activeTurn",
+      "executionProcess",
       "counters",
       "hashes",
       "sessionLineage",

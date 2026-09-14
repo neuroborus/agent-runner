@@ -646,8 +646,16 @@ function normalizeConfirmationRoleOutput(
   return result;
 }
 
-export async function runPlanExecution({ action, run, runtime, settings }) {
+export async function runPlanExecution({
+  action,
+  run,
+  runtime,
+  settings,
+  operatorStop = false,
+  operatorStopPreEffectRejection = null,
+}) {
   assertRun(run);
+  if (run.pipelineState.workflowState === "CANCELED") return run;
   assertRuntime(runtime, Object.keys(run.roles));
   const resumeAction = normalizeResumeAction(action);
   if (run.pipelineState.settings === null) {
@@ -914,6 +922,13 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
   }
 
   async function pausePreEffectCommitRejection(rejection) {
+    if (operatorStop && rejection.code === "ERR_OPERATOR_STOP_BEFORE_COMMIT") {
+      await transition(
+        { ...state(), workflowState: "COMMIT", pendingCommit: null },
+        { pause: null },
+      );
+      return currentRun;
+    }
     const reason = rejection.recoverable
       ? "backend_unavailable"
       : "commit_failed";
@@ -6133,6 +6148,91 @@ ${step.subject}`),
     if (state().settings === null) {
       await transition({ ...state(), settings }, { pause: null });
     }
+    if (operatorStop) {
+      if (state().pendingCommit?.status === "consumed") {
+        if (
+          operatorStopPreEffectRejection !== null &&
+          state().pendingCommit.preEffectRejection === null
+        ) {
+          await transition({
+            ...state(),
+            pendingCommit: {
+              ...state().pendingCommit,
+              preEffectRejection: operatorStopPreEffectRejection,
+            },
+          });
+        }
+        await runCommitTurn();
+        return currentRun;
+      }
+      if (state().repositoryBaseline !== null) {
+        const current = state();
+        const writable =
+          interruptedTurn !== null &&
+          interruptedTurnIsWritable(interruptedTurn);
+        const inspected = await runtime.git.reconcileInterrupted(
+          current.repositoryBaseline,
+          {
+            allowWorkspaceChanges: writable,
+            allowIndexChanges: false,
+          },
+        );
+        if (
+          current.pendingEdit === null &&
+          (await readCurrentInputs()) === null
+        )
+          return currentRun;
+        if (
+          inspected.contentFingerprint !==
+          current.repositoryBaseline.contentFingerprint
+        ) {
+          const fixing = ["check-and-fix", "resolve-findings"].includes(
+            interruptedTurn?.phase,
+          );
+          const samePhase =
+            current.workflowState === "IMPLEMENT" ||
+            current.workflowState === "CHECK_AND_FIX";
+          const workflowState = samePhase
+            ? current.workflowState
+            : current.settings.mode === "lazy"
+              ? "CHECK_AND_FIX"
+              : "REVIEW";
+          const alreadyCharged =
+            interruptedTurn?.phase === "check-and-fix"
+              ? current.pendingLazyCorrection?.fixRoundCharged === true
+              : current.pendingCorrection;
+          await transition(
+            {
+              ...current,
+              ...clearedCandidateAndTerminalGate(),
+              workflowState,
+              repositoryBaseline: inspected,
+              ...(interruptedTurn?.phase === "check-and-fix"
+                ? markPendingLazyCorrectionCharged(current)
+                : {}),
+              previousFindings: current.findings.length
+                ? current.findings
+                : current.previousFindings,
+              findings: [],
+              reviewReconsideration: [],
+              pendingCorrection: fixing || current.pendingCorrection,
+            },
+            {
+              nextCounters: {
+                ...counters(),
+                fixRounds:
+                  counters().fixRounds + (fixing && !alreadyCharged ? 1 : 0),
+              },
+            },
+          );
+          if (!samePhase) {
+            currentRun = await runtime.finishAgentTurn(interruptedTurn);
+            interruptedTurn = null;
+          }
+        }
+      }
+      return currentRun;
+    }
     if (!(await recoverInterruptedTurn())) {
       return currentRun;
     }
@@ -6504,6 +6604,12 @@ ${evidence}`,
         ].includes(cause?.code))
     ) {
       return pause("unsafe_git_state", { code: cause.code });
+    }
+    if (
+      operatorStop &&
+      cause?.code === "ERR_INTERRUPTED_REPOSITORY_CONTROL_CHANGED"
+    ) {
+      return pause(interruptedControlChange(cause), { code: cause.code });
     }
     const preflightComplete = state().preflightComplete;
     const causePath = cause?.path ?? cause?.cause?.path;

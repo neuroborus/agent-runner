@@ -67,6 +67,19 @@ not widen ordinary workspace-write access. Polishing never requests it.
 
 ## Normalized failures and recovery
 
+Provider requests may carry runner-owned abort and process-registration
+callbacks. The adapter keeps these out of prompts and provider configuration.
+Owned supervisors wait for durable registration before launching work and
+normally run as PID 1 in private Linux namespaces. A runner exercised inside
+the already-private trusted-validation namespace uses a distinct owned session
+when that sandbox denies nested namespace creation; the enclosing namespace
+still contains otherwise detached descendants. Cancellation or runner loss
+retires the owned containment before reconciliation can release ownership.
+Unavailable containment fails before provider execution. Every fresh
+or recovery attempt checks the abort signal. A constrained commit that may already have begun stays
+on the verification-only path; a proven pre-effect interruption retains that
+bounded proof for safe recovery.
+
 Adapters classify native failures into a finite provider-neutral control
 surface. Authentication, unsafe permissions, forbidden collaboration,
 isolation failure, invalid contracts, and ambiguous writable outcomes fail

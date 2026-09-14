@@ -55,8 +55,8 @@ project-local operating guidance.
 - Git
 - Codex CLI 0.147.0 or newer stable and/or Claude Code 2.1.233 or newer stable,
   depending on the selected role backends
-- `bubblewrap` for trusted validation and the V1 Claude backend on Linux, plus
-  `socat` for the Claude backend
+- Linux with usable PID namespaces and system-installed `bubblewrap` for owned
+  execution and trusted validation, plus `socat` for the Claude backend
 
 The project uses native ES modules. External runtime dependencies comprise the
 official Node MCP server SDK and its schema library.
@@ -227,8 +227,11 @@ permissions. The pinned path is reverified on resume and execution. Its network
 namespace has a minimal read-only system and repository view, private runtime
 and temporary storage, a hidden user home, and a finite non-credential
 environment. Rootless Docker and command-owned services run inside the same
-mount, network, and PID namespaces. A private PID namespace and an outer
-process group retire that complete service tree before reconciliation. A
+mount, network, and PID namespaces. The runner records its enclosing namespace
+init's identity and retires the complete tree, including detached descendants,
+before reconciliation. Nested runner tests reuse that already-private PID
+namespace through a distinct owned session when its policy denies another PID
+namespace; no sandbox authority is added. A
 readiness signal classifies isolation setup failures separately from executed
 check failures. Workspace, Git, ref, remote, identity,
 and validation-infrastructure snapshots must remain stable. Isolation or

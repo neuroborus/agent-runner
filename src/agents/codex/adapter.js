@@ -3,6 +3,7 @@ import { lstatSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
+import { executeOwnedProcess, spawnOwnedProcess } from "../owned-process.js";
 import packageMetadata from "../../../package.json" with { type: "json" };
 import {
   createAdapterContract,
@@ -1368,7 +1369,11 @@ export function createCodexAdapter(options = {}) {
     let result;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        result = await execute(
+        result = await (
+          request.onProcess !== undefined && execute === executeFile
+            ? executeOwnedProcess
+            : execute
+        )(
           codexBinary,
           nativeArguments(request, [
             "-C",
@@ -1382,10 +1387,22 @@ export function createCodexAdapter(options = {}) {
             env: processEnvironment,
             maxBuffer: 1024 * 1024,
             timeout: MCP_DISCOVERY_TIMEOUT_MS,
+            ...(request.signal === undefined ? {} : { signal: request.signal }),
+            ...(request.onProcess === undefined
+              ? {}
+              : { onProcess: request.onProcess }),
           },
         );
         break;
-      } catch {
+      } catch (cause) {
+        request.signal?.throwIfAborted();
+        if (
+          [
+            "ERR_EXECUTION_PROCESS_ACTIVE",
+            "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+          ].includes(cause?.code)
+        )
+          throw cause;
         if (attempt === 1) {
           throw new CodexAdapterError(
             "Codex MCP configuration is temporarily unavailable.",
@@ -1454,20 +1471,35 @@ export function createCodexAdapter(options = {}) {
   }
 
   async function createAuthorizedCommit(request) {
+    let effectStarted = false;
     try {
+      request.signal?.throwIfAborted();
       await executeCodexLocalCommit({
         codexBinary,
         cwd: request.cwd,
         env: commandEnvironment,
-        execute,
+        execute: (file, args, executionOptions) =>
+          request.onProcess === undefined
+            ? execute(file, args, executionOptions)
+            : executeOwnedProcess(file, args, {
+                ...executionOptions,
+                signal: request.signal,
+                onProcess: request.onProcess,
+              }),
+        beforeEffect: () => {
+          request.signal?.throwIfAborted();
+          effectStarted = true;
+        },
         expectedHead: request.commit.expectedHead,
         message: request.commit.message,
       });
     } catch (cause) {
+      if (cause?.effectStarted === false) effectStarted = false;
       throw new CodexAdapterError(
         "Authorized local commit outcome requires Git-state verification.",
         {
-          ambiguous: true,
+          ambiguous: effectStarted,
+          effectStarted,
           cause,
           code: "ERR_CODEX_LOCAL_COMMIT_INTERRUPTED",
         },
@@ -1476,20 +1508,33 @@ export function createCodexAdapter(options = {}) {
   }
 
   async function runAttempt(request, { fresh = false, recovery = false } = {}) {
+    request.signal?.throwIfAborted();
     const workspaceStorage = await prepareWorkspaceStorage(request);
     try {
       const launch = await appServerLaunch(request, workspaceStorage);
       let child;
       try {
-        child = spawnProcess(codexBinary, launch.argumentsList, {
+        request.signal?.throwIfAborted();
+        const launchProcess =
+          request.onProcess !== undefined && spawnProcess === spawn
+            ? spawnOwnedProcess
+            : spawnProcess;
+        child = launchProcess(codexBinary, launch.argumentsList, {
           cwd: request.cwd,
           env: processEnvironment,
           stdio: ["pipe", "pipe", "pipe"],
+          ...(launchProcess === spawnOwnedProcess
+            ? { signal: request.signal, onProcess: request.onProcess }
+            : {}),
         });
       } catch (cause) {
         throw processError("Cannot start Codex app-server.", cause);
       }
-      const client = createCodexAppServerClient(child, CodexAdapterError);
+      const client = createCodexAppServerClient(
+        child,
+        CodexAdapterError,
+        request.signal,
+      );
       let result;
       let operationFailed = false;
       try {
@@ -1528,6 +1573,8 @@ export function createCodexAdapter(options = {}) {
           if (!operationFailed) {
             throw cause;
           }
+        } finally {
+          await child.ownedCompletion;
         }
       }
       return result;
@@ -1554,6 +1601,20 @@ export function createCodexAdapter(options = {}) {
     try {
       result = await runAttempt(request);
     } catch (cause) {
+      if (request.signal?.aborted) {
+        if (request.access === "local-commit") {
+          throw new CodexAdapterError(
+            "Local commit stopped before execution.",
+            {
+              cause,
+              code: cause?.code ?? "ERR_CODEX_LOCAL_COMMIT_INTERRUPTED",
+              effectStarted: false,
+            },
+          );
+        }
+        throw cause;
+      }
+      request.signal?.throwIfAborted();
       if (
         cause instanceof CodexAdapterError &&
         cause.recoverable &&

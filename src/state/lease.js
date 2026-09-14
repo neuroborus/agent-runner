@@ -5,11 +5,12 @@ import {
   readOptionalPublishedText,
   removeFile,
 } from "./files.js";
+import { inspectProcessOwner } from "./process-owner.js";
 import {
-  inspectProcessOwner,
+  assertRunId,
+  RunStoreError,
   validateProcessIdentity,
-} from "./process-owner.js";
-import { assertRunId, RunStoreError } from "./validation.js";
+} from "./validation.js";
 
 const LEASE_FILENAME = ".lease";
 const RECLAIMING_LEASE_FILENAME = ".lease-reclaiming";

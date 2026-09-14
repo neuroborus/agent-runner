@@ -1604,6 +1604,36 @@ test("proves a rejected local-commit policy did not start the effect", async () 
   assert.equal(localCommitSandboxCalls(fixture).length, 1);
 });
 
+test("preserves immutable and primitive abort reasons before local commit execution", async () => {
+  for (const reason of [
+    Object.freeze(new Error("Operator pause")),
+    "Operator cancel",
+  ]) {
+    const fixture = createFixture();
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          access: "local-commit",
+          authorizationId: "authorization-1",
+          commit: {
+            expectedHead: EXPECTED_HEAD,
+            message: "feat(test): create commit",
+          },
+          signal: AbortSignal.abort(reason),
+        }),
+      ),
+      (error) => {
+        assert.ok(error instanceof ClaudeAdapterError);
+        assert.equal(error.effectStarted, false);
+        assert.equal(error.cause, reason);
+        return true;
+      },
+    );
+    assert.equal(turnCalls(fixture).length, 0);
+    assert.equal(fixture.calls.filter(({ file }) => file === "git").length, 0);
+  }
+});
+
 test("never replays an interrupted local-commit turn", async () => {
   const fixture = createFixture({
     handle({ call }) {

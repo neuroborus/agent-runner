@@ -186,6 +186,15 @@ unsafe reconciliation, changed inputs, or ambiguous effects have their own
 bounded recovery rules. Do not erase locks, patch state files, reset stagnation
 history, or assume every `no_progress` pause has the same recovery path.
 
+Owned execution requires Linux PID namespaces and system-installed bubblewrap.
+The runner-trusted executor may reuse its already-private PID namespace for a
+nested runner test when its sandbox correctly denies another namespace; it does
+not relax that sandbox. Otherwise, unavailable containment fails before provider
+work begins. Stops retain exclusion until the recorded supervisor and descendants,
+including detached services, have stopped. Unknown ownership and older
+group-only records remain conservative recovery barriers; an empty process
+group alone does not authorize clearing them.
+
 Codex `ERR_INVALID_CODEX_SCHEMA` is a terminal local request error, and
 `ERR_CODEX_TURN_FAILED` with `turn_bad_request` is a terminal provider request
 rejection. A recognized structured HTTP 400 schema rejection has the latter

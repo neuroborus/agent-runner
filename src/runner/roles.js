@@ -63,6 +63,19 @@ async function runAdapter(adapter, backend, request, providers) {
   try {
     return await adapter.run(request);
   } catch (cause) {
+    // Preserve the runner's pre-effect stop proof before redacting provider and
+    // supervised-process error wrappers. No native cause crosses this boundary.
+    if (
+      cause?.effectStarted === false &&
+      request.signal?.aborted &&
+      [cause, cause?.cause, cause?.cause?.cause].includes(request.signal.reason)
+    ) {
+      throw normalizeAdapterFailure(
+        backend,
+        { code: request.signal.reason?.code, effectStarted: false },
+        providers,
+      );
+    }
     throw normalizeAdapterFailure(backend, cause, providers);
   }
 }

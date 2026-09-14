@@ -2602,6 +2602,43 @@ A user override must be explicitly recorded in `events.jsonl` and `progress.md`.
 
 ---
 
+## Operator Pause And Cancellation
+
+The runner's durable stop protocol applies to every role, checkpoint, and mode.
+An accepted request aborts only registered execution. The runner contains
+owned processes in private PID namespaces. A runner nested inside the
+runner-trusted validation namespace uses an owned session when that sandbox
+denies another PID namespace, without widening the enclosing sandbox. It waits
+for owned containment teardown, including detached descendants, before repository
+reconciliation. The runner keeps its
+execution lease and any held worktree lease until the pipeline's read-only
+reconciliation path has accounted for the interrupted turn. That path cannot
+invoke providers, trusted checks, or artifact writes. It revalidates frozen
+inputs and the original access contract, preserves existing artifacts and safe
+partial content, and retains unsafe input or repository changes as blockers.
+It never rolls back content or changes Git controls.
+
+A completed operator pause uses `WAITING_FOR_USER`, `operator_paused`, and a
+null resume action. Its private checkpoint preserves the reconciled workflow
+position, logical turn, and preceding pause. Resuming an already paused
+checkpoint restores its blockers and pending editor authorization without
+consuming them. Session reconstruction uses frozen roles, mode, settings, and
+source lineage; an interrupted role does not refork its source. `CANCELED` is
+terminal and inspectable, and every resume path rejects it.
+
+Writable partial changes advance the baseline only after index, history/ref,
+remote, identity, and input checks pass. They invalidate dependent candidate,
+finalization, and confirmation evidence and charge actual correction work once.
+A consumed commit remains verification-only during reconciliation, even when
+its effect races the request. A verified commit SHA and step advancement are
+recorded atomically with the stop outcome; resume never reinvokes that consumed
+effect. An uncreated or invalid commit retains its ordinary blocker, including
+available pre-effect proof. If the runner proves that the operator stop
+prevented invocation and Git verification confirms no effect, it retires the
+unused authorization and preserves `COMMIT` for a newly authorized attempt on
+resume. Cancellation winning during reconciliation changes only the requested
+terminal outcome.
+
 ## 16. Resume
 
 `agent-run resume --run <run-id>` must reconstruct the workflow from persisted

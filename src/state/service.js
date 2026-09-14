@@ -10,7 +10,7 @@ import { atomicWriteFile, resolveRunArtifactPath } from "./files.js";
 import { createStateJournal } from "./journal.js";
 import { createLeaseManager } from "./lease.js";
 import { createMutationBoundary } from "./mutation.js";
-import { readProcessIdentity } from "./process-owner.js";
+import { inspectProcessOwner, readProcessIdentity } from "./process-owner.js";
 import { createStopService } from "./stops.js";
 import {
   assertRunCanAdvance,
@@ -305,6 +305,12 @@ export function createRunStore({
         },
       );
     }
+    if (run.executionProcess !== null) {
+      throw new RunStoreError(
+        "Owned execution must stop before releasing ownership.",
+        { code: "ERR_EXECUTION_PROCESS_ACTIVE" },
+      );
+    }
   }
   const runLeases = createLeaseManager({
     withMutation: withRunMutation,
@@ -325,7 +331,8 @@ export function createRunStore({
     async canReclaim(record, requestingRunId) {
       if (record.runId === requestingRunId) return true;
       try {
-        return !stopIsPending(await loadRun(record.runId));
+        const current = await loadRun(record.runId);
+        return !stopIsPending(current) && current.executionProcess === null;
       } catch (cause) {
         if (cause?.code === "ERR_RUN_NOT_FOUND") return true;
         throw cause;
@@ -540,6 +547,7 @@ export function createRunStore({
               input.childSessions === undefined ? [] : input.childSessions,
           },
           activeTurn: null,
+          executionProcess: null,
           stopRequest: null,
           pipelineState:
             input.pipelineState === undefined ? {} : input.pipelineState,
@@ -636,8 +644,10 @@ export function createRunStore({
 
   async function runIsLeased(runId) {
     const runDirectory = await getRunDirectory(runId);
+    const current = (await loadSnapshot(runDirectory, runId)).state;
     return (
-      stopIsPending((await loadSnapshot(runDirectory, runId)).state) ||
+      stopIsPending(current) ||
+      current.executionProcess !== null ||
       runLeases.isLeased(runDirectory, runId)
     );
   }
@@ -1080,8 +1090,86 @@ export function createRunStore({
   async function inspectRunLeaseOwner(runId) {
     return runLeases.inspect(await getRunDirectory(runId), runId);
   }
+  async function recordExecutionProcess(lease, pid, proof = null) {
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
+      const snapshot = await loadSnapshot(runDirectory, record.runId);
+      if (pid !== null) {
+        assertRunCanAdvance(snapshot.state);
+        if (snapshot.state.executionProcess !== null) {
+          throw new RunStoreError(
+            "The preceding execution process must stop first.",
+            {
+              code: "ERR_EXECUTION_PROCESS_ACTIVE",
+            },
+          );
+        }
+      } else if (snapshot.state.executionProcess === null)
+        return snapshot.state;
+      const identity = pid === null ? null : await processIdentity(pid);
+      if (
+        proof !== null &&
+        !isDeepStrictEqual(identity, proof.processIdentity)
+      ) {
+        throw new RunStoreError(
+          "Execution identity changed before registration.",
+          {
+            code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+          },
+        );
+      }
+      const next = normalizeRunState(
+        {
+          ...snapshot.state,
+          executionProcess:
+            pid === null
+              ? null
+              : {
+                  pid,
+                  hostname: hostName,
+                  processIdentity: identity,
+                  namespaceId: proof?.namespaceId ?? null,
+                },
+          revision: snapshot.state.revision + 1,
+          updatedAt: timestamp(snapshot.state.updatedAt),
+        },
+        record.runId,
+      );
+      await journal.appendTransition(runDirectory, next, snapshot, {
+        actor: "runner",
+        phase: "execution",
+        kind: pid === null ? "stopped" : "started",
+        message:
+          pid === null
+            ? "Owned execution process stopped."
+            : "Owned execution process recorded before launch.",
+      });
+      return deepFreeze(next);
+    });
+  }
+  async function inspectExecutionProcess(runId) {
+    const record = (await loadRun(runId)).executionProcess;
+    const localIdentity =
+      record?.hostname === hostName ? await processIdentity(processId) : null;
+    return record === null
+      ? null
+      : deepFreeze({
+          ...record,
+          status: await inspectProcessOwner(record, {
+            hostName,
+            processIsAlive,
+            processIdentity,
+          }),
+          previousBoot:
+            record.processIdentity !== null &&
+            localIdentity !== null &&
+            record.processIdentity.bootId !== localIdentity.bootId,
+        });
+  }
   return Object.freeze({
+    recordExecutionProcess,
+    inspectExecutionProcess,
     requestOperatorStop: stops.request,
+    recordStopActivity: stops.activity,
     completeOperatorStop: stops.complete,
     loadStopCheckpoint: stops.checkpoint,
     inspectRunLeaseOwner,

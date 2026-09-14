@@ -3,7 +3,7 @@ import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
-import { PROVIDER_REGISTRY } from "../agents/index.js";
+import { PROVIDER_REGISTRY, terminateOwnedProcess } from "../agents/index.js";
 import { createClarificationService } from "../clarifications/index.js";
 import {
   loadProjectConfiguration,
@@ -33,6 +33,12 @@ import {
   RunnerError,
 } from "./input.js";
 import { pipelineForRun } from "./migration.js";
+import {
+  createStopMonitor,
+  reconcileOperatorStop,
+  restoreOperatorPause,
+  stopPending,
+} from "./stops.js";
 import {
   defaultAdapters,
   probeRequiredRoles,
@@ -171,35 +177,89 @@ export function createRunner(options = {}) {
     );
   }
 
-  function runtimeFor(pipeline, lease, run, selectedAdapters) {
+  function runtimeFor(pipeline, lease, run, selectedAdapters, monitor) {
     return Object.freeze({
-      adapters: selectedAdapters,
+      adapters:
+        monitor === undefined
+          ? selectedAdapters
+          : Object.fromEntries(
+              Object.entries(selectedAdapters).map(([role, adapter]) => [
+                role,
+                {
+                  probe: async () => {
+                    await monitor.check();
+                    return adapter.probe();
+                  },
+                  run: (request) =>
+                    monitor.invoke((value) => adapter.run(value), request),
+                },
+              ]),
+            ),
       clarifications,
-      git,
-      trustedValidation,
+      git:
+        monitor === undefined
+          ? git
+          : {
+              ...git,
+              stagePolishingHandoff: async (value) => {
+                await monitor.check();
+                return git.stagePolishingHandoff(value);
+              },
+              prepareCommit: async (value) => {
+                await monitor.check();
+                return git.prepareCommit(value);
+              },
+              consumeCommit: async (...args) => {
+                try {
+                  await monitor.check();
+                  return await git.consumeCommit(...args);
+                } catch (cause) {
+                  monitor.rejectBeforeCommit(cause);
+                  throw cause;
+                }
+              },
+            },
+      trustedValidation:
+        monitor === undefined
+          ? trustedValidation
+          : {
+              preflight: (value) => trustedValidation.preflight(value),
+              execute: (request) =>
+                monitor.invoke(
+                  (value) => trustedValidation.execute(value),
+                  request,
+                ),
+            },
       readInputs: ({ taskPath }) => readInputs(pipeline, taskPath),
       async startAgentTurn(activeTurn, { pipelineState } = {}) {
-        const current = await runStore.loadRun(run.runId);
-        pipeline.workflow.validateRun(
-          deepFreeze({
-            ...current,
+        try {
+          await monitor?.check();
+          const current = await runStore.loadRun(run.runId);
+          pipeline.workflow.validateRun(
+            deepFreeze({
+              ...current,
+              ...(pipelineState === undefined ? {} : { pipelineState }),
+              activeTurn,
+              revision: current.revision + 1,
+            }),
+          );
+          const activity = {
+            actor: activeTurn?.role,
+            phase: activeTurn?.phase,
+            kind: "turn-started",
+            message: `${activeTurn?.role} ${activeTurn?.phase} turn started.`,
+          };
+          const next = await runStore.startAgentTurn(lease, activeTurn, {
+            activity,
             ...(pipelineState === undefined ? {} : { pipelineState }),
-            activeTurn,
-            revision: current.revision + 1,
-          }),
-        );
-        const activity = {
-          actor: activeTurn?.role,
-          phase: activeTurn?.phase,
-          kind: "turn-started",
-          message: `${activeTurn?.role} ${activeTurn?.phase} turn started.`,
-        };
-        const next = await runStore.startAgentTurn(lease, activeTurn, {
-          activity,
-          ...(pipelineState === undefined ? {} : { pipelineState }),
-        });
-        await publish(activity, next);
-        return next;
+          });
+          await publish(activity, next);
+          return next;
+        } catch (cause) {
+          if (activeTurn?.phase === "commit")
+            monitor?.rejectBeforeCommit(cause);
+          throw cause;
+        }
       },
       finishAgentTurn: (activeTurn) =>
         runStore.finishAgentTurn(lease, activeTurn),
@@ -218,13 +278,17 @@ export function createRunner(options = {}) {
         await publish(activity, next);
         return next;
       },
-      writePlan: (writeOptions) => writePlan(run.taskPath, writeOptions),
+      writePlan: async (writeOptions) => {
+        await monitor?.check();
+        return writePlan(run.taskPath, writeOptions);
+      },
       writeRunArtifact: ({ path, content }) =>
         runStore.writeRunArtifact(lease, path, content),
     });
   }
 
   async function execute(pipeline, run, lease, action = null) {
+    if (run.pipelineState.workflowState === "CANCELED") return run;
     if (
       run.schemaVersion !== RUN_STATE_SCHEMA_VERSION ||
       run.runtimeCompatibility?.runnerVersion !==
@@ -253,20 +317,98 @@ export function createRunner(options = {}) {
         code: "ERR_MISSING_RUN_SETTINGS",
       });
     }
-    return pipeline.workflow.run({
-      action,
-      run,
+    const selected = roleAdapters(run, adapters, providers);
+    const baseRuntime = runtimeFor(pipeline, lease, run, selected);
+    if (stopPending(run))
+      return reconcileOperatorStop({
+        run,
+        pipeline,
+        lease,
+        runStore,
+        runtime: baseRuntime,
+        publish,
+      });
+    // Recover an orphaned supervised process before examining or replaying work.
+    if (run.executionProcess !== null) {
+      const owner = await runStore.inspectExecutionProcess(run.runId);
+      await terminateOwnedProcess(owner.pid, () =>
+        runStore.inspectExecutionProcess(run.runId),
+      );
+      run = await runStore.recordExecutionProcess(lease, null);
+    }
+    const monitor = createStopMonitor({
+      runId: run.runId,
+      lease,
+      runStore,
+      publish,
+    });
+    let completed;
+    try {
+      await monitor.check();
+      completed = await pipeline.workflow.run({
+        action,
+        run,
+        settings,
+        runtime: runtimeFor(pipeline, lease, run, selected, monitor),
+      });
+    } catch (cause) {
+      if (!stopPending(await runStore.loadRun(run.runId))) throw cause;
+    } finally {
+      await monitor.close();
+    }
+    const latest = await runStore.loadRun(run.runId);
+    return stopPending(latest)
+      ? reconcileOperatorStop({
+          run: latest,
+          pipeline,
+          lease,
+          runStore,
+          runtime: baseRuntime,
+          publish,
+          preEffectRejection: monitor.preEffectRejection,
+        })
+      : completed;
+  }
+
+  async function reconcilePendingStop(lease, runId) {
+    const current = await runStore.loadRun(runId);
+    const { pipeline } = pipelineForRun(current);
+    return reconcileOperatorStop({
+      run: current,
+      pipeline,
+      lease,
+      runStore,
+      publish,
       runtime: runtimeFor(
         pipeline,
         lease,
-        run,
-        roleAdapters(run, adapters, providers),
+        current,
+        roleAdapters(current, adapters, providers),
       ),
-      settings,
     });
   }
 
-  async function withWorktreeLease(run, operation) {
+  async function releaseRunLease(lease, runId) {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        await lease.release();
+        return;
+      } catch (cause) {
+        if (cause?.code !== "ERR_STOP_RECONCILIATION_REQUIRED") throw cause;
+        const current = await runStore.loadRun(runId);
+        await withWorktreeLease(
+          current,
+          () => reconcilePendingStop(lease, runId),
+          lease,
+        );
+      }
+    }
+    throw new RunnerError("Operator stop reconciliation is still pending.", {
+      code: "ERR_STOP_RECONCILIATION_REQUIRED",
+    });
+  }
+
+  async function withWorktreeLease(run, operation, executionLease) {
     if (!pipelineRequiresWorktreeLease(run.pipelineId)) {
       return operation();
     }
@@ -277,7 +419,20 @@ export function createRunner(options = {}) {
     try {
       return await operation();
     } finally {
-      await worktreeLease.release();
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          await worktreeLease.release();
+          break;
+        } catch (cause) {
+          if (
+            cause?.code !== "ERR_STOP_RECONCILIATION_REQUIRED" ||
+            executionLease === undefined ||
+            attempt >= 4
+          )
+            throw cause;
+          await reconcilePendingStop(executionLease, run.runId);
+        }
+      }
     }
   }
 
@@ -488,7 +643,7 @@ export function createRunner(options = {}) {
         created.state,
       );
     } catch (cause) {
-      await created.lease.release();
+      await releaseRunLease(created.lease, created.state.runId);
       throw cause;
     }
     return Object.freeze({ created, pipeline });
@@ -496,64 +651,125 @@ export function createRunner(options = {}) {
 
   async function create(input, options = {}) {
     const { created } = await prepare(input, options);
-    try {
-      return await result(created.state);
-    } finally {
-      await created.lease.release();
-    }
+    await releaseRunLease(created.lease, created.state.runId);
+    return result(await runStore.loadRun(created.state.runId));
   }
 
   async function run(input) {
     const { created, pipeline } = await prepare(input);
     try {
-      return await result(
-        await withWorktreeLease(created.state, () =>
-          execute(pipeline, created.state, created.lease),
-        ),
+      await withWorktreeLease(
+        created.state,
+        () => execute(pipeline, created.state, created.lease),
+        created.lease,
       );
     } finally {
-      await created.lease.release();
+      await releaseRunLease(created.lease, created.state.runId);
     }
+    return result(await runStore.loadRun(created.state.runId));
+  }
+
+  async function resumeLeased(normalized, lease) {
+    const { pipeline, run: loaded } = await recoverCompatibleRun(
+      lease,
+      normalized.runId,
+    );
+    let recovered = loaded;
+    if (recovered.pipelineState.workflowState === "CANCELED") {
+      throw new RunnerError("Canceled runs cannot resume.", {
+        code: "ERR_RUN_CANCELED",
+      });
+    }
+    if (stopPending(recovered)) {
+      return withWorktreeLease(
+        recovered,
+        () => execute(pipeline, recovered, lease),
+        lease,
+      );
+    }
+    let operatorRestore = null;
+    if (recovered.pause?.reason === "operator_paused") {
+      operatorRestore = restoreOperatorPause(recovered);
+      if (normalized.action !== null)
+        throw new RunnerError("Resume an operator pause with a null action.", {
+          code: "ERR_INAPPLICABLE_RESUME_ACTION",
+        });
+      if (operatorRestore.pipelineState.workflowState === "WAITING_FOR_USER") {
+        return runStore.transitionRun(
+          lease,
+          {
+            pipelineState: operatorRestore.pipelineState,
+            pause: operatorRestore.pause,
+            activeTurn: operatorRestore.activeTurn,
+          },
+          {
+            activity: {
+              actor: "runner",
+              phase: "stop",
+              kind: "resumed",
+              message: "Operator pause resumed at its preserved checkpoint.",
+            },
+          },
+        );
+      }
+    }
+    if (
+      recovered.pipelineState.workflowState === "WAITING_FOR_USER" ||
+      normalized.action !== null
+    ) {
+      try {
+        pipeline.validateResumeAction(recovered, normalized.action);
+      } catch (cause) {
+        throw new RunnerError(cause.message, {
+          cause,
+          code: "ERR_INAPPLICABLE_RESUME_ACTION",
+        });
+      }
+    }
+    return withWorktreeLease(
+      recovered,
+      async () => {
+        if (operatorRestore !== null) {
+          recovered = await runStore.transitionRun(
+            lease,
+            {
+              pipelineState: operatorRestore.pipelineState,
+              pause: operatorRestore.pause,
+              activeTurn: operatorRestore.activeTurn,
+            },
+            {
+              activity: {
+                actor: "runner",
+                phase: "stop",
+                kind: "resumed",
+                message: "Operator pause resumed at its preserved checkpoint.",
+              },
+            },
+          );
+        }
+        if (
+          (recovered.pipelineState.trustedValidation?.commands.length ?? 0) > 0
+        ) {
+          await trustedValidation.preflight({
+            projectPath: recovered.projectPath,
+          });
+        }
+        await validatePersistedBoundary(recovered);
+        return execute(pipeline, recovered, lease, normalized.action);
+      },
+      lease,
+    );
   }
 
   async function resume(input) {
     const normalized = normalizeResumeInput(input);
     const lease = await runStore.acquireRunLease(normalized.runId);
     try {
-      const { pipeline, run: recovered } = await recoverCompatibleRun(
-        lease,
-        normalized.runId,
-      );
-      if (
-        recovered.pipelineState.workflowState === "WAITING_FOR_USER" ||
-        normalized.action !== null
-      ) {
-        try {
-          pipeline.validateResumeAction(recovered, normalized.action);
-        } catch (cause) {
-          throw new RunnerError(cause.message, {
-            cause,
-            code: "ERR_INAPPLICABLE_RESUME_ACTION",
-          });
-        }
-      }
-      return await result(
-        await withWorktreeLease(recovered, async () => {
-          if (
-            (recovered.pipelineState.trustedValidation?.commands.length ?? 0) >
-            0
-          ) {
-            await trustedValidation.preflight({
-              projectPath: recovered.projectPath,
-            });
-          }
-          await validatePersistedBoundary(recovered);
-          return execute(pipeline, recovered, lease, normalized.action);
-        }),
-      );
+      await resumeLeased(normalized, lease);
     } finally {
-      await lease.release();
+      await releaseRunLease(lease, normalized.runId);
     }
+    return result(await runStore.loadRun(normalized.runId));
   }
 
   async function status(runId) {
@@ -596,49 +812,60 @@ export function createRunner(options = {}) {
           answers = orderedInputAnswers(preparedRun, normalized);
         },
       });
-      return await withWorktreeLease(run, async () => {
-        const transcript = await clarifications.writeEditAnswers(
-          run.pipelineState.pendingEdit,
-          answers,
-          { expectedHash: normalized.responseHash },
-        );
-        const next = await runStore.transitionRun(
-          lease,
-          {
-            pause: {
-              ...run.pause,
-              inputResponse: {
-                requestId: normalized.requestId,
-                transcriptHash: transcript.hash,
+      if (stopPending(run) || run.pipelineState.workflowState === "CANCELED") {
+        throw new RunnerError("Stopped runs cannot accept input mutations.", {
+          code: "ERR_STOP_RECONCILIATION_REQUIRED",
+        });
+      }
+      await withWorktreeLease(
+        run,
+        async () => {
+          const transcript = await clarifications.writeEditAnswers(
+            run.pipelineState.pendingEdit,
+            answers,
+            { expectedHash: normalized.responseHash },
+          );
+          const next = await runStore.transitionRun(
+            lease,
+            {
+              pause: {
+                ...run.pause,
+                inputResponse: {
+                  requestId: normalized.requestId,
+                  transcriptHash: transcript.hash,
+                },
               },
             },
-          },
-          {
-            activity: {
+            {
+              activity: {
+                actor: "runner",
+                phase: "clarification",
+                kind: "submitted",
+                message: "Pending user input was recorded.",
+              },
+            },
+          );
+          await publish(
+            {
               actor: "runner",
               phase: "clarification",
               kind: "submitted",
               message: "Pending user input was recorded.",
             },
-          },
-        );
-        await publish(
-          {
-            actor: "runner",
-            phase: "clarification",
-            kind: "submitted",
-            message: "Pending user input was recorded.",
-          },
-          next,
-        );
-        return result(next);
-      });
+            next,
+          );
+          return result(next);
+        },
+        lease,
+      );
     } finally {
-      await lease.release();
+      await releaseRunLease(lease, normalized.runId);
     }
+    return result(await runStore.loadRun(normalized.runId));
   }
 
   return Object.freeze({
+    requestOperatorStop: (input) => runStore.requestOperatorStop(input),
     create,
     previewInput,
     resume,
