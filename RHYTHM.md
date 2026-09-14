@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-09-14
 
+- **Codex shell commands retain the owned-process proof through a narrow
+  allowlist.** The provider process keeps its full isolated parent environment,
+  while command construction applies Codex's automatic secret exclusions,
+  explicit workspace values, and an exact allowlist of standard core names,
+  `AGENT_RUNNER_OWNED_PROCESS`, and supplied workspace names. This preserves
+  ownership evidence across provider-native PID sessions without exposing
+  unrelated parent variables or weakening filesystem, network, MCP, or Git
+  isolation.
+
 - **Transient ownership inspection has one bounded recovery window.** A
   completion-time incomplete descendant observation retries against one
   non-resetting descendant-grace deadline before retaining the existing

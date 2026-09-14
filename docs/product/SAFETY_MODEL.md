@@ -112,6 +112,15 @@ completion. A retained containment boundary may keep protocol pipes open, but
 the ownership failure still triggers bounded adapter cleanup and propagates as
 the primary error through client teardown; successful process completion never
 replaces the required protocol result.
+
+Codex also retains the dynamic `AGENT_RUNNER_OWNED_PROCESS` marker in
+model-issued commands through an exact environment allowlist. The shell policy
+starts from the provider parent only so Codex can apply its standard automatic
+secret exclusions, then overlays explicit workspace values and exposes only
+standard core names, the ownership marker, and those workspace names. This
+preserves descendant ownership proof without exposing unrelated parent
+environment values or changing provider connectivity.
+
 Reconciliation preserves safe partial
 workspace content without staging or rollback and retains read-only mutation,
 index, history/ref, remote, identity, and input findings as blockers.

@@ -1231,11 +1231,18 @@ fixed platform temporary location without consulting ambient temporary
 variables. The effective writable set is the repository content, including an
 eligible `.agents`, and that private root. `TMPDIR`, `XDG_CACHE_HOME`, and
 `XDG_RUNTIME_DIR` project validated children of the root into command tooling
-through the effective shell policy; the provider process environment remains
-unchanged, ambient `TMPDIR` and host `/tmp` remain excluded, and command network
-access remains denied. In-session compaction retains the attempt's root. Every
-successful, failed, or freshly recovered attempt validates and removes its root
-before returning or retrying, and unsafe preparation or cleanup fails closed.
+through the effective shell policy. The policy starts from the full provider
+process environment, applies Codex's automatic secret-name exclusions and an
+empty custom exclusion list, overlays those explicit workspace values, and then
+keeps exactly Codex's standard core names (`HOME`, `LOGNAME`, `PATH`, `SHELL`,
+and `USER`), `AGENT_RUNNER_OWNED_PROCESS`, and the three workspace names. This
+preserves the dynamic ownership proof without exposing unrelated parent
+variables. The provider process environment remains unchanged, ambient
+`TMPDIR` and host `/tmp` remain excluded, shell profiles stay disabled, and
+command network access remains denied. In-session compaction retains the
+attempt's root. Every successful, failed, or freshly recovered attempt validates
+and removes its root before returning or retrying, and unsafe preparation or
+cleanup fails closed.
 Codex observes owned-process completion as soon as the App Server starts and
 races only its rejection against the complete protocol operation. An ownership
 failure therefore starts bounded client and workspace cleanup promptly and

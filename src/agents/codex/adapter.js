@@ -131,14 +131,43 @@ const DISABLED_FEATURES = Object.freeze([
   "skill_mcp_dependency_install",
 ]);
 const EMPTY_SHELL_ENVIRONMENT = Object.freeze({});
+const CODEX_CORE_SHELL_ENVIRONMENT_NAMES = Object.freeze([
+  "HOME",
+  "LOGNAME",
+  "PATH",
+  "SHELL",
+  "USER",
+]);
+const OWNED_PROCESS_ENVIRONMENT_NAME = "AGENT_RUNNER_OWNED_PROCESS";
+const SHELL_ENVIRONMENT_POLICY_FIELDS = Object.freeze([
+  "exclude",
+  "experimental_use_profile",
+  "filters",
+  "ignore_default_excludes",
+  "include_only",
+  "inherit",
+  "set",
+]);
+
+function shellEnvironmentNames(environment) {
+  return [
+    ...CODEX_CORE_SHELL_ENVIRONMENT_NAMES,
+    OWNED_PROCESS_ENVIRONMENT_NAME,
+    ...Object.keys(environment),
+  ];
+}
 
 function shellEnvironmentPolicy(environment) {
   const values = Object.entries(environment)
     .map(([name, value]) => `${name}=${JSON.stringify(value)}`)
     .join(",");
+  const names = shellEnvironmentNames(environment)
+    .map((name) => JSON.stringify(name))
+    .join(",");
   return (
-    'shell_environment_policy={inherit="core",ignore_default_excludes=false,' +
-    `experimental_use_profile=false,set={${values}}}`
+    'shell_environment_policy={inherit="all",ignore_default_excludes=false,' +
+    `exclude=[],set={${values}},include_only=[${names}],` +
+    "experimental_use_profile=false}"
   );
 }
 
@@ -461,6 +490,22 @@ function sameEnvironment(actual, expected) {
   );
 }
 
+function sameNames(actual, expected) {
+  return (
+    Array.isArray(actual) &&
+    actual.length === expected.length &&
+    actual.every((name, index) => name === expected[index])
+  );
+}
+
+function hasExactFields(value, fields) {
+  return (
+    isRecord(value) &&
+    Object.keys(value).length === fields.length &&
+    fields.every((field) => Object.hasOwn(value, field))
+  );
+}
+
 function assertIsolatedConfiguration(
   value,
   expectedMcpServers,
@@ -471,6 +516,9 @@ function assertIsolatedConfiguration(
   const memories = config?.memories;
   const mcpServers = config?.mcp_servers;
   const shellEnvironment = config?.shell_environment_policy;
+  const expectedShellEnvironmentNames = shellEnvironmentNames(
+    expectedShellEnvironment,
+  );
   let diagnosticClass;
   if (!isRecord(config) || !isRecord(features)) {
     diagnosticClass = "isolation_effective_configuration";
@@ -487,13 +535,13 @@ function assertIsolatedConfiguration(
   } else if (!Array.isArray(config.notify) || config.notify.length !== 0) {
     diagnosticClass = "isolation_notification";
   } else if (
-    !isRecord(shellEnvironment) ||
-    shellEnvironment.inherit !== "core" ||
+    !hasExactFields(shellEnvironment, SHELL_ENVIRONMENT_POLICY_FIELDS) ||
+    shellEnvironment.inherit !== "all" ||
     shellEnvironment.ignore_default_excludes !== false ||
     shellEnvironment.experimental_use_profile !== false ||
     !sameEnvironment(shellEnvironment.set, expectedShellEnvironment) ||
-    shellEnvironment.exclude !== null ||
-    shellEnvironment.include_only !== null ||
+    !sameNames(shellEnvironment.exclude, []) ||
+    !sameNames(shellEnvironment.include_only, expectedShellEnvironmentNames) ||
     shellEnvironment.filters !== null
   ) {
     diagnosticClass = "isolation_shell_environment";

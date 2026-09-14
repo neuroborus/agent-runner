@@ -905,16 +905,22 @@ root beneath the fixed platform temporary location. Add exactly the repository
 and that root to native writable roots, keep host `/tmp` excluded, and project
 only its validated temporary, cache, and runtime children as `TMPDIR`,
 `XDG_CACHE_HOME`, and `XDG_RUNTIME_DIR` through the effective command shell
-policy. Do not change the provider process environment. Retain the root across
-in-session compaction, but validate and remove it after every success, failure,
-or fresh recovery before starting another attempt with a distinct root. Unsafe
-preparation or cleanup fails closed and never reports success. Read-only and
-local-commit storage remain unchanged. Strip ambient Git
-repository redirection and identity overrides from every Codex process
-environment, and expose only Codex's filtered core environment plus those three
-private paths, without shell-profile loading, to agent commands. Remove key-,
-secret-, and token-named variables from the isolated local-commit executor
-while retaining the ordinary environment needed by Git and hooks.
+policy. Build that policy from the full provider process environment, retain
+Codex's automatic secret-name exclusions and an empty custom exclusion list,
+then apply the explicit workspace values and an exact allowlist containing
+Codex's standard core names (`HOME`, `LOGNAME`, `PATH`, `SHELL`, and `USER`),
+`AGENT_RUNNER_OWNED_PROCESS`, and those three workspace names. The allowlist
+keeps the dynamic owned-process proof available to model-issued commands
+without exposing unrelated parent variables. Do not change the provider process
+environment. Retain the root across in-session compaction, but validate and
+remove it after every success, failure, or fresh recovery before starting
+another attempt with a distinct root. Unsafe preparation or cleanup fails
+closed and never reports success. Read-only and local-commit storage remain
+unchanged. Strip ambient Git repository redirection and identity overrides from
+every Codex process environment, and disable shell-profile loading for agent
+commands. Remove key-, secret-, and token-named variables from the isolated
+local-commit executor while retaining the ordinary environment needed by Git
+and hooks.
 Capability, isolation, and prohibited-operation failures expose only one
 bounded allowlisted diagnostic class identifying the rejected capability or
 operation class. Do not retain the reported command, native error response,
@@ -2939,6 +2945,11 @@ At minimum cover:
 Real Codex/Claude smoke tests should be opt-in integration tests. The owned
 Codex smoke registers its supervised process and must read and validate the
 repository `package.json` through a model-issued read-only command.
+Provider smoke tests are not required finalization checks or runner-trusted
+validation commands because both agent and trusted-validation sandboxes deny
+provider network access. After the finalized commit is installed, the operator
+runs the applicable opt-in smoke once on the host as separate integration
+verification.
 
 ---
 

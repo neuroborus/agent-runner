@@ -26,6 +26,14 @@ import {
 const PROJECT_PATH = process.cwd();
 const EXPECTED_HEAD = "a".repeat(40);
 const HELP = "--disable\n--enable\n--listen\n--strict-config\n";
+const CODEX_CORE_SHELL_ENVIRONMENT_NAMES = Object.freeze([
+  "HOME",
+  "LOGNAME",
+  "PATH",
+  "SHELL",
+  "USER",
+]);
+const OWNED_PROCESS_ENVIRONMENT_NAME = "AGENT_RUNNER_OWNED_PROCESS";
 const STRICT_SCHEMA = Object.freeze({
   type: "object",
   properties: {
@@ -133,7 +141,7 @@ function httpClientErrorMessage({
   return `unexpected status ${status}: ${pretty ? `\n${body}\n` : body}`;
 }
 
-function isolatedConfiguration() {
+function isolatedConfiguration(shellEnvironment = {}) {
   return {
     features: {
       apps: false,
@@ -168,11 +176,15 @@ function isolatedConfiguration() {
     },
     notify: [],
     shell_environment_policy: {
-      inherit: "core",
+      inherit: "all",
       ignore_default_excludes: false,
-      exclude: null,
-      set: {},
-      include_only: null,
+      exclude: [],
+      set: shellEnvironment,
+      include_only: [
+        ...CODEX_CORE_SHELL_ENVIRONMENT_NAMES,
+        OWNED_PROCESS_ENVIRONMENT_NAME,
+        ...Object.keys(shellEnvironment),
+      ],
       filters: null,
       experimental_use_profile: false,
     },
@@ -296,9 +308,9 @@ function createFixture({
         case "model/list":
           return { result: { data: [{ id: "gpt-test" }], nextCursor: null } };
         case "config/read": {
-          const config = isolatedConfiguration();
-          config.shell_environment_policy.set =
-            workspaceStorage?.shellEnvironment ?? {};
+          const config = isolatedConfiguration(
+            workspaceStorage?.shellEnvironment,
+          );
           return {
             result: {
               config,
@@ -727,10 +739,13 @@ test("advertises local commits only with an enforceable isolated sandbox", async
   assert.equal(fixture.processes.length, 0);
 });
 
-test("removes ambient Git redirection and identity overrides", async () => {
+test("restricts command environment without changing provider environment", async () => {
+  const ownershipProof = "b".repeat(64);
   const fixture = createFixture({
     env: {
       ...process.env,
+      AGENT_RUNNER_OWNED_PROCESS: ownershipProof,
+      AGENT_RUNNER_UNRELATED_PARENT: "unrelated-parent-value",
       AGENT_RUNNER_TEST_TOKEN: "provider-token",
       EMAIL: "override@example.invalid",
       Email: "mixed-case@example.invalid",
@@ -763,6 +778,14 @@ test("removes ambient Git redirection and identity overrides", async () => {
     fixture.processes[0].options.env.AGENT_RUNNER_TEST_TOKEN,
     "provider-token",
   );
+  assert.equal(
+    fixture.processes[0].options.env.AGENT_RUNNER_OWNED_PROCESS,
+    ownershipProof,
+  );
+  assert.equal(
+    fixture.processes[0].options.env.AGENT_RUNNER_UNRELATED_PARENT,
+    "unrelated-parent-value",
+  );
   assert.equal(fixture.processes[0].options.env.GIT_DIR, undefined);
   assert.equal(fixture.processes[0].options.env.TMPDIR, "/ambient/tmp");
   assert.equal(
@@ -772,6 +795,20 @@ test("removes ambient Git redirection and identity overrides", async () => {
   assert.equal(
     fixture.processes[0].options.env.XDG_RUNTIME_DIR,
     "/ambient/runtime",
+  );
+  const shellPolicy = fixture.processes[0].argumentsList.find((argument) =>
+    argument.startsWith("shell_environment_policy="),
+  );
+  assert.match(shellPolicy, /inherit="all"/u);
+  assert.match(shellPolicy, /ignore_default_excludes=false,exclude=\[\]/u);
+  assert.match(shellPolicy, /set=\{TMPDIR=/u);
+  assert.match(
+    shellPolicy,
+    /include_only=\["HOME","LOGNAME","PATH","SHELL","USER","AGENT_RUNNER_OWNED_PROCESS","TMPDIR","XDG_CACHE_HOME","XDG_RUNTIME_DIR"\]/u,
+  );
+  assert.doesNotMatch(
+    shellPolicy,
+    /AGENT_RUNNER_UNRELATED_PARENT|unrelated-parent-value|AGENT_RUNNER_TEST_TOKEN|provider-token/u,
   );
   assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
 });
@@ -883,8 +920,9 @@ test("runs a structured read-only turn with an explicit model", async () => {
     "-c",
     "notify=[]",
     "-c",
-    'shell_environment_policy={inherit="core",ignore_default_excludes=false,' +
-      "experimental_use_profile=false,set={}}",
+    'shell_environment_policy={inherit="all",ignore_default_excludes=false,' +
+      'exclude=[],set={},include_only=["HOME","LOGNAME","PATH","SHELL",' +
+      '"USER","AGENT_RUNNER_OWNED_PROCESS"],experimental_use_profile=false}',
     "-c",
     "memories.generate_memories=false",
     "-c",
@@ -1123,12 +1161,15 @@ test("limits workspace writes to the requested repository", async () => {
   );
   assert.ok(
     fixture.processes[0].argumentsList.includes(
-      'shell_environment_policy={inherit="core",' +
+      'shell_environment_policy={inherit="all",' +
         "ignore_default_excludes=false," +
-        "experimental_use_profile=false," +
+        "exclude=[]," +
         `set={TMPDIR=${JSON.stringify(storage.shellEnvironment.TMPDIR)},` +
         `XDG_CACHE_HOME=${JSON.stringify(storage.shellEnvironment.XDG_CACHE_HOME)},` +
-        `XDG_RUNTIME_DIR=${JSON.stringify(storage.shellEnvironment.XDG_RUNTIME_DIR)}}}`,
+        `XDG_RUNTIME_DIR=${JSON.stringify(storage.shellEnvironment.XDG_RUNTIME_DIR)}},` +
+        'include_only=["HOME","LOGNAME","PATH","SHELL","USER",' +
+        '"AGENT_RUNNER_OWNED_PROCESS","TMPDIR","XDG_CACHE_HOME",' +
+        '"XDG_RUNTIME_DIR"],experimental_use_profile=false}',
     ),
   );
   assert.equal((await fixture.adapter.probe()).gitMetadataWriteBlocked, true);
@@ -1286,20 +1327,34 @@ test("rejects substitution of an explicit model", async (t) => {
 });
 
 test("fails before starting a thread when isolation is incomplete", async () => {
-  const configurations = Array.from({ length: 9 }, isolatedConfiguration);
+  const configurations = Array.from({ length: 16 }, isolatedConfiguration);
   configurations[0].mcp_servers["configured-server"].enabled = true;
   configurations[1].features.multi_agent = true;
-  configurations[2].shell_environment_policy.inherit = "all";
-  delete configurations[3].mcp_servers["configured-server"];
-  configurations[4].features.code_mode_host = false;
-  configurations[5] = { nativeOutput: "sensitive-native-output" };
-  configurations[6].memories.generate_memories = true;
-  configurations[7].notify.push("sensitive-native-output");
-  configurations[8].web_search = "enabled";
+  configurations[2].shell_environment_policy.inherit = "core";
+  configurations[3].shell_environment_policy.ignore_default_excludes = true;
+  configurations[4].shell_environment_policy.exclude.push("UNEXPECTED");
+  configurations[5].shell_environment_policy.set.UNEXPECTED = "value";
+  configurations[6].shell_environment_policy.include_only.reverse();
+  configurations[7].shell_environment_policy.filters = [];
+  configurations[8].shell_environment_policy.experimental_use_profile = true;
+  configurations[9].shell_environment_policy.unexpected = true;
+  delete configurations[10].mcp_servers["configured-server"];
+  configurations[11].features.code_mode_host = false;
+  configurations[12] = { nativeOutput: "sensitive-native-output" };
+  configurations[13].memories.generate_memories = true;
+  configurations[14].notify.push("sensitive-native-output");
+  configurations[15].web_search = "enabled";
 
   const diagnostics = [
     "isolation_mcp",
     "isolation_feature",
+    "isolation_shell_environment",
+    "isolation_shell_environment",
+    "isolation_shell_environment",
+    "isolation_shell_environment",
+    "isolation_shell_environment",
+    "isolation_shell_environment",
+    "isolation_shell_environment",
     "isolation_shell_environment",
     "isolation_mcp",
     "isolation_command_host",
