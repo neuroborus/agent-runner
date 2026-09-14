@@ -132,6 +132,7 @@ function inspectOwnedAncestry(parentPid, session) {
       }
     } catch (cause) {
       if (cause?.code === "EACCES" || cause?.code === "EPERM") {
+        if (matchesProcessBaseline(ancestorPid)) continue;
         incomplete = true;
         continue;
       }
@@ -624,6 +625,7 @@ function inspectOwnedAncestry(
   sessionId,
   ownerToken,
   includeSession,
+  baseline,
   read,
 ) {
   const seen = new Set();
@@ -656,6 +658,7 @@ function inspectOwnedAncestry(
       }
     } catch (cause) {
       if (["EACCES", "EPERM"].includes(cause?.code)) {
+        if (matchesProcessBaseline(ancestorPid, baseline, read)) continue;
         incomplete = true;
         continue;
       }
@@ -720,6 +723,7 @@ export function inspectOwnedSessionProcesses(
           sessionId,
           ownerToken,
           includeSession,
+          baseline,
           read,
         );
         if (ancestry === "current") members.push(pid);
@@ -735,6 +739,7 @@ export function inspectOwnedSessionProcesses(
             sessionId,
             ownerToken,
             includeSession,
+            baseline,
             read,
           );
           if (ancestry === "current") {
@@ -992,6 +997,20 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
   let containmentFailure = null;
   let processBaseline = null;
   let startRequested = false;
+  const killLauncher = (signal) => {
+    if (launcher.isolatedNamespace) {
+      try {
+        process.kill(-child.pid, signal);
+        return true;
+      } catch (cause) {
+        if (cause?.code !== "ESRCH") {
+          containmentFailure ??= cause;
+          return false;
+        }
+      }
+    }
+    return killChild(signal);
+  };
   const kill = (signal) => {
     if (!launcher.isolatedNamespace) {
       try {
@@ -1001,13 +1020,13 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
         return false;
       }
     }
-    return killChild(signal);
+    return killLauncher(signal);
   };
   child.kill = (signal = "SIGTERM") => {
     if (child.exitCode !== null || child.signalCode !== null) return false;
     terminationRequested = true;
     if (!startRequested) {
-      killChild(signal);
+      killLauncher(signal);
     } else if (child.connected) {
       try {
         child.send({ type: "terminate", signal }, (cause) => {
@@ -1022,7 +1041,7 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
     if (terminationTimer === undefined) {
       terminationTimer = setTimeout(() => {
         if (startRequested) kill("SIGKILL");
-        else killChild("SIGKILL");
+        else killLauncher("SIGKILL");
       }, descendantGraceMs);
       terminationTimer.unref();
       terminationFailureTimer = setTimeout(
