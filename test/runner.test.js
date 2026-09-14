@@ -1688,7 +1688,17 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
   const fixture = await createFixture(t);
   const adapter = createAdapter({ questionFirst: true });
   const activities = [];
-  const firstRunner = runnerFor(fixture, { codex: adapter }, { activities });
+  const firstRunner = runnerFor(
+    fixture,
+    { codex: adapter },
+    {
+      activities,
+      configuration: {
+        ...RUNNER_CONFIGURATION,
+        pipelines: { "plan-authoring": { preferredCommitLineLimit: 650 } },
+      },
+    },
+  );
 
   const paused = await firstRunner.run({
     pipelineId: "plan-authoring",
@@ -1716,6 +1726,7 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
   assert.deepEqual(paused.run.pipelineState.settings, {
     maxRevisionRounds: 20,
     mode: "independent",
+    preferredCommitLineLimit: 650,
     stagnationWindowRounds: 3,
   });
   assert.deepEqual(adapter.calls[0].session, {
@@ -1733,7 +1744,11 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
     { codex: adapter },
     {
       activities,
-      configuration: { schemaVersion: 1, defaultBackend: "claude" },
+      configuration: {
+        schemaVersion: 1,
+        defaultBackend: "claude",
+        pipelines: { "plan-authoring": { preferredCommitLineLimit: 1200 } },
+      },
     },
   );
   const beforeResume = await secondRunner.status(paused.run.runId);
@@ -1752,6 +1767,7 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
   assert.deepEqual(completed.run.pipelineState.settings, {
     maxRevisionRounds: 20,
     mode: "independent",
+    preferredCommitLineLimit: 650,
     stagnationWindowRounds: 3,
   });
   assert.deepEqual(
@@ -1775,6 +1791,93 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
   assert.ok(activities.some(({ actor }) => actor === "planner"));
   assert.ok(activities.some(({ actor }) => actor === "reviewer"));
   assert.ok(activities.every(({ runId }) => runId === paused.run.runId));
+});
+
+test("migrates legacy authoring line targets under the lease without configuration reload", async (t) => {
+  const fixture = await createFixture(t);
+  const store = createRunStore({ stateRoot: fixture.stateRoot });
+  const delegate = createAdapter();
+  const initialRunner = runnerFor(
+    fixture,
+    { codex: delegate },
+    { runStore: store },
+  );
+  const prepared = await initialRunner.create({
+    pipelineId: "plan-authoring",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    sourceSession: null,
+  });
+  const statePath = join(prepared.directoryPath, "state.json");
+  const eventsPath = join(prepared.directoryPath, "events.jsonl");
+  const state = JSON.parse(await readFile(statePath, "utf8"));
+  const events = (await readFile(eventsPath, "utf8"))
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  for (const legacy of [state, ...events.map((event) => event.state)]) {
+    legacy.pipelineStateVersion = 3;
+    delete legacy.pipelineState.settings.preferredCommitLineLimit;
+  }
+  await writeFile(statePath, `${JSON.stringify(state)}\n`);
+  await writeFile(
+    eventsPath,
+    `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+  );
+  const before = await Promise.all([readFile(statePath), readFile(eventsPath)]);
+  const runner = createRunner({
+    adapters: {
+      codex: {
+        ...delegate,
+        async run(request) {
+          const saved = await store.loadRun(prepared.run.runId);
+          assert.equal(await store.runIsLeased(prepared.run.runId), true);
+          assert.equal(saved.pipelineStateVersion, 4);
+          assert.equal(
+            saved.pipelineState.settings.preferredCommitLineLimit,
+            900,
+          );
+          return delegate.run(request);
+        },
+      },
+    },
+    clarifications: createClarificationService({ interactive: false }),
+    git: createGitService(),
+    runStore: store,
+    async loadConfiguration() {
+      throw new Error("Migration reloaded configuration.");
+    },
+  });
+  const lease = await store.acquireRunLease(prepared.run.runId);
+  try {
+    const status = await runner.status(prepared.run.runId);
+    assert.equal(
+      status.run.pipelineState.settings.preferredCommitLineLimit,
+      900,
+    );
+    await assert.rejects(runner.resume({ runId: prepared.run.runId }), {
+      code: "ERR_RUN_LEASED",
+    });
+    assert.deepEqual(
+      await Promise.all([readFile(statePath), readFile(eventsPath)]),
+      before,
+    );
+  } finally {
+    await lease.release();
+  }
+  const completed = await runner.resume({ runId: prepared.run.runId });
+  assert.equal(completed.run.pipelineState.workflowState, "DONE");
+  const persistedEvents = (await readFile(eventsPath, "utf8"))
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(persistedEvents[1].activity.kind, "migrated");
+  assert.equal(
+    persistedEvents[1].state.pipelineState.settings.preferredCommitLineLimit,
+    900,
+  );
 });
 
 test("migrates a legacy runtime envelope under the run lease before resume", async (t) => {
@@ -2426,6 +2529,7 @@ test("persists project overrides and blocks later configuration changes", async 
         "plan-authoring": {
           mode: "lazy",
           maxRevisionRounds: 4,
+          preferredCommitLineLimit: 450,
           roles: { reviewer: { contextSize: "200000" } },
         },
       },
@@ -2441,6 +2545,7 @@ test("persists project overrides and blocks later configuration changes", async 
     pipelines: {
       "plan-authoring": {
         maxRevisionRounds: 9,
+        preferredCommitLineLimit: 700,
         roles: { reviewer: { model: "runner-reviewer" } },
       },
     },
@@ -2461,6 +2566,7 @@ test("persists project overrides and blocks later configuration changes", async 
   assert.deepEqual(paused.run.pipelineState.settings, {
     maxRevisionRounds: 4,
     mode: "independent",
+    preferredCommitLineLimit: 450,
     stagnationWindowRounds: 3,
   });
   assert.equal(

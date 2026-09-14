@@ -25,6 +25,7 @@
     "plan-authoring": {
       "mode": "independent",
       "maxRevisionRounds": 20,
+      "preferredCommitLineLimit": 900,
       "stagnationWindowRounds": 3,
       "roles": {
         "planner": {},

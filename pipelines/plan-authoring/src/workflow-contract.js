@@ -1222,7 +1222,7 @@ export function assertRun(run) {
   if (
     !isRecord(run) ||
     run.pipelineId !== "plan-authoring" ||
-    run.pipelineStateVersion !== 3 ||
+    run.pipelineStateVersion !== 4 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -1501,7 +1501,12 @@ export function assertRun(run) {
 }
 
 export function assertSettings(settings) {
-  const fields = ["maxRevisionRounds", "mode", "stagnationWindowRounds"];
+  const fields = [
+    "maxRevisionRounds",
+    "mode",
+    "preferredCommitLineLimit",
+    "stagnationWindowRounds",
+  ];
   if (
     !isRecord(settings) ||
     Object.keys(settings).length !== fields.length ||
@@ -1512,7 +1517,7 @@ export function assertSettings(settings) {
   if (!["independent", "lazy"].includes(settings.mode)) {
     throw workflowError("Plan-authoring setting mode is invalid.");
   }
-  for (const field of ["maxRevisionRounds", "stagnationWindowRounds"]) {
+  for (const field of fields.filter((field) => field !== "mode")) {
     if (!Number.isSafeInteger(settings[field]) || settings[field] < 1) {
       throw workflowError(`Plan-authoring setting ${field} is invalid.`);
     }

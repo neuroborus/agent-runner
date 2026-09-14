@@ -13,6 +13,13 @@ apart from the resolved clarification and plan artifact paths. The resulting
 headings contain the exact subject-only Conventional Commit messages that plan
 execution will later consume unchanged.
 
+The authoring setting `preferredCommitLineLimit` defaults to 900 anticipated
+changed lines per commit, counting additions plus deletions including tests and
+documentation. Planner and Plan Reviewer prefer smaller cohesive boundaries;
+larger indivisible changes remain valid with a concise explanation in the plan.
+The target is a planning heuristic and does not impose a new plan-format rule
+or execution limit.
+
 Plan authoring proposes work; it does not implement the task, create a commit,
 or guarantee that a later worktree will remain compatible with the plan.
 

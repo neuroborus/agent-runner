@@ -31,6 +31,10 @@ test("tracked example is valid and local configuration is ignored", async () => 
   assert.equal(configuration.defaultContextSize, "current");
   assert.deepEqual(configuration.trustedCommands, {});
   assert.equal(configuration.pipelines["plan-authoring"].mode, "independent");
+  assert.equal(
+    configuration.pipelines["plan-authoring"].preferredCommitLineLimit,
+    900,
+  );
   assert.equal(configuration.pipelines["plan-execution"].mode, "independent");
   assert.equal(configuration.pipelines.polishing.mode, "independent");
   assert.deepEqual(configuration.pipelines["plan-authoring"].roles.reviewer, {
@@ -70,6 +74,7 @@ test("minimal configuration uses pipeline-owned setting defaults", () => {
   assert.deepEqual(configuration.pipelines["plan-authoring"], {
     maxRevisionRounds: 20,
     mode: "independent",
+    preferredCommitLineLimit: 900,
     stagnationWindowRounds: 3,
     roles: {},
   });

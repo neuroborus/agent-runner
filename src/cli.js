@@ -467,7 +467,15 @@ export async function main(
 
   if (command === "pipelines") {
     const output = PIPELINES.map(
-      (entry) => `${entry.id}\t${entry.description}`,
+      (entry) =>
+        `${entry.id}\t${entry.description}\n  Settings (defaults): ${Object.entries(
+          entry.settings,
+        )
+          .map(
+            ([name, definition]) =>
+              `${name}=${JSON.stringify(definition.defaultValue)}`,
+          )
+          .join(", ")}`,
     ).join("\n");
     stdout.write(`${output}\n`);
     return 0;

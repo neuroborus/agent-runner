@@ -106,6 +106,7 @@ test("role resolution normalizes configuration objects", () => {
     settings: {
       maxRevisionRounds: 4,
       mode: "independent",
+      preferredCommitLineLimit: 900,
       stagnationWindowRounds: 3,
     },
     sourceProfile: null,
@@ -175,6 +176,59 @@ test("lazy polishing resolves only the Worker role", () => {
 
   assert.deepEqual(Object.keys(resolved.roles), ["worker"]);
   assert.equal(resolved.settings.mode, "lazy");
+});
+
+test("preferred commit line targets validate and resolve through configuration precedence", () => {
+  const configuration = (value) => ({
+    schemaVersion: 1,
+    defaultBackend: "codex",
+    pipelines: { "plan-authoring": { preferredCommitLineLimit: value } },
+  });
+  const resolve = (root, project) =>
+    resolvePipelineConfiguration("plan-authoring", root, {}, {}, null, project)
+      .settings.preferredCommitLineLimit;
+
+  assert.equal(resolve({ schemaVersion: 1, defaultBackend: "codex" }), 900);
+  assert.equal(resolve(configuration(700)), 700);
+  assert.equal(resolve(configuration(700), configuration(450)), 450);
+  assert.equal(resolve(configuration(1)), 1);
+  assert.equal(
+    resolve(configuration(Number.MAX_SAFE_INTEGER)),
+    Number.MAX_SAFE_INTEGER,
+  );
+  for (const invalid of [
+    0,
+    -1,
+    1.5,
+    "900",
+    null,
+    true,
+    Number.MAX_SAFE_INTEGER + 1,
+  ]) {
+    assert.throws(
+      () => resolve(configuration(invalid)),
+      /preferredCommitLineLimit/u,
+    );
+    assert.throws(
+      () => resolve(configuration(700), configuration(invalid)),
+      /preferredCommitLineLimit/u,
+    );
+  }
+  assert.throws(
+    () =>
+      resolvePipelineConfiguration(
+        "plan-execution",
+        configuration(700),
+        {},
+        {},
+        null,
+        {
+          schemaVersion: 1,
+          pipelines: { "plan-execution": { preferredCommitLineLimit: 900 } },
+        },
+      ),
+    /preferredCommitLineLimit/u,
+  );
 });
 
 test("setting overrides take precedence over project and runner settings", () => {

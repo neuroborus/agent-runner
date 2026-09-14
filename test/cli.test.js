@@ -1079,5 +1079,9 @@ test("pipelines lists the statically registered pipelines", async () => {
   assert.match(stdout.read(), /^plan-authoring\t/mu);
   assert.match(stdout.read(), /^plan-execution\t/mu);
   assert.match(stdout.read(), /^polishing\t/mu);
+  assert.match(
+    stdout.read(),
+    /Settings \(defaults\):.*preferredCommitLineLimit=900/u,
+  );
   assert.equal(stderr.read(), "");
 });
