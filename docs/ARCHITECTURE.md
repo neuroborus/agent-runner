@@ -712,6 +712,87 @@ envelope in its acceptance event while preserving pipeline state and history.
 
 ### Common envelope and pipeline migrations
 
+Common envelope version 5 adds nullable `executionProcess` ownership. Legacy
+envelopes project null without read-side writes; the ordinary leased runtime
+migration persists the current shape. Before a provider or trusted command
+can execute, a private supervisor waits on a separate inherited Node IPC channel
+while the runner journals its host PID, hostname, boot/start identity, and PID
+namespace identity. The shared agents boundary normally launches this
+supervisor as PID 1 in a private Linux namespace using system-protected
+bubblewrap. When repository validation is already inside the runner-trusted
+private PID namespace and that policy correctly denies another namespace, it
+instead gives the supervisor a distinct owned session inside the enclosing
+namespace. It preserves
+inherited filesystem/network restrictions; provider and trusted-executor
+sandboxes still enforce their narrower access contracts. The launcher's private
+status channel supplies the host PID, verified against its parent and namespace
+before registration. No provider work starts without that proof.
+
+Launcher verification resolves the fixed system executable to a regular,
+single-linked canonical file and checks that file plus every relevant ancestor
+against the effective Linux mount table. A read-only mount is a protected
+substitution anchor even when a namespace-root permission probe would otherwise
+report writable. Paths without that anchor must deny runner-identity writes
+through the root. Missing mount evidence, links, or a writable substitution
+path fails closed.
+
+Disconnecting IPC on runner loss starts bounded cleanup; bubblewrap also binds
+the namespace lifetime to the runner. Exiting namespace PID 1 makes the kernel
+retire all descendants, including detached sessions, double forks, and nested
+namespaces. Normal completion reports surviving descendants before retiring
+them, so trusted checks cannot pass with leaked work. Recovery inspects only the
+recorded owner and waits for namespace-init death before clearing ownership;
+the outer launcher's exit alone is insufficient. Live shutdown uses the original
+child handle and control channel. Recovery relies on parent-death teardown and
+never signals a numeric host PID, avoiding identity-check/signalling races with
+PID reuse. Unverifiable ownership retains exclusion.
+Former group-only records remain conservative until a verified reboot; they
+cannot prove that detached descendants stopped. Unavailable namespace support
+fails before execution. Reusing the enclosing trusted namespace neither retries
+without containment nor widens its policy; session membership and a per-launch
+inherited ownership token supply the inner ownership boundary while the
+enclosing namespace init remains responsible for otherwise detached descendants.
+
+The runner service accepts revision-bound `requestOperatorStop` requests and
+monitors durable revisions while executing. An accepted request aborts only
+the owned provider or trusted execution and publishes stopping activity.
+Provider recovery attempts and the constrained commit executor check the same
+abort signal before starting. The run/worktree leases remain held through
+process shutdown, read-only reconciliation, and the final stop event. Persisted
+process ownership also prevents a different run from reclaiming the worktree
+after owner loss, and prevents checkpoint advancement before process cleanup.
+CLI/MCP command registration remains transport-owned.
+
+Each pipeline has a reconciliation-only entry path with provider invocation,
+trusted commands, and artifact writes disabled. It rechecks frozen inputs and
+the interrupted access contract, preserves safe partial content, rejects index
+or Git-control drift, and retains safety blockers. Content-changing partial
+work invalidates dependent gates and charges correction work once; the exact
+suspended journal checkpoint remains inspectable. Consumed commits are verified
+without reinvoking their executor. Handoff reconciliation only inspects whether
+the existing index is complete or untouched; it never stages. Verified effects
+and step advancement are included atomically in the final stop event.
+When the runner proves that an operator stop prevented commit invocation,
+verification of unchanged Git state retires the unused authorization. Resume
+can obtain a new authorization; uncertain or begun effects remain verification-only.
+Provider error redaction retains that runner-owned pre-effect stop proof while
+discarding native error wrappers; unrelated rejections remain blockers.
+
+Reconciliation produces `WAITING_FOR_USER` with `operator_paused` and an
+explicit null resume action, or terminal `CANCELED`. A bounded private
+`operatorResume` record retains the reconciled workflow position, active-turn
+reconstruction marker, and any preceding pause. Null resume restores an existing
+pause without consuming its editor authorization or bypassing its blockers.
+Otherwise it reconstructs the preserved logical role from frozen configuration
+and session lineage only after reacquiring any required worktree lease.
+Invalidated content returns through the pipeline's
+candidate gate before further finalization. Cancellation cannot resume.
+Cancellation superseding a pause during reconciliation changes only the final
+outcome; verification never replays an effect or counts its progress twice.
+Authorized clarification edits remain pending; stop reconciliation checks Git
+safety without consuming them or classifying them as frozen-input drift. Input
+drift outside that window cannot skip repository reconciliation.
+
 `state.json` contains the common versioned envelope: monotonic revision,
 pipeline ID and state version, an explicit runtime-compatibility tuple,
 canonical paths, resolved roles, counters, hashes, pause state, session

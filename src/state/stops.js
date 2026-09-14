@@ -4,6 +4,7 @@ import {
   assertRunId,
   deepFreeze,
   normalizeRunState,
+  normalizePublicActivity,
   normalizeTransitionPatch,
   RUNTIME_COMPATIBILITY,
   RUN_STATE_SCHEMA_VERSION,
@@ -94,6 +95,12 @@ export function createStopService({
             "ERR_RUN_TERMINAL",
           );
         }
+        if (current.pause?.reason === "operator_paused") {
+          reject(
+            "An operator pause is already effective; retry its original request.",
+            "ERR_STOP_PENDING",
+          );
+        }
         const supersedes =
           stopIsPending(current) &&
           kind === "cancel_requested" &&
@@ -162,11 +169,17 @@ export function createStopService({
 
   // Only the execution owner calls this after runner/Git reconciliation. The
   // state boundary neither signals a process nor performs a repository effect.
-  async function complete(lease, { requestId, patch }) {
+  async function complete(lease, { requestId, patch, outcomeMessage }) {
     const normalizedPatch = normalizeTransitionPatch(patch);
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
       const current = snapshot.state;
+      if (current.executionProcess !== null) {
+        reject(
+          "Owned execution must stop before reconciliation completes.",
+          "ERR_EXECUTION_PROCESS_ACTIVE",
+        );
+      }
       if (
         current.stopRequest?.requestId === requestId &&
         !stopIsPending(current) &&
@@ -189,7 +202,8 @@ export function createStopService({
       if (
         normalizedPatch.pipelineState?.workflowState !==
           (canceled ? "CANCELED" : "WAITING_FOR_USER") ||
-        (!canceled && normalizedPatch.pause?.reason !== "operator_paused")
+        normalizedPatch.pause?.reason !==
+          (canceled ? "operator_canceled" : "operator_paused")
       ) {
         reject(
           "Stop reconciliation must record the requested outcome.",
@@ -210,14 +224,21 @@ export function createStopService({
         },
         record.runId,
       );
-      await journal.appendTransition(runDirectory, next, snapshot, {
-        actor: "runner",
-        phase: "stop",
-        kind: "reconciled",
-        message: canceled
-          ? "Operator cancellation reconciled."
-          : "Operator pause reconciled.",
-      });
+      await journal.appendTransition(
+        runDirectory,
+        next,
+        snapshot,
+        normalizePublicActivity({
+          actor: "runner",
+          phase: "stop",
+          kind: "reconciled",
+          message:
+            outcomeMessage ??
+            (canceled
+              ? "Operator cancellation reconciled."
+              : "Operator pause reconciled."),
+        }),
+      );
       return deepFreeze(next);
     });
   }
@@ -230,5 +251,29 @@ export function createStopService({
       : deepFreeze(snapshot.events[revision - 1].state);
   }
 
-  return Object.freeze({ request, complete, checkpoint });
+  async function activity(lease, value) {
+    const normalized = normalizePublicActivity(value);
+    if (normalized?.actor !== "runner" || normalized.phase !== "stop") {
+      reject(
+        "Operator stop activity is invalid.",
+        "ERR_INVALID_PUBLIC_ACTIVITY",
+      );
+    }
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
+      const snapshot = await loadSnapshot(runDirectory, record.runId);
+      if (!stopIsPending(snapshot.state)) return snapshot.state;
+      const next = normalizeRunState(
+        {
+          ...snapshot.state,
+          revision: snapshot.state.revision + 1,
+          updatedAt: timestamp(snapshot.state.updatedAt),
+        },
+        record.runId,
+      );
+      await journal.appendTransition(runDirectory, next, snapshot, normalized);
+      return deepFreeze(next);
+    });
+  }
+
+  return Object.freeze({ request, complete, checkpoint, activity });
 }

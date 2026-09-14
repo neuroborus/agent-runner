@@ -2,7 +2,7 @@ import { isAbsolute, resolve } from "node:path";
 
 import { isAdapterDiagnosticClass } from "../agents/index.js";
 
-export const RUN_STATE_SCHEMA_VERSION = 4;
+export const RUN_STATE_SCHEMA_VERSION = 5;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
   runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
@@ -19,6 +19,7 @@ const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   LEGACY_RUN_STATE_SCHEMA_VERSION,
   2,
   3,
+  4,
   RUN_STATE_SCHEMA_VERSION,
 ]);
 
@@ -42,6 +43,7 @@ const STATE_FIELDS = new Set([
   "pause",
   "sessionLineage",
   "activeTurn",
+  "executionProcess",
   "stopRequest",
   "pipelineState",
   "createdAt",
@@ -164,6 +166,34 @@ function assertInputText(value, path, maximumLength = MAX_INPUT_TEXT_LENGTH) {
 
 function normalizePause(value) {
   const pause = cloneRecord(value, "run.pause");
+  const operatorReason = ["operator_paused", "operator_canceled"].includes(
+    pause.reason,
+  );
+  if (operatorReason !== Object.hasOwn(pause, "operatorResume")) {
+    fail("Operator resume checkpoint is invalid.");
+  }
+  if (operatorReason) {
+    const checkpoint = pause.operatorResume;
+    assertRecord(checkpoint, "run.pause.operatorResume");
+    rejectUnknownFields(
+      checkpoint,
+      new Set(["workflowState", "pause", "activeTurn"]),
+      "run.pause.operatorResume",
+    );
+    if (
+      Object.keys(checkpoint).length !== 3 ||
+      typeof checkpoint.workflowState !== "string" ||
+      !/^[A-Z][A-Z_]{0,63}$/u.test(checkpoint.workflowState) ||
+      Object.hasOwn(checkpoint.pause ?? {}, "operatorResume") ||
+      ["operator_paused", "operator_canceled"].includes(
+        checkpoint.pause?.reason,
+      )
+    )
+      fail("Operator resume checkpoint is invalid.");
+    checkpoint.activeTurn = normalizeActiveTurn(checkpoint.activeTurn);
+    checkpoint.pause =
+      checkpoint.pause === null ? null : normalizePause(checkpoint.pause);
+  }
   if (
     Object.hasOwn(pause, "diagnosticClass") &&
     !isAdapterDiagnosticClass(pause.diagnosticClass)
@@ -558,11 +588,67 @@ export function stopIsPending(state) {
   );
 }
 
+export function validateProcessIdentity(value) {
+  if (value === null) return null;
+  if (
+    value === undefined ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.keys(value).length !== 2 ||
+    typeof value.bootId !== "string" ||
+    !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(value.bootId) ||
+    typeof value.startTicks !== "string" ||
+    !/^(?:0|[1-9][0-9]{0,31})$/u.test(value.startTicks)
+  ) {
+    throw new RunStoreError("Process identity is invalid.", {
+      code: "ERR_INVALID_PROCESS_IDENTITY",
+    });
+  }
+  return { bootId: value.bootId, startTicks: value.startTicks };
+}
+
+function normalizeExecutionProcess(value, schemaVersion) {
+  if ((value === undefined && schemaVersion < 5) || value === null) return null;
+  assertRecord(value, "run.executionProcess");
+  rejectUnknownFields(
+    value,
+    new Set(["pid", "hostname", "processIdentity", "namespaceId"]),
+    "run.executionProcess",
+  );
+  if (
+    schemaVersion < 5 ||
+    ![3, 4].includes(Object.keys(value).length) ||
+    (value.namespaceId != null &&
+      (typeof value.namespaceId !== "string" ||
+        !/^pid:\[\d{1,20}\]$/u.test(value.namespaceId))) ||
+    !Number.isSafeInteger(value.pid) ||
+    value.pid < 1 ||
+    typeof value.hostname !== "string" ||
+    value.hostname.length < 1 ||
+    value.hostname.length > 255 ||
+    UNSAFE_TEXT_PATTERN.test(value.hostname)
+  )
+    fail("Run execution process is invalid.");
+  return {
+    ...value,
+    processIdentity: validateProcessIdentity(value.processIdentity),
+    namespaceId: value.namespaceId ?? null,
+  };
+}
+
 export function assertRunCanAdvance(state) {
   if (stopIsPending(state)) {
     throw new RunStoreError(
       "Operator stop must be reconciled before further work.",
       { code: "ERR_STOP_RECONCILIATION_REQUIRED" },
+    );
+  }
+  if (state.executionProcess != null) {
+    throw new RunStoreError(
+      "Owned execution must stop before advancing its checkpoint.",
+      {
+        code: "ERR_EXECUTION_PROCESS_ACTIVE",
+      },
     );
   }
   if (
@@ -643,6 +729,10 @@ export function normalizeRunState(value, expectedRunId) {
     pause,
     sessionLineage: normalizeSessionLineage(value.sessionLineage),
     activeTurn: normalizeActiveTurn(value.activeTurn, value.schemaVersion),
+    executionProcess: normalizeExecutionProcess(
+      value.executionProcess,
+      value.schemaVersion,
+    ),
     stopRequest: normalizeStopRequest(value.stopRequest, value),
     pipelineState: cloneRecord(value.pipelineState, "run.pipelineState"),
     createdAt,

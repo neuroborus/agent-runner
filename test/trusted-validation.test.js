@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   access,
@@ -342,7 +342,6 @@ test("isolates host-control and remote-write probes", async (t) => {
   assert.equal(execution.options.environment.HOME, "/nonexistent");
   assert.equal(execution.options.environment.GIT_SSH_COMMAND, "/bin/false");
   assert.equal(execution.options.environment.GIT_CONFIG_GLOBAL, "/dev/null");
-
   const shadowed = createTrustedValidationService({
     bubblewrapExecutable: fakeLauncher,
     git,
@@ -592,6 +591,146 @@ test("terminates persistent descendants after successful trusted commands", asyn
   });
   const childPid = Number.parseInt(await readFile(pidPath, "utf8"), 10);
   assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
+});
+
+test("supervised trusted commands preserve readiness, exit status, and descendant rejection", async (t) => {
+  const projectPath = await repository(t);
+  const recorded = [];
+  let registrationSideEffect;
+  const options = {
+    cwd: projectPath,
+    environment: process.env,
+    timeoutMs: 4000,
+    terminationGraceMs: 100,
+    onProcess: async (pid) => {
+      recorded.push(pid);
+      if (pid !== null) registrationSideEffect?.();
+    },
+  };
+  const failed = await runExactCommand(
+    {
+      executable: process.execPath,
+      arguments: [
+        "-e",
+        "require('node:fs').writeSync(3, Buffer.from([1])); process.exit(7)",
+      ],
+    },
+    { ...options, readinessRequired: true },
+  );
+  assert.equal(failed.status, "FAIL");
+  assert.equal(failed.exitCode, 7);
+  assert.equal(recorded.length, 2);
+  assert.equal(recorded[1], null);
+
+  let neighbor;
+  let neighborClosed;
+  registrationSideEffect = () => {
+    neighbor = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      stdio: "ignore",
+    });
+    neighborClosed = new Promise((resolve) => neighbor.once("close", resolve));
+  };
+  const concurrent = await runExactCommand(
+    { executable: process.execPath, arguments: ["-e", "process.exit(0)"] },
+    options,
+  );
+  registrationSideEffect = undefined;
+  t.after(async () => {
+    if (neighbor.exitCode === null && neighbor.signalCode === null)
+      neighbor.kill("SIGKILL");
+    await neighborClosed;
+  });
+  assert.equal(concurrent.status, "PASS");
+  assert.doesNotThrow(() => process.kill(neighbor.pid, 0));
+  neighbor.kill("SIGKILL");
+  await neighborClosed;
+
+  const detachedPidPath = join(projectPath, "detached.pid");
+  let detachedPid;
+  t.after(() => {
+    if (detachedPid === undefined) return;
+    try {
+      process.kill(detachedPid, "SIGKILL");
+    } catch {}
+  });
+  for (const command of [
+    {
+      executable: "/bin/bash",
+      arguments: ["-c", "(trap '' HUP TERM; while :; do :; done) &"],
+    },
+    {
+      executable: "/bin/bash",
+      arguments: [
+        "-c",
+        "set -m; (child=$BASHPID; kill -0 -- -$child || exit 1; trap '' HUP TERM; while :; do :; done) &",
+      ],
+    },
+    {
+      detached: true,
+      executable: process.execPath,
+      arguments: [
+        "-e",
+        "const { spawn } = require('node:child_process'); " +
+          "const { writeFileSync } = require('node:fs'); " +
+          "function launch(attempt = 0) { " +
+          "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], " +
+          "{ detached: true, stdio: 'ignore' }); " +
+          "child.once('error', (cause) => { " +
+          "if (cause.code === 'EAGAIN' && attempt < 20) " +
+          "setTimeout(() => launch(attempt + 1), 25); " +
+          "else process.exitCode = 1; }); " +
+          "child.once('spawn', () => { child.unref(); " +
+          `writeFileSync(${JSON.stringify(detachedPidPath)}, String(child.pid)); }); } launch();`,
+      ],
+    },
+  ]) {
+    const { detached, ...request } = command;
+    const recordedBefore = recorded.length;
+    const leaked = await runExactCommand(request, options);
+    assert.deepEqual(leaked, {
+      status: "BLOCKED",
+      exitCode: null,
+      signal: null,
+      timedOut: false,
+      reason: "process-tree",
+    });
+    assert.equal(recorded.length, recordedBefore + 2);
+    assert.equal(recorded.at(-1), null);
+    assert.throws(() => process.kill(recorded.at(-2), 0), { code: "ESRCH" });
+    if (detached) {
+      detachedPid = Number.parseInt(
+        await readFile(detachedPidPath, "utf8"),
+        10,
+      );
+      assert.throws(() => process.kill(detachedPid, 0), { code: "ESRCH" });
+      detachedPid = undefined;
+    }
+  }
+  const signaled = await runExactCommand(
+    {
+      executable: process.execPath,
+      arguments: ["-e", "process.kill(process.pid, 'SIGTERM')"],
+    },
+    options,
+  );
+  assert.deepEqual(signaled, {
+    status: "FAIL",
+    exitCode: null,
+    signal: "SIGTERM",
+    timedOut: false,
+    reason: "exit",
+  });
+  const missing = await runExactCommand(
+    { executable: join(projectPath, "missing-command"), arguments: [] },
+    options,
+  );
+  assert.deepEqual(missing, {
+    status: "BLOCKED",
+    exitCode: null,
+    signal: null,
+    timedOut: false,
+    reason: "spawn",
+  });
 });
 
 test("preserves a failed trusted command after descendants retire", async (t) => {

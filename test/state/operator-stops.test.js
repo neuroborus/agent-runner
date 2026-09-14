@@ -82,10 +82,65 @@ async function complete(f, receipt, lease = f.lease, store = f.store) {
         ...current.pipelineState,
         workflowState: canceled ? "CANCELED" : "WAITING_FOR_USER",
       },
-      pause: canceled ? null : { reason: "operator_paused" },
+      pause: {
+        reason: canceled ? "operator_canceled" : "operator_paused",
+        resumeAction: null,
+        operatorResume: {
+          workflowState: current.stopRequest.checkpoint.workflowState,
+          pause:
+            current.pause?.operatorResume === undefined
+              ? current.pause
+              : current.pause.operatorResume.pause,
+          activeTurn: current.stopRequest.checkpoint.activeTurn,
+        },
+      },
     },
   });
 }
+
+test("validates suspended turn and input envelopes before completing an operator stop", async (t) => {
+  const f = await fixture(t);
+  const receipt = await f.store.requestOperatorStop(f.input);
+  const checkpoint = {
+    workflowState: "IMPLEMENT",
+    pause: null,
+    activeTurn: null,
+  };
+  for (const operatorResume of [
+    { workflowState: "IMPLEMENT", pause: null, hidden: null },
+    {
+      ...checkpoint,
+      activeTurn: { role: "worker", phase: "implement", hidden: true },
+    },
+    {
+      ...checkpoint,
+      pause: { reason: "clarification_answers_required", inputRequest: {} },
+    },
+    {
+      ...checkpoint,
+      pause: { reason: "operator_paused", operatorResume: checkpoint },
+    },
+  ]) {
+    await assert.rejects(
+      f.store.completeOperatorStop(f.lease, {
+        requestId: receipt.requestId,
+        patch: {
+          pipelineState: {
+            ...f.state.pipelineState,
+            workflowState: "WAITING_FOR_USER",
+          },
+          pause: {
+            reason: "operator_paused",
+            resumeAction: null,
+            operatorResume,
+          },
+        },
+      }),
+      { code: "ERR_INVALID_RUN_STATE" },
+    );
+  }
+  await complete(f, receipt);
+});
 
 test("records a bounded stop checkpoint during a live turn and replays its receipt", async (t) => {
   const f = await fixture(t);
@@ -259,6 +314,14 @@ test("retains existing pause requirements by reference to the exact suspended st
     baseline.pipelineState.pendingEdit,
   );
   assert.equal(finished.stopRequest.checkpoint.resumeAction, null);
+  await assert.rejects(
+    f.store.requestOperatorStop({
+      ...f.input,
+      expectedRevision: finished.revision,
+      idempotencyKey: "already-paused",
+    }),
+    { code: "ERR_STOP_PENDING" },
+  );
   // The later runner resume policy must consume the preserved blocker, not bypass it.
   await f.store.transitionRun(f.lease, {
     pause: baseline.pause,
@@ -441,6 +504,70 @@ test("distinguishes reused PIDs and rebooted owners without trusting process liv
     await complete(f, receipt, lease, recovery);
     await lease.release();
     await assert.rejects(f.lease.release(), { code: "ERR_INVALID_RUN_LEASE" });
+  }
+});
+
+test("durable subprocess ownership retains worktree exclusion and distinguishes host loss", async (t) => {
+  const f = await fixture(t);
+  await f.store.acquireWorktreeLease(f.projectPath, f.input.runId);
+  const proof = {
+    processIdentity: { bootId: BOOT_A, startTicks: "101" },
+    namespaceId: "pid:[4026533000]",
+  };
+  const registered = await f.store.recordExecutionProcess(f.lease, 101, proof);
+  assert.equal(registered.executionProcess.pid, 101);
+  assert.equal(registered.executionProcess.namespaceId, proof.namespaceId);
+  assert.equal(
+    (await f.store.inspectExecutionProcess(f.input.runId)).namespaceId,
+    proof.namespaceId,
+  );
+  await assert.rejects(f.store.transitionRun(f.lease, { pause: null }), {
+    code: "ERR_EXECUTION_PROCESS_ACTIVE",
+  });
+  await assert.rejects(f.lease.release(), {
+    code: "ERR_EXECUTION_PROCESS_ACTIVE",
+  });
+  const recovery = createRunStore({
+    ...f.storeOptions,
+    processId: 200,
+    processIsAlive: (pid) => pid !== 100,
+    processIdentity: (pid) => ({ bootId: BOOT_B, startTicks: String(pid) }),
+  });
+  assert.equal(
+    (await recovery.inspectExecutionProcess(f.input.runId)).previousBoot,
+    true,
+  );
+  await assert.rejects(
+    recovery.acquireWorktreeLease(f.projectPath, OTHER_RUN),
+    { code: "ERR_WORKTREE_LEASED" },
+  );
+  const lease = await recovery.acquireRunLease(f.input.runId);
+  await recovery.recordExecutionProcess(lease, null);
+  const worktree = await recovery.acquireWorktreeLease(
+    f.projectPath,
+    f.input.runId,
+  );
+  await worktree.release();
+  await lease.release();
+});
+
+test("namespace registration rejects identity replacement without recording a new owner", async (t) => {
+  const f = await fixture(t);
+  const before = await f.store.loadRun(f.input.runId);
+  for (const proof of [
+    {
+      processIdentity: { bootId: BOOT_A, startTicks: "999" },
+      namespaceId: "pid:[1]",
+    },
+    {
+      processIdentity: { bootId: BOOT_B, startTicks: "101" },
+      namespaceId: "pid:[1]",
+    },
+  ]) {
+    await assert.rejects(f.store.recordExecutionProcess(f.lease, 101, proof), {
+      code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    });
+    assert.deepEqual(await f.store.loadRun(f.input.runId), before);
   }
 });
 

@@ -56,6 +56,19 @@ the same checkout concurrently. Status and activity reads remain lock-free.
 
 ## Pauses, resume, and observability
 
+The runner service distinguishes an operator pause from cancellation. A pause
+retains the frozen run and its reconciled checkpoint; its null resume action
+restores any existing blocker before ordinary work can continue. Cancellation
+produces inspectable terminal `CANCELED` state and cannot be resumed. Safe
+partial workspace changes and task artifacts remain available in either case.
+These service operations do not themselves register CLI or MCP commands.
+
+Stop requests are durable before owned execution is interrupted. Activity
+reports stopping, repository reconciliation, and the resulting state, while
+leases remain held until accounting completes. If a commit or handoff already
+began, verification records the observed effect without undoing or replaying it.
+Retained safety blockers remain visible through the bounded pause projection.
+
 Legacy opaque plan-execution failures during terminal confirmation can expose
 an action-free retry in either mode when durable history proves acceptance and
 finalization. CLI and MCP share that eligibility; status remains lock-free and

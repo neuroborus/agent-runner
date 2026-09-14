@@ -195,6 +195,34 @@ moving active or terminal workflow positions, reviving a terminal run,
 rewriting the draft, replaying an accepted checkpoint, consuming a revision or
 correction round, or writing `plan.md`.
 
+## Operator Pause And Cancellation
+
+The runner's durable stop protocol applies to every role, checkpoint, and mode.
+An accepted request aborts only registered execution. The runner contains
+owned processes in private PID namespaces. A runner nested inside the
+runner-trusted validation namespace uses an owned session when that sandbox
+denies another PID namespace, without widening the enclosing sandbox. It waits
+for owned containment teardown, including detached descendants, before repository
+reconciliation. The runner keeps its
+execution lease and any held worktree lease until the pipeline's read-only
+reconciliation path has accounted for the interrupted turn. That path cannot
+invoke providers, trusted checks, or artifact writes. It revalidates frozen
+inputs and the original access contract, preserves existing artifacts and safe
+partial content, and retains unsafe input or repository changes as blockers.
+It never rolls back content or changes Git controls.
+
+A completed operator pause uses `WAITING_FOR_USER`, `operator_paused`, and a
+null resume action. Its private checkpoint preserves the reconciled workflow
+position, logical turn, and preceding pause. Resuming an already paused
+checkpoint restores its blockers and pending editor authorization without
+consuming them. Session reconstruction uses frozen roles, mode, settings, and
+source lineage; an interrupted role does not refork its source. `CANCELED` is
+terminal and inspectable, and every resume path rejects it.
+
+Every planning turn remains repository-read-only. Stop reconciliation requires
+an unchanged baseline and preserves the durable draft and declared artifacts.
+A read-only mutation remains a blocker after an operator pause is lifted.
+
 ## Clarification
 
 Before the first Planner turn in `CLARIFY`, the runner ensures the clarification

@@ -7,6 +7,26 @@ remain in the owning documentation.
 
 ## 2026-09-13
 
+- **Operator stops reconcile under the execution owner's leases.** The runner
+  watches durable stop requests and aborts only its registered provider or
+  trusted-command PID namespace. A supervisor waits for registration before
+  launching work and starts cleanup when its owner's inherited IPC channel closes.
+  System-protected bubblewrap establishes the namespace; its PID 1 lifetime
+  contains detached sessions and double forks that process groups cannot retain.
+  Envelope version 5 records host PID, boot/start, and namespace identity before
+  launch, and retains exclusion until namespace teardown. Live signalling uses
+  the original child handle/control channel; recovery never signals recycled
+  numeric host PIDs. A nested runner test uses a distinct owned session only
+  when the enclosing runner-trusted PID namespace denies another namespace;
+  that existing namespace remains the detached-descendant containment boundary
+  without added authority. Unsupported isolation otherwise fails closed without
+  a group-only fallback. It retains conservative owner-loss recovery. Pipelines reconcile
+  frozen inputs and Git permissions without provider work, preserve safe partial
+  content, and invalidate affected gates. Consumed commits and begun handoffs are
+  verified without replay; observed progress and the requested pause or terminal
+  cancellation are recorded together. Null resume restores existing blockers
+  before proceeding.
+
 - **Writable turns defer selected trusted checks without deferring repairs.**
   Plan execution and polishing project only persisted exact command text into
   implementation, polishing, lazy check/fix, and finding-resolution requests,

@@ -148,6 +148,9 @@ const RESUMABLE_WORKFLOW_STATES = new Set([
   "CONFIRM",
 ]);
 const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
+  operator_paused:
+    "The operator paused this run; resume restores its checkpoint and any existing blockers.",
+  operator_canceled: "The operator canceled this run; it cannot resume.",
   backend_unavailable: "The selected backend is temporarily unavailable.",
   bootstrap_inventory_capacity_exhausted:
     "A complete bootstrap validation inventory exceeds the supported bounded capacity.",
@@ -285,6 +288,26 @@ function publicFindings(state) {
 }
 
 function projectPause(run) {
+  if (["operator_paused", "operator_canceled"].includes(run.pause?.reason)) {
+    const retained = run.pause.operatorResume?.pause;
+    const explanation = PUBLIC_PAUSE_EXPLANATIONS[run.pause.reason];
+    return Object.freeze({
+      reason: run.pause.reason,
+      code: publicCode(retained?.code),
+      explanation,
+      evidence: Object.freeze(
+        Object.hasOwn(PUBLIC_PAUSE_EXPLANATIONS, retained?.reason ?? "")
+          ? [`Retained blocker: ${PUBLIC_PAUSE_EXPLANATIONS[retained.reason]}`]
+          : [],
+      ),
+      resumeState: null,
+      nextActions: Object.freeze(
+        run.pause.reason === "operator_paused"
+          ? [Object.freeze({ type: "resume", action: null })]
+          : [],
+      ),
+    });
+  }
   if (run.pause === null) {
     return null;
   }
@@ -378,6 +401,12 @@ function projectStatus(run) {
 }
 
 function validateResumeAction(run, action) {
+  if (
+    run.pause?.reason === "operator_paused" &&
+    run.pipelineState.workflowState === "WAITING_FOR_USER" &&
+    action === null
+  )
+    return;
   const state = run.pipelineState;
   if (state.workflowState !== "WAITING_FOR_USER") {
     throw new Error("Only a persisted paused run can be resumed.");

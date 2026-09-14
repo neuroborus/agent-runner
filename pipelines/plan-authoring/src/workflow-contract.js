@@ -9,6 +9,7 @@ import {
 export const MAX_CLARIFICATION_ROUNDS = 3;
 
 export const WORKFLOW_STATES = Object.freeze([
+  "CANCELED",
   "CLARIFY",
   "ANALYZE",
   "DRAFT",
@@ -1181,6 +1182,43 @@ export function normalizedCounters(counters) {
 }
 
 export function assertRun(run) {
+  if (["operator_paused", "operator_canceled"].includes(run?.pause?.reason)) {
+    const checkpoint = run.pause.operatorResume;
+    const canceled = run.pause.reason === "operator_canceled";
+    if (
+      !isRecord(checkpoint) ||
+      Object.keys(checkpoint).length !== 3 ||
+      Object.keys(checkpoint).some(
+        (field) => !["workflowState", "pause", "activeTurn"].includes(field),
+      ) ||
+      !WORKFLOW_STATES.includes(checkpoint.workflowState) ||
+      checkpoint.workflowState === "CANCELED" ||
+      ["operator_paused", "operator_canceled"].includes(
+        checkpoint.pause?.reason,
+      ) ||
+      run.activeTurn !== null ||
+      run.pause.resumeAction !== null ||
+      run.pipelineState?.workflowState !==
+        (canceled ? "CANCELED" : "WAITING_FOR_USER") ||
+      run.stopRequest == null ||
+      run.stopRequest.reconciledRevision === null ||
+      run.stopRequest.kind !==
+        (canceled ? "cancel_requested" : "pause_requested")
+    ) {
+      throw workflowError("Operator stop checkpoint is invalid.");
+    }
+    run = {
+      ...run,
+      pause: checkpoint.pause,
+      activeTurn: checkpoint.activeTurn,
+      pipelineState: {
+        ...run.pipelineState,
+        workflowState: checkpoint.workflowState,
+      },
+    };
+  } else if (run?.pipelineState?.workflowState === "CANCELED") {
+    throw workflowError("Cancellation requires a reconciled operator request.");
+  }
   if (
     !isRecord(run) ||
     run.pipelineId !== "plan-authoring" ||
