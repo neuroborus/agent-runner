@@ -188,6 +188,7 @@ function createFixture({
   handle,
   help = HELP,
   ownedCompletionFailure,
+  retainedOwnedContainment = false,
   spawnError = false,
   storageCleanupError = false,
   storagePreparationError = false,
@@ -386,6 +387,7 @@ function createFixture({
     }
 
     let input = "";
+    let killCalls = 0;
     child.stdin = new Writable({
       write(chunk, _encoding, callback) {
         input += chunk.toString("utf8");
@@ -397,7 +399,7 @@ function createFixture({
       },
       final(callback) {
         callback();
-        close();
+        if (!retainedOwnedContainment) close();
       },
     });
     if (closeError) {
@@ -408,6 +410,7 @@ function createFixture({
     child.stdout = stdout;
     child.stderr = stderr;
     child.kill = () => {
+      killCalls += 1;
       close();
       return true;
     };
@@ -419,7 +422,8 @@ function createFixture({
       child.ownedCompletion = Promise.resolve()
         .then(() => options.onProcess(987_654))
         .then(async () => {
-          await options.onProcess(null);
+          child.ownedContainmentRetained = retainedOwnedContainment;
+          if (!retainedOwnedContainment) await options.onProcess(null);
           completionState.observedBeforeRejection = completionState.observed;
           throw ownedCompletionFailure;
         });
@@ -433,6 +437,7 @@ function createFixture({
       file,
       argumentsList,
       messages,
+      killCalls: () => killCalls,
       ownedCompletionState: child.ownedCompletionState,
       options,
       workspaceStorage,
@@ -510,6 +515,7 @@ test(
     const timeoutFailure = new Error("owned completion failure timed out");
     const fixture = createFixture({
       ownedCompletionFailure: failure,
+      retainedOwnedContainment: true,
       handle({ message }) {
         if (message.method === "initialize") {
           return { pending: true };
@@ -538,6 +544,7 @@ test(
       ),
       true,
     );
+    assert.equal(fixture.processes[0].killCalls(), 0);
   },
 );
 

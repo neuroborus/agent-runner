@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-09-14
 
+- **Transient ownership inspection has one bounded recovery window.** A
+  completion-time incomplete descendant observation retries against one
+  non-resetting descendant-grace deadline before retaining the existing
+  fail-closed error and durable exclusion. Once persistent containment failure
+  is reported, the parent closes provider protocol resources and unreferences
+  the detached supervisor and IPC channel without disconnecting containment,
+  signalling unverified work, or clearing ownership, so the run owner can exit
+  while deterministic recovery remains possible.
+
 - **Owned-process failure is independent of provider protocol completion.**
   Codex races only owned-completion rejection against the complete App Server
   operation. A supervisor retaining containment and open protocol pipes can no

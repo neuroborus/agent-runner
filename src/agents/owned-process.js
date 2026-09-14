@@ -243,48 +243,80 @@ function retainContainmentFailure(code) {
 function finish() {
   if (settled) return;
   settled = true;
-  const report = () => {
-    const initial = inspectDescendants();
-    const send = (inspection, descendantsStopped = initial.active) => {
-      const descendantsActive = mode === "session" && inspection.active;
-      const failed = !inspection.complete || descendantsActive;
-      const exit = () => process.exit(failed || descendantsStopped ? 125 : 0);
-      if (process.connected) {
-        process.send({
-          type: "outcome",
-          outcome,
-          descendantsStopped,
-          descendantsActive,
-          inspectionComplete: inspection.complete,
-        }, exit);
-      } else {
-        exit();
-      }
-    };
-    if (!initial.complete) return retainContainmentFailure("unverifiable");
-    if (!initial.active || mode !== "session") return send(initial);
-    if (!signalDescendants("SIGTERM")) {
-      return retainContainmentFailure("unverifiable");
+  let inspectionDeadline;
+  const withCompleteInspection = (inspect, complete) => {
+    const inspection = inspect();
+    if (inspection !== null) {
+      complete(inspection);
+      return;
     }
-    setTimeout(() => {
-      if (!signalDescendants("SIGKILL")) {
-        return retainContainmentFailure("unverifiable");
-      }
-      const deadline = Date.now() + grace;
-      const waitForExit = () => {
-        const inspection = inspectDescendants();
-        if (!inspection.complete) {
-          return retainContainmentFailure("unverifiable");
-        }
-        if (!inspection.active) return send(inspection, true);
-        if (Date.now() >= deadline) return retainContainmentFailure("active");
-        setTimeout(waitForExit, Math.min(10, Math.max(1, grace))).unref();
-      };
-      waitForExit();
-    }, grace).unref();
+    inspectionDeadline ??= Date.now() + grace;
+    if (Date.now() >= inspectionDeadline) {
+      retainContainmentFailure("unverifiable");
+      return;
+    }
+    setTimeout(
+      () => withCompleteInspection(inspect, complete),
+      Math.min(10, Math.max(1, inspectionDeadline - Date.now())),
+    ).unref();
   };
-  if (inspectDescendants().active) setTimeout(report, grace).unref();
-  else report();
+  const inspectCompletely = (complete) =>
+    withCompleteInspection(() => {
+      const inspection = inspectDescendants();
+      return inspection.complete ? inspection : null;
+    }, complete);
+  const signalCompletely = (signal, complete) =>
+    withCompleteInspection(
+      () => (signalDescendants(signal) ? true : null),
+      complete,
+    );
+  const report = (observed) => {
+    const continueReport = (initial) => {
+      const send = (inspection, descendantsStopped = initial.active) => {
+        const descendantsActive = mode === "session" && inspection.active;
+        const failed = !inspection.complete || descendantsActive;
+        const exit = () => process.exit(failed || descendantsStopped ? 125 : 0);
+        if (process.connected) {
+          process.send({
+            type: "outcome",
+            outcome,
+            descendantsStopped,
+            descendantsActive,
+            inspectionComplete: inspection.complete,
+          }, exit);
+        } else {
+          exit();
+        }
+      };
+      if (!initial.active || mode !== "session") return send(initial);
+      signalCompletely("SIGTERM", () => {
+        setTimeout(() => {
+          signalCompletely("SIGKILL", () => {
+            const deadline = Date.now() + grace;
+            const waitForExit = () => {
+              inspectCompletely((inspection) => {
+                if (!inspection.active) return send(inspection, true);
+                if (Date.now() >= deadline) {
+                  return retainContainmentFailure("active");
+                }
+                setTimeout(
+                  waitForExit,
+                  Math.min(10, Math.max(1, grace)),
+                ).unref();
+              });
+            };
+            waitForExit();
+          });
+        }, grace).unref();
+      });
+    };
+    if (observed === undefined) inspectCompletely(continueReport);
+    else continueReport(observed);
+  };
+  inspectCompletely((initial) => {
+    if (initial.active) setTimeout(report, grace).unref();
+    else report(initial);
+  });
 }
 function terminate(signal = "SIGTERM", verify = false) {
   const inspectionComplete = signalDescendants(signal);
@@ -1105,6 +1137,9 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
     child.on("message", async (message) => {
       if (message?.type === "containment-failure") {
         const unverifiable = message.code === "unverifiable";
+        child.ownedContainmentRetained = true;
+        child.unref();
+        child.channel?.unref?.();
         rejectCompletion?.(
           ownedError(
             unverifiable
