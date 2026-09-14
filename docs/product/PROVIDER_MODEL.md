@@ -61,6 +61,14 @@ Codex uses a runner-owned private temporary root for writable attempts; Claude
 advertises writable capability only after its native sandbox policy is proven.
 Remote writes remain blocked in every access mode.
 
+Codex model-issued commands derive from the provider process environment only
+through a strict shell policy. Automatic secret-name exclusions run before
+explicit workspace values, and an exact allowlist retains Codex's standard core
+names, the dynamic `AGENT_RUNNER_OWNED_PROCESS` proof, and the supplied workspace
+environment names. Unrelated parent variables remain unavailable, while the
+provider process keeps its existing environment for authentication and provider
+connectivity.
+
 Plan execution's local commit is a separate constrained adapter capability. It
 is available only for the Worker's one-shot authorized `COMMIT` turn and does
 not widen ordinary workspace-write access. Polishing never requests it.
