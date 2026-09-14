@@ -25,8 +25,11 @@ Using the provided schema, return READY when compatible; otherwise return PLAN_R
 For READY, set reason to "" and evidence to [].
 For PLAN_REVISION_REQUIRED, provide reason and evidence.`;
 
+const VALIDATION_INFRASTRUCTURE_INSTRUCTIONS = `Validation infrastructure means files that own validation commands, discovery, runners, configuration, or mandatory finalization guidance. Exclude ordinary source, individual tests, fixtures, and generated output merely consumed by checks. Classify by the file's responsibility, not its name or extension.`;
+
 export const BOOTSTRAP_INSTRUCTIONS = `Study the repository, task, validated plan, clarifications, project instructions, relevant finalization guidance, other relevant skills, project checks, tests, and Git history independently and without modifying the repository.
 Return the following fields inside the schema's result object. Provide a concise bootstrap summary covering the task, relevant architecture and files, invariants, planned commits, risks, and the complete project finalization procedure. Independently identify every required check as a stable C-prefixed ID and exact command, plus every repository-relative file that controls those checks, package scripts, test discovery, test runners, or validation configuration.
+${VALIDATION_INFRASTRUCTURE_INSTRUCTIONS}
 Cover every substantive validation requirement, but keep the summary and required-check inventory staging-independent. Do not require staging, a staged handoff, index mutation or inspection, an implicit worktree-versus-index assertion, an alternate index, or commit-message drafting. Generic commit preparation belongs only to COMMIT. Express an applicable content check against HEAD or explicit trees instead of the index.
 Required-check IDs must be unique. Exact commands must be unique, single-line, and already normalized without leading or trailing whitespace. Validation-infrastructure paths must be unique, existing, canonical repository-relative file paths; never return a symlink or a path through a symlink, including a symlink alias of a canonical path.
 Each inventory field has a per-role capacity of ${MAX_BOOTSTRAP_ITEMS} items. If the complete requiredChecks or validationInfrastructure inventory would exceed that capacity, do not truncate it or invent a placeholder. Check requiredChecks first, then validationInfrastructure, and return CAPACITY_EXHAUSTED for the first over-capacity field with capacityField set to its exact field name and capacityLimit set to ${MAX_BOOTSTRAP_ITEMS}.
@@ -160,6 +163,7 @@ Otherwise, return each FIX or DISPUTE decision using the provided schema.`;
 
 export const FINALIZATION_INSTRUCTIONS = `Run the complete project finalization procedure in this dedicated turn and report its result using the provided schema. Follow every substantive instruction in the applicable project guidance, including required checks, project-required formatting or generated output, and staging-independent content review.
 
+${VALIDATION_INFRASTRUCTURE_INSTRUCTIONS}
 Do not perform unrelated fixes or create a commit.
 Keep the finalization inventory staging-independent. When project finalization guidance includes generic commit preparation, defer staging, staged/index-relative inspection, alternate-index workarounds, staged handoff, and commit-message drafting to the authorized COMMIT turn. Do not run git add, inspect the staged diff, or draft a commit message in this turn. Express each applicable content check against HEAD or explicit trees. This phase-owned deferral is neither a validation blocker nor a skipped required check and must not prevent PASS.
 The validated plan subject remains authoritative. After candidate convergence and the fingerprint-bound finalization and terminal-confirmation gate pass, the constrained COMMIT executor alone runs git add -A, performs fixed runner-owned staged-diff hygiene, and creates the subject-only commit.

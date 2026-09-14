@@ -937,14 +937,21 @@ checkpoint, consuming revision or correction budgets, or writing `plan.md`.
 Plan execution and polishing state version 2 persist the mode-specific
 bootstrapped required-check inventory, the repository-relative files that own
 validation infrastructure, and a runner-computed fingerprint of those files.
-Each pipeline owns a 64-item limit for each inventory field returned by one
-bootstrap role and a separate 128-item limit for each runner-derived inventory
-field, including persisted, finalization, and fingerprint inputs. A role that
-cannot return a complete field within 64 items reports the strict
-`CAPACITY_EXHAUSTED` result with that `capacityField` and `capacityLimit: 64`;
-the pipeline pauses with `bootstrap_inventory_capacity_exhausted` and a bounded
-public diagnostic without consuming a structured-output correction or
-accepting truncated evidence.
+Plan execution owns a 256-item limit for each bootstrap role inventory field
+and a separate 512-item limit for each derived, persisted, finalization, and
+fingerprint-input field. Polishing retains its 64/128 limits. A role exceeding
+its pipeline's limit reports strict `CAPACITY_EXHAUSTED` with that `capacityField`
+and per-role `capacityLimit`; required-check overflow takes priority. The
+pipeline pauses without consuming a correction or accepting truncated evidence.
+Execution infrastructure includes files owning commands, discovery, runners,
+configuration, or mandatory finalization guidance, excluding ordinary source,
+individual tests, fixtures, and generated output merely consumed by checks.
+Classification uses responsibility rather than filename heuristics.
+The Git validation-infrastructure fingerprint API accepts 512 paths; other Git
+path lists retain their 256-path bounds. Execution state version 16 expands
+capacity with a leased migration preserving legacy 64/128 evidence, budgets,
+completed commits, and one-shot effects. Item, structured-output, and durable
+byte limits do not change.
 In independent mode, the runner establishes that inventory from accepted Worker
 evidence followed by accepted Reviewer evidence; in lazy mode, accepted Worker
 evidence is complete. It deduplicates exact commands and paths in stable

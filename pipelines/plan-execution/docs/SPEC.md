@@ -1535,14 +1535,18 @@ consumes the producing role's one bounded read-only correction, and fails
 closed if the replacement remains invalid. Validation-migration discovery uses
 the same policy, and finalization candidate inventories are rejected by their
 owning batched correction policy as well.
-Each role may return at most 64 `requiredChecks` and 64
+Validation infrastructure consists of files owning commands, discovery, runners,
+configuration, or mandatory finalization guidance. Exclude ordinary source,
+individual tests, fixtures, and generated output merely consumed by checks.
+Classification is semantic, not a filename or extension heuristic.
+Each role may return at most 256 `requiredChecks` and 256
 `validationInfrastructure` entries. The independently derived, persisted,
-finalization, and fingerprint-input inventories each allow at most 128 entries,
+finalization, and fingerprint-input inventories each allow at most 512 entries,
 so two disjoint maximum role inventories remain representable. If a complete
-role field would exceed 64 items, the role must return the strict
+role field would exceed 256 items, the role must return the strict
 `CAPACITY_EXHAUSTED` result with empty inventory and ordinary result fields,
 `capacityField` equal to `requiredChecks` or `validationInfrastructure`, and
-`capacityLimit: 64`. It checks `requiredChecks` first when both fields are over
+`capacityLimit: 256`. It checks `requiredChecks` first when both fields are over
 capacity. The runner pauses immediately with
 `bootstrap_inventory_capacity_exhausted` and the bounded public code
 `ERR_BOOTSTRAP_INVENTORY_CAPACITY_EXHAUSTED`; it does not consume a correction
@@ -1907,6 +1911,13 @@ including session-independent reconstruction after interruption.
 Malformed replacement output follows the existing separate read-only correction
 budget. A valid replacement and one fresh terminal confirmation must bind the
 same resulting content and validation fingerprints before `COMMIT`.
+
+Pipeline state version 16 expands inventory capacities to 256 per role and 512
+for aggregate evidence. Its leased version-15 migration preserves accepted
+64/128 inventories, finalization and review evidence, counters, terminal history,
+and consumed commit authorization without replaying effects or reloading
+configuration. Per-item and structured-output byte limits are unchanged; a
+count-valid result can still exceed the 256 KiB structured-result limit.
 
 Pipeline state version 15 adds `finalizationRecovery`, containing consumed
 `attempts`, explicit `additionalAttempts`, `required` and `pending` flags, and
@@ -2870,7 +2881,8 @@ At minimum cover:
 56. every role prompt prohibits delegation, and a backend-reported delegated
     turn remains terminal while its finite class is redacted, durable, and
     projected consistently through CLI and MCP status.
-57. 64-item role inventories, disjoint 128-item derived inventories,
+57. 256/257-item role boundaries, disjoint 512-item derived inventories and
+    513-item rejection, semantic infrastructure classification, unchanged byte bounds,
     persistence, finalization round trips, infrastructure fingerprinting, and
     strict capacity exhaustion remain bounded and consistent.
 58. ownerless interrupted read-only and writable turns revalidate all durable
@@ -2933,7 +2945,7 @@ At minimum cover:
 73. lazy no-progress, stable-finding, fix, and additional-round behavior remains
     bounded without weakening exact commits, trusted checks, fingerprints, Git
     controls, product decisions, or no-coauthor/no-push rules.
-74. every supported legacy version migrates through state version 15 to
+74. every supported legacy version migrates through state version 16 to
     `independent` without reviving terminal runs or replaying completed or
     pending commit effects.
 75. lazy provider and deterministic contract failures receive one scoped

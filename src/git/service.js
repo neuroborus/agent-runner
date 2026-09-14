@@ -76,8 +76,8 @@ function assertBoolean(value, name) {
   return value;
 }
 
-function isPathList(value) {
-  if (!Array.isArray(value) || value.length > 256) {
+function isPathList(value, maximum = 256) {
+  if (!Array.isArray(value) || value.length > maximum) {
     return false;
   }
   for (const entry of value) {
@@ -88,8 +88,8 @@ function isPathList(value) {
   return true;
 }
 
-function assertPathList(value, name) {
-  if (!isPathList(value)) {
+function assertPathList(value, name, maximum = 256) {
+  if (!isPathList(value, maximum)) {
     throw new GitSafetyError(`${name} must be an array of paths.`, {
       code: "ERR_INVALID_GIT_OPTIONS",
     });
@@ -395,7 +395,7 @@ export function createGitService(options = {}) {
   async function validationInfrastructureFingerprint(options) {
     assertOptions(options, "Validation-infrastructure options");
     const { paths, projectPath } = options;
-    assertPathList(paths, "paths");
+    assertPathList(paths, "paths", 512);
     const repositoryPath = await resolveRepository(runGit, projectPath);
     return pathsFingerprintAtRoot(contentContext, repositoryPath, paths);
   }

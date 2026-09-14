@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-09-14
 
+- **Execution inventories cover complete validation ownership.** Bootstrap roles
+  can each report 256 checks and infrastructure files; derived and finalization
+  inventories accept 512. Infrastructure is defined by ownership of commands,
+  discovery, runners, configuration, or mandatory finalization guidance, not
+  by files merely consumed by checks. The shared Git fingerprint input accepts
+  512 paths while other path lists and byte limits remain unchanged. State
+  version 16 migrates saved evidence without resetting budgets or replaying
+  completed effects; polishing retains its existing limits for now.
+
 - **Trusted command catalogs can be project-local.** Safe project configuration
   uses the existing exact-vector validator. Normalized catalogs merge root then
   project, deduplicate identical same-name definitions, and reject conflicts

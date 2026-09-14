@@ -1146,9 +1146,14 @@ export function migratePlanExecutionStateV14(run) {
   });
 }
 
+export function migratePlanExecutionStateV15(run) {
+  // Capacity expansion preserves all accepted evidence and consumed effects.
+  return Object.freeze({ ...run.pipelineState });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
-  stateVersion: 15,
+  stateVersion: 16,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1164,6 +1169,7 @@ export const planExecutionPipeline = Object.freeze({
     12: migratePlanExecutionStateV12,
     13: migratePlanExecutionStateV13,
     14: migratePlanExecutionStateV14,
+    15: migratePlanExecutionStateV15,
   }),
   roles: ROLES,
   resolveActiveRoles,
@@ -1182,7 +1188,7 @@ export const planExecutionPipeline = Object.freeze({
   prepareRecovery(run, history) {
     prepareLegacyConfirmationRecovery(run, history, (historicalRun) => {
       let current = historicalRun;
-      while (current.pipelineStateVersion < 15) {
+      while (current.pipelineStateVersion < 16) {
         const migration =
           planExecutionPipeline.migrations[current.pipelineStateVersion];
         current = {

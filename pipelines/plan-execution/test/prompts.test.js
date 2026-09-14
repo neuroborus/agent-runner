@@ -43,7 +43,7 @@ test("bootstrap instructions preserve independent evidence and arbitration", () 
     /independently identify every required check/iu,
   );
   assert.match(BOOTSTRAP_INSTRUCTIONS, /validationInfrastructure/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /capacity of 64 items/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /capacity of 256 items/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /CAPACITY_EXHAUSTED/u);
   assert.match(
     BOOTSTRAP_INSTRUCTIONS,
@@ -369,4 +369,26 @@ test("writable candidate instructions defer checks without suppressing unrelated
       /NOT_RUN|requiredChecks|validationInfrastructure/u,
     );
   }
+});
+
+test("execution discovery and finalization classify infrastructure by responsibility", () => {
+  for (const instructions of [
+    BOOTSTRAP_INSTRUCTIONS,
+    FINALIZATION_INSTRUCTIONS,
+  ]) {
+    assert.match(
+      instructions,
+      /own validation commands, discovery, runners, configuration, or mandatory finalization guidance/u,
+    );
+    assert.match(
+      instructions,
+      /Exclude ordinary source, individual tests, fixtures, and generated output merely consumed by checks/u,
+    );
+    assert.match(instructions, /responsibility, not its name or extension/u);
+  }
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /per-role capacity of 256 items/u);
+  assert.match(
+    BOOTSTRAP_INSTRUCTIONS,
+    /Check requiredChecks first, then validationInfrastructure/u,
+  );
 });
