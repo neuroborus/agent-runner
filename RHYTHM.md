@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-09-14
 
+- **Commit size is an authoring heuristic.** The persisted
+  `preferredCommitLineLimit` defaults to 900 anticipated additions plus deletions,
+  including tests and documentation. Planner and review prompts prefer cohesive
+  boundaries within that target and require concise explanations for indivisible
+  exceptions. Descriptor-driven configuration, CLI discovery, and MCP metadata
+  share the default; leased legacy migration supplies it without reloading
+  configuration or replaying work. The shared plan format and execution gate
+  remain unchanged.
+
 - **Codex shell commands retain the owned-process proof through a narrow
   allowlist.** The provider process keeps its full isolated parent environment,
   while command construction applies Codex's automatic secret exclusions,

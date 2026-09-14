@@ -33,6 +33,13 @@ test("configuration ownership and defaults are documented", async () => {
   assert.match(architecture, /CLI override/u);
   assert.match(architecture, /native default/u);
   assert.match(authoringSpecification, /maxRevisionRounds = 20/u);
+  assert.match(authoringSpecification, /preferredCommitLineLimit = 900/u);
+  for (const document of [readme, architecture, authoringSpecification]) {
+    assert.match(document, /preferredCommitLineLimit/u);
+    assert.match(document, /additions\s+plus deletions/u);
+    assert.match(document, /heuristic/u);
+    assert.match(document, /indivisible|cannot be split safely/u);
+  }
   assert.match(authoringSpecification, /stagnationWindowRounds = 3/u);
   assert.match(executionSpecification, /maxFixRoundsPerStep = 20/u);
   assert.match(executionSpecification, /maxDisputesPerFinding = 5/u);

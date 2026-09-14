@@ -463,6 +463,11 @@ test("projects descriptor-owned pipeline mode guidance", async () => {
 
   const control = createMcpControlPlane({ runner: {}, runStore: {} });
   const { pipelines } = await control.pipelinesList();
+  assert.deepEqual(
+    pipelines.find(({ id }) => id === "plan-authoring").settings
+      .preferredCommitLineLimit,
+    { defaultValue: 900 },
+  );
   for (const pipeline of pipelines) {
     assert.deepEqual(pipeline.settings.mode, {
       defaultValue: "independent",

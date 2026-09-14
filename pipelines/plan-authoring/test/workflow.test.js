@@ -19,6 +19,7 @@ import {
   createPlanAuthoringState,
   migratePlanAuthoringStateV1,
   migratePlanAuthoringStateV2,
+  migratePlanAuthoringStateV3,
   planAuthoringPipeline,
   runPlanAuthoring,
 } from "../src/index.js";
@@ -440,7 +441,7 @@ async function createFixture(
   let currentRun = {
     revision: 1,
     pipelineId: "plan-authoring",
-    pipelineStateVersion: 3,
+    pipelineStateVersion: 4,
     projectPath,
     taskPath,
     roles: Object.fromEntries(
@@ -458,6 +459,7 @@ async function createFixture(
       settings: {
         maxRevisionRounds: 15,
         mode,
+        preferredCommitLineLimit: 900,
         stagnationWindowRounds: 3,
       },
     }),
@@ -592,6 +594,7 @@ async function createFixture(
       settings: {
         maxRevisionRounds: 15,
         mode,
+        preferredCommitLineLimit: 900,
         stagnationWindowRounds: 3,
         ...settings,
       },
@@ -677,7 +680,7 @@ test("writes one validated plan through independent source-session forks", async
 });
 
 test("selects lazy Planner-only mode and migrates legacy runs to independent", async (t) => {
-  assert.equal(planAuthoringPipeline.stateVersion, 3);
+  assert.equal(planAuthoringPipeline.stateVersion, 4);
   assert.equal(
     planAuthoringPipeline.resolveActiveRoles(),
     planAuthoringPipeline.roles,
@@ -695,6 +698,7 @@ test("selects lazy Planner-only mode and migrates legacy runs to independent", a
     settings: {
       maxRevisionRounds: 15,
       mode: "independent",
+      preferredCommitLineLimit: 900,
       stagnationWindowRounds: 3,
     },
   });
@@ -740,6 +744,82 @@ test("selects lazy Planner-only mode and migrates legacy runs to independent", a
   assert.deepEqual(migratedVersionTwo.lazyCorrections, []);
   assert.equal(migratedVersionTwo.pendingLazyCorrection, null);
 });
+
+test("migrates legacy line targets without changing progress or null settings", async (t) => {
+  const fixture = await createFixture(t);
+  const completed = await fixture.run();
+  for (const state of [createPlanAuthoringState(), completed.pipelineState]) {
+    const legacy = structuredClone(state);
+    if (legacy.settings !== null)
+      delete legacy.settings.preferredCommitLineLimit;
+    const before = structuredClone(legacy);
+    const migrated = migratePlanAuthoringStateV3({ pipelineState: legacy });
+    assert.deepEqual(legacy, before);
+    assert.deepEqual(migrated, {
+      ...legacy,
+      settings:
+        legacy.settings === null
+          ? null
+          : {
+              ...legacy.settings,
+              preferredCommitLineLimit: 900,
+            },
+    });
+  }
+  for (const invalid of [
+    undefined,
+    0,
+    -1,
+    1.5,
+    "900",
+    null,
+    Number.MAX_SAFE_INTEGER + 1,
+  ]) {
+    const run = structuredClone(completed);
+    run.pipelineState.settings.preferredCommitLineLimit = invalid;
+    assert.throws(
+      () => planAuthoringPipeline.workflow.validateRun(run),
+      /preferredCommitLineLimit/u,
+    );
+  }
+});
+
+for (const mode of ["independent", "lazy"]) {
+  test(`${mode} planning and recovery prompts carry a soft persisted line target`, async (t) => {
+    const largePlan = `${PLAN}\n\n${"Describe the cohesive change.\n".repeat(10)}`;
+    const fixture = await createFixture(t, {
+      mode,
+      planner:
+        mode === "lazy"
+          ? [ready(), draft(largePlan), checkUnchanged(), clean()]
+          : [ready(), draft(largePlan), draft(largePlan)],
+      reviewer: [findings("scope"), approved()],
+    });
+    const result = await fixture.run({ preferredCommitLineLimit: 1 });
+    assert.equal(result.pipelineState.workflowState, "DONE");
+    assert.equal(result.pipelineState.settings.preferredCommitLineLimit, 1);
+    assert.equal(await readFile(fixture.planPath, "utf8"), largePlan);
+    const requests = [
+      ...fixture.calls.planner.slice(1),
+      ...fixture.calls.reviewer,
+    ];
+    assert.ok(requests.some(({ session }) => session?.mode === "continue"));
+    for (const request of requests) {
+      for (const prompt of [request.prompt, request.recoveryPrompt]) {
+        assert.match(prompt, /at or below 1 anticipated changed lines/u);
+        assert.match(
+          prompt,
+          /additions plus deletions, including tests and documentation/u,
+        );
+        assert.match(prompt, /planning heuristic, not a hard maximum/u);
+        assert.match(
+          prompt,
+          /state a concise reason in the plan identifying the indivisible change/u,
+        );
+      }
+    }
+  });
+}
 
 test("converges a lazy plan with one source fork and no review roles", async (t) => {
   const fixture = await createFixture(t, {
@@ -876,6 +956,12 @@ test("corrects a provider-rejected lazy checkpoint in one fresh read-only sessio
     correctionRequest.prompt,
     /Pending correction diagnostic batch/u,
   );
+  for (const prompt of [
+    correctionRequest.prompt,
+    correctionRequest.recoveryPrompt,
+  ]) {
+    assert.match(prompt, /at or below 900 anticipated changed lines/u);
+  }
   assert.match(
     correctionRequest.prompt,
     /Plan to check and fix:\n## Commit 1/u,
@@ -1987,6 +2073,7 @@ test("keeps resolved settings stable across resume", async (t) => {
   await fixture.run({
     maxRevisionRounds: 1,
     stagnationWindowRounds: 10,
+    preferredCommitLineLimit: 650,
   });
   await writeFile(
     fixture.clarificationPath,
@@ -1996,12 +2083,14 @@ test("keeps resolved settings stable across resume", async (t) => {
   const resumed = await fixture.run({
     maxRevisionRounds: 2,
     stagnationWindowRounds: 10,
+    preferredCommitLineLimit: 1200,
   });
   assert.equal(resumed.pause.reason, "plan_revision_limit_reached");
   assert.equal(resumed.counters.revisionRounds, 1);
   assert.deepEqual(resumed.pipelineState.settings, {
     maxRevisionRounds: 1,
     mode: "independent",
+    preferredCommitLineLimit: 650,
     stagnationWindowRounds: 10,
   });
 });

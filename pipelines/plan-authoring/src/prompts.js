@@ -21,6 +21,10 @@ const PLAN_FORMAT_INSTRUCTIONS =
 export const AGENT_GUIDANCE_SCOPE_INSTRUCTIONS =
   "Do not propose or approve project `.agents` changes unless the user's task explicitly requires them; treat a violation as a finding, not a user question. Do not modify the resolved project configuration during a run.";
 
+export function preferredCommitLineInstructions(limit) {
+  return `Prefer each proposed commit to stay at or below ${limit} anticipated changed lines, counted as additions plus deletions, including tests and documentation. Smaller cohesive commits are welcome. This is a planning heuristic, not a hard maximum or a validation or execution limit. When one coherent change cannot be split safely, keep the larger commit and state a concise reason in the plan identifying the indivisible change. Do not invent artificial boundaries or reject a plan solely for exceeding the target.`;
+}
+
 export const DRAFT_INSTRUCTIONS = `Write a concise commit-by-commit plan for the requested changes. Keep the plan idiomatic and minimal, follow the project's conventions, and ensure it contains no contradictions.
 
 ${PLAN_FORMAT_INSTRUCTIONS}

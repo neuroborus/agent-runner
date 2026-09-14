@@ -24,6 +24,12 @@ source-session lineage are frozen into a new run. Resume uses that snapshot and
 does not silently adopt later configuration changes. `independent` is the
 default mode; choosing `lazy` is always an explicit operator decision.
 
+Plan authoring's `preferredCommitLineLimit` is a positive-integer planning
+target, default 900, configured through runner settings or the safe project
+overlay. It is persisted for the run; legacy runs receive 900 without adopting
+current configuration. CLI pipeline listing and MCP pipeline metadata expose
+the descriptor-owned default. It does not restrict execution diff size.
+
 ## CLI and MCP control
 
 The CLI provides run, resume, pause, cancel, status, pipeline discovery, and

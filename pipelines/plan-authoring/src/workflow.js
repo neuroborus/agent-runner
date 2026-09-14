@@ -17,6 +17,7 @@ import {
   LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
   NO_DELEGATION_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
+  preferredCommitLineInstructions,
   REVIEW_INSTRUCTIONS,
   STAGNATION_INSTRUCTIONS,
 } from "./prompts.js";
@@ -509,7 +510,15 @@ export async function runPlanAuthoring({
           ? { id: sourceSession, mode: "fork" }
           : undefined;
     const roleConfiguration = currentRun.roles[role];
-    const recoveryPrompt = completeRolePrompt(buildPrompt(evidenceContext));
+    const promptWithSettings = (evidence) =>
+      pipelineState().workflowState === "CLARIFY"
+        ? buildPrompt(evidence)
+        : `${buildPrompt(evidence)}\n\n${preferredCommitLineInstructions(
+            pipelineState().settings.preferredCommitLineLimit,
+          )}`;
+    const recoveryPrompt = completeRolePrompt(
+      promptWithSettings(evidenceContext),
+    );
     const executionPreferences = Object.fromEntries(
       ["profile", "model", "contextSize"].flatMap((field) =>
         typeof roleConfiguration[field] === "string" &&
@@ -524,7 +533,7 @@ export async function runPlanAuthoring({
       prompt:
         session?.mode === "continue"
           ? rolePrompt(
-              buildPrompt(
+              promptWithSettings(
                 latestSession?.contextKey === contextKey ? "" : evidenceContext,
               ),
             )

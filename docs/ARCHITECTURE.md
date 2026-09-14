@@ -247,6 +247,19 @@ The root loader owns only the versioned envelope, strict field validation, and
 resolution precedence; it does not duplicate pipeline-specific role or setting
 lists.
 
+Plan authoring additionally owns the positive-safe-integer
+`preferredCommitLineLimit`, default 900. Root configuration and a safe project
+overlay resolve it through existing precedence before creation. It is a prompt
+heuristic for anticipated additions plus deletions, including tests and
+documentation: prefer cohesive commits within the target and explain genuinely
+indivisible exceptions. It changes neither the shared plan contract nor execution
+validation. Authoring state version 4 persists the value; the ordered version-3
+migration supplies 900 to non-null legacy settings without configuration reload,
+progress changes, or effect replay. The existing lease governs persistence of
+that migration. Authoring planning, review, self-review, and recovery prompts
+use the saved value. CLI `pipelines` displays descriptor-owned setting defaults;
+MCP `pipelines_list` projects the same metadata.
+
 Every built-in descriptor owns one string `mode` setting with exactly
 `independent` and `lazy`. A missing value resolves to `independent`, which is
 the default and recommended option because its distinct primary and review

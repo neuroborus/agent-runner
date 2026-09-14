@@ -36,6 +36,7 @@ The pipeline descriptor declares the `planner`, `reviewer`, and on-demand
 ```text
 mode = independent
 maxRevisionRounds = 20
+preferredCommitLineLimit = 900
 stagnationWindowRounds = 3
 ```
 
@@ -45,6 +46,17 @@ separate Plan Reviewer provides genuinely independent semantic review, at the
 cost of more provider context and tokens. `lazy` is an explicit
 lower-consumption choice that uses only the Planner and does not provide
 independent review. It is never selected automatically.
+
+`preferredCommitLineLimit` must be a positive safe integer. Planner and Plan
+Reviewer prefer each proposed commit to stay within that anticipated additions
+plus deletions target, including tests and documentation; smaller cohesive
+commits are welcome. A larger commit remains valid when the plan states a
+concise reason identifying the coherent change that cannot be split safely.
+This is a heuristic, never a hard maximum, structural validation rule, or
+execution diff limit. It changes neither the plan artifact contract nor model
+turn timing. Draft, revision, independent review, self-review, correction, and
+recovery prompts carry the persisted target. CLI pipeline listing and MCP
+pipeline metadata expose its descriptor-owned default.
 
 Values may be overridden under `pipelines.plan-authoring` in the runner's
 versioned `.agent-runner.json` contract or its safe project overlay. Role
@@ -199,6 +211,14 @@ marker. Its ordered version-2 migration initializes both fields empty without
 moving active or terminal workflow positions, reviving a terminal run,
 rewriting the draft, replaying an accepted checkpoint, consuming a revision or
 correction round, or writing `plan.md`.
+
+Pipeline state version 4 adds `preferredCommitLineLimit` to non-null settings.
+Its ordered version-3 migration supplies 900 without reloading runner or project
+configuration and preserves null preflight settings. It leaves workflow
+position, drafts, evidence, counters, source lineage, pending corrections, and
+terminal outcomes unchanged. Status may project the migration without writing;
+resume persists it under the existing per-run lease before agent work. New runs
+persist the resolved value at creation and resume never re-resolves it.
 
 ## Operator Pause And Cancellation
 

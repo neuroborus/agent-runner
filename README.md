@@ -157,25 +157,26 @@ explicit and shows `claude-primary` and `claude-secondary` aliases.
 
 Pipeline settings use these defaults:
 
-| Pipeline         | Setting                  |       Default |
-| ---------------- | ------------------------ | ------------: |
-| `plan-authoring` | `mode`                   | `independent` |
-| `plan-authoring` | `maxRevisionRounds`      |            20 |
-| `plan-authoring` | `stagnationWindowRounds` |             3 |
-| `plan-execution` | `mode`                   | `independent` |
-| `plan-execution` | `maxFixRoundsPerStep`    |            20 |
-| `plan-execution` | `finalization`           |        `auto` |
-| `plan-execution` | `maxDisputesPerFinding`  |             5 |
-| `plan-execution` | `maxSameFindingRounds`   |             5 |
-| `plan-execution` | `stagnationWindowRounds` |             3 |
-| `plan-execution` | `trustedChecks`          |          `[]` |
-| `polishing`      | `mode`                   | `independent` |
-| `polishing`      | `maxFixRounds`           |            20 |
-| `polishing`      | `finalization`           |        `auto` |
-| `polishing`      | `maxDisputesPerFinding`  |             5 |
-| `polishing`      | `maxSameFindingRounds`   |             5 |
-| `polishing`      | `stagnationWindowRounds` |             3 |
-| `polishing`      | `trustedChecks`          |          `[]` |
+| Pipeline         | Setting                    |       Default |
+| ---------------- | -------------------------- | ------------: |
+| `plan-authoring` | `mode`                     | `independent` |
+| `plan-authoring` | `maxRevisionRounds`        |            20 |
+| `plan-authoring` | `preferredCommitLineLimit` |           900 |
+| `plan-authoring` | `stagnationWindowRounds`   |             3 |
+| `plan-execution` | `mode`                     | `independent` |
+| `plan-execution` | `maxFixRoundsPerStep`      |            20 |
+| `plan-execution` | `finalization`             |        `auto` |
+| `plan-execution` | `maxDisputesPerFinding`    |             5 |
+| `plan-execution` | `maxSameFindingRounds`     |             5 |
+| `plan-execution` | `stagnationWindowRounds`   |             3 |
+| `plan-execution` | `trustedChecks`            |          `[]` |
+| `polishing`      | `mode`                     | `independent` |
+| `polishing`      | `maxFixRounds`             |            20 |
+| `polishing`      | `finalization`             |        `auto` |
+| `polishing`      | `maxDisputesPerFinding`    |             5 |
+| `polishing`      | `maxSameFindingRounds`     |             5 |
+| `polishing`      | `stagnationWindowRounds`   |             3 |
+| `polishing`      | `trustedChecks`            |          `[]` |
 
 `mode` accepts exactly `independent` and `lazy`. A missing value resolves to
 `independent`. The tracked [example](.agent-runner.example.json) selects
@@ -186,6 +187,17 @@ declared role, but a lazy run resolves, probes, persists, and invokes only its
 Planner or Worker. Reviewer and Arbiter configuration stays available in the
 configuration files for a later independent run without being resolved or
 exposed by the lazy run.
+
+`preferredCommitLineLimit` is a positive-integer planning target for anticipated
+additions plus deletions per commit, including tests and documentation. Set it
+under `pipelines.plan-authoring` in runner configuration or the safe project
+overlay; project values take precedence. Planner and Plan Reviewer prefer
+cohesive commits within the target, with smaller commits welcome. A larger
+indivisible change remains valid when the plan explains why it cannot be split
+safely. This heuristic changes neither the plan format nor execution validation.
+The resolved value is persisted and reused on resume; legacy runs receive 900.
+`agent-run pipelines` lists descriptor-owned setting defaults, and MCP
+`pipelines_list` exposes the same defaults.
 
 The stagnation window detects consecutive blocked correction rounds. In
 independent mode the first full window invokes one fresh Arbiter and a second

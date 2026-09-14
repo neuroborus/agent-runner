@@ -59,6 +59,7 @@ const SETTINGS = Object.freeze({
     validate: pipelineMode,
     values: PIPELINE_MODES,
   }),
+  preferredCommitLineLimit: positiveIntegerSetting(900),
   stagnationWindowRounds: positiveIntegerSetting(3),
 });
 const TASK_INPUTS = Object.freeze({
@@ -274,12 +275,28 @@ export function migratePlanAuthoringStateV2(run) {
   });
 }
 
+export function migratePlanAuthoringStateV3(run) {
+  const current = run.pipelineState;
+  return Object.freeze({
+    ...current,
+    settings:
+      current.settings === null
+        ? null
+        : Object.freeze({
+            ...current.settings,
+            preferredCommitLineLimit:
+              SETTINGS.preferredCommitLineLimit.defaultValue,
+          }),
+  });
+}
+
 export const planAuthoringPipeline = Object.freeze({
   id: PLAN_AUTHORING_PIPELINE_ID,
-  stateVersion: 3,
+  stateVersion: 4,
   migrations: Object.freeze({
     1: migratePlanAuthoringStateV1,
     2: migratePlanAuthoringStateV2,
+    3: migratePlanAuthoringStateV3,
   }),
   roles: ROLES,
   resolveActiveRoles,
