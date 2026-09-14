@@ -329,6 +329,33 @@ test("ignores a proven pre-existing inaccessible process", () => {
   );
 });
 
+test("ignores a proven pre-existing inaccessible ancestor", () => {
+  assert.deepEqual(
+    inspectOwnedSessionProcesses("44", "a".repeat(64), {
+      baseline: new Map([["202", { bootId: BOOT_ID, startTicks: "5678" }]]),
+      getuid: () => 1000,
+      list: () => ["101"],
+      read(path) {
+        if (path === "/proc/sys/kernel/random/boot_id") {
+          return `${BOOT_ID}\n`;
+        }
+        if (path === "/proc/101/stat") {
+          return processStat(101, 202, 3);
+        }
+        if (path === "/proc/101/status") {
+          return "Uid:\t1000\t1000\t1000\t1000\n";
+        }
+        if (path === "/proc/101/environ") return "";
+        if (path === "/proc/202/stat") {
+          return processStat(202, 1, 3, "5678");
+        }
+        throw Object.assign(new Error("denied"), { code: "EACCES" });
+      },
+    }),
+    [],
+  );
+});
+
 test("ignores complete unrelated ancestry independently of the baseline", () => {
   const ownerToken = "a".repeat(64);
   assert.deepEqual(
