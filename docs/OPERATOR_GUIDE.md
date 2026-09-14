@@ -50,9 +50,10 @@ execution run. Do not edit a frozen clarification transcript to override it,
 rewrite completed commits, or reuse a plan whose steps are already implemented.
 Prepare a new plan for the remaining work when required.
 
-Runner-root configuration defines trusted profiles and command vectors. An
-ignored, untracked project configuration may select those aliases and safe
-settings. The default project configuration is
+Runner-root configuration defines trusted profile implementations. Both root
+and ignored, untracked project configuration may define exact trusted command
+vectors; project configuration may select these aliases and safe settings.
+The default project configuration is
 `LOCAL_ARTIFACTS/agent-runner.json`; an explicit project configuration must be
 confined to the project. `artifactRoot` defaults to `LOCAL_ARTIFACTS`.
 Repository-local artifacts must already be ignored. The runner never changes
@@ -93,10 +94,17 @@ universally forbidden: the relevant distinction is which content and boundary
 the command actually checks.
 
 Commands requiring unavailable sandbox capabilities, IPC, sockets, or host
-services may need runner-trusted execution. Only runner-root configuration can
-define an exact executable and argument vector. Select its alias separately
+services may need runner-trusted execution. Root and safe project
+`trustedCommands` catalogs merge in root-then-project order. Identical same-name
+vectors deduplicate; conflicts reject configuration even when unselected.
+The merged catalog is limited to 256 definitions and each pipeline selection
+to 32 aliases. Select root or project aliases separately
 for every applicable pipeline; selecting it for plan execution does not select
-it for polishing. The selection defaults to empty and is frozen for each run.
+it for polishing. The selection defaults to empty; a project selection replaces
+the root selection. Exact vectors, identities, and fingerprints are frozen
+before agent work and reused on resume. Later project configuration edits
+trigger the protected-input guard. Definitions cannot add environment,
+credentials, shell-string substitutes, or broader host authority.
 Trusted checks retain isolation and mutation guards; they do not grant broader
 agent permissions or accept user-attested results.
 

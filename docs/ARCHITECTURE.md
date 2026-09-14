@@ -151,12 +151,12 @@ For a new run, the root also discovers an optional ignored and untracked
 `<project>/LOCAL_ARTIFACTS/agent-runner.json`, or uses an explicitly selected
 confined project path from CLI/MCP. Both files require `schemaVersion: 1`;
 unknown versions, pipelines, roles, settings, and fields are errors. Project
-configuration may select runner-trusted aliases, override execution defaults,
-pipeline roles and settings, and select a normalized repository-relative
-artifact root. It cannot define profiles, credentials, binaries, or arbitrary
-environment values. Tracked, non-ignored, missing explicit, traversing, and
-symbolic-link paths are rejected without creating a file or changing ignore
-rules.
+configuration may define exact trusted commands, select trusted aliases,
+override execution defaults, pipeline roles and settings, and select a normalized
+repository-relative artifact root. It cannot define profiles, credentials,
+provider binaries, or arbitrary environment values. Tracked, non-ignored,
+missing explicit, traversing, and symbolic-link paths are rejected without
+creating a file or changing ignore rules.
 
 The confined read that supplies parsed project values also produces a
 versioned protection record. It pins the canonical project and file paths,
@@ -288,20 +288,25 @@ the run. Runner configuration supplies the base value and a safe project
 overlay may replace it. The resolved selection is persisted with the other
 pipeline settings and is not reloaded on resume.
 
-`trustedCommands` is runner-only configuration. Each lowercase alias binds one
-exact inventory command to one executable and argument vector; definitions
-cannot carry environment values. The runner catalog accepts at most 256
-definitions, while each immutable run snapshot remains limited to 32 selected
-commands. Direct argument strings may contain line feeds for exact multiline
-scripts; other control characters remain invalid. Plan execution and polishing
-each own a `trustedChecks` setting that may select aliases, and an ignored
-project configuration may replace that pipeline's selection, but project
-configuration cannot define an alias, binary, argument, environment value, or
-new host command. The default selection is empty. Before agent work, the root
+`trustedCommands` is accepted in root and safe project configuration through
+the same exact-vector validator. Each lowercase alias binds one exact inventory
+command to one executable and argument vector. Definitions reject shell-string
+substitutes and environment, credential, or host-authority fields.
+Configuration privately merges normalized root then project catalogs in stable
+order, deduplicates identical same-name definitions, and rejects conflicts even
+when unselected. The merged catalog accepts at most 256 definitions, while each
+immutable run snapshot remains limited to 32 selected commands. Direct argument
+strings may contain line feeds for exact multiline scripts; other control
+characters remain invalid. Plan execution and polishing each own a
+`trustedChecks` setting; an ignored project configuration may replace that
+pipeline's selection with root or project aliases. The default selection is
+empty, and selected order determines snapshot order. Profile implementations
+and trusted execution policy remain runner-owned. Before agent work, the root
 resolves it into an immutable snapshot containing every selected vector,
 deterministic command identities, an ordered command fingerprint, and a
 trusted-configuration fingerprint. Resume uses that durable snapshot without
-reloading either configuration source.
+reloading either configuration source. Later project configuration changes
+remain subject to the protected-input guard.
 
 ## Run Lifecycle
 

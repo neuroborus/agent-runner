@@ -29,7 +29,13 @@ test("tracked example is valid and local configuration is ignored", async () => 
   assert.equal(configuration.defaultProfile, "current");
   assert.equal(configuration.defaultModel, "current");
   assert.equal(configuration.defaultContextSize, "current");
-  assert.deepEqual(configuration.trustedCommands, {});
+  assert.deepEqual(configuration.trustedCommands, {
+    "repository-check": {
+      command: "npm run check",
+      executable: "npm",
+      arguments: ["run", "check"],
+    },
+  });
   assert.equal(configuration.pipelines["plan-authoring"].mode, "independent");
   assert.equal(
     configuration.pipelines["plan-authoring"].preferredCommitLineLimit,
@@ -51,7 +57,11 @@ test("tracked example is valid and local configuration is ignored", async () => 
   });
   assert.equal(configuration.pipelines["plan-execution"].finalization, "auto");
   assert.equal(configuration.pipelines.polishing.finalization, "auto");
-  assert.deepEqual(configuration.pipelines.polishing.trustedChecks, []);
+  for (const pipelineId of ["plan-execution", "polishing"]) {
+    assert.deepEqual(configuration.pipelines[pipelineId].trustedChecks, [
+      "repository-check",
+    ]);
+  }
   assert.match(gitignore, /^\/\.agent-runner\.json$/mu);
   assert.ok(Object.isFrozen(configuration));
   assert.ok(Object.isFrozen(configuration.pipelines));
@@ -368,7 +378,7 @@ test("project configuration rejects untrusted and unsafe fields", () => {
     [{ credentials: {} }, /credentials/u],
     [{ binary: "/usr/bin/codex" }, /binary/u],
     [{ environment: {} }, /environment/u],
-    [{ trustedCommands: {} }, /trustedCommands/u],
+    [{ trustedCommands: [] }, /trustedCommands/u],
     [
       {
         pipelines: {

@@ -223,7 +223,7 @@ export function createTrustedValidationSnapshot(
   const commands = Object.freeze(
     selections.map((alias) => {
       const command = normalizedDefinitions[alias];
-      if (command === undefined) {
+      if (!Object.hasOwn(normalizedDefinitions, alias)) {
         throw new TrustedValidationError(
           `Trusted validation selects unknown command: ${alias}.`,
           { code: "ERR_UNKNOWN_TRUSTED_COMMAND" },

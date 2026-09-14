@@ -357,7 +357,7 @@ test("project configuration is a strict partial overlay", () => {
   });
 });
 
-test("only runner configuration defines exact trusted command vectors", () => {
+test("project selections preserve exact runner command vectors", () => {
   const runnerConfiguration = parseRunnerConfiguration(
     JSON.stringify({
       schemaVersion: 1,

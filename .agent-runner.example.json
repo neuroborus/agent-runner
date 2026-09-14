@@ -6,7 +6,13 @@
   "defaultProfile": "current",
   "defaultModel": "current",
   "defaultContextSize": "current",
-  "trustedCommands": {},
+  "trustedCommands": {
+    "repository-check": {
+      "command": "npm run check",
+      "executable": "npm",
+      "arguments": ["run", "check"]
+    }
+  },
   "profiles": {
     "codex-work": {
       "backend": "codex",
@@ -44,7 +50,7 @@
       "maxDisputesPerFinding": 5,
       "maxSameFindingRounds": 5,
       "stagnationWindowRounds": 3,
-      "trustedChecks": [],
+      "trustedChecks": ["repository-check"],
       "roles": {
         "worker": {},
         "reviewer": {
@@ -63,7 +69,7 @@
       "maxDisputesPerFinding": 5,
       "maxSameFindingRounds": 5,
       "stagnationWindowRounds": 3,
-      "trustedChecks": [],
+      "trustedChecks": ["repository-check"],
       "roles": {
         "worker": {},
         "reviewer": {
