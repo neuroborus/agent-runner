@@ -762,11 +762,13 @@ supervisor as PID 1 in a private Linux namespace using system-protected
 bubblewrap. When repository validation is already inside the runner-trusted
 private PID namespace and that policy correctly denies another namespace, it
 instead gives the supervisor a distinct owned session inside the enclosing
-namespace. It preserves
-inherited filesystem/network restrictions; provider and trusted-executor
-sandboxes still enforce their narrower access contracts. The launcher's private
-status channel supplies the host PID, verified against its parent and namespace
-before registration. No provider work starts without that proof.
+namespace. The private launcher preserves inherited filesystem/network
+restrictions while replacing `/dev` with bubblewrap's minimal synthetic device
+filesystem. Enclosing-session reuse retains the enclosing namespace's mounts
+and restrictions. Provider and trusted-executor sandboxes still enforce their
+narrower access contracts. The launcher's private status channel supplies the
+host PID, verified against its parent and namespace before registration. No
+provider work starts without that proof.
 
 Launcher verification resolves the fixed system executable to a regular,
 single-linked canonical file and checks that file plus every relevant ancestor
