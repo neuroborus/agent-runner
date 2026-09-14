@@ -148,6 +148,17 @@ owner, an interrupted turn, and idle work. An ownerless interrupted turn may
 accept action-free resume at the exact revision; it is not permission to start
 a second owner. Follow the current public state and actions.
 
+To stop active work, use `agent-run pause --run <run-id>` or
+`agent-run cancel --run <run-id>`. The shorthand reads status once and binds
+that revision to one fresh key. Automation may instead provide both
+`--expected-revision` and `--idempotency-key`; retry with those exact values
+and never refresh a stale request silently. MCP supervisors use `run_pause` or
+`run_cancel` with the same explicit revision-and-key rule. Pause preserves a
+resumable checkpoint. Cancellation is terminal and older intents cannot revive
+it. A pending request is durable across disconnect or owner loss; status and
+wait expose its bounded kind and revision while the live owner or a detached
+same-run continuation reconciles it.
+
 ## 5. Recover a pause without taking over the work
 
 **A pause is not completion.** Read its reason, bounded evidence, pending input,

@@ -369,6 +369,9 @@ async function createStoredRun(
 
 function storedRunner(store, paths) {
   return {
+    requestOperatorStop(input) {
+      return store.requestOperatorStop(input);
+    },
     validateBoundary(input) {
       return store.validateStateBoundary(input);
     },
@@ -455,6 +458,8 @@ test("projects descriptor-owned pipeline mode guidance", async () => {
   assert.match(MCP_INSTRUCTIONS, /lazy is opt-in/u);
   assert.match(MCP_INSTRUCTIONS, /does not provide independent review/u);
   assert.match(MCP_INSTRUCTIONS, /never select it automatically/u);
+  assert.match(MCP_INSTRUCTIONS, /run_pause or run_cancel/u);
+  assert.match(MCP_INSTRUCTIONS, /never refresh a stale revision silently/u);
 
   const control = createMcpControlPlane({ runner: {}, runStore: {} });
   const { pipelines } = await control.pipelinesList();
@@ -561,6 +566,8 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
     "guidance_update",
     "pipelines_list",
     "run_activity",
+    "run_cancel",
+    "run_pause",
     "run_respond",
     "run_resume",
     "run_start",
@@ -575,6 +582,20 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
   assert.equal(
     tools.find((tool) => tool.name === "run_start").annotations.destructiveHint,
     true,
+  );
+  for (const name of ["run_pause", "run_cancel"]) {
+    const tool = tools.find((candidate) => candidate.name === name);
+    assert.equal(tool.annotations.readOnlyHint, false);
+    assert.deepEqual(tool.inputSchema.required.sort(), [
+      "expectedRevision",
+      "idempotencyKey",
+      "runId",
+    ]);
+    assert.match(tool.description, /same idempotency key and revision/u);
+  }
+  assert.match(
+    tools.find((tool) => tool.name === "run_wait").description,
+    /completion, cancellation, failure/u,
   );
   const startTool = tools.find((tool) => tool.name === "run_start");
   assert.match(startTool.description, /user deliberately selects/u);
@@ -794,6 +815,142 @@ test("persists exact action receipts and rejects idempotency collisions", async 
     }),
     (error) => error.code === "ERR_MCP_IDEMPOTENCY_CONFLICT",
   );
+});
+
+test("persists stop receipts, projects pending stops, and starts one ownerless reconciliation", async (t) => {
+  const paths = await workspace(t, "agent-runner-mcp-stop-");
+  const store = createRunStore({ stateRoot: paths.stateRoot });
+  const initial = await createStoredRun(store, paths);
+  const runner = storedRunner(store, paths);
+  let ownerIsLive = false;
+  const launches = [];
+  const control = createMcpControlPlane({
+    runner,
+    runStore: {
+      ...store,
+      async runLeaseOwnerIsLive() {
+        return ownerIsLive;
+      },
+    },
+    async launchRun(runId, action, options) {
+      launches.push({ runId, action, options });
+      ownerIsLive = true;
+    },
+  });
+  const pauseInput = {
+    runId: initial.runId,
+    expectedRevision: initial.revision,
+    idempotencyKey: "pause-key",
+  };
+  const pause = await control.runPause(pauseInput);
+  assert.deepEqual(pause, {
+    runId: initial.runId,
+    requestId: pause.requestId,
+    kind: "pause_requested",
+    expectedRevision: initial.revision,
+    revision: initial.revision + 1,
+  });
+  assert.match(pause.requestId, /^[a-f0-9]{64}$/u);
+  assert.deepEqual(await control.runPause(pauseInput), pause);
+  assert.equal(launches.length, 1);
+  assert.equal(launches[0].runId, initial.runId);
+  assert.equal(launches[0].action, null);
+  assert.equal(
+    launches[0].options.expectedRuntimeCompatibility,
+    DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
+  );
+  assert.equal(typeof launches[0].options.onExit, "function");
+  const status = await control.runStatus({ runId: initial.runId });
+  assert.deepEqual(status.pendingStop, {
+    kind: "pause_requested",
+    revision: initial.revision + 1,
+  });
+  assert.doesNotMatch(JSON.stringify(status), new RegExp(pause.requestId, "u"));
+  await assert.rejects(
+    control.runPause({
+      ...pauseInput,
+      expectedRevision: initial.revision + 1,
+    }),
+    { code: "ERR_MCP_IDEMPOTENCY_CONFLICT" },
+  );
+  await assert.rejects(
+    control.runPause({
+      ...pauseInput,
+      idempotencyKey: "stale-pause",
+    }),
+    { code: "ERR_STALE_RUN_REVISION" },
+  );
+  await assert.rejects(
+    control.runPause({
+      ...pauseInput,
+      expectedRevision: pause.revision,
+      idempotencyKey: "competing-pause",
+    }),
+    { code: "ERR_STOP_PENDING" },
+  );
+
+  const cancelInput = {
+    runId: initial.runId,
+    expectedRevision: pause.revision,
+    idempotencyKey: "cancel-key",
+  };
+  const cancel = await control.runCancel(cancelInput);
+  assert.equal(cancel.kind, "cancel_requested");
+  assert.equal(cancel.revision, pause.revision + 1);
+  assert.deepEqual(
+    (await control.runStatus({ runId: initial.runId })).pendingStop,
+    {
+      kind: "cancel_requested",
+      revision: cancel.revision,
+    },
+  );
+});
+
+test("recovers an ownerless stop after the requesting client disconnects", async (t) => {
+  const paths = await workspace(t, "agent-runner-mcp-stop-disconnect-");
+  const store = createRunStore({ stateRoot: paths.stateRoot });
+  const initial = await createStoredRun(store, paths);
+  const runner = storedRunner(store, paths);
+  let ownerIsLive = false;
+  const abort = new AbortController();
+  const runStore = {
+    ...store,
+    async runLeaseOwnerIsLive() {
+      return ownerIsLive;
+    },
+  };
+  const input = {
+    runId: initial.runId,
+    expectedRevision: initial.revision,
+    idempotencyKey: "disconnected-cancel",
+  };
+  await assert.rejects(
+    createMcpControlPlane({
+      runner,
+      runStore,
+      async launchRun() {
+        abort.abort();
+      },
+    }).runCancel(input, { signal: abort.signal }),
+    { name: "AbortError" },
+  );
+  assert.equal(
+    (await runner.status(initial.runId)).run.stopRequest.kind,
+    "cancel_requested",
+  );
+
+  let launches = 0;
+  const receipt = await createMcpControlPlane({
+    runner,
+    runStore,
+    async launchRun() {
+      launches += 1;
+      ownerIsLive = true;
+    },
+  }).runCancel(input);
+  assert.equal(receipt.kind, "cancel_requested");
+  assert.equal(receipt.revision, initial.revision + 1);
+  assert.equal(launches, 1);
 });
 
 test("reconciles an incomplete start intent after run creation", async (t) => {
@@ -1637,6 +1794,7 @@ test("resumes only an action valid for the persisted pause", async (t) => {
     revision: 1,
     activityCursor: 1,
     status: "WAITING_FOR_USER",
+    pendingStop: null,
     execution: { state: "idle", role: null, phase: null },
     currentStep: null,
     pause: {

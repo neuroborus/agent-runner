@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-09-14
+
+- **Pause and cancellation are durable controls across CLI and MCP.** CLI
+  shorthand captures one inspected revision and fresh idempotency key, while
+  repeatable CLI automation and the `run_pause` and `run_cancel` MCP tools bind
+  both values explicitly. Exact retries replay state-owned receipts and stale
+  requests never refresh silently. A live runner observes the durable stop;
+  owner loss starts a detached same-run reconciliation without granting a
+  second execution owner. Bounded status and wait projections expose pending
+  intent without request identity or checkpoints, wait cancellation remains
+  local to the caller, and terminal `CANCELED` work cannot be revived by an
+  older continuation.
+
 ## 2026-09-13
 
 - **Operator stops reconcile under the execution owner's leases.** The runner

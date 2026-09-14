@@ -40,7 +40,7 @@ const EXECUTABLE_PATH = fileURLToPath(
 export const DETACHED_RUNTIME_COMPATIBILITY_ENV =
   "AGENT_RUNNER_PARENT_RUNTIME_COMPATIBILITY";
 
-const RUN_INSTRUCTIONS = `Use run_start to start a durable pipeline, then use one run_wait call for the desired waiting interval. Use run_activity only for explicit or historical reads; do not poll status, activity, or wait at a fixed cadence. independent is the default and recommended mode because it provides genuinely independent semantic review, but it uses more provider context and tokens. lazy is opt-in, reduces consumption, and does not provide independent review; never select it automatically to save tokens. Leave sourceSession unset unless the user deliberately chooses to fork a compatible current native session after being offered a fresh start. Offer its known trusted profile with the fork choice; when the profile is unknown, offer only current profile inheritance and never guess an alias. In independent mode the primary and review roles fork the complete source context independently; in lazy mode the primary role forks it once. Recommend a fresh start for a long, multi-topic, or uncertain source session. Keep native session IDs opaque; never inspect provider-private storage or infer or fabricate an ID. Answer pending input from explicit user context when sufficient; otherwise ask the user. Never invent a material product decision.`;
+const RUN_INSTRUCTIONS = `Use run_start to start a durable pipeline, then use one run_wait call for the desired waiting interval. Use run_activity only for explicit or historical reads; do not poll status, activity, or wait at a fixed cadence. Use run_pause or run_cancel with the exact inspected revision and a unique idempotency key; retry the same logical request with the same values and never refresh a stale revision silently. Cancellation is terminal. independent is the default and recommended mode because it provides genuinely independent semantic review, but it uses more provider context and tokens. lazy is opt-in, reduces consumption, and does not provide independent review; never select it automatically to save tokens. Leave sourceSession unset unless the user deliberately chooses to fork a compatible current native session after being offered a fresh start. Offer its known trusted profile with the fork choice; when the profile is unknown, offer only current profile inheritance and never guess an alias. In independent mode the primary and review roles fork the complete source context independently; in lazy mode the primary role forks it once. Recommend a fresh start for a long, multi-topic, or uncertain source session. Keep native session IDs opaque; never inspect provider-private storage or infer or fabricate an ID. Answer pending input from explicit user context when sufficient; otherwise ask the user. Never invent a material product decision.`;
 const ISSUE_REPORTING_INSTRUCTIONS = `Use unexpected_issue_report only when you, as the supervising client agent, explicitly conclude that Agent Runner behaved genuinely unexpectedly or contrary to its documented contract. Expected completion, exhausted configured budgets, usage limits, expected user pauses, documented environment blockers, and invalid user or configuration input are not reportable issues. Supply concise English Markdown deliberately; the server never collects or attaches logs, transcripts, prompts, environment values, credentials, secrets, or other diagnostics automatically.`;
 const GUIDANCE_INSTRUCTIONS =
   "Call guidance_read once before first managing a run for each project and follow the combined operator guide.";
@@ -193,6 +193,13 @@ const runResumeSchema = z
     action: resumeAction.nullable().default(null),
   })
   .strict();
+const runStopSchema = z
+  .object({
+    idempotencyKey,
+    runId,
+    expectedRevision: z.number().int().positive().safe(),
+  })
+  .strict();
 const markdownContent = (maximumLength) =>
   z
     .string()
@@ -332,6 +339,13 @@ function statusProjection({ directoryPath, run }, leaseOwnerIsLive) {
     revision: run.revision,
     activityCursor: run.revision,
     status: run.pipelineState.workflowState,
+    pendingStop:
+      run.stopRequest?.reconciledRevision === null
+        ? {
+            kind: run.stopRequest.kind,
+            revision: run.stopRequest.acceptedRevision,
+          }
+        : null,
     execution: executionProjection(run, leaseOwnerIsLive),
     currentStep: status.currentStep,
     pause,
@@ -350,7 +364,7 @@ function statusProjection({ directoryPath, run }, leaseOwnerIsLive) {
 function waitIsTerminal(run) {
   const state = run.pipelineState.workflowState;
   return (
-    ["DONE", "FAILED"].includes(state) ||
+    ["DONE", "FAILED", "CANCELED"].includes(state) ||
     (state === "WAITING_FOR_USER" && run.pause?.inputResponse === undefined)
   );
 }
@@ -516,7 +530,7 @@ export function createMcpControlPlane(options = {}) {
             (next) => next.type === "resume" && next.action === null,
           );
       if (
-        run.pipelineState.workflowState === "DONE" ||
+        ["DONE", "CANCELED"].includes(run.pipelineState.workflowState) ||
         (run.pipelineState.workflowState === "FAILED" && !recoverableFailure) ||
         (!allowWaiting &&
           run.pipelineState.workflowState === "WAITING_FOR_USER") ||
@@ -844,7 +858,9 @@ export function createMcpControlPlane(options = {}) {
         const interrupted =
           run.activeTurn !== null &&
           run.pause === null &&
-          !["DONE", "FAILED"].includes(run.pipelineState.workflowState);
+          !["DONE", "FAILED", "CANCELED"].includes(
+            run.pipelineState.workflowState,
+          );
         if (interrupted) {
           if (input.action !== null) {
             throw new Error(
@@ -875,6 +891,57 @@ export function createMcpControlPlane(options = {}) {
     } finally {
       await action.release();
     }
+  }
+
+  async function reconcileDetachedStop(receipt, signal) {
+    let launched = false;
+    let childExited = false;
+    let childExitCode = null;
+    while (true) {
+      const current = await runner.status(receipt.runId);
+      if (
+        current.run.stopRequest === null ||
+        current.run.stopRequest.reconciledRevision !== null ||
+        (await runStore.runLeaseOwnerIsLive(receipt.runId))
+      ) {
+        return;
+      }
+      if (childExited) {
+        throw new RunStoreError(
+          `Detached stop reconciliation for run ${receipt.runId} exited ` +
+            "before acquiring ownership; retry this request with the same " +
+            "idempotency key.",
+          {
+            code:
+              childExitCode === RUNTIME_VERSION_SKEW_EXIT_CODE
+                ? "ERR_RUNTIME_VERSION_SKEW"
+                : "ERR_DETACHED_START_FAILED",
+          },
+        );
+      }
+      if (!launched) {
+        await launchRun(receipt.runId, null, {
+          expectedRuntimeCompatibility: detachedCompatibilityToken,
+          onExit(code) {
+            childExited = true;
+            childExitCode = code;
+          },
+        });
+        launched = true;
+      }
+      await delay(RETRY_DELAY_MS, signal);
+    }
+  }
+
+  async function runStop(input, kind, signal) {
+    const receipt = await runner.requestOperatorStop({
+      runId: input.runId,
+      kind,
+      expectedRevision: input.expectedRevision,
+      idempotencyKey: input.idempotencyKey,
+    });
+    await reconcileDetachedStop(receipt, signal);
+    return receipt;
   }
 
   async function unexpectedIssueReport(input, { signal } = {}) {
@@ -953,6 +1020,10 @@ export function createMcpControlPlane(options = {}) {
     runActivity,
     runRespond,
     runResume,
+    runPause: (input, context) =>
+      runStop(input, "pause_requested", context?.signal),
+    runCancel: (input, context) =>
+      runStop(input, "cancel_requested", context?.signal),
     runStart,
     runStatus,
     runWait,
@@ -1043,6 +1114,28 @@ export function createMcpServer(options = {}) {
     async (input) => result(await control.runStatus(input)),
   );
   server.registerTool(
+    "run_pause",
+    {
+      description:
+        "Request a durable operator pause at the exact inspected revision. Retry the same logical request with the same idempotency key and revision; never refresh a stale request silently.",
+      inputSchema: runStopSchema,
+      annotations: mutating,
+    },
+    async (input, context) =>
+      result(await control.runPause(input, { signal: context.mcpReq.signal })),
+  );
+  server.registerTool(
+    "run_cancel",
+    {
+      description:
+        "Request terminal cancellation at the exact inspected revision. Retry the same logical request with the same idempotency key and revision; never refresh a stale request silently.",
+      inputSchema: runStopSchema,
+      annotations: mutating,
+    },
+    async (input, context) =>
+      result(await control.runCancel(input, { signal: context.mcpReq.signal })),
+  );
+  server.registerTool(
     "run_activity",
     {
       description:
@@ -1062,7 +1155,7 @@ export function createMcpServer(options = {}) {
     "run_wait",
     {
       description:
-        "Wait once for user input, completion, failure, or timeout. Do not call at a fixed cadence; a timeout leaves the run available for a later explicit call.",
+        "Wait once for user input, completion, cancellation, failure, or timeout. Do not call at a fixed cadence; a timeout leaves the run available for a later explicit call.",
       inputSchema: z
         .object({
           runId,

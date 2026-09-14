@@ -486,9 +486,28 @@ agent-run resume --run <run-id> --extra-fix-rounds 3
 agent-run resume --run <run-id> --override-finding R7
 ```
 
+An operator can also request a durable pause or terminal cancellation. The
+short CLI form reads the run once, binds that revision to a fresh idempotency
+key, and submits the request:
+
+```bash
+agent-run pause --run <run-id>
+agent-run cancel --run <run-id>
+```
+
+For repeatable automation, supply both captured values explicitly. Retry an
+uncertain request with exactly the same revision and key; never refresh a stale
+request silently:
+
+```bash
+agent-run pause --run <run-id> --expected-revision 42 --idempotency-key <key>
+agent-run cancel --run <run-id> --expected-revision 42 --idempotency-key <key>
+```
+
 `run` and `resume` exit with status `2` when they return a persisted pause.
-Invalid input and startup or execution failures exit with status `1`; `status`
-exits successfully when it can read the requested run.
+Accepted `pause` and `cancel` requests and readable `status` calls exit
+successfully. Invalid input and startup or execution failures exit with status
+`1`.
 
 Resume after editing the reported clarification artifact or resolving a
 reported retryable blocker. After clarification closes, only a
@@ -584,6 +603,8 @@ exposes:
 - `run_start`
 - `run_status`
 - `run_activity`
+- `run_cancel`
+- `run_pause`
 - `run_wait`
 - `run_respond`
 - `run_resume`
@@ -698,11 +719,21 @@ only non-pause exception is a null action at the exact revision of a nonterminal
 persisted active turn with no live execution owner; stale revisions, non-null
 actions, and concurrent owners are rejected.
 
+Use `run_pause` or `run_cancel` with `expectedRevision` from the inspected
+status or wait result and a unique `idempotencyKey`. A pause preserves the
+reconciled checkpoint for an action-free resume; cancellation reaches terminal
+`CANCELED` and cannot be revived. Exact retries use the same arguments and key.
+Older or conflicting requests fail instead of silently adopting a newer
+revision. Status and wait expose a bounded `pendingStop` while reconciliation
+is in progress, and waits treat `CANCELED` as terminal.
+
 Mutating tools persist an action intent before mutation and a receipt before
 returning. Exact retries return the original result, while reusing a key with
 different arguments is rejected. Issue reporting uses that contract for its
-single local file creation. Runs continue in detached local children, so
-MCP disconnects and wait cancellation affect only the client call. A detached
+single local file creation. Accepted stop requests notify the live execution
+owner or start detached same-run reconciliation when ownership was lost. Runs
+continue in detached local children, so MCP disconnects and wait cancellation
+affect only the client call. A detached
 start or resume rejects active canonical-worktree ownership before launch and
 withholds its receipt after launch until the run advances or the child owns the
 worktree. Losing a concurrent ownership race keeps the durable idempotency

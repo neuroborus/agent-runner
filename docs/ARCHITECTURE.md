@@ -453,9 +453,10 @@ or performs finalization or commit work.
 
 `agent-run mcp` exposes the same static pipeline registry and runner through the
 official Node MCP SDK over STDIO only. The private `src/mcp/service.js` module
-owns the seven pipeline-control tools: `pipelines_list`, `run_start`, `run_status`,
-`run_activity`, `run_wait`, `run_respond`, and `run_resume`, the shared-capability
-tools `guidance_read` and `guidance_update`, and the
+owns the nine pipeline-control tools: `pipelines_list`, `run_start`, `run_status`,
+`run_activity`, `run_wait`, `run_respond`, `run_resume`, `run_pause`, and
+`run_cancel`; it also owns the shared-capability tools `guidance_read` and
+`guidance_update`, and the
 conditionally registered MCP-only `unexpected_issue_report`. It contains
 transport schemas and concise projections, not a second workflow
 implementation. The private `src/mcp/reporting.js` module owns the narrow local
@@ -530,6 +531,16 @@ remains deterministic when the competing lease is released between MCP polls.
 An MCP disconnect, tool timeout, worktree conflict, or duplicate recovery
 launch cannot create a second workflow owner.
 
+`run_pause` and `run_cancel` delegate directly to the state-owned stop action,
+so the acceptance event and receipt are durable before either tool returns.
+Both require the caller's exact inspected revision and idempotency key. An
+exact retry replays the receipt; a stale or conflicting request never refreshes
+itself. A live execution owner observes the durable request through the runner
+monitor. If ownership was already lost, MCP launches a detached action-free
+resume to perform the same-run reconciliation; execution and worktree leases
+still exclude a second owner. Client cancellation stops only the tool's wait
+for ownership and does not retract the request or terminate the detached child.
+
 MCP start fields remain additive. `run_start.mode` accepts only `independent`
 and `lazy` and has the same highest precedence as CLI `--mode`. MCP guidance
 states that `independent` is the default and recommended choice for genuinely
@@ -552,9 +563,11 @@ does not appear in the latter enum; the selected installed adapter must still
 prove native fork support at its capability probe.
 
 `run_wait` is one revision-driven server-side wait that ends at an unresolved
-`WAITING_FOR_USER`, `DONE`, `FAILED`, or its caller-selected timeout. Optional
-MCP progress notifications carry only bounded public activity with role labels;
-they do not wake a model or alter the run. Cancellation cancels only that wait.
+`WAITING_FOR_USER`, `DONE`, `FAILED`, `CANCELED`, or its caller-selected
+timeout. Optional MCP progress notifications carry only bounded public activity
+with role labels; they do not wake a model or alter the run. Cancellation
+cancels only that wait.
+
 MCP status and wait also project one bounded `execution` object. Its finite
 `state` is `running` while the per-run execution lease has a live owner,
 `interrupted` when persisted provider activity has lost its owner, and `idle`
@@ -568,6 +581,10 @@ interrupted process without polling or a heartbeat.
 recommendations. Status, wait, and activity project the persisted resolved mode
 without inactive role configuration or provider-private data. `run_activity`
 remains an explicit cursor-based history read rather than a polling primitive.
+Status and wait additionally expose only the pending stop kind and accepted
+revision while reconciliation is incomplete; the request hash, suspended
+checkpoint, and internal ownership evidence remain private.
+
 V1 does not require the MCP Tasks extension, a network transport,
 authentication, or a daemon.
 
