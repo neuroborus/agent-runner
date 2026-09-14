@@ -350,6 +350,9 @@ function createFixture({
           messages,
           processIndex,
         })) ?? defaultResponse(message);
+      if (response?.pending === true) {
+        return;
+      }
       if (response?.stdoutError === true) {
         setImmediate(() => {
           stdout.emit("error", new Error("test stdout failure"));
@@ -494,6 +497,47 @@ test(
       true,
     );
     assert.deepEqual(registrations, [987_654, null]);
+  },
+);
+
+test(
+  "propagates owned completion failure while the protocol remains open",
+  { timeout: 5_000 },
+  async () => {
+    const failure = Object.assign(new Error("owned completion failed"), {
+      code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    });
+    const timeoutFailure = new Error("owned completion failure timed out");
+    const fixture = createFixture({
+      ownedCompletionFailure: failure,
+      handle({ message }) {
+        if (message.method === "initialize") {
+          return { pending: true };
+        }
+        return undefined;
+      },
+    });
+    let timeout;
+
+    try {
+      await assert.rejects(
+        Promise.race([
+          fixture.adapter.run(request({ onProcess: async () => {} })),
+          new Promise((_, reject) => {
+            timeout = setTimeout(() => reject(timeoutFailure), 1_000);
+          }),
+        ]),
+        (cause) => cause === failure,
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
+    assert.equal(
+      fixture.processes[0].messages.some(
+        ({ method }) => method === "initialize",
+      ),
+      true,
+    );
   },
 );
 

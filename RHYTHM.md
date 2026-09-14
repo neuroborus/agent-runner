@@ -7,6 +7,13 @@ remain in the owning documentation.
 
 ## 2026-09-14
 
+- **Owned-process failure is independent of provider protocol completion.**
+  Codex races only owned-completion rejection against the complete App Server
+  operation. A supervisor retaining containment and open protocol pipes can no
+  longer leave a durable turn falsely running: the original ownership failure
+  starts bounded cleanup and remains primary. Successful process completion
+  does not substitute for a required protocol result.
+
 - **Owned supervision preserves provider-native sandbox nesting.** Ordinary
   commands retain private PID namespace ownership. Provider adapters explicitly
   identify only executions that create their mandatory native sandbox; after a
