@@ -186,6 +186,19 @@ function turnCalls(fixture) {
   );
 }
 
+test("marks only Claude native-sandbox executions as provider-owned", async () => {
+  const fixture = createFixture();
+  await fixture.adapter.run(request({ onProcess: async () => {} }));
+
+  const turn = turnCalls(fixture)[0];
+  const metadata = fixture.calls.find(
+    ({ file, argumentsList }) =>
+      file === "git" && argumentsList.includes("--absolute-git-dir"),
+  );
+  assert.equal(turn.options.ownershipMode, "native-sandbox-provider");
+  assert.equal(metadata.options.ownershipMode, undefined);
+});
+
 test("constructs and probes enforceable Claude capabilities", async () => {
   assert.doesNotThrow(() => createClaudeAdapter());
   assert.equal(
@@ -1538,6 +1551,16 @@ test("creates one exact authorized commit in a networkless sandbox", async () =>
       commit: { expectedHead: EXPECTED_HEAD, message },
     }),
   );
+
+  const metadata = fixture.calls.find(
+    ({ file, argumentsList }) =>
+      file === "git" && argumentsList.includes("--absolute-git-dir"),
+  );
+  const commitSandbox = localCommitSandboxCalls(fixture).find(
+    ({ options }) => options.ownershipMode === "native-sandbox-provider",
+  );
+  assert.equal(metadata.options.ownershipMode, undefined);
+  assert.ok(commitSandbox);
 
   assert.equal(
     option(turnCalls(fixture)[0].argumentsList, "--permission-mode"),

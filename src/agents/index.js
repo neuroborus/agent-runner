@@ -58,6 +58,8 @@ export {
 export { STRUCTURED_OUTPUT_FAILURE_CLASS };
 export {
   assertOwnedProcessLauncherProtected,
+  inspectOwnedSessionProcesses,
+  resolveOwnedProcessLauncher,
   spawnOwnedProcess,
   terminateOwnedProcess,
 } from "./owned-process.js";

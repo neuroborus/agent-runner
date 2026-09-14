@@ -757,12 +757,17 @@ envelopes project null without read-side writes; the ordinary leased runtime
 migration persists the current shape. Before a provider or trusted command
 can execute, a private supervisor waits on a separate inherited Node IPC channel
 while the runner journals its host PID, hostname, boot/start identity, and PID
-namespace identity. The shared agents boundary normally launches this
-supervisor as PID 1 in a private Linux namespace using system-protected
-bubblewrap. When repository validation is already inside the runner-trusted
-private PID namespace and that policy correctly denies another namespace, it
-instead gives the supervisor a distinct owned session inside the enclosing
-namespace. The private launcher preserves inherited filesystem/network
+namespace identity. The shared agents boundary owns the closed `ordinary` and
+`native-sandbox-provider` supervision modes. Ordinary processes launch this
+supervisor as PID 1 in a private Linux namespace using
+system-protected bubblewrap. Provider launches use that mode only when a cached,
+namespace-local probe proves the complete outer-plus-inner user, PID, mount,
+device, and network namespace shape. When nesting is unavailable on the initial
+host PID namespace, only a declared provider may use a distinct owned session
+before its mandatory native sandbox starts. When repository validation is
+already inside the runner-trusted private PID namespace and that policy denies
+another namespace, the existing owned-session mode remains available without
+widening the enclosing sandbox. The private launcher preserves inherited filesystem/network
 restrictions while replacing `/dev` with bubblewrap's minimal synthetic device
 filesystem. Enclosing-session reuse retains the enclosing namespace's mounts
 and restrictions. Provider and trusted-executor sandboxes still enforce their
@@ -785,15 +790,21 @@ namespaces. Normal completion reports surviving descendants before retiring
 them, so trusted checks cannot pass with leaked work. Recovery inspects only the
 recorded owner and waits for namespace-init death before clearing ownership;
 the outer launcher's exit alone is insufficient. Live shutdown uses the original
-child handle and control channel. Recovery relies on parent-death teardown and
-never signals a numeric host PID, avoiding identity-check/signalling races with
-PID reuse. Unverifiable ownership retains exclusion.
+child handle and control channel. The session token is derived from the already
+persisted PID, boot, and process-start proof, so recovery can reject clearing a
+dead session supervisor while matching descendants remain without signalling a
+numeric host PID. Unverifiable ownership retains exclusion.
 Former group-only records remain conservative until a verified reboot; they
-cannot prove that detached descendants stopped. Unavailable namespace support
-fails before execution. Reusing the enclosing trusted namespace neither retries
-without containment nor widens its policy; session membership and a per-launch
-inherited ownership token supply the inner ownership boundary while the
-enclosing namespace init remains responsible for otherwise detached descendants.
+cannot prove that detached descendants stopped. Unavailable ordinary namespace
+support fails before execution. Session-mode discovery combines session
+membership and verified live ancestry with a per-launch inherited ownership
+token, including same-user descendants that create another session or PID
+namespace. Inaccessible or malformed process evidence is unverifiable, and
+surviving descendants after bounded TERM/KILL retirement fail closed. Reusing
+the enclosing trusted
+namespace neither retries without containment nor widens its policy; its
+namespace init remains responsible for otherwise detached descendants.
+Ordinary processes never receive the initial-host session fallback.
 
 The runner service accepts revision-bound `requestOperatorStop` requests and
 monitors durable revisions while executing. An accepted request aborts only

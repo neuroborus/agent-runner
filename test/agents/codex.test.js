@@ -439,6 +439,20 @@ function request(overrides = {}) {
   };
 }
 
+test("marks only Codex native-sandbox executions as provider-owned", async () => {
+  const fixture = createFixture();
+  await fixture.adapter.run(request({ onProcess: async () => {} }));
+
+  assert.equal(
+    fixture.processes[0].options.ownershipMode,
+    "native-sandbox-provider",
+  );
+  const discovery = fixture.executeCalls.find(({ argumentsList }) =>
+    argumentsList.includes("mcp"),
+  );
+  assert.equal(discovery.options.ownershipMode, undefined);
+});
+
 test("creates and cleans owner-confined Codex workspace storage", async (t) => {
   const parentPath = await mkdtemp(
     join(tmpdir(), "agent-runner-codex-storage-parent-"),
@@ -1838,6 +1852,14 @@ test("creates an authorized commit through a networkless sandbox", async () => {
     additionalProperties: false,
   });
   const gitCall = fixture.executeCalls.find(({ file }) => file === "git");
+  assert.equal(gitCall.options.ownershipMode, undefined);
+  assert.ok(
+    fixture.executeCalls.some(
+      ({ argumentsList, options }) =>
+        argumentsList[0] === "sandbox" &&
+        options.ownershipMode === "native-sandbox-provider",
+    ),
+  );
   assert.deepEqual(gitCall.argumentsList, [
     "-C",
     PROJECT_PATH,
@@ -3371,8 +3393,10 @@ test(
   },
   async () => {
     const adapter = createCodexAdapter();
+    const registrations = [];
     const result = await adapter.run(
       request({
+        onProcess: async (pid) => registrations.push(pid),
         prompt:
           "Use a repository command to read package.json. Return JSON with " +
           "packageName set to its name field and commandWorked set to true. " +
@@ -3392,5 +3416,7 @@ test(
       packageName: packageMetadata.name,
       commandWorked: true,
     });
+    assert.equal(Number.isSafeInteger(registrations[0]), true);
+    assert.equal(registrations.at(-1), null);
   },
 );

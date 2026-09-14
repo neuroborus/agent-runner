@@ -77,14 +77,21 @@ process signalling or repository effect.
 The runner connects that protocol to an owned-process abort boundary. Provider
 and trusted-command processes wait for durable registration before executing;
 runner loss closes their private control pipe and starts bounded cleanup.
-Private PID namespaces contain detached and reparented descendants. Nested
-runner tests inside the trusted-validation namespace use an owned session only
-when that enclosing sandbox denies another PID namespace; the enclosing
+Private PID namespaces contain detached and reparented descendants. Provider
+processes that require another native sandbox use that mode only when the full
+nested shape is available. Otherwise, an explicitly declared provider alone may
+use session/token ownership on the initial host namespace; verified live
+ancestry and same-user token discovery retain descendants that create another
+session or namespace, and incomplete process evidence fails closed. Nested
+runner tests inside the trusted-validation namespace retain the owned-session
+path when that enclosing sandbox denies another PID namespace; the enclosing
 namespace remains the ultimate containment boundary. The runner records the
 owned supervisor identity and verifies its death before clearing ownership;
 the outer launcher's exit or an empty process group is insufficient.
 Live shutdown signals only through the owned child handle/control channel;
 recovery verifies parent-death teardown without signalling host PIDs.
+For session ownership, the persisted PID/boot/start proof reconstructs the
+token used to detect survivors after supervisor loss without signalling them.
 Unverifiable ownership or surviving descendants retains exclusion.
 Reconciliation preserves safe partial
 workspace content without staging or rollback and retains read-only mutation,

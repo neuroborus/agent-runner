@@ -69,11 +69,17 @@ not widen ordinary workspace-write access. Polishing never requests it.
 
 Provider requests may carry runner-owned abort and process-registration
 callbacks. The adapter keeps these out of prompts and provider configuration.
-Owned supervisors wait for durable registration before launching work and
-normally run as PID 1 in private Linux namespaces. A runner exercised inside
-the already-private trusted-validation namespace uses a distinct owned session
-when that sandbox denies nested namespace creation; the enclosing namespace
-still contains otherwise detached descendants. Cancellation or runner loss
+Owned supervisors wait for durable registration before launching work. A
+provider adapter declares `native-sandbox-provider` only for an execution that
+requires a native sandbox. That mode uses a private PID namespace only after
+the complete nested namespace shape is proven; when nesting is unavailable on
+the initial host namespace, it may instead use the
+narrow session/token ownership mode while its mandatory provider sandbox still
+enforces command isolation. Ordinary owned processes cannot use
+that host fallback. A runner exercised inside the already-private
+trusted-validation namespace retains the distinct owned-session path when
+that sandbox denies nested namespace creation; the enclosing namespace still
+contains otherwise detached descendants. Cancellation or runner loss
 retires the owned containment before reconciliation can release ownership.
 Unavailable containment fails before provider execution. Every fresh
 or recovery attempt checks the abort signal. A constrained commit that may already have begun stays

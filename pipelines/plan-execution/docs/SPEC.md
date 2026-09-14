@@ -2613,9 +2613,12 @@ A user override must be explicitly recorded in `events.jsonl` and `progress.md`.
 
 The runner's durable stop protocol applies to every role, checkpoint, and mode.
 An accepted request aborts only registered execution. The runner contains
-owned processes in private PID namespaces. A runner nested inside the
-runner-trusted validation namespace uses an owned session when that sandbox
-denies another PID namespace, without widening the enclosing sandbox. It waits
+ordinary owned processes in private PID namespaces. Explicit native-sandbox
+provider processes prefer that mode after a complete nested capability probe
+and alone may fall back to session/token ownership on the initial host
+namespace when nesting is unavailable. A runner nested inside the runner-trusted
+validation namespace retains an owned session when that sandbox denies another
+PID namespace, without widening the enclosing sandbox. It waits
 for owned containment teardown, including detached descendants, before repository
 reconciliation. The runner keeps its
 execution lease and any held worktree lease until the pipeline's read-only
@@ -2933,7 +2936,9 @@ At minimum cover:
     overrides, never restore invalidated evidence; interruption and unavailable
     providers preserve pending attempts, while explicit retries grant only one.
 
-Real Codex/Claude smoke tests should be opt-in integration tests.
+Real Codex/Claude smoke tests should be opt-in integration tests. The owned
+Codex smoke registers its supervised process and must read and validate the
+repository `package.json` through a model-issued read-only command.
 
 ---
 

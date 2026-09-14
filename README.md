@@ -236,11 +236,15 @@ permissions. The pinned path is reverified on resume and execution. Its network
 namespace has a minimal read-only system and repository view, private runtime
 and temporary storage, a hidden user home, and a finite non-credential
 environment. Rootless Docker and command-owned services run inside the same
-mount, network, and PID namespaces. The runner records its enclosing namespace
-init's identity and retires the complete tree, including detached descendants,
-before reconciliation. Nested runner tests reuse that already-private PID
-namespace through a distinct owned session when its policy denies another PID
-namespace; no sandbox authority is added. A
+mount, network, and PID namespaces. The runner records its owned supervisor
+identity and retires the complete tree, including detached descendants, before
+reconciliation. Native-sandbox provider processes prefer private PID ownership
+when the full nested shape is available. If nesting is unavailable on the
+initial host namespace, only an explicitly declared provider may use
+session/token ownership while its native sandbox remains mandatory;
+ordinary processes retain private PID isolation. Nested runner tests reuse that
+already-private PID namespace through the same distinct owned session when its
+policy denies another PID namespace; no sandbox authority is added. A
 readiness signal classifies isolation setup failures separately from executed
 check failures. Workspace, Git, ref, remote, identity,
 and validation-infrastructure snapshots must remain stable. Isolation or
