@@ -1654,8 +1654,9 @@ substituted, replaced, or weakened checks are invalid output. The runner hashes
 the identified package scripts, test-discovery and runner files, skill guidance,
 and validation configuration rather than trusting an agent-supplied hash.
 Changing that inventory, its file set, or its fingerprint is provisional until
-the independent read-only terminal Reviewer, or the lazy read-only terminal clean confirmation,
-accepts that the task or current plan step authorizes the complete change for
+the read-only terminal Reviewer in independent and combined modes, or the lazy
+read-only terminal clean confirmation, accepts that the task or current plan
+step authorizes the complete change for
 the same content fingerprint. The confirming turn receives both the established
 and candidate tuples, so acceptance cannot depend on a prior native session.
 Both pipelines invalidate rejected evidence and use their independently owned

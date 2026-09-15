@@ -3188,7 +3188,7 @@ Do not build:
 15. Retry exhaustion always pauses; it never accepts unresolved work.
 16. Runner correctness does not depend on native agent-session resume.
 17. Codex and Claude Code are both first-class V1 backends.
-18. Independent-mode Worker, Reviewer, and Arbiter backend choices are
+18. Independent and combined Worker, Reviewer, and Arbiter backend choices are
     independent; lazy mode resolves only Worker.
 19. Workflow logic is backend-agnostic.
 20. State survives process termination and never pollutes the target repository.

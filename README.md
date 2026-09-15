@@ -15,6 +15,15 @@ Read the [operator guide](docs/OPERATOR_GUIDE.md) for the complete CLI/MCP
 supervision procedure, pause recovery, validation boundaries, and safe
 project-local operating guidance.
 
+| Mode          | Quality | Speed | Token consumption | Meaning                                                         |
+| ------------- | ------- | ----- | ----------------- | --------------------------------------------------------------- |
+| `lazy`        | ★★★☆☆   | ★★★★★ | ★★☆☆☆             | Lower-consumption self-review without an independent Reviewer.  |
+| `independent` | ★★★★☆   | ★★★☆☆ | ★★★★☆             | Recommended default with genuinely independent semantic review. |
+| `combined`    | ★★★★★   | ★★☆☆☆ | ★★★★★             | Primary self-convergence followed by the full independent gate. |
+
+More token stars mean greater consumption. Ratings are relative guidance, not
+measured provider guarantees.
+
 ## Core Guarantees
 
 - Pipelines own their roles, inputs, prompts, state machines, and output policy.
@@ -115,9 +124,9 @@ A target repository may optionally provide an ignored, untracked
 ignored path with `--project-config`. A project file may select aliases already
 trusted by the runner, set backend/model/context defaults, override pipeline
 roles and limits, and select a normalized repository-relative `artifactRoot`.
-Its accepted fields select runner-trusted aliases, execution preferences,
-pipeline settings, and the artifact root. Agent Runner expects an existing
-ignored, untracked, confined regular file.
+It may also define exact `trustedCommands` vectors under the same contract as
+the runner catalog; profile implementations remain runner-owned. Agent Runner
+expects an existing ignored, untracked, confined regular file.
 
 For a run that uses this file, Agent Runner persists its canonical path,
 content hash, file identity, and real-directory ancestry before agent work.
