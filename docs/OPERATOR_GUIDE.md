@@ -174,8 +174,16 @@ and never refresh a stale request silently. MCP supervisors use `run_pause` or
 `run_cancel` with the same explicit revision-and-key rule. Pause preserves a
 resumable checkpoint. Cancellation is terminal and older intents cannot revive
 it. A pending request is durable across disconnect or owner loss; status and
-wait expose its bounded kind and revision while the live owner or a detached
+wait expose its bounded kind, revision, timing, and target step while the live owner or a detached
 same-run continuation reconciles it.
+
+Runner-service callers can request `after-current-commit` for a selected
+execution step. The existing CLI/MCP stop inputs remain immediate. For a deferred
+request, supervise its durable target rather than starting another owner. A
+successful target commit and stop outcome are recorded together; a blocked or
+interrupted target stops at its reconciled checkpoint without extra work. Resume
+restores any underlying blocker. A pause after the final commit resumes directly
+to `DONE`; cancellation preserves all completed commits and cannot resume.
 
 ## 5. Recover a pause without taking over the work
 

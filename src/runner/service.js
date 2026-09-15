@@ -12,7 +12,7 @@ import {
   resolvePipelineConfiguration,
 } from "../config/index.js";
 import { createGitService } from "../git/index.js";
-import { getPipeline } from "../pipeline-registry.js";
+import { getPipeline, resolveStopBoundary } from "../pipeline-registry.js";
 import {
   createRunStore,
   deepFreeze,
@@ -146,7 +146,7 @@ export function createRunner(options = {}) {
   const loadConfiguration =
     options.loadConfiguration ?? (() => loadRunnerConfiguration(providers));
   const onActivity = options.onActivity ?? (async () => {});
-  const runStore = options.runStore ?? createRunStore();
+  const runStore = options.runStore ?? createRunStore({ resolveStopBoundary });
   const trustedValidation =
     options.trustedValidation ?? createTrustedValidationService({ git });
   if (
@@ -339,7 +339,10 @@ export function createRunner(options = {}) {
         await publish(activity, next);
         return next;
       },
-      async settleVerifiedCommit(patch, { activity, expectedPipelineState }) {
+      async settleVerifiedCommit(
+        patch,
+        { activity, expectedPipelineState, verifiedCommit },
+      ) {
         let configurationFailure = null;
         try {
           await checkConfiguration();
@@ -372,7 +375,10 @@ export function createRunner(options = {}) {
               configurationFailure,
             );
             settlementActivity = settlement.activity;
-            return settlement;
+            return {
+              ...settlement,
+              settlement: { kind: "commit", commit: verifiedCommit },
+            };
           },
           { validate: pipeline.workflow.validateRun },
         );

@@ -170,7 +170,11 @@ function runSummary({ directoryPath, run }) {
   if (run.stopRequest?.reconciledRevision === null) {
     lines.push(
       `Stop pending: ${run.stopRequest.kind === "cancel_requested" ? "cancel" : "pause"}`,
+      `Stop timing: ${run.stopRequest.timing ?? "immediate"}`,
+      `Effective stop timing: ${run.stopRequest.effectiveTiming ?? "immediate"}`,
     );
+    if (run.stopRequest.targetBoundary != null)
+      lines.push(`Stop target step: ${run.stopRequest.targetBoundary.step}`);
   }
   if (pause !== null) {
     lines.push(`Pause: ${pause.reason}`);

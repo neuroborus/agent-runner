@@ -2409,7 +2409,8 @@ The ordinary path and consumed-effect recovery share `runCommitTurn` and its
 checkpoint helper. Settlement never creates or retries a commit. If publication
 is interrupted, propagate the error without overwriting possibly journaled
 progress from a stale local snapshot; resume recovers the journal or repeats only
-verification of the consumed effect. Deferred timing remains unavailable.
+verification of the consumed effect. Deferred requests settle at this same
+verified checkpoint, or at a quiescent fallback if the target cannot finish.
 
 The authorization permits one ordinary local commit only. It does not permit
 `commit --amend`, merge commits, rebases, resets, branch switches, tag creation,
@@ -2652,7 +2653,7 @@ A user override must be explicitly recorded in `events.jsonl` and `progress.md`.
 ## Operator Pause And Cancellation
 
 The runner's durable stop protocol applies to every role, checkpoint, and mode.
-An accepted request aborts only registered execution. The runner contains
+An immediate request aborts only registered execution. The runner contains
 ordinary owned processes in private PID namespaces. Explicit native-sandbox
 provider processes prefer that mode after a complete nested capability probe
 and alone may fall back to session/token ownership on the initial host
@@ -2688,6 +2689,30 @@ prevented invocation and Git verification confirms no effect, it retires the
 unused authorization and preserves `COMMIT` for a newly authorized attempt on
 resume. Cancellation winning during reconciliation changes only the requested
 terminal outcome.
+
+The runner service also accepts `timing: "after-current-commit"` when a step is
+selected, including its suspended checkpoints. It rejects this timing during
+clarification/bootstrap and when no current step exists. The target is resolved
+from the authoritative state inside acceptance serialization and cannot move.
+CLI/MCP request inputs still use immediate timing; their existing status surfaces
+show durable requested/effective timing and the target step.
+
+Deferred acceptance reserves ownership while the target step continues through
+its ordinary gates. Monitoring remains active for immediate cancellation
+supersession. Successful verification records the SHA, baseline, next checkpoint,
+and operator outcome in one leased state mutation before any next-step Worker.
+A final-step pause preserves `DONE` as its resume checkpoint and resume invokes
+no agent; a final-step cancellation retains all commits in terminal `CANCELED`.
+If terminal completion wins before acceptance, the request is rejected normally.
+
+A pause, failure, or interruption before verified settlement applies the request
+at the quiescent checkpoint after owned execution and effects are reconciled.
+Recovery never performs extra work to obtain a commit. It preserves underlying
+blockers and terminal failures, protected-input evidence, and consumed effect
+and authorization records. Settlement accounts for either the verified commit
+or the quiescent fallback; publication interruption cannot replay an effect.
+Successful verification resolves a provisional commit-verification failure;
+its earlier diagnostic remains in history while unrelated blockers stay intact.
 
 ## 16. Resume
 

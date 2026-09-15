@@ -76,14 +76,25 @@ CLI shorthand captures one status revision and key, while explicit CLI and MCP
 requests require both values for repeatable automation. Exact retries replay
 their durable receipt; stale requests are never refreshed implicitly.
 
-Stop requests are durable before owned execution is interrupted. Activity
+The runner service supports `after-current-commit` for a selected execution
+step, including suspended steps; other pipelines and pre-step checkpoints reject
+it. CLI/MCP request inputs remain immediate. A deferred request lets that target
+finish normally while retaining ownership. An immediate cancellation can
+supersede it. Verification records the commit and stop outcome before the next
+step; a pause, failure, or interruption instead settles at the reconciled
+quiescent checkpoint without extra work. Existing blockers and failure evidence
+remain available. After the final commit, pause resumes through `DONE` without
+agent work; cancellation retains completed history in `CANCELED`.
+
+Stop requests are durable before immediate owned execution is interrupted. Activity
 reports stopping, repository reconciliation, and the resulting state, while
 leases remain held until accounting completes. If a commit or handoff already
 began, verification records the observed effect without undoing or replaying it.
 Retained safety blockers remain visible through the bounded pause projection.
 An ownerless accepted request starts detached same-run reconciliation, and a
 client disconnect cancels only its wait. Public status and waits expose the
-pending kind and accepted revision without the request identity or checkpoint;
+pending kind, accepted revision, requested/effective timing, and target step
+without the request identity or private checkpoint;
 cancellation is a terminal wait result and older intents cannot revive it.
 
 Legacy opaque plan-execution failures during terminal confirmation can expose

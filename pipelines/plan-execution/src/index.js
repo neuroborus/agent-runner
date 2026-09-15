@@ -1,5 +1,6 @@
 import { join } from "node:path";
 
+import { resolveStopBoundary } from "./commit-checkpoint.js";
 import {
   canRecoverLegacyConfirmation,
   prepareLegacyConfirmationRecovery,
@@ -1153,6 +1154,7 @@ export function migratePlanExecutionStateV15(run) {
 
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
+  resolveStopBoundary,
   stateVersion: 16,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,

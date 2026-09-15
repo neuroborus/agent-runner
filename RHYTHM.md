@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-09-15
 
+- **Deferred stops settle at the selected execution boundary.** Execution owns
+  target selection; root composition supplies it to state, which serializes
+  acceptance and settlement. The monitor permits the target step while still
+  observing immediate cancellation. Verification supplies one SHA to the
+  existing checkpoint path, including recovery; quiescent fallback preserves
+  blockers and consumed-effect evidence without extra work. Final-step pause
+  retains `DONE` for an agent-free resume. CLI/MCP status shows timing and target
+  while request inputs remain immediate.
+
 - **Deferred stop targets belong to durable state.** A trusted injected resolver
   binds requests to immutable commit-boundary evidence under acceptance
   serialization. Target-step work retains ownership, and crossing requires atomic

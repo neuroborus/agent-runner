@@ -65,8 +65,9 @@ file or a surviving native session.
 Operator-stop acceptance has its own short state mutation boundary, separate
 from execution ownership. A durable request preserves the exact suspended
 journal checkpoint and existing blockers; cancellation cannot be downgraded.
-While reconciliation is pending, ordinary state writes and release of held
-execution/worktree leases fail closed. Even after owner loss, another run
+An immediate pending request blocks ordinary state writes; deferred requests
+permit only target-step progress. Release of held execution/worktree leases
+fails closed until accounting completes. Even after owner loss, another run
 cannot reclaim that worktree until the original run records reconciliation.
 Boot and process-start identity distinguish a recorded owner from a reused PID;
 unverifiable owners remain conservative exclusion barriers. An acceptance
@@ -124,6 +125,14 @@ environment values or changing provider connectivity.
 Reconciliation preserves safe partial
 workspace content without staging or rollback and retains read-only mutation,
 index, history/ref, remote, identity, and input findings as blockers.
+
+A deferred commit-boundary stop reserves execution/worktree ownership while
+its immutable target step advances. State rejects boundary crossing except via
+atomic settlement of verified progress and the latest stop outcome. The monitor
+continues to enforce superseding immediate cancellation. Interrupted or blocked
+targets settle after quiescent reconciliation; no role, check, or commit is
+invoked merely to satisfy the request. Terminal failure and protected-input
+blockers survive inside the preserved checkpoint.
 
 A stop racing a consumed commit or handoff runs verification only. The final
 stop event records an observed completed effect and its progress once. An
