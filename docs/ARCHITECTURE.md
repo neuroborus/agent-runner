@@ -315,7 +315,7 @@ project configuration, applies run-wide, role-specific, and accepted
 pipeline-setting overrides, asks the descriptor for the active roles, and
 persists those resolved roles, the resolved settings, artifact root, and
 optional source-session reference and profile before pipeline work begins.
-Common run-envelope version 6 persists the optional project-configuration
+Common run-envelope version 7 retains the optional project-configuration
 protection record. Older runs normalize the absent field to `null`; migration
 never fabricates evidence by inspecting a current file.
 `run` then holds the new run's per-run lease while invoking its statically
@@ -709,10 +709,12 @@ the published record and continue to verify its opaque owner token.
 
 ### State-owned operator stop protocol
 
-The common envelope version 4 adds a nullable bounded `stopRequest`. The state
-service's `requestOperatorStop` accepts exactly a run ID, `pause_requested` or
-`cancel_requested`, an inspected `expectedRevision`, and an `idempotencyKey`.
-It persists a version-2 action intent, appends the complete acceptance event,
+The common envelope version 7 extends the nullable bounded `stopRequest` with
+requested and effective timing, immutable target evidence, and settlement
+accounting. The state service's `requestOperatorStop` accepts a run ID,
+`pause_requested` or `cancel_requested`, an inspected `expectedRevision`, an
+`idempotencyKey`, and optional `timing` (`immediate` by default).
+It persists a version-3 action intent, appends the complete acceptance event,
 and publishes an acceptance receipt before returning. This capability does not
 signal processes, reconcile Git, or expose CLI/MCP commands; those operations
 belong to runner and transport integration.
@@ -741,15 +743,38 @@ new competing requests that cannot supersede the pending stop. Exact retries
 return their original receipt. If receipt publication was interrupted, the
 acceptance event reconstructs it even after cancellation superseded a pause or
 the run terminated. Receipt replay neither advances the run nor executes work.
-Version-1 action records remain readable; incomplete actions upgrade when
-written, and completed receipts replay without migration writes.
+Version-1 and version-2 action records remain readable; incomplete actions
+upgrade when written, and completed receipts replay without migration writes.
+New stop argument identities include timing and canonicalize omitted and explicit
+`immediate`. Legacy timing-less identities accept those same immediate arguments
+and retain their original receipt shape; a timing change conflicts. Legacy stop
+records normalize to immediate timing without read-side writes. New receipts
+include requested/effective timing and bounded target evidence; MCP status projects
+only timing and the target step alongside the existing pending kind/revision.
 
 The private `src/state/stop-policy.js` owns three distinct decisions: whether a
 request awaits reconciliation, whether that request blocks execution, and
 whether unresolved stop accounting or a recorded execution process retains
-ownership. All accepted requests are immediate, so a pending request currently
-blocks execution. Timing options remain unsupported. Envelope validation owns
+ownership. Immediate requests block execution. Deferred requests retain ownership
+while allowing progress within their immutable target. Envelope validation owns
 shape; the stop service owns acceptance, supersession, and receipt accounting.
+
+State accepts `after-current-commit` only with a trusted synchronous
+`resolveStopBoundary` capability supplied to `createRunStore` by composition.
+It resolves a frozen authoritative snapshot inside acceptance serialization.
+The bounded `verified-commit-v1` evidence contains the positive step number,
+completed-commit count, and baseline SHA; no provider data or free text is stored.
+Ordinary writes cannot change that boundary; only leased atomic settlement can
+record progress together with the stop outcome. Unsupported resolver results or
+persisted capabilities fail closed, including during history reads. Production
+registration and deferred CLI/MCP inputs remain unavailable at this stage.
+
+Cancellation supersession retains the original suspended checkpoint and cannot
+delay an earlier immediate stop. Requested timing remains visible when effective
+timing is immediate; a still-deferred cancellation retains the earlier target.
+Settlement records either a verified commit SHA or a quiescent fallback, and
+becomes immutable with the reconciliation revision. Workflow meaning and commit
+verification remain the pipeline/runner's responsibility.
 
 The common advancement guard applies inside the mutation boundary to workflow
 transitions, provider-turn records, session/artifact writes, and execution

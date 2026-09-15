@@ -1,6 +1,11 @@
 import { isDeepStrictEqual } from "node:util";
 
-import { assertRunCanAdvance, stopIsPending } from "./stop-policy.js";
+import { STOP_TIMINGS } from "./stop-contract.js";
+import {
+  resolveCommitBoundary,
+  assertRunCanAdvance,
+  stopIsPending,
+} from "./stop-policy.js";
 import {
   assertRunId,
   deepFreeze,
@@ -29,6 +34,13 @@ function receipt(runId, request) {
     kind: request.kind,
     expectedRevision: request.expectedRevision,
     revision: request.acceptedRevision,
+    ...(request.identityVersion === 2
+      ? {
+          timing: request.timing,
+          effectiveTiming: request.effectiveTiming,
+          targetBoundary: request.targetBoundary,
+        }
+      : {}),
   };
 }
 
@@ -40,33 +52,45 @@ export function createStopService({
   mutate,
   runLeases,
   timestamp,
+  resolveStopBoundary,
 }) {
   async function request(input) {
     if (
       input === null ||
       typeof input !== "object" ||
       Array.isArray(input) ||
-      Object.keys(input).length !== 4 ||
+      ![4, 5].includes(Object.keys(input).length) ||
       Object.keys(input).some(
         (field) =>
-          !["runId", "kind", "expectedRevision", "idempotencyKey"].includes(
-            field,
-          ),
+          ![
+            "runId",
+            "kind",
+            "expectedRevision",
+            "idempotencyKey",
+            "timing",
+          ].includes(field),
       ) ||
       !KINDS.has(input.kind) ||
+      (Object.hasOwn(input, "timing") && !STOP_TIMINGS.has(input.timing)) ||
       !Number.isSafeInteger(input.expectedRevision) ||
       input.expectedRevision < 1
     ) {
       reject("Operator stop request is invalid.", "ERR_INVALID_STOP_REQUEST");
     }
-    const { runId, kind, expectedRevision, idempotencyKey } = input;
+    const {
+      runId,
+      kind,
+      expectedRevision,
+      idempotencyKey,
+      timing = "immediate",
+    } = input;
     assertRunId(runId);
     const directory = await getRunDirectory(runId);
     await loadSnapshot(directory, runId);
     const action = await actions.begin({
       key: idempotencyKey,
       tool: KINDS.get(kind),
-      arguments: { runId, expectedRevision },
+      arguments: { runId, expectedRevision, timing },
       context: { runId },
     });
     try {
@@ -117,9 +141,28 @@ export function createStopService({
             "ERR_STOP_PENDING",
           );
         }
+        const requestedBoundary =
+          timing === "after-current-commit"
+            ? resolveCommitBoundary(current, resolveStopBoundary)
+            : null;
+        const effectiveTiming =
+          supersedes && current.stopRequest.effectiveTiming === "immediate"
+            ? "immediate"
+            : timing;
+        const targetBoundary =
+          effectiveTiming === "immediate"
+            ? null
+            : supersedes
+              ? current.stopRequest.targetBoundary
+              : requestedBoundary;
         const stopRequest = {
           requestId,
           kind,
+          timing,
+          effectiveTiming,
+          targetBoundary,
+          identityVersion: action.legacyIdentity ? 1 : 2,
+          settlement: null,
           expectedRevision,
           acceptedRevision: current.revision + 1,
           requestedAt: timestamp(current.updatedAt),
@@ -154,9 +197,11 @@ export function createStopService({
               ? "pause-requested"
               : "cancel-requested",
           message:
-            kind === "pause_requested"
-              ? "Operator pause requested; reconciliation is required."
-              : "Operator cancellation requested; reconciliation is required.",
+            effectiveTiming === "after-current-commit"
+              ? "Operator stop requested after the current commit."
+              : kind === "pause_requested"
+                ? "Operator pause requested; reconciliation is required."
+                : "Operator cancellation requested; reconciliation is required.",
         });
         return receipt(runId, stopRequest);
       });
@@ -229,8 +274,10 @@ export function createStopService({
           "ERR_EXECUTION_PROCESS_ACTIVE",
         );
       }
-      if (!stopIsPending(snapshot.state)) assertRunCanAdvance(snapshot.state);
-      const { patch, activity } = resolve(
+      if (!stopIsPending(snapshot.state)) {
+        assertRunCanAdvance(snapshot.state, resolveStopBoundary);
+      }
+      const { patch, activity, settlement } = resolve(
         deepFreeze(structuredClone(snapshot.state)),
       );
       return persistCheckpoint(
@@ -239,6 +286,7 @@ export function createStopService({
         normalizeTransitionPatch(patch),
         activity,
         validate,
+        settlement,
       );
     });
   }
@@ -249,6 +297,7 @@ export function createStopService({
     patch,
     activity,
     validate = () => {},
+    settlement = { kind: "quiescent", commit: null },
   ) {
     const current = snapshot.state;
     const pending = stopIsPending(current);
@@ -271,7 +320,12 @@ export function createStopService({
         ...patch,
         activeTurn: null,
         stopRequest: pending
-          ? { ...current.stopRequest, reconciledRevision: current.revision + 1 }
+          ? {
+              ...current.stopRequest,
+              reconciledRevision: current.revision + 1,
+              settlement:
+                current.stopRequest.identityVersion === 2 ? settlement : null,
+            }
           : current.stopRequest,
         revision: current.revision + 1,
         updatedAt: timestamp(current.updatedAt),

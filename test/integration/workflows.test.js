@@ -168,7 +168,13 @@ test("MCP pause and cancellation reconcile through the shared active runner", as
     assert.equal(receipt.kind, `${action}_requested`);
     assert.deepEqual(
       (await control.runStatus({ runId: running.runId })).pendingStop,
-      { kind: `${action}_requested`, revision: receipt.revision },
+      {
+        kind: `${action}_requested`,
+        revision: receipt.revision,
+        timing: "immediate",
+        effectiveTiming: "immediate",
+        targetStep: null,
+      },
     );
     assert.ok(
       (

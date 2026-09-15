@@ -3,13 +3,14 @@ import { lstat, mkdir, realpath } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
 
+import { STOP_TIMINGS, validStopTiming } from "./stop-contract.js";
 import { atomicWriteFile, readOptionalText } from "./files.js";
 import { createLeaseManager } from "./lease.js";
 import { createMutationBoundary } from "./mutation.js";
 import { readProcessIdentity } from "./process-owner.js";
 import { assertRunId, deepFreeze, RunStoreError } from "./validation.js";
 
-const ACTION_SCHEMA_VERSION = 2;
+const ACTION_SCHEMA_VERSION = 3;
 const ACTIONS_DIRECTORY = "actions";
 const ACTION_FILENAME = "action.json";
 const MAX_KEY_LENGTH = 1_024;
@@ -74,9 +75,36 @@ function actionIdentity(key, tool, actionArguments) {
   ) {
     throw actionError("MCP action input is invalid.");
   }
+  let legacyArgumentsHash = null;
+  if (["run_pause", "run_cancel"].includes(tool)) {
+    if (
+      !isRecord(actionArguments) ||
+      Object.keys(actionArguments).some(
+        (field) => !["runId", "expectedRevision", "timing"].includes(field),
+      )
+    )
+      throw actionError("Stop action arguments are invalid.");
+    const timing = actionArguments.timing ?? "immediate";
+    if (
+      !STOP_TIMINGS.has(timing) ||
+      (Object.hasOwn(actionArguments, "timing") &&
+        actionArguments.timing !== timing)
+    )
+      throw actionError("Stop action timing is invalid.");
+    if (timing === "immediate") {
+      legacyArgumentsHash = hash(
+        canonicalJson({
+          runId: actionArguments.runId,
+          expectedRevision: actionArguments.expectedRevision,
+        }),
+      );
+    }
+    actionArguments = { ...actionArguments, timing };
+  }
   return Object.freeze({
     keyHash: hash(key),
     argumentsHash: hash(canonicalJson(actionArguments)),
+    legacyArgumentsHash,
   });
 }
 
@@ -97,7 +125,7 @@ function parseRecord(source, keyHash) {
   if (
     !isRecord(value) ||
     Object.keys(value).some((field) => !ACTION_FIELDS.has(field)) ||
-    ![1, ACTION_SCHEMA_VERSION].includes(value.schemaVersion) ||
+    ![1, 2, ACTION_SCHEMA_VERSION].includes(value.schemaVersion) ||
     (value.schemaVersion === 1 &&
       ["run_pause", "run_cancel"].includes(value.tool)) ||
     value.keyHash !== keyHash ||
@@ -121,8 +149,10 @@ function parseRecord(source, keyHash) {
       throw actionError("Stop action context is invalid.");
     if (value.status === "completed") {
       const result = value.result;
+      const modern = Object.hasOwn(result, "timing");
       if (
-        Object.keys(result).length !== 5 ||
+        Object.keys(result).length !== (modern ? 8 : 5) ||
+        (modern && (value.schemaVersion < 3 || !validStopTiming(result))) ||
         result.runId !== value.context.runId ||
         result.requestId !== keyHash ||
         result.kind !==
@@ -137,6 +167,7 @@ function parseRecord(source, keyHash) {
           canonicalJson({
             runId: result.runId,
             expectedRevision: result.expectedRevision,
+            ...(modern ? { timing: result.timing } : {}),
           }),
         ) !== value.argumentsHash
       ) {
@@ -224,7 +255,7 @@ export function createActionStore({
       throw actionError("MCP action input is invalid.");
     }
 
-    const { keyHash, argumentsHash } = actionIdentity(
+    const { keyHash, argumentsHash, legacyArgumentsHash } = actionIdentity(
       key,
       tool,
       actionArguments,
@@ -270,7 +301,11 @@ export function createActionStore({
         await atomicWriteFile(recordPath, serialized);
       } else {
         record = parseRecord(source, keyHash);
-        if (record.tool !== tool || record.argumentsHash !== argumentsHash) {
+        if (
+          record.tool !== tool ||
+          (record.argumentsHash !== argumentsHash &&
+            record.argumentsHash !== legacyArgumentsHash)
+        ) {
           throw actionError(
             "Idempotency key was already used with different arguments.",
             "ERR_MCP_IDEMPOTENCY_CONFLICT",
@@ -281,6 +316,9 @@ export function createActionStore({
       let released = false;
       return Object.freeze({
         created,
+        get legacyIdentity() {
+          return record.argumentsHash === legacyArgumentsHash;
+        },
         get record() {
           return deepFreeze(structuredClone(record));
         },
@@ -341,7 +379,7 @@ export function createActionStore({
   }
 
   async function read({ key, tool, arguments: actionArguments }) {
-    const { keyHash, argumentsHash } = actionIdentity(
+    const { keyHash, argumentsHash, legacyArgumentsHash } = actionIdentity(
       key,
       tool,
       actionArguments,
@@ -377,7 +415,11 @@ export function createActionStore({
       return null;
     }
     const record = parseRecord(source, keyHash);
-    if (record.tool !== tool || record.argumentsHash !== argumentsHash) {
+    if (
+      record.tool !== tool ||
+      (record.argumentsHash !== argumentsHash &&
+        record.argumentsHash !== legacyArgumentsHash)
+    ) {
       throw actionError(
         "Idempotency key was already used with different arguments.",
         "ERR_MCP_IDEMPOTENCY_CONFLICT",

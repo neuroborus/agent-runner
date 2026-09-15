@@ -7,6 +7,7 @@ import {
   readOptionalText,
   truncateDurableFile,
 } from "./files.js";
+import { resolveCommitBoundary, assertStopProgress } from "./stop-policy.js";
 import {
   normalizePublicActivity,
   normalizeRunState,
@@ -80,7 +81,9 @@ function normalizeEvent(value, runId, lineNumber) {
     if (
       Number.isSafeInteger(value.schemaVersion) &&
       value.schemaVersion > 0 &&
-      ![1, 2, 3, 4, 5, RUN_STATE_SCHEMA_VERSION].includes(value.schemaVersion)
+      ![1, 2, 3, 4, 5, 6, RUN_STATE_SCHEMA_VERSION].includes(
+        value.schemaVersion,
+      )
     ) {
       throw new RunStoreError(
         `Unsupported event.schemaVersion: ${String(value.schemaVersion)}; ` +
@@ -134,7 +137,11 @@ function normalizeEvent(value, runId, lineNumber) {
   }
 }
 
-function assertEventContinuity(events, startIndex = 1) {
+function assertEventContinuity(
+  events,
+  startIndex = 1,
+  resolveStopBoundary = null,
+) {
   if (events[0].state.createdAt !== events[0].state.updatedAt) {
     throw new RunStoreError("Initial event timestamps are inconsistent.", {
       code: "ERR_INVALID_EVENT_LOG",
@@ -163,7 +170,7 @@ function assertEventContinuity(events, startIndex = 1) {
       state.runtimeCompatibility?.runnerVersion ===
         RUNTIME_COMPATIBILITY.runnerVersion &&
       state.runtimeCompatibility?.runStateVersion === state.schemaVersion;
-    assertStopContinuity(events, index, migrationIsValid);
+    assertStopContinuity(events, index, migrationIsValid, resolveStopBoundary);
     const lineageChanged =
       state.sessionLineage.source !== previousState.sessionLineage.source ||
       state.sessionLineage.sourceProfile !==
@@ -197,7 +204,7 @@ function assertEventContinuity(events, startIndex = 1) {
   }
 }
 
-function assertStopContinuity(events, index, migrating) {
+function assertStopContinuity(events, index, migrating, resolveStopBoundary) {
   const current = events[index].state;
   const previous = events[index - 1].state;
   const stop = current.stopRequest;
@@ -218,11 +225,17 @@ function assertStopContinuity(events, index, migrating) {
     !isDeepStrictEqual(checkpoint.activeTurn, stop.checkpoint.activeTurn) ||
     accepted?.requestId !== stop.requestId ||
     !isDeepStrictEqual(
-      { ...stop, reconciledRevision: null },
-      { ...accepted, reconciledRevision: null },
+      { ...stop, reconciledRevision: null, settlement: null },
+      { ...accepted, reconciledRevision: null, settlement: null },
     )
   )
     invalid();
+  if (
+    stop.targetBoundary !== null &&
+    typeof resolveStopBoundary !== "function"
+  ) {
+    resolveCommitBoundary(current, resolveStopBoundary);
+  }
   if (prior?.requestId === stop.requestId) {
     if (prior.reconciledRevision !== null) {
       if (!isDeepStrictEqual(prior, stop)) invalid();
@@ -236,6 +249,8 @@ function assertStopContinuity(events, index, migrating) {
             current.pause?.reason !== "operator_paused")
       )
         invalid();
+    } else if (stop.effectiveTiming === "after-current-commit") {
+      assertStopProgress(previous, current, resolveStopBoundary);
     } else if (
       !migrating &&
       !isDeepStrictEqual(previous.pipelineState, current.pipelineState)
@@ -249,9 +264,29 @@ function assertStopContinuity(events, index, migrating) {
     stop.reconciledRevision !== null
   )
     invalid();
+  if (stop.timing === "after-current-commit") {
+    resolveCommitBoundary(previous, resolveStopBoundary);
+  }
+  const expectedTiming =
+    prior?.reconciledRevision === null && prior.effectiveTiming === "immediate"
+      ? "immediate"
+      : stop.timing;
+  if (stop.effectiveTiming !== expectedTiming) invalid();
+  if (
+    stop.effectiveTiming === "after-current-commit" &&
+    !isDeepStrictEqual(
+      resolveCommitBoundary(previous, resolveStopBoundary),
+      stop.targetBoundary,
+    )
+  )
+    invalid();
   if (prior !== null && prior.reconciledRevision === null) {
     if (
       stop.kind !== "cancel_requested" ||
+      (prior.effectiveTiming === "immediate" &&
+        stop.effectiveTiming !== "immediate") ||
+      (stop.effectiveTiming === "after-current-commit" &&
+        !isDeepStrictEqual(stop.targetBoundary, prior.targetBoundary)) ||
       !isDeepStrictEqual(stop.checkpoint, prior.checkpoint) ||
       ![prior.expectedRevision, previous.revision].includes(
         stop.expectedRevision,
@@ -277,7 +312,7 @@ function assertStopContinuity(events, index, migrating) {
     invalid();
 }
 
-async function readEvents(runDirectory, runId) {
+async function readEvents(runDirectory, runId, resolveStopBoundary) {
   const source = await readOptionalText(join(runDirectory, EVENTS_FILENAME));
   if (source === null) {
     throw new RunStoreError("Run event log is missing.", {
@@ -324,7 +359,7 @@ async function readEvents(runDirectory, runId) {
       );
     }
   }
-  assertEventContinuity(events);
+  assertEventContinuity(events, 1, resolveStopBoundary);
 
   return {
     events,
@@ -355,9 +390,9 @@ async function readStoredState(runDirectory, runId) {
   }
 }
 
-async function loadSnapshot(runDirectory, runId) {
+async function loadSnapshot(runDirectory, runId, resolveStopBoundary) {
   const storedState = await readStoredState(runDirectory, runId);
-  const eventLog = await readEvents(runDirectory, runId);
+  const eventLog = await readEvents(runDirectory, runId, resolveStopBoundary);
   const { events, hasPartialTail, validByteLength } = eventLog;
   const lastEvent = events.at(-1);
 
@@ -432,7 +467,10 @@ async function removePartialEventTail(runDirectory, snapshot) {
   }
 }
 
-export function createStateJournal({ onTransitionBoundary }) {
+export function createStateJournal({
+  onTransitionBoundary,
+  resolveStopBoundary,
+}) {
   async function appendTransition(runDirectory, state, snapshot, activity) {
     await removePartialEventTail(runDirectory, snapshot);
 
@@ -446,7 +484,11 @@ export function createStateJournal({ onTransitionBoundary }) {
     };
     const nextEvents = [...snapshot.events, event];
     if (snapshot.events.length > 0)
-      assertEventContinuity(nextEvents, snapshot.events.length);
+      assertEventContinuity(
+        nextEvents,
+        snapshot.events.length,
+        resolveStopBoundary,
+      );
     const serializedEvent = JSON.stringify(event);
     if (
       snapshot.validByteLength + Buffer.byteLength(serializedEvent) + 1 >
@@ -484,5 +526,10 @@ export function createStateJournal({ onTransitionBoundary }) {
     }
   }
 
-  return Object.freeze({ appendTransition, loadSnapshot, recover });
+  return Object.freeze({
+    appendTransition,
+    loadSnapshot: (directory, runId) =>
+      loadSnapshot(directory, runId, resolveStopBoundary),
+    recover,
+  });
 }

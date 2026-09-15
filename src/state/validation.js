@@ -1,8 +1,9 @@
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 import { isAdapterDiagnosticClass } from "../agents/index.js";
+import { validStopTiming, validStopSettlement } from "./stop-contract.js";
 
-export const RUN_STATE_SCHEMA_VERSION = 6;
+export const RUN_STATE_SCHEMA_VERSION = 7;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
   runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
@@ -21,6 +22,7 @@ const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   3,
   4,
   5,
+  6,
   RUN_STATE_SCHEMA_VERSION,
 ]);
 
@@ -632,6 +634,24 @@ function normalizeStopRequest(value, state) {
   if (state.schemaVersion < 4)
     fail("Legacy state cannot contain a stop request.");
   assertRecord(value, "run.stopRequest");
+  const legacy = !Object.hasOwn(value, "timing");
+  if (
+    legacy &&
+    ["effectiveTiming", "targetBoundary", "settlement", "identityVersion"].some(
+      (field) => Object.hasOwn(value, field),
+    )
+  )
+    fail("Partial stop timing is invalid.");
+  if (legacy) {
+    value = {
+      ...value,
+      timing: "immediate",
+      effectiveTiming: "immediate",
+      targetBoundary: null,
+      settlement: null,
+      identityVersion: 1,
+    };
+  }
   const fields = new Set([
     "requestId",
     "kind",
@@ -640,10 +660,26 @@ function normalizeStopRequest(value, state) {
     "requestedAt",
     "checkpoint",
     "reconciledRevision",
+    "timing",
+    "effectiveTiming",
+    "targetBoundary",
+    "settlement",
+    "identityVersion",
   ]);
   rejectUnknownFields(value, fields, "run.stopRequest");
   if (
     Object.keys(value).length !== fields.size ||
+    !validStopTiming(value) ||
+    ![1, 2].includes(value.identityVersion) ||
+    (state.schemaVersion < 7 && value.identityVersion !== 1) ||
+    (value.identityVersion === 1 &&
+      (value.timing !== "immediate" || value.settlement !== null)) ||
+    (value.settlement !== null &&
+      (!validStopSettlement(value.settlement) ||
+        value.reconciledRevision === null)) ||
+    (value.identityVersion === 2 &&
+      value.reconciledRevision !== null &&
+      value.settlement === null) ||
     !["pause_requested", "cancel_requested"].includes(value.kind) ||
     !Number.isSafeInteger(value.expectedRevision) ||
     value.expectedRevision < 1 ||
