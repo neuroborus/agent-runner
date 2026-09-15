@@ -466,6 +466,7 @@ export function createTrustedValidationService(options = {}) {
       result = await runCommand(execution.command, {
         cwd: before.projectPath,
         environment: execution.environment,
+        ownershipMode: execution.ownershipMode,
         readinessRequired: execution.readinessRequired ?? false,
         terminationGraceMs,
         timeoutMs,
