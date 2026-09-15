@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 
+import { executionPolicy } from "./mode-policy.js";
 import { assertRun } from "./workflow-contract.js";
 
 // This evidence is deliberately neither persisted on the run nor projected.
@@ -319,7 +320,7 @@ function proveHistory(run, history, migrate) {
       unchangedCheck = null;
     }
 
-    const lazy = state.settings?.mode === "lazy";
+    const policy = executionPolicy(state.settings);
     const candidateTransition =
       bound &&
       !contentChanged &&
@@ -327,7 +328,7 @@ function proveHistory(run, history, migrate) {
       ["FINALIZE", "CONFIRM"].includes(state.workflowState) &&
       state.candidateReviewedFingerprint ===
         state.repositoryBaseline.contentFingerprint &&
-      (lazy
+      (policy.primaryConvergence
         ? before.workflowState === "CLEAN_CONFIRM" &&
           completedTurn?.role === "worker" &&
           completedTurn.phase === "clean-confirm" &&
@@ -342,7 +343,7 @@ function proveHistory(run, history, migrate) {
     // The unchanged-check proof must survive the CLEAN_CONFIRM -> gate edge.
     if (
       candidateTransition &&
-      (!lazy ||
+      (!policy.primaryConvergence ||
         before.repositoryBaseline.contentFingerprint === lazyCheckFingerprint)
     ) {
       candidate = candidateTuple(state);
@@ -367,7 +368,7 @@ function proveHistory(run, history, migrate) {
         before.workflowState === "CONFIRM" &&
         bound &&
         !contentChanged &&
-        completedTurn?.role === (lazy ? "worker" : "reviewer") &&
+        completedTurn?.role === policy.terminalConfirmer &&
         completedTurn.phase === "confirm" &&
         current.activeTurn === null &&
         previous.pause === null &&

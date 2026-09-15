@@ -1,5 +1,6 @@
 import { join } from "node:path";
 
+import { candidateCheckpoint, executionPolicy } from "./mode-policy.js";
 import { resolveStopBoundary } from "./commit-checkpoint.js";
 import {
   canRecoverLegacyConfirmation,
@@ -533,7 +534,7 @@ function validateResumeAction(run, action) {
   }
   if (action?.type === "override-finding") {
     if (
-      state.settings?.mode === "lazy" ||
+      !executionPolicy(state.settings).independentReview ||
       ![
         "fix_limit_reached",
         "no_progress",
@@ -1089,9 +1090,7 @@ export function migratePlanExecutionStateV13(run) {
     ...current,
     workflowState:
       needsCandidateMigration && !paused
-        ? current.settings?.mode === "lazy"
-          ? "CHECK_AND_FIX"
-          : "REVIEW"
+        ? candidateCheckpoint(current.settings)
         : current.workflowState,
     reviewCorrection: null,
     pendingReviewCorrection: null,
@@ -1112,7 +1111,8 @@ export function migratePlanExecutionStateV13(run) {
       ? preservedFingerprint
       : null,
     candidateConfirmationFingerprint:
-      preserveAcceptedGate && current.settings?.mode === "lazy"
+      preserveAcceptedGate &&
+      executionPolicy(current.settings).primaryConvergence
         ? preservedFingerprint
         : null,
     candidateMigrationPending: needsCandidateMigration && paused,

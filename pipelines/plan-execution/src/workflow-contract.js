@@ -7,10 +7,10 @@ import {
   serializeCommitPlan,
 } from "@agent-runner/commit-plan";
 
+import { executionPolicy } from "./mode-policy.js";
+
 export const MAX_CLARIFICATION_ROUNDS = 3;
 export const DEFAULT_FINALIZATION_POLICY = "auto";
-const ROLES = Object.freeze(["worker", "reviewer", "arbiter"]);
-const LAZY_ROLES = Object.freeze(["worker"]);
 export const CONVENTIONAL_FINALIZATION_SKILL_PATHS = Object.freeze([
   ".agents/skills/finalization/SKILL.md",
   ".claude/skills/finalization/SKILL.md",
@@ -133,7 +133,7 @@ export const MAX_OPTIONS = 16;
 export const MAX_DIAGNOSTIC_ITEMS = 32;
 
 export function resolveActiveRoles(settings) {
-  return settings?.mode === "lazy" ? LAZY_ROLES : ROLES;
+  return executionPolicy(settings).activeRoles;
 }
 
 const MAX_STRUCTURED_RESULT_BYTES = 256 * 1024;
@@ -3593,7 +3593,7 @@ export function normalizePipelineState(value) {
       value = { ...value, settings };
     }
   }
-  const lazy = value.settings?.mode === "lazy";
+  const policy = executionPolicy(value.settings);
   if (
     value.cleanConfirmationFingerprint !== null &&
     (typeof value.cleanConfirmationFingerprint !== "string" ||
@@ -3853,7 +3853,8 @@ export function normalizePipelineState(value) {
       reviewerValidation !== null &&
       workerValidation === null) ||
     ((resolvedSummary !== null || disagreement !== null) &&
-      (workerSummary === null || (!lazy && reviewerSummary === null))) ||
+      (workerSummary === null ||
+        (policy.independentBootstrap && reviewerSummary === null))) ||
     (resolvedSummary !== null && disagreement !== null)
   ) {
     throw workflowError("Plan-execution bootstrap context is inconsistent.");
@@ -3869,7 +3870,7 @@ export function normalizePipelineState(value) {
     );
   }
   if (
-    lazy &&
+    !policy.independentBootstrap &&
     (reviewerSummary !== null ||
       reviewerValidation !== null ||
       disagreement !== null ||
@@ -4178,25 +4179,26 @@ export function normalizePipelineState(value) {
     candidateReviewedFingerprint: value.candidateReviewedFingerprint,
     findingOverrides,
   });
-  const acceptedCandidateGate = lazy
+  const acceptedCandidateGate = policy.primaryConvergence
     ? acceptedCandidateReview &&
       value.candidateConfirmationFingerprint ===
         value.candidateReviewedFingerprint
     : acceptedCandidateReview;
   if (
-    (!lazy &&
+    (!policy.primaryConvergence &&
       (value.candidateConfirmationFingerprint !== null ||
-        value.cleanConfirmationFingerprint !== null ||
-        value.lazySourceForkConsumed ||
         lazyCorrections.length !== 0 ||
         pendingLazyCorrection !== null ||
         ["CHECK_AND_FIX", "CLEAN_CONFIRM"].includes(value.workflowState))) ||
-    (lazy && value.workflowState === "REVIEW")
+    (!policy.independentReview && value.workflowState === "REVIEW") ||
+    (policy.terminalConfirmer !== "worker" &&
+      value.cleanConfirmationFingerprint !== null) ||
+    (policy.primarySessionScope !== "run" && value.lazySourceForkConsumed)
   ) {
     throw workflowError("Plan-execution mode state is inconsistent.");
   }
   if (
-    lazy &&
+    !policy.independentReview &&
     (value.reviewerStep !== null ||
       value.reviewCorrection !== null ||
       value.pendingReviewCorrection !== null ||
@@ -4213,7 +4215,7 @@ export function normalizePipelineState(value) {
   }
   if (
     value.cleanConfirmationFingerprint !== null &&
-    (!lazy ||
+    (policy.terminalConfirmer !== "worker" ||
       value.cleanConfirmationFingerprint !== value.finalizedFingerprint ||
       value.cleanConfirmationFingerprint !== value.reviewedFingerprint ||
       value.reviewResult?.status !== "APPROVED")
@@ -4222,7 +4224,7 @@ export function normalizePipelineState(value) {
   }
   if (
     value.candidateConfirmationFingerprint !== null &&
-    (!lazy ||
+    (!policy.primaryConvergence ||
       value.candidateConfirmationFingerprint !==
         value.candidateReviewedFingerprint ||
       candidateReviewResult?.status !== "APPROVED")
@@ -4562,7 +4564,7 @@ export function normalizePipelineState(value) {
   }
   if (
     value.workflowState === "REVIEW" &&
-    (lazy ||
+    (!policy.independentReview ||
       (finalizationResult !== null && finalizationResult.status !== "PASS") ||
       reviewResult !== null ||
       value.reviewedFingerprint !== null)
@@ -4571,7 +4573,7 @@ export function normalizePipelineState(value) {
   }
   if (
     value.workflowState === "CHECK_AND_FIX" &&
-    (!lazy ||
+    (!policy.primaryConvergence ||
       (finalizationResult !== null && finalizationResult.status !== "PASS") ||
       reviewResult !== null ||
       value.reviewedFingerprint !== null ||
@@ -4581,7 +4583,7 @@ export function normalizePipelineState(value) {
   }
   if (
     value.workflowState === "CLEAN_CONFIRM" &&
-    (!lazy ||
+    (!policy.primaryConvergence ||
       (finalizationResult !== null && finalizationResult.status !== "PASS") ||
       reviewResult !== null ||
       value.reviewedFingerprint !== null ||
@@ -4623,7 +4625,7 @@ export function normalizePipelineState(value) {
       !acceptedCandidateGate ||
       value.reviewedFingerprint !== value.finalizedFingerprint ||
       !acceptedReviewGate ||
-      (lazy &&
+      (policy.terminalConfirmer === "worker" &&
         value.cleanConfirmationFingerprint !== value.finalizedFingerprint) ||
       findings.length !== 0 ||
       pendingDisputes.length !== 0 ||
@@ -4640,7 +4642,7 @@ export function normalizePipelineState(value) {
       !acceptedCandidateGate ||
       value.reviewedFingerprint !== value.finalizedFingerprint ||
       !acceptedReviewGate ||
-      (lazy &&
+      (policy.terminalConfirmer === "worker" &&
         value.cleanConfirmationFingerprint !== value.finalizedFingerprint) ||
       findings.length !== 0 ||
       pendingDisputes.length !== 0 ||
@@ -4914,7 +4916,7 @@ export function assertRun(run) {
   }
   if (
     (state.lazySourceForkConsumed && run.sessionLineage.source === null) ||
-    (state.settings?.mode === "lazy" &&
+    (executionPolicy(state.settings).primarySessionScope === "run" &&
       run.sessionLineage.source !== null &&
       (run.sessionLineage.children.length > 0 ||
         (run.activeTurn !== null && run.activeTurn !== undefined)) &&
@@ -5275,7 +5277,7 @@ function normalizeSettings(settings) {
   return normalized;
 }
 
-export function assertRuntime(runtime, activeRoles = ROLES) {
+export function assertRuntime(runtime, activeRoles = resolveActiveRoles()) {
   if (
     !isRecord(runtime) ||
     !isRecord(runtime.adapters) ||
