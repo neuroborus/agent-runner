@@ -16,7 +16,7 @@ The runner must:
   skill-guided finalization gate;
 - independently review each candidate by default, or run bounded primary-only
   candidate convergence when lazy mode is explicitly selected;
-- allow the Worker to fix findings and, in independent mode, dispute Reviewer
+- allow the Worker to fix findings and, in independent and combined modes, dispute Reviewer
   findings;
 - advance only when the exact current workspace has passed candidate
   convergence, finalization, and one distinct mode-specific read-only terminal
@@ -205,13 +205,51 @@ agent-run run plan-execution \
   --reviewer-context-size 200000
 ```
 
-`--mode` accepts exactly `independent` and `lazy`. `independent` is the default
+`--mode` accepts `independent`, `lazy`, and `combined`. `independent` is the default
 and recommended mode because it provides genuinely independent semantic review,
 although its separate roles use more provider context and tokens. `lazy` is an
 explicit lower-consumption choice that uses only the Worker and does not provide
 independent review. The runner never selects it automatically.
 
-An independent run may seed Worker and Reviewer from one existing session only
+### Combined commit review
+
+Combined execution runs Worker check/fix and a separate read-only clean
+confirmation before the complete independent candidate Reviewer gate. Both
+candidate approvals bind the same content fingerprint. Finalization may format
+that content; a distinct Reviewer terminal confirmation approves its resulting
+fingerprint and validation evidence before one-shot commit authorization.
+Content repairs restart primary convergence. Self-findings go directly to fixing;
+independent findings retain disputes, withdrawals, exact recorded overrides, and
+fresh on-demand arbitration. Unresolved bootstrap disagreements and primary
+exhaustion pause without arbitration. Corrections remain bounded and interrupted
+work is charged once; resume preserves the saved mode and consumed commits remain
+verification-only.
+
+Combined mode uses the independent active roles, bootstrap discovery and union,
+checkpoint source forks, and fresh output-correction contexts. The Arbiter is
+confined to independent finding resolution, including finding-based stagnation.
+An unresolved non-finding bootstrap or validation-migration disagreement pauses
+with `bootstrap_disagreement`; retry repeats reconciliation without arbitration.
+
+The normal route is `IMPLEMENT -> CHECK_AND_FIX -> CLEAN_CONFIRM -> REVIEW ->
+FINALIZE -> CONFIRM -> COMMIT`. Worker check/fix retains workspace-write access;
+its separate clean confirmation is read-only. `primaryFindings` stores only
+combined self-confirmation blockers; it never replaces independent findings or
+pending disputes. `candidateConfirmationFingerprint` records primary approval;
+`candidateReviewResult` and `candidateReviewedFingerprint` record the independent
+Reviewer gate. Primary confirmation alone cannot authorize finalization or commit.
+Unchanged resolutions may retain passing finalization only when live content and
+infrastructure still match, after both candidate gates reconverge. Persisted lazy
+correction field names and their bounded accounting remain unchanged.
+
+State version 17 adds empty primary findings through the existing leased migration
+chain. Missing and legacy missing modes remain independent. Migration preserves
+saved modes, evidence, counters, and prepared or consumed effect records; it never
+constructs a combined approval from a historical single gate. Journal-proven
+confirmation recovery requires both primary and independent candidate edges for
+combined mode, followed by finalization and terminal confirmation provenance.
+
+An independent or combined run may seed Worker and Reviewer from one existing session only
 when both use its backend. A lazy run applies that requirement only to its
 active Worker:
 
@@ -228,10 +266,10 @@ agent-run run plan-execution \
 The runner splits only the backend prefix, keeps the session ID opaque, probes
 native fork support, and persists the resolved source and known trusted
 profile. A known source profile supplies `current` for the Worker and, in
-independent mode, Reviewer and requires every explicit participating
+independent and combined modes, Reviewer and requires every explicit participating
 backend/profile selection to match. An unknown source profile requires those
 profiles to remain `current` and omits the native
-profile override. In independent mode, Worker and Reviewer checkpoints fork it
+profile override. In independent and combined modes, Worker and Reviewer checkpoints fork it
 independently and every Arbiter remains fresh. In lazy mode, it is forked
 exactly once into the logical Worker across clarification, bootstrap, all
 planned commits, and every convergence checkpoint. Later checkpoints continue
@@ -274,7 +312,7 @@ Claude worker + Codex reviewer
 The Arbiter must also support either backend.
 
 The pipeline descriptor declares the `worker`, `reviewer`, and `arbiter` roles
-and owns active-role selection. Independent mode activates all three, with the
+and owns active-role selection. Independent and combined modes activate all three, with the
 Arbiter still probed on demand; lazy mode activates only the Worker.
 Role objects under `pipelines.plan-execution.roles` in the runner's
 `.agent-runner.json` or its safe project overlay may provide optional string
@@ -423,7 +461,7 @@ Persist at least:
   fingerprints;
 - fix/dispute counters;
 - latest candidate-review result and finding IDs, plus candidate-reviewed,
-  candidate-clean-confirmed, finalized, and terminal-confirmed content
+  primary-clean-confirmed, finalized, and terminal-confirmed content
   fingerprints;
 - complete required-check inventory, validation-infrastructure file list, and
   runner-computed infrastructure fingerprint;
@@ -1317,20 +1355,20 @@ DONE
 FAILED
 ```
 
-`CHECK_AND_FIX` and `CLEAN_CONFIRM` are used only in lazy mode. `FIX`,
+`CHECK_AND_FIX` and `CLEAN_CONFIRM` are used in lazy and combined modes. `FIX`,
 `DISPUTE`, `ARBITRATE`, implementation self-review, and per-step context refresh
 remain actions within the owning independent-mode states rather than separate
 persisted states.
 
 The private `mode-policy.js` owns the separate decisions for active roles,
 independent bootstrap, primary convergence, independent review, terminal
-confirmer, arbitration eligibility, and session lineage. Only `independent`
-and `lazy` remain accepted. The descriptor and persisted settings contract
+confirmer, bootstrap versus finding arbitration eligibility, and session lineage.
+The accepted modes are `independent`, `lazy`, and `combined`. The descriptor and persisted settings contract
 validate modes; policy selection does not introduce another configuration API.
 
 Implementation, content-changing finding resolution, migration re-entry, and
 stop reconciliation share candidate routing: `REVIEW` for independent mode,
-`CHECK_AND_FIX` for lazy mode. Content findings from terminal evidence rejection
+`CHECK_AND_FIX` for lazy and combined modes. Content findings from terminal evidence rejection
 use independent finding resolution or direct primary fixing; pure evidence
 rejection still repeats finalization without code-fix accounting. The terminal
 confirmer and journal recovery use the same role decision.
@@ -1338,7 +1376,8 @@ confirmer and journal recovery use the same role decision.
 The private `gate-evidence.js` owns composable evidence predicates and
 invalidation. A candidate record must name its inspected fingerprint; independent
 approval requires approval or exact fingerprint-bound finding overrides, while
-lazy approval requires the primary clean confirmation. Passing finalization has
+lazy approval requires the primary clean confirmation. Combined requires both
+primary confirmation and independent approval for the same candidate. Passing finalization has
 its own resulting fingerprint, and terminal confirmation must match that result
 with no unresolved findings or disputes before new commit authorization. A
 formatter may change the candidate fingerprint without rewriting candidate proof.
@@ -1354,7 +1393,7 @@ its validated journal proof. Successful settlement clears evidence for the next
 step and retains the final step's evidence at `DONE`.
 
 Session selection is independent of routing: lazy's logical Worker consumes
-its source fork once across all checkpoints, independent Worker and Reviewer
+its source fork once across all checkpoints, independent and combined Worker and Reviewer
 contexts fork by checkpoint, and recovery or explicit output correction reconstructs
 freshly. Arbiters never inherit a source or prior child. Existing persisted
 `lazyCorrections`, `pendingLazyCorrection`, and `lazySourceForkConsumed` shapes
@@ -1509,7 +1548,7 @@ context.
 
 No implementation changes may occur before bootstrap completes.
 
-In independent mode, run Worker bootstrap and Reviewer bootstrap independently
+In independent and combined modes, run Worker bootstrap and Reviewer bootstrap independently
 and in read-only mode. Clarification and bootstrap use distinct role
 checkpoints. Reconciliation may continue the Worker bootstrap session, but
 implementation and review never do. In lazy mode, run only Worker bootstrap,
@@ -2197,7 +2236,7 @@ action-free retry. Eligibility requires the authoritative, continuous
 write-ahead journal, not merely the terminal snapshot. The journal must prove
 an actual mode-specific candidate transition: independent candidate review
 acceptance, or an unchanged lazy `CHECK_AND_FIX` followed by accepted candidate
-`CLEAN_CONFIRM`. It must also prove passing finalization and the failed
+`CLEAN_CONFIRM`; combined requires both primary and independent edges. It must also prove passing finalization and the failed
 read-only terminal `CONFIRM` turn for the same step. Complete current state,
 check, trust, override, accounting, and effect contracts still apply.
 
@@ -2247,7 +2286,7 @@ path.
 
 Finding resolution fixes or disputes the current blockers and then returns
 control. It does not invoke project finalization or perform generic commit
-preparation; a content-changing fix returns to independent `REVIEW` or lazy
+preparation; a content-changing fix returns to independent `REVIEW` or lazy/combined
 `CHECK_AND_FIX` candidate convergence before the dedicated `FINALIZE` gate.
 The established required-check inventory remains input to that gate and is not
 phase-local finding-resolution work.
@@ -2341,6 +2380,10 @@ when:
 
 - a material bootstrap disagreement remains; or
 - a Worker/Reviewer dispute remains unresolved after the configured dispute budget.
+
+Combined permits only independent finding resolution arbitration, including
+finding-based stagnation. Bootstrap disagreement and primary exhaustion pause
+without invoking an Arbiter.
 
 Give the Arbiter only:
 
@@ -3039,7 +3082,7 @@ At minimum cover:
 73. lazy no-progress, stable-finding, fix, and additional-round behavior remains
     bounded without weakening exact commits, trusted checks, fingerprints, Git
     controls, product decisions, or no-coauthor/no-push rules.
-74. every supported legacy version migrates through state version 16 to
+74. every supported legacy version migrates through state version 17 to
     `independent` without reviving terminal runs or replaying completed or
     pending commit effects.
 75. lazy provider and deterministic contract failures receive one scoped
@@ -3224,7 +3267,7 @@ Do not build:
     interruption, resume, budget, fingerprint, finalization, confirmation,
     review, Git, and commit gates remain unchanged.
 44. A deliberately supplied source forks independently by checkpoint in
-    independent mode and exactly once into the logical Worker in lazy mode;
+    independent and combined modes and exactly once into the logical Worker in lazy mode;
     native-session reconstruction never changes that lineage.
 
 ---

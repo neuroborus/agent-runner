@@ -140,30 +140,32 @@ test("lazy plan authoring resolves only the Planner role", () => {
   assert.equal(resolved.settings.mode, "lazy");
 });
 
-test("combined authoring resolves all independent roles from saved selections", () => {
-  const resolved = resolvePipelineConfiguration("plan-authoring", {
-    schemaVersion: 1,
-    defaultBackend: "codex",
-    pipelines: {
-      "plan-authoring": {
-        mode: "combined",
-        roles: {
-          reviewer: { backend: "claude", model: "review-model" },
-          arbiter: { model: "arbitration-model" },
+for (const pipelineId of ["plan-authoring", "plan-execution"]) {
+  test(`combined ${pipelineId} resolves all independent roles from saved selections`, () => {
+    const resolved = resolvePipelineConfiguration(pipelineId, {
+      schemaVersion: 1,
+      defaultBackend: "codex",
+      pipelines: {
+        [pipelineId]: {
+          mode: "combined",
+          roles: {
+            reviewer: { backend: "claude", model: "review-model" },
+            arbiter: { model: "arbitration-model" },
+          },
         },
       },
-    },
+    });
+    assert.equal(resolved.settings.mode, "combined");
+    assert.deepEqual(Object.keys(resolved.roles), [
+      pipelineId === "plan-authoring" ? "planner" : "worker",
+      "reviewer",
+      "arbiter",
+    ]);
+    assert.equal(resolved.roles.reviewer.backend, "claude");
+    assert.equal(resolved.roles.reviewer.model, "review-model");
+    assert.equal(resolved.roles.arbiter.model, "arbitration-model");
   });
-  assert.equal(resolved.settings.mode, "combined");
-  assert.deepEqual(Object.keys(resolved.roles), [
-    "planner",
-    "reviewer",
-    "arbiter",
-  ]);
-  assert.equal(resolved.roles.reviewer.backend, "claude");
-  assert.equal(resolved.roles.reviewer.model, "review-model");
-  assert.equal(resolved.roles.arbiter.model, "arbitration-model");
-});
+}
 
 test("lazy plan execution resolves only the Worker role", () => {
   const resolved = resolvePipelineConfiguration("plan-execution", {

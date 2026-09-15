@@ -4,7 +4,11 @@ import {
   clearedCandidateAndTerminalGate,
   finalizationGatePassed,
 } from "./gate-evidence.js";
-import { candidateCheckpoint, executionPolicy } from "./mode-policy.js";
+import {
+  candidateCheckpoint,
+  executionPolicy,
+  combinedReview,
+} from "./mode-policy.js";
 import { resolveStopBoundary } from "./commit-checkpoint.js";
 import {
   canRecoverLegacyConfirmation,
@@ -76,7 +80,7 @@ function positiveIntegerSetting(defaultValue) {
   });
 }
 
-const PIPELINE_MODES = Object.freeze(["independent", "lazy"]);
+const PIPELINE_MODES = Object.freeze(["independent", "lazy", "combined"]);
 
 function pipelineMode(value) {
   return PIPELINE_MODES.includes(value);
@@ -107,7 +111,7 @@ const SETTINGS = Object.freeze({
   maxSameFindingRounds: positiveIntegerSetting(5),
   mode: Object.freeze({
     defaultValue: "independent",
-    errorMessage: "must be independent or lazy",
+    errorMessage: "must be independent, lazy, or combined",
     recommendedValue: "independent",
     validate: pipelineMode,
     values: PIPELINE_MODES,
@@ -130,6 +134,7 @@ const TASK_INPUTS = Object.freeze({
 });
 const RETRYABLE_PAUSE_REASONS = new Set([
   "backend_unavailable",
+  "bootstrap_disagreement",
   "confirmation_output_invalid",
   "environment_blocked",
   "finalization_cannot_pass",
@@ -161,6 +166,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   arbiter_cannot_resolve:
     "The Arbiter could not resolve the current blocking dispute.",
   backend_unavailable: "The selected backend is temporarily unavailable.",
+  bootstrap_disagreement:
+    "Independent bootstrap summaries remain unresolved. Retry reconciliation after clarifying the repository evidence; combined mode cannot arbitrate bootstrap.",
   bootstrap_inventory_capacity_exhausted:
     "A complete bootstrap validation inventory exceeds the supported bounded capacity.",
   clarification_answers_required:
@@ -324,6 +331,7 @@ function publicFindings(state) {
     ...new Map(
       [
         ...(Array.isArray(state.findings) ? state.findings : []),
+        ...(Array.isArray(state.primaryFindings) ? state.primaryFindings : []),
         ...finalizationFeedbackFindings(state),
       ].map((finding) => [finding.id, finding]),
     ).values(),
@@ -539,6 +547,8 @@ function validateResumeAction(run, action) {
   if (action?.type === "override-finding") {
     if (
       !executionPolicy(state.settings).independentReview ||
+      (combinedReview(state.settings) &&
+        run.pause?.resumeState === "CHECK_AND_FIX") ||
       ![
         "fix_limit_reached",
         "no_progress",
@@ -569,6 +579,7 @@ function validateResumeAction(run, action) {
         (!state.preflightComplete ||
           ([
             "backend_unavailable",
+            "bootstrap_disagreement",
             "confirmation_output_invalid",
             "environment_blocked",
             "finalization_cannot_pass",
@@ -1151,10 +1162,18 @@ export function migratePlanExecutionStateV15(run) {
   return Object.freeze({ ...run.pipelineState });
 }
 
+export function migratePlanExecutionStateV16(run) {
+  // The leased runner migration preserves saved modes, budgets, and effects.
+  return Object.freeze({
+    ...run.pipelineState,
+    primaryFindings: Object.freeze([]),
+  });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
   resolveStopBoundary,
-  stateVersion: 16,
+  stateVersion: 17,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1171,6 +1190,7 @@ export const planExecutionPipeline = Object.freeze({
     13: migratePlanExecutionStateV13,
     14: migratePlanExecutionStateV14,
     15: migratePlanExecutionStateV15,
+    16: migratePlanExecutionStateV16,
   }),
   roles: ROLES,
   resolveActiveRoles,
@@ -1189,7 +1209,9 @@ export const planExecutionPipeline = Object.freeze({
   prepareRecovery(run, history) {
     prepareLegacyConfirmationRecovery(run, history, (historicalRun) => {
       let current = historicalRun;
-      while (current.pipelineStateVersion < 16) {
+      while (
+        current.pipelineStateVersion < planExecutionPipeline.stateVersion
+      ) {
         const migration =
           planExecutionPipeline.migrations[current.pipelineStateVersion];
         current = {

@@ -13,15 +13,27 @@ writing follow both gates. Revisions clear dependent approvals and restart
 primary convergence. Self findings return directly to fixing; only independent
 finding resolution can use arbitration. Invalid output and interrupted recovery
 do not duplicate accepted correction work or reset bounded budgets. These turns
-remain repository-read-only. Execution and polishing do not yet support combined.
+remain repository-read-only. Polishing does not yet support combined.
 In every authoring mode, exhaustion on deterministic structural failures pauses
 without arbitration; an Arbiter cannot resolve those failures.
+
+Combined execution runs Worker check/fix and a separate read-only clean
+confirmation before the complete independent candidate Reviewer gate. Both
+candidate approvals bind the same content fingerprint. Finalization may format
+that content; a distinct Reviewer terminal confirmation approves its resulting
+fingerprint and validation evidence before one-shot commit authorization.
+Content repairs restart primary convergence. Self-findings go directly to fixing;
+independent findings retain disputes, withdrawals, exact recorded overrides, and
+fresh on-demand arbitration. Unresolved bootstrap disagreements and primary
+exhaustion pause without arbitration. Corrections remain bounded and interrupted
+work is charged once; resume preserves the saved mode and consumed commits remain
+verification-only.
 
 ## Bootstrap inventory
 
 Before writable work, plan execution and polishing establish the complete
 staging-independent validation inventory and the repository files that control
-it. Independent mode combines separately accepted Worker and Reviewer
+it. Independent and execution combined modes combine separately accepted Worker and Reviewer
 inventories. Lazy mode accepts one complete Worker inventory under the same
 deterministic rules. Reconciliation and arbitration may resolve summaries, but
 they cannot add, select, or remove checks.

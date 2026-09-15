@@ -24,7 +24,7 @@ import {
   resolution,
 } from "./support/index.js";
 
-for (const mode of ["independent", "lazy"]) {
+for (const mode of ["independent", "lazy", "combined"]) {
   test(`${mode} repair rejoins candidate convergence before its terminal confirmer`, async (t) => {
     const turns = [];
     let beforeRepair;
@@ -33,7 +33,7 @@ for (const mode of ["independent", "lazy"]) {
       worker: [
         clarificationReady(),
         bootstrapReady("Worker"),
-        ...(mode === "independent" ? [reconciliationResolved()] : []),
+        ...(mode !== "lazy" ? [reconciliationResolved()] : []),
       ],
       sourceSession: SOURCE_SESSION,
       workWorker: [
@@ -92,6 +92,12 @@ for (const mode of ["independent", "lazy"]) {
           ]
         : [
             ["worker", "resolve-findings", "workspace-write"],
+            ...(mode === "combined"
+              ? [
+                  ["worker", "check-and-fix", "workspace-write"],
+                  ["worker", "clean-confirm", "read-only"],
+                ]
+              : []),
             ["reviewer", "review", "read-only"],
             ["worker", "finalize", "workspace-write"],
             ["reviewer", "confirm", "read-only"],
@@ -103,7 +109,10 @@ for (const mode of ["independent", "lazy"]) {
     const workerForks = fixture.calls.worker.filter(
       ({ session }) => session?.mode === "fork",
     );
-    assert.equal(workerForks.length, mode === "lazy" ? 1 : 3);
+    assert.equal(
+      workerForks.length,
+      mode === "lazy" ? 1 : mode === "combined" ? 9 : 3,
+    );
     if (mode === "lazy") {
       assert.equal(fixture.probeCalls.reviewer, 0);
       assert.equal(fixture.calls.reviewer.length, 0);
@@ -126,7 +135,7 @@ for (const mode of ["independent", "lazy"]) {
       worker: [
         clarificationReady(),
         bootstrapReady("Worker"),
-        ...(mode === "independent" ? [reconciliationResolved()] : []),
+        ...(mode !== "lazy" ? [reconciliationResolved()] : []),
       ],
       sourceSession: SOURCE_SESSION,
       workWorker: [
@@ -174,7 +183,7 @@ for (const mode of ["independent", "lazy"]) {
     });
     assert.equal(
       reconciled.pipelineState.workflowState,
-      mode === "lazy" ? "CHECK_AND_FIX" : "REVIEW",
+      mode !== "independent" ? "CHECK_AND_FIX" : "REVIEW",
     );
     assert.equal(reconciled.counters.fixRounds, before.counters.fixRounds + 1);
     assert.equal(reconciled.pipelineState.pendingCorrection, true);
@@ -205,7 +214,7 @@ for (const mode of ["independent", "lazy"]) {
       worker: [
         clarificationReady(),
         bootstrapReady("Worker"),
-        ...(mode === "independent" ? [reconciliationResolved()] : []),
+        ...(mode !== "lazy" ? [reconciliationResolved()] : []),
       ],
       workWorker: [
         implementationCompleted(),
@@ -260,7 +269,7 @@ for (const mode of ["independent", "lazy"]) {
         worker: [
           clarificationReady(),
           bootstrapReady("Worker"),
-          ...(mode === "independent" ? [reconciliationResolved()] : []),
+          ...(mode !== "lazy" ? [reconciliationResolved()] : []),
         ],
         workWorker: [
           implementationCompleted(),

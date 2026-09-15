@@ -24,9 +24,21 @@ Plan authoring also supports explicit `combined` mode: Planner check/fix and
 clean confirmation precede independent Reviewer approval. Revisions restart
 primary convergence. Self findings and structural exhaustion never trigger
 arbitration. All planning turns remain repository-read-only and artifact writes
-remain runner-owned. Execution and polishing reject combined; check each
+remain runner-owned. Polishing rejects combined; check each
 descriptor through pipeline discovery before selecting it. Resume retains the
 saved mode and correction budgets.
+
+Combined execution runs Worker check/fix and a separate read-only clean
+confirmation before the complete independent candidate Reviewer gate. Both
+candidate approvals bind the same content fingerprint. Finalization may format
+that content; a distinct Reviewer terminal confirmation approves its resulting
+fingerprint and validation evidence before one-shot commit authorization.
+Content repairs restart primary convergence. Self-findings go directly to fixing;
+independent findings retain disputes, withdrawals, exact recorded overrides, and
+fresh on-demand arbitration. Unresolved bootstrap disagreements and primary
+exhaustion pause without arbitration. Corrections remain bounded and interrupted
+work is charged once; resume preserves the saved mode and consumed commits remain
+verification-only.
 
 Give a worktree one owner. Plan execution and polishing enforce a canonical
 worktree lease, including across CLI and MCP. While a run owns execution, do

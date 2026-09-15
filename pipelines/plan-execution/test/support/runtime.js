@@ -1533,7 +1533,7 @@ async function createFixture(
     revision: 1,
     runId,
     pipelineId: "plan-execution",
-    pipelineStateVersion: 16,
+    pipelineStateVersion: 17,
     projectPath,
     taskPath,
     roles: Object.fromEntries(
@@ -1549,7 +1549,7 @@ async function createFixture(
     pipelineState: createPlanExecutionState({
       artifactRoot,
       proactiveClarification,
-      ...(mode === "lazy"
+      ...(mode !== "independent"
         ? { settings: { ...SETTINGS, ...modeSettings, mode } }
         : {}),
       ...(trustedValidation === undefined ? {} : { trustedValidation }),
@@ -1912,7 +1912,7 @@ async function createFixture(
   ) {
     currentRun = {
       ...currentRun,
-      pipelineStateVersion: 16,
+      pipelineStateVersion: 17,
       pipelineState,
       pause,
       revision: currentRun.revision + 1,

@@ -110,7 +110,7 @@ test("minimal configuration uses pipeline-owned setting defaults", () => {
   });
 });
 
-test("combined is available only through the authoring descriptor", () => {
+test("combined availability follows authoring and execution descriptors", () => {
   for (const parse of [
     parseRunnerConfiguration,
     (source) => parseProjectConfiguration(source, { schemaVersion: 1 }),
@@ -122,7 +122,7 @@ test("combined is available only through the authoring descriptor", () => {
           [pipeline]: { mode: "combined" },
         },
       });
-      if (pipeline === "plan-authoring") {
+      if (pipeline !== "polishing") {
         assert.equal(parse(source).pipelines[pipeline].mode, "combined");
       } else {
         assert.throws(() => parse(source), /mode must be independent or lazy/u);
@@ -219,7 +219,7 @@ test("configuration rejects unsupported shapes and values", () => {
     ],
     [
       '{"schemaVersion":1,"pipelines":{"plan-execution":{"mode":"automatic"}}}',
-      /mode must be independent or lazy/u,
+      /mode must be independent, lazy, or combined/u,
     ],
     [
       '{"schemaVersion":1,"pipelines":{"polishing":{"finalization":"checks/finalize.md"}}}',

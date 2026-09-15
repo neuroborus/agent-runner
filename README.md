@@ -27,7 +27,7 @@ project-local operating guidance.
   genuinely independent semantic review, at the cost of more provider context
   and tokens. `lazy` is an explicit lower-consumption choice that uses only the
   primary agent and does not provide independent review; it is never selected
-  automatically. Authoring additionally offers `combined` for primary
+  automatically. Authoring and execution additionally offer `combined` for primary
   convergence followed by independent review.
 - Codex and Claude can be selected independently for each pipeline role.
 - Read-only agent turns include repository-mutation verification.
@@ -180,7 +180,7 @@ Pipeline settings use these defaults:
 | `polishing`      | `trustedChecks`            |          `[]` |
 
 `mode` accepts `independent` and `lazy` in every pipeline, plus `combined` in
-plan authoring. Execution and polishing reject combined. A missing value
+plan authoring and execution. Polishing rejects combined. A missing value
 resolves to `independent`. The tracked [example](.agent-runner.example.json) selects
 `independent` explicitly for every pipeline. Runner and ignored project
 configuration may select a descriptor-supported value, and `--mode` or MCP
@@ -196,12 +196,25 @@ primary convergence; self findings return directly to fixing. Only independent
 finding resolution can use a fresh Arbiter. All agent turns remain read-only;
 the runner writes the validated plan. For example:
 
+Combined execution runs Worker check/fix and a separate read-only clean
+confirmation before the complete independent candidate Reviewer gate. Both
+candidate approvals bind the same content fingerprint. Finalization may format
+that content; a distinct Reviewer terminal confirmation approves its resulting
+fingerprint and validation evidence before one-shot commit authorization.
+Content repairs restart primary convergence. Self-findings go directly to fixing;
+independent findings retain disputes, withdrawals, exact recorded overrides, and
+fresh on-demand arbitration. Unresolved bootstrap disagreements and primary
+exhaustion pause without arbitration. Corrections remain bounded and interrupted
+work is charged once; resume preserves the saved mode and consumed commits remain
+verification-only.
+
 ```bash
 agent-run run plan-authoring --project /path/to/repository --task /path/to/task --mode combined
+agent-run run plan-execution --project /path/to/repository --task /path/to/task --mode combined
 ```
 
-The equivalent MCP `run_start` request uses `"pipelineId": "plan-authoring"`
-and `"mode": "combined"`. Saved mode and bounded correction progress survive
+The equivalent MCP `run_start` request uses the selected `pipelineId`
+(`plan-authoring` or `plan-execution`) and `"mode": "combined"`. Saved mode and bounded correction progress survive
 resume; changing configuration does not switch an existing run.
 
 `preferredCommitLineLimit` is a positive-integer planning target for anticipated
@@ -705,11 +718,11 @@ selects the same confined project file as `--project-config`; `profile`,
 `model`, and `contextSize` set run-wide selections; the same fields inside a
 `roleOverrides` entry take precedence. Optional `mode` overrides project and
 runner configuration and is validated by the selected descriptor. All pipelines
-accept `independent` and `lazy`; only plan authoring accepts `combined`.
+accept `independent` and `lazy`; plan authoring and execution accept `combined`.
 `independent` is the default and recommended option for genuinely independent
 semantic review, but it consumes more provider context and tokens. `lazy` is
 opt-in for lower consumption and does not provide independent review; a
-controlling agent must never select it automatically. `combined` adds Planner
+controlling agent must never select it automatically. `combined` adds primary
 convergence before the full independent review gate. `sourceSession.profile`
 carries a known trusted source alias while its `id` remains opaque. These
 optional fields are additive; the minimal fresh-start request is:
