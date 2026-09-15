@@ -26,10 +26,9 @@ have the documented highest precedence.
 Resolved active roles, settings, artifact root, trusted commands, and optional
 source-session lineage are frozen into a new run. Resume uses that snapshot and
 does not silently adopt later configuration changes. `independent` is the
-default mode; choosing `lazy` or authoring/execution `combined` is always an explicit
+default mode; choosing `lazy` or `combined` is always an explicit
 operator decision. Combined adds primary convergence before independent review.
-CLI/MCP discovery exposes descriptor-specific availability; unsupported pipeline
-selections reject. Resume preserves the saved mode, approvals, and budgets.
+All three descriptors expose these modes through CLI/MCP discovery. Resume preserves the saved mode, approvals, and budgets.
 
 Plan authoring's `preferredCommitLineLimit` is a positive-integer planning
 target, default 900, configured through runner settings or the safe project

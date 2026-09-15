@@ -93,93 +93,104 @@ test("reconstructs a persisted bootstrap correction after interruption", async (
   assert.match(fixture.calls.worker[3].prompt, /Correction diagnostic/u);
 });
 
-test("reconciles an interrupted content-changing lazy correction once", async (t) => {
-  const processLoss = new Error("Process stopped during lazy correction.");
-  let checkTurns = 0;
-  let correctionChanged = false;
-  const fixture = await createFixture(t, {
-    mode: "lazy",
-    worker: [
-      clarificationReady(),
-      bootstrapReady("Worker"),
-      polishingCompleted(),
-      { ...checkAndFix(), status: "INVALID" },
-      checkAndFix("CHANGED"),
-      checkAndFix(),
-      candidateClean(),
-      finalizationPassed(),
-      cleanConfirmation(),
-    ],
-    async onRoleRun(role, request, _turn, { projectPath }) {
-      if (role === "worker" && request.schema === CHECK_AND_FIX_SCHEMA) {
-        checkTurns += 1;
-        if (checkTurns === 2) {
-          correctionChanged = true;
-          await writeFile(
-            join(projectPath, "interrupted-lazy-correction.txt"),
-            "fixed\n",
-          );
+for (const mode of ["lazy", "combined"]) {
+  test(`reconciles an interrupted content-changing ${mode} correction once`, async (t) => {
+    const processLoss = new Error("Process stopped during lazy correction.");
+    let checkTurns = 0;
+    let correctionChanged = false;
+    const fixture = await createFixture(t, {
+      mode,
+      worker: [
+        clarificationReady(),
+        bootstrapReady("Worker"),
+        ...(mode === "combined" ? [reconciliationResolved()] : []),
+        polishingCompleted(),
+        { ...checkAndFix(), status: "INVALID" },
+        checkAndFix("CHANGED"),
+        checkAndFix(),
+        candidateClean(),
+        finalizationPassed(),
+        ...(mode === "lazy" ? [cleanConfirmation()] : []),
+      ],
+      async onRoleRun(role, request, _turn, { projectPath }) {
+        if (role === "worker" && request.schema === CHECK_AND_FIX_SCHEMA) {
+          checkTurns += 1;
+          if (checkTurns === 2) {
+            correctionChanged = true;
+            await writeFile(
+              join(projectPath, "interrupted-lazy-correction.txt"),
+              "fixed\n",
+            );
+          }
         }
-      }
-    },
-  });
-  const git = fixture.runtime.git;
-  const snapshot = git.snapshot;
-  const transition = fixture.runtime.transition;
-  const finishAgentTurn = fixture.runtime.finishAgentTurn;
-  let processStopped = false;
-  fixture.runtime.git = {
-    ...git,
-    async snapshot(options) {
-      if (
-        correctionChanged &&
-        !processStopped &&
-        fixture.currentRun.activeTurn?.phase === "check-and-fix"
-      ) {
-        processStopped = true;
+      },
+    });
+    const git = fixture.runtime.git;
+    const snapshot = git.snapshot;
+    const transition = fixture.runtime.transition;
+    const finishAgentTurn = fixture.runtime.finishAgentTurn;
+    let processStopped = false;
+    fixture.runtime.git = {
+      ...git,
+      async snapshot(options) {
+        if (
+          correctionChanged &&
+          !processStopped &&
+          fixture.currentRun.activeTurn?.phase === "check-and-fix"
+        ) {
+          processStopped = true;
+          throw processLoss;
+        }
+        return snapshot(options);
+      },
+    };
+    fixture.runtime.transition = async (patch, options) => {
+      if (processStopped) {
         throw processLoss;
       }
-      return snapshot(options);
-    },
-  };
-  fixture.runtime.transition = async (patch, options) => {
-    if (processStopped) {
-      throw processLoss;
-    }
-    return transition(patch, options);
-  };
-  fixture.runtime.finishAgentTurn = async (turn) => {
-    if (processStopped) {
-      throw processLoss;
-    }
-    return finishAgentTurn(turn);
-  };
+      return transition(patch, options);
+    };
+    fixture.runtime.finishAgentTurn = async (turn) => {
+      if (processStopped) {
+        throw processLoss;
+      }
+      return finishAgentTurn(turn);
+    };
 
-  await assert.rejects(fixture.run(), (error) => error === processLoss);
-  assert.equal(fixture.currentRun.pipelineState.workflowState, "CHECK_AND_FIX");
-  assert.notEqual(fixture.currentRun.pipelineState.pendingLazyCorrection, null);
-  assert.equal(fixture.currentRun.counters.fixRounds, 0);
+    await assert.rejects(fixture.run(), (error) => error === processLoss);
+    assert.equal(
+      fixture.currentRun.pipelineState.workflowState,
+      "CHECK_AND_FIX",
+    );
+    assert.notEqual(
+      fixture.currentRun.pipelineState.pendingLazyCorrection,
+      null,
+    );
+    assert.equal(fixture.currentRun.counters.fixRounds, 0);
 
-  processStopped = false;
-  await fixture.recover();
-  fixture.runtime.git = git;
-  const result = await fixture.run();
+    processStopped = false;
+    await fixture.recover();
+    fixture.runtime.git = git;
+    const result = await fixture.run();
 
-  assert.equal(result.pipelineState.workflowState, "DONE");
-  assert.equal(result.counters.fixRounds, 1);
-  assert.equal(result.pipelineState.lazyCorrections[0].fixRoundCharged, true);
-  assert.equal(result.pipelineState.pendingLazyCorrection, null);
-  assert.equal(
-    fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
-      .length,
-    1,
-  );
-  assert.equal(
-    fixture.calls.worker.filter(({ schema }) => schema === CHECK_AND_FIX_SCHEMA)
-      .length,
-    3,
-  );
-});
+    assert.equal(result.pipelineState.workflowState, "DONE");
+    assert.equal(result.counters.fixRounds, 1);
+    assert.equal(result.pipelineState.lazyCorrections[0].fixRoundCharged, true);
+    assert.equal(result.pipelineState.pendingLazyCorrection, null);
+    assert.equal(
+      fixture.calls.worker.filter(
+        ({ schema }) => schema === FINALIZATION_SCHEMA,
+      ).length,
+      1,
+    );
+    assert.equal(
+      fixture.calls.worker.filter(
+        ({ schema }) => schema === CHECK_AND_FIX_SCHEMA,
+      ).length,
+      3,
+    );
+  });
+}
 
 test("resumes a reconciled lazy polishing check without replay", async (t) => {
   const processLoss = new Error(

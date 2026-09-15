@@ -2633,7 +2633,7 @@ for (const mode of ["independent", "lazy"]) {
             assert.equal(request.session, undefined);
             assert.match(
               request.prompt,
-              /previous structured lazy checkpoint result was rejected/u,
+              /previous structured primary checkpoint result was rejected/u,
             );
             await writeFile(
               join(request.cwd, "delegated-check.txt"),

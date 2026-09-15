@@ -474,16 +474,13 @@ test("projects descriptor-owned pipeline mode guidance", async () => {
     assert.deepEqual(pipeline.settings.mode, {
       defaultValue: "independent",
       recommendedValue: "independent",
-      values:
-        pipeline.id !== "polishing"
-          ? ["independent", "lazy", "combined"]
-          : ["independent", "lazy"],
+      values: ["independent", "lazy", "combined"],
     });
     assert.ok(pipeline.runOptions.includes("mode"));
   }
 });
 
-for (const pipelineId of ["plan-authoring", "plan-execution"]) {
+for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
   test(`MCP combined ${pipelineId} starts preserve mode in receipts and public projections`, async (t) => {
     const paths = await workspace(t, "agent-runner-mcp-combined-");
     const store = createRunStore({ stateRoot: paths.stateRoot });
@@ -703,10 +700,7 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
     assert.deepEqual(pipeline.settings.mode, {
       defaultValue: "independent",
       recommendedValue: "independent",
-      values:
-        pipeline.id !== "polishing"
-          ? ["independent", "lazy", "combined"]
-          : ["independent", "lazy"],
+      values: ["independent", "lazy", "combined"],
     });
     assert.ok(pipeline.runOptions.includes("mode"));
   }

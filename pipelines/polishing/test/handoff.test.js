@@ -274,21 +274,22 @@ test("rejects Git-index mutation during lazy check/fix", async (t) => {
   assert.equal(result.pipelineState.cleanConfirmationFingerprint, null);
 });
 
-for (const mode of ["independent", "lazy"]) {
+for (const mode of ["independent", "lazy", "combined"]) {
   test(`${mode} recovers a verified runner handoff after DONE persistence is interrupted`, async (t) => {
     const processLoss = new Error("Runner process stopped after staging.");
     const fixture = await createIntegrationFixture(t, {
       mode,
-      ...(mode === "lazy"
+      ...(mode !== "independent"
         ? {
             worker: [
               clarificationReady(),
               bootstrapReady("Worker"),
+              ...(mode === "combined" ? [reconciliationResolved()] : []),
               polishingCompleted(),
               checkAndFix(),
               candidateClean(),
               finalizationPassed(),
-              cleanConfirmation(),
+              ...(mode === "lazy" ? [cleanConfirmation()] : []),
             ],
           }
         : {}),

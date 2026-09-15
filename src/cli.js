@@ -109,7 +109,7 @@ Options:
                            independent review, but uses more context and tokens;
                            lazy is opt-in, uses less, and has no independent review;
                            combined adds primary convergence before independent review
-                           and is available for plan-authoring and plan-execution
+                           and is available for all three pipelines
       --fork-from          Fork a compatible backend session into active roles
                            independent and combined fork primary and review roles separately;
                            lazy forks once into the primary role

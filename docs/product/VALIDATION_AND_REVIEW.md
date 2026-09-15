@@ -13,9 +13,11 @@ writing follow both gates. Revisions clear dependent approvals and restart
 primary convergence. Self findings return directly to fixing; only independent
 finding resolution can use arbitration. Invalid output and interrupted recovery
 do not duplicate accepted correction work or reset bounded budgets. These turns
-remain repository-read-only. Polishing does not yet support combined.
+remain repository-read-only.
 In every authoring mode, exhaustion on deterministic structural failures pauses
 without arbitration; an Arbiter cannot resolve those failures.
+
+## Execution and polishing review
 
 Combined execution runs Worker check/fix and a separate read-only clean
 confirmation before the complete independent candidate Reviewer gate. Both
@@ -29,14 +31,24 @@ exhaustion pause without arbitration. Corrections remain bounded and interrupted
 work is charged once; resume preserves the saved mode and consumed commits remain
 verification-only.
 
+Combined polishing uses independent bootstrap, Worker check/fix and read-only
+clean confirmation, independent candidate review, finalization, and a distinct
+Reviewer terminal confirmation. Content repairs restart primary convergence;
+unchanged resolutions reuse only fingerprint-current finalization. Self-findings
+return directly to fixing; only independent finding resolution may invoke Arbiter.
+Unresolved bootstrap and exhausted primary budgets pause. Handoff remains
+runner-owned staging without a commit, and resume preserves accepted evidence
+and correction accounting.
+
 ## Bootstrap inventory
 
 Before writable work, plan execution and polishing establish the complete
 staging-independent validation inventory and the repository files that control
-it. Independent and execution combined modes combine separately accepted Worker and Reviewer
+it. Independent and combined modes combine separately accepted Worker and Reviewer
 inventories. Lazy mode accepts one complete Worker inventory under the same
-deterministic rules. Reconciliation and arbitration may resolve summaries, but
-they cannot add, select, or remove checks.
+deterministic rules. Reconciliation may resolve summaries, but cannot add, select, or remove
+checks. Only independent mode permits bootstrap arbitration; unresolved combined
+bootstrap disagreements remain blocking.
 
 Commands, paths, capacity limits, and selected runner-trusted commands are
 validated before acceptance. Validation-infrastructure paths must identify

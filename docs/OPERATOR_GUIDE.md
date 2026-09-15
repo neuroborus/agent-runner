@@ -24,9 +24,17 @@ Plan authoring also supports explicit `combined` mode: Planner check/fix and
 clean confirmation precede independent Reviewer approval. Revisions restart
 primary convergence. Self findings and structural exhaustion never trigger
 arbitration. All planning turns remain repository-read-only and artifact writes
-remain runner-owned. Polishing rejects combined; check each
-descriptor through pipeline discovery before selecting it. Resume retains the
+remain runner-owned. All three descriptors support combined. Resume retains the
 saved mode and correction budgets.
+
+Combined polishing uses independent bootstrap, Worker check/fix and read-only
+clean confirmation, independent candidate review, finalization, and a distinct
+Reviewer terminal confirmation. Content repairs restart primary convergence;
+unchanged resolutions reuse only fingerprint-current finalization. Self-findings
+return directly to fixing; only independent finding resolution may invoke Arbiter.
+Unresolved bootstrap and exhausted primary budgets pause. Handoff remains
+runner-owned staging without a commit, and resume preserves accepted evidence
+and correction accounting.
 
 Combined execution runs Worker check/fix and a separate read-only clean
 confirmation before the complete independent candidate Reviewer gate. Both
@@ -138,7 +146,7 @@ credentials, shell-string substitutes, or broader host authority.
 Trusted checks retain isolation and mutation guards; they do not grant broader
 agent permissions or accept user-attested results.
 
-Writable implementation, polishing, lazy check/fix, and finding-resolution turns
+Writable implementation, polishing, lazy or combined check/fix, and finding-resolution turns
 receive only the persisted exact selected command text, including after resume
 or reconstruction. Established required-check execution and attestation belong
 to `FINALIZE`; selected trusted commands must never execute inside agent turns.

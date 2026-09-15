@@ -47,8 +47,8 @@ plan and a new execution run.
 
 Polishing starts from an existing non-empty local change set rather than a
 plan. It makes that whole change set correct, idiomatic, minimal, finalized, and
-reviewed. Independent Reviewer convergence, or lazy Worker convergence, occurs
-before finalization; a distinct read-only terminal confirmation then accepts
+reviewed. Independent Reviewer convergence, lazy Worker convergence, or both
+in combined mode occurs before finalization; a distinct read-only terminal confirmation then accepts
 the finalized content and validation evidence. The runner stages that complete
 accepted result and leaves it uncommitted. Polishing never requests local-commit
 access and never changes `HEAD`.
@@ -70,14 +70,14 @@ alternates between a writable check-and-fix pass and a distinct read-only clean
 confirmation. Findings go directly back to fixing; lazy mode never invokes a
 Reviewer or Arbiter. The runner never selects lazy mode automatically.
 
-`combined` is available in plan authoring and execution. In authoring it converges the
+`combined` is available in every pipeline. In authoring it converges the
 durable draft with Planner check/fix and a separate clean confirmation, then
 requires the full independent Reviewer gate. Reviewer revisions restart primary
 convergence; self findings return to fixing. Self-review and structural
 exhaustion pause without arbitration. Only independent finding resolution may
 invoke the fresh Arbiter. Every authoring agent turn remains repository-read-only;
 the runner writes the deterministically validated artifact. Pipeline descriptors
-own mode availability; polishing still rejects combined.
+own mode availability.
 
 Combined execution runs Worker check/fix and a separate read-only clean
 confirmation before the complete independent candidate Reviewer gate. Both
@@ -90,6 +90,15 @@ fresh on-demand arbitration. Unresolved bootstrap disagreements and primary
 exhaustion pause without arbitration. Corrections remain bounded and interrupted
 work is charged once; resume preserves the saved mode and consumed commits remain
 verification-only.
+
+Combined polishing uses independent bootstrap, Worker check/fix and read-only
+clean confirmation, independent candidate review, finalization, and a distinct
+Reviewer terminal confirmation. Content repairs restart primary convergence;
+unchanged resolutions reuse only fingerprint-current finalization. Self-findings
+return directly to fixing; only independent finding resolution may invoke Arbiter.
+Unresolved bootstrap and exhausted primary budgets pause. Handoff remains
+runner-owned staging without a commit, and resume preserves accepted evidence
+and correction accounting.
 
 All supported modes retain the same clarification, persistence, Git, redaction, and
 effect-safety guarantees.

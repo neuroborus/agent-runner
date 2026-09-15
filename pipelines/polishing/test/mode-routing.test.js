@@ -319,10 +319,11 @@ for (const mode of ["independent", "lazy"]) {
   });
 }
 
-test("polishing keeps combined unavailable", () => {
+test("polishing exposes all supported modes", () => {
   assert.deepEqual(polishingPipeline.settings.mode.values, [
     "independent",
     "lazy",
+    "combined",
   ]);
-  assert.equal(polishingPipeline.settings.mode.validate("combined"), false);
+  assert.equal(polishingPipeline.settings.mode.validate("combined"), true);
 });

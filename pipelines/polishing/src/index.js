@@ -2,7 +2,11 @@ import {
   clearedCandidateAndTerminalGate,
   terminalConfirmationGatePassed,
 } from "./gate-evidence.js";
-import { candidateCheckpoint, polishingPolicy } from "./mode-policy.js";
+import {
+  candidateCheckpoint,
+  combinedReview,
+  polishingPolicy,
+} from "./mode-policy.js";
 import {
   createPolishingState,
   MAX_CLARIFICATION_ROUNDS,
@@ -75,7 +79,7 @@ function positiveIntegerSetting(defaultValue, maximum = null) {
   });
 }
 
-const PIPELINE_MODES = Object.freeze(["independent", "lazy"]);
+const PIPELINE_MODES = Object.freeze(["independent", "lazy", "combined"]);
 
 function pipelineMode(value) {
   return PIPELINE_MODES.includes(value);
@@ -106,7 +110,7 @@ const SETTINGS = Object.freeze({
   maxSameFindingRounds: positiveIntegerSetting(5),
   mode: Object.freeze({
     defaultValue: "independent",
-    errorMessage: "must be independent or lazy",
+    errorMessage: "must be independent, lazy, or combined",
     recommendedValue: "independent",
     validate: pipelineMode,
     values: PIPELINE_MODES,
@@ -127,6 +131,7 @@ const TASK_INPUTS = Object.freeze({
   context: Object.freeze({ filename: "context.md", optional: true }),
 });
 const RETRYABLE_PAUSE_REASONS = new Set([
+  "bootstrap_disagreement",
   "backend_unavailable",
   "confirmation_output_invalid",
   "environment_blocked",
@@ -153,6 +158,8 @@ const RESUMABLE_WORKFLOW_STATES = new Set([
   "CONFIRM",
 ]);
 const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
+  bootstrap_disagreement:
+    "Independent bootstrap summaries remain unresolved; retry reconciliation without arbitration.",
   operator_paused:
     "The operator paused this run; resume restores its checkpoint and any existing blockers.",
   operator_canceled: "The operator canceled this run; it cannot resume.",
@@ -288,6 +295,7 @@ function publicFindings(state) {
     ...new Map(
       [
         ...(Array.isArray(state.findings) ? state.findings : []),
+        ...(Array.isArray(state.primaryFindings) ? state.primaryFindings : []),
         ...finalizationFeedbackFindings(state),
       ].map((finding) => [finding.id, finding]),
     ).values(),
@@ -465,6 +473,8 @@ function validateResumeAction(run, action) {
   if (action?.type === "override-finding") {
     if (
       !polishingPolicy(state.settings).independentReview ||
+      (combinedReview(state.settings) &&
+        run.pause?.resumeState === "CHECK_AND_FIX") ||
       ![
         "fix_limit_reached",
         "no_progress",
@@ -961,9 +971,16 @@ export function migratePolishingStateV11(run) {
   return Object.freeze({ ...run.pipelineState });
 }
 
+export function migratePolishingStateV12(run) {
+  return Object.freeze({
+    ...run.pipelineState,
+    primaryFindings: Object.freeze([]),
+  });
+}
+
 export const polishingPipeline = Object.freeze({
   id: POLISHING_PIPELINE_ID,
-  stateVersion: 12,
+  stateVersion: 13,
   migrations: Object.freeze({
     1: migratePolishingStateV1,
     2: migratePolishingStateV2,
@@ -976,6 +993,7 @@ export const polishingPipeline = Object.freeze({
     9: migratePolishingStateV9,
     10: migratePolishingStateV10,
     11: migratePolishingStateV11,
+    12: migratePolishingStateV12,
   }),
   roles: ROLES,
   resolveActiveRoles,
