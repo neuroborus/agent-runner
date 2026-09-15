@@ -1,4 +1,6 @@
-import { RunStoreError } from "./validation.js";
+import { isDeepStrictEqual } from "node:util";
+import { validStopBoundary } from "./stop-contract.js";
+import { deepFreeze, RunStoreError } from "./validation.js";
 
 export function stopIsPending(state) {
   return (
@@ -6,18 +8,55 @@ export function stopIsPending(state) {
   );
 }
 
-// Requests are immediate today. Enforcement is a separate policy from pending
-// accounting so execution eligibility never determines ownership retention.
-export function stopBlocksExecution(state) {
-  return stopIsPending(state);
+export function resolveCommitBoundary(state, resolver) {
+  const boundary =
+    typeof resolver === "function"
+      ? resolver(deepFreeze(structuredClone(state)))
+      : null;
+  if (!validStopBoundary(boundary)) {
+    throw new RunStoreError(
+      "Commit-boundary stops are unsupported at this checkpoint.",
+      {
+        code: "ERR_STOP_BOUNDARY_UNSUPPORTED",
+      },
+    );
+  }
+  return structuredClone(boundary);
+}
+
+export function stopBlocksExecution(state, resolver) {
+  if (!stopIsPending(state)) return false;
+  if (state.stopRequest.effectiveTiming !== "after-current-commit") return true;
+  return !isDeepStrictEqual(
+    resolveCommitBoundary(state, resolver),
+    state.stopRequest.targetBoundary,
+  );
+}
+
+export function assertStopProgress(previous, next, resolver) {
+  if (
+    stopIsPending(previous) &&
+    previous.stopRequest.effectiveTiming === "after-current-commit" &&
+    !isDeepStrictEqual(
+      resolveCommitBoundary(next, resolver),
+      previous.stopRequest.targetBoundary,
+    )
+  ) {
+    throw new RunStoreError(
+      "Commit-boundary progress requires atomic settlement.",
+      {
+        code: "ERR_STOP_BOUNDARY_SETTLEMENT_REQUIRED",
+      },
+    );
+  }
 }
 
 export function runRetainsOwnership(state) {
   return stopIsPending(state) || state.executionProcess != null;
 }
 
-export function assertRunCanAdvance(state) {
-  if (stopBlocksExecution(state)) {
+export function assertRunCanAdvance(state, resolver) {
+  if (stopBlocksExecution(state, resolver)) {
     throw new RunStoreError(
       "Operator stop must be reconciled before further work.",
       { code: "ERR_STOP_RECONCILIATION_REQUIRED" },
@@ -33,7 +72,7 @@ export function assertRunCanAdvance(state) {
   }
   if (
     state.pipelineState.workflowState === "CANCELED" ||
-    state.stopRequest?.kind === "cancel_requested"
+    (state.stopRequest?.kind === "cancel_requested" && !stopIsPending(state))
   ) {
     throw new RunStoreError("A canceled run cannot advance.", {
       code: "ERR_RUN_CANCELED",

@@ -851,6 +851,9 @@ test("persists stop receipts, projects pending stops, and starts one ownerless r
   assert.deepEqual(pause, {
     runId: initial.runId,
     requestId: pause.requestId,
+    timing: "immediate",
+    effectiveTiming: "immediate",
+    targetBoundary: null,
     kind: "pause_requested",
     expectedRevision: initial.revision,
     revision: initial.revision + 1,
@@ -867,6 +870,9 @@ test("persists stop receipts, projects pending stops, and starts one ownerless r
   assert.equal(typeof launches[0].options.onExit, "function");
   const status = await control.runStatus({ runId: initial.runId });
   assert.deepEqual(status.pendingStop, {
+    timing: "immediate",
+    effectiveTiming: "immediate",
+    targetStep: null,
     kind: "pause_requested",
     revision: initial.revision + 1,
   });
@@ -907,6 +913,9 @@ test("persists stop receipts, projects pending stops, and starts one ownerless r
     {
       kind: "cancel_requested",
       revision: cancel.revision,
+      timing: "immediate",
+      effectiveTiming: "immediate",
+      targetStep: null,
     },
   );
 });

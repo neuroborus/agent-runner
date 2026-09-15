@@ -14,6 +14,7 @@ import { inspectProcessOwner, readProcessIdentity } from "./process-owner.js";
 import { createStopService } from "./stops.js";
 import {
   assertRunCanAdvance,
+  assertStopProgress,
   assertRunCanReleaseOwnership,
   runRetainsOwnership,
 } from "./stop-policy.js";
@@ -218,6 +219,7 @@ export function createRunStore({
   leaseStaleMs = DEFAULT_LEASE_STALE_MS,
   onLeasePublicationBoundary = async () => {},
   onTransitionBoundary = async () => {},
+  resolveStopBoundary = null,
 } = {}) {
   if (typeof stateRoot !== "string" || !isAbsolute(stateRoot)) {
     throw new RunStoreError("State root must be an absolute path.", {
@@ -225,6 +227,8 @@ export function createRunStore({
     });
   }
   if (
+    (resolveStopBoundary !== null &&
+      typeof resolveStopBoundary !== "function") ||
     typeof clock !== "function" ||
     typeof runIdFactory !== "function" ||
     typeof leaseTokenFactory !== "function" ||
@@ -274,7 +278,10 @@ export function createRunStore({
       : currentTimestamp;
   }
 
-  const journal = createStateJournal({ onTransitionBoundary });
+  const journal = createStateJournal({
+    onTransitionBoundary,
+    resolveStopBoundary,
+  });
   const mutate = createMutationBoundary({
     hostName,
     processId,
@@ -866,7 +873,7 @@ export function createRunStore({
 
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
-      assertRunCanAdvance(snapshot.state);
+      assertRunCanAdvance(snapshot.state, resolveStopBoundary);
       if (
         expectedRevision !== undefined &&
         snapshot.state.revision !== expectedRevision
@@ -895,6 +902,7 @@ export function createRunStore({
         },
         record.runId,
       );
+      assertStopProgress(snapshot.state, nextState, resolveStopBoundary);
       await journal.appendTransition(
         runDirectory,
         nextState,
@@ -939,7 +947,7 @@ export function createRunStore({
     }
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
-      assertRunCanAdvance(snapshot.state);
+      assertRunCanAdvance(snapshot.state, resolveStopBoundary);
       if (!isDeepStrictEqual(snapshot.state.activeTurn, normalized)) {
         throw new RunStoreError("Active agent turn does not match.", {
           code: "ERR_INVALID_AGENT_TURN",
@@ -965,7 +973,7 @@ export function createRunStore({
 
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
-      assertRunCanAdvance(snapshot.state);
+      assertRunCanAdvance(snapshot.state, resolveStopBoundary);
       if (
         snapshot.state.sessionLineage.children.some(
           (child) => child.sessionId === normalizedChild.sessionId,
@@ -1015,6 +1023,7 @@ export function createRunStore({
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       assertRunCanAdvance(
         (await loadSnapshot(runDirectory, record.runId)).state,
+        resolveStopBoundary,
       );
       const artifactPath = await resolveRunArtifactPath(
         runDirectory,
@@ -1072,6 +1081,7 @@ export function createRunStore({
   }
 
   const stops = createStopService({
+    resolveStopBoundary,
     actions,
     getRunDirectory,
     loadSnapshot,
@@ -1087,7 +1097,7 @@ export function createRunStore({
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
       if (pid !== null) {
-        assertRunCanAdvance(snapshot.state);
+        assertRunCanAdvance(snapshot.state, resolveStopBoundary);
         if (snapshot.state.executionProcess !== null) {
           throw new RunStoreError(
             "The preceding execution process must stop first.",

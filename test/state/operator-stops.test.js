@@ -300,7 +300,7 @@ test("rejects unrelated stale revisions, terminal requests, and malformed input"
     { ...f.input, expectedRevision: 0 },
     { ...f.input, kind: "stop" },
     { ...f.input, signal: "SIGKILL" },
-    { ...f.input, timing: "after-current-commit" },
+    { ...f.input, timing: "after-next-turn" },
   ]) {
     await assert.rejects(f.store.requestOperatorStop(input), {
       code: "ERR_INVALID_STOP_REQUEST",
@@ -354,55 +354,64 @@ test("retains existing pause requirements by reference to the exact suspended st
 });
 
 test("recovers accepted requests at every journal publication boundary", async (t) => {
-  for (const boundary of [
-    "event-appended",
-    "state-replaced",
-    "progress-replaced",
-  ]) {
-    let fail = false;
-    const f = await fixture(t, {
-      onTransitionBoundary: async (point) => {
-        if (fail && point === boundary) {
-          fail = false;
-          throw new Error("simulated interruption");
-        }
-      },
-    });
-    fail = true;
-    await assert.rejects(
-      f.store.requestOperatorStop(f.input),
-      /simulated interruption/u,
-    );
-    const pending = await f.store.loadRun(f.input.runId);
-    assert.equal(pending.revision, 2);
-    const peer = createRunStore({
-      ...f.storeOptions,
-      onTransitionBoundary: async () => {},
-    });
-    const receipt = await peer.requestOperatorStop(f.input);
-    assert.equal(receipt.revision, 2);
-    assert.equal((await peer.loadRun(f.input.runId)).revision, 2);
-    assert.equal(
-      (
-        await peer.readAction({
-          key: f.input.idempotencyKey,
-          tool: "run_pause",
-          arguments: { runId: f.input.runId, expectedRevision: 1 },
-        })
-      ).status,
-      "completed",
-    );
-    await complete(f, receipt);
-    const events = (
-      await readFile(join(f.directoryPath, "events.jsonl"), "utf8")
-    )
-      .trim()
-      .split("\n")
-      .map(JSON.parse);
-    assert.deepEqual(
-      events.map((event) => event.revision),
-      [1, 2, 3],
-    );
+  for (const timing of ["immediate", "after-current-commit"]) {
+    for (const boundary of [
+      "event-appended",
+      "state-replaced",
+      "progress-replaced",
+    ]) {
+      let fail = false;
+      const f = await fixture(t, {
+        resolveStopBoundary: commitBoundary,
+        onTransitionBoundary: async (point) => {
+          if (fail && point === boundary) {
+            fail = false;
+            throw new Error("simulated interruption");
+          }
+        },
+      });
+      const input = { ...f.input, timing };
+      fail = true;
+      await assert.rejects(
+        f.store.requestOperatorStop(input),
+        /simulated interruption/u,
+      );
+      const pending = await f.store.loadRun(f.input.runId);
+      assert.equal(pending.revision, 2);
+      const peer = createRunStore({
+        ...f.storeOptions,
+        onTransitionBoundary: async () => {},
+      });
+      const receipt = await peer.requestOperatorStop(input);
+      assert.equal(receipt.revision, 2);
+      assert.equal(receipt.timing, timing);
+      assert.deepEqual(
+        receipt.targetBoundary,
+        pending.stopRequest.targetBoundary,
+      );
+      assert.equal((await peer.loadRun(f.input.runId)).revision, 2);
+      assert.equal(
+        (
+          await peer.readAction({
+            key: f.input.idempotencyKey,
+            tool: "run_pause",
+            arguments: { runId: f.input.runId, expectedRevision: 1, timing },
+          })
+        ).status,
+        "completed",
+      );
+      await complete(f, receipt);
+      const events = (
+        await readFile(join(f.directoryPath, "events.jsonl"), "utf8")
+      )
+        .trim()
+        .split("\n")
+        .map(JSON.parse);
+      assert.deepEqual(
+        events.map((event) => event.revision),
+        [1, 2, 3],
+      );
+    }
   }
 });
 
@@ -466,40 +475,42 @@ test("a stop winning the mutation boundary prevents a queued workflow transition
 });
 
 test("retains worktree exclusion through owner loss until same-run reconciliation", async (t) => {
-  const f = await fixture(t);
-  const worktree = await f.store.acquireWorktreeLease(
-    f.projectPath,
-    f.input.runId,
-  );
-  const receipt = await f.store.requestOperatorStop(f.input);
-  await assert.rejects(worktree.release(), {
-    code: "ERR_STOP_RECONCILIATION_REQUIRED",
-  });
-  const recovery = createRunStore({
-    ...f.storeOptions,
-    processId: 200,
-    processIsAlive: (pid) => pid !== 100,
-  });
-  assert.equal(
-    await recovery.worktreeLeaseOwner(f.projectPath, OTHER_RUN),
-    f.input.runId,
-  );
-  assert.equal(await recovery.runLeaseOwnerIsLive(f.input.runId), false);
-  await assert.rejects(
-    recovery.acquireWorktreeLease(f.projectPath, OTHER_RUN),
-    { code: "ERR_WORKTREE_LEASED" },
-  );
-  const lease = await recovery.acquireRunLease(f.input.runId);
-  const reclaimedWorktree = await recovery.acquireWorktreeLease(
-    f.projectPath,
-    f.input.runId,
-  );
-  await recovery.recoverRun(lease);
-  await complete(f, receipt, lease, recovery);
-  await reclaimedWorktree.release();
-  await lease.release();
-  const next = await recovery.acquireWorktreeLease(f.projectPath, OTHER_RUN);
-  await next.release();
+  for (const timing of ["immediate", "after-current-commit"]) {
+    const f = await fixture(t, { resolveStopBoundary: commitBoundary });
+    const worktree = await f.store.acquireWorktreeLease(
+      f.projectPath,
+      f.input.runId,
+    );
+    const receipt = await f.store.requestOperatorStop({ ...f.input, timing });
+    await assert.rejects(worktree.release(), {
+      code: "ERR_STOP_RECONCILIATION_REQUIRED",
+    });
+    const recovery = createRunStore({
+      ...f.storeOptions,
+      processId: 200,
+      processIsAlive: (pid) => pid !== 100,
+    });
+    assert.equal(
+      await recovery.worktreeLeaseOwner(f.projectPath, OTHER_RUN),
+      f.input.runId,
+    );
+    assert.equal(await recovery.runLeaseOwnerIsLive(f.input.runId), false);
+    await assert.rejects(
+      recovery.acquireWorktreeLease(f.projectPath, OTHER_RUN),
+      { code: "ERR_WORKTREE_LEASED" },
+    );
+    const lease = await recovery.acquireRunLease(f.input.runId);
+    const reclaimedWorktree = await recovery.acquireWorktreeLease(
+      f.projectPath,
+      f.input.runId,
+    );
+    await recovery.recoverRun(lease);
+    await complete(f, receipt, lease, recovery);
+    await reclaimedWorktree.release();
+    await lease.release();
+    const next = await recovery.acquireWorktreeLease(f.projectPath, OTHER_RUN);
+    await next.release();
+  }
 });
 
 test("distinguishes reused PIDs and rebooted owners without trusting process liveness alone", async (t) => {
@@ -939,7 +950,7 @@ test("legacy completed action receipts replay unchanged and new intents upgrade 
   const resumed = await f.store.beginAction(request);
   await resumed.complete({ runId: f.input.runId });
   await resumed.release();
-  assert.equal(JSON.parse(await readFile(path, "utf8")).schemaVersion, 2);
+  assert.equal(JSON.parse(await readFile(path, "utf8")).schemaVersion, 3);
   const completed = JSON.parse(await readFile(path, "utf8"));
   completed.schemaVersion = 1;
   const historical = JSON.stringify(completed);
@@ -1366,4 +1377,390 @@ test("checkpoint settlement cannot bypass owned processes or a pending stop outc
     receipt.revision,
   );
   await complete(f, receipt);
+});
+
+function commitBoundary(run) {
+  if (
+    run.pipelineId !== "plan-execution" ||
+    run.pipelineState.currentStep === null
+  )
+    return null;
+  return {
+    capability: "verified-commit-v1",
+    step: run.pipelineState.currentStep ?? 1,
+    completedCommits: run.pipelineState.completedCommits?.length ?? 0,
+    baselineHead: run.pipelineState.repositoryBaseline?.head ?? "a".repeat(40),
+  };
+}
+
+test("deferred stops bind serialized targets and reserve ownership while the target advances", async (t) => {
+  for (const kind of ["pause_requested", "cancel_requested"]) {
+    await t.test(kind, async (t) => {
+      const f = await fixture(t, { resolveStopBoundary: commitBoundary });
+      const worktree = await f.store.acquireWorktreeLease(
+        f.projectPath,
+        f.input.runId,
+      );
+      const input = { ...f.input, kind, timing: "after-current-commit" };
+      const receipt = await f.store.requestOperatorStop(input);
+      assert.equal(receipt.timing, input.timing);
+      assert.deepEqual(receipt.targetBoundary, commitBoundary(f.state));
+      assert.ok(Object.isFrozen(receipt.targetBoundary));
+      await f.store.transitionRun(f.lease, {
+        counters: { rounds: 2 },
+        pipelineState: { ...f.state.pipelineState, currentStep: 1 },
+      });
+      const turn = { role: "worker", phase: "implement" };
+      await f.store.startAgentTurn(f.lease, turn, {
+        activity: {
+          actor: "worker",
+          phase: "implement",
+          kind: "turn-started",
+          message: "Target step continues.",
+        },
+      });
+      await f.store.recordChildSession(f.lease, {
+        role: "worker",
+        sessionId: "target-session",
+      });
+      await f.store.writeRunArtifact(f.lease, "target.txt", "target evidence");
+      await f.store.recordExecutionProcess(f.lease, 101);
+      await f.store.recordExecutionProcess(f.lease, null);
+      await f.store.finishAgentTurn(f.lease, turn);
+      const target = await f.store.loadRun(input.runId);
+      for (const change of [
+        { currentStep: 2 },
+        { completedCommits: ["b".repeat(40)] },
+        { repositoryBaseline: { head: "b".repeat(40) } },
+      ]) {
+        await assert.rejects(
+          f.store.transitionRun(f.lease, {
+            pipelineState: { ...target.pipelineState, ...change },
+          }),
+          { code: "ERR_STOP_BOUNDARY_SETTLEMENT_REQUIRED" },
+        );
+      }
+      await assert.rejects(worktree.release(), {
+        code: "ERR_STOP_RECONCILIATION_REQUIRED",
+      });
+      await assert.rejects(f.lease.release(), {
+        code: "ERR_STOP_RECONCILIATION_REQUIRED",
+      });
+      const unsupported = createRunStore({
+        ...f.storeOptions,
+        resolveStopBoundary: null,
+      });
+      await assert.rejects(unsupported.loadRun(input.runId), {
+        code: "ERR_STOP_BOUNDARY_UNSUPPORTED",
+      });
+      const canceled = kind === "cancel_requested";
+      const settled = await f.store.settleCheckpoint(f.lease, (latest) => ({
+        patch: {
+          pipelineState: {
+            ...latest.pipelineState,
+            currentStep: 2,
+            completedCommits: ["b".repeat(40)],
+            workflowState: canceled ? "CANCELED" : "WAITING_FOR_USER",
+          },
+          pause: {
+            reason: canceled ? "operator_canceled" : "operator_paused",
+            resumeAction: null,
+            operatorResume: {
+              workflowState: "IMPLEMENT",
+              pause: null,
+              activeTurn: null,
+            },
+          },
+        },
+        settlement: { kind: "commit", commit: "b".repeat(40) },
+      }));
+      assert.deepEqual(
+        settled.stopRequest.targetBoundary,
+        receipt.targetBoundary,
+      );
+      assert.deepEqual(settled.stopRequest.settlement, {
+        kind: "commit",
+        commit: "b".repeat(40),
+      });
+      assert.equal(settled.stopRequest.reconciledRevision, settled.revision);
+      assert.deepEqual(await f.store.requestOperatorStop(input), receipt);
+      await worktree.release();
+      await f.lease.release();
+    });
+  }
+});
+
+test("timing identities canonicalize immediate omission and reject changed requests", async (t) => {
+  const f = await fixture(t, { resolveStopBoundary: commitBoundary });
+  const accepted = await f.store.requestOperatorStop(f.input);
+  assert.equal(accepted.timing, "immediate");
+  assert.deepEqual(
+    await f.store.requestOperatorStop({ ...f.input, timing: "immediate" }),
+    accepted,
+  );
+  await assert.rejects(
+    f.store.requestOperatorStop({ ...f.input, timing: "after-current-commit" }),
+    { code: "ERR_MCP_IDEMPOTENCY_CONFLICT" },
+  );
+  await complete(f, accepted);
+  const other = await fixture(t);
+  await assert.rejects(
+    other.store.requestOperatorStop({
+      ...other.input,
+      timing: "after-current-commit",
+    }),
+    { code: "ERR_STOP_BOUNDARY_UNSUPPORTED" },
+  );
+  assert.equal((await other.store.loadRun(other.input.runId)).revision, 1);
+  for (const resolver of [
+    () => null,
+    () => ({ ...commitBoundary(f.state), capability: "unknown" }),
+    () => ({ ...commitBoundary(f.state), secret: "forbidden" }),
+  ]) {
+    const invalid = await fixture(t, { resolveStopBoundary: resolver });
+    await assert.rejects(
+      invalid.store.requestOperatorStop({
+        ...invalid.input,
+        timing: "after-current-commit",
+      }),
+      { code: "ERR_STOP_BOUNDARY_UNSUPPORTED" },
+    );
+  }
+});
+
+test("cancellation supersession never postpones an earlier stop", async (t) => {
+  for (const [pauseTiming, cancelTiming] of [
+    ["immediate", "after-current-commit"],
+    ["after-current-commit", "immediate"],
+    ["after-current-commit", "after-current-commit"],
+  ]) {
+    const f = await fixture(t, { resolveStopBoundary: commitBoundary });
+    const pauseInput = { ...f.input, timing: pauseTiming };
+    const paused = await f.store.requestOperatorStop(pauseInput);
+    const canceled = await f.store.requestOperatorStop({
+      ...f.input,
+      kind: "cancel_requested",
+      timing: cancelTiming,
+      idempotencyKey: "superseding-cancel",
+    });
+    assert.equal(canceled.timing, cancelTiming);
+    assert.equal(
+      canceled.effectiveTiming,
+      pauseTiming === "immediate" ? "immediate" : cancelTiming,
+    );
+    assert.deepEqual(
+      canceled.targetBoundary,
+      canceled.effectiveTiming === "immediate" ? null : paused.targetBoundary,
+    );
+    assert.deepEqual(await f.store.requestOperatorStop(pauseInput), paused);
+    if (canceled.effectiveTiming === "immediate")
+      await assert.rejects(
+        f.store.transitionRun(f.lease, { counters: { rounds: 3 } }),
+        { code: "ERR_STOP_RECONCILIATION_REQUIRED" },
+      );
+    await complete(f, canceled);
+  }
+});
+
+test("legacy timing-less receipts and pending intents preserve their original identities", async (t) => {
+  for (const completed of [false, true]) {
+    const f = await fixture(t);
+    const identity = {
+      key: f.input.idempotencyKey,
+      tool: "run_pause",
+      arguments: { runId: f.input.runId, expectedRevision: 1 },
+      context: { runId: f.input.runId },
+    };
+    let expected;
+    if (completed) expected = await f.store.requestOperatorStop(f.input);
+    else {
+      const action = await f.store.beginAction(identity);
+      await action.release();
+    }
+    const hash = createHash("sha256")
+      .update(f.input.idempotencyKey)
+      .digest("hex");
+    const path = join(f.storeOptions.stateRoot, "actions", hash, "action.json");
+    const record = JSON.parse(await readFile(path, "utf8"));
+    record.schemaVersion = 2;
+    record.argumentsHash = createHash("sha256")
+      .update(JSON.stringify({ expectedRevision: 1, runId: f.input.runId }))
+      .digest("hex");
+    if (completed) {
+      const { timing, effectiveTiming, targetBoundary, ...legacyReceipt } =
+        expected;
+      expected = legacyReceipt;
+      record.result = expected;
+      const eventsPath = join(f.directoryPath, "events.jsonl");
+      const events = (await readFile(eventsPath, "utf8"))
+        .trim()
+        .split("\n")
+        .map(JSON.parse);
+      for (const event of events) {
+        event.schemaVersion = event.state.schemaVersion = 6;
+        event.state.runtimeCompatibility.runStateVersion = 6;
+        if (event.state.stopRequest)
+          for (const field of [
+            "timing",
+            "effectiveTiming",
+            "targetBoundary",
+            "identityVersion",
+            "settlement",
+          ])
+            delete event.state.stopRequest[field];
+      }
+      await writeFile(eventsPath, events.map(JSON.stringify).join("\n") + "\n");
+      await writeFile(
+        join(f.directoryPath, "state.json"),
+        JSON.stringify(events.at(-1).state),
+      );
+    }
+    const bytes = JSON.stringify(record);
+    await writeFile(path, bytes);
+    const receipt = await f.store.requestOperatorStop({
+      ...f.input,
+      timing: "immediate",
+    });
+    assert.equal(Object.hasOwn(receipt, "timing"), false);
+    if (completed) {
+      assert.deepEqual(receipt, expected);
+      assert.equal(await readFile(path, "utf8"), bytes);
+    }
+    const loaded = await f.store.loadRun(f.input.runId);
+    assert.equal(loaded.stopRequest.timing, "immediate");
+    assert.equal(loaded.stopRequest.identityVersion, 1);
+    await assert.rejects(
+      f.store.requestOperatorStop({
+        ...f.input,
+        timing: "after-current-commit",
+      }),
+      { code: "ERR_MCP_IDEMPOTENCY_CONFLICT" },
+    );
+    if (!completed) await complete(f, receipt);
+  }
+});
+
+test("deferred acceptance resolves the authoritative step while queued crossing stays blocked", async (t) => {
+  const entered = deferred();
+  const release = deferred();
+  let armed = false;
+  const f = await fixture(t, {
+    resolveStopBoundary(run) {
+      assert.ok(Object.isFrozen(run.pipelineState));
+      return commitBoundary(run);
+    },
+    async onTransitionBoundary(point) {
+      if (armed && point === "event-appended") {
+        armed = false;
+        entered.resolve();
+        await release.promise;
+      }
+    },
+  });
+  const next = await f.store.transitionRun(f.lease, {
+    pipelineState: { ...f.state.pipelineState, currentStep: 2 },
+  });
+  armed = true;
+  const input = {
+    ...f.input,
+    expectedRevision: next.revision,
+    timing: "after-current-commit",
+  };
+  const request = f.store.requestOperatorStop(input);
+  await entered.promise;
+  const crossing = assert.rejects(
+    f.store.transitionRun(f.lease, {
+      pipelineState: { ...next.pipelineState, currentStep: 3 },
+    }),
+    { code: "ERR_STOP_BOUNDARY_SETTLEMENT_REQUIRED" },
+  );
+  try {
+    const read = await f.store.loadRun(input.runId);
+    assert.equal(read.stopRequest.targetBoundary.step, 2);
+    assert.equal(await f.store.runIsLeased(input.runId), true);
+  } finally {
+    release.resolve();
+  }
+  const [receipt] = await Promise.all([request, crossing]);
+  await complete(f, receipt);
+  assert.deepEqual(
+    (await f.store.loadRun(input.runId)).stopRequest.settlement,
+    {
+      kind: "quiescent",
+      commit: null,
+    },
+  );
+});
+
+test("deferred stop history rejects changed targets, timing, and settlement evidence", async (t) => {
+  const f = await fixture(t, { resolveStopBoundary: commitBoundary });
+  const receipt = await f.store.requestOperatorStop({
+    ...f.input,
+    timing: "after-current-commit",
+  });
+  await f.store.transitionRun(f.lease, { counters: { rounds: 1 } });
+  await complete(f, receipt);
+  const eventsPath = join(f.directoryPath, "events.jsonl");
+  const statePath = join(f.directoryPath, "state.json");
+  const originalEvents = await readFile(eventsPath, "utf8");
+  const originalState = await readFile(statePath, "utf8");
+  const changes = [
+    (events) => {
+      events[2].state.stopRequest.targetBoundary.step = 2;
+    },
+    (events) => {
+      events[2].state.stopRequest.timing = "immediate";
+    },
+    (events) => {
+      events[1].state.stopRequest.targetBoundary.capability = "unsupported";
+    },
+    (events) => {
+      events[1].state.stopRequest.targetBoundary.privateData = "forbidden";
+    },
+    (events) => {
+      events[1].state.stopRequest.targetBoundary.step = 0;
+    },
+    (events) => {
+      events[1].state.stopRequest.targetBoundary.baselineHead = "not-a-sha";
+    },
+    (events) => {
+      events[1].state.stopRequest.settlement = {
+        kind: "quiescent",
+        commit: null,
+      };
+    },
+    (events) => {
+      events.at(-1).state.stopRequest.settlement = null;
+    },
+    (events) => {
+      events.at(-1).state.stopRequest.settlement = {
+        kind: "commit",
+        commit: "invalid",
+      };
+    },
+    (events) => {
+      for (const event of events.slice(1)) {
+        event.state.stopRequest.effectiveTiming = "immediate";
+        event.state.stopRequest.targetBoundary = null;
+      }
+    },
+  ];
+  try {
+    for (const change of changes) {
+      const events = originalEvents.trim().split("\n").map(JSON.parse);
+      change(events);
+      await writeFile(eventsPath, events.map(JSON.stringify).join("\n") + "\n");
+      await writeFile(statePath, JSON.stringify(events.at(-1).state));
+      await assert.rejects(f.store.loadRun(f.input.runId), (error) =>
+        ["ERR_INVALID_EVENT_LOG", "ERR_INVALID_RUN_STATE"].includes(error.code),
+      );
+    }
+  } finally {
+    await writeFile(eventsPath, originalEvents);
+    await writeFile(statePath, originalState);
+  }
+  assert.equal(
+    (await f.store.loadRun(f.input.runId)).stopRequest.targetBoundary.step,
+    1,
+  );
 });

@@ -344,6 +344,9 @@ function statusProjection({ directoryPath, run }, leaseOwnerIsLive) {
         ? {
             kind: run.stopRequest.kind,
             revision: run.stopRequest.acceptedRevision,
+            timing: run.stopRequest.timing,
+            effectiveTiming: run.stopRequest.effectiveTiming,
+            targetStep: run.stopRequest.targetBoundary?.step ?? null,
           }
         : null,
     execution: executionProjection(run, leaseOwnerIsLive),

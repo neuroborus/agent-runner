@@ -7,6 +7,14 @@ remain in the owning documentation.
 
 ## 2026-09-15
 
+- **Deferred stop targets belong to durable state.** A trusted injected resolver
+  binds requests to immutable commit-boundary evidence under acceptance
+  serialization. Target-step work retains ownership, and crossing requires atomic
+  settlement. Timing participates in new identities while historical immediate
+  receipts remain replayable. Supersession cannot postpone an earlier stop;
+  unsupported capabilities fail closed. Production registration is deferred to
+  the runner integration step.
+
 - **Verified commits settle progress and stops together.** Execution owns the
   successful checkpoint construction; state owns its atomic leased publication.
   The runner resolves the latest operator outcome while preserving the verified
