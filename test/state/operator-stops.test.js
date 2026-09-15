@@ -72,6 +72,29 @@ async function fixture(
   return { ...created, store, storeOptions, projectPath, input };
 }
 
+function advancementOperations(f, activeTurn) {
+  return [
+    () => f.store.transitionRun(f.lease, { counters: { rounds: 1 } }),
+    () =>
+      f.store.startAgentTurn(f.lease, activeTurn, {
+        activity: {
+          actor: activeTurn.role,
+          phase: activeTurn.phase,
+          kind: "turn-started",
+          message: "Worker started.",
+        },
+      }),
+    () => f.store.finishAgentTurn(f.lease, activeTurn),
+    () =>
+      f.store.recordChildSession(f.lease, {
+        role: "worker",
+        sessionId: "late-child",
+      }),
+    () => f.store.writeRunArtifact(f.lease, "late.txt", "late artifact"),
+    () => f.store.recordExecutionProcess(f.lease, 101),
+  ];
+}
+
 async function complete(f, receipt, lease = f.lease, store = f.store) {
   const current = await store.loadRun(f.input.runId);
   const canceled = receipt.kind === "cancel_requested";
@@ -277,6 +300,7 @@ test("rejects unrelated stale revisions, terminal requests, and malformed input"
     { ...f.input, expectedRevision: 0 },
     { ...f.input, kind: "stop" },
     { ...f.input, signal: "SIGKILL" },
+    { ...f.input, timing: "after-current-commit" },
   ]) {
     await assert.rejects(f.store.requestOperatorStop(input), {
       code: "ERR_INVALID_STOP_REQUEST",
@@ -1052,4 +1076,167 @@ test("competing controllers recover dead choosing and ready mutation claims", as
     await complete(f, results[1].value, lease, cancelStore);
     await lease.release();
   }
+});
+
+test("accepted stops block each queued advancement while reads stay lock-free", async (t) => {
+  const operations = [
+    "transition",
+    "start-turn",
+    "finish-turn",
+    "child-session",
+    "artifact",
+    "process",
+  ];
+  for (const kind of ["pause_requested", "cancel_requested"]) {
+    for (const [index, name] of operations.entries()) {
+      await t.test(`${kind}/${name}`, async (t) => {
+        const entered = deferred();
+        const release = deferred();
+        let armed = false;
+        const f = await fixture(t, {
+          onTransitionBoundary: async (point) => {
+            if (armed && point === "event-appended") {
+              armed = false;
+              entered.resolve();
+              await release.promise;
+            }
+          },
+        });
+        const activeTurn = { role: "worker", phase: "implement" };
+        const active = await f.store.startAgentTurn(f.lease, activeTurn, {
+          activity: {
+            actor: "worker",
+            phase: "implement",
+            kind: "turn-started",
+            message: "Worker started.",
+          },
+        });
+        const input = { ...f.input, kind, expectedRevision: active.revision };
+        armed = true;
+        const request = f.store.requestOperatorStop(input);
+        await entered.promise;
+        const queued = assert.rejects(
+          advancementOperations(f, activeTurn)[index],
+          {
+            code: "ERR_STOP_RECONCILIATION_REQUIRED",
+          },
+        );
+        let receipt;
+        try {
+          const read = await f.store.loadRun(input.runId);
+          assert.equal(read.stopRequest.kind, kind);
+          assert.equal(await f.store.runIsLeased(input.runId), true);
+          assert.equal(
+            (await f.store.readPublicActivity(input.runId)).cursor,
+            read.revision,
+          );
+          assert.equal(
+            (
+              await f.store.waitForRunChange(input.runId, {
+                afterRevision: active.revision,
+                timeoutMs: 0,
+              })
+            ).revision,
+            read.revision,
+          );
+        } finally {
+          release.resolve();
+          [receipt] = await Promise.all([request, queued]);
+        }
+        const stopped = await f.store.loadRun(input.runId);
+        assert.equal(stopped.revision, receipt.revision);
+        assert.deepEqual(stopped.sessionLineage, active.sessionLineage);
+        assert.deepEqual(stopped.activeTurn, activeTurn);
+        assert.equal(stopped.executionProcess, null);
+        await assert.rejects(readFile(join(f.directoryPath, "late.txt")), {
+          code: "ENOENT",
+        });
+        assert.deepEqual(await f.store.requestOperatorStop(input), receipt);
+        await complete(f, receipt);
+      });
+    }
+  }
+});
+
+test("retiring an owned process does not release pending stop accounting", async (t) => {
+  for (const kind of ["pause_requested", "cancel_requested"]) {
+    await t.test(kind, async (t) => {
+      const f = await fixture(t);
+      const worktree = await f.store.acquireWorktreeLease(
+        f.projectPath,
+        f.input.runId,
+      );
+      const registered = await f.store.recordExecutionProcess(f.lease, 101);
+      const receipt = await f.store.requestOperatorStop({
+        ...f.input,
+        kind,
+        expectedRevision: registered.revision,
+      });
+      await assert.rejects(complete(f, receipt), {
+        code: "ERR_EXECUTION_PROCESS_ACTIVE",
+      });
+      for (const operation of advancementOperations(f, {
+        role: "worker",
+        phase: "implement",
+      })) {
+        await assert.rejects(operation, {
+          code: "ERR_STOP_RECONCILIATION_REQUIRED",
+        });
+      }
+      const retired = await f.store.recordExecutionProcess(f.lease, null);
+      assert.equal(retired.executionProcess, null);
+      assert.equal(retired.stopRequest.reconciledRevision, null);
+      assert.deepEqual(
+        await f.store.recordExecutionProcess(f.lease, null),
+        retired,
+      );
+      for (const lease of [f.lease, worktree]) {
+        await assert.rejects(lease.release(), {
+          code: "ERR_STOP_RECONCILIATION_REQUIRED",
+        });
+      }
+      await complete(f, receipt);
+      await worktree.release();
+      await f.lease.release();
+      assert.equal(await f.store.runIsLeased(f.input.runId), false);
+      const next = await f.store.acquireWorktreeLease(f.projectPath, OTHER_RUN);
+      await next.release();
+    });
+  }
+});
+
+test("reconciled cancellation prevents advancement without retaining ownership", async (t) => {
+  const f = await fixture(t);
+  const input = { ...f.input, kind: "cancel_requested" };
+  const receipt = await f.store.requestOperatorStop(input);
+  const canceled = await complete(f, receipt);
+  for (const operation of advancementOperations(f, {
+    role: "worker",
+    phase: "implement",
+  })) {
+    await assert.rejects(operation, { code: "ERR_RUN_CANCELED" });
+  }
+  await f.lease.release();
+  assert.equal(await f.store.runIsLeased(input.runId), false);
+  assert.deepEqual(await f.store.requestOperatorStop(input), receipt);
+  assert.deepEqual(await f.store.loadRun(input.runId), canceled);
+});
+
+test("process ownership alone blocks advancement until its durable record is retired", async (t) => {
+  const f = await fixture(t);
+  const registered = await f.store.recordExecutionProcess(f.lease, 101);
+  assert.equal(registered.stopRequest, null);
+  for (const operation of advancementOperations(f, {
+    role: "worker",
+    phase: "implement",
+  })) {
+    await assert.rejects(operation, { code: "ERR_EXECUTION_PROCESS_ACTIVE" });
+  }
+  await f.store.recordExecutionProcess(f.lease, null);
+  const advanced = await f.store.transitionRun(f.lease, {
+    counters: { rounds: 1 },
+  });
+  assert.equal(advanced.counters.rounds, 1);
+  await f.lease.release();
+  assert.equal(await f.store.runIsLeased(f.input.runId), false);
 });

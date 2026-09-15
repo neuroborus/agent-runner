@@ -744,8 +744,24 @@ the run terminated. Receipt replay neither advances the run nor executes work.
 Version-1 action records remain readable; incomplete actions upgrade when
 written, and completed receipts replay without migration writes.
 
-Pending requests prevent ordinary state advancement, new provider-turn
-records, session/artifact writes, and release of held run/worktree ownership.
+The private `src/state/stop-policy.js` owns three distinct decisions: whether a
+request awaits reconciliation, whether that request blocks execution, and
+whether unresolved stop accounting or a recorded execution process retains
+ownership. All accepted requests are immediate, so a pending request currently
+blocks execution. Timing options remain unsupported. Envelope validation owns
+shape; the stop service owns acceptance, supersession, and receipt accounting.
+
+The common advancement guard applies inside the mutation boundary to workflow
+transitions, provider-turn records, session/artifact writes, and execution
+registration. Pending stop enforcement takes precedence over process accounting,
+then terminal cancellation blocks any further advancement. Retiring a recorded
+process remains allowed while a stop is pending so reconciliation can finish.
+
+Lease release, worktree reclamation, and durable `runIsLeased` exclusion consult
+the separate ownership-retention policy. A reconciled cancellation remains
+terminal without retaining ownership; a reconciled pause permits ordinary
+resumption once other blockers are resolved. A pending stop prevents release
+of held run/worktree ownership even after its process record has been retired.
 A dead owner's existing worktree lease remains excluded from other runs while
 the request is pending; only recovery of the same run can reclaim it.
 Reclamation, including stale-marker recovery, rechecks the stop under the
