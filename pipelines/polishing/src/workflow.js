@@ -3,6 +3,13 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import {
+  candidateCheckpoint,
+  findingResolutionCheckpoint,
+  polishingPolicy,
+  selectRoleSession,
+} from "./mode-policy.js";
+
+import {
   AGENT_GUIDANCE_SCOPE_INSTRUCTIONS,
   BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
   BOOTSTRAP_CORRECTION_INSTRUCTIONS,
@@ -1233,25 +1240,16 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     const latestSession = [...currentRun.sessionLineage.children]
       .reverse()
       .find((child) => child.role === role);
-    const lazyPrimary = state().settings.mode === "lazy" && role === "worker";
-    const previousSession =
-      !recovering &&
-      role !== "arbiter" &&
-      (lazyPrimary || latestSession?.contextKey === contextKey) &&
-      latestSession !== undefined
-        ? latestSession.sessionId
-        : undefined;
-    const sourceSession = currentRun.sessionLineage.source;
-    const session = freshSession
-      ? undefined
-      : previousSession !== undefined
-        ? { id: previousSession, mode: "continue" }
-        : !recovering &&
-            sourceSession !== null &&
-            role !== "arbiter" &&
-            (!lazyPrimary || !state().lazySourceForkConsumed)
-          ? { id: sourceSession, mode: "fork" }
-          : undefined;
+    const { session, previousSession, consumeSourceFork } = selectRoleSession({
+      settings: state().settings,
+      role,
+      latestSession,
+      contextKey,
+      sourceSession: currentRun.sessionLineage.source,
+      sourceForkConsumed: state().lazySourceForkConsumed,
+      recovering,
+      freshSession,
+    });
     const configuration = currentRun.roles[role];
     const recoveryPrompt = completeRolePrompt(buildPrompt(context));
     const executionPreferences = Object.fromEntries(
@@ -1278,7 +1276,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     let agentError;
     currentRun = await runtime.startAgentTurn(
       turn,
-      lazyPrimary && session?.mode === "fork"
+      consumeSourceFork
         ? {
             pipelineState: {
               ...state(),
@@ -1334,10 +1332,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
             contentChangingCorrection || contentChangingLazyCheck
               ? {
                   ...current,
-                  workflowState:
-                    current.settings.mode === "lazy"
-                      ? "CHECK_AND_FIX"
-                      : "REVIEW",
+                  workflowState: candidateCheckpoint(current.settings),
                   repositoryBaseline: nextRepositoryBaseline,
                   ...clearedCandidateAndTerminalGate(),
                   previousFindings:
@@ -1974,9 +1969,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         ...invalidatedLegacyValidation(current),
         workflowState: resumePolishing
           ? "POLISH"
-          : current.settings.mode === "lazy"
-            ? "CHECK_AND_FIX"
-            : "REVIEW",
+          : candidateCheckpoint(current.settings),
         additionalFixRounds,
       },
       {
@@ -2008,8 +2001,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     await transition(
       {
         ...current,
-        workflowState:
-          current.settings.mode === "lazy" ? "CHECK_AND_FIX" : "REVIEW",
+        workflowState: candidateCheckpoint(current.settings),
         candidateMigrationPending: false,
         additionalFixRounds,
       },
@@ -2296,14 +2288,14 @@ ${JSON.stringify(
     const current = state();
     if (
       result.validationChange !== "REJECTED" ||
-      (current.settings.mode !== "lazy" &&
+      (polishingPolicy(current.settings).independentReview &&
         validationRejectionIsOverridden(result.findings, fingerprint))
     ) {
       return false;
     }
     const findings = result.findings.filter(
       ({ id }) =>
-        current.settings.mode === "lazy" ||
+        !polishingPolicy(current.settings).independentReview ||
         !findingOverrideApplies(id, fingerprint),
     );
     const evidenceIds = result.finalizationFindingIds.filter((id) =>
@@ -2335,9 +2327,7 @@ ${JSON.stringify(
         ...(pure ? clearedTerminalGate() : clearedCandidateAndTerminalGate()),
         workflowState: pure
           ? "FINALIZE"
-          : current.settings.mode === "lazy"
-            ? "CHECK_AND_FIX"
-            : "RESOLVE_FINDINGS",
+          : findingResolutionCheckpoint(current.settings),
         finalizationRecovery: {
           ...current.finalizationRecovery,
           required: true,
@@ -2587,10 +2577,10 @@ ${JSON.stringify(
       current.finalizedFingerprint === null ||
       current.reviewedFingerprint !== current.finalizedFingerprint ||
       !confirmationAccepted ||
-      (current.settings.mode === "lazy" &&
+      (polishingPolicy(current.settings).primaryConvergence &&
         current.candidateConfirmationFingerprint !==
           current.candidateReviewedFingerprint) ||
-      (current.settings.mode === "lazy" &&
+      (polishingPolicy(current.settings).terminalConfirmer === "worker" &&
         current.cleanConfirmationFingerprint !== current.finalizedFingerprint)
     ) {
       return false;
@@ -2598,8 +2588,7 @@ ${JSON.stringify(
     if ((await contentFingerprint()) !== current.finalizedFingerprint) {
       await transition({
         ...current,
-        workflowState:
-          current.settings.mode === "lazy" ? "CHECK_AND_FIX" : "REVIEW",
+        workflowState: candidateCheckpoint(current.settings),
         ...clearedCandidateAndTerminalGate(),
         previousFindings: current.previousFindings,
         pendingCorrection: true,
@@ -2698,8 +2687,7 @@ ${JSON.stringify(
     await transition(
       {
         ...invalidatedLegacyValidation(current),
-        workflowState:
-          current.settings.mode === "lazy" ? "CHECK_AND_FIX" : "REVIEW",
+        workflowState: candidateCheckpoint(current.settings),
         workerValidation: null,
         reviewerValidation: null,
         validationMigrationDisagreement: null,
@@ -2801,7 +2789,7 @@ ${JSON.stringify(
       ...finalizationFeedbackFindings(current),
     ].find(({ id }) => id === resumeAction.findingId);
     if (
-      current.settings.mode === "lazy" ||
+      !polishingPolicy(current.settings).independentReview ||
       finding === undefined ||
       fingerprint === null ||
       findingOverrideApplies(resumeAction.findingId, fingerprint) ||
@@ -3318,8 +3306,7 @@ ${evidence}${
     await transition(
       {
         ...state(),
-        workflowState:
-          state().settings.mode === "lazy" ? "CHECK_AND_FIX" : "REVIEW",
+        workflowState: candidateCheckpoint(state().settings),
         polishSummary: result.summary,
         ...clearedCandidateAndTerminalGate(),
         previousFindings:
@@ -5264,7 +5251,7 @@ ${JSON.stringify(
       current.blockedSinceStagnation >= current.settings.stagnationWindowRounds
     ) {
       if (
-        current.settings.mode === "lazy" ||
+        !polishingPolicy(current.settings).arbitration ||
         current.stagnationArbitrationUsed
       ) {
         await pause("no_progress", {
@@ -5443,8 +5430,7 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
           ...(changed || current.finalizationResult?.status !== "PASS"
             ? clearedCandidateAndTerminalGate()
             : clearedCandidateAndConfirmationGate(current)),
-          workflowState:
-            current.settings.mode === "lazy" ? "CHECK_AND_FIX" : "REVIEW",
+          workflowState: candidateCheckpoint(current.settings),
           previousFindings:
             current.findings.length === 0
               ? current.previousFindings
@@ -5521,9 +5507,7 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
             current.workflowState === "CHECK_AND_FIX";
           const workflowState = samePhase
             ? current.workflowState
-            : current.settings.mode === "lazy"
-              ? "CHECK_AND_FIX"
-              : "REVIEW";
+            : candidateCheckpoint(current.settings);
           const alreadyCharged =
             interruptedTurn?.phase === "check-and-fix"
               ? current.pendingLazyCorrection?.fixRoundCharged === true
@@ -5792,7 +5776,7 @@ ${evidence}`,
           }
           continue;
         }
-        if (current.settings.mode === "lazy") {
+        if (!polishingPolicy(current.settings).independentBootstrap) {
           if (!(await completeLazyBootstrap())) {
             return currentRun;
           }
@@ -5853,7 +5837,7 @@ ${evidence}`,
 
       if (current.workflowState === "CONFIRM") {
         const confirmed =
-          current.settings.mode === "lazy"
+          polishingPolicy(current.settings).terminalConfirmer === "worker"
             ? await runLazyConfirmationTurn()
             : await runIndependentConfirmationTurn();
         if (!confirmed) {

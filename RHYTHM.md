@@ -7,6 +7,12 @@ remain in the owning documentation.
 
 ## 2026-09-15
 
+- **Polishing mode responsibilities are explicit.** A private policy separates
+  role participation, bootstrap, convergence, review, arbitration, and session
+  lineage so ordinary and interrupted repair routes agree. Supported modes,
+  correction ledgers, and permissions remain unchanged; handoff staging stays
+  runner-owned.
+
 - **Combined execution requires both candidate gates.** Worker convergence and
   separate clean confirmation precede independent Reviewer approval of the same
   content. Reviewer terminal confirmation then covers the formatter's result.

@@ -175,6 +175,16 @@ V1 registers:
 - `polishing`: polishes, finalizes, and reviews an existing dirty worktree, then
   stages the complete result while leaving it uncommitted.
 
+Polishing's private `mode-policy.js` separates active roles, bootstrap
+independence, primary convergence, independent review, terminal confirmer,
+arbitration eligibility, and primary session scope. Its workflow, persisted
+validator, resume checks, and legacy migrations share those decisions. Ordinary
+and interrupted repairs return through the same candidate checkpoint. Lazy keeps
+one run-wide Worker source fork; independent checkpoints remain isolated and
+Arbiter and correction contexts remain fresh. Persisted correction shapes and
+budgets do not change. No policy grants index authority: staging remains the
+runner-owned handoff effect. Polishing still accepts only independent and lazy.
+
 The pipeline registry is static. V1 has no dynamic plugins, workflow DSL, or
 generic DAG executor.
 

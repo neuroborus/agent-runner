@@ -1,3 +1,4 @@
+import { candidateCheckpoint, polishingPolicy } from "./mode-policy.js";
 import {
   createPolishingState,
   MAX_CLARIFICATION_ROUNDS,
@@ -459,7 +460,7 @@ function validateResumeAction(run, action) {
   }
   if (action?.type === "override-finding") {
     if (
-      state.settings?.mode === "lazy" ||
+      !polishingPolicy(state.settings).independentReview ||
       ![
         "fix_limit_reached",
         "no_progress",
@@ -904,9 +905,7 @@ export function migratePolishingStateV9(run) {
     ...current,
     workflowState:
       needsCandidateMigration && !paused
-        ? current.settings?.mode === "lazy"
-          ? "CHECK_AND_FIX"
-          : "REVIEW"
+        ? candidateCheckpoint(current.settings)
         : current.workflowState,
     reviewCorrection: null,
     pendingReviewCorrection: null,
@@ -923,7 +922,8 @@ export function migratePolishingStateV9(run) {
       ? preservedFingerprint
       : null,
     candidateConfirmationFingerprint:
-      preserveAcceptedGate && current.settings?.mode === "lazy"
+      preserveAcceptedGate &&
+      polishingPolicy(current.settings).primaryConvergence
         ? preservedFingerprint
         : null,
     candidateMigrationPending: needsCandidateMigration && paused,
