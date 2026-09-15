@@ -7,6 +7,12 @@ remain in the owning documentation.
 
 ## 2026-09-15
 
+- **Execution gate evidence composes independently of mode routing.** Shared
+  private predicates bind candidate approval to inspected content and terminal
+  confirmation to the formatter's result. Repairs and unchanged resolutions use
+  explicit invalidation rules across normal execution, migration, and recovery;
+  consumed commit effects retain verification-only semantics.
+
 - **Execution mode responsibilities are private pipeline policy.** Active roles,
   bootstrap, convergence, terminal confirmation, arbitration, and session scope
   now have distinct decisions shared by workflow, validation, and recovery.

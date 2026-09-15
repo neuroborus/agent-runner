@@ -63,9 +63,22 @@ for (const mode of ["independent", "lazy"]) {
       repair.patch.counters.fixRounds,
       beforeRepair.counters.fixRounds + 1,
     );
-    assert.equal(repair.patch.pipelineState.finalizationResult, null);
-    assert.equal(repair.patch.pipelineState.candidateReviewedFingerprint, null);
-    assert.equal(repair.patch.pipelineState.reviewedFingerprint, null);
+    for (const field of [
+      "candidateReviewResult",
+      "candidateReviewedFingerprint",
+      "candidateConfirmationFingerprint",
+      "finalizationResult",
+      "finalizedFingerprint",
+      "reviewResult",
+      "reviewedFingerprint",
+      "cleanConfirmationFingerprint",
+      "reviewCorrection",
+      "pendingReviewCorrection",
+      "confirmationCorrection",
+      "pendingConfirmationCorrection",
+    ]) {
+      assert.equal(repair.patch.pipelineState[field], null, field);
+    }
     assert.deepEqual(
       turns.slice(turns.findIndex(([, phase]) => phase === "resolve-findings")),
       mode === "lazy"

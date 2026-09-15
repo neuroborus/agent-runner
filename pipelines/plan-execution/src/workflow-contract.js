@@ -7,6 +7,11 @@ import {
   serializeCommitPlan,
 } from "@agent-runner/commit-plan";
 
+import {
+  candidateGatePassed,
+  commitGatePassed,
+  finalizationGatePassed,
+} from "./gate-evidence.js";
 import { executionPolicy } from "./mode-policy.js";
 
 export const MAX_CLARIFICATION_ROUNDS = 3;
@@ -3421,51 +3426,6 @@ function normalizeFindingOverrides(value) {
   return value;
 }
 
-function findingIsOverridden(findingOverrides, findingId, fingerprint) {
-  return findingOverrides.some(
-    (entry) =>
-      entry.findingId === findingId && entry.fingerprint === fingerprint,
-  );
-}
-
-function reviewGatePassed({
-  findingOverrides,
-  findings,
-  previousFindings,
-  reviewedFingerprint,
-  reviewResult,
-}) {
-  if (["UNCHANGED", "ACCEPTED"].includes(reviewResult?.validationChange)) {
-    return true;
-  }
-  return (
-    reviewResult?.validationChange === "REJECTED" &&
-    reviewedFingerprint !== null &&
-    findings.length === 0 &&
-    previousFindings.length > 0 &&
-    previousFindings.every(({ id }) =>
-      findingIsOverridden(findingOverrides, id, reviewedFingerprint),
-    )
-  );
-}
-
-function candidateReviewGatePassed({
-  candidateReviewResult,
-  candidateReviewedFingerprint,
-  findingOverrides,
-}) {
-  if (candidateReviewResult?.status === "APPROVED") {
-    return true;
-  }
-  return (
-    candidateReviewResult?.status === "FINDINGS" &&
-    candidateReviewedFingerprint !== null &&
-    candidateReviewResult.findingIds.every((id) =>
-      findingIsOverridden(findingOverrides, id, candidateReviewedFingerprint),
-    )
-  );
-}
-
 function normalizePendingCommit(value) {
   if (value === null) {
     return null;
@@ -4165,25 +4125,19 @@ export function normalizePipelineState(value) {
     throw workflowError("Plan-execution review reconsideration is invalid.");
   }
   const findingOverrides = normalizeFindingOverrides(value.findingOverrides);
-  const acceptedReviewGate = reviewGatePassed({
+  const pendingCommit = normalizePendingCommit(value.pendingCommit);
+  const completedCommits = normalizeCompletedCommits(value.completedCommits);
+  const gateState = {
+    ...value,
+    candidateReviewResult,
+    finalizationResult,
+    reviewResult,
     findingOverrides,
     findings,
     previousFindings,
-    reviewedFingerprint: value.reviewedFingerprint,
-    reviewResult,
-  });
-  const pendingCommit = normalizePendingCommit(value.pendingCommit);
-  const completedCommits = normalizeCompletedCommits(value.completedCommits);
-  const acceptedCandidateReview = candidateReviewGatePassed({
-    candidateReviewResult,
-    candidateReviewedFingerprint: value.candidateReviewedFingerprint,
-    findingOverrides,
-  });
-  const acceptedCandidateGate = policy.primaryConvergence
-    ? acceptedCandidateReview &&
-      value.candidateConfirmationFingerprint ===
-        value.candidateReviewedFingerprint
-    : acceptedCandidateReview;
+    pendingDisputes,
+  };
+  const acceptedCandidateGate = candidateGatePassed(gateState);
   if (
     (!policy.primaryConvergence &&
       (value.candidateConfirmationFingerprint !== null ||
@@ -4597,8 +4551,7 @@ export function normalizePipelineState(value) {
   }
   if (
     value.workflowState === "CONFIRM" &&
-    (finalizationResult?.status !== "PASS" ||
-      value.finalizedFingerprint === null ||
+    (!finalizationGatePassed(gateState) ||
       !acceptedCandidateGate ||
       reviewResult !== null ||
       value.reviewedFingerprint !== null ||
@@ -4618,35 +4571,14 @@ export function normalizePipelineState(value) {
   ) {
     throw workflowError("Plan-execution finding resolution has no blockers.");
   }
-  if (
-    value.workflowState === "COMMIT" &&
-    (finalizationResult?.status !== "PASS" ||
-      value.finalizedFingerprint === null ||
-      !acceptedCandidateGate ||
-      value.reviewedFingerprint !== value.finalizedFingerprint ||
-      !acceptedReviewGate ||
-      (policy.terminalConfirmer === "worker" &&
-        value.cleanConfirmationFingerprint !== value.finalizedFingerprint) ||
-      findings.length !== 0 ||
-      pendingDisputes.length !== 0 ||
-      value.reviewReconsideration.length !== 0)
-  ) {
+  if (value.workflowState === "COMMIT" && !commitGatePassed(gateState)) {
     throw workflowError("Plan-execution commit gate is inconsistent.");
   }
   if (
     value.workflowState === "DONE" &&
     (value.currentStep !== null ||
       pendingCommit !== null ||
-      finalizationResult?.status !== "PASS" ||
-      value.finalizedFingerprint === null ||
-      !acceptedCandidateGate ||
-      value.reviewedFingerprint !== value.finalizedFingerprint ||
-      !acceptedReviewGate ||
-      (policy.terminalConfirmer === "worker" &&
-        value.cleanConfirmationFingerprint !== value.finalizedFingerprint) ||
-      findings.length !== 0 ||
-      pendingDisputes.length !== 0 ||
-      value.reviewReconsideration.length !== 0)
+      !commitGatePassed(gateState))
   ) {
     throw workflowError("Plan-execution completion state is inconsistent.");
   }

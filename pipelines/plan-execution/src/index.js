@@ -1,5 +1,9 @@
 import { join } from "node:path";
 
+import {
+  clearedCandidateAndTerminalGate,
+  finalizationGatePassed,
+} from "./gate-evidence.js";
 import { candidateCheckpoint, executionPolicy } from "./mode-policy.js";
 import { resolveStopBoundary } from "./commit-checkpoint.js";
 import {
@@ -1084,8 +1088,7 @@ export function migratePlanExecutionStateV13(run) {
   const preserveAcceptedGate =
     (immutableTerminal || verificationOnly) && preservedFingerprint !== null;
   const preserveLegacyConfirmation =
-    (immutableTerminal || verificationOnly) &&
-    current.finalizationResult?.status === "PASS";
+    (immutableTerminal || verificationOnly) && finalizationGatePassed(current);
   return Object.freeze({
     ...current,
     workflowState:
@@ -1118,15 +1121,11 @@ export function migratePlanExecutionStateV13(run) {
     candidateMigrationPending: needsCandidateMigration && paused,
     ...(needsCandidateMigration
       ? {
+          ...clearedCandidateAndTerminalGate(),
+          candidateMigrationPending: paused,
           finalizationCorrections: Object.freeze([]),
           pendingFinalizationCorrection: null,
           lazyCorrections: Object.freeze([]),
-          pendingLazyCorrection: null,
-          cleanConfirmationFingerprint: null,
-          finalizationResult: null,
-          finalizedFingerprint: null,
-          reviewResult: null,
-          reviewedFingerprint: null,
           previousFindings:
             current.findings.length === 0
               ? current.previousFindings
