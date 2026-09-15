@@ -475,7 +475,7 @@ test("projects descriptor-owned pipeline mode guidance", async () => {
       defaultValue: "independent",
       recommendedValue: "independent",
       values:
-        pipeline.id === "plan-authoring"
+        pipeline.id !== "polishing"
           ? ["independent", "lazy", "combined"]
           : ["independent", "lazy"],
     });
@@ -483,42 +483,44 @@ test("projects descriptor-owned pipeline mode guidance", async () => {
   }
 });
 
-test("MCP combined starts preserve mode in receipts and public projections", async (t) => {
-  const paths = await workspace(t, "agent-runner-mcp-combined-");
-  const store = createRunStore({ stateRoot: paths.stateRoot });
-  let launches = 0;
-  const control = createMcpControlPlane({
-    runner: storedRunner(store, paths),
-    runStore: store,
-    runIdFactory: () => RUN_ID,
-    async launchRun(id) {
-      launches += 1;
-      return advanceMutatingStoredRun(store, id);
-    },
+for (const pipelineId of ["plan-authoring", "plan-execution"]) {
+  test(`MCP combined ${pipelineId} starts preserve mode in receipts and public projections`, async (t) => {
+    const paths = await workspace(t, "agent-runner-mcp-combined-");
+    const store = createRunStore({ stateRoot: paths.stateRoot });
+    let launches = 0;
+    const control = createMcpControlPlane({
+      runner: storedRunner(store, paths),
+      runStore: store,
+      runIdFactory: () => RUN_ID,
+      async launchRun(id) {
+        launches += 1;
+        return advanceMutatingStoredRun(store, id);
+      },
+    });
+    const input = {
+      idempotencyKey: "combined-start",
+      pipelineId,
+      projectPath: paths.projectPath,
+      taskPath: paths.taskPath,
+      mode: "combined",
+      proactiveClarification: false,
+      roleOverrides: {},
+      sourceSession: null,
+    };
+    assert.deepEqual(await control.runStart(input), { runId: RUN_ID });
+    assert.deepEqual(await control.runStart(input), { runId: RUN_ID });
+    assert.equal(launches, 1);
+    assert.equal((await control.runStatus({ runId: RUN_ID })).mode, "combined");
+    assert.equal(
+      (await control.runActivity({ runId: RUN_ID, cursor: 0, limit: 50 })).mode,
+      "combined",
+    );
+    await assert.rejects(
+      control.runStart({ ...input, mode: "independent" }),
+      (error) => error.code === "ERR_MCP_IDEMPOTENCY_CONFLICT",
+    );
   });
-  const input = {
-    idempotencyKey: "combined-start",
-    pipelineId: "plan-authoring",
-    projectPath: paths.projectPath,
-    taskPath: paths.taskPath,
-    mode: "combined",
-    proactiveClarification: false,
-    roleOverrides: {},
-    sourceSession: null,
-  };
-  assert.deepEqual(await control.runStart(input), { runId: RUN_ID });
-  assert.deepEqual(await control.runStart(input), { runId: RUN_ID });
-  assert.equal(launches, 1);
-  assert.equal((await control.runStatus({ runId: RUN_ID })).mode, "combined");
-  assert.equal(
-    (await control.runActivity({ runId: RUN_ID, cursor: 0, limit: 50 })).mode,
-    "combined",
-  );
-  await assert.rejects(
-    control.runStart({ ...input, mode: "independent" }),
-    (error) => error.code === "ERR_MCP_IDEMPOTENCY_CONFLICT",
-  );
-});
+}
 
 test("broad STDIO discovery may skip when child stdout is unavailable", async () => {
   const skipped = [];
@@ -702,7 +704,7 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
       defaultValue: "independent",
       recommendedValue: "independent",
       values:
-        pipeline.id === "plan-authoring"
+        pipeline.id !== "polishing"
           ? ["independent", "lazy", "combined"]
           : ["independent", "lazy"],
     });

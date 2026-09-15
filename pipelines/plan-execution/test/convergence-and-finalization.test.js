@@ -1936,37 +1936,45 @@ test("runs lazy execution with one Worker source fork and no review roles", asyn
   );
 });
 
-test("automatically corrects invalid lazy check output in a fresh session", async (t) => {
-  const fixture = await createFixture(t, {
-    mode: "lazy",
-    worker: [clarificationReady(), bootstrapReady("Worker")],
-    workWorker: [
-      implementationCompleted(),
-      finalizationPassed(),
-      { ...checkAndFix(), rejected: "not retained" },
-      checkAndFix(),
-      cleanConfirmation(),
-    ],
+for (const mode of ["lazy", "combined"]) {
+  test(`automatically corrects invalid ${mode} check output in a fresh session`, async (t) => {
+    const fixture = await createFixture(t, {
+      mode,
+      worker: [
+        clarificationReady(),
+        bootstrapReady("Worker"),
+        ...(mode === "combined" ? [reconciliationResolved()] : []),
+      ],
+      workWorker: [
+        implementationCompleted(),
+        finalizationPassed(),
+        { ...checkAndFix(), rejected: "not retained" },
+        checkAndFix(),
+        cleanConfirmation(),
+      ],
+    });
+
+    const completed = await fixture.run();
+    const correctionCall = fixture.calls.worker.find(({ prompt }) =>
+      prompt.includes(
+        "previous structured lazy checkpoint result was rejected",
+      ),
+    );
+    const correctionState = fixture.transitions.find(
+      ({ patch }) =>
+        patch?.pipelineState?.pendingLazyCorrection !== null &&
+        patch?.pipelineState?.pendingLazyCorrection !== undefined,
+    ).patch.pipelineState;
+
+    assert.equal(completed.pipelineState.workflowState, "DONE");
+    assert.equal(correctionCall.session, undefined);
+    assert.equal(correctionState.pendingLazyCorrection.phase, "CHECK_AND_FIX");
+    assert.equal(correctionState.pendingLazyCorrection.attempt, 1);
+    assert.equal(correctionState.pendingLazyCorrection.fixRoundCharged, false);
+    assert.equal(correctionState.lazyCorrections.length, 1);
+    assert.equal(completed.counters.fixRounds, 1);
   });
-
-  const completed = await fixture.run();
-  const correctionCall = fixture.calls.worker.find(({ prompt }) =>
-    prompt.includes("previous structured lazy checkpoint result was rejected"),
-  );
-  const correctionState = fixture.transitions.find(
-    ({ patch }) =>
-      patch?.pipelineState?.pendingLazyCorrection !== null &&
-      patch?.pipelineState?.pendingLazyCorrection !== undefined,
-  ).patch.pipelineState;
-
-  assert.equal(completed.pipelineState.workflowState, "DONE");
-  assert.equal(correctionCall.session, undefined);
-  assert.equal(correctionState.pendingLazyCorrection.phase, "CHECK_AND_FIX");
-  assert.equal(correctionState.pendingLazyCorrection.attempt, 1);
-  assert.equal(correctionState.pendingLazyCorrection.fixRoundCharged, false);
-  assert.equal(correctionState.lazyCorrections.length, 1);
-  assert.equal(completed.counters.fixRounds, 1);
-});
+}
 
 test("corrects a classified lazy provider failure without retaining diagnostics", async (t) => {
   let rejected = false;
@@ -2009,45 +2017,51 @@ test("corrects a classified lazy provider failure without retaining diagnostics"
   assert.doesNotMatch(JSON.stringify(fixture.transitions), /DO_NOT_PERSIST/u);
 });
 
-test("rechecks an invalid content-changing lazy result before finalization", async (t) => {
-  let changed = false;
-  const fixture = await createFixture(t, {
-    mode: "lazy",
-    worker: [clarificationReady(), bootstrapReady("Worker")],
-    workWorker: [
-      implementationCompleted(),
-      { ...checkAndFix("CHANGED"), unexpected: "rejected" },
-      checkAndFix(),
-      cleanConfirmation(),
-      finalizationPassed(),
-    ],
-    async onRoleRun(role, request) {
-      if (
-        role === "worker" &&
-        request.prompt.includes("If you find any problems, fix them") &&
-        !changed
-      ) {
-        changed = true;
-        await writeFile(join(request.cwd, "invalid-lazy-fix.txt"), "fixed\n");
-      }
-    },
+for (const mode of ["lazy", "combined"]) {
+  test(`rechecks an invalid content-changing ${mode} result before finalization`, async (t) => {
+    let changed = false;
+    const fixture = await createFixture(t, {
+      mode,
+      worker: [
+        clarificationReady(),
+        bootstrapReady("Worker"),
+        ...(mode === "combined" ? [reconciliationResolved()] : []),
+      ],
+      workWorker: [
+        implementationCompleted(),
+        { ...checkAndFix("CHANGED"), unexpected: "rejected" },
+        checkAndFix(),
+        cleanConfirmation(),
+        finalizationPassed(),
+      ],
+      async onRoleRun(role, request) {
+        if (
+          role === "worker" &&
+          request.prompt.includes("If you find any problems, fix them") &&
+          !changed
+        ) {
+          changed = true;
+          await writeFile(join(request.cwd, "invalid-lazy-fix.txt"), "fixed\n");
+        }
+      },
+    });
+
+    const completed = await fixture.run({ maxFixRoundsPerStep: 1 });
+    const finalizations = fixture.calls.worker.filter(({ prompt }) =>
+      prompt.includes("Run the complete project finalization procedure"),
+    );
+
+    assert.equal(completed.pipelineState.workflowState, "DONE");
+    assert.equal(finalizations.length, 1);
+    assert.equal(completed.counters.fixRounds, 1);
+    assert.ok(
+      fixture.transitions.some(
+        ({ patch }) =>
+          patch?.pipelineState?.pendingLazyCorrection?.fixRoundCharged === true,
+      ),
+    );
   });
-
-  const completed = await fixture.run({ maxFixRoundsPerStep: 1 });
-  const finalizations = fixture.calls.worker.filter(({ prompt }) =>
-    prompt.includes("Run the complete project finalization procedure"),
-  );
-
-  assert.equal(completed.pipelineState.workflowState, "DONE");
-  assert.equal(finalizations.length, 1);
-  assert.equal(completed.counters.fixRounds, 1);
-  assert.ok(
-    fixture.transitions.some(
-      ({ patch }) =>
-        patch?.pipelineState?.pendingLazyCorrection?.fixRoundCharged === true,
-    ),
-  );
-});
+}
 
 test("does not recount an invalid lazy mutation when finalization restores its fingerprint", async (t) => {
   let changed = false;
@@ -2572,33 +2586,39 @@ test("pauses an invalid corrected finalization transition at its resumable check
   assert.equal(completed.pipelineState.workflowState, "DONE");
 });
 
-test("pauses repeated unsupported lazy convergence results", async (t) => {
-  const fixture = await createFixture(t, {
-    mode: "lazy",
-    worker: [clarificationReady(), bootstrapReady("Worker")],
-    workWorker: [
-      implementationCompleted(),
-      finalizationPassed(),
-      checkAndFix("REFINALIZE"),
-      checkAndFix("REFINALIZE"),
-    ],
+for (const mode of ["lazy", "combined"]) {
+  test(`pauses repeated unsupported ${mode} convergence results`, async (t) => {
+    const fixture = await createFixture(t, {
+      mode,
+      worker: [
+        clarificationReady(),
+        bootstrapReady("Worker"),
+        ...(mode === "combined" ? [reconciliationResolved()] : []),
+      ],
+      workWorker: [
+        implementationCompleted(),
+        finalizationPassed(),
+        checkAndFix("REFINALIZE"),
+        checkAndFix("REFINALIZE"),
+      ],
+    });
+
+    const paused = await fixture.run();
+
+    assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+    assert.equal(paused.pause.reason, "lazy_output_invalid");
+    assert.equal(paused.pause.resumeState, "CHECK_AND_FIX");
+    assert.deepEqual(paused.pipelineState.pendingLazyCorrection.diagnostics, [
+      {
+        role: "worker",
+        phase: "check-and-fix",
+        contract: "lazy-check-and-fix",
+        field: "result",
+        constraint: "semantic-contract",
+      },
+    ]);
   });
-
-  const paused = await fixture.run();
-
-  assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
-  assert.equal(paused.pause.reason, "lazy_output_invalid");
-  assert.equal(paused.pause.resumeState, "CHECK_AND_FIX");
-  assert.deepEqual(paused.pipelineState.pendingLazyCorrection.diagnostics, [
-    {
-      role: "worker",
-      phase: "check-and-fix",
-      contract: "lazy-check-and-fix",
-      field: "result",
-      constraint: "semantic-contract",
-    },
-  ]);
-});
+}
 
 test("rejects repository mutation during lazy clean confirmation", async (t) => {
   let mutated = false;

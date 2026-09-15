@@ -70,14 +70,26 @@ alternates between a writable check-and-fix pass and a distinct read-only clean
 confirmation. Findings go directly back to fixing; lazy mode never invokes a
 Reviewer or Arbiter. The runner never selects lazy mode automatically.
 
-`combined` is currently available only in plan authoring. It converges the
+`combined` is available in plan authoring and execution. In authoring it converges the
 durable draft with Planner check/fix and a separate clean confirmation, then
 requires the full independent Reviewer gate. Reviewer revisions restart primary
 convergence; self findings return to fixing. Self-review and structural
 exhaustion pause without arbitration. Only independent finding resolution may
 invoke the fresh Arbiter. Every authoring agent turn remains repository-read-only;
 the runner writes the deterministically validated artifact. Pipeline descriptors
-own mode availability; execution and polishing still reject combined.
+own mode availability; polishing still rejects combined.
+
+Combined execution runs Worker check/fix and a separate read-only clean
+confirmation before the complete independent candidate Reviewer gate. Both
+candidate approvals bind the same content fingerprint. Finalization may format
+that content; a distinct Reviewer terminal confirmation approves its resulting
+fingerprint and validation evidence before one-shot commit authorization.
+Content repairs restart primary convergence. Self-findings go directly to fixing;
+independent findings retain disputes, withdrawals, exact recorded overrides, and
+fresh on-demand arbitration. Unresolved bootstrap disagreements and primary
+exhaustion pause without arbitration. Corrections remain bounded and interrupted
+work is charged once; resume preserves the saved mode and consumed commits remain
+verification-only.
 
 All supported modes retain the same clarification, persistence, Git, redaction, and
 effect-safety guarantees.

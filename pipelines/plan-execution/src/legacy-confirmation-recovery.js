@@ -4,7 +4,7 @@ import {
   candidateGatePassed,
   finalizationGatePassed,
 } from "./gate-evidence.js";
-import { executionPolicy } from "./mode-policy.js";
+import { executionPolicy, primaryFindings } from "./mode-policy.js";
 import { assertRun } from "./workflow-contract.js";
 
 // This evidence is deliberately neither persisted on the run nor projected.
@@ -149,6 +149,7 @@ function proveHistory(run, history, migrate) {
   let candidate = null;
   let finalization = null;
   let unchangedCheck = null;
+  let primaryClean = null;
   let completedTurn = null;
   let activeRequest = null;
   let failed = false;
@@ -229,7 +230,7 @@ function proveHistory(run, history, migrate) {
       ) &&
       !(
         before.workflowState === "CHECK_AND_FIX" &&
-        before.findings.length > 0 &&
+        primaryFindings(before).length > 0 &&
         state.workflowState === "CLEAN_CONFIRM" &&
         !contentChanged
       ) &&
@@ -243,6 +244,7 @@ function proveHistory(run, history, migrate) {
       candidate = null;
       finalization = null;
       unchangedCheck = null;
+      primaryClean = null;
       completedTurn = null;
     }
     if (
@@ -325,13 +327,24 @@ function proveHistory(run, history, migrate) {
     }
 
     const policy = executionPolicy(state.settings);
+    if (state.candidateConfirmationFingerprint === null) primaryClean = null;
+    if (
+      bound &&
+      !contentChanged &&
+      before.workflowState === "CLEAN_CONFIRM" &&
+      completedTurn?.role === "worker" &&
+      completedTurn.phase === "clean-confirm" &&
+      isActivity(event, "worker", "clean-confirm", ["clean"]) &&
+      lazyCheckFingerprint === state.candidateConfirmationFingerprint
+    )
+      primaryClean = lazyCheckFingerprint;
     const candidateTransition =
       bound &&
       !contentChanged &&
       event.state.pipelineStateVersion >= 14 &&
       ["FINALIZE", "CONFIRM"].includes(state.workflowState) &&
       candidateGatePassed(state, state.repositoryBaseline.contentFingerprint) &&
-      (policy.primaryConvergence
+      (!policy.independentReview
         ? before.workflowState === "CLEAN_CONFIRM" &&
           completedTurn?.role === "worker" &&
           completedTurn.phase === "clean-confirm" &&
@@ -347,7 +360,7 @@ function proveHistory(run, history, migrate) {
     if (
       candidateTransition &&
       (!policy.primaryConvergence ||
-        before.repositoryBaseline.contentFingerprint === lazyCheckFingerprint)
+        state.candidateConfirmationFingerprint === primaryClean)
     ) {
       candidate = candidateTuple(state);
     }

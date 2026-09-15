@@ -7,6 +7,14 @@ remain in the owning documentation.
 
 ## 2026-09-15
 
+- **Combined execution requires both candidate gates.** Worker convergence and
+  separate clean confirmation precede independent Reviewer approval of the same
+  content. Reviewer terminal confirmation then covers the formatter's result.
+  This adds primary repair discipline without replacing independent review or
+  broadening commit authority. Only independent finding resolution permits
+  arbitration; bootstrap disagreement remains a retryable pause. Saved modes,
+  bounded correction accounting, and consumed-effect recovery survive migration.
+
 - **Execution gate evidence composes independently of mode routing.** Shared
   private predicates bind candidate approval to inspected content and terminal
   confirmation to the formatter's result. Repairs and unchanged resolutions use

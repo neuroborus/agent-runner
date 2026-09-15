@@ -29,9 +29,10 @@ function primaryCleanGatePassed(
   fingerprint = state.candidateReviewedFingerprint,
 ) {
   return (
-    candidateEvidenceBound(state, fingerprint) &&
-    state.candidateReviewResult.status === "APPROVED" &&
-    state.candidateConfirmationFingerprint === fingerprint
+    hasFingerprint(fingerprint) &&
+    state.candidateConfirmationFingerprint === fingerprint &&
+    (executionPolicy(state.settings).independentReview ||
+      state.candidateReviewResult?.status === "APPROVED")
   );
 }
 
@@ -143,6 +144,7 @@ function clearedCandidateGate() {
     candidateReviewedFingerprint: null,
     candidateConfirmationFingerprint: null,
     candidateMigrationPending: false,
+    primaryFindings: [],
   };
 }
 

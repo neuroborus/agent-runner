@@ -67,7 +67,7 @@ contract.
 All pipelines additionally require:
 
 - Own one descriptor-defined `mode` setting. All pipelines support
-  `independent` and `lazy`; only plan-authoring additionally supports `combined`.
+  `independent` and `lazy`; plan-authoring and plan-execution additionally support `combined`.
   Missing and legacy missing modes resolve to `independent`. Persist the
   resolved value at creation and preserve it on resume.
 - Validate configured role values deterministically, but in lazy mode resolve,
@@ -113,6 +113,15 @@ All pipelines additionally require:
   drafts as structured output and never write artifacts directly.
 
 `plan-execution` additionally requires:
+
+- In combined mode use independent roles and bootstrap, then converge Worker
+  `CHECK_AND_FIX` and a distinct read-only `CLEAN_CONFIRM` before the complete
+  independent candidate Reviewer gate. Both approve the same candidate; Reviewer
+  terminal confirmation covers the finalized fingerprint and validation evidence.
+- Route combined self-findings directly to fixing and restart primary convergence
+  after content repairs. Only independent finding resolution can invoke Arbiter;
+  unresolved bootstrap disagreements and primary exhaustion remain blocking.
+  Preserve correction budgets, exact overrides, and consumed-effect recovery.
 
 - In independent mode run Worker and Reviewer bootstrap independently and
   read-only. In lazy mode use the Worker alone to establish the complete

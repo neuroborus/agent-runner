@@ -12,7 +12,7 @@ import {
   commitGatePassed,
   finalizationGatePassed,
 } from "./gate-evidence.js";
-import { executionPolicy } from "./mode-policy.js";
+import { executionPolicy, combinedReview } from "./mode-policy.js";
 
 export const MAX_CLARIFICATION_ROUNDS = 3;
 export const DEFAULT_FINALIZATION_POLICY = "auto";
@@ -69,6 +69,7 @@ const PIPELINE_STATE_FIELDS = new Set([
   "pendingConfirmationCorrection",
   "lazyCorrections",
   "pendingLazyCorrection",
+  "primaryFindings",
   "candidateReviewResult",
   "candidateReviewedFingerprint",
   "candidateConfirmationFingerprint",
@@ -314,6 +315,15 @@ const EDIT_PAUSE_REASONS = Object.freeze({
   "proactive-clarification": "proactive_clarification",
 });
 const PAUSE_RESUME_STATES = Object.freeze({
+  bootstrap_disagreement: Object.freeze([
+    "BOOTSTRAP",
+    "IMPLEMENT",
+    "CHECK_AND_FIX",
+    "REVIEW",
+    "FINALIZE",
+    "CONFIRM",
+    "RESOLVE_FINDINGS",
+  ]),
   backend_unavailable: Object.freeze([
     "CLARIFY",
     "BOOTSTRAP",
@@ -3554,6 +3564,23 @@ export function normalizePipelineState(value) {
     }
   }
   const policy = executionPolicy(value.settings);
+  const primaryFindings = normalizePersistedFindings(value.primaryFindings);
+  if (
+    primaryFindings.length > 0 &&
+    (value.candidateConfirmationFingerprint !== null ||
+      !combinedReview(value.settings) ||
+      ![
+        "CHECK_AND_FIX",
+        "CLEAN_CONFIRM",
+        "WAITING_FOR_USER",
+        "FAILED",
+      ].includes(value.workflowState))
+  ) {
+    throw workflowError("Plan-execution primary findings are inapplicable.");
+  }
+  if (!policy.bootstrapArbitration && value.bootstrapArbitrationUsed) {
+    throw workflowError("Plan-execution bootstrap arbitration is unavailable.");
+  }
   if (
     value.cleanConfirmationFingerprint !== null &&
     (typeof value.cleanConfirmationFingerprint !== "string" ||
@@ -4179,9 +4206,11 @@ export function normalizePipelineState(value) {
   if (
     value.candidateConfirmationFingerprint !== null &&
     (!policy.primaryConvergence ||
-      value.candidateConfirmationFingerprint !==
-        value.candidateReviewedFingerprint ||
-      candidateReviewResult?.status !== "APPROVED")
+      (value.candidateReviewedFingerprint !== null &&
+        value.candidateConfirmationFingerprint !==
+          value.candidateReviewedFingerprint) ||
+      (!policy.independentReview &&
+        candidateReviewResult?.status !== "APPROVED"))
   ) {
     throw workflowError(
       "Plan-execution candidate confirmation is inconsistent.",
@@ -4238,6 +4267,8 @@ export function normalizePipelineState(value) {
     ) &&
     ([
       "IMPLEMENT",
+      "CHECK_AND_FIX",
+      "CLEAN_CONFIRM",
       "REVIEW",
       "FINALIZE",
       "CONFIRM",
@@ -4348,6 +4379,8 @@ export function normalizePipelineState(value) {
   if (
     stagnationDirection !== null &&
     ![
+      "CHECK_AND_FIX",
+      "CLEAN_CONFIRM",
       "IMPLEMENT",
       "FINALIZE",
       "REVIEW",
@@ -4363,9 +4396,14 @@ export function normalizePipelineState(value) {
   }
   if (
     value.reviewReconsideration.length > 0 &&
-    !["REVIEW", "CONFIRM", "WAITING_FOR_USER", "FAILED"].includes(
-      value.workflowState,
-    )
+    ![
+      "CHECK_AND_FIX",
+      "CLEAN_CONFIRM",
+      "REVIEW",
+      "CONFIRM",
+      "WAITING_FOR_USER",
+      "FAILED",
+    ].includes(value.workflowState)
   ) {
     throw workflowError(
       "Plan-execution review reconsideration is inapplicable.",
@@ -4519,6 +4557,9 @@ export function normalizePipelineState(value) {
   if (
     value.workflowState === "REVIEW" &&
     (!policy.independentReview ||
+      (policy.primaryConvergence &&
+        value.candidateConfirmationFingerprint !==
+          value.repositoryBaseline?.contentFingerprint) ||
       (finalizationResult !== null && finalizationResult.status !== "PASS") ||
       reviewResult !== null ||
       value.reviewedFingerprint !== null)
@@ -4643,6 +4684,7 @@ export function createPlanExecutionState({
       pendingConfirmationCorrection: null,
       lazyCorrections: Object.freeze([]),
       pendingLazyCorrection: null,
+      primaryFindings: Object.freeze([]),
       candidateReviewResult: null,
       candidateReviewedFingerprint: null,
       candidateConfirmationFingerprint: null,
@@ -4765,7 +4807,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 16 ||
+    run.pipelineStateVersion !== 17 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -4995,7 +5037,9 @@ export function assertRun(run) {
       ? PAUSE_RESUME_STATES[run.pause.reason]
       : undefined;
     const requiresResumeState =
-      ["fix_limit_reached", "no_progress"].includes(run.pause.reason) ||
+      ["fix_limit_reached", "no_progress", "bootstrap_disagreement"].includes(
+        run.pause.reason,
+      ) ||
       (run.pause.reason === "commit_failed" && state.pendingCommit === null) ||
       (state.preflightComplete &&
         [
@@ -5131,7 +5175,7 @@ export function assertSettings(settings) {
   if (!isTrustedCheckSelection(settings.trustedChecks)) {
     throw workflowError("Plan-execution setting trustedChecks is invalid.");
   }
-  if (!["independent", "lazy"].includes(settings.mode)) {
+  if (!["independent", "lazy", "combined"].includes(settings.mode)) {
     throw workflowError("Plan-execution setting mode is invalid.");
   }
   for (const field of NUMERIC_SETTINGS_FIELDS) {

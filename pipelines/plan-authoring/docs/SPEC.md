@@ -49,7 +49,8 @@ independent review. It is never selected automatically. `combined` is an
 explicit choice that adds Planner convergence and clean confirmation before the
 complete independent Reviewer gate. It resolves Planner, Reviewer, and on-demand
 Arbiter with independent checkpoint isolation. Availability belongs to each
-pipeline descriptor: execution and polishing still reject `combined`.
+pipeline descriptor: execution also supports combined commit review; polishing
+still rejects `combined`.
 
 `preferredCommitLineLimit` must be a positive safe integer. Planner and Plan
 Reviewer prefer each proposed commit to stay within that anticipated additions

@@ -103,7 +103,7 @@ test("registry exposes explicit immutable pipeline descriptors", () => {
     }
     assert.deepEqual(
       pipeline.settings.mode.values,
-      pipeline.id === "plan-authoring"
+      pipeline.id !== "polishing"
         ? ["independent", "lazy", "combined"]
         : ["independent", "lazy"],
     );

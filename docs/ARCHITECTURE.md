@@ -129,10 +129,22 @@ arbitration, and primary session scope. The workflow, persisted-state validator,
 resume-action checks, migrations, and journal-proven confirmation recovery use
 those decisions. Ordinary and stop-reconciled content repairs rejoin the same
 candidate checkpoint. Session selection preserves one run-wide Worker source
-fork in lazy mode, checkpoint forks in independent mode, and fresh arbitration
+fork in lazy mode, checkpoint forks in independent and combined modes, and fresh arbitration
 and output-correction contexts. Permissions, one-shot commit verification, and bounded
 correction accounting remain with their existing workflow operations; policy
-selection grants no additional repository authority or supported modes.
+selection grants no additional repository authority.
+
+Combined execution runs Worker check/fix and a separate read-only clean
+confirmation before the complete independent candidate Reviewer gate. Both
+candidate approvals bind the same content fingerprint. Finalization may format
+that content; a distinct Reviewer terminal confirmation approves its resulting
+fingerprint and validation evidence before one-shot commit authorization.
+Content repairs restart primary convergence. Self-findings go directly to fixing;
+independent findings retain disputes, withdrawals, exact recorded overrides, and
+fresh on-demand arbitration. Unresolved bootstrap disagreements and primary
+exhaustion pause without arbitration. Corrections remain bounded and interrupted
+work is charged once; resume preserves the saved mode and consumed commits remain
+verification-only.
 
 Execution's private `gate-evidence.js` composes primary clean evidence,
 independent candidate approval, passing finalization, and terminal confirmation.
@@ -143,6 +155,11 @@ may format it, so its resulting fingerprint requires distinct terminal approval.
 Content repairs clear dependent evidence. Unchanged resolutions reconverge the
 candidate and retain passing finalization only subject to fresh content and
 infrastructure checks. Correction ledgers keep their existing bounded accounting.
+Execution state version 17 adds bounded `primaryFindings` without renaming the
+persisted lazy correction ledger. Leased version-16 migration adds an empty list
+and preserves saved mode, counters, gate evidence, and pending effects. Combined
+primary proof and independent approval remain distinct, including journal-proven
+confirmation recovery.
 Consumed effects still bypass new authorization and use verification-only recovery;
 the shared predicates neither replace journal provenance nor grant Git authority.
 
@@ -284,8 +301,8 @@ use the saved value. CLI `pipelines` displays descriptor-owned setting defaults;
 MCP `pipelines_list` projects the same metadata.
 
 Every built-in descriptor owns one string `mode` setting supporting
-`independent` and `lazy`. Plan authoring additionally supports `combined`;
-execution and polishing reject that selection. A missing value resolves to
+`independent` and `lazy`. Plan authoring and execution additionally support `combined`;
+polishing rejects that selection. A missing value resolves to
 `independent`, which is the default and recommended option because its distinct primary and review
 roles provide genuinely independent semantic review. That independence uses
 more provider context and tokens. `lazy` is an explicit lower-consumption
@@ -612,7 +629,7 @@ validates availability. It has the same highest precedence as CLI `--mode`.
 MCP guidance states that `independent` is the default and recommended choice for genuinely
 independent semantic review despite its higher context and token cost, and that
 `lazy` is an opt-in lower-consumption tradeoff without independent review that
-must never be selected automatically. Authoring-only `combined` adds primary
+must never be selected automatically. Authoring and execution `combined` adds primary
 convergence before independent review. `sourceSession` defaults to unset. When
 a compatible current native session is available, the controlling agent offers
 a fresh start and a deliberate fork choice, including its trusted source

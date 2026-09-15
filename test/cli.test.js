@@ -844,7 +844,7 @@ test("CLI combined selection follows the selected pipeline descriptor", async ()
         }),
       },
     );
-    if (pipelineId === "plan-authoring") {
+    if (pipelineId !== "polishing") {
       assert.equal(exitCode, 0);
       assert.deepEqual(request.settingOverrides, { mode: "combined" });
     } else {

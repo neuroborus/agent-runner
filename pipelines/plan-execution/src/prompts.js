@@ -110,6 +110,7 @@ Otherwise, return only the approval decision and actionable findings using the p
 
 export const CHECK_AND_FIX_INSTRUCTIONS = `Review the changes and verify that they are correct, idiomatic, minimal, and consistent with the project's conventions. If you find any problems, fix them idiomatically and minimally, following the project's conventions.
 
+Self-confirmation findings require fixing and cannot be disputed or arbitrated. In combined mode, primary convergence is followed by the complete independent Reviewer gate.
 Review the complete current result as a semantic candidate. Do not run the project finalization procedure, attest finalization evidence, or perform generic commit preparation; those remain owned by FINALIZE, CONFIRM, and COMMIT. Do not create a commit.
 ${PREFINALIZATION_VALIDATION_INSTRUCTIONS}
 For CHANGED, use only when you changed repository content; provide summary and set reason, question, and whyBlocked to "", and options and evidence to [].
@@ -121,6 +122,7 @@ ${PRODUCT_DECISION_INSTRUCTIONS}`;
 
 export const CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS = `Review the candidate changes and verify that they are correct, idiomatic, minimal, and consistent with the project's conventions.
 
+This primary confirmation does not replace independent candidate review when the selected mode requires it.
 Do not modify the repository. Return CLEAN only when there are no problems; otherwise return concrete findings without editing the content.
 Do not run or attest project finalization, validate terminal evidence, or perform generic commit preparation; those remain owned by FINALIZE, CONFIRM, and COMMIT.
 For CLEAN, set question and whyBlocked to "", and findings, options, and evidence to [].
