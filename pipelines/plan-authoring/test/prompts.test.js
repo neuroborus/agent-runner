@@ -53,6 +53,7 @@ test("review instructions require a correct and consistent plan", () => {
     `Review the plan and verify that it is correct, idiomatic, minimal, consistent with the project's conventions, and free of contradictions.
 
 Use contiguous \`## Commit N: type(scope)[!]: imperative summary\` sections starting at 1, with no preamble. Use feat, fix, refactor, perf, test, docs, build, ci, chore, or revert; each heading contains the exact one-line subject-only commit message, at most 72 Unicode code points and without a trailing period. Put implementation details below it.
+Assess the complete draft independently. In combined mode, prior Planner confirmation does not substitute for your review.
 Do not modify the repository or artifact files.
 ${PRODUCT_DECISION_INSTRUCTIONS}
 For APPROVED, set findings, options, and evidence to [], and question and whyBlocked to "".

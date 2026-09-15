@@ -20,6 +20,14 @@ tokens. `lazy` is an explicit opt-in choice with lower consumption and no
 independent review. It uses the primary role's bounded check/fix and separate
 read-only clean confirmations. Never choose lazy automatically to save tokens.
 
+Plan authoring also supports explicit `combined` mode: Planner check/fix and
+clean confirmation precede independent Reviewer approval. Revisions restart
+primary convergence. Self findings and structural exhaustion never trigger
+arbitration. All planning turns remain repository-read-only and artifact writes
+remain runner-owned. Execution and polishing reject combined; check each
+descriptor through pipeline discovery before selecting it. Resume retains the
+saved mode and correction budgets.
+
 Give a worktree one owner. Plan execution and polishing enforce a canonical
 worktree lease, including across CLI and MCP. While a run owns execution, do
 not mutate its repository, Git state, frozen inputs, configuration, local
@@ -65,7 +73,7 @@ session unset unless the user deliberately chooses to fork a compatible current
 session after being offered a fresh start. Use only a known trusted source
 profile, or `current` inheritance if it is unknown. Keep session IDs opaque;
 never inspect provider-private storage or invent an ID. Prefer a fresh start
-for long, mixed-topic, or uncertain context. Independent mode forks source
+for long, mixed-topic, or uncertain context. Independent and combined modes fork source
 context separately into primary and review checkpoints; lazy mode forks it
 once into the primary role. Durable recovery does not require native sessions
 to survive.

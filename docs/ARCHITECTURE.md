@@ -260,9 +260,10 @@ that migration. Authoring planning, review, self-review, and recovery prompts
 use the saved value. CLI `pipelines` displays descriptor-owned setting defaults;
 MCP `pipelines_list` projects the same metadata.
 
-Every built-in descriptor owns one string `mode` setting with exactly
-`independent` and `lazy`. A missing value resolves to `independent`, which is
-the default and recommended option because its distinct primary and review
+Every built-in descriptor owns one string `mode` setting supporting
+`independent` and `lazy`. Plan authoring additionally supports `combined`;
+execution and polishing reject that selection. A missing value resolves to
+`independent`, which is the default and recommended option because its distinct primary and review
 roles provide genuinely independent semantic review. That independence uses
 more provider context and tokens. `lazy` is an explicit lower-consumption
 choice that uses only the Planner for plan authoring or the Worker for execution
@@ -582,19 +583,21 @@ resume to perform the same-run reconciliation; execution and worktree leases
 still exclude a second owner. Client cancellation stops only the tool's wait
 for ownership and does not retract the request or terminate the detached child.
 
-MCP start fields remain additive. `run_start.mode` accepts only `independent`
-and `lazy` and has the same highest precedence as CLI `--mode`. MCP guidance
-states that `independent` is the default and recommended choice for genuinely
+MCP start fields remain additive. `run_start.mode` exposes the union of
+descriptor modes (`independent`, `lazy`, `combined`); the selected pipeline
+validates availability. It has the same highest precedence as CLI `--mode`.
+MCP guidance states that `independent` is the default and recommended choice for genuinely
 independent semantic review despite its higher context and token cost, and that
 `lazy` is an opt-in lower-consumption tradeoff without independent review that
-must never be selected automatically. `sourceSession` defaults to unset. When
+must never be selected automatically. Authoring-only `combined` adds primary
+convergence before independent review. `sourceSession` defaults to unset. When
 a compatible current native session is available, the controlling agent offers
 a fresh start and a deliberate fork choice, including its trusted source
 profile when known. An unknown profile permits only `current` inheritance; the
 agent never guesses an alias, inspects provider-private storage, or interprets
 the opaque native ID. The field is passed only after the user selects the fork.
-Independent mode forks the complete source context into primary and review
-roles; lazy mode forks it once into the primary role. A fresh start is
+Independent and combined modes fork the complete source context into primary
+and review roles; lazy mode forks it once into the primary role. A fresh start is
 recommended for a long, multi-topic, or uncertain source session to avoid
 unnecessary provider context and quota use.
 
@@ -1440,12 +1443,23 @@ Plan authoring separates primary convergence, independent review, session scope,
 correction accounting, and arbitration eligibility in its private
 `review-policy.js`. The workflow and persisted-state contract share these pure
 decisions. Turn implementations, effect guards, persistence, and plan writing
-remain in the workflow. The policy exposes no new mode or configuration and
-does not rename durable lazy-checkpoint fields. Draft review invalidation
+remain in the workflow. Combined mode enables both primary convergence and
+independent review, retaining checkpoint-isolated sessions and the existing
+durable lazy-checkpoint field names. Draft review invalidation
 retains correction scopes so returning to an earlier fingerprint cannot reset
 an automatic correction allowance.
 
-Plan authoring owns lazy structured-output recovery at both checkpoints.
+Combined authoring records primary confirmation separately from Reviewer
+approval. A revised draft clears both and restarts primary convergence; Reviewer
+reconsideration of an unchanged draft can retain primary confirmation. Self
+findings and structural failures return to check/fix, without arbitration on
+exhaustion. Only independent finding resolution may request the fresh Arbiter.
+Each accepted check/fix or revision consumes one bounded revision round; invalid
+output and recovery cannot duplicate accepted work. Version 5 adds combined
+mode while migrating saved version-4 independent/lazy state unchanged under
+the lease; missing mode remains independent and unsupported old values reject.
+
+Plan authoring owns primary-convergence structured-output recovery at both checkpoints.
 Provider and deterministic contract failures become bounded diagnostics, then
 one fresh repository-read-only Planner session receives the complete durable
 draft-bound request and original schema. Only a valid replacement under the
@@ -1690,7 +1704,8 @@ producing result; plan execution batches all such independently detectable
 violations, and the same policy rejects a finalization candidate inventory
 without delegating index ownership to an ordinary Worker turn.
 
-An explicitly supplied source session is different. In independent mode, the
+An explicitly supplied source session is different. In independent and combined
+modes, the
 first eligible turn of each new primary or review checkpoint creates a direct
 child and returns its ID without resuming or mutating the source. In lazy mode,
 only the first eligible primary turn may create that child, and the durable

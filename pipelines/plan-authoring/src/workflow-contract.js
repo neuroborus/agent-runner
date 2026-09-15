@@ -839,7 +839,8 @@ export function normalizePipelineState(value) {
     value.cleanConfirmationFingerprint !== null &&
     (!authoringPolicy(value.settings).primaryConvergence ||
       value.cleanConfirmationFingerprint !== value.draftFingerprint ||
-      !value.reviewApproved)
+      (!value.reviewApproved &&
+        !authoringPolicy(value.settings).independentReview))
   ) {
     throw workflowError(
       "Plan-authoring clean confirmation fingerprint is not applicable.",
@@ -1013,6 +1014,17 @@ export function normalizePipelineState(value) {
       value.canonicalPlan !== null)
   ) {
     throw workflowError("Plan-authoring revision state is inconsistent.");
+  }
+  if (
+    authoringPolicy(value.settings).primaryConvergence &&
+    authoringPolicy(value.settings).independentReview &&
+    ["REVIEW", "REVISE"].includes(value.workflowState) &&
+    (value.cleanConfirmationFingerprint !== value.draftFingerprint ||
+      (value.workflowState === "REVISE" && value.blockerKind !== "findings"))
+  ) {
+    throw workflowError(
+      "Combined review requires primary confirmation of the draft.",
+    );
   }
   if (
     value.workflowState === "CHECK_AND_FIX" &&
@@ -1223,7 +1235,7 @@ export function assertRun(run) {
   if (
     !isRecord(run) ||
     run.pipelineId !== "plan-authoring" ||
-    run.pipelineStateVersion !== 4 ||
+    run.pipelineStateVersion !== 5 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -1513,7 +1525,7 @@ export function assertSettings(settings) {
   ) {
     throw workflowError("Plan-authoring settings are invalid.");
   }
-  if (!["independent", "lazy"].includes(settings.mode)) {
+  if (!["independent", "lazy", "combined"].includes(settings.mode)) {
     throw workflowError("Plan-authoring setting mode is invalid.");
   }
   for (const field of fields.filter((field) => field !== "mode")) {

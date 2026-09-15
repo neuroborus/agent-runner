@@ -1,4 +1,4 @@
-// Internal decisions for the two supported modes, never persisted configuration.
+// Internal decisions derived from the descriptor's supported modes.
 const INDEPENDENT = Object.freeze({
   primaryConvergence: false,
   independentReview: true,
@@ -11,8 +11,15 @@ const LAZY = Object.freeze({
   primarySessionScope: "run",
   arbitration: false,
 });
+const COMBINED = Object.freeze({
+  primaryConvergence: true,
+  independentReview: true,
+  primarySessionScope: "checkpoint",
+  arbitration: true,
+});
 
 export function authoringPolicy(settings) {
+  if (settings?.mode === "combined") return COMBINED;
   return settings?.mode === "lazy" ? LAZY : INDEPENDENT;
 }
 
@@ -22,10 +29,10 @@ export function draftCheckpoint(settings) {
     : "REVIEW";
 }
 
-export function revisionCheckpoint(settings) {
-  return authoringPolicy(settings).primaryConvergence
-    ? "CHECK_AND_FIX"
-    : "REVISE";
+export function revisionCheckpoint(settings, checkpoint) {
+  const policy = authoringPolicy(settings);
+  if (policy.independentReview && checkpoint === "REVIEW") return "REVISE";
+  return policy.primaryConvergence ? "CHECK_AND_FIX" : "REVISE";
 }
 
 export function checkpointAllowed(settings, checkpoint) {
@@ -145,7 +152,10 @@ export function correctionDecision(state, counters) {
     return "limit";
   if (state.blockedSinceArbitration < state.settings.stagnationWindowRounds)
     return "continue";
-  return authoringPolicy(state.settings).arbitration && !state.arbitrationUsed
+  const policy = authoringPolicy(state.settings);
+  const independentResolution =
+    state.workflowState === "REVISE" && state.blockerKind === "findings";
+  return policy.arbitration && independentResolution && !state.arbitrationUsed
     ? "arbitrate"
     : "stagnation";
 }

@@ -89,7 +89,7 @@ const PIPELINE_USAGE = PIPELINES.map(
 const USAGE = `Agent Runner
 
 Usage:
-  agent-run run <pipeline> --project <repo> --task <task-dir> [--mode <independent|lazy>] [--clarify] [--profile <alias>] [--fork-from <backend>:<session-id>]
+  agent-run run <pipeline> --project <repo> --task <task-dir> [--mode <independent|lazy|combined>] [--clarify] [--profile <alias>] [--fork-from <backend>:<session-id>]
   agent-run resume --run <run-id> [--extra-fix-rounds <count> | --override-finding <finding-id>]
   agent-run pause --run <run-id> [--timing immediate|after-current-commit] [--expected-revision <revision> --idempotency-key <key>]
   agent-run cancel --run <run-id> [--timing immediate|after-current-commit] [--expected-revision <revision> --idempotency-key <key>]
@@ -104,12 +104,14 @@ ${PIPELINE_USAGE}
 
 Options:
       --clarify            Open the clarification editor before agent questions
-      --mode               Select independent or lazy pipeline execution
+      --mode               Select a mode supported by the pipeline descriptor
                            independent is default and recommended for genuinely
                            independent review, but uses more context and tokens;
-                           lazy is opt-in, uses less, and has no independent review
+                           lazy is opt-in, uses less, and has no independent review;
+                           combined adds primary convergence before independent review
+                           and is currently available only for plan-authoring
       --fork-from          Fork a compatible backend session into active roles
-                           independent forks primary and review roles separately;
+                           independent and combined fork primary and review roles separately;
                            lazy forks once into the primary role
       --fork-profile       Trusted profile alias used by the source session
       --profile            Set the run-wide trusted profile alias

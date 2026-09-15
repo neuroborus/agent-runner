@@ -1875,7 +1875,7 @@ test("migrates legacy authoring line targets under the lease without configurati
         async run(request) {
           const saved = await store.loadRun(prepared.run.runId);
           assert.equal(await store.runIsLeased(prepared.run.runId), true);
-          assert.equal(saved.pipelineStateVersion, 4);
+          assert.equal(saved.pipelineStateVersion, 5);
           assert.equal(
             saved.pipelineState.settings.preferredCommitLineLimit,
             900,
@@ -2542,6 +2542,46 @@ test("runs lazy plan authoring with only one Planner fork", async (t) => {
     result.run.sessionLineage.children.map(({ role }) => role),
     ["planner"],
   );
+});
+
+test("runs combined authoring with independent role probes and checkpoint forks", async (t) => {
+  const fixture = await createFixture(t);
+  const adapter = createAdapter();
+  const runner = runnerFor(fixture, { codex: adapter });
+  const result = await runner.run({
+    pipelineId: "plan-authoring",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+    roleOverrides: {
+      planner: { model: "planner-model" },
+      reviewer: { model: "reviewer-model" },
+      arbiter: { backend: "claude" },
+    },
+    settingOverrides: { mode: "combined" },
+    sourceSession: { backend: "codex", id: SOURCE_SESSION },
+  });
+  assert.equal(result.run.pipelineState.workflowState, "DONE");
+  assert.equal(result.run.pipelineState.settings.mode, "combined");
+  assert.deepEqual(Object.keys(result.run.roles), [
+    "planner",
+    "reviewer",
+    "arbiter",
+  ]);
+  assert.deepEqual(
+    adapter.probes.map(({ model }) => model),
+    ["planner-model", "reviewer-model"],
+  );
+  assert.equal(adapter.calls.length, 5);
+  assert.equal(
+    adapter.calls.filter(({ session }) => session?.mode === "fork").length,
+    3,
+  );
+  assert.deepEqual(
+    result.run.sessionLineage.children.map(({ role }) => role),
+    ["planner", "planner", "reviewer"],
+  );
+  assert.ok(adapter.calls.every(({ access }) => access === "read-only"));
+  assert.equal(await readFile(join(fixture.taskPath, "plan.md"), "utf8"), PLAN);
 });
 
 test("persists project overrides and blocks later configuration changes", async (t) => {

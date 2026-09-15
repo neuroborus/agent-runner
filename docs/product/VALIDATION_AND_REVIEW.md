@@ -4,6 +4,19 @@ Validation and semantic review are separate sources of evidence. Deterministic
 checks prove executable repository properties; agents assess correctness,
 scope, architecture, and edge cases. Neither substitutes for the other.
 
+## Authoring review
+
+Combined authoring requires two distinct approvals over the same durable draft:
+a mutation-free Planner clean confirmation after check/fix, then independent
+Reviewer approval. Deterministic plan validation and runner-owned artifact
+writing follow both gates. Revisions clear dependent approvals and restart
+primary convergence. Self findings return directly to fixing; only independent
+finding resolution can use arbitration. Invalid output and interrupted recovery
+do not duplicate accepted correction work or reset bounded budgets. These turns
+remain repository-read-only. Execution and polishing do not yet support combined.
+In every authoring mode, exhaustion on deterministic structural failures pauses
+without arbitration; an Arbiter cannot resolve those failures.
+
 ## Bootstrap inventory
 
 Before writable work, plan execution and polishing establish the complete

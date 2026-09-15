@@ -976,12 +976,15 @@ ${JSON.stringify(
     await transition(
       {
         ...state,
-        workflowState: revisionCheckpoint(state.settings),
+        workflowState: revisionCheckpoint(state.settings, state.workflowState),
         findings: values.findings ?? [],
         validationIssues: values.validationIssues ?? [],
         blockerKind,
         reviewApproved: false,
-        cleanConfirmationFingerprint: null,
+        cleanConfirmationFingerprint:
+          state.workflowState === "REVIEW"
+            ? state.cleanConfirmationFingerprint
+            : null,
         pendingLazyCorrection: null,
         ...accounting,
         arbiterDirection: null,
@@ -995,7 +998,7 @@ ${JSON.stringify(
         publicActivity: activity(
           blockerKind === "validation"
             ? "runner"
-            : authoringPolicy(state.settings).independentReview
+            : state.workflowState === "REVIEW"
               ? "reviewer"
               : "planner",
           "revision",
@@ -1482,11 +1485,15 @@ ${pipelineState().draft}${lazyCorrectionPrompt(correction)}`,
             await transition(
               {
                 ...pipelineState(),
-                workflowState: "VALIDATE",
+                workflowState: authoringPolicy(current.settings)
+                  .independentReview
+                  ? "REVIEW"
+                  : "VALIDATE",
                 findings: [],
                 validationIssues: [],
                 blockerKind: null,
-                reviewApproved: true,
+                reviewApproved: !authoringPolicy(current.settings)
+                  .independentReview,
                 cleanConfirmationFingerprint: inspectedFingerprint,
                 pendingLazyCorrection: null,
                 arbiterDirection: null,
@@ -1550,7 +1557,8 @@ ${pipelineState().draft}${reviewDirectionPrompt(pipelineState())}`,
             validationIssues: [],
             blockerKind: null,
             reviewApproved: true,
-            cleanConfirmationFingerprint: null,
+            cleanConfirmationFingerprint:
+              pipelineState().cleanConfirmationFingerprint,
             arbiterDirection: null,
           },
           {

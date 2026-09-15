@@ -16,7 +16,9 @@ arbitrary environment values.
 
 Configured inactive roles are validated, but lazy mode neither resolves nor
 probes them and does not persist or publicly expose their provider-private
-values.
+values. Authoring combined mode resolves Planner, Reviewer, and on-demand
+Arbiter like independent mode. Its added Planner turns do not share the
+Reviewer session; the Arbiter always starts fresh.
 
 Before work, an adapter proves the capabilities required by the role: structured
 output, read-only inspection, safe workspace writes when applicable, remote
@@ -46,8 +48,8 @@ inputs, summaries, decisions, fingerprints, and repository evidence. A
 compatible session may be continued as an optimization, but interruption and
 context exhaustion can recover in a fresh session without changing correctness.
 
-An operator may deliberately provide a source session. Independent mode forks
-it separately into primary and review checkpoints so the Reviewer does not
+An operator may deliberately provide a source session. Independent mode and
+authoring combined mode fork it separately into primary and review checkpoints so the Reviewer does not
 inherit the primary agent's reasoning. Lazy mode forks it exactly once into the
 logical primary role for the entire run. The source ID remains opaque, profile
 compatibility is checked before work, and a failed fork never silently becomes

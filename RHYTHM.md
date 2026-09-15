@@ -7,6 +7,14 @@ remain in the owning documentation.
 
 ## 2026-09-15
 
+- **Combined authoring converges before independent review.** Authoring alone
+  exposes an explicit combined mode, reusing primary check/fix and clean
+  confirmation before the complete Reviewer gate. Revisions invalidate both
+  approvals, and only independent finding resolution permits arbitration.
+  Checkpoint-isolated sessions, read-only turns, durable correction accounting,
+  and runner-owned artifact writes retain their existing boundaries. Mode
+  availability comes from descriptors; saved modes survive leased migration.
+
 - **Authoring review policy is independent of turn execution.** Private pure
   decisions now separate primary convergence, independent review, session scope,
   correction accounting, and arbitration eligibility. Workflow and state

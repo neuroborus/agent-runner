@@ -110,6 +110,27 @@ test("minimal configuration uses pipeline-owned setting defaults", () => {
   });
 });
 
+test("combined is available only through the authoring descriptor", () => {
+  for (const parse of [
+    parseRunnerConfiguration,
+    (source) => parseProjectConfiguration(source, { schemaVersion: 1 }),
+  ]) {
+    for (const pipeline of ["plan-authoring", "plan-execution", "polishing"]) {
+      const source = JSON.stringify({
+        schemaVersion: 1,
+        pipelines: {
+          [pipeline]: { mode: "combined" },
+        },
+      });
+      if (pipeline === "plan-authoring") {
+        assert.equal(parse(source).pipelines[pipeline].mode, "combined");
+      } else {
+        assert.throws(() => parse(source), /mode must be independent or lazy/u);
+      }
+    }
+  }
+});
+
 test("configuration rejects unsupported shapes and values", () => {
   const invalidConfigurations = [
     ["not json", /valid JSON/u],
@@ -178,7 +199,7 @@ test("configuration rejects unsupported shapes and values", () => {
     ],
     [
       '{"schemaVersion":1,"pipelines":{"plan-authoring":{"mode":"automatic"}}}',
-      /mode must be independent or lazy/u,
+      /mode must be independent, lazy, or combined/u,
     ],
     [
       '{"schemaVersion":1,"pipelines":{"plan-authoring":{"stagnationWindowRounds":0}}}',

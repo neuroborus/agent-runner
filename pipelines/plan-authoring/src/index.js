@@ -43,7 +43,7 @@ function positiveIntegerSetting(defaultValue) {
   });
 }
 
-const PIPELINE_MODES = Object.freeze(["independent", "lazy"]);
+const PIPELINE_MODES = Object.freeze(["independent", "lazy", "combined"]);
 
 function pipelineMode(value) {
   return PIPELINE_MODES.includes(value);
@@ -54,7 +54,7 @@ const SETTINGS = Object.freeze({
   maxRevisionRounds: positiveIntegerSetting(20),
   mode: Object.freeze({
     defaultValue: "independent",
-    errorMessage: "must be independent or lazy",
+    errorMessage: "must be independent, lazy, or combined",
     recommendedValue: "independent",
     validate: pipelineMode,
     values: PIPELINE_MODES,
@@ -80,7 +80,7 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   input_changed: "A task input changed after the run began.",
   internal_failure: "Plan authoring failed.",
   lazy_output_invalid:
-    "The lazy checkpoint result remains invalid and requires an explicit retry.",
+    "The primary convergence result remains invalid and requires an explicit retry.",
   plan_revision_limit_reached:
     "Plan revision reached its configured correction limit.",
   plan_revision_not_converging:
@@ -290,13 +290,34 @@ export function migratePlanAuthoringStateV3(run) {
   });
 }
 
+export function migratePlanAuthoringStateV4(run) {
+  const current = run.pipelineState;
+  if (
+    current.settings !== null &&
+    ![undefined, "independent", "lazy"].includes(current.settings.mode)
+  ) {
+    throw new Error("Unsupported legacy plan-authoring mode.");
+  }
+  return Object.freeze({
+    ...current,
+    settings:
+      current.settings === null
+        ? null
+        : Object.freeze({
+            ...current.settings,
+            mode: current.settings.mode ?? "independent",
+          }),
+  });
+}
+
 export const planAuthoringPipeline = Object.freeze({
   id: PLAN_AUTHORING_PIPELINE_ID,
-  stateVersion: 4,
+  stateVersion: 5,
   migrations: Object.freeze({
     1: migratePlanAuthoringStateV1,
     2: migratePlanAuthoringStateV2,
     3: migratePlanAuthoringStateV3,
+    4: migratePlanAuthoringStateV4,
   }),
   roles: ROLES,
   resolveActiveRoles,
