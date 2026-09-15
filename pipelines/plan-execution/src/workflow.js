@@ -668,6 +668,8 @@ export async function runPlanExecution({
   let interruptedRepositoryReconciled = false;
   let legacyRecoveryPersistence = false;
   let commitCheckpointSettlement = false;
+  // Journal publication can succeed before its caller observes completion.
+  let commitAuthorizationPersistence = false;
 
   function state() {
     return normalizePipelineState(currentRun.pipelineState);
@@ -5804,6 +5806,7 @@ ${JSON.stringify(
           expectedSnapshot: current.repositoryBaseline,
           subject: step.subject,
           persistPendingCommit: async (preparedAuthorization) => {
+            commitAuthorizationPersistence = true;
             await transition(
               {
                 ...state(),
@@ -5822,6 +5825,7 @@ ${JSON.stringify(
                 ),
               },
             );
+            commitAuthorizationPersistence = false;
           },
         });
       } catch (cause) {
@@ -5869,6 +5873,7 @@ ${JSON.stringify(
           pendingCommit.authorization,
           {
             consumePendingCommit: async () => {
+              commitAuthorizationPersistence = true;
               await transition(
                 {
                   ...state(),
@@ -5887,6 +5892,7 @@ ${JSON.stringify(
                   ),
                 },
               );
+              commitAuthorizationPersistence = false;
             },
           },
         );
@@ -6546,6 +6552,7 @@ ${evidence}`,
   } catch (cause) {
     if (
       commitCheckpointSettlement ||
+      commitAuthorizationPersistence ||
       legacyRecoveryPersistence ||
       cause?.code === "ERR_RUN_REVISION_CHANGED"
     )

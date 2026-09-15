@@ -2718,6 +2718,10 @@ Recovery never performs extra work to obtain a commit. It preserves underlying
 blockers and terminal failures, protected-input evidence, and consumed effect
 and authorization records. Settlement accounts for either the verified commit
 or the quiescent fallback; publication interruption cannot replay an effect.
+Preparation and consumption publication failures propagate without persisting
+an older in-memory checkpoint. Recovery reloads the durable authorization:
+prepared effects remain uninvoked during stop reconciliation, and consumed
+effects remain verification-only even when invocation never began.
 Successful verification resolves a provisional commit-verification failure;
 its earlier diagnostic remains in history while unrelated blockers stay intact.
 
