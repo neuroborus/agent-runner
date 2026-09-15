@@ -185,6 +185,18 @@ Arbiter and correction contexts remain fresh. Persisted correction shapes and
 budgets do not change. No policy grants index authority: staging remains the
 runner-owned handoff effect. Polishing still accepts only independent and lazy.
 
+Polishing's private `gate-evidence.js` composes primary clean, independent
+candidate, finalization, terminal-confirmation, and handoff predicates. Routing,
+persisted validation, legacy migration, and handoff authorization share these
+checks. Candidate approval binds its inspected fingerprint; finalization can
+format it into a different fingerprint that needs distinct terminal approval.
+Content repair clears dependent evidence. Unchanged resolution retains only
+fingerprint-bound passing finalization, subject to live content and infrastructure
+rechecks after reconvergence. Legacy active evidence reconverges under the lease;
+accepted handoff evidence survives migration and completed effects remain
+verification-only. No persisted shape, mode, correction budget, or index permission
+changes.
+
 The pipeline registry is static. V1 has no dynamic plugins, workflow DSL, or
 generic DAG executor.
 

@@ -27,6 +27,7 @@ pipelines/polishing/
 ├── docs/
 │   └── SPEC.md
 ├── src/
+│   ├── gate-evidence.js
 │   ├── index.js
 │   ├── mode-policy.js
 │   ├── prompts.js
@@ -46,6 +47,22 @@ primary convergence, independent review, terminal confirmer, arbitration, and
 primary session scope. The workflow, persisted validator, resume-action checks,
 and legacy migration use these decisions without changing the accepted
 `independent` and `lazy` modes. `combined` remains unavailable.
+
+The private `gate-evidence.js` composes primary clean evidence, independent
+candidate approval, passing finalization, terminal confirmation, and handoff
+readiness. Workflow routing, persisted validation, and legacy migration use the
+same predicates. Candidate acceptance binds its result to the inspected
+fingerprint; formatting may produce a different finalized fingerprint, which
+requires its own terminal confirmation. Findings require exact fingerprint
+scoped overrides where the existing independent review rules permit them.
+
+Shared invalidation clears dependent approvals after content repairs. Unchanged
+resolutions clear candidate and terminal approval but retain only fingerprint-bound
+passing finalization; reuse still requires live content and infrastructure checks.
+Correction budgets and durable ledgers retain their existing reset rules. Legacy
+active evidence reconverges under the lease, while accepted handoff evidence is
+preserved for recovery without rerunning agents or completed staging effects.
+The persisted shape and state version remain unchanged.
 
 Content repairs, interrupted repairs, and migration re-entry share candidate
 routing: `REVIEW` for independent mode and `CHECK_AND_FIX` for lazy mode.

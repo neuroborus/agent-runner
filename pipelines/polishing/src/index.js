@@ -1,3 +1,7 @@
+import {
+  clearedCandidateAndTerminalGate,
+  terminalConfirmationGatePassed,
+} from "./gate-evidence.js";
 import { candidateCheckpoint, polishingPolicy } from "./mode-policy.js";
 import {
   createPolishingState,
@@ -900,7 +904,7 @@ export function migratePolishingStateV9(run) {
   const preservedFingerprint =
     current.reviewedFingerprint ?? current.finalizedFingerprint;
   const preserveAcceptedGate =
-    (immutableTerminal || handoff) && preservedFingerprint !== null;
+    (immutableTerminal || handoff) && terminalConfirmationGatePassed(current);
   return Object.freeze({
     ...current,
     workflowState:
@@ -931,13 +935,8 @@ export function migratePolishingStateV9(run) {
       ? {
           finalizationCorrection: null,
           pendingFinalizationCorrection: null,
-          lazyCorrections: Object.freeze([]),
-          pendingLazyCorrection: null,
-          cleanConfirmationFingerprint: null,
-          finalizationResult: null,
-          finalizedFingerprint: null,
-          reviewResult: null,
-          reviewedFingerprint: null,
+          ...clearedCandidateAndTerminalGate(),
+          candidateMigrationPending: paused,
           previousFindings:
             current.findings.length === 0
               ? current.previousFindings
