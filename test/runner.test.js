@@ -3159,20 +3159,59 @@ test("verified commit settlement stops before the next Worker and retains config
                 request.prompt.includes("Implement the changes described")
               ) {
                 const current = await store.loadRun(runId);
-                await runner.requestOperatorStop({
-                  runId,
-                  kind,
-                  timing,
-                  expectedRevision: current.revision,
-                  idempotencyKey: "deferred-stop",
-                });
-                const pending = (await runner.status(runId)).run.stopRequest;
-                assert.equal(pending.targetBoundary.step, 1);
-                assert.equal(pending.effectiveTiming, timing);
                 const control = createMcpControlPlane({
                   runner,
                   runStore: store,
                 });
+                const input = {
+                  runId,
+                  timing,
+                  expectedRevision: current.revision,
+                  idempotencyKey: "deferred-stop",
+                };
+                if (steps === 2) {
+                  const stopRequest =
+                    kind === "pause_requested"
+                      ? control.runPause
+                      : control.runCancel;
+                  const receipt = await stopRequest(input);
+                  assert.deepEqual(await stopRequest(input), receipt);
+                } else {
+                  let receiptOutput = "";
+                  assert.equal(
+                    await main(
+                      [
+                        kind === "pause_requested" ? "pause" : "cancel",
+                        "--run",
+                        runId,
+                        "--timing",
+                        timing,
+                        "--expected-revision",
+                        String(current.revision),
+                        "--idempotency-key",
+                        input.idempotencyKey,
+                      ],
+                      {
+                        createCommandRunner: () => runner,
+                        stdout: {
+                          write: (text) => {
+                            receiptOutput += text;
+                          },
+                        },
+                        stderr: {
+                          write: (text) => {
+                            throw new Error(text);
+                          },
+                        },
+                      },
+                    ),
+                    0,
+                  );
+                  assert.match(receiptOutput, /Stop target step: 1/u);
+                }
+                const pending = (await runner.status(runId)).run.stopRequest;
+                assert.equal(pending.targetBoundary.step, 1);
+                assert.equal(pending.effectiveTiming, timing);
                 assert.deepEqual(
                   (await control.runStatus({ runId })).pendingStop,
                   {
@@ -3280,6 +3319,20 @@ test("verified commit settlement stops before the next Worker and retains config
         kind: "commit",
         commit: stopped.pipelineState.completedCommits[0],
       });
+      const control = createMcpControlPlane({ runner, runStore: store });
+      const status = await control.runStatus({ runId });
+      assert.equal(status.stop.state, "settled");
+      assert.deepEqual(status.stop.settlement, stopped.stopRequest.settlement);
+      const waited = await control.runWait({ runId, cursor: 0, timeoutMs: 0 });
+      assert.deepEqual(waited.stop, status.stop);
+      const activity = await control.runActivity({
+        runId,
+        cursor: 0,
+        limit: 100,
+      });
+      assert.ok(
+        activity.activities.some((entry) => entry.stop?.state === "settled"),
+      );
       assert.equal(verifiedCalls, 1);
       assert.equal(commits, 1);
       assert.equal(callsAfterVerification, 0);
@@ -3401,9 +3454,16 @@ test("deferred stops settle quiescent failures and suspended steps without furth
                 primaryTurns += 1;
                 if (outcome !== "suspended") {
                   const current = await store.loadRun(runId);
-                  await runner.requestOperatorStop({
+                  const control = createMcpControlPlane({
+                    runner,
+                    runStore: store,
+                  });
+                  await (
+                    kind === "pause_requested"
+                      ? control.runPause
+                      : control.runCancel
+                  )({
                     runId,
-                    kind,
                     timing: "after-current-commit",
                     expectedRevision: current.revision,
                     idempotencyKey: "deferred-fallback",
@@ -3415,9 +3475,8 @@ test("deferred stops settle quiescent failures and suspended steps without furth
                         once: true,
                       }),
                     );
-                    await runner.requestOperatorStop({
+                    await control.runCancel({
                       runId,
-                      kind: "cancel_requested",
                       timing: "immediate",
                       expectedRevision: current.revision,
                       idempotencyKey: "immediate-cancel",
@@ -3452,13 +3511,42 @@ test("deferred stops settle quiescent failures and suspended steps without furth
         let stopped = (await runner.resume({ runId })).run;
         if (outcome === "suspended") {
           assert.equal(stopped.pause.reason, "backend_unavailable");
-          await runner.requestOperatorStop({
-            runId,
-            kind,
-            timing: "after-current-commit",
-            expectedRevision: stopped.revision,
-            idempotencyKey: "suspended-stop",
-          });
+          let output = "";
+          assert.equal(
+            await main(
+              [
+                kind === "pause_requested" ? "pause" : "cancel",
+                "--run",
+                runId,
+                "--timing",
+                "after-current-commit",
+                "--expected-revision",
+                String(stopped.revision),
+                "--idempotency-key",
+                "suspended-stop",
+              ],
+              {
+                createCommandRunner: () => runner,
+                stdout: {
+                  write: (text) => {
+                    output += text;
+                  },
+                },
+                stderr: {
+                  write: (text) => {
+                    throw new Error(text);
+                  },
+                },
+              },
+            ),
+            0,
+          );
+          assert.match(output, /Stop target step: 1/u);
+          const control = createMcpControlPlane({ runner, runStore: store });
+          assert.equal(
+            (await control.runStatus({ runId })).stop.state,
+            "applicable",
+          );
           stopped = (await runner.resume({ runId })).run;
         }
         const canceled =

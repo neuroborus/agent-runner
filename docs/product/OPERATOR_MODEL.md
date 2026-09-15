@@ -78,7 +78,9 @@ their durable receipt; stale requests are never refreshed implicitly.
 
 The runner service supports `after-current-commit` for a selected execution
 step, including suspended steps; other pipelines and pre-step checkpoints reject
-it. CLI/MCP request inputs remain immediate. A deferred request lets that target
+it. CLI pause/cancel accepts `--timing`; MCP stop tools accept `timing`, both
+with `immediate` and `after-current-commit` and omission equivalent to immediate.
+Exact retries preserve timing as well as revision and key. A deferred request lets that target
 finish normally while retaining ownership. An immediate cancellation can
 supersede it. Verification records the commit and stop outcome before the next
 step; a pause, failure, or interruption instead settles at the reconciled
@@ -94,8 +96,15 @@ Retained safety blockers remain visible through the bounded pause projection.
 An ownerless accepted request starts detached same-run reconciliation, and a
 client disconnect cancels only its wait. Public status and waits expose the
 pending kind, accepted revision, requested/effective timing, and target step
-without the request identity or private checkpoint;
-cancellation is a terminal wait result and older intents cannot revive it.
+without the request identity or private checkpoint. The bounded `stop` summary
+also remains after settlement. Its state is `pending` while awaiting the target,
+`applicable` for immediate requests or suspended/failed checkpoints awaiting
+reconciliation, and `settled` after accounting. Ownership loss still requires
+reconciliation even when the durable summary is pending. Settlement is nullable
+for pending or legacy records, otherwise `quiescent` or `commit` with the verified
+SHA. Activity projects the summary from each historical event, while receipts
+replay immutable acceptance evidence. Cancellation is a terminal wait result
+and older intents cannot revive it.
 
 Legacy opaque plan-execution failures during terminal confirmation can expose
 an action-free retry in either mode when durable history proves acceptance and

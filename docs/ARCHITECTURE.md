@@ -749,8 +749,19 @@ New stop argument identities include timing and canonicalize omitted and explici
 `immediate`. Legacy timing-less identities accept those same immediate arguments
 and retain their original receipt shape; a timing change conflicts. Legacy stop
 records normalize to immediate timing without read-side writes. New receipts
-include requested/effective timing and bounded target evidence; MCP status projects
-only timing and the target step alongside the existing pending kind/revision.
+include requested/effective timing and bounded target evidence. CLI `--timing`
+and MCP's optional `timing` field expose the same two values; omission stays
+immediate. Transport validation never refreshes an inspected revision or changes
+retry arguments. MCP keeps `pendingStop` for pending requests and adds the
+state-owned bounded `projectOperatorStop` summary as `stop` for current and settled
+requests. CLI status uses the same summary; public activity derives it from each
+event's state, and waits reuse status. It excludes identities and private
+checkpoints, exposing kind, accepted revision, requested/effective timing,
+target step, state, and nullable settlement. `applicable` denotes immediate
+requests or suspended/failed checkpoints awaiting reconciliation; other pending
+requests remain `pending`, including interrupted owners awaiting recovery.
+`settled` denotes completed accounting, with `quiescent` or a verified commit
+SHA when available. These projections do not decide ownership or enforcement.
 
 The private `src/state/stop-policy.js` owns three distinct decisions: whether a
 request awaits reconciliation, whether that request blocks execution, and

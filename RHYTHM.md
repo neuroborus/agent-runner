@@ -7,6 +7,13 @@ remain in the owning documentation.
 
 ## 2026-09-15
 
+- **Stop timing is an explicit transport choice.** CLI and MCP expose immediate
+  or after-current-commit timing without refreshing inspected revisions.
+  Immutable receipts retain acceptance evidence; shared bounded status and
+  historical activity summaries retain settlement. Deferred requests use the
+  existing quiescent fallback and detached reconciliation, so a disconnected
+  caller or canceled wait never grants another owner or asks for extra work.
+
 - **Deferred stops settle at the selected execution boundary.** Execution owns
   target selection; root composition supplies it to state, which serializes
   acceptance and settlement. The monitor permits the target step while still

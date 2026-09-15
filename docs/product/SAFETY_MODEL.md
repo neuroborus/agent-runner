@@ -126,6 +126,12 @@ Reconciliation preserves safe partial
 workspace content without staging or rollback and retains read-only mutation,
 index, history/ref, remote, identity, and input findings as blockers.
 
+CLI and MCP stop timing accepts only `immediate` or `after-current-commit`.
+Omission is immediate. Neither transport refreshes stale inspected revisions;
+retries bind timing to the same durable identity. Public stop and activity
+summaries omit private checkpoints and request identities; receipts retain
+bounded acceptance evidence, and waits never confer execution ownership.
+
 A deferred commit-boundary stop reserves execution/worktree ownership while
 its immutable target step advances. State rejects boundary crossing except via
 atomic settlement of verified progress and the latest stop outcome. The monitor

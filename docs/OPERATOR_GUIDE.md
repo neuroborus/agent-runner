@@ -177,13 +177,29 @@ it. A pending request is durable across disconnect or owner loss; status and
 wait expose its bounded kind, revision, timing, and target step while the live owner or a detached
 same-run continuation reconciles it.
 
-Runner-service callers can request `after-current-commit` for a selected
-execution step. The existing CLI/MCP stop inputs remain immediate. For a deferred
-request, supervise its durable target rather than starting another owner. A
+Add `--timing after-current-commit` to CLI pause/cancel, or
+`timing: "after-current-commit"` to MCP `run_pause`/`run_cancel`, to stop after
+the selected execution step. Omission and explicit `immediate` are equivalent.
+Retry with unchanged timing, revision, and key. Authoring, polishing,
+clarification/bootstrap, and checkpoints without a selected step reject deferred
+timing; terminal runs reject new stops. Suspended execution steps are eligible.
+For a deferred request, supervise its durable target rather than starting another owner. A
 successful target commit and stop outcome are recorded together; a blocked or
 interrupted target stops at its reconciled checkpoint without extra work. Resume
 restores any underlying blocker. A pause after the final commit resumes directly
 to `DONE`; cancellation preserves all completed commits and cannot resume.
+
+An immediate cancel can supersede a pending deferred pause. A deferred cancel
+cannot postpone an earlier immediate pause: inspect effective timing as well as
+requested timing. Acceptance receipts are immutable, so replay does not report
+a later settlement. Read status/wait `stop` for the latest outcome, or activity
+for the summary at an event's revision. `pending` awaits the target; `applicable`
+means immediate enforcement or a suspended/failed checkpoint awaiting
+reconciliation; `settled` records completion of stop accounting. An interrupted
+owner can still need reconciliation while the durable summary is `pending`.
+Settlement is either `quiescent` or `commit` with its verified SHA. Legacy
+settled stops may have no settlement details. None of these fields authorize
+another execution owner or extra work.
 
 ## 5. Recover a pause without taking over the work
 

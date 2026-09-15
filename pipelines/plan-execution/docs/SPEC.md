@@ -2694,8 +2694,15 @@ The runner service also accepts `timing: "after-current-commit"` when a step is
 selected, including its suspended checkpoints. It rejects this timing during
 clarification/bootstrap and when no current step exists. The target is resolved
 from the authoritative state inside acceptance serialization and cannot move.
-CLI/MCP request inputs still use immediate timing; their existing status surfaces
-show durable requested/effective timing and the target step.
+CLI pause/cancel exposes `--timing immediate|after-current-commit`; MCP stop
+tools expose the equivalent optional `timing` field. Omission is immediate and
+canonicalizes with explicit immediate timing for replay. Both transports retain
+the exact inspected revision and idempotency key and reject changed arguments.
+Status and waits expose bounded requested/effective timing, target step, pending
+or applicable state, and retained settlement; activity uses event-time evidence.
+Receipts remain immutable acceptance evidence, including across supersession
+and settlement. A disconnected caller can retry the same request without
+creating another owner, and wait cancellation affects only the wait.
 
 Deferred acceptance reserves ownership while the target step continues through
 its ordinary gates. Monitoring remains active for immediate cancellation

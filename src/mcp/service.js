@@ -27,6 +27,7 @@ import {
 } from "../runner/index.js";
 import {
   createRunStore,
+  projectOperatorStop,
   RUNTIME_VERSION_SKEW_EXIT_CODE,
   RunStoreError,
 } from "../state/index.js";
@@ -41,7 +42,7 @@ const EXECUTABLE_PATH = fileURLToPath(
 export const DETACHED_RUNTIME_COMPATIBILITY_ENV =
   "AGENT_RUNNER_PARENT_RUNTIME_COMPATIBILITY";
 
-const RUN_INSTRUCTIONS = `Use run_start to start a durable pipeline, then use one run_wait call for the desired waiting interval. Use run_activity only for explicit or historical reads; do not poll status, activity, or wait at a fixed cadence. Use run_pause or run_cancel with the exact inspected revision and a unique idempotency key; retry the same logical request with the same values and never refresh a stale revision silently. Cancellation is terminal. independent is the default and recommended mode because it provides genuinely independent semantic review, but it uses more provider context and tokens. lazy is opt-in, reduces consumption, and does not provide independent review; never select it automatically to save tokens. Leave sourceSession unset unless the user deliberately chooses to fork a compatible current native session after being offered a fresh start. Offer its known trusted profile with the fork choice; when the profile is unknown, offer only current profile inheritance and never guess an alias. In independent mode the primary and review roles fork the complete source context independently; in lazy mode the primary role forks it once. Recommend a fresh start for a long, multi-topic, or uncertain source session. Keep native session IDs opaque; never inspect provider-private storage or infer or fabricate an ID. Answer pending input from explicit user context when sufficient; otherwise ask the user. Never invent a material product decision.`;
+const RUN_INSTRUCTIONS = `Use run_start to start a durable pipeline, then use one run_wait call for the desired waiting interval. Use run_activity only for explicit or historical reads; do not poll status, activity, or wait at a fixed cadence. Stop timing defaults to immediate; use after-current-commit only for a selected plan-execution step. A blocked or interrupted step stops at its reconciled checkpoint without extra work. Use run_pause or run_cancel with the exact inspected revision and a unique idempotency key; retry the same logical request with the same values and never refresh a stale revision silently. Cancellation is terminal. independent is the default and recommended mode because it provides genuinely independent semantic review, but it uses more provider context and tokens. lazy is opt-in, reduces consumption, and does not provide independent review; never select it automatically to save tokens. Leave sourceSession unset unless the user deliberately chooses to fork a compatible current native session after being offered a fresh start. Offer its known trusted profile with the fork choice; when the profile is unknown, offer only current profile inheritance and never guess an alias. In independent mode the primary and review roles fork the complete source context independently; in lazy mode the primary role forks it once. Recommend a fresh start for a long, multi-topic, or uncertain source session. Keep native session IDs opaque; never inspect provider-private storage or infer or fabricate an ID. Answer pending input from explicit user context when sufficient; otherwise ask the user. Never invent a material product decision.`;
 const ISSUE_REPORTING_INSTRUCTIONS = `Use unexpected_issue_report only when you, as the supervising client agent, explicitly conclude that Agent Runner behaved genuinely unexpectedly or contrary to its documented contract. Expected completion, exhausted configured budgets, usage limits, expected user pauses, documented environment blockers, and invalid user or configuration input are not reportable issues. Supply concise English Markdown deliberately; the server never collects or attaches logs, transcripts, prompts, environment values, credentials, secrets, or other diagnostics automatically.`;
 const GUIDANCE_INSTRUCTIONS =
   "Call guidance_read once before first managing a run for each project and follow the combined operator guide.";
@@ -199,6 +200,7 @@ const runStopSchema = z
     idempotencyKey,
     runId,
     expectedRevision: z.number().int().positive().safe(),
+    timing: z.enum(["immediate", "after-current-commit"]).optional(),
   })
   .strict();
 const markdownContent = (maximumLength) =>
@@ -340,6 +342,7 @@ function statusProjection({ directoryPath, run }, leaseOwnerIsLive) {
     revision: run.revision,
     activityCursor: run.revision,
     status: run.pipelineState.workflowState,
+    stop: projectOperatorStop(run),
     pendingStop:
       run.stopRequest?.reconciledRevision === null
         ? {
@@ -938,11 +941,13 @@ export function createMcpControlPlane(options = {}) {
   }
 
   async function runStop(input, kind, signal) {
+    input = runStopSchema.parse(input);
     const receipt = await runner.requestOperatorStop({
       runId: input.runId,
       kind,
       expectedRevision: input.expectedRevision,
       idempotencyKey: input.idempotencyKey,
+      ...(input.timing === undefined ? {} : { timing: input.timing }),
     });
     await reconcileDetachedStop(receipt, signal);
     return receipt;
@@ -1121,7 +1126,7 @@ export function createMcpServer(options = {}) {
     "run_pause",
     {
       description:
-        "Request a durable operator pause at the exact inspected revision. Retry the same logical request with the same idempotency key and revision; never refresh a stale request silently.",
+        "Request a durable operator pause at the exact inspected revision. Timing defaults to immediate; after-current-commit is supported only for a selected execution step, including suspended steps. It settles after verification or at a reconciled quiescent checkpoint on pause, failure, or interruption, without extra work. Retry the same logical request with the same idempotency key and revision and unchanged timing; never refresh a stale request silently.",
       inputSchema: runStopSchema,
       annotations: mutating,
     },
@@ -1132,7 +1137,7 @@ export function createMcpServer(options = {}) {
     "run_cancel",
     {
       description:
-        "Request terminal cancellation at the exact inspected revision. Retry the same logical request with the same idempotency key and revision; never refresh a stale request silently.",
+        "Request terminal cancellation at the exact inspected revision. Timing defaults to immediate; after-current-commit is supported only for a selected execution step, including suspended steps. It settles after verification or at a reconciled quiescent checkpoint on pause, failure, or interruption, without extra work. Retry the same logical request with the same idempotency key and revision and unchanged timing; never refresh a stale request silently.",
       inputSchema: runStopSchema,
       annotations: mutating,
     },
