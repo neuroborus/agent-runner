@@ -745,6 +745,14 @@ acceptance event reconstructs it even after cancellation superseded a pause or
 the run terminated. Receipt replay neither advances the run nor executes work.
 Version-1 and version-2 action records remain readable; incomplete actions
 upgrade when written, and completed receipts replay without migration writes.
+
+Execution propagates commit-authorization preparation and consumption publication
+failures without overwriting the journal with a stale local checkpoint. Deferred
+stop recovery preserves the durable authorization, never invokes a prepared
+effect to obtain a commit, and only verifies a consumed effect. Fault-injection
+coverage includes acceptance versus advancement/completion, lost receipts,
+lease transfer, and verified settlement publication for both stop actions.
+
 New stop argument identities include timing and canonicalize omitted and explicit
 `immediate`. Legacy timing-less identities accept those same immediate arguments
 and retain their original receipt shape; a timing change conflicts. Legacy stop

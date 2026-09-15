@@ -7,6 +7,13 @@ remain in the owning documentation.
 
 ## 2026-09-15
 
+- **Authorization publication failures preserve durable effect accounting.**
+  Deferred-stop fault injection exposed stale workflow failure writes after
+  preparation or consumption was already journaled. Execution now propagates
+  those failures to existing recovery, preserving prepared authorization and
+  verification-only consumed effects. Coverage exercises both stop actions,
+  acceptance races, receipt replay, owner loss, and settlement publication.
+
 - **Stop timing is an explicit transport choice.** CLI and MCP expose immediate
   or after-current-commit timing without refreshing inspected revisions.
   Immutable receipts retain acceptance evidence; shared bounded status and
