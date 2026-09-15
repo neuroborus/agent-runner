@@ -7,6 +7,13 @@ remain in the owning documentation.
 
 ## 2026-09-14
 
+- **Polishing inventories match complete validation ownership.** Polishing now
+  accepts 256 entries per bootstrap role and 512 per derived or finalization
+  field, with the same responsibility-based infrastructure definition as
+  execution. State version 12 preserves saved 64/128 evidence and handoff
+  effects under leased migration. Index authority remains runner-owned; byte
+  limits and strict Claude preflight and sandbox restrictions remain unchanged.
+
 - **Execution inventories cover complete validation ownership.** Bootstrap roles
   can each report 256 checks and infrastructure files; derived and finalization
   inventories accept 512. Infrastructure is defined by ownership of commands,

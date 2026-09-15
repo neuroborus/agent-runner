@@ -206,7 +206,7 @@ const ADAPTER_FAILURE_FIELDS = Object.freeze([
 export const MAX_TEXT_LENGTH = 4_000;
 export const MAX_SUMMARY_LENGTH = 20_000;
 export const MAX_ITEMS = 32;
-export const MAX_BOOTSTRAP_ITEMS = MAX_ITEMS * 2;
+export const MAX_BOOTSTRAP_ITEMS = 256;
 export const MAX_VALIDATION_ITEMS = MAX_BOOTSTRAP_ITEMS * 2;
 export const MAX_OPTIONS = 16;
 const MAX_STRUCTURED_RESULT_BYTES = 256 * 1024;
@@ -4377,7 +4377,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "polishing" ||
-    run.pipelineStateVersion !== 11 ||
+    run.pipelineStateVersion !== 12 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||

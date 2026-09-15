@@ -13,6 +13,7 @@ import { polishingPipeline } from "../src/index.js";
 import {
   MAX_BOOTSTRAP_ITEMS,
   MAX_VALIDATION_ITEMS,
+  normalizePipelineState,
 } from "../src/workflow-contract.js";
 import {
   SOURCE_SESSION,
@@ -95,11 +96,11 @@ test("persists and finalizes a disjoint maximum role-derived inventory", async (
   const roleInventory = (role) => ({
     requiredChecks: Array.from({ length: MAX_BOOTSTRAP_ITEMS }, (_, index) => ({
       id: `C${index + 1}`,
-      command: `node --test validation/${role}-${index + 1}.test.js`,
+      command: `node validation/${role}-${index + 1}.js`,
     })),
     validationInfrastructure: Array.from(
       { length: MAX_BOOTSTRAP_ITEMS },
-      (_, index) => `validation/${role}-${index + 1}.test.js`,
+      (_, index) => `validation/${role}-${index + 1}.js`,
     ),
   });
   const workerInventory = roleInventory("worker");
@@ -167,6 +168,15 @@ test("persists and finalizes a disjoint maximum role-derived inventory", async (
     MAX_VALIDATION_ITEMS,
   );
   assert.equal(state.finalizationResult.checks.length, MAX_VALIDATION_ITEMS);
+  for (const field of ["requiredChecks", "validationInfrastructure"]) {
+    const extra =
+      field === "requiredChecks"
+        ? { id: "C513", command: "node validation/extra.js" }
+        : "validation/extra.js";
+    assert.throws(() =>
+      normalizePipelineState({ ...state, [field]: [...state[field], extra] }),
+    );
+  }
   assert.equal(state.validationInfrastructureFingerprint, expectedFingerprint);
   assert.equal(
     state.finalizationResult.validationInfrastructureFingerprint,

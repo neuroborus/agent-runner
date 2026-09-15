@@ -957,9 +957,14 @@ export function migratePolishingStateV10(run) {
   });
 }
 
+export function migratePolishingStateV11(run) {
+  // Capacity expansion preserves all accepted evidence and consumed effects.
+  return Object.freeze({ ...run.pipelineState });
+}
+
 export const polishingPipeline = Object.freeze({
   id: POLISHING_PIPELINE_ID,
-  stateVersion: 11,
+  stateVersion: 12,
   migrations: Object.freeze({
     1: migratePolishingStateV1,
     2: migratePolishingStateV2,
@@ -971,6 +976,7 @@ export const polishingPipeline = Object.freeze({
     8: migratePolishingStateV8,
     9: migratePolishingStateV9,
     10: migratePolishingStateV10,
+    11: migratePolishingStateV11,
   }),
   roles: ROLES,
   resolveActiveRoles,

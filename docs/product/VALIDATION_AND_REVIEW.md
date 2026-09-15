@@ -125,15 +125,14 @@ and argument vector in its isolated service, retains bounded status rather than
 native output, and rejects repository or control-state mutation. This mechanism
 does not broaden an agent turn's permissions.
 
-Execution validation infrastructure consists of files that own commands,
-discovery, runners, configuration, or mandatory finalization guidance. Ordinary
+Execution and polishing validation infrastructure consists of files that own
+commands, discovery, runners, configuration, or mandatory finalization guidance. Ordinary
 source, individual tests, fixtures, and generated output merely consumed by
 checks are excluded; ownership is semantic rather than inferred from filenames.
-Execution permits 256 entries per role field and 512 per merged, persisted, or
-finalization field. Polishing retains 64/128. Inventories are complete and never
-truncated; `requiredChecks` overflow has priority over infrastructure overflow.
-Existing byte limits still apply. Legacy execution evidence migrates under the
-lease without losing completed effects or resetting budgets.
+Both pipelines permit 256 entries per role field and 512 per merged, persisted,
+or finalization field. Inventories are complete and never truncated; `requiredChecks` overflow has priority over infrastructure overflow.
+Existing byte limits still apply. Legacy evidence in both pipelines migrates
+under the lease without losing completed effects or resetting budgets.
 
 ## Failure and blocking behavior
 

@@ -339,13 +339,17 @@ IDs. Every command or path found by any active role is preserved. Reconciliation
 and arbitration resolve only summaries and material disagreements; their output
 contains no inventory fields and cannot invent, select, or omit commands or
 paths. The runner—not an agent—fingerprints the derived files.
-Each role may return at most 64 `requiredChecks` and 64
+Validation infrastructure consists of files owning commands, discovery, runners,
+configuration, or mandatory finalization guidance. Exclude ordinary source,
+individual tests, fixtures, and generated output merely consumed by checks.
+Classification is semantic, not a filename or extension heuristic.
+Each role may return at most 256 `requiredChecks` and 256
 `validationInfrastructure` entries. The independently derived, persisted,
-finalization, and fingerprint-input inventories each allow at most 128 entries,
+finalization, and fingerprint-input inventories each allow at most 512 entries,
 so two disjoint maximum role inventories remain representable. If a complete
-role field would exceed 64 items, the role returns `CAPACITY_EXHAUSTED` with
+role field would exceed 256 items, the role returns `CAPACITY_EXHAUSTED` with
 empty inventory and ordinary result fields, `capacityField` equal to
-`requiredChecks` or `validationInfrastructure`, and `capacityLimit: 64`.
+`requiredChecks` or `validationInfrastructure`, and `capacityLimit: 256`.
 It checks `requiredChecks` first when both fields are over capacity. The runner
 pauses immediately with `bootstrap_inventory_capacity_exhausted` and public code
 `ERR_BOOTSTRAP_INVENTORY_CAPACITY_EXHAUSTED`; it does not consume a correction
@@ -850,7 +854,7 @@ or finalization is blocked and the precise `POLISH`, `REVIEW`, `FINALIZE`, `CHEC
 change the pipeline state version. The runner-owned handoff is represented by
 pipeline state version 5.
 Bootstrap capacity exhaustion instead has no retry action: its bounded public
-diagnostic identifies the producing role, full inventory field, and 64-item
+diagnostic identifies the producing role, full inventory field, and 256-item
 limit so the validation surface or Runner capacity can be addressed before a
 new run.
 
@@ -1031,6 +1035,15 @@ effects. Recovery-state validation rejects unknown fields, inconsistent attempt
 allowances and pending markers, malformed feedback, and retained finalization
 or confirmation evidence while replacement finalization is required.
 
+Pipeline state version 12 expands inventory capacities to 256 per role and 512
+for aggregate, persisted, finalization, and fingerprint evidence. Its leased
+version-11 migration preserves legacy 64/128 inventories, counters, terminal
+history, and pending or completed handoff effects without replaying role work
+or reloading configuration. Per-item, structured-output, and durable byte limits
+remain unchanged; count-valid output can still exceed the 256 KiB result limit.
+Expanded schemas retain strict Claude preflight and existing sandbox restrictions,
+without enabling `allowAllUnixSockets: true` or broader host access.
+
 MCP uses the common STDIO tools, persists idempotency intents before mutation
 and receipts before returning, and launches detached continuation under the
 same lease rules. A worktree conflict leaves the durable run and incomplete
@@ -1093,7 +1106,8 @@ semantics, and handoff behavior. Cover at least:
 - stable runner derivation across conflicting role IDs, cross-role repeated
   commands and paths, role-only entries, trusted commands, and attempted
   reconciliation inventory invention;
-- 64-item role inventories, disjoint 128-item derived inventories,
+- 256/257-item role boundaries, disjoint 512-item derived inventories and
+  513-item rejection, semantic infrastructure classification, unchanged byte bounds,
   persistence, finalization round trips, infrastructure fingerprinting, and
   strict bounded capacity exhaustion;
 - duplicate IDs or commands, multiline commands, missing files, directories,
@@ -1138,7 +1152,7 @@ semantics, and handoff behavior. Cover at least:
   plan-execution runs, detached MCP retry, and same-host stale recovery;
 - compatible legacy migration, incompatible reader and detached-child
   rejection, and disconnects that leave durable state unchanged;
-- every supported legacy version migrating through state version 11 to safe
+- every supported legacy version migrating through state version 12 to safe
   candidate convergence while preserving paused and terminal runs without
   replaying `HANDOFF`;
 - sandbox, IPC, loopback, process-isolation, missing-service, and permission
