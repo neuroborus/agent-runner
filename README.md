@@ -22,12 +22,12 @@ project-local operating guidance.
 - Every pipeline starts with a bounded, read-only `CLARIFY` phase.
 - After clarification closes, a blocking material product decision pauses the
   pipeline through `PRODUCT_DECISION_REQUIRED`.
-- Every built-in pipeline supports `independent` and `lazy` execution modes.
+- Every built-in pipeline supports `independent`, `lazy`, and `combined` modes.
   `independent` is the default and recommended choice because it provides
   genuinely independent semantic review, at the cost of more provider context
   and tokens. `lazy` is an explicit lower-consumption choice that uses only the
   primary agent and does not provide independent review; it is never selected
-  automatically. Authoring and execution additionally offer `combined` for primary
+  automatically. `combined` adds primary
   convergence followed by independent review.
 - Codex and Claude can be selected independently for each pipeline role.
 - Read-only agent turns include repository-mutation verification.
@@ -179,8 +179,7 @@ Pipeline settings use these defaults:
 | `polishing`      | `stagnationWindowRounds`   |             3 |
 | `polishing`      | `trustedChecks`            |          `[]` |
 
-`mode` accepts `independent` and `lazy` in every pipeline, plus `combined` in
-plan authoring and execution. Polishing rejects combined. A missing value
+`mode` accepts `independent`, `lazy`, and `combined` in every pipeline. A missing value
 resolves to `independent`. The tracked [example](.agent-runner.example.json) selects
 `independent` explicitly for every pipeline. Runner and ignored project
 configuration may select a descriptor-supported value, and `--mode` or MCP
@@ -208,13 +207,23 @@ exhaustion pause without arbitration. Corrections remain bounded and interrupted
 work is charged once; resume preserves the saved mode and consumed commits remain
 verification-only.
 
+Combined polishing uses independent bootstrap, Worker check/fix and read-only
+clean confirmation, independent candidate review, finalization, and a distinct
+Reviewer terminal confirmation. Content repairs restart primary convergence;
+unchanged resolutions reuse only fingerprint-current finalization. Self-findings
+return directly to fixing; only independent finding resolution may invoke Arbiter.
+Unresolved bootstrap and exhausted primary budgets pause. Handoff remains
+runner-owned staging without a commit, and resume preserves accepted evidence
+and correction accounting.
+
 ```bash
 agent-run run plan-authoring --project /path/to/repository --task /path/to/task --mode combined
 agent-run run plan-execution --project /path/to/repository --task /path/to/task --mode combined
+agent-run run polishing --project /path/to/repository --task /path/to/task --mode combined
 ```
 
 The equivalent MCP `run_start` request uses the selected `pipelineId`
-(`plan-authoring` or `plan-execution`) and `"mode": "combined"`. Saved mode and bounded correction progress survive
+(`plan-authoring`, `plan-execution`, or `polishing`) and `"mode": "combined"`. Saved mode and bounded correction progress survive
 resume; changing configuration does not switch an existing run.
 
 `preferredCommitLineLimit` is a positive-integer planning target for anticipated
@@ -503,9 +512,9 @@ ID, pipeline state-schema version, and an explicit runtime compatibility tuple
 independent from the package version. Compatible legacy state is migrated by
 the owning pipeline under the per-run lease; incompatible readers return a
 specific version-skew error while preserving the run. The mode-aware pipeline
-versions are plan-authoring version 3, plan-execution version 15, and polishing
-version 11. Their ordered migrations resolve every supported legacy run to
-`independent` without moving terminal workflows or replaying role turns,
+versions are plan-authoring version 5, plan-execution version 17, and polishing
+version 13. Their ordered migrations resolve missing legacy modes to
+`independent` and preserve explicitly saved modes without moving terminal workflows or replaying role turns,
 commits, or handoffs. Complete write-ahead events precede atomic state
 replacement; recovery repairs a lagging state file and derived progress.
 Mutating runs require one per-run execution lease. Plan execution and polishing
@@ -718,7 +727,7 @@ selects the same confined project file as `--project-config`; `profile`,
 `model`, and `contextSize` set run-wide selections; the same fields inside a
 `roleOverrides` entry take precedence. Optional `mode` overrides project and
 runner configuration and is validated by the selected descriptor. All pipelines
-accept `independent` and `lazy`; plan authoring and execution accept `combined`.
+accept `independent`, `lazy`, and `combined`.
 `independent` is the default and recommended option for genuinely independent
 semantic review, but it consumes more provider context and tokens. `lazy` is
 opt-in for lower consumption and does not provide independent review; a

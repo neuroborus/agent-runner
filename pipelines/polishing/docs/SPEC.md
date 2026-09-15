@@ -45,8 +45,8 @@ ownership; pipeline registration remains static.
 The private `mode-policy.js` separates active roles, independent bootstrap,
 primary convergence, independent review, terminal confirmer, arbitration, and
 primary session scope. The workflow, persisted validator, resume-action checks,
-and legacy migration use these decisions without changing the accepted
-`independent` and `lazy` modes. `combined` remains unavailable.
+and legacy migration use these decisions for the supported
+`independent`, `lazy`, and `combined` modes.
 
 The private `gate-evidence.js` composes primary clean evidence, independent
 candidate approval, passing finalization, terminal confirmation, and handoff
@@ -62,21 +62,47 @@ passing finalization; reuse still requires live content and infrastructure check
 Correction budgets and durable ledgers retain their existing reset rules. Legacy
 active evidence reconverges under the lease, while accepted handoff evidence is
 preserved for recovery without rerunning agents or completed staging effects.
-The persisted shape and state version remain unchanged.
+The existing evidence fields retain their persisted meaning.
 
 Content repairs, interrupted repairs, and migration re-entry share candidate
-routing: `REVIEW` for independent mode and `CHECK_AND_FIX` for lazy mode.
+routing: `REVIEW` for independent mode and `CHECK_AND_FIX` for lazy and combined modes.
 Terminal content findings use independent finding resolution or direct primary
 fixing; pure evidence rejection still repeats finalization. Policy selection
 never grants permissions: agent turns remain unable to change the index, and
 handoff staging remains runner-owned.
 
 Session selection retains a single run-wide Worker source fork in lazy mode and
-separate primary/review checkpoint forks in independent mode. Recovery and output
+separate primary/review checkpoint forks in independent and combined modes. Recovery and output
 correction can reconstruct fresh sessions; Arbiter contexts are always fresh.
 The existing `lazyCorrections`, `pendingLazyCorrection`, and
-`lazySourceForkConsumed` fields, bounded accounting, and state version remain
-unchanged. Large turn implementations and Git reconciliation stay in the workflow.
+`lazySourceForkConsumed` fields and bounded accounting remain unchanged. Large turn implementations and Git reconciliation stay in the workflow.
+
+## Combined Review
+
+Combined mode uses independent Worker/Reviewer bootstrap discovery and
+reconciliation, all active roles, and independent source checkpoint forks.
+Unresolved bootstrap or validation-migration disagreement pauses for explicit
+retry without Arbiter. Independent remains the default and recommended mode.
+
+After `POLISH`, Worker `CHECK_AND_FIX` and a separate read-only `CLEAN_CONFIRM`
+must converge before independent `REVIEW`. Durable `primaryFindings` retain
+self-findings for direct fixing; they never replace independent findings or
+enter dispute/override/arbitration routes. Candidate confirmation and independent
+approval bind the same fingerprint. `FINALIZE` follows, then independent Reviewer
+`CONFIRM` covers the formatter's result and validation evidence before `HANDOFF`.
+
+Independent findings retain the full fix, dispute, withdrawal, exact override,
+and fresh finding-arbitration workflow. Content-changing repairs restart primary
+convergence and invalidate dependent approval; unchanged resolution can reuse
+current finalization only after both candidate gates reconverge. Neither primary
+exhaustion nor non-finding failures permit arbitration. Corrections use existing
+bounded ledgers and counters, including exact-once interrupted correction charging.
+Every agent still lacks index authority. The runner alone stages the accepted
+handoff and never creates a polishing commit.
+
+State version 13 adds `primaryFindings`. The version-12 leased migration initializes
+it empty and preserves saved mode, budgets, approvals, and completed handoff
+recovery. Missing legacy mode remains independent.
 
 ## Inputs And Change Set
 
@@ -109,8 +135,8 @@ tracked input is allowed and remains protected by input-drift checks.
 ## Roles And Configuration
 
 The descriptor declares independently configurable `worker`, `reviewer`, and
-on-demand `arbiter` roles and owns active-role selection. Independent mode
-activates all three, with Arbiter still resolved on demand; lazy mode activates
+on-demand `arbiter` roles and owns active-role selection. Independent and
+combined modes activate all three, with Arbiter still resolved on demand; lazy mode activates
 only Worker. CLI and runner configuration use the common backend
 and execution-preference precedence rules. Each role accepts string trusted
 `profile`, backend-native `model`, and decimal `contextSize` selections;
@@ -153,7 +179,7 @@ maxSameFindingRounds = 5
 stagnationWindowRounds = 3
 ```
 
-`mode` accepts exactly `independent` and `lazy`. Missing values resolve to
+`mode` accepts exactly `independent`, `lazy`, and `combined`. Missing values resolve to
 `independent`, which is the default and recommended mode because its separate
 Reviewer provides genuinely independent semantic review, at the cost of more
 provider context and tokens. `lazy` is an explicit lower-consumption choice
@@ -193,7 +219,7 @@ All configured roles are validated,
 but only active roles are resolved, probed, persisted, source-session checked,
 or invoked. Inactive values stay in the configuration source for a later
 independent run and are not exposed through lazy state. The resolved active
-roles, settings, and artifact root are persisted. In independent mode the
+roles, settings, and artifact root are persisted. In independent and combined modes the
 Arbiter backend is probed when first needed; lazy mode never probes Reviewer or
 Arbiter.
 When a project configuration supplied those values, the root runner persists
@@ -258,14 +284,14 @@ Preflight:
 3. rejects task-input/change-set overlap;
 4. verifies the ignored run clarification path;
 5. records the dirty repository snapshot and requires at least one change;
-6. probes Worker and Reviewer independently in independent mode, or Worker
-   alone in lazy mode;
+6. probes Worker and Reviewer independently in independent and combined modes,
+   or Worker alone in lazy mode;
 7. resolves and persists the selected trusted-command vectors, identities,
    ordered-command fingerprint, and trusted-configuration fingerprint;
 8. creates or preserves the run clarification transcript;
 9. stores the artifact root, settings, hashes, backend versions, and the repository baseline.
 
-In independent mode, Worker and Reviewer bootstrap independently and read-only.
+In independent and combined modes, Worker and Reviewer bootstrap independently and read-only.
 In lazy mode, Worker bootstraps alone and its complete accepted summary and
 validation inventory become the resolved context after the same deterministic
 validation, capacity, correction, staging-independence, trusted-check,
@@ -274,10 +300,10 @@ study the repository, task, complete current changes, clarifications,
 instructions, relevant skills and finalization guidance, repository-defined
 project checks, tests, and useful Git history. They
 must not see each other's interpretation before both summaries exist in
-independent mode. A source session supplied with `--fork-from` and optional
+independent and combined modes. A source session supplied with `--fork-from` and optional
 separate `--fork-profile` is forked directly and independently for the first
-eligible turn of each Worker and Reviewer checkpoint in independent mode. A
-known source profile supplies the Worker and, in independent mode, Reviewer's
+eligible turn of each Worker and Reviewer checkpoint in independent and combined
+modes. A known source profile supplies the Worker and, in those modes, Reviewer's
 `current` selection and every explicit participating backend/profile must
 match; an unknown source profile requires `current` and omits a native
 override. The Arbiter remains fresh. In lazy mode,
@@ -293,7 +319,7 @@ fork its complete context more than once.
 
 Each direct child session is persisted with a key over its accepted inputs and
 pipeline-owned role checkpoint. Clarification, bootstrap, Worker work, and
-Reviewer work are distinct checkpoints. In independent mode, reconciliation
+Reviewer work are distinct checkpoints. In independent and combined modes, reconciliation
 may continue the Worker bootstrap session, but polishing and review never
 continue bootstrap sessions. In lazy mode, compatible checkpoints may continue
 the single Worker child; otherwise durable state reconstructs the same logical
@@ -352,23 +378,25 @@ The pipeline stores concise summaries as external run artifacts:
 
 ```text
 context/worker.md
-context/reviewer.md  # independent mode only
+context/reviewer.md  # independent and combined modes
 context/resolved.md
 ```
 
-In independent mode, the Worker reconciles both summaries from repository
-evidence without forcing agreement. A material disagreement invokes one fresh,
-read-only Arbiter, which may select the Worker summary, select the Reviewer
+In independent and combined modes, the Worker reconciles both summaries from
+repository evidence without forcing agreement. Only independent mode permits a
+material disagreement to invoke one fresh, read-only Arbiter, which may select
+the Worker summary, select the Reviewer
 summary, synthesize an evidence-supported result, or require a genuine product
-decision. In lazy mode, the accepted Worker summary is copied directly to the
-resolved context and no reconciliation or arbitration occurs. Only a resolved
+decision. Combined mode pauses unresolved disagreement for explicit retry
+without arbitration. In lazy mode, the accepted Worker summary is copied
+directly to the resolved context and no reconciliation or arbitration occurs. Only a resolved
 context permits the workflow to enter `POLISH`.
 
 Each active bootstrap role independently returns the complete ordered inventory
 of stable `C`-prefixed required-check IDs and exact commands, plus every
 repository-relative file that controls package scripts, test discovery, test
-runners, skill guidance, or validation configuration. In independent mode, the
-runner establishes the inventory from accepted Worker evidence followed by
+runners, skill guidance, or validation configuration. In independent and combined
+modes, the runner establishes the inventory from accepted Worker evidence followed by
 accepted Reviewer evidence; in lazy mode, accepted Worker evidence is the
 complete inventory. It deduplicates exact commands and paths in stable
 first-seen order,
@@ -442,8 +470,8 @@ DONE
 FAILED
 ```
 
-`CHECK_AND_FIX` and `CLEAN_CONFIRM` are lazy-only candidate-convergence states.
-`REVIEW` is the independent candidate-convergence state, while `CONFIRM` owns
+`CHECK_AND_FIX` and `CLEAN_CONFIRM` are lazy and combined primary-convergence states.
+`REVIEW` is the independent candidate-review state, while `CONFIRM` owns
 the mode-specific terminal read-only confirmation. Only runner-owned transition
 code advances the workflow.
 
@@ -467,8 +495,8 @@ Compatible continuation turns inherit this responsibility from their native
 session without repeating it. A violation follows the ordinary finding-and-fix
 path and never reopens user questions.
 
-Polishing, lazy `CHECK_AND_FIX`, and finding-resolution prompts receive only
-the exact command text selected in persisted `trustedValidation.commands`.
+Polishing, lazy or combined `CHECK_AND_FIX`, and finding-resolution prompts
+receive only the exact command text selected in persisted `trustedValidation.commands`.
 The bounded projection accompanies complete, continued, reconstructed, and
 correction requests and is an empty array for an empty selection. It does not
 reload configuration, expose executable vectors or provider settings, or repeat
@@ -1190,7 +1218,7 @@ semantics, and handoff behavior. Cover at least:
   plan-execution runs, detached MCP retry, and same-host stale recovery;
 - compatible legacy migration, incompatible reader and detached-child
   rejection, and disconnects that leave durable state unchanged;
-- every supported legacy version migrating through state version 12 to safe
+- every supported legacy version migrating through state version 13 to safe
   candidate convergence while preserving paused and terminal runs without
   replaying `HANDOFF`;
 - sandbox, IPC, loopback, process-isolation, missing-service, and permission

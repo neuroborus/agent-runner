@@ -140,7 +140,7 @@ test("lazy plan authoring resolves only the Planner role", () => {
   assert.equal(resolved.settings.mode, "lazy");
 });
 
-for (const pipelineId of ["plan-authoring", "plan-execution"]) {
+for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
   test(`combined ${pipelineId} resolves all independent roles from saved selections`, () => {
     const resolved = resolvePipelineConfiguration(pipelineId, {
       schemaVersion: 1,

@@ -6,6 +6,7 @@ const INDEPENDENT = Object.freeze({
   primaryConvergence: false,
   terminalConfirmer: "reviewer",
   arbitration: true,
+  bootstrapArbitration: true,
   primarySessionScope: "checkpoint",
 });
 const LAZY = Object.freeze({
@@ -15,10 +16,29 @@ const LAZY = Object.freeze({
   primaryConvergence: true,
   terminalConfirmer: "worker",
   arbitration: false,
+  bootstrapArbitration: false,
   primarySessionScope: "run",
 });
 
+const COMBINED = Object.freeze({
+  ...INDEPENDENT,
+  primaryConvergence: true,
+  bootstrapArbitration: false,
+});
+
+export function combinedReview(settings) {
+  const policy = polishingPolicy(settings);
+  return policy.primaryConvergence && policy.independentReview;
+}
+
+export function primaryFindings(state) {
+  return combinedReview(state.settings)
+    ? state.primaryFindings
+    : state.findings;
+}
+
 export function polishingPolicy(settings) {
+  if (settings?.mode === "combined") return COMBINED;
   return settings?.mode === "lazy" ? LAZY : INDEPENDENT;
 }
 

@@ -183,7 +183,7 @@ and interrupted repairs return through the same candidate checkpoint. Lazy keeps
 one run-wide Worker source fork; independent checkpoints remain isolated and
 Arbiter and correction contexts remain fresh. Persisted correction shapes and
 budgets do not change. No policy grants index authority: staging remains the
-runner-owned handoff effect. Polishing still accepts only independent and lazy.
+runner-owned handoff effect. Polishing accepts independent, lazy, and combined.
 
 Polishing's private `gate-evidence.js` composes primary clean, independent
 candidate, finalization, terminal-confirmation, and handoff predicates. Routing,
@@ -323,8 +323,7 @@ use the saved value. CLI `pipelines` displays descriptor-owned setting defaults;
 MCP `pipelines_list` projects the same metadata.
 
 Every built-in descriptor owns one string `mode` setting supporting
-`independent` and `lazy`. Plan authoring and execution additionally support `combined`;
-polishing rejects that selection. A missing value resolves to
+`independent`, `lazy`, and `combined`. A missing value resolves to
 `independent`, which is the default and recommended option because its distinct primary and review
 roles provide genuinely independent semantic review. That independence uses
 more provider context and tokens. `lazy` is an explicit lower-consumption
@@ -651,7 +650,7 @@ validates availability. It has the same highest precedence as CLI `--mode`.
 MCP guidance states that `independent` is the default and recommended choice for genuinely
 independent semantic review despite its higher context and token cost, and that
 `lazy` is an opt-in lower-consumption tradeoff without independent review that
-must never be selected automatically. Authoring and execution `combined` adds primary
+must never be selected automatically. `combined` adds primary
 convergence before independent review. `sourceSession` defaults to unset. When
 a compatible current native session is available, the controlling agent offers
 a fresh start and a deliberate fork choice, including its trusted source
@@ -1364,6 +1363,17 @@ migration invalidates unprovable active gate evidence and routes it through safe
 mode-specific candidate convergence, defers the same repair for paused runs,
 and preserves `HANDOFF`, `DONE`, and `FAILED` without replaying staging.
 
+Polishing state version 13 enables combined review with independent roles,
+bootstrap, and isolated checkpoint sessions. Worker check/fix and separate
+read-only clean confirmation precede independent candidate review of the same
+fingerprint; independent terminal confirmation covers finalized content before
+runner-only handoff. Durable `primaryFindings` keep self-findings separate from
+independent findings. Content repairs clear both gates; unchanged resolutions
+retain only current finalization. Only independent finding resolution permits
+fresh arbitration; unresolved bootstrap and primary exhaustion pause. Version-12
+migration adds an empty primary-findings record without changing saved mode,
+correction budgets, or consumed handoff evidence.
+
 Polishing state version 11 adds the same bounded semantic finalization recovery
 as plan execution, with two automatic attempts per polishing run. Both terminal
 roles share deterministic pure/mixed rejection routing within polishing. Exact
@@ -1633,7 +1643,7 @@ persist `environment_blocked` rather than treating that condition as a code
 failure, preserve safe workspace content, and invalidate any stale
 fingerprint-bound candidate, finalization, and confirmation evidence. A
 content-changing finding resolution resumes at `REVIEW` in independent mode or
-`CHECK_AND_FIX` in lazy mode; an unchanged turn resumes at its original
+`CHECK_AND_FIX` in lazy and combined modes; an unchanged turn resumes at its original
 checkpoint. Finalization always resumes at `FINALIZE`. The workflow does not
 weaken isolation or grant network or host temporary-directory access to bypass
 the unavailable validation.
@@ -1683,7 +1693,7 @@ identical for Codex and Claude and does not broaden ordinary Worker access to
 Git metadata.
 
 Polishing uses the same ownership rule without requesting `local-commit`.
-Worker polishing, finalization, finding-resolution, and lazy check/fix turns
+Worker polishing, finalization, finding-resolution, and lazy or combined check/fix turns
 are content-only, including when selected finalization guidance normally
 requests staging. Bootstrap, validation-migration, and finalization inventories
 use the same deterministic staging-independence policy as plan execution;
@@ -1699,7 +1709,7 @@ no unstaged or non-ignored untracked remnants, and staged whitespace hygiene
 before the pipeline can enter `DONE`.
 
 Both pipelines project only exact command text from persisted
-`trustedValidation.commands` into implementation or polishing, lazy
+`trustedValidation.commands` into implementation or polishing, lazy or combined
 `CHECK_AND_FIX`, and finding-resolution prompts. The existing snapshot bounds
 limit the projection; an empty selection produces an empty array. Complete,
 continued, reconstructed, and correction requests all carry it without

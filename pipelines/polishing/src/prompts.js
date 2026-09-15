@@ -99,7 +99,8 @@ ${required ? "This skill is explicitly configured, so a missing, escaping, or in
 For PASS, FAIL, SKILL_MISSING, SKILL_INVALID, or BLOCKED, set skillPath to ${JSON.stringify(skillPath)}.`;
 }
 
-export const CANDIDATE_REVIEW_INSTRUCTIONS = `Review the complete current change set independently against the task, resolved context, architecture, tests, edge cases, minimality, and project conventions.
+export const CANDIDATE_REVIEW_INSTRUCTIONS = `In combined mode, independently review the complete candidate even after Worker clean confirmation; primary approval does not replace this gate.
+Review the complete current change set independently against the task, resolved context, architecture, tests, edge cases, minimality, and project conventions.
 
 Do not modify the repository. Review the complete result as a semantic candidate. Do not run the project finalization procedure, attest finalization evidence, or perform generic handoff preparation; those remain owned by FINALIZE, CONFIRM, and HANDOFF.
 Reuse an existing R-prefixed ID for an unchanged finding. Report every actionable blocker, but do not report preferences or already-resolved issues.
@@ -129,7 +130,8 @@ For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-dec
 Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
 ${PRODUCT_DECISION_INSTRUCTIONS}`;
 
-export const CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS = `Review the candidate changes and verify that they are correct, idiomatic, minimal, and consistent with the project's conventions.
+export const CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS = `This confirms primary convergence in lazy or combined mode. In combined mode, independent review still follows; self-findings go directly to Worker fixing without dispute, override, or arbitration.
+Review the candidate changes and verify that they are correct, idiomatic, minimal, and consistent with the project's conventions.
 
 Do not modify the repository. Return CLEAN only when there are no problems; otherwise return concrete findings without editing the content.
 Do not run the project finalization procedure, attest finalization, validate terminal evidence, or perform generic handoff preparation; those remain owned by FINALIZE, CONFIRM, and HANDOFF.
@@ -149,7 +151,7 @@ For FINDINGS, provide one or more findings with unique stable R-prefixed numeric
 For PRODUCT_DECISION_REQUIRED, set findings, finalizationFindingIds, and validationEvidence to [], and validationChange to UNCHANGED; use the product-decision fields.
 ${PRODUCT_DECISION_INSTRUCTIONS}`;
 
-export const LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS = `Your previous structured lazy checkpoint result was rejected by provider or deterministic validation. Return one complete replacement result using the same checkpoint schema.
+export const LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS = `Your previous structured primary checkpoint result was rejected by provider or deterministic validation. Return one complete replacement result using the same checkpoint schema.
 Correct every identified field-and-constraint violation from current repository evidence and the complete durable checkpoint context. Do not quote or retain the rejected result, disclose provider diagnostics, ask an ordinary clarification question, or provide finalization, confirmation, review, approval, staging, or handoff evidence early. A CHECK_AND_FIX correction remains workspace-writable but must not change the index; report actual safe content mutation exactly. A CLEAN_CONFIRM correction remains repository-read-only. Preserve the original checkpoint semantics exactly. A repeated invalid result pauses the pipeline.`;
 
 export const REVIEW_CORRECTION_INSTRUCTIONS = `Your previous structured candidate-review result was rejected by deterministic validation. Make the pending read-only correction and return a complete replacement result using the same candidate-review schema.

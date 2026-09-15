@@ -31,7 +31,8 @@ function primaryCleanGatePassed(
   return (
     hasFingerprint(fingerprint) &&
     state.candidateConfirmationFingerprint === fingerprint &&
-    state.candidateReviewResult?.status === "APPROVED"
+    (polishingPolicy(state.settings).independentReview ||
+      state.candidateReviewResult?.status === "APPROVED")
   );
 }
 
@@ -151,6 +152,7 @@ function clearedCandidateGate() {
     candidateReviewedFingerprint: null,
     candidateConfirmationFingerprint: null,
     candidateMigrationPending: false,
+    primaryFindings: [],
   };
 }
 

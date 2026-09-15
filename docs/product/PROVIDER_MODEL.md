@@ -16,7 +16,7 @@ arbitrary environment values.
 
 Configured inactive roles are validated, but lazy mode neither resolves nor
 probes them and does not persist or publicly expose their provider-private
-values. Combined authoring and execution resolve their primary role, Reviewer, and on-demand
+values. Combined pipelines resolve their primary role, Reviewer, and on-demand
 Arbiter like independent mode. Its added primary turns do not share the
 Reviewer session; the Arbiter always starts fresh.
 

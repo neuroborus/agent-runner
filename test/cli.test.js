@@ -844,14 +844,8 @@ test("CLI combined selection follows the selected pipeline descriptor", async ()
         }),
       },
     );
-    if (pipelineId !== "polishing") {
-      assert.equal(exitCode, 0);
-      assert.deepEqual(request.settingOverrides, { mode: "combined" });
-    } else {
-      assert.equal(exitCode, 1);
-      assert.equal(request, undefined);
-      assert.match(stderr.read(), /mode must be independent or lazy/u);
-    }
+    assert.equal(exitCode, 0);
+    assert.deepEqual(request.settingOverrides, { mode: "combined" });
   }
 });
 

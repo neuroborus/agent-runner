@@ -7,6 +7,13 @@ remain in the owning documentation.
 
 ## 2026-09-15
 
+- **Combined polishing completes mode availability.** All three pipelines now
+  support primary convergence followed by independent review. Polishing keeps
+  self-findings separate, requires both candidate approvals and independent
+  terminal confirmation, and limits arbitration to independent findings.
+  Existing budgets, isolated sessions, and runner-owned uncommitted handoff
+  survive recovery. Independent remains the default and recommendation.
+
 - **Polishing gate evidence has one owner.** Pipeline-private predicates bind
   candidate approval to inspected content and handoff to the separately finalized
   and confirmed content. Routing, validation, migration, and recovery now share

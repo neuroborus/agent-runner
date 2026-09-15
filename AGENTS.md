@@ -67,7 +67,7 @@ contract.
 All pipelines additionally require:
 
 - Own one descriptor-defined `mode` setting. All pipelines support
-  `independent` and `lazy`; plan-authoring and plan-execution additionally support `combined`.
+  `independent`, `lazy`, and `combined`.
   Missing and legacy missing modes resolve to `independent`. Persist the
   resolved value at creation and preserve it on resume.
 - Validate configured role values deterministically, but in lazy mode resolve,
@@ -156,11 +156,19 @@ All pipelines additionally require:
 
 `polishing` additionally requires:
 
+- In combined mode use independent roles and bootstrap, then Worker check/fix
+  and separate read-only clean confirmation before independent candidate review.
+  Both approve the same candidate. Independent Reviewer terminal confirmation
+  covers finalization before runner-owned handoff. Self-findings return directly
+  to fixing; content repairs restart convergence. Only independent finding
+  resolution can invoke Arbiter; other bootstrap failures and primary exhaustion
+  remain blocking. Preserve exact overrides and bounded correction accounting.
+
 - In independent mode run Worker and Reviewer bootstrap independently and
   read-only. In lazy mode use the Worker alone to establish the complete
   staging-independent inventory under the same deterministic rules.
-- Allow only Worker polishing, finalization, finding-resolution, and lazy
-  check/fix turns to change safe workspace content. No agent turn may change
+- Allow only Worker polishing, finalization, finding-resolution, and
+  lazy or combined check/fix turns to change safe workspace content. No agent turn may change
   the index; the runner alone stages the finalized and reviewed polishing
   handoff.
 - Keep bootstrap, validation-migration, and finalization required-check
