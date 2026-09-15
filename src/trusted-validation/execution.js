@@ -221,11 +221,13 @@ export async function runExactCommand(
   {
     cwd,
     environment,
+    ownershipMode = "ordinary",
     readinessRequired = false,
     terminationGraceMs = DEFAULT_TERMINATION_GRACE_MS,
     timeoutMs,
     signal,
     onProcess,
+    spawnProcess = onProcess === undefined ? spawn : spawnOwnedProcess,
   },
 ) {
   signal?.throwIfAborted();
@@ -240,22 +242,23 @@ export async function runExactCommand(
   }
   let child;
   try {
-    child = (onProcess === undefined ? spawn : spawnOwnedProcess)(
-      command.executable,
-      command.arguments,
-      {
-        cwd,
-        detached: true,
-        env: environment,
-        shell: false,
-        stdio: readinessRequired
-          ? ["ignore", "ignore", "ignore", "pipe"]
-          : "ignore",
-        ...(onProcess === undefined
-          ? {}
-          : { signal, onProcess, descendantGraceMs: terminationGraceMs }),
-      },
-    );
+    child = spawnProcess(command.executable, command.arguments, {
+      cwd,
+      detached: true,
+      env: environment,
+      shell: false,
+      stdio: readinessRequired
+        ? ["ignore", "ignore", "ignore", "pipe"]
+        : "ignore",
+      ...(onProcess === undefined
+        ? {}
+        : {
+            signal,
+            onProcess,
+            ownershipMode,
+            descendantGraceMs: terminationGraceMs,
+          }),
+    });
   } catch {
     return {
       status: "BLOCKED",
@@ -651,6 +654,8 @@ export function sandboxTrustedCommand(
         }),
       }),
       environment: safeEnvironment(environment),
+      // This command establishes its own mandatory isolation profile.
+      ownershipMode: "native-sandbox-provider",
       readinessRequired: true,
     });
   } catch (cause) {

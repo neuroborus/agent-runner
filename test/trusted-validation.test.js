@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import {
   access,
   chmod,
@@ -79,6 +80,105 @@ function snapshot(alias, command, executable, argumentsList) {
     [alias],
   );
 }
+
+test("forwards sandbox ownership through trusted execution without changing containment", async () => {
+  for (const ownershipMode of [
+    "native-sandbox-provider",
+    undefined,
+    "ordinary",
+  ]) {
+    for (const descendantsStopped of [false, true]) {
+      const projectPath = process.cwd();
+      const before = { projectPath, contentFingerprint: hash("content") };
+      const trusted = snapshot("check", "node check.js", "node", ["check.js"]);
+      const environment = { PATH: "/usr/bin" };
+      const signal = new AbortController().signal;
+      const onProcess = async () => {};
+      let execution;
+      let launch;
+      let inspected = false;
+      const service = createTrustedValidationService({
+        environment,
+        git: {
+          async snapshot() {
+            return before;
+          },
+          async assertUnchanged(value) {
+            assert.equal(value, before);
+            inspected = true;
+          },
+        },
+        sandboxCommand(command) {
+          return {
+            command,
+            environment,
+            ownershipMode,
+            readinessRequired: true,
+          };
+        },
+        runCommand(command, options) {
+          execution = { command, options };
+          return runExactCommand(command, {
+            ...options,
+            spawnProcess(file, argumentsList, spawnOptions) {
+              launch = { file, argumentsList, options: spawnOptions };
+              const child = new EventEmitter();
+              child.pid = 123;
+              child.stdio = [null, null, null, null, new EventEmitter()];
+              child.ownedCompletion = Promise.resolve({
+                outcome: { type: "close", exitCode: 7, signal: null },
+                descendantsStopped,
+              });
+              queueMicrotask(() => {
+                child.stdio[4].emit("data", Buffer.from([1]));
+                child.emit("close", 0, null);
+              });
+              return child;
+            },
+          });
+        },
+        terminationGraceMs: 123,
+        timeoutMs: 456,
+      });
+
+      const result = await service.execute({
+        bindings: {
+          contentFingerprint: before.contentFingerprint,
+          validationInfrastructureFingerprint: hash("infrastructure"),
+          commandFingerprint: trusted.commandFingerprint,
+          configurationFingerprint: trusted.configurationFingerprint,
+        },
+        commandIdentity: trusted.commands[0].identity,
+        projectPath,
+        snapshot: trusted,
+        signal,
+        onProcess,
+      });
+
+      assert.deepEqual(execution.command, trusted.commands[0]);
+      assert.equal(execution.options.timeoutMs, 456);
+      assert.equal(execution.options.readinessRequired, true);
+      assert.deepEqual(launch, {
+        file: "node",
+        argumentsList: ["check.js"],
+        options: {
+          cwd: projectPath,
+          detached: true,
+          env: environment,
+          shell: false,
+          stdio: ["ignore", "ignore", "ignore", "pipe"],
+          signal,
+          onProcess,
+          descendantGraceMs: 123,
+          ownershipMode: ownershipMode ?? "ordinary",
+        },
+      });
+      assert.equal(inspected, true);
+      assert.equal(result.status, descendantsStopped ? "BLOCKED" : "FAIL");
+      assert.equal(result.exitCode, descendantsStopped ? null : 7);
+    }
+  }
+});
 
 test("bounds each snapshot independently from the command catalog", () => {
   const definitions = Object.fromEntries(
@@ -335,6 +435,7 @@ test("isolates host-control and remote-write probes", async (t) => {
     ),
   );
   assert.equal(execution.options.readinessRequired, true);
+  assert.equal(execution.options.ownershipMode, "native-sandbox-provider");
   assert.equal(execution.options.environment.DOCKER_CONFIG, undefined);
   assert.equal(execution.options.environment.DOCKER_HOST, undefined);
   assert.equal(execution.options.environment.GH_TOKEN, undefined);

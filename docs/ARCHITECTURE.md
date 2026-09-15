@@ -1728,7 +1728,12 @@ The finalization agent returns `NOT_RUN` only for those selected entries; after
 the agent turn reconciles, the root executor replaces each placeholder by
 running the exact persisted executable/argument vector directly without a
 shell. On Linux it requires bubblewrap and runs with a private network
-namespace. Before agent work, the root resolves bubblewrap only from fixed
+namespace. The trusted sandbox selects `native-sandbox-provider` ownership;
+the service and exact-command executor forward that mode to the owned-process
+launcher so it probes the complete nested isolation shape. Executions whose
+sandbox does not select a mode retain ordinary ownership. The trusted command's
+isolation profile and process-containment requirements remain unchanged.
+Before agent work, the root resolves bubblewrap only from fixed
 system locations to a canonical absolute executable whose file and ancestor
 directories are not writable by the runner identity. Project-relative or
 project-writable `PATH` entries never participate, and resume and execution
