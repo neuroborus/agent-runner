@@ -15,6 +15,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 
 import { createLegacyRecoveryFixture } from "../../pipelines/plan-execution/test/support/index.js";
+import { resolveStopBoundary } from "../../src/pipeline-registry.js";
 import {
   createTrustedValidationService,
   createTrustedValidationSnapshot,
@@ -229,6 +230,884 @@ Add the requested value.
 
 Cover the requested value.`;
 
+const SOURCE_SESSION = "11111111-1111-4111-8111-111111111111";
+
+// Reopen the public runner with an empty adapter session set. Durable state,
+// not a surviving native conversation, must supply each resumed checkpoint.
+async function combinedScenario(t, pipelineId, hooks = {}) {
+  const paths = await fixture(t, {
+    plan: pipelineId === "plan-authoring" ? null : TWO_STEP_PLAN,
+  });
+  if (pipelineId === "polishing") {
+    await writeFile(
+      join(paths.projectPath, "src/base.js"),
+      "export const base = 2;\n",
+    );
+  }
+  const configurationPath = join(
+    paths.projectPath,
+    "LOCAL_ARTIFACTS/agent-runner.json",
+  );
+  await mkdir(join(paths.projectPath, "LOCAL_ARTIFACTS"));
+  await writeFile(
+    configurationPath,
+    JSON.stringify({
+      schemaVersion: 1,
+      pipelines: { [pipelineId]: { mode: "lazy" } },
+    }),
+  );
+  const runStore = createRunStore({
+    stateRoot: paths.stateRoot,
+    resolveStopBoundary,
+  });
+  const calls = [];
+  const git = createGitService();
+  let handoffs = 0;
+  let loads = 0;
+  let runId;
+  let runner;
+  let generation = 0;
+  function reopen() {
+    const backend = createBackend("codex", {
+      sessionPrefix: `codex-${generation++}`,
+    });
+    const sessions = new Set();
+    runner = createRunner({
+      runStore,
+      git: {
+        ...git,
+        async stagePolishingHandoff(input) {
+          handoffs += 1;
+          return git.stagePolishingHandoff(input);
+        },
+      },
+      clarifications: createClarificationService({ interactive: false }),
+      loadConfiguration: async () => {
+        assert.equal(loads++, 0, "Resume must use saved configuration.");
+        return parseRunnerConfiguration(
+          JSON.stringify({
+            schemaVersion: 1,
+            defaultBackend: "codex",
+            pipelines: {
+              [pipelineId]: { mode: "independent", ...hooks.settings },
+            },
+          }),
+        );
+      },
+      adapters: {
+        codex: {
+          ...backend,
+          async run(request) {
+            const durable = await runStore.loadRun(runId);
+            const turn = { ...durable.activeTurn, request };
+            calls.push(turn);
+            if (
+              request.access !== "local-commit" &&
+              request.session?.mode === "continue" &&
+              !sessions.has(request.session.id)
+            ) {
+              assert.equal(typeof request.recoveryPrompt, "string");
+              assert.ok(
+                request.recoveryPrompt.includes(
+                  "Implement the requested value.",
+                ),
+              );
+              request = {
+                ...request,
+                session: undefined,
+                prompt: request.recoveryPrompt,
+              };
+            }
+            await hooks.beforeTurn?.(turn, durable, {
+              runner,
+              configurationPath,
+            });
+            const supplied = await hooks.result?.(turn, durable);
+            const response =
+              supplied === undefined
+                ? await backend.run(request)
+                : {
+                    output: "structured",
+                    sessionId: `checkpoint-${calls.length}`,
+                    structured:
+                      request.schema?.properties?.result?.anyOf === undefined
+                        ? supplied
+                        : { result: supplied },
+                  };
+            sessions.add(response.sessionId);
+            await hooks.afterTurn?.(
+              turn,
+              durable,
+              response.structured.result ?? response.structured,
+            );
+            return response;
+          },
+        },
+      },
+    });
+    return runner;
+  }
+  const prepared = await reopen().create({
+    pipelineId,
+    projectPath: paths.projectPath,
+    taskPath: paths.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    settingOverrides: { mode: "combined" },
+    sourceSession: { backend: "codex", id: SOURCE_SESSION },
+  });
+  runId = prepared.run.runId;
+  return {
+    ...paths,
+    runId,
+    runStore,
+    calls,
+    reopen,
+    resume: (action = null) => runner.resume({ runId, action }),
+    control: () => createMcpControlPlane({ runner, runStore }),
+    get handoffs() {
+      return handoffs;
+    },
+  };
+}
+
+function providerInterruption() {
+  return Object.assign(
+    new Error("The provider stopped before returning a checkpoint."),
+    { recoverable: true },
+  );
+}
+
+function reviewFinding() {
+  return {
+    id: "R1",
+    file: "src/base.js",
+    problem: "The base value needs review.",
+    reason: "The proposed value must match the task.",
+    suggestedAction: "Verify the base value.",
+  };
+}
+
+const EMPTY_DECISION = {
+  question: "",
+  options: [],
+  whyBlocked: "",
+  evidence: [],
+};
+
+for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
+  test(`combined ${pipelineId} retains self-findings across interrupted fixing without arbitration`, async (t) => {
+    let reported = false;
+    let interrupted = false;
+    const authoring = pipelineId === "plan-authoring";
+    const finding = authoring
+      ? {
+          id: "base-value",
+          description: "Verify the planned base value.",
+          evidence: ["The draft should explain how the value is verified."],
+        }
+      : reviewFinding();
+    const scenario = await combinedScenario(t, pipelineId, {
+      beforeTurn(turn) {
+        if (reported && !interrupted && turn.phase === "check-and-fix") {
+          interrupted = true;
+          assert.ok(turn.request.recoveryPrompt.includes(finding.id));
+          throw providerInterruption();
+        }
+      },
+      afterTurn(turn, durable, result) {
+        if (!reported && turn.phase === "clean-confirm") {
+          reported = true;
+          result.status = "FINDINGS";
+          result.findings = [finding];
+        }
+      },
+    });
+    const paused = (await scenario.resume()).run;
+    assert.equal(
+      paused.pause.resumeState,
+      "CHECK_AND_FIX",
+      JSON.stringify(paused.pause),
+    );
+    const findings = authoring
+      ? paused.pipelineState.findings
+      : paused.pipelineState.primaryFindings;
+    assert.deepEqual(findings, [finding]);
+    assert.equal(
+      scenario.calls.some(({ phase }) => phase === "review"),
+      false,
+    );
+    const count = scenario.calls.length;
+    scenario.reopen();
+    const completed = (await scenario.resume()).run;
+    assert.equal(
+      completed.pipelineState.workflowState,
+      "DONE",
+      JSON.stringify(completed.pause),
+    );
+    assert.deepEqual(
+      scenario.calls.slice(count, count + 3).map(({ phase }) => phase),
+      ["check-and-fix", "clean-confirm", "review"],
+    );
+    assert.ok(
+      scenario.calls[count].request.recoveryPrompt.includes(finding.id),
+    );
+    assert.equal(
+      scenario.calls.some(({ role }) => role === "arbiter"),
+      false,
+    );
+  });
+}
+
+for (const pipelineId of ["plan-execution", "polishing"]) {
+  test(`combined ${pipelineId} charges interrupted primary correction once`, async (t) => {
+    let changed = false;
+    let interrupted = false;
+    const scenario = await combinedScenario(t, pipelineId, {
+      settings:
+        pipelineId === "polishing"
+          ? { maxFixRounds: 2 }
+          : { maxFixRoundsPerStep: 2 },
+      async result(turn, durable) {
+        if (turn.phase !== "check-and-fix") return;
+        if (!changed) {
+          changed = true;
+          await writeFile(
+            join(turn.request.cwd, "src/base.js"),
+            "export const base = 7;\n",
+          );
+          return { status: "INVALID" };
+        }
+        if (
+          durable.pipelineState.pendingLazyCorrection !== null &&
+          !interrupted
+        ) {
+          interrupted = true;
+          assert.equal(turn.request.access, "workspace-write");
+          assert.equal(turn.request.session, undefined);
+          throw providerInterruption();
+        }
+      },
+      afterTurn(turn, durable) {
+        if (
+          turn.phase === "confirm" &&
+          (pipelineId === "polishing" ||
+            durable.pipelineState.currentStep === 1)
+        ) {
+          assert.equal(durable.counters.fixRounds, 1);
+          assert.equal(durable.pipelineState.lazyCorrections.length, 1);
+          assert.equal(
+            durable.pipelineState.lazyCorrections[0].fixRoundCharged,
+            true,
+          );
+        }
+      },
+    });
+    const paused = (await scenario.resume()).run;
+    assert.ok(interrupted);
+    assert.equal(paused.pause.resumeState, "CHECK_AND_FIX");
+    assert.equal(paused.counters.fixRounds, 1);
+    const pending = paused.pipelineState.pendingLazyCorrection;
+    assert.ok(pending);
+    assert.equal(pending.fixRoundCharged, true);
+    assert.equal(paused.pipelineState.lazyCorrections.length, 1);
+    assert.equal(
+      await readFile(join(scenario.projectPath, "src/base.js"), "utf8"),
+      "export const base = 7;\n",
+    );
+    const count = scenario.calls.length;
+    scenario.reopen();
+    const completed = (await scenario.resume()).run;
+    assert.equal(
+      completed.pipelineState.workflowState,
+      "DONE",
+      JSON.stringify(completed.pause),
+    );
+    assert.equal(scenario.calls[count].request.access, "workspace-write");
+    assert.equal(scenario.calls[count].request.session, undefined);
+    assert.equal(completed.pipelineState.pendingLazyCorrection, null);
+    assert.equal(completed.counters.correctionRounds, 0);
+    if (pipelineId === "polishing")
+      assert.equal(completed.counters.fixRounds, 1);
+    assert.equal(
+      scenario.calls.some(({ role }) => role === "arbiter"),
+      false,
+    );
+  });
+
+  test(`combined ${pipelineId} retains exact overrides across interrupted reconvergence`, async (t) => {
+    let overrideAccepted = false;
+    let interrupted = false;
+    const scenario = await combinedScenario(t, pipelineId, {
+      settings: { maxSameFindingRounds: 1 },
+      beforeTurn(turn, durable) {
+        if (
+          overrideAccepted &&
+          !interrupted &&
+          turn.phase === "check-and-fix"
+        ) {
+          interrupted = true;
+          assert.equal(
+            durable.pipelineState.findingOverrides[0].findingId,
+            "R1",
+          );
+          throw providerInterruption();
+        }
+      },
+      result(turn) {
+        if (turn.phase === "resolve-findings")
+          return {
+            status: "RESOLVED",
+            decisions: [
+              {
+                id: "R1",
+                decision: "FIX",
+                reason: "The value was checked without changing content.",
+                evidence: [],
+              },
+            ],
+            reason: "",
+            ...EMPTY_DECISION,
+          };
+      },
+      afterTurn(turn, durable, result) {
+        if (
+          turn.phase === "review" &&
+          (pipelineId === "polishing" ||
+            durable.pipelineState.currentStep === 1)
+        ) {
+          result.status = "FINDINGS";
+          result.findings = [reviewFinding()];
+        }
+      },
+    });
+    const paused = (await scenario.resume()).run;
+    assert.equal(paused.pause.reason, "no_progress");
+    overrideAccepted = true;
+    const waiting = (
+      await scenario.resume({ type: "override-finding", findingId: "R1" })
+    ).run;
+    assert.ok(interrupted);
+    const overrides = waiting.pipelineState.findingOverrides;
+    assert.deepEqual(overrides, [
+      {
+        findingId: "R1",
+        fingerprint: paused.pipelineState.candidateReviewedFingerprint,
+      },
+    ]);
+    scenario.reopen();
+    const completed = (await scenario.resume()).run;
+    assert.equal(
+      completed.pipelineState.workflowState,
+      "DONE",
+      JSON.stringify(completed.pause),
+    );
+    if (pipelineId === "polishing")
+      assert.deepEqual(completed.pipelineState.findingOverrides, overrides);
+    assert.equal(
+      scenario.calls.some(({ role }) => role === "arbiter"),
+      false,
+    );
+  });
+
+  for (const changed of [false, true]) {
+    test(`combined ${pipelineId} retains only valid finalization after ${changed ? "changed" : "unchanged"} resolution and interruption`, async (t) => {
+      let reported = false;
+      let resolved = false;
+      let interrupted = false;
+      let finalization;
+      const scenario = await combinedScenario(t, pipelineId, {
+        beforeTurn(turn) {
+          if (resolved && !interrupted && turn.phase === "check-and-fix") {
+            interrupted = true;
+            throw providerInterruption();
+          }
+        },
+        async result(turn, durable) {
+          if (turn.phase === "resolve-findings") {
+            assert.equal(durable.pipelineState.findings[0].id, "R1");
+            if (changed)
+              await writeFile(
+                join(turn.request.cwd, "src/base.js"),
+                "export const base = 3;\n",
+              );
+            resolved = true;
+            return {
+              status: "RESOLVED",
+              decisions: [
+                {
+                  id: "R1",
+                  decision: "FIX",
+                  reason: "Verified and resolved the value concern.",
+                  evidence: [],
+                },
+              ],
+              reason: "",
+              ...EMPTY_DECISION,
+            };
+          }
+        },
+        afterTurn(turn, durable, result) {
+          if (!reported && turn.phase === "confirm") {
+            reported = true;
+            finalization = durable.pipelineState.finalizationResult;
+            result.status = "FINDINGS";
+            result.findings = [reviewFinding()];
+          }
+        },
+      });
+      const paused = (await scenario.resume()).run;
+      assert.equal(
+        paused.pause.resumeState,
+        "CHECK_AND_FIX",
+        JSON.stringify(paused.pause),
+      );
+      assert.equal(paused.pipelineState.candidateReviewResult, null);
+      assert.equal(paused.pipelineState.reviewedFingerprint, null);
+      assert.deepEqual(
+        paused.pipelineState.finalizationResult,
+        changed ? null : finalization,
+      );
+      const counters = paused.counters.fixRounds;
+      assert.equal(counters, 2);
+      const count = scenario.calls.length;
+      scenario.reopen();
+      const completed = (await scenario.resume()).run;
+      assert.equal(
+        completed.pipelineState.workflowState,
+        "DONE",
+        JSON.stringify(completed.pause),
+      );
+      assert.deepEqual(
+        scenario.calls.slice(count, count + 3).map(({ phase }) => phase),
+        ["check-and-fix", "clean-confirm", "review"],
+      );
+      const finalizations = scenario.calls.filter(
+        ({ phase }) => phase === "finalize",
+      ).length;
+      assert.equal(
+        finalizations,
+        (pipelineId === "plan-execution" ? 2 : 1) + Number(changed),
+      );
+      if (pipelineId === "polishing")
+        assert.equal(completed.counters.fixRounds, counters + 1);
+      assert.equal(
+        scenario.calls.some(({ role }) => role === "arbiter"),
+        false,
+      );
+    });
+  }
+
+  test(`combined ${pipelineId} reconstructs disputed findings and fresh arbitration`, async (t) => {
+    let reported = false;
+    let interrupted = false;
+    const scenario = await combinedScenario(t, pipelineId, {
+      settings: { maxDisputesPerFinding: 1 },
+      beforeTurn(turn) {
+        if (turn.role === "arbiter" && !interrupted) {
+          interrupted = true;
+          throw providerInterruption();
+        }
+      },
+      result(turn) {
+        if (turn.role === "arbiter") {
+          assert.equal(turn.request.session, undefined);
+          assert.equal(turn.request.access, "read-only");
+          assert.match(turn.request.recoveryPrompt, /R1/u);
+          return {
+            direction: "WORKER_CORRECT",
+            rationale: "The recorded Worker evidence resolves the concern.",
+            ...EMPTY_DECISION,
+          };
+        }
+        if (turn.request.prompt.includes("Worker disputes:"))
+          return {
+            status: "RESOLVED",
+            decisions: [
+              {
+                id: "R1",
+                direction: "UPHOLD",
+                reason: "The Reviewer still disputes that interpretation.",
+                evidence: [],
+              },
+            ],
+            ...EMPTY_DECISION,
+          };
+        if (turn.phase === "resolve-findings")
+          return {
+            status: "RESOLVED",
+            decisions: [
+              {
+                id: "R1",
+                decision: "DISPUTE",
+                reason: "The existing value matches the task.",
+                evidence: ["src/base.js contains the required value."],
+              },
+            ],
+            reason: "",
+            ...EMPTY_DECISION,
+          };
+      },
+      afterTurn(turn, durable, result) {
+        if (!reported && turn.phase === "review") {
+          reported = true;
+          result.status = "FINDINGS";
+          result.findings = [reviewFinding()];
+        }
+      },
+    });
+    const paused = (await scenario.resume()).run;
+    assert.ok(interrupted);
+    assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+    assert.equal(paused.pipelineState.findings[0].id, "R1");
+    assert.equal(
+      paused.pipelineState.disputeHistory.at(-1).direction,
+      "UPHOLD",
+    );
+    const count = scenario.calls.length;
+    scenario.reopen();
+    const completed = (await scenario.resume()).run;
+    assert.equal(
+      completed.pipelineState.workflowState,
+      "DONE",
+      JSON.stringify(completed.pause),
+    );
+    assert.equal(scenario.calls[count].role, "arbiter");
+    assert.ok(
+      scenario.calls
+        .filter(({ role }) => role === "arbiter")
+        .every(({ request }) => request.session === undefined),
+    );
+    assert.deepEqual(
+      scenario.calls.slice(count + 1, count + 4).map(({ phase }) => phase),
+      ["check-and-fix", "clean-confirm", "review"],
+    );
+    if (pipelineId === "polishing") {
+      assert.equal(
+        completed.pipelineState.findingArbitrations[0].direction,
+        "WORKER_CORRECT",
+      );
+      assert.equal(completed.pipelineState.disputeCounts.R1, 1);
+    }
+  });
+}
+
+for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
+  for (const kind of ["pause", "cancel"]) {
+    const timings =
+      pipelineId === "plan-execution"
+        ? ["immediate", "after-current-commit"]
+        : ["immediate"];
+    for (const timing of timings) {
+      test(`combined ${pipelineId} reconciles ${timing} ${kind} at primary confirmation`, async (t) => {
+        let receipt;
+        let stopInput;
+        let stoppedAt;
+        const scenario = await combinedScenario(t, pipelineId, {
+          async beforeTurn(turn, durable, { runner }) {
+            if (receipt || turn.phase !== "clean-confirm") return;
+            stoppedAt = scenario.calls.length;
+            const control = createMcpControlPlane({
+              runner,
+              runStore: scenario.runStore,
+            });
+            const requestStop =
+              kind === "pause" ? control.runPause : control.runCancel;
+            stopInput = {
+              runId: durable.runId,
+              expectedRevision: durable.revision,
+              idempotencyKey: `${kind}-${timing}`,
+              timing,
+            };
+            if (pipelineId !== "plan-execution") {
+              await assert.rejects(
+                requestStop({
+                  ...stopInput,
+                  idempotencyKey: "unsupported-deferred",
+                  timing: "after-current-commit",
+                }),
+              );
+              assert.equal(
+                (await scenario.runStore.loadRun(durable.runId)).stopRequest,
+                null,
+              );
+            }
+            receipt = await requestStop(stopInput);
+          },
+        });
+        const result = (await scenario.resume()).run;
+        assert.ok(receipt);
+        assert.equal(
+          result.pipelineState.workflowState,
+          kind === "pause" ? "WAITING_FOR_USER" : "CANCELED",
+        );
+        if (kind === "pause")
+          assert.equal(result.pause.reason, "operator_paused");
+        const later = scenario.calls.slice(stoppedAt);
+        assert.equal(
+          later.some(
+            ({ phase }) =>
+              phase === "implement" ||
+              phase === "polish" ||
+              phase === "check-and-fix",
+          ),
+          false,
+        );
+        if (timing === "immediate") assert.equal(later.length, 0);
+        else
+          assert.deepEqual(
+            later.map(({ phase }) => phase),
+            ["review", "finalize", "confirm", "commit"],
+          );
+        const commits = scenario.calls.filter(
+          ({ request }) => request.access === "local-commit",
+        ).length;
+        assert.equal(commits, timing === "after-current-commit" ? 1 : 0);
+        assert.equal(scenario.handoffs, 0);
+        const control = scenario.control();
+        assert.deepEqual(
+          await (kind === "pause" ? control.runPause : control.runCancel)(
+            stopInput,
+          ),
+          receipt,
+        );
+        if (kind === "cancel") {
+          const turns = scenario.calls.length;
+          await assert.rejects(
+            control.runResume({
+              runId: scenario.runId,
+              expectedRevision: result.revision,
+              action: null,
+              idempotencyKey: "cannot-revive",
+            }),
+          );
+          assert.equal(scenario.calls.length, turns);
+        } else {
+          scenario.reopen();
+          const resumed = (await scenario.resume()).run;
+          assert.equal(
+            resumed.pipelineState.workflowState,
+            "DONE",
+            JSON.stringify(resumed.pause),
+          );
+          assert.equal(
+            scenario.calls.filter(
+              ({ request }) => request.access === "local-commit",
+            ).length,
+            pipelineId === "plan-execution" ? 2 : 0,
+          );
+          assert.equal(scenario.handoffs, pipelineId === "polishing" ? 1 : 0);
+        }
+      });
+    }
+  }
+}
+
+for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
+  for (const mutation of ["content", "index", "history", "configuration"]) {
+    test(`combined ${pipelineId} rejects ${mutation} mutation during clean confirmation`, async (t) => {
+      let mutated = false;
+      const scenario = await combinedScenario(t, pipelineId, {
+        async beforeTurn(turn, durable, { configurationPath }) {
+          if (mutated || turn.phase !== "clean-confirm") return;
+          mutated = true;
+          assert.equal(turn.request.access, "read-only");
+          if (mutation === "configuration") {
+            await writeFile(
+              configurationPath,
+              JSON.stringify({
+                schemaVersion: 1,
+                pipelines: { [pipelineId]: { mode: "independent" } },
+              }),
+            );
+          } else if (mutation === "history") {
+            await executeFile("git", [
+              "-C",
+              turn.request.cwd,
+              "commit",
+              "--allow-empty",
+              "-qm",
+              "chore(test): unauthorized history",
+            ]);
+          } else if (mutation === "index") {
+            await executeFile("git", [
+              "-C",
+              turn.request.cwd,
+              "update-index",
+              "--force-remove",
+              "src/base.js",
+            ]);
+          } else {
+            await writeFile(
+              join(turn.request.cwd, "src/base.js"),
+              "export const base = 99;\n",
+            );
+          }
+        },
+      });
+      const result = (await scenario.resume()).run;
+      assert.ok(mutated);
+      assert.equal(
+        result.pipelineState.workflowState,
+        "WAITING_FOR_USER",
+        JSON.stringify(result.pause),
+      );
+      assert.equal(
+        result.pause.reason,
+        mutation === "configuration"
+          ? "project_configuration_changed"
+          : pipelineId === "plan-authoring"
+            ? "read_only_mutation"
+            : "read_only_agent_mutated_repository",
+      );
+      assert.equal(scenario.calls.at(-1).phase, "clean-confirm");
+      if (mutation === "index") {
+        assert.equal(
+          await readFile(join(scenario.projectPath, "src/base.js"), "utf8"),
+          `export const base = ${pipelineId === "polishing" ? 2 : 1};\n`,
+        );
+      }
+      assert.equal(scenario.handoffs, 0);
+      assert.equal(
+        scenario.calls.some(({ request }) => request.access === "local-commit"),
+        false,
+      );
+      if (pipelineId !== "plan-authoring") {
+        assert.equal(result.pipelineState.finalizationResult, null);
+        assert.equal(result.pipelineState.candidateReviewResult, null);
+      }
+    });
+  }
+}
+
+for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
+  const phases =
+    pipelineId === "plan-authoring"
+      ? ["check-and-fix", "clean-confirm", "review"]
+      : ["check-and-fix", "clean-confirm", "review", "finalize", "confirm"];
+  for (const phase of phases) {
+    test(`combined ${pipelineId} reconstructs interrupted ${phase} from durable gates`, async (t) => {
+      let interrupted = false;
+      const scenario = await combinedScenario(t, pipelineId, {
+        async beforeTurn(turn) {
+          if (!interrupted && turn.phase === phase) {
+            const projected = await scenario
+              .control()
+              .runStatus({ runId: scenario.runId });
+            assert.equal(projected.mode, "combined");
+            assert.deepEqual(projected.execution, {
+              state: "running",
+              phase,
+              role: ["review", "confirm"].includes(phase)
+                ? "reviewer"
+                : pipelineId === "plan-authoring"
+                  ? "planner"
+                  : "worker",
+            });
+            interrupted = true;
+            throw providerInterruption();
+          }
+        },
+      });
+      const control = scenario.control();
+      const initial = await control.runStatus({ runId: scenario.runId });
+      assert.equal(initial.mode, "combined");
+      const paused = (await scenario.resume()).run;
+      assert.equal(
+        paused.pipelineState.workflowState,
+        "WAITING_FOR_USER",
+        JSON.stringify(paused.pause),
+      );
+      assert.equal(
+        paused.pause.resumeState,
+        phase.toUpperCase().replaceAll("-", "_"),
+      );
+      assert.deepEqual(Object.keys(paused.roles), [
+        pipelineId === "plan-authoring" ? "planner" : "worker",
+        "reviewer",
+        "arbiter",
+      ]);
+      const count = scenario.calls.length;
+      const finalized = paused.pipelineState.finalizationResult;
+      scenario.reopen();
+      const completed = (await scenario.resume()).run;
+      assert.equal(
+        completed.pipelineState.workflowState,
+        "DONE",
+        JSON.stringify(completed.pause),
+      );
+      assert.equal(completed.pipelineState.settings.mode, "combined");
+      assert.equal(scenario.calls[count].phase, phase);
+      assert.equal(
+        scenario.calls.some(({ role }) => role === "arbiter"),
+        false,
+      );
+      const firstReview = scenario.calls.find(
+        ({ phase }) => phase === "review",
+      );
+      assert.equal(firstReview.request.session?.mode, "fork");
+      assert.equal(firstReview.request.session.id, SOURCE_SESSION);
+      const resumed = scenario.calls.slice(count).map(({ phase }) => phase);
+      assert.deepEqual(
+        resumed.slice(0, phases.length - phases.indexOf(phase)),
+        phases.slice(phases.indexOf(phase)),
+      );
+      assert.ok(
+        completed.sessionLineage.children.some(
+          ({ role }) => role === "reviewer",
+        ),
+      );
+      assert.equal(completed.pipelineState.lazySourceForkConsumed, false);
+      if (pipelineId === "plan-authoring") {
+        assert.ok(
+          scenario.calls.every(({ request }) => request.access === "read-only"),
+        );
+        assert.equal(
+          await readFile(join(scenario.taskPath, "plan.md"), "utf8"),
+          TWO_STEP_PLAN,
+        );
+      } else {
+        assert.equal(
+          completed.pipelineState.candidateConfirmationFingerprint,
+          completed.pipelineState.candidateReviewedFingerprint,
+        );
+        assert.equal(
+          completed.pipelineState.reviewedFingerprint,
+          completed.pipelineState.finalizedFingerprint,
+        );
+        assert.equal(completed.counters.correctionRounds, 0);
+        if (phase === "confirm") {
+          assert.equal(
+            scenario.calls
+              .slice(count)
+              .filter(({ phase }) => phase === "finalize").length,
+            pipelineId === "plan-execution" ? 1 : 0,
+          );
+          if (pipelineId === "polishing")
+            assert.deepEqual(
+              completed.pipelineState.finalizationResult,
+              finalized,
+            );
+        }
+      }
+      const turns = scenario.calls.length;
+      await scenario.resume();
+      assert.equal(
+        scenario.calls.length,
+        turns,
+        "Completed effects must not replay.",
+      );
+      assert.equal(scenario.handoffs, pipelineId === "polishing" ? 1 : 0);
+      assert.equal(
+        scenario.calls.filter(
+          ({ request }) => request.access === "local-commit",
+        ).length,
+        pipelineId === "plan-execution" ? 2 : 0,
+      );
+    });
+  }
+}
+
 function sink() {
   let value = "";
   return {
@@ -288,6 +1167,7 @@ function createBackend(
     implementationGate = null,
     polishingGate = null,
     rejectSource = false,
+    sessionPrefix = backend,
   } = {},
 ) {
   const calls = [];
@@ -302,7 +1182,7 @@ function createBackend(
       return request.session.id;
     }
     sessionSequence += 1;
-    return `${backend}-${role}-${sessionSequence}`;
+    return `${sessionPrefix}-${role}-${sessionSequence}`;
   }
 
   async function implement(request) {
@@ -376,7 +1256,48 @@ function createBackend(
 
       let role = "worker";
       let structured;
-      if (request.prompt.includes("Study the task, existing clarifications")) {
+      if (
+        request.prompt.includes(
+          "Return the complete revised plan only when content changed.",
+        ) ||
+        request.prompt.includes(
+          "Concrete findings from the preceding clean confirmation:",
+        )
+      ) {
+        const authoring = request.prompt.includes(
+          "Return the complete revised plan",
+        );
+        role = authoring ? "planner" : "worker";
+        structured = {
+          status: "UNCHANGED",
+          ...(authoring
+            ? { plan: "" }
+            : { summary: "The candidate needs no repair.", reason: "" }),
+          question: "",
+          options: [],
+          whyBlocked: "",
+          evidence: [],
+        };
+      } else if (
+        request.prompt.includes(
+          "A CLEAN result confirms primary convergence",
+        ) ||
+        request.prompt.includes("Inspected candidate fingerprint:")
+      ) {
+        role = request.prompt.includes("primary convergence")
+          ? "planner"
+          : "worker";
+        structured = {
+          status: "CLEAN",
+          findings: [],
+          question: "",
+          options: [],
+          whyBlocked: "",
+          evidence: [],
+        };
+      } else if (
+        request.prompt.includes("Study the task, existing clarifications")
+      ) {
         role = "planner";
         authoringClarifications += 1;
         if (failAuthoringClarification && authoringClarifications === 1) {
@@ -1450,7 +2371,12 @@ async function projectCommandScenario(t, pipelineId, hooks = {}) {
   const projectConfiguration = {
     schemaVersion: 1,
     trustedCommands: { "project-check": definition },
-    pipelines: { [pipelineId]: { trustedChecks: ["project-check"] } },
+    pipelines: {
+      [pipelineId]: {
+        ...(hooks.mode === undefined ? {} : { mode: hooks.mode }),
+        trustedChecks: ["project-check"],
+      },
+    },
   };
   await mkdir(join(paths.projectPath, "LOCAL_ARTIFACTS"));
   await writeFile(configurationPath, JSON.stringify(projectConfiguration));
@@ -1501,6 +2427,7 @@ async function projectCommandScenario(t, pipelineId, hooks = {}) {
             });
           }
         }
+        await hooks.afterTurn?.(request, durable, result);
         if (
           request.prompt.includes("Implement the changes described") ||
           request.prompt.includes(
@@ -1631,6 +2558,86 @@ async function projectCommandScenario(t, pipelineId, hooks = {}) {
 }
 
 for (const pipelineId of ["plan-execution", "polishing"]) {
+  for (const rejectEvidence of [false, true]) {
+    test(`combined ${pipelineId} ${rejectEvidence ? "reruns rejected" : "reuses interrupted"} trusted finalization evidence`, async (t) => {
+      let confirmations = 0;
+      const scenario = await projectCommandScenario(t, pipelineId, {
+        mode: "combined",
+        beforeTurn(request, durable) {
+          if (durable.activeTurn.phase !== "confirm") return;
+          confirmations += 1;
+          if (!rejectEvidence && confirmations === 1)
+            throw providerInterruption();
+        },
+        afterTurn(request, durable, result) {
+          if (
+            rejectEvidence &&
+            durable.activeTurn.phase === "confirm" &&
+            confirmations === 1
+          ) {
+            result.status = "FINDINGS";
+            result.validationChange = "REJECTED";
+            result.validationEvidence = [
+              "Fresh complete evidence is required.",
+            ];
+            result.findings = [
+              {
+                id: "R1",
+                file: "src/base.js",
+                problem: "Validation evidence is insufficient.",
+                reason: "The terminal gate requires a fresh complete run.",
+                suggestedAction: "Repeat finalization without editing content.",
+              },
+            ];
+            result.finalizationFindingIds = ["R1"];
+          }
+        },
+      });
+      let completed = (await scenario.resume()).run;
+      if (!rejectEvidence) {
+        assert.equal(completed.pause.resumeState, "CONFIRM");
+        assert.equal(scenario.executions.length, 1);
+        const finalization = completed.pipelineState.finalizationResult;
+        scenario.reopen();
+        completed = (await scenario.resume()).run;
+        if (pipelineId === "polishing")
+          assert.deepEqual(
+            completed.pipelineState.finalizationResult,
+            finalization,
+          );
+      }
+      assert.equal(
+        completed.pipelineState.workflowState,
+        "DONE",
+        JSON.stringify(completed.pause),
+      );
+      const ordinary = pipelineId === "plan-execution" ? 2 : 1;
+      assert.equal(
+        scenario.executions.length,
+        ordinary + Number(rejectEvidence),
+      );
+      assert.deepEqual(
+        completed.pipelineState.trustedValidation,
+        scenario.expected,
+      );
+      assert.equal(completed.counters.correctionRounds, 0);
+      assert.equal(
+        scenario.calls.filter(({ prompt }) =>
+          prompt.includes(
+            "Concrete findings from the preceding clean confirmation:",
+          ),
+        ).length,
+        ordinary,
+      );
+      assert.equal(scenario.handoffs, pipelineId === "polishing" ? 1 : 0);
+      const calls = scenario.calls.length;
+      const executions = scenario.executions.length;
+      await scenario.resume();
+      assert.equal(scenario.calls.length, calls);
+      assert.equal(scenario.executions.length, executions);
+    });
+  }
+
   test(`project command snapshots survive interruption and complete ${pipelineId}`, async (t) => {
     let interrupted = false;
     const scenario = await projectCommandScenario(t, pipelineId, {
