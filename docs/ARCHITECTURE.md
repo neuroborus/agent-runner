@@ -1436,6 +1436,15 @@ convergence before fresh finalization. Both require a fresh terminal confirmatio
 Existing fix/revision, stable-finding, stagnation, and additional-round budgets
 bound the loop and never silently accept an unconfirmed result.
 
+Plan authoring separates primary convergence, independent review, session scope,
+correction accounting, and arbitration eligibility in its private
+`review-policy.js`. The workflow and persisted-state contract share these pure
+decisions. Turn implementations, effect guards, persistence, and plan writing
+remain in the workflow. The policy exposes no new mode or configuration and
+does not rename durable lazy-checkpoint fields. Draft review invalidation
+retains correction scopes so returning to an earlier fingerprint cannot reset
+an automatic correction allowance.
+
 Plan authoring owns lazy structured-output recovery at both checkpoints.
 Provider and deterministic contract failures become bounded diagnostics, then
 one fresh repository-read-only Planner session receives the complete durable

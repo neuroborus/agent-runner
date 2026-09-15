@@ -6,6 +6,12 @@ import {
   serializeCommitPlan,
 } from "@agent-runner/commit-plan";
 
+import {
+  authoringPolicy,
+  checkpointAllowed,
+  sameCorrectionScope,
+} from "./review-policy.js";
+
 export const MAX_CLARIFICATION_ROUNDS = 3;
 
 export const WORKFLOW_STATES = Object.freeze([
@@ -110,7 +116,7 @@ export const LAZY_OUTPUT_RETRY_EXPLANATION =
   "The bounded automatic lazy checkpoint correction remains invalid. Retry the same correction after the backend can satisfy the unchanged contract.";
 
 export function resolveActiveRoles(settings) {
-  return settings?.mode === "lazy" ? LAZY_ROLES : ROLES;
+  return authoringPolicy(settings).independentReview ? ROLES : LAZY_ROLES;
 }
 
 export class PlanAuthoringWorkflowError extends Error {
@@ -680,14 +686,6 @@ function normalizeLazyCorrection(value) {
   return value;
 }
 
-function sameLazyCorrectionScope(left, right) {
-  return (
-    left.attempt === right.attempt &&
-    left.phase === right.phase &&
-    left.draftFingerprint === right.draftFingerprint
-  );
-}
-
 function normalizeLazyCorrections(value) {
   if (!Array.isArray(value) || value.length > MAX_DIAGNOSTIC_ITEMS) {
     throw workflowError("Plan-authoring lazy corrections are invalid.");
@@ -839,7 +837,7 @@ export function normalizePipelineState(value) {
   }
   if (
     value.cleanConfirmationFingerprint !== null &&
-    (value.settings?.mode !== "lazy" ||
+    (!authoringPolicy(value.settings).primaryConvergence ||
       value.cleanConfirmationFingerprint !== value.draftFingerprint ||
       !value.reviewApproved)
   ) {
@@ -855,9 +853,9 @@ export function normalizePipelineState(value) {
   if (
     pendingLazyCorrection !== null &&
     (!lazyCorrections.some((correction) =>
-      sameLazyCorrectionScope(correction, pendingLazyCorrection),
+      sameCorrectionScope(correction, pendingLazyCorrection),
     ) ||
-      value.settings?.mode !== "lazy" ||
+      !authoringPolicy(value.settings).primaryConvergence ||
       value.draftFingerprint !== pendingLazyCorrection.draftFingerprint ||
       ![pendingLazyCorrection.phase, "WAITING_FOR_USER", "FAILED"].includes(
         value.workflowState,
@@ -867,7 +865,10 @@ export function normalizePipelineState(value) {
       "Plan-authoring pending lazy correction is inconsistent.",
     );
   }
-  if (lazyCorrections.length !== 0 && value.settings?.mode !== "lazy") {
+  if (
+    lazyCorrections.length !== 0 &&
+    !authoringPolicy(value.settings).primaryConvergence
+  ) {
     throw workflowError("Plan-authoring lazy corrections are not applicable.");
   }
   if (value.canonicalPlan !== null) {
@@ -1040,7 +1041,7 @@ export function normalizePipelineState(value) {
       value.blockerKind !== null ||
       !value.reviewApproved ||
       value.canonicalPlan !== null ||
-      (value.settings.mode === "lazy"
+      (authoringPolicy(value.settings).primaryConvergence
         ? value.cleanConfirmationFingerprint !== value.draftFingerprint
         : value.cleanConfirmationFingerprint !== null))
   ) {
@@ -1052,7 +1053,7 @@ export function normalizePipelineState(value) {
       value.blockerKind !== null ||
       !value.reviewApproved ||
       value.canonicalPlan === null ||
-      (value.settings.mode === "lazy"
+      (authoringPolicy(value.settings).primaryConvergence
         ? value.cleanConfirmationFingerprint !== value.draftFingerprint
         : value.cleanConfirmationFingerprint !== null) ||
       (value.workflowState === "DONE") !== (value.planPath !== null))
@@ -1083,22 +1084,22 @@ export function normalizePipelineState(value) {
   }
   if (
     value.settings !== null &&
-    ((value.settings.mode === "lazy" &&
-      ["REVIEW", "REVISE"].includes(value.workflowState)) ||
-      (value.settings.mode === "independent" &&
-        ["CHECK_AND_FIX", "CLEAN_CONFIRM"].includes(value.workflowState)))
+    !checkpointAllowed(value.settings, value.workflowState)
   ) {
     throw workflowError("Plan-authoring mode state is inconsistent.");
   }
   if (
-    value.settings?.mode === "lazy" &&
+    !authoringPolicy(value.settings).arbitration &&
     (value.arbitrationUsed || value.arbiterDirection !== null)
   ) {
     throw workflowError(
       "Lazy plan authoring cannot contain arbitration state.",
     );
   }
-  if (value.lazySourceForkConsumed && value.settings?.mode !== "lazy") {
+  if (
+    value.lazySourceForkConsumed &&
+    authoringPolicy(value.settings).primarySessionScope !== "run"
+  ) {
     throw workflowError("Plan-authoring source-fork state is not applicable.");
   }
   if (
@@ -1306,7 +1307,7 @@ export function assertRun(run) {
   if (
     (pipelineState.lazySourceForkConsumed &&
       run.sessionLineage.source === null) ||
-    (pipelineState.settings?.mode === "lazy" &&
+    (authoringPolicy(pipelineState.settings).primarySessionScope === "run" &&
       run.sessionLineage.source !== null &&
       (run.sessionLineage.children.length > 0 ||
         (run.activeTurn !== null && run.activeTurn !== undefined)) &&
@@ -1441,9 +1442,7 @@ export function assertRun(run) {
     }
     const resumeStateMatchesMode =
       !hasResumeState ||
-      (pipelineState.settings.mode === "lazy"
-        ? !["REVIEW", "REVISE"].includes(run.pause.resumeState)
-        : !["CHECK_AND_FIX", "CLEAN_CONFIRM"].includes(run.pause.resumeState));
+      checkpointAllowed(pipelineState.settings, run.pause.resumeState);
     const resumableRetry = [
       "backend_unavailable",
       "lazy_output_invalid",

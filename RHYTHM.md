@@ -7,6 +7,12 @@ remain in the owning documentation.
 
 ## 2026-09-15
 
+- **Authoring review policy is independent of turn execution.** Private pure
+  decisions now separate primary convergence, independent review, session scope,
+  correction accounting, and arbitration eligibility. Workflow and state
+  validation share those decisions while retaining the two supported modes,
+  durable lazy fields, guards, and existing turn implementations.
+
 - **Authorization publication failures preserve durable effect accounting.**
   Deferred-stop fault injection exposed stale workflow failure writes after
   preparation or consumption was already journaled. Execution now propagates
