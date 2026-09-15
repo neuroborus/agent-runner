@@ -2420,3 +2420,170 @@ test("detects repository changes made between turns", async (t) => {
   assert.equal(result.pause.reason, "read_only_mutation");
   assert.equal(fixture.calls.reviewer.length, 0);
 });
+
+test("draft review policy preserves mode ordering and structural write guards", async (t) => {
+  for (const mode of ["independent", "lazy"]) {
+    await t.test(mode, async (t) => {
+      const turns = [];
+      const fixture = await createFixture(t, {
+        mode,
+        sourceSession: SOURCE_SESSION,
+        planner:
+          mode === "independent"
+            ? [ready(), draft("not a plan"), draft(REVISED_PLAN)]
+            : [
+                ready(),
+                draft("not a plan"),
+                checkUnchanged(),
+                clean(),
+                checkChanged(),
+                checkUnchanged(),
+                clean(),
+              ],
+        reviewer: mode === "independent" ? [approved(), approved()] : [],
+        async onRoleRun(role, request) {
+          const state = fixture.currentRun.pipelineState;
+          turns.push([role, state.workflowState]);
+          assert.equal(request.access, "read-only");
+          await assert.rejects(readFile(fixture.planPath), { code: "ENOENT" });
+          if (["REVIEW", "CHECK_AND_FIX"].includes(state.workflowState)) {
+            assert.equal(state.reviewApproved, false);
+            assert.equal(state.cleanConfirmationFingerprint, null);
+            assert.equal(state.canonicalPlan, null);
+          }
+        },
+      });
+      const result = await fixture.run();
+      assert.deepEqual(
+        turns,
+        mode === "independent"
+          ? [
+              ["planner", "CLARIFY"],
+              ["planner", "DRAFT"],
+              ["reviewer", "REVIEW"],
+              ["planner", "REVISE"],
+              ["reviewer", "REVIEW"],
+            ]
+          : [
+              ["planner", "CLARIFY"],
+              ["planner", "DRAFT"],
+              ["planner", "CHECK_AND_FIX"],
+              ["planner", "CLEAN_CONFIRM"],
+              ["planner", "CHECK_AND_FIX"],
+              ["planner", "CHECK_AND_FIX"],
+              ["planner", "CLEAN_CONFIRM"],
+            ],
+      );
+      const states = fixture.transitions.flatMap(({ patch }) =>
+        patch?.pipelineState ? [patch.pipelineState] : [],
+      );
+      const rejected = states.find(
+        (state) => state.blockerKind === "validation",
+      );
+      assert.equal(rejected.draftFingerprint, hash("not a plan"));
+      assert.equal(rejected.reviewApproved, false);
+      assert.equal(rejected.cleanConfirmationFingerprint, null);
+      assert.ok(rejected.validationIssues.length > 0);
+      const writing = states.filter(
+        (state) => state.workflowState === "WRITE_PLAN",
+      );
+      assert.equal(writing.length, 1);
+      assert.equal(writing[0].draftFingerprint, hash(REVISED_PLAN));
+      assert.equal(writing[0].reviewApproved, true);
+      assert.equal(
+        writing[0].cleanConfirmationFingerprint,
+        mode === "lazy" ? hash(REVISED_PLAN) : null,
+      );
+      assert.equal(await readFile(fixture.planPath, "utf8"), REVISED_PLAN);
+      assert.equal(result.counters.revisionRounds, mode === "lazy" ? 3 : 1);
+      assert.equal(result.counters.correctionRounds, mode === "lazy" ? 1 : 0);
+      assert.equal(fixture.calls.arbiter.length, 0);
+      assert.equal(
+        Object.values(fixture.calls)
+          .flat()
+          .filter(({ session }) => session?.mode === "fork").length,
+        mode === "lazy" ? 1 : 3,
+      );
+    });
+  }
+});
+
+test("draft changes retain correction scopes when the same fingerprint returns", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    sourceSession: SOURCE_SESSION,
+    reviewer: [],
+    planner: [
+      ready(),
+      draft(),
+      invalidUnchanged("first invalid output"),
+      checkChanged(),
+      checkChanged(PLAN),
+      invalidUnchanged("repeated invalid output"),
+    ],
+  });
+  const result = await fixture.run();
+  assert.equal(result.pause.reason, "lazy_output_invalid");
+  assert.equal(result.pause.resumeState, "CHECK_AND_FIX");
+  assert.equal(result.counters.revisionRounds, 2);
+  assert.equal(result.counters.correctionRounds, 0);
+  assert.equal(result.pipelineState.lazyCorrections.length, 1);
+  assert.equal(result.pipelineState.lazyCorrections[0].attempt, 1);
+  assert.equal(
+    result.pipelineState.lazyCorrections[0].draftFingerprint,
+    hash(PLAN),
+  );
+  assert.deepEqual(
+    result.pipelineState.pendingLazyCorrection,
+    result.pipelineState.lazyCorrections[0],
+  );
+  assert.equal(result.pipelineState.cleanConfirmationFingerprint, null);
+  assert.equal(fixture.calls.planner.length, 6);
+  assert.equal(fixture.calls.planner[3].session, undefined);
+  assert.equal(fixture.calls.planner[4].session.mode, "continue");
+  assert.equal(
+    fixture.calls.planner.filter(({ session }) => session?.mode === "fork")
+      .length,
+    1,
+  );
+  assert.equal(fixture.calls.reviewer.length, 0);
+  assert.equal(fixture.calls.arbiter.length, 0);
+  await assert.rejects(readFile(fixture.planPath), { code: "ENOENT" });
+});
+
+test("revision exhaustion takes priority over stagnation in both supported modes", async (t) => {
+  for (const mode of ["independent", "lazy"]) {
+    await t.test(mode, async (t) => {
+      const fixture = await createFixture(t, {
+        mode,
+        planner:
+          mode === "independent"
+            ? [ready(), draft(), draft(REVISED_PLAN)]
+            : [ready(), draft(), checkUnchanged(), findings("scope-b")],
+        reviewer:
+          mode === "independent"
+            ? [findings("scope-a"), findings("scope-b")]
+            : [],
+      });
+      const result = await fixture.run({
+        maxRevisionRounds: 1,
+        stagnationWindowRounds: 1,
+      });
+      assert.equal(result.pause.reason, "plan_revision_limit_reached");
+      assert.equal(result.counters.revisionRounds, 1);
+      assert.equal(result.counters.correctionRounds, 1);
+      assert.equal(result.pipelineState.lastCountedRevision, 1);
+      assert.equal(result.pipelineState.blockedSinceArbitration, 1);
+      assert.deepEqual(result.pipelineState.correctionHistory, [
+        {
+          round: 1,
+          draftFingerprint: hash(mode === "lazy" ? PLAN : REVISED_PLAN),
+          findingIds: ["scope-b"],
+          validationIssues: [],
+        },
+      ]);
+      assert.equal(fixture.calls.arbiter.length, 0);
+      await assert.rejects(readFile(fixture.planPath), { code: "ENOENT" });
+    });
+  }
+});

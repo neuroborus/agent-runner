@@ -535,6 +535,26 @@ mutation pauses instead of advancing. Before creating a repository-local
 clarification transcript, require `git check-ignore` evidence that its resolved
 path is ignored and untracked.
 
+## Implementation ownership
+
+The private `src/review-policy.js` module owns pure decisions for primary
+convergence, independent review, session scope, correction accounting, and
+arbitration eligibility. It maps only the existing `independent` and `lazy`
+modes; these decisions are not new settings or persisted fields.
+`workflow-contract.js` uses the same policy to validate checkpoint eligibility,
+confirmation evidence, and session lineage. `workflow.js` retains turn execution,
+repository and input guards, durable transitions, and the final plan writer.
+
+Draft acceptance clears findings, validation and review evidence, pending output
+correction, and canonical output before routing to the next review checkpoint.
+It retains the bounded correction ledger: returning to an earlier draft
+fingerprint cannot obtain another automatic correction for the same phase.
+Blocked-round accounting counts each completed revision at most once. Revision
+exhaustion takes precedence over stagnation; a pending output correction remains
+the same attempt. Only independent review can request the one fresh Arbiter.
+Persisted `lazy*` fields, state versions, supported modes, and migration behavior
+remain unchanged. No large turn implementation moves into the policy module.
+
 ## V1 Boundaries
 
 - Use explicit JavaScript workflow logic, not a workflow DSL.

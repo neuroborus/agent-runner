@@ -53,6 +53,17 @@ import {
   sha256,
   workflowError,
 } from "./workflow-contract.js";
+import {
+  authoringPolicy,
+  blockedCorrection,
+  correctionDecision,
+  correctionScope,
+  draftCheckpoint,
+  invalidateDraftReview,
+  revisionCheckpoint,
+  sameCorrectionScope,
+  selectRoleSession,
+} from "./review-policy.js";
 
 export {
   MAX_CLARIFICATION_ROUNDS,
@@ -489,26 +500,16 @@ export async function runPlanAuthoring({
     const latestSession = [...currentRun.sessionLineage.children]
       .reverse()
       .find((child) => child.role === role);
-    const lazyPrimary =
-      pipelineState().settings?.mode === "lazy" && role === "planner";
-    const previousSession =
-      !recovering &&
-      role !== "arbiter" &&
-      (lazyPrimary || latestSession?.contextKey === contextKey) &&
-      latestSession !== undefined
-        ? latestSession.sessionId
-        : undefined;
-    const sourceSession = currentRun.sessionLineage.source;
-    const session = freshSession
-      ? undefined
-      : previousSession !== undefined
-        ? { id: previousSession, mode: "continue" }
-        : !recovering &&
-            sourceSession !== null &&
-            role !== "arbiter" &&
-            (!lazyPrimary || !pipelineState().lazySourceForkConsumed)
-          ? { id: sourceSession, mode: "fork" }
-          : undefined;
+    const { session, previousSession, consumeSourceFork } = selectRoleSession({
+      settings: pipelineState().settings,
+      role,
+      latestSession,
+      contextKey,
+      sourceSession: currentRun.sessionLineage.source,
+      sourceForkConsumed: pipelineState().lazySourceForkConsumed,
+      recovering,
+      freshSession,
+    });
     const roleConfiguration = currentRun.roles[role];
     const promptWithSettings = (evidence) =>
       pipelineState().workflowState === "CLARIFY"
@@ -547,7 +548,7 @@ export async function runPlanAuthoring({
     let agentError;
     currentRun = await runtime.startAgentTurn(
       turn,
-      lazyPrimary && session?.mode === "fork"
+      consumeSourceFork
         ? {
             pipelineState: {
               ...pipelineState(),
@@ -805,29 +806,6 @@ export async function runPlanAuthoring({
     );
   }
 
-  function lazyCorrectionScope(phase, state = pipelineState()) {
-    return Object.freeze({
-      attempt: 1,
-      phase,
-      draftFingerprint: state.draftFingerprint,
-    });
-  }
-
-  function lazyCorrectionMatchesScope(correction, scope) {
-    return (
-      correction !== null &&
-      correction.attempt === scope.attempt &&
-      correction.phase === scope.phase &&
-      correction.draftFingerprint === scope.draftFingerprint
-    );
-  }
-
-  function lazyCorrectionAttempt(scope) {
-    return pipelineState().lazyCorrections.find((correction) =>
-      lazyCorrectionMatchesScope(correction, scope),
-    );
-  }
-
   function lazyCorrectionPrompt(correction) {
     return correction === null
       ? ""
@@ -848,7 +826,11 @@ export async function runPlanAuthoring({
     );
     const state = pipelineState();
     const existing =
-      state.pendingLazyCorrection ?? lazyCorrectionAttempt(scope) ?? null;
+      state.pendingLazyCorrection ??
+      state.lazyCorrections.find((correction) =>
+        sameCorrectionScope(correction, scope),
+      ) ??
+      null;
     const correction = { ...scope, diagnostics };
     if (existing === null) {
       await transition(
@@ -983,57 +965,39 @@ ${JSON.stringify(
 
   async function registerBlock(blockerKind, values) {
     const state = pipelineState();
-    const lazy = state.settings.mode === "lazy";
     const currentCounters = counters();
-    const isCorrection =
-      currentCounters.revisionRounds > state.lastCountedRevision;
-    const nextCorrectionRounds =
-      currentCounters.correctionRounds + (isCorrection ? 1 : 0);
-    const nextBlocked = state.blockedSinceArbitration + (isCorrection ? 1 : 0);
-    const history = isCorrection
-      ? [
-          ...state.correctionHistory,
-          {
-            round: nextCorrectionRounds,
-            draftFingerprint: state.draftFingerprint,
-            findingIds:
-              blockerKind === "findings"
-                ? values.findings.map(({ id }) => id)
-                : [],
-            validationIssues:
-              blockerKind === "validation" ? values.validationIssues : [],
-          },
-        ].slice(-MAX_DIAGNOSTIC_ITEMS)
-      : state.correctionHistory;
+    const { correctionRounds, ...accounting } = blockedCorrection(
+      state,
+      currentCounters,
+      blockerKind,
+      values,
+      MAX_DIAGNOSTIC_ITEMS,
+    );
     await transition(
       {
         ...state,
-        workflowState: lazy ? "CHECK_AND_FIX" : "REVISE",
+        workflowState: revisionCheckpoint(state.settings),
         findings: values.findings ?? [],
         validationIssues: values.validationIssues ?? [],
         blockerKind,
         reviewApproved: false,
         cleanConfirmationFingerprint: null,
         pendingLazyCorrection: null,
-        lastCountedRevision: isCorrection
-          ? currentCounters.revisionRounds
-          : state.lastCountedRevision,
-        blockedSinceArbitration: nextBlocked,
+        ...accounting,
         arbiterDirection: null,
-        correctionHistory: history,
         canonicalPlan: null,
       },
       {
         nextCounters: {
           ...currentCounters,
-          correctionRounds: nextCorrectionRounds,
+          correctionRounds,
         },
         publicActivity: activity(
           blockerKind === "validation"
             ? "runner"
-            : lazy
-              ? "planner"
-              : "reviewer",
+            : authoringPolicy(state.settings).independentReview
+              ? "reviewer"
+              : "planner",
           "revision",
           "blocked",
           `Plan blocked by ${blockerKind}.`,
@@ -1333,19 +1297,10 @@ ${evidence}`,
         await transition(
           {
             ...pipelineState(),
-            workflowState:
-              pipelineState().settings.mode === "lazy"
-                ? "CHECK_AND_FIX"
-                : "REVIEW",
+            workflowState: draftCheckpoint(pipelineState().settings),
             draft: result.plan,
             draftFingerprint: sha256(result.plan),
-            findings: [],
-            validationIssues: [],
-            blockerKind: null,
-            reviewApproved: false,
-            cleanConfirmationFingerprint: null,
-            arbiterDirection: null,
-            canonicalPlan: null,
+            ...invalidateDraftReview(),
           },
           {
             publicActivity: activity(
@@ -1360,18 +1315,13 @@ ${evidence}`,
       }
 
       if (state.workflowState === "CHECK_AND_FIX") {
-        if (
-          state.pendingLazyCorrection === null &&
-          counters().revisionRounds >= state.settings.maxRevisionRounds
-        ) {
+        const decision = correctionDecision(state, counters());
+        if (decision === "limit") {
           return pause("plan_revision_limit_reached", {
             revisionRounds: counters().revisionRounds,
           });
         }
-        if (
-          state.pendingLazyCorrection === null &&
-          state.blockedSinceArbitration >= state.settings.stagnationWindowRounds
-        ) {
+        if (decision === "stagnation") {
           return pause("plan_revision_not_converging", {
             correctionRounds: counters().correctionRounds,
           });
@@ -1380,8 +1330,7 @@ ${evidence}`,
         while (true) {
           const current = pipelineState();
           const correction = current.pendingLazyCorrection;
-          const scope =
-            correction ?? lazyCorrectionScope("CHECK_AND_FIX", current);
+          const scope = correction ?? correctionScope("CHECK_AND_FIX", current);
           const inspectedFingerprint = current.draftFingerprint;
           try {
             const output = await runRole(
@@ -1434,14 +1383,7 @@ ${findingPrompt(pipelineState())}${lazyCorrectionPrompt(correction)}`,
                   workflowState: "CHECK_AND_FIX",
                   draft: result.plan,
                   draftFingerprint: sha256(result.plan),
-                  findings: [],
-                  validationIssues: [],
-                  blockerKind: null,
-                  reviewApproved: false,
-                  cleanConfirmationFingerprint: null,
-                  pendingLazyCorrection: null,
-                  arbiterDirection: null,
-                  canonicalPlan: null,
+                  ...invalidateDraftReview(),
                 },
                 {
                   nextCounters: { ...counters(), revisionRounds },
@@ -1459,14 +1401,7 @@ ${findingPrompt(pipelineState())}${lazyCorrectionPrompt(correction)}`,
               {
                 ...pipelineState(),
                 workflowState: "CLEAN_CONFIRM",
-                findings: [],
-                validationIssues: [],
-                blockerKind: null,
-                reviewApproved: false,
-                cleanConfirmationFingerprint: null,
-                pendingLazyCorrection: null,
-                arbiterDirection: null,
-                canonicalPlan: null,
+                ...invalidateDraftReview(),
               },
               {
                 nextCounters: { ...counters(), revisionRounds },
@@ -1499,8 +1434,7 @@ ${findingPrompt(pipelineState())}${lazyCorrectionPrompt(correction)}`,
         while (true) {
           const current = pipelineState();
           const correction = current.pendingLazyCorrection;
-          const scope =
-            correction ?? lazyCorrectionScope("CLEAN_CONFIRM", current);
+          const scope = correction ?? correctionScope("CLEAN_CONFIRM", current);
           const inspectedFingerprint = current.draftFingerprint;
           try {
             const output = await runRole(
@@ -1632,22 +1566,19 @@ ${pipelineState().draft}${reviewDirectionPrompt(pipelineState())}`,
       }
 
       if (state.workflowState === "REVISE") {
-        if (counters().revisionRounds >= state.settings.maxRevisionRounds) {
+        const decision = correctionDecision(state, counters());
+        if (decision === "limit") {
           return pause("plan_revision_limit_reached", {
             revisionRounds: counters().revisionRounds,
           });
         }
-        if (
-          state.blockedSinceArbitration >= state.settings.stagnationWindowRounds
-        ) {
-          if (state.arbitrationUsed) {
-            return pause("plan_revision_not_converging", {
-              correctionRounds: counters().correctionRounds,
-            });
-          }
-          if (!(await arbitrateStagnation())) {
-            return currentRun;
-          }
+        if (decision === "stagnation") {
+          return pause("plan_revision_not_converging", {
+            correctionRounds: counters().correctionRounds,
+          });
+        }
+        if (decision === "arbitrate") {
+          if (!(await arbitrateStagnation())) return currentRun;
           continue;
         }
         const output = await runRole(
@@ -1680,16 +1611,10 @@ ${findingPrompt(pipelineState())}`,
         await transition(
           {
             ...pipelineState(),
-            workflowState: "REVIEW",
+            workflowState: draftCheckpoint(pipelineState().settings),
             draft: result.plan,
             draftFingerprint: sha256(result.plan),
-            findings: [],
-            validationIssues: [],
-            blockerKind: null,
-            reviewApproved: false,
-            cleanConfirmationFingerprint: null,
-            arbiterDirection: null,
-            canonicalPlan: null,
+            ...invalidateDraftReview(),
           },
           {
             nextCounters: { ...counters(), revisionRounds },
