@@ -50,7 +50,8 @@ bin entry point -> root runtime -> pipeline workspaces -> shared contracts
 ```
 
 - The root runtime composes the application and owns CLI, MCP, configuration,
-  persistence, Git safety, clarifications, trusted execution, and providers.
+  persistence, Git safety, clarifications, operator guidance, trusted execution,
+  and providers.
 - A pipeline owns its roles, prompts, schemas, state machine, retry policy, and
   completion criteria.
 - A shared package owns a deterministic, framework-agnostic contract with more
@@ -74,6 +75,7 @@ Assign every behavior to one owner before deciding where its file belongs.
 | Command parsing and terminal projection                      | root CLI                    |
 | STDIO protocol and detached control operations               | root MCP boundary           |
 | Configuration loading and precedence                         | root configuration boundary |
+| Common/local operator guidance and safe local replacement    | root guidance boundary      |
 | Run and resume coordination                                  | root runner                 |
 | State, Git, clarification, and trusted-command effects       | their root capability       |
 | Provider protocol, flags, sessions, and output normalization | owning provider adapter     |
@@ -174,7 +176,12 @@ Keep a cross-cutting effect in the root capability that owns its lifecycle:
 
 - state files, journals, actions, and leases belong to the state boundary;
 - snapshots, fingerprints, staging, and commit verification belong to Git;
-- confined files and editor invocation belong to clarifications;
+- confined clarification transcripts and their editor lifecycle belong to
+  clarifications;
+- operator document composition and confined local publication belong to
+  guidance, using state-owned actions and leases;
+- shell-free editor launch and candidate selection belong to `src/editor.js`;
+  clarification authorization and guidance publication retain their own exit policy;
 - allowlists and host execution belong to trusted validation;
 - provider processes and native sandboxes belong to agents.
 

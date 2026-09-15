@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, open, readFile, realpath } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import { PROVIDER_REGISTRY } from "../agents/index.js";
@@ -23,24 +25,96 @@ const MAX_CONFIGURATION_BYTES = 1024 * 1024;
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
 const NONBLOCK = constants.O_NONBLOCK ?? 0;
 
-async function readConfinedConfiguration(path) {
+function isWithin(parentPath, childPath) {
+  const pathFromParent = relative(parentPath, childPath);
+  return (
+    pathFromParent === "" ||
+    (!pathFromParent.startsWith(`..${sep}`) &&
+      pathFromParent !== ".." &&
+      !isAbsolute(pathFromParent))
+  );
+}
+
+function fileIdentity(metadata) {
+  return Object.freeze({
+    device: metadata.dev.toString(),
+    inode: metadata.ino.toString(),
+    size: metadata.size.toString(),
+    modifiedNs: metadata.mtimeNs.toString(),
+    changedNs: metadata.ctimeNs.toString(),
+  });
+}
+
+async function confinedAncestors(projectPath, path) {
+  if (!isWithin(projectPath, path) || path === projectPath) {
+    throw new ConfigurationError(
+      "Project configuration must remain inside the project.",
+      { code: "ERR_PROJECT_CONFIGURATION_READ" },
+    );
+  }
+  const paths = [];
+  for (let current = dirname(path); ; current = dirname(current)) {
+    paths.unshift(current);
+    if (current === projectPath) break;
+    if (current === dirname(current)) {
+      throw new ConfigurationError(
+        "Project configuration must remain inside the project.",
+        { code: "ERR_PROJECT_CONFIGURATION_READ" },
+      );
+    }
+  }
+  return Promise.all(
+    paths.map(async (ancestorPath) => {
+      const before = await lstat(ancestorPath, { bigint: true });
+      const canonicalPath = await realpath(ancestorPath);
+      const after = await lstat(ancestorPath, { bigint: true });
+      if (
+        !before.isDirectory() ||
+        !after.isDirectory() ||
+        canonicalPath !== ancestorPath ||
+        before.dev !== after.dev ||
+        before.ino !== after.ino
+      ) {
+        throw new ConfigurationError(
+          "Project configuration ancestors must be real directories.",
+          { code: "ERR_PROJECT_CONFIGURATION_READ" },
+        );
+      }
+      return Object.freeze({
+        path: ancestorPath,
+        device: after.dev.toString(),
+        inode: after.ino.toString(),
+      });
+    }),
+  );
+}
+
+async function readConfinedConfiguration(path, projectPath, relativePath) {
   let handle;
   try {
-    const pathBefore = await lstat(path, { bigint: true });
+    const [pathBefore, ancestorsBefore] = await Promise.all([
+      lstat(path, { bigint: true }),
+      confinedAncestors(projectPath, path),
+    ]);
     if (
       !pathBefore.isFile() ||
+      pathBefore.nlink !== 1n ||
       pathBefore.size > BigInt(MAX_CONFIGURATION_BYTES)
     ) {
       throw new ConfigurationError(
-        "Project configuration must be a bounded regular file.",
+        "Project configuration must be a bounded, unlinked regular file.",
         { code: "ERR_PROJECT_CONFIGURATION_READ" },
       );
     }
     handle = await open(path, constants.O_RDONLY | NO_FOLLOW | NONBLOCK);
     const before = await handle.stat({ bigint: true });
-    if (!before.isFile() || before.size > BigInt(MAX_CONFIGURATION_BYTES)) {
+    if (
+      !before.isFile() ||
+      before.nlink !== 1n ||
+      before.size > BigInt(MAX_CONFIGURATION_BYTES)
+    ) {
       throw new ConfigurationError(
-        "Project configuration must be a bounded regular file.",
+        "Project configuration must be a bounded, unlinked regular file.",
         { code: "ERR_PROJECT_CONFIGURATION_READ" },
       );
     }
@@ -77,12 +151,18 @@ async function readConfinedConfiguration(path) {
         { code: "ERR_PROJECT_CONFIGURATION_READ" },
       );
     }
-    const [after, pathAfter] = await Promise.all([
-      handle.stat({ bigint: true }),
-      lstat(path, { bigint: true }),
-    ]);
+    const [after, pathAfter, canonicalPath, ancestorsAfter] = await Promise.all(
+      [
+        handle.stat({ bigint: true }),
+        lstat(path, { bigint: true }),
+        realpath(path),
+        confinedAncestors(projectPath, path),
+      ],
+    );
     if (
       !pathAfter.isFile() ||
+      pathAfter.nlink !== 1n ||
+      canonicalPath !== path ||
       before.dev !== after.dev ||
       before.ino !== after.ino ||
       before.size !== after.size ||
@@ -92,21 +172,35 @@ async function readConfinedConfiguration(path) {
       after.ino !== pathAfter.ino ||
       after.size !== pathAfter.size ||
       after.mtimeNs !== pathAfter.mtimeNs ||
-      after.ctimeNs !== pathAfter.ctimeNs
+      after.ctimeNs !== pathAfter.ctimeNs ||
+      !isDeepStrictEqual(ancestorsBefore, ancestorsAfter)
     ) {
       throw new ConfigurationError(
         "Project configuration changed while it was read.",
         { code: "ERR_PROJECT_CONFIGURATION_READ" },
       );
     }
+    let content;
     try {
-      return new TextDecoder("utf-8", { fatal: true }).decode(source);
+      content = new TextDecoder("utf-8", { fatal: true }).decode(source);
     } catch (cause) {
       throw new ConfigurationError(
         "Project configuration must contain valid UTF-8.",
         { cause, code: "ERR_PROJECT_CONFIGURATION_READ" },
       );
     }
+    return Object.freeze({
+      content,
+      protection: Object.freeze({
+        schemaVersion: 1,
+        path,
+        projectPath,
+        relativePath,
+        contentHash: createHash("sha256").update(source).digest("hex"),
+        identity: fileIdentity(after),
+        ancestors: Object.freeze(ancestorsAfter),
+      }),
+    });
   } catch (cause) {
     if (cause instanceof ConfigurationError) {
       throw cause;
@@ -162,14 +256,56 @@ export async function loadProjectConfiguration({
       { code: "ERR_PROJECT_CONFIGURATION_NOT_IGNORED" },
     );
   }
+  const loaded = await readConfinedConfiguration(
+    inspection.path,
+    projectPath,
+    inspection.relativePath,
+  );
   return Object.freeze({
     path: inspection.path,
     configuration: parseProjectConfiguration(
-      await readConfinedConfiguration(inspection.path),
+      loaded.content,
       runnerConfiguration,
       providers,
     ),
+    protection: loaded.protection,
   });
+}
+
+export async function assertProjectConfigurationProtected({
+  inspectPath,
+  projectPath,
+  protection,
+}) {
+  if (protection === null) return;
+  try {
+    const inspection = await inspectPath({
+      path: protection.path,
+      projectPath,
+    });
+    if (
+      !inspection.exists ||
+      inspection.path !== protection.path ||
+      inspection.relativePath !== protection.relativePath ||
+      inspection.tracked ||
+      !inspection.ignored
+    ) {
+      throw new Error("Project configuration confinement changed.");
+    }
+    const current = await readConfinedConfiguration(
+      protection.path,
+      projectPath,
+      protection.relativePath,
+    );
+    if (!isDeepStrictEqual(current.protection, protection)) {
+      throw new Error("Project configuration identity changed.");
+    }
+  } catch (cause) {
+    throw new ConfigurationError(
+      "The resolved project configuration changed during the run.",
+      { cause, code: "ERR_PROJECT_CONFIGURATION_CHANGED" },
+    );
+  }
 }
 
 export async function loadRunnerConfiguration(providers = PROVIDER_REGISTRY) {

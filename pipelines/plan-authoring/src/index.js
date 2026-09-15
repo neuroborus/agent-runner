@@ -43,7 +43,7 @@ function positiveIntegerSetting(defaultValue) {
   });
 }
 
-const PIPELINE_MODES = Object.freeze(["independent", "lazy"]);
+const PIPELINE_MODES = Object.freeze(["independent", "lazy", "combined"]);
 
 function pipelineMode(value) {
   return PIPELINE_MODES.includes(value);
@@ -54,11 +54,12 @@ const SETTINGS = Object.freeze({
   maxRevisionRounds: positiveIntegerSetting(20),
   mode: Object.freeze({
     defaultValue: "independent",
-    errorMessage: "must be independent or lazy",
+    errorMessage: "must be independent, lazy, or combined",
     recommendedValue: "independent",
     validate: pipelineMode,
     values: PIPELINE_MODES,
   }),
+  preferredCommitLineLimit: positiveIntegerSetting(900),
   stagnationWindowRounds: positiveIntegerSetting(3),
 });
 const TASK_INPUTS = Object.freeze({
@@ -66,6 +67,9 @@ const TASK_INPUTS = Object.freeze({
   context: Object.freeze({ filename: "context.md", optional: true }),
 });
 const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
+  operator_paused:
+    "The operator paused this run; resume restores its checkpoint and any existing blockers.",
+  operator_canceled: "The operator canceled this run; it cannot resume.",
   backend_unavailable: "The selected backend is temporarily unavailable.",
   clarification_answers_required:
     "Material clarification answers are required before planning can continue.",
@@ -76,12 +80,14 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   input_changed: "A task input changed after the run began.",
   internal_failure: "Plan authoring failed.",
   lazy_output_invalid:
-    "The lazy checkpoint result remains invalid and requires an explicit retry.",
+    "The primary convergence result remains invalid and requires an explicit retry.",
   plan_revision_limit_reached:
     "Plan revision reached its configured correction limit.",
   plan_revision_not_converging:
     "Plan revision did not converge within the bounded correction window.",
   proactive_clarification: "Optional proactive clarification input is pending.",
+  project_configuration_changed:
+    "The resolved project configuration changed; this run cannot continue.",
   product_decision_required:
     "A material product decision is required before planning can continue.",
   read_only_mutation:
@@ -134,6 +140,26 @@ function publicResumeState(run) {
 }
 
 function projectPause(run) {
+  if (["operator_paused", "operator_canceled"].includes(run.pause?.reason)) {
+    const retained = run.pause.operatorResume?.pause;
+    const explanation = PUBLIC_PAUSE_EXPLANATIONS[run.pause.reason];
+    return Object.freeze({
+      reason: run.pause.reason,
+      code: publicCode(retained?.code),
+      explanation,
+      evidence: Object.freeze(
+        Object.hasOwn(PUBLIC_PAUSE_EXPLANATIONS, retained?.reason ?? "")
+          ? [`Retained blocker: ${PUBLIC_PAUSE_EXPLANATIONS[retained.reason]}`]
+          : [],
+      ),
+      resumeState: null,
+      nextActions: Object.freeze(
+        run.pause.reason === "operator_paused"
+          ? [Object.freeze({ type: "resume", action: null })]
+          : [],
+      ),
+    });
+  }
   if (run.pause === null) {
     return null;
   }
@@ -205,6 +231,15 @@ function projectStatus(run) {
 }
 
 function validateResumeAction(run, action) {
+  if (run.pause?.reason === "project_configuration_changed") {
+    throw new Error("A run with changed project configuration cannot resume.");
+  }
+  if (
+    run.pause?.reason === "operator_paused" &&
+    run.pipelineState.workflowState === "WAITING_FOR_USER" &&
+    action === null
+  )
+    return;
   if (
     run.pipelineState.workflowState !== "WAITING_FOR_USER" ||
     action !== null ||
@@ -240,12 +275,49 @@ export function migratePlanAuthoringStateV2(run) {
   });
 }
 
+export function migratePlanAuthoringStateV3(run) {
+  const current = run.pipelineState;
+  return Object.freeze({
+    ...current,
+    settings:
+      current.settings === null
+        ? null
+        : Object.freeze({
+            ...current.settings,
+            preferredCommitLineLimit:
+              SETTINGS.preferredCommitLineLimit.defaultValue,
+          }),
+  });
+}
+
+export function migratePlanAuthoringStateV4(run) {
+  const current = run.pipelineState;
+  if (
+    current.settings !== null &&
+    ![undefined, "independent", "lazy"].includes(current.settings.mode)
+  ) {
+    throw new Error("Unsupported legacy plan-authoring mode.");
+  }
+  return Object.freeze({
+    ...current,
+    settings:
+      current.settings === null
+        ? null
+        : Object.freeze({
+            ...current.settings,
+            mode: current.settings.mode ?? "independent",
+          }),
+  });
+}
+
 export const planAuthoringPipeline = Object.freeze({
   id: PLAN_AUTHORING_PIPELINE_ID,
-  stateVersion: 3,
+  stateVersion: 5,
   migrations: Object.freeze({
     1: migratePlanAuthoringStateV1,
     2: migratePlanAuthoringStateV2,
+    3: migratePlanAuthoringStateV3,
+    4: migratePlanAuthoringStateV4,
   }),
   roles: ROLES,
   resolveActiveRoles,

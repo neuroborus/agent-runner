@@ -66,15 +66,16 @@ contract.
 
 All pipelines additionally require:
 
-- Own one `mode` setting with exactly `independent` and `lazy`; resolve a
-  missing value and every legacy run to `independent`, persist the resolved
-  value at creation, and never reload it on resume.
+- Own one descriptor-defined `mode` setting. All pipelines support
+  `independent`, `lazy`, and `combined`.
+  Missing and legacy missing modes resolve to `independent`. Persist the
+  resolved value at creation and preserve it on resume.
 - Validate configured role values deterministically, but in lazy mode resolve,
   probe, persist, source-session-check, invoke, and publicly project only the
   Planner or Worker. Preserve inactive Reviewer and Arbiter configuration for
   a future independent run without exposing provider-private values.
 - Fork a deliberately supplied source session independently by primary and
-  review checkpoints in independent mode. In lazy mode fork it exactly once
+  review checkpoints in independent and combined modes. In lazy mode fork it exactly once
   into the logical primary role for the entire run, then continue the child or
   reconstruct the same role without reforking the source.
 - In lazy mode alternate a writable primary-agent `CHECK_AND_FIX` turn with a
@@ -99,7 +100,28 @@ All pipelines additionally require:
   confirms their resolved path is ignored; never alter target ignore rules
   automatically.
 
+`plan-authoring` additionally requires:
+
+- In combined mode, converge the durable draft with Planner `CHECK_AND_FIX`
+  and a distinct `CLEAN_CONFIRM`, then require the complete independent
+  Reviewer gate before deterministic validation and runner-owned artifact writing.
+- Reviewer revisions restart primary convergence and invalidate dependent
+  approvals. Self-confirmation findings go directly to fixing; self-review and
+  structural exhaustion pause without arbitration. Only independent finding
+  resolution may invoke the fresh Arbiter. Count accepted corrections once.
+- Keep every agent turn repository-read-only, including check/fix; agents return
+  drafts as structured output and never write artifacts directly.
+
 `plan-execution` additionally requires:
+
+- In combined mode use independent roles and bootstrap, then converge Worker
+  `CHECK_AND_FIX` and a distinct read-only `CLEAN_CONFIRM` before the complete
+  independent candidate Reviewer gate. Both approve the same candidate; Reviewer
+  terminal confirmation covers the finalized fingerprint and validation evidence.
+- Route combined self-findings directly to fixing and restart primary convergence
+  after content repairs. Only independent finding resolution can invoke Arbiter;
+  unresolved bootstrap disagreements and primary exhaustion remain blocking.
+  Preserve correction budgets, exact overrides, and consumed-effect recovery.
 
 - In independent mode run Worker and Reviewer bootstrap independently and
   read-only. In lazy mode use the Worker alone to establish the complete
@@ -134,11 +156,19 @@ All pipelines additionally require:
 
 `polishing` additionally requires:
 
+- In combined mode use independent roles and bootstrap, then Worker check/fix
+  and separate read-only clean confirmation before independent candidate review.
+  Both approve the same candidate. Independent Reviewer terminal confirmation
+  covers finalization before runner-owned handoff. Self-findings return directly
+  to fixing; content repairs restart convergence. Only independent finding
+  resolution can invoke Arbiter; other bootstrap failures and primary exhaustion
+  remain blocking. Preserve exact overrides and bounded correction accounting.
+
 - In independent mode run Worker and Reviewer bootstrap independently and
   read-only. In lazy mode use the Worker alone to establish the complete
   staging-independent inventory under the same deterministic rules.
-- Allow only Worker polishing, finalization, finding-resolution, and lazy
-  check/fix turns to change safe workspace content. No agent turn may change
+- Allow only Worker polishing, finalization, finding-resolution, and
+  lazy or combined check/fix turns to change safe workspace content. No agent turn may change
   the index; the runner alone stages the finalized and reviewed polishing
   handoff.
 - Keep bootstrap, validation-migration, and finalization required-check
@@ -163,12 +193,13 @@ All pipelines additionally require:
 | `bin/agent-run.js`                | Thin executable entry point                                          |
 | `src/index.js`                    | Public root source boundary                                          |
 | `src/cli.js`                      | Argument parsing and terminal-facing command dispatch                |
+| `src/editor.js`                   | Shared shell-free editor selection, launch, and exit outcomes        |
 | `src/mcp/index.js`                | Public STDIO MCP protocol capability boundary                        |
 | `src/mcp/`                        | Private schemas, projections, waits, detached dispatch, reporting    |
 | `src/config/index.js`             | Public runner-configuration capability boundary                      |
 | `src/config/`                     | Private parsing, confined loading, profiles, and resolution          |
 | `src/clarifications/index.js`     | Public clarification-service boundary                                |
-| `src/clarifications/`             | Private coordination, confined transcript, and editor modules        |
+| `src/clarifications/`             | Private authorization coordination and confined transcript files     |
 | `src/pipeline-registry.js`        | Explicit registry of built-in pipelines                              |
 | `src/runner/index.js`             | Public runner-orchestration capability boundary                      |
 | `src/runner/`                     | Private input, role/session, migration, and orchestration modules    |
@@ -176,6 +207,8 @@ All pipelines additionally require:
 | `src/state/`                      | Private service, files, journals, actions, leases, and validation    |
 | `src/git/index.js`                | Public Git-safety capability boundary                                |
 | `src/git/`                        | Private service, command, content, commit, and handoff modules       |
+| `src/guidance/index.js`           | Public operator-guidance capability boundary                         |
+| `src/guidance/`                   | Private composition, confined documents, and durable local updates   |
 | `src/trusted-validation/index.js` | Public runner-trusted validation capability boundary                 |
 | `src/trusted-validation/`         | Private contracts, snapshots, sandboxing, and command execution      |
 | `src/agents/index.js`             | Public agent-adapter directory boundary                              |
@@ -193,6 +226,7 @@ All pipelines additionally require:
 | `test/clarifications/`            | Clarification-service behavior tests                                 |
 | `test/config/`                    | Configuration parsing, loading, and resolution tests                 |
 | `test/git/`                       | Git-safety behavior tests                                            |
+| `test/guidance/`                  | Operator guidance, local-file safety, and update recovery tests      |
 | `test/integration/`               | Cross-capability workflow integration tests                          |
 | `test/mcp/`                       | MCP control-plane and issue-reporting behavior tests                 |
 | `test/state/`                     | State persistence and safety behavior tests                          |

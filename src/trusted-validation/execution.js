@@ -19,6 +19,8 @@ import {
   sep,
 } from "node:path";
 
+import { spawnOwnedProcess } from "../agents/index.js";
+
 const BUBBLEWRAP_CANDIDATES = Object.freeze([
   "/usr/bin/bwrap",
   "/bin/bwrap",
@@ -219,11 +221,16 @@ export async function runExactCommand(
   {
     cwd,
     environment,
+    ownershipMode = "ordinary",
     readinessRequired = false,
     terminationGraceMs = DEFAULT_TERMINATION_GRACE_MS,
     timeoutMs,
+    signal,
+    onProcess,
+    spawnProcess = onProcess === undefined ? spawn : spawnOwnedProcess,
   },
 ) {
+  signal?.throwIfAborted();
   if (process.platform === "win32") {
     return {
       status: "BLOCKED",
@@ -235,7 +242,7 @@ export async function runExactCommand(
   }
   let child;
   try {
-    child = spawn(command.executable, command.arguments, {
+    child = spawnProcess(command.executable, command.arguments, {
       cwd,
       detached: true,
       env: environment,
@@ -243,6 +250,14 @@ export async function runExactCommand(
       stdio: readinessRequired
         ? ["ignore", "ignore", "ignore", "pipe"]
         : "ignore",
+      ...(onProcess === undefined
+        ? {}
+        : {
+            signal,
+            onProcess,
+            ownershipMode,
+            descendantGraceMs: terminationGraceMs,
+          }),
     });
   } catch {
     return {
@@ -260,7 +275,10 @@ export async function runExactCommand(
     );
   });
   let ready = !readinessRequired;
-  child.stdio?.[3]?.once("data", (value) => {
+  child.stdout?.resume();
+  child.stderr?.resume();
+  child.stdin?.end();
+  child.stdio?.[onProcess === undefined ? 3 : 4]?.once("data", (value) => {
     ready = value[0] === 1;
   });
   let timeout;
@@ -268,7 +286,14 @@ export async function runExactCommand(
     timeout = setTimeout(() => resolvePromise({ type: "timeout" }), timeoutMs);
     timeout.unref();
   });
-  const outcome = await Promise.race([closed, expired]);
+  let abort;
+  const aborted = new Promise((resolve) => {
+    abort = () => resolve({ type: "aborted" });
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+  });
+  const outcome = await Promise.race([closed, expired, aborted]);
+  signal?.removeEventListener("abort", abort);
   clearTimeout(timeout);
   if (outcome.type === "error" || !Number.isSafeInteger(child.pid)) {
     return {
@@ -279,11 +304,13 @@ export async function runExactCommand(
       reason: "spawn",
     };
   }
-  if (outcome.type === "timeout") {
-    const terminated = await terminateProcessGroup(
-      child.pid,
-      terminationGraceMs,
-    );
+  if (outcome.type === "timeout" || outcome.type === "aborted") {
+    // A supervised launch owns its original child handle and a PID namespace.
+    // Never rediscover a process group after that wrapper may have exited.
+    let terminated = true;
+    if (child.ownedCompletion === undefined) {
+      terminated = await terminateProcessGroup(child.pid, terminationGraceMs);
+    } else child.kill("SIGKILL");
     const finalOutcome = await Promise.race([
       closed,
       delay(terminationGraceMs).then(() => null),
@@ -294,6 +321,8 @@ export async function runExactCommand(
         { code: "ERR_TRUSTED_VALIDATION_PROCESS_TREE_ACTIVE" },
       );
     }
+    await child.ownedCompletion;
+    signal?.throwIfAborted();
     return {
       status: "BLOCKED",
       exitCode: Number.isSafeInteger(finalOutcome?.exitCode)
@@ -305,7 +334,29 @@ export async function runExactCommand(
       reason: ready ? "timeout" : "isolation",
     };
   }
-  let descendantsActive = processGroupExists(child.pid);
+  const supervision = await child.ownedCompletion;
+  signal?.throwIfAborted();
+  const executed = supervision?.outcome ?? outcome;
+  if (executed.type === "error") {
+    return {
+      status: "BLOCKED",
+      exitCode: null,
+      signal: null,
+      timedOut: false,
+      reason: "spawn",
+    };
+  }
+  if (supervision?.descendantsStopped) {
+    return {
+      status: "BLOCKED",
+      exitCode: null,
+      signal: null,
+      timedOut: false,
+      reason: ready ? "process-tree" : "isolation",
+    };
+  }
+  let descendantsActive =
+    supervision === undefined && processGroupExists(child.pid);
   if (descendantsActive && ready) {
     descendantsActive = !(await waitForProcessGroupExit(
       child.pid,
@@ -341,9 +392,11 @@ export async function runExactCommand(
     };
   }
   return {
-    status: outcome.exitCode === 0 ? "PASS" : "FAIL",
-    exitCode: Number.isSafeInteger(outcome.exitCode) ? outcome.exitCode : null,
-    signal: typeof outcome.signal === "string" ? outcome.signal : null,
+    status: executed.exitCode === 0 ? "PASS" : "FAIL",
+    exitCode: Number.isSafeInteger(executed.exitCode)
+      ? executed.exitCode
+      : null,
+    signal: typeof executed.signal === "string" ? executed.signal : null,
     timedOut: false,
     reason: "exit",
   };
@@ -601,6 +654,8 @@ export function sandboxTrustedCommand(
         }),
       }),
       environment: safeEnvironment(environment),
+      // This command establishes its own mandatory isolation profile.
+      ownershipMode: "native-sandbox-provider",
       readinessRequired: true,
     });
   } catch (cause) {

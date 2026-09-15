@@ -25,6 +25,7 @@ dependency before an actual import needs it.
 - Versioned runner configuration loading, validation, and role resolution.
 - Run IDs, atomic state, append-only events, resume, and status.
 - Clarification files, editor invocation, transcript updates, and input hashes.
+- Common operator guidance, complete local additions, and safe durable replacement.
 - Frozen provider registration plus adapter execution and access-mode
   enforcement.
 - Git snapshots, content fingerprints, read-only guards, remote/identity guards,
@@ -89,6 +90,17 @@ The Codex provider lives under `src/agents/codex/` behind its provider
 `index.js`. The root agent boundary imports only that index; the adapter, App
 Server transport, local-commit executor, and workspace storage remain private
 siblings that own Codex processes, protocols, flags, parsing, and sessions.
+The private Codex `schema.js` validates the effective response schema before
+any provider activity in `run`, including local-commit readiness. Its recursive
+keyword allowlist and structural checks supplement the shared JSON,
+strict-object, size, and depth checks without imposing Codex restrictions on
+other adapters. It traverses schema positions rather than property names or
+literal data, permits resolved local recursive references, and rejects
+unsupported declarations with terminal `ERR_INVALID_CODEX_SCHEMA` before
+probing, spawning, or recovery. This input-contract error is neither backend
+unavailability nor malformed-output correction. Pipeline-owned normalizers
+remain authoritative for semantic constraints such as terminal finding-ID
+uniqueness that the portable response schemas cannot express.
 
 The root `src/agents/index.js` is the only agent API consumed outside the agent
 capability. Its private `registry.js` defines one frozen, source-controlled
@@ -111,6 +123,46 @@ through its static descriptor. The descriptor also selects the active roles
 from its resolved settings, including all mode semantics; pipeline states remain
 workspace-owned rather than becoming root runtime policy.
 
+Execution's private `mode-policy.js` separates active roles, independent
+bootstrap, primary convergence, independent review, terminal confirmer,
+arbitration, and primary session scope. The workflow, persisted-state validator,
+resume-action checks, migrations, and journal-proven confirmation recovery use
+those decisions. Ordinary and stop-reconciled content repairs rejoin the same
+candidate checkpoint. Session selection preserves one run-wide Worker source
+fork in lazy mode, checkpoint forks in independent and combined modes, and fresh arbitration
+and output-correction contexts. Permissions, one-shot commit verification, and bounded
+correction accounting remain with their existing workflow operations; policy
+selection grants no additional repository authority.
+
+Combined execution runs Worker check/fix and a separate read-only clean
+confirmation before the complete independent candidate Reviewer gate. Both
+candidate approvals bind the same content fingerprint. Finalization may format
+that content; a distinct Reviewer terminal confirmation approves its resulting
+fingerprint and validation evidence before one-shot commit authorization.
+Content repairs restart primary convergence. Self-findings go directly to fixing;
+independent findings retain disputes, withdrawals, exact recorded overrides, and
+fresh on-demand arbitration. Unresolved bootstrap disagreements and primary
+exhaustion pause without arbitration. Corrections remain bounded and interrupted
+work is charged once; resume preserves the saved mode and consumed commits remain
+verification-only.
+
+Execution's private `gate-evidence.js` composes primary clean evidence,
+independent candidate approval, passing finalization, and terminal confirmation.
+Persisted validation, normal routing, migration invalidation, journal-proven
+recovery, stop reconciliation, and new commit authorization share these predicates
+and resets. Candidate approval stays bound to the inspected content; finalization
+may format it, so its resulting fingerprint requires distinct terminal approval.
+Content repairs clear dependent evidence. Unchanged resolutions reconverge the
+candidate and retain passing finalization only subject to fresh content and
+infrastructure checks. Correction ledgers keep their existing bounded accounting.
+Execution state version 17 adds bounded `primaryFindings` without renaming the
+persisted lazy correction ledger. Leased version-16 migration adds an empty list
+and preserves saved mode, counters, gate evidence, and pending effects. Combined
+primary proof and independent approval remain distinct, including journal-proven
+confirmation recovery.
+Consumed effects still bypass new authorization and use verification-only recovery;
+the shared predicates neither replace journal provenance nor grant Git authority.
+
 The root CLI owns `--clarify` as a common run-lifecycle option. Role and
 pipeline-specific options remain in pipeline descriptors.
 
@@ -122,6 +174,28 @@ V1 registers:
   per step.
 - `polishing`: polishes, finalizes, and reviews an existing dirty worktree, then
   stages the complete result while leaving it uncommitted.
+
+Polishing's private `mode-policy.js` separates active roles, bootstrap
+independence, primary convergence, independent review, terminal confirmer,
+arbitration eligibility, and primary session scope. Its workflow, persisted
+validator, resume checks, and legacy migrations share those decisions. Ordinary
+and interrupted repairs return through the same candidate checkpoint. Lazy keeps
+one run-wide Worker source fork; independent checkpoints remain isolated and
+Arbiter and correction contexts remain fresh. Persisted correction shapes and
+budgets do not change. No policy grants index authority: staging remains the
+runner-owned handoff effect. Polishing accepts independent, lazy, and combined.
+
+Polishing's private `gate-evidence.js` composes primary clean, independent
+candidate, finalization, terminal-confirmation, and handoff predicates. Routing,
+persisted validation, legacy migration, and handoff authorization share these
+checks. Candidate approval binds its inspected fingerprint; finalization can
+format it into a different fingerprint that needs distinct terminal approval.
+Content repair clears dependent evidence. Unchanged resolution retains only
+fingerprint-bound passing finalization, subject to live content and infrastructure
+rechecks after reconvergence. Legacy active evidence reconverges under the lease;
+accepted handoff evidence survives migration and completed effects remain
+verification-only. No persisted shape, mode, correction budget, or index permission
+changes.
 
 The pipeline registry is static. V1 has no dynamic plugins, workflow DSL, or
 generic DAG executor.
@@ -139,12 +213,21 @@ For a new run, the root also discovers an optional ignored and untracked
 `<project>/LOCAL_ARTIFACTS/agent-runner.json`, or uses an explicitly selected
 confined project path from CLI/MCP. Both files require `schemaVersion: 1`;
 unknown versions, pipelines, roles, settings, and fields are errors. Project
-configuration may select runner-trusted aliases, override execution defaults,
-pipeline roles and settings, and select a normalized repository-relative
-artifact root. It cannot define profiles, credentials, binaries, or arbitrary
-environment values. Tracked, non-ignored, missing explicit, traversing, and
-symbolic-link paths are rejected without creating a file or changing ignore
-rules.
+configuration may define exact trusted commands, select trusted aliases,
+override execution defaults, pipeline roles and settings, and select a normalized
+repository-relative artifact root. It cannot define profiles, credentials,
+provider binaries, or arbitrary environment values. Tracked, non-ignored,
+missing explicit, traversing, and symbolic-link paths are rejected without
+creating a file or changing ignore rules.
+
+The confined read that supplies parsed project values also produces a
+versioned protection record. It pins the canonical project and file paths,
+repository-relative location, SHA-256 content hash, device/inode and bounded
+file metadata, plus device/inode evidence for every real directory from the
+project root to the file's parent. The initial read and every later inspection
+use a bounded no-follow descriptor and compare path, descriptor, and ancestor
+identity before and after reading. A project configuration must have one hard
+link.
 
 The V1 shape is:
 
@@ -226,9 +309,22 @@ The root loader owns only the versioned envelope, strict field validation, and
 resolution precedence; it does not duplicate pipeline-specific role or setting
 lists.
 
-Every built-in descriptor owns one string `mode` setting with exactly
-`independent` and `lazy`. A missing value resolves to `independent`, which is
-the default and recommended option because its distinct primary and review
+Plan authoring additionally owns the positive-safe-integer
+`preferredCommitLineLimit`, default 900. Root configuration and a safe project
+overlay resolve it through existing precedence before creation. It is a prompt
+heuristic for anticipated additions plus deletions, including tests and
+documentation: prefer cohesive commits within the target and explain genuinely
+indivisible exceptions. It changes neither the shared plan contract nor execution
+validation. Authoring state version 4 persists the value; the ordered version-3
+migration supplies 900 to non-null legacy settings without configuration reload,
+progress changes, or effect replay. The existing lease governs persistence of
+that migration. Authoring planning, review, self-review, and recovery prompts
+use the saved value. CLI `pipelines` displays descriptor-owned setting defaults;
+MCP `pipelines_list` projects the same metadata.
+
+Every built-in descriptor owns one string `mode` setting supporting
+`independent`, `lazy`, and `combined`. A missing value resolves to
+`independent`, which is the default and recommended option because its distinct primary and review
 roles provide genuinely independent semantic review. That independence uses
 more provider context and tokens. `lazy` is an explicit lower-consumption
 choice that uses only the Planner for plan authoring or the Worker for execution
@@ -254,20 +350,25 @@ the run. Runner configuration supplies the base value and a safe project
 overlay may replace it. The resolved selection is persisted with the other
 pipeline settings and is not reloaded on resume.
 
-`trustedCommands` is runner-only configuration. Each lowercase alias binds one
-exact inventory command to one executable and argument vector; definitions
-cannot carry environment values. The runner catalog accepts at most 256
-definitions, while each immutable run snapshot remains limited to 32 selected
-commands. Direct argument strings may contain line feeds for exact multiline
-scripts; other control characters remain invalid. Plan execution and polishing
-each own a `trustedChecks` setting that may select aliases, and an ignored
-project configuration may replace that pipeline's selection, but project
-configuration cannot define an alias, binary, argument, environment value, or
-new host command. The default selection is empty. Before agent work, the root
+`trustedCommands` is accepted in root and safe project configuration through
+the same exact-vector validator. Each lowercase alias binds one exact inventory
+command to one executable and argument vector. Definitions reject shell-string
+substitutes and environment, credential, or host-authority fields.
+Configuration privately merges normalized root then project catalogs in stable
+order, deduplicates identical same-name definitions, and rejects conflicts even
+when unselected. The merged catalog accepts at most 256 definitions, while each
+immutable run snapshot remains limited to 32 selected commands. Direct argument
+strings may contain line feeds for exact multiline scripts; other control
+characters remain invalid. Plan execution and polishing each own a
+`trustedChecks` setting; an ignored project configuration may replace that
+pipeline's selection with root or project aliases. The default selection is
+empty, and selected order determines snapshot order. Profile implementations
+and trusted execution policy remain runner-owned. Before agent work, the root
 resolves it into an immutable snapshot containing every selected vector,
 deterministic command identities, an ordered command fingerprint, and a
 trusted-configuration fingerprint. Resume uses that durable snapshot without
-reloading either configuration source.
+reloading either configuration source. Later project configuration changes
+remain subject to the protected-input guard.
 
 ## Run Lifecycle
 
@@ -276,6 +377,9 @@ project configuration, applies run-wide, role-specific, and accepted
 pipeline-setting overrides, asks the descriptor for the active roles, and
 persists those resolved roles, the resolved settings, artifact root, and
 optional source-session reference and profile before pipeline work begins.
+Common run-envelope version 7 retains the optional project-configuration
+protection record. Older runs normalize the absent field to `null`; migration
+never fabricates evidence by inspecting a current file.
 `run` then holds the new run's per-run lease while invoking its statically
 registered workflow. Plan execution and polishing additionally hold one external lease
 keyed by the canonical Git worktree before any workflow-owned mutation. The
@@ -283,6 +387,17 @@ runner always acquires the per-run lease first and releases the worktree lease
 first. `resume` recovers the durable event history and reconstructs the same
 runtime from persisted state without reloading either configuration source or
 requiring a live native session. `status` remains lock-free.
+
+The root runner, rather than a pipeline or provider, checks a non-null
+protection record before recovery and stop reconciliation, immediately before
+and after every provider turn, and before trusted execution, commit
+authorization/consumption, and handoff. Removal, content drift, same-content
+replacement, hard or symbolic links, changed ignored/tracked status, or
+ancestor substitution produces only `ERR_PROJECT_CONFIGURATION_CHANGED` and
+the bounded non-resumable `project_configuration_changed` pause. It does not
+restore or replace the file. If an irreversible commit or handoff effect has
+already begun, its existing verification-only accounting remains authoritative
+before further execution is blocked.
 
 `artifactRoot` defaults to `LOCAL_ARTIFACTS`. Plan execution and polishing use
 it only for runner-owned repository-local artifacts beneath
@@ -344,17 +459,132 @@ read-only repository mutation never projects acceptance of contaminated or
 hybrid changes. This is a read-only projection of existing durable state and
 does not change the root or pipeline state versions.
 
+## Operator Guidance
+
+`docs/OPERATOR_GUIDE.md` is the installed, canonical CLI/MCP operating procedure.
+It distinguishes expected pauses, genuine unexpected defects, and stable
+project lessons. Operators follow current actions and resume resumable work
+without taking it over. Valid dirty work from a genuinely non-resumable run may
+enter polishing after ownership ends and inputs are reconciled, preserving
+contamination safeguards and the uncommitted outcome.
+
+The guidance capability lives under `src/guidance/` behind its public `index.js`.
+Private content, contract, file, and service modules own composition, configuration
+selection, confined access, and durable replacement. Its factory is deliberately
+exported from `src/index.js`; transports consume the same capability rather
+than duplicating policy. No pipeline depends on it.
+
+`createGuidanceService().read({ projectPath, projectConfigurationPath? })` loads
+the common guide from the installed runner and uses public configuration and
+Git services to resolve `<artifactRoot>/agent-runner/rules.md`. Its result
+contains canonical project/local/configuration paths, complete `commonContent`
+and `localContent`, `combinedContent`, and `localHash`. Rendering separates the
+documents and states that local additions cannot weaken common safety or
+product contracts. Missing local content is an empty string with a null hash;
+an existing document, including an empty one, has a SHA-256 hash. Reading
+creates neither local artifacts nor external state.
+
+Both documents have a 64 KiB UTF-8 byte limit. Reads and replacements reject
+invalid encoding, unsafe control characters, and recognizable credential or
+provider-transcript formats without echoing or partially redacting content.
+Operators remain responsible for excluding sensitive material that cannot be
+recognized deterministically. Local paths must be ignored, untracked, confined,
+and disjoint from project configuration and protected control paths. Missing
+destinations receive the same safety inspection. Symlinks, hard links,
+non-regular files, and unsafe ancestors fail closed.
+
+The public `update` method accepts the same selectors plus complete
+`localContent`, nullable `expectedHash`, and `idempotencyKey`. It validates the
+external-state boundary before intent or lease writes, rejecting state and
+project trees that contain one another. It binds the key to
+canonical arguments and a content hash, and reserves the destination and a hash
+of resolved configuration. The existing action store accepts the narrow
+`guidance_update` kind. Context and receipts contain paths, hashes, publication
+phases, and filesystem identity, never document bodies. The state service's
+`withGuidanceLease` holds the canonical-worktree lease with an opaque operation
+owner, excluding mutating execution and other guidance writers across processes.
+A contender receives a conflict and may retry its same incomplete intent after
+ownership is released.
+
+Filesystem access is relative to pinned directory descriptors using
+`/proc/self/fd` or `/dev/fd`; unavailable descriptor access fails closed.
+Directory identities and lexical confinement are rechecked around effects so
+ancestor replacement cannot redirect reads, writes, publication, or cleanup.
+Atomic rename publishes an owner-only, synchronized temporary file in the
+destination directory; that temporary path must also be ignored. Publication
+rechecks configuration, path safety, execution ownership, the expected hash,
+and inspected file identities.
+
+An intent records reserved, writing, prepared, and published phases. Temporary
+inode provenance is persisted before writing, and complete file identity before
+rename. Recovery removes a proven partial temporary write or recognizes its
+own renamed inode. It never adopts another writer's identical bytes or
+overwrites an intervening edit. An unproven temporary file left before
+provenance was recorded is neither adopted nor deleted; retry reserves a fresh
+name. Changed configuration cannot redirect incomplete publication. A durable
+published record completes its receipt without replaying the effect. Completed
+retries return the recorded bounded receipt (`projectPath`, `localPath`,
+`localHash`, `updated`) without reapplying the old hash comparison or reloading
+configuration. Receipts describe their operation, not the current document.
+
+The CLI dispatches `guidance` and `guidance edit` directly to this capability
+with project/configuration selectors; it never constructs a pipeline runner.
+The capability's `edit` method reads and pins the complete original selection,
+opens an owner-only temporary document outside the project, and validates the
+entire result after the editor closes. It uses the same confined file access
+and shared writer, retaining the original destination and configuration hash
+through the publication boundary. Even unchanged content must pass current
+path, hash, configuration, and execution-ownership checks. A missing document
+left unchanged remains absent, with a null-hash no-op receipt; explicit empty
+replacement still creates an empty document. Temporary copies are removed
+through their pinned parent directory, without following substituted links.
+
+`src/editor.js` owns shared shell-free command parsing, `$VISUAL`/`$EDITOR`
+selection, launch fallback, and exit/signal outcomes. Only an unavailable or
+unparseable editor command permits fallback. Guidance rejects a nonzero or
+signalled close and never publishes that edit. Clarification retains its
+existing policy: any launched editor close consumes its one-shot authorization,
+even after a nonzero exit or signal. Authorization, document safety, and
+publication remain in their owning capabilities. MCP never opens an editor.
+
+Local guidance is supervisor context only: it is absent from role prompts, run
+state, and resume configuration. Guidance never constructs a pipeline run,
+changes ignore rules, replaces the common guide, mutates Git control state,
+or performs finalization or commit work.
+
 ## MCP Control Plane
 
 `agent-run mcp` exposes the same static pipeline registry and runner through the
 official Node MCP SDK over STDIO only. The private `src/mcp/service.js` module
-owns the seven pipeline-control tools: `pipelines_list`, `run_start`, `run_status`,
-`run_activity`, `run_wait`, `run_respond`, and `run_resume`, plus the
+owns the nine pipeline-control tools: `pipelines_list`, `run_start`, `run_status`,
+`run_activity`, `run_wait`, `run_respond`, `run_resume`, `run_pause`, and
+`run_cancel`; it also owns the shared-capability tools `guidance_read` and
+`guidance_update`, and the
 conditionally registered MCP-only `unexpected_issue_report`. It contains
 transport schemas and concise projections, not a second workflow
 implementation. The private `src/mcp/reporting.js` module owns the narrow local
 publication service. Standard output belongs exclusively to MCP; bounded
 protocol diagnostics go to standard error without prompts or model transcripts.
+
+One compact startup instruction asks the supervisor to call `guidance_read`
+once before first managing a run for each project. It remains present when
+issue reporting is disabled; tool descriptions do not repeat the guide.
+Both strict guidance schemas accept `projectPath` and optional
+`projectConfigurationPath`. Reading returns complete common and local content,
+combined rendering, resolved paths, and the nullable local hash. Replacement
+also requires complete `localContent`, nullable `expectedHash`, and an
+`idempotencyKey`, returning only the bounded publication receipt. An empty
+document removes local additions. Reading is annotated read-only; replacement
+is destructive, idempotent, and local.
+
+MCP delegates both calls directly to `src/guidance/index.js`, sharing the
+control plane's run store and current configuration loader. That capability
+owns file safety, byte and content validation, composition, worktree exclusion,
+action intents, interrupted-publication recovery, and receipts. MCP neither
+opens an editor nor adds another action wrapper. Completed retries replay the
+recorded receipt without overwriting later CLI or MCP edits; stale edits require
+a fresh read, reconciliation, and a new mutation key. Guidance remains outside
+role prompts, run state, and resume configuration.
 
 Unexpected-issue reporting remains deliberate and caller-initiated. Its tool
 description and server instructions limit it to a supervising client agent
@@ -379,7 +609,7 @@ or overwriting an existing path.
 Mutating MCP calls require an opaque idempotency key. The state layer hashes the
 key, binds it to the tool and canonical arguments, and durably records an action
 intent before mutation and a receipt before returning. An exact retry returns
-the receipt; reuse with different arguments fails. An incomplete intent is
+the receipt; reuse with different arguments fails. An incomplete run intent is
 reconciled against the reserved run ID, current revision, submitted transcript
 hash, and execution lease before work is launched again.
 
@@ -404,19 +634,31 @@ remains deterministic when the competing lease is released between MCP polls.
 An MCP disconnect, tool timeout, worktree conflict, or duplicate recovery
 launch cannot create a second workflow owner.
 
-MCP start fields remain additive. `run_start.mode` accepts only `independent`
-and `lazy` and has the same highest precedence as CLI `--mode`. MCP guidance
-states that `independent` is the default and recommended choice for genuinely
+`run_pause` and `run_cancel` delegate directly to the state-owned stop action,
+so the acceptance event and receipt are durable before either tool returns.
+Both require the caller's exact inspected revision and idempotency key. An
+exact retry replays the receipt; a stale or conflicting request never refreshes
+itself. A live execution owner observes the durable request through the runner
+monitor. If ownership was already lost, MCP launches a detached action-free
+resume to perform the same-run reconciliation; execution and worktree leases
+still exclude a second owner. Client cancellation stops only the tool's wait
+for ownership and does not retract the request or terminate the detached child.
+
+MCP start fields remain additive. `run_start.mode` exposes the union of
+descriptor modes (`independent`, `lazy`, `combined`); the selected pipeline
+validates availability. It has the same highest precedence as CLI `--mode`.
+MCP guidance states that `independent` is the default and recommended choice for genuinely
 independent semantic review despite its higher context and token cost, and that
 `lazy` is an opt-in lower-consumption tradeoff without independent review that
-must never be selected automatically. `sourceSession` defaults to unset. When
+must never be selected automatically. `combined` adds primary
+convergence before independent review. `sourceSession` defaults to unset. When
 a compatible current native session is available, the controlling agent offers
 a fresh start and a deliberate fork choice, including its trusted source
 profile when known. An unknown profile permits only `current` inheritance; the
 agent never guesses an alias, inspects provider-private storage, or interprets
 the opaque native ID. The field is passed only after the user selects the fork.
-Independent mode forks the complete source context into primary and review
-roles; lazy mode forks it once into the primary role. A fresh start is
+Independent and combined modes fork the complete source context into primary
+and review roles; lazy mode forks it once into the primary role. A fresh start is
 recommended for a long, multi-topic, or uncertain source session to avoid
 unnecessary provider context and quota use.
 
@@ -426,9 +668,11 @@ does not appear in the latter enum; the selected installed adapter must still
 prove native fork support at its capability probe.
 
 `run_wait` is one revision-driven server-side wait that ends at an unresolved
-`WAITING_FOR_USER`, `DONE`, `FAILED`, or its caller-selected timeout. Optional
-MCP progress notifications carry only bounded public activity with role labels;
-they do not wake a model or alter the run. Cancellation cancels only that wait.
+`WAITING_FOR_USER`, `DONE`, `FAILED`, `CANCELED`, or its caller-selected
+timeout. Optional MCP progress notifications carry only bounded public activity
+with role labels; they do not wake a model or alter the run. Cancellation
+cancels only that wait.
+
 MCP status and wait also project one bounded `execution` object. Its finite
 `state` is `running` while the per-run execution lease has a live owner,
 `interrupted` when persisted provider activity has lost its owner, and `idle`
@@ -442,15 +686,51 @@ interrupted process without polling or a heartbeat.
 recommendations. Status, wait, and activity project the persisted resolved mode
 without inactive role configuration or provider-private data. `run_activity`
 remains an explicit cursor-based history read rather than a polling primitive.
+Status and wait additionally expose only the pending stop kind and accepted
+revision while reconciliation is incomplete; the request hash, suspended
+checkpoint, and internal ownership evidence remain private.
+
 V1 does not require the MCP Tasks extension, a network transport,
 authentication, or a daemon.
 
 ## External Run State
 
+The state service's internal `loadRunHistory` operation returns the run and
+complete validated events from one authoritative snapshot. It shares journal
+continuity, size, migration-envelope, and snapshot-consistency checks with
+ordinary reads and preserves lock-free, non-repairing status semantics.
+Recovery still repairs incomplete tails and lagging snapshots only under the
+run lease. Optional expected-revision transitions reject stale evidence before
+appending anything.
+
+The runner supplies this private history to a pipeline's optional
+`prepareRecovery` descriptor operation. Plan execution binds legacy terminal
+confirmation eligibility to the inspected run object and revision; no history
+or recovery authorization is serialized into public run data. Status may
+project supported migrations in memory, while execution first persists the
+existing migration chain and obtains fresh history under both execution
+leases. Plan-execution resume revalidates canonical project and task boundaries
+inside the worktree lease, including restart after a durable recovery transition.
+Pipeline policy validates actual candidate/finalization transitions and their
+intervening fingerprint lineage. A migrated terminal snapshot alone
+cannot establish acceptance. The exact legacy opaque failure can then enter
+`CONFIRM` through a revision-checked write-ahead transition carrying the
+read-only active request. Existing interrupted-turn reconstruction handles a
+crash at any persistence boundary without repeating a source fork or earlier
+work. Non-actionable `pendingCorrection` accounting is retained with its
+counters; concrete pending work and effects remain disqualifying.
+
+The descriptor shares that eligibility with CLI/MCP projections and resume
+action validation. MCP's detached launcher admits the proven failed state
+without changing stale-revision, ownership, compatibility, or receipt rules.
+The owning [execution specification](../pipelines/plan-execution/docs/SPEC.md)
+defines eligibility and revalidation; the state layer owns all journal I/O.
+
 The root runtime persists runs under `$XDG_STATE_HOME/agent-runner/`, falling
 back to `~/.local/state/agent-runner/`. A run is addressed by an opaque ID and
-stored beneath `runs/<run-id>/`; preflight rejects a state root inside the
-canonical project or task directory.
+stored beneath `runs/<run-id>/`. Preflight requires the canonical state tree
+to be disjoint from both the project and task trees: neither may contain the
+other.
 
 MCP action intents and receipts live under `actions/<hashed-key>/` in the same
 external root. The opaque key itself is not persisted. Action records are
@@ -467,9 +747,15 @@ same path, while key reuse with different arguments fails.
 Canonical-worktree leases live under
 `worktrees/<sha256(canonical-worktree-path)>/` in that external root. The hash
 keeps filesystem-safe bounded keys while the owner record contains only the
-run ID, an opaque token, process ID, hostname, and acquisition time. Empty key
-directories may remain after release; ownership exists only while `.lease` is
-present.
+run ID, an opaque token, process ID, hostname, acquisition time, and nullable
+process identity. Version-2 lease records pin Linux boot identity and process
+start ticks when available. A live reused PID is a replaced owner, not proof
+that the recorded execution survives. Foreign-host, legacy live, and otherwise
+unverifiable owners remain conservative exclusion barriers. Legacy records are
+read without rewriting them; successful acquisition publishes the current
+lease format. Empty key directories may remain after release. Ownership uses
+`.lease`; a pending stop also retains an interrupted `.lease-reclaiming`
+reservation until reconciliation permits its release.
 
 Run, canonical-worktree, reclaiming, and MCP action leases share one durable
 no-replace publication primitive. It writes and syncs the complete JSON record
@@ -479,9 +765,279 @@ the directory before acquisition returns. A lock-free reader therefore treats
 an unpublished lease as absent and parses only a complete record. If it meets
 the bounded internal link between publication and cleanup, including after an
 interrupted publisher, it removes only the matching same-directory temporary
-link to restore the isolated final file; unrecognized or persistent hard links
-remain unsafe. Exclusive contention, stale-owner recovery, and release all use
+link to restore the isolated final file. Bounded retries cover replacement
+publication between inspection and opening; each read still requires an
+isolated regular file, and unrecognized or persistent hard links remain unsafe.
+Exclusive contention, stale-owner recovery, and release all use
 the published record and continue to verify its opaque owner token.
+
+### State-owned operator stop protocol
+
+The common envelope version 7 extends the nullable bounded `stopRequest` with
+requested and effective timing, immutable target evidence, and settlement
+accounting. The state service's `requestOperatorStop` accepts a run ID,
+`pause_requested` or `cancel_requested`, an inspected `expectedRevision`, an
+`idempotencyKey`, and optional `timing` (`immediate` by default).
+It persists a version-3 action intent, appends the complete acceptance event,
+and publishes an acceptance receipt before returning. This capability does not
+signal processes, reconcile Git, or expose CLI/MCP commands; those operations
+belong to runner and transport integration.
+
+Short, recoverable `.mutation-<uuid>` claims serialize requests with
+execution-owned journal writes and lease release. Each contender durably
+publishes a choosing claim before selecting its ordered ticket; it waits for
+choosing peers and lower ticket/identity pairs. Dead claims have unique paths,
+so recovery cannot unlink a newer owner at a reused lock pathname. Claims and
+contention retries are bounded, and unverifiable owners continue to exclude
+mutation. Action-lease reclamation uses the same boundary, which does not grant
+another execution lease. Worktree owners without a pipeline run, such as
+guidance publishers, use claims in the worktree lease directory. Status and
+activity reads remain lock-free.
+The acceptance record contains the hashed request identity, request kind,
+inspected and accepted revisions, request time, nullable reconciled revision,
+and a suspended checkpoint. That checkpoint records the workflow state, active
+turn, null resume action, and the exact earlier journal revision. Reading that
+revision recovers the complete frozen state, including existing pause blockers
+and pending input, without duplicating a potentially large pipeline payload.
+
+Only nonterminal runs accept fresh requests. A cancellation may supersede a
+pending pause using either its original inspected revision or the current
+revision; it retains the original checkpoint. Other stale requests fail, as do
+new competing requests that cannot supersede the pending stop. Exact retries
+return their original receipt. If receipt publication was interrupted, the
+acceptance event reconstructs it even after cancellation superseded a pause or
+the run terminated. Receipt replay neither advances the run nor executes work.
+Version-1 and version-2 action records remain readable; incomplete actions
+upgrade when written, and completed receipts replay without migration writes.
+
+Execution propagates commit-authorization preparation and consumption publication
+failures without overwriting the journal with a stale local checkpoint. Deferred
+stop recovery preserves the durable authorization, never invokes a prepared
+effect to obtain a commit, and only verifies a consumed effect. Fault-injection
+coverage includes acceptance versus advancement/completion, lost receipts,
+lease transfer, and verified settlement publication for both stop actions.
+
+New stop argument identities include timing and canonicalize omitted and explicit
+`immediate`. Legacy timing-less identities accept those same immediate arguments
+and retain their original receipt shape; a timing change conflicts. Legacy stop
+records normalize to immediate timing without read-side writes. New receipts
+include requested/effective timing and bounded target evidence. CLI `--timing`
+and MCP's optional `timing` field expose the same two values; omission stays
+immediate. Transport validation never refreshes an inspected revision or changes
+retry arguments. MCP keeps `pendingStop` for pending requests and adds the
+state-owned bounded `projectOperatorStop` summary as `stop` for current and settled
+requests. CLI status uses the same summary; public activity derives it from each
+event's state, and waits reuse status. It excludes identities and private
+checkpoints, exposing kind, accepted revision, requested/effective timing,
+target step, state, and nullable settlement. `applicable` denotes immediate
+requests or suspended/failed checkpoints awaiting reconciliation; other pending
+requests remain `pending`, including interrupted owners awaiting recovery.
+`settled` denotes completed accounting, with `quiescent` or a verified commit
+SHA when available. These projections do not decide ownership or enforcement.
+
+The private `src/state/stop-policy.js` owns three distinct decisions: whether a
+request awaits reconciliation, whether that request blocks execution, and
+whether unresolved stop accounting or a recorded execution process retains
+ownership. Immediate requests block execution. Deferred requests retain ownership
+while allowing progress within their immutable target. The runner monitor keeps
+watching for immediate cancellation supersession without aborting deferred work.
+Envelope validation owns
+shape; the stop service owns acceptance, supersession, and receipt accounting.
+
+State accepts `after-current-commit` only with a trusted synchronous
+`resolveStopBoundary` capability supplied to `createRunStore` by composition.
+It resolves a frozen authoritative snapshot inside acceptance serialization.
+The bounded `verified-commit-v1` evidence contains the positive step number,
+completed-commit count, and baseline SHA; no provider data or free text is stored.
+Ordinary writes cannot change that boundary; only leased atomic settlement can
+record progress together with the stop outcome. Unsupported resolver results or
+persisted capabilities fail closed, including during history reads. The root
+pipeline registry supplies execution's boundary resolver to the runner
+and MCP stores. Execution accepts a selected step, including suspended
+checkpoints; clarification, bootstrap, absent steps, and the other pipelines
+reject deferred requests. Direct state stores without that capability still
+fail closed. Deferred CLI/MCP request inputs remain unavailable.
+
+Cancellation supersession retains the original suspended checkpoint and cannot
+delay an earlier immediate stop. Requested timing remains visible when effective
+timing is immediate; a still-deferred cancellation retains the earlier target.
+Settlement records either a verified commit SHA or a quiescent fallback, and
+becomes immutable with the reconciliation revision. Workflow meaning and commit
+verification remain the pipeline/runner's responsibility. Execution supplies the
+verified SHA to both ordinary checkpoint settlement and verification-only recovery.
+The state mutation records progress and the latest requested outcome together.
+If the target pauses, fails, or loses its owner before verification, recovery
+reconciles effects and applies the request at the quiescent checkpoint without
+invoking another role. Underlying failures, blockers, and consumed authorization
+evidence remain in the operator checkpoint. A final-commit pause suspends `DONE`;
+resume reaches `DONE` without agent work. Final-commit cancellation retains all
+completed commits in `CANCELED`.
+
+The common advancement guard applies inside the mutation boundary to workflow
+transitions, provider-turn records, session/artifact writes, and execution
+registration. Pending stop enforcement takes precedence over process accounting,
+then terminal cancellation blocks any further advancement. Retiring a recorded
+process remains allowed while a stop is pending so reconciliation can finish.
+
+Lease release, worktree reclamation, and durable `runIsLeased` exclusion consult
+the separate ownership-retention policy. A reconciled cancellation remains
+terminal without retaining ownership; a reconciled pause permits ordinary
+resumption once other blockers are resolved. A pending stop prevents release
+of held run/worktree ownership even after its process record has been retired.
+A dead owner's existing worktree lease remains excluded from other runs while
+the request is pending; only recovery of the same run can reclaim it.
+Reclamation, including stale-marker recovery, rechecks the stop under the
+original run's mutation boundary before replacing ownership. A crash leaving
+only a reclaiming record retains that reservation until a replacement lease
+exists, restricted to the same run while a stop is pending; failed
+replacement publication restores the previous lease when possible.
+`inspectRunLeaseOwner` exposes private identity and finite
+live/dead/replaced/unverifiable classification for runner use; unverifiable
+owners are not eligible signalling targets.
+
+Only the execution lease holder can call `completeOperatorStop`, after the
+runner has reconciled the interrupted access contract and any begun effects.
+That operation atomically records `WAITING_FOR_USER`/`operator_paused` or
+`CANCELED`, clears active-turn activity, and marks reconciliation complete.
+It does no repository work. The journal retains the suspended checkpoint and
+prohibits cancellation downgrade or revival. Identical completion retries do
+not add another transition. Lease release becomes possible only after this
+durable accounting. Version-1 through version-3 run envelopes project a null
+request without read-side writes; stop acceptance can upgrade only the common
+envelope in its acceptance event while preserving pipeline state and history.
+
+Verified commit settlement uses the leased `settleCheckpoint` state operation.
+Its synchronous resolver reads the latest authoritative snapshot inside the
+mutation boundary; the runner supplies workflow patches and the pipeline
+validator checks the fully normalized result before journal publication. A
+recorded execution process prevents settlement. A pending stop must settle to
+its requested outcome, including a cancellation that superseded a pause during
+verification. No provider, Git, or artifact effects run inside the resolver.
+
+Execution's private `commit-checkpoint.js` constructs the verified SHA, clean
+repository baseline, completed-commit list, next step or `DONE`, evidence resets,
+and counters. Normal execution and verification-only stop recovery use that same
+construction. The runner wraps the checkpoint in an operator pause or cancellation
+when applicable and retains protected-configuration blockers beneath the stop.
+Successful settlement clears the active commit turn and consumed authorization
+in the same event as progress. Publication errors escape without writing failure
+state from an older local snapshot; journal recovery preserves an already
+published checkpoint without replaying the commit. Deferred requests use the
+same settlement path and retain explicit commit or quiescent accounting.
+
+### Common envelope and pipeline migrations
+
+Common envelope version 5 adds nullable `executionProcess` ownership. Legacy
+envelopes project null without read-side writes; the ordinary leased runtime
+migration persists the current shape. Before a provider or trusted command
+can execute, a private supervisor waits on a separate inherited Node IPC channel
+while the runner journals its host PID, hostname, boot/start identity, and PID
+namespace identity. The shared agents boundary owns the closed `ordinary` and
+`native-sandbox-provider` supervision modes. Ordinary processes launch this
+supervisor as PID 1 in a private Linux namespace using
+system-protected bubblewrap. Provider launches use that mode only when a cached,
+namespace-local probe proves the complete outer-plus-inner user, PID, mount,
+device, and network namespace shape. When nesting is unavailable on the initial
+host PID namespace, only a declared provider may use a distinct owned session
+before its mandatory native sandbox starts. When repository validation is
+already inside the runner-trusted private PID namespace and that policy denies
+another namespace, the existing owned-session mode remains available without
+widening the enclosing sandbox. The private launcher preserves inherited filesystem/network
+restrictions while replacing `/dev` with bubblewrap's minimal synthetic device
+filesystem. Enclosing-session reuse retains the enclosing namespace's mounts
+and restrictions. Provider and trusted-executor sandboxes still enforce their
+narrower access contracts. The launcher's private status channel supplies the
+host PID, verified against its parent and namespace before registration. No
+provider work starts without that proof.
+
+Launcher verification resolves the fixed system executable to a regular,
+single-linked canonical file and checks that file plus every relevant ancestor
+against the effective Linux mount table. A read-only mount is a protected
+substitution anchor even when a namespace-root permission probe would otherwise
+report writable. Paths without that anchor must deny runner-identity writes
+through the root. Missing mount evidence, links, or a writable substitution
+path fails closed.
+
+Disconnecting IPC on runner loss starts bounded cleanup; bubblewrap also binds
+the namespace lifetime to the runner. Exiting namespace PID 1 makes the kernel
+retire all descendants, including detached sessions, double forks, and nested
+namespaces. Normal completion reports surviving descendants before retiring
+them, so trusted checks cannot pass with leaked work. Recovery inspects only the
+recorded owner and waits for namespace-init death before clearing ownership;
+the outer launcher's exit alone is insufficient. Live shutdown uses the original
+child handle and control channel. The session token is derived from the already
+persisted PID, boot, and process-start proof, so recovery can reject clearing a
+dead session supervisor while matching descendants remain without signalling a
+numeric host PID. Unverifiable ownership retains exclusion.
+Former group-only records remain conservative until a verified reboot; they
+cannot prove that detached descendants stopped. Unavailable ordinary namespace
+support fails before execution. Session-mode discovery combines session
+membership and verified live ancestry with a per-launch inherited ownership
+token, including same-user descendants that create another session or PID
+namespace. Complete ancestry that reaches an unrelated host process remains an
+independent reason to disregard an inaccessible candidate regardless of launch
+timing. After durable registration and before provider work, an initial-host
+session launch snapshots stable PID/boot/start identities. Exact matching
+against that baseline is used only when ancestry is inconclusive, especially
+for an unchanged pre-existing process reparented to PID 1. New, reused, changed,
+owned, malformed, and otherwise unproven candidates remain unverifiable;
+recovery has no launch baseline and retains only the ancestry proof. Other
+incomplete process evidence is unverifiable, and
+surviving descendants after bounded TERM/KILL retirement fail closed. Reusing
+the enclosing trusted
+namespace neither retries without containment nor widens its policy; its
+namespace init remains responsible for otherwise detached descendants.
+Ordinary processes never receive the initial-host session fallback.
+
+Completion-time descendant inspection retries transiently incomplete evidence
+against one non-resetting descendant-grace deadline. Complete evidence resumes
+the ordinary success or bounded TERM/KILL path; uncertainty at the deadline
+retains the existing fail-closed error and durable ownership exclusion. After
+reporting that persistent containment failure, the parent unreferences the
+already-detached supervisor handle and IPC channel without disconnecting it,
+signalling an unverified process, or clearing registration. Provider protocol
+resources may then close and the run owner may exit while the supervisor keeps
+containment available for deterministic recovery.
+
+The runner service accepts revision-bound `requestOperatorStop` requests and
+monitors durable revisions while executing. An accepted request aborts only
+the owned provider or trusted execution and publishes stopping activity.
+Provider recovery attempts and the constrained commit executor check the same
+abort signal before starting. The run/worktree leases remain held through
+process shutdown, read-only reconciliation, and the final stop event. Persisted
+process ownership also prevents a different run from reclaiming the worktree
+after owner loss, and prevents checkpoint advancement before process cleanup.
+CLI/MCP command registration remains transport-owned.
+
+Each pipeline has a reconciliation-only entry path with provider invocation,
+trusted commands, and artifact writes disabled. It rechecks frozen inputs and
+the interrupted access contract, preserves safe partial content, rejects index
+or Git-control drift, and retains safety blockers. Content-changing partial
+work invalidates dependent gates and charges correction work once; the exact
+suspended journal checkpoint remains inspectable. Consumed commits are verified
+without reinvoking their executor. Handoff reconciliation only inspects whether
+the existing index is complete or untouched; it never stages. Verified effects
+and step advancement are included atomically in the final stop event.
+When the runner proves that an operator stop prevented commit invocation,
+verification of unchanged Git state retires the unused authorization. Resume
+can obtain a new authorization; uncertain or begun effects remain verification-only.
+Provider error redaction retains that runner-owned pre-effect stop proof while
+discarding native error wrappers; unrelated rejections remain blockers.
+
+Reconciliation produces `WAITING_FOR_USER` with `operator_paused` and an
+explicit null resume action, or terminal `CANCELED`. A bounded private
+`operatorResume` record retains the reconciled workflow position, active-turn
+reconstruction marker, and any preceding pause. Null resume restores an existing
+pause without consuming its editor authorization or bypassing its blockers.
+Otherwise it reconstructs the preserved logical role from frozen configuration
+and session lineage only after reacquiring any required worktree lease.
+Invalidated content returns through the pipeline's
+candidate gate before further finalization. Cancellation cannot resume.
+Cancellation superseding a pause during reconciliation changes only the final
+outcome; verification never replays an effect or counts its progress twice.
+Authorized clarification edits remain pending; stop reconciliation checks Git
+safety without consuming them or classifying them as frozen-input drift. Input
+drift outside that window cannot skip repository reconciliation.
 
 `state.json` contains the common versioned envelope: monotonic revision,
 pipeline ID and state version, an explicit runtime-compatibility tuple,
@@ -490,8 +1046,8 @@ lineage, nullable bounded active provider role/phase, timestamps, and opaque
 pipeline-owned state, including its resolved settings from the initial
 revision. The compatibility generation is maintained independently from the
 package version, which is not a persistence contract.
-The root validates JSON shape and size without interpreting workflow roles or
-outcomes.
+The root validates JSON shape, size, and the common terminal/stop lifecycle;
+pipeline-specific roles and outcomes remain opaque to the state capability.
 Session lineage records an optional source-session reference, its resolved
 trusted profile when known, and every direct child role/session ID with its
 accepted-input and pipeline-checkpoint context key. Legacy role records missing
@@ -538,14 +1094,23 @@ checkpoint, consuming revision or correction budgets, or writing `plan.md`.
 Plan execution and polishing state version 2 persist the mode-specific
 bootstrapped required-check inventory, the repository-relative files that own
 validation infrastructure, and a runner-computed fingerprint of those files.
-Each pipeline owns a 64-item limit for each inventory field returned by one
-bootstrap role and a separate 128-item limit for each runner-derived inventory
-field, including persisted, finalization, and fingerprint inputs. A role that
-cannot return a complete field within 64 items reports the strict
-`CAPACITY_EXHAUSTED` result with that `capacityField` and `capacityLimit: 64`;
-the pipeline pauses with `bootstrap_inventory_capacity_exhausted` and a bounded
-public diagnostic without consuming a structured-output correction or
-accepting truncated evidence.
+Plan execution and polishing each own a 256-item limit for each bootstrap role
+inventory field and a separate 512-item limit for each derived, persisted,
+finalization, and fingerprint-input field. A role exceeding its pipeline's limit
+reports strict `CAPACITY_EXHAUSTED` with that `capacityField`
+and per-role `capacityLimit`; required-check overflow takes priority. The
+pipeline pauses without consuming a correction or accepting truncated evidence.
+Validation infrastructure includes files owning commands, discovery, runners,
+configuration, or mandatory finalization guidance, excluding ordinary source,
+individual tests, fixtures, and generated output merely consumed by checks.
+Classification uses responsibility rather than filename heuristics.
+The Git validation-infrastructure fingerprint API accepts 512 paths; other Git
+path lists retain their 256-path bounds. Execution state version 16 and polishing
+state version 12 expand capacity with leased migrations preserving legacy 64/128
+evidence, budgets, completed commits and handoffs, and one-shot effects. Item,
+structured-output, and durable byte limits do not change. Expanded schemas retain
+strict Claude preflight and native sandbox restrictions without enabling
+`allowAllUnixSockets: true` or broader host access.
 In independent mode, the runner establishes that inventory from accepted Worker
 evidence followed by accepted Reviewer evidence; in lazy mode, accepted Worker
 evidence is complete. It deduplicates exact commands and paths in stable
@@ -699,6 +1264,30 @@ invalidated and routed to safe mode-specific candidate convergence. Retained
 legacy terminal-Reviewer correction diagnostics are translated into the new
 terminal-confirmation namespace on immutable paths.
 
+Plan execution state version 15 adds bounded semantic finalization recovery.
+Terminal roles share rejection routing: after the exact whole-result override
+gate, `REJECTED` invalidates finalization immediately. The structured
+`finalizationFindingIds` subset separates evidence-only findings from content
+repairs. Pure rejection preserves candidate approval and re-enters `FINALIZE`
+without code-fix accounting; mixed rejection resolves content first and still
+requires replacement finalization. The complete deterministic gate preserves
+established check IDs/commands and infrastructure entries, and fresh confirmation
+binds the resulting fingerprint. Ordinary non-rejection reuse is unchanged.
+Evidence rejection remains valid when inventories are unchanged; equality of
+the inventory cannot substitute for sufficient check evidence.
+
+The version-14 migration initializes metadata without interpreting missing
+provider output or replaying workflow/effect history. Two semantic retries per
+step are reserved durably before invocation. Pending attempts survive
+interruption and unavailable providers without recounting; fingerprint drift
+clears feedback without restoring allowance. Exhaustion exposes
+`finalization_evidence_rejected` at `FINALIZE` with one explicit additional
+attempt per null retry. Independent overrides use the saved terminal content
+fingerprint; closing recovery feedback still requires replacement finalization
+and fresh confirmation. Only bounded validated findings and control metadata
+are retained. Each pipeline owns its recovery policy independently; polishing
+adopts the same contract with a per-run allowance in state version 11.
+
 Polishing state version 3 adopts the same resolved trusted-validation snapshot,
 per-check executor provenance, and fingerprint-bound evidence tuple. Its
 version-2 migration selects empty legacy trust, preserves safe workspace
@@ -774,6 +1363,30 @@ migration invalidates unprovable active gate evidence and routes it through safe
 mode-specific candidate convergence, defers the same repair for paused runs,
 and preserves `HANDOFF`, `DONE`, and `FAILED` without replaying staging.
 
+Polishing state version 13 enables combined review with independent roles,
+bootstrap, and isolated checkpoint sessions. Worker check/fix and separate
+read-only clean confirmation precede independent candidate review of the same
+fingerprint; independent terminal confirmation covers finalized content before
+runner-only handoff. Durable `primaryFindings` keep self-findings separate from
+independent findings. Content repairs clear both gates; unchanged resolutions
+retain only current finalization. Only independent finding resolution permits
+fresh arbitration; unresolved bootstrap and primary exhaustion pause. Version-12
+migration adds an empty primary-findings record without changing saved mode,
+correction budgets, or consumed handoff evidence.
+
+Polishing state version 11 adds the same bounded semantic finalization recovery
+as plan execution, with two automatic attempts per polishing run. Both terminal
+roles share deterministic pure/mixed rejection routing within polishing. Exact
+terminal-fingerprint overrides are checked first; otherwise rejected evidence is
+invalidated immediately and replacement finalization plus fresh confirmation
+must pass before runner-owned `HANDOFF`. Pending attempts survive interruption
+and environment/provider blockage without recounting. Scope drift clears feedback
+without restoring allowance; explicit retry after exhaustion grants one additional
+attempt. The version-10 migration initializes metadata without moving checkpoints,
+inferring old rejection output, or replaying pending or completed staging effects.
+The existing polishing malformed-output correction budget and index restrictions
+remain unchanged.
+
 Common run-envelope version 3 adds `activeTurn`, either `null` or the current
 bounded `{ role, phase }`. Version-1 and version-2 runs project it as `null`
 without rewriting state or history; the next mutating continuation persists the
@@ -813,11 +1426,25 @@ fixed platform temporary location without consulting ambient temporary
 variables. The effective writable set is the repository content, including an
 eligible `.agents`, and that private root. `TMPDIR`, `XDG_CACHE_HOME`, and
 `XDG_RUNTIME_DIR` project validated children of the root into command tooling
-through the effective shell policy; the provider process environment remains
-unchanged, ambient `TMPDIR` and host `/tmp` remain excluded, and command network
-access remains denied. In-session compaction retains the attempt's root. Every
-successful, failed, or freshly recovered attempt validates and removes its root
-before returning or retrying, and unsafe preparation or cleanup fails closed.
+through the effective shell policy. The policy starts from the full provider
+process environment, applies Codex's automatic secret-name exclusions and an
+empty custom exclusion list, overlays those explicit workspace values, and then
+keeps exactly Codex's standard core names (`HOME`, `LOGNAME`, `PATH`, `SHELL`,
+and `USER`), `AGENT_RUNNER_OWNED_PROCESS`, and the three workspace names. This
+preserves the dynamic ownership proof without exposing unrelated parent
+variables. The provider process environment remains unchanged, ambient
+`TMPDIR` and host `/tmp` remain excluded, shell profiles stay disabled, and
+command network access remains denied. In-session compaction retains the
+attempt's root. Every successful, failed, or freshly recovered attempt validates
+and removes its root before returning or retrying, and unsafe preparation or
+cleanup fails closed.
+Codex observes owned-process completion as soon as the App Server starts and
+races only its rejection against the complete protocol operation. An ownership
+failure therefore starts bounded client and workspace cleanup promptly and
+retains precedence over client-cleanup failures, even when containment
+deliberately keeps protocol pipes open. Successful owned completion does not
+satisfy a protocol request; the adapter still requires the complete App Server
+result.
 Read-only and local-commit storage remain independently isolated. Both adapters
 advertise `gitMetadataWriteBlocked`; the runner, not an agent turn, owns effects
 that require the index.
@@ -867,8 +1494,8 @@ Advancement requires `CLEAN`, no repository mutation, and the exact inspected
 content fingerprint. In plan execution and polishing this first converges the
 candidate; `FINALIZE` follows, then a distinct read-only `CONFIRM` applies the
 validation-change decision to the finalized evidence.
-Findings return directly to `CHECK_AND_FIX`, never to dispute or arbitration.
-Terminal findings clear candidate and confirmation attestations but retain a
+Content findings return directly to `CHECK_AND_FIX`, never to dispute or arbitration.
+Ordinary terminal findings clear candidate and confirmation attestations but retain a
 successful finalization record while its content and validation-infrastructure
 fingerprints remain current. After candidate convergence, the runner recomputes
 both fingerprints and retries `CONFIRM` directly on an exact match; otherwise it
@@ -877,13 +1504,34 @@ for observed repository mutation. Every actual content or validation-
 infrastructure change, provider correction-scope drift, content-changing
 interruption reconciliation, and plan-execution commit-step advancement
 invalidates finalization evidence. Plan-authoring drafts stay
-in external state and are deterministically validated only after confirmation;
-plan-execution and polishing terminal findings always return through candidate
-convergence and one fresh terminal confirmation. Existing fix/revision, stable-
-finding, stagnation, and additional-round budgets bound the loop and never
-silently accept an unconfirmed result.
+in external state and are deterministically validated only after confirmation.
+Plan execution and polishing route pure validation-evidence rejection directly
+to bounded replacement finalization; mixed rejection returns through candidate
+convergence before fresh finalization. Both require a fresh terminal confirmation.
+Existing fix/revision, stable-finding, stagnation, and additional-round budgets
+bound the loop and never silently accept an unconfirmed result.
 
-Plan authoring owns lazy structured-output recovery at both checkpoints.
+Plan authoring separates primary convergence, independent review, session scope,
+correction accounting, and arbitration eligibility in its private
+`review-policy.js`. The workflow and persisted-state contract share these pure
+decisions. Turn implementations, effect guards, persistence, and plan writing
+remain in the workflow. Combined mode enables both primary convergence and
+independent review, retaining checkpoint-isolated sessions and the existing
+durable lazy-checkpoint field names. Draft review invalidation
+retains correction scopes so returning to an earlier fingerprint cannot reset
+an automatic correction allowance.
+
+Combined authoring records primary confirmation separately from Reviewer
+approval. A revised draft clears both and restarts primary convergence; Reviewer
+reconsideration of an unchanged draft can retain primary confirmation. Self
+findings and structural failures return to check/fix, without arbitration on
+exhaustion. Only independent finding resolution may request the fresh Arbiter.
+Each accepted check/fix or revision consumes one bounded revision round; invalid
+output and recovery cannot duplicate accepted work. Version 5 adds combined
+mode while migrating saved version-4 independent/lazy state unchanged under
+the lease; missing mode remains independent and unsupported old values reject.
+
+Plan authoring owns primary-convergence structured-output recovery at both checkpoints.
 Provider and deterministic contract failures become bounded diagnostics, then
 one fresh repository-read-only Planner session receives the complete durable
 draft-bound request and original schema. Only a valid replacement under the
@@ -942,26 +1590,60 @@ adapters own native recognition and expose only bounded normalized diagnostics;
 pipelines consume the backend-neutral recoverable failure. Other allowlisted
 backend, capability, configuration, usage, and provider failures use the same
 durable pause path.
+
+Codex App Server `other` failures use bounded native HTTP error recognition
+before opaque recovery. A complete `unexpected status` wrapper with an
+allowlisted non-transient client status and a parsed JSON `error` envelope
+becomes terminal `ERR_CODEX_TURN_FAILED` / `turn_bad_request`, with the fixed
+message `Codex turn failed.` and `recoverable: false`. This includes HTTP 400
+`invalid_request_error` / `invalid_json_schema`; it starts no compaction, fresh
+retry, backend-availability pause, or output correction.
+Recognition is limited to 16 KiB, statuses 400, 401, 403, 404, 405, 413, 415, and
+422, and a shallow envelope with scalar `message`, `type`, `param`, and `code`
+fields. The type must identify an invalid request, or authentication/permission
+failure at status 401/403 respectively. Optional non-null codes must be in the
+adapter's finite client-error allowlist. Optional native URL, CF ray, and request
+ID suffixes are discarded. Unknown codes, malformed JSON, duplicate fields or
+metadata, inconsistent status text, oversized evidence, transient statuses,
+and prose lookalikes remain opaque; additional details and variant payloads
+are never alternative classification sources.
+Opaque failures retain `turn_other` and the existing recoverable flag. Neither
+path retains native messages, variant payloads, additional details, or causes.
+Completion notifications and hydrated turns accept only `completed`, `failed`,
+and `interrupted` statuses before failure classification. For these failures,
+the existing item audit and explicit-model reroute guard still
+reject policy and protocol violations before classification or recovery. For
+opaque non-commit failures outside a source fork, the existing recovery path
+attempts one fresh session with the complete `recoveryPrompt` and observed workspace.
+The failure itself does not request compaction, and the second attempt's
+failure propagates unchanged without another reconstruction. Source forks
+remain ineligible for fresh fallback. Local-commit readiness failures exit
+before retry with `effectStarted: false`; executor outcomes remain on their
+verification-only path and are never replayed.
+
 An otherwise unclassified valid read-only result or process failure is
 recoverable only because the enforced read-only envelope and the pipeline's
 post-turn repository guard prove that it could not mutate the repository.
 Unknown writable process outcomes remain terminal after reconciliation;
 classified usage and provider failures may pause only after safe workspace
-changes and control state have been reconciled. The rejected turn is invoked
-once, then the owning pipeline persists `backend_unavailable`, its resumable
-workflow state, reconciled one-shot authorization state, and any safe workspace
-changes before entering `WAITING_FOR_USER`. Resume reconstructs the same
-durable request after availability returns. No new persisted field or state
-version is required.
+changes and control state have been reconciled. After the adapter's applicable
+retry policy is exhausted, the owning pipeline persists `backend_unavailable`,
+the exact resumable workflow checkpoint, reconciled one-shot authorization
+state, and any safe workspace changes before entering `WAITING_FOR_USER`.
+Resume reconstructs the same durable request after availability returns. No new
+persisted field or state version is required.
 
-A Worker that cannot execute required validation because of sandbox, IPC,
-loopback, process-isolation, missing-service, permission, or comparable external
-constraints returns a bounded structured blocker. Plan execution and polishing
+A Worker returns a bounded structured blocker when sandbox, IPC, loopback,
+process-isolation, missing-service, permission, or comparable external
+constraints prevent work not delegated to an exact selected runner-trusted
+command. A selected command's agent-sandbox limitation alone cannot block
+applicable content repairs or semantic review; another command's selection
+does not suppress a genuine blocker. Plan execution and polishing
 persist `environment_blocked` rather than treating that condition as a code
 failure, preserve safe workspace content, and invalidate any stale
 fingerprint-bound candidate, finalization, and confirmation evidence. A
 content-changing finding resolution resumes at `REVIEW` in independent mode or
-`CHECK_AND_FIX` in lazy mode; an unchanged turn resumes at its original
+`CHECK_AND_FIX` in lazy and combined modes; an unchanged turn resumes at its original
 checkpoint. Finalization always resumes at `FINALIZE`. The workflow does not
 weaken isolation or grant network or host temporary-directory access to bypass
 the unavailable validation.
@@ -972,11 +1654,13 @@ substituted, replaced, or weakened checks are invalid output. The runner hashes
 the identified package scripts, test-discovery and runner files, skill guidance,
 and validation configuration rather than trusting an agent-supplied hash.
 Changing that inventory, its file set, or its fingerprint is provisional until
-the independent read-only terminal Reviewer, or the lazy read-only terminal clean confirmation,
-accepts that the task or current plan step authorizes the complete change for
+the read-only terminal Reviewer in independent and combined modes, or the lazy
+read-only terminal clean confirmation, accepts that the task or current plan
+step authorizes the complete change for
 the same content fingerprint. The confirming turn receives both the established
 and candidate tuples, so acceptance cannot depend on a prior native session.
-Rejection remains a finding. Commands and repository-relative infrastructure
+Both pipelines invalidate rejected evidence and use their independently owned
+bounded semantic recovery routes. Commands and repository-relative infrastructure
 paths are validated and compared without rewriting interior whitespace.
 Host-reported results and user attestations are outside this trust boundary.
 Plan execution builds both passing and failing persisted finalization evidence
@@ -1010,7 +1694,7 @@ identical for Codex and Claude and does not broaden ordinary Worker access to
 Git metadata.
 
 Polishing uses the same ownership rule without requesting `local-commit`.
-Worker polishing, finalization, finding-resolution, and lazy check/fix turns
+Worker polishing, finalization, finding-resolution, and lazy or combined check/fix turns
 are content-only, including when selected finalization guidance normally
 requests staging. Bootstrap, validation-migration, and finalization inventories
 use the same deterministic staging-independence policy as plan execution;
@@ -1025,14 +1709,31 @@ verifies unchanged content and Git controls, a nonempty complete staged set,
 no unstaged or non-ignored untracked remnants, and staged whitespace hygiene
 before the pipeline can enter `DONE`.
 
+Both pipelines project only exact command text from persisted
+`trustedValidation.commands` into implementation or polishing, lazy or combined
+`CHECK_AND_FIX`, and finding-resolution prompts. The existing snapshot bounds
+limit the projection; an empty selection produces an empty array. Complete,
+continued, reconstructed, and correction requests all carry it without
+configuration reloads, provider settings, executable vectors, or a repeated
+validation inventory. Established required-check execution and attestation
+remain exclusive to `FINALIZE`. Selected trusted commands never execute inside
+agent turns, and their agent-sandbox limitations do not prevent applicable
+repairs and semantic review. Bootstrap inventory-reporting and finalization
+`NOT_RUN` instructions stay in their existing contexts.
+
 A selected runner-trusted command is the only exception to agent-side check
-execution. The runner-derived bootstrap inventory must contain its exact
-configured command.
+execution during finalization. The runner-derived bootstrap inventory must
+contain its exact configured command.
 The finalization agent returns `NOT_RUN` only for those selected entries; after
 the agent turn reconciles, the root executor replaces each placeholder by
 running the exact persisted executable/argument vector directly without a
 shell. On Linux it requires bubblewrap and runs with a private network
-namespace. Before agent work, the root resolves bubblewrap only from fixed
+namespace. The trusted sandbox selects `native-sandbox-provider` ownership;
+the service and exact-command executor forward that mode to the owned-process
+launcher so it probes the complete nested isolation shape. Executions whose
+sandbox does not select a mode retain ordinary ownership. The trusted command's
+isolation profile and process-containment requirements remain unchanged.
+Before agent work, the root resolves bubblewrap only from fixed
 system locations to a canonical absolute executable whose file and ancestor
 directories are not writable by the runner identity. Project-relative or
 project-writable `PATH` entries never participate, and resume and execution
@@ -1065,7 +1766,7 @@ fingerprints. This service does not broaden any agent turn's sandbox and
 introduces no daemon or shell DSL.
 
 Before plan execution or polishing accepts a producing role's bootstrap or
-legacy validation-migration inventory, and before plan execution fingerprints
+legacy validation-migration inventory, and before either pipeline fingerprints
 finalization evidence, the root Git boundary verifies every
 validation-infrastructure entry is an existing regular file whose canonical
 repository-relative path exactly matches the proposed path. Missing files,
@@ -1081,7 +1782,8 @@ producing result; plan execution batches all such independently detectable
 violations, and the same policy rejects a finalization candidate inventory
 without delegating index ownership to an ordinary Worker turn.
 
-An explicitly supplied source session is different. In independent mode, the
+An explicitly supplied source session is different. In independent and combined
+modes, the
 first eligible turn of each new primary or review checkpoint creates a direct
 child and returns its ID without resuming or mutating the source. In lazy mode,
 only the first eligible primary turn may create that child, and the durable

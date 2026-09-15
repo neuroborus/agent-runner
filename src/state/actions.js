@@ -3,28 +3,27 @@ import { lstat, mkdir, realpath } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
 
-import {
-  atomicWriteFile,
-  publishExclusiveFile,
-  readOptionalPublishedText,
-  readOptionalText,
-  removeFile,
-} from "./files.js";
-import { RunStoreError } from "./validation.js";
+import { STOP_TIMINGS, validStopTiming } from "./stop-contract.js";
+import { atomicWriteFile, readOptionalText } from "./files.js";
+import { createLeaseManager } from "./lease.js";
+import { createMutationBoundary } from "./mutation.js";
+import { readProcessIdentity } from "./process-owner.js";
+import { assertRunId, deepFreeze, RunStoreError } from "./validation.js";
 
-const ACTION_SCHEMA_VERSION = 1;
+const ACTION_SCHEMA_VERSION = 3;
 const ACTIONS_DIRECTORY = "actions";
 const ACTION_FILENAME = "action.json";
-const LEASE_FILENAME = ".lease";
 const MAX_KEY_LENGTH = 1_024;
 const MAX_ACTION_BYTES = 256 * 1_024;
 const TOOLS = new Set([
   "run_start",
   "run_respond",
   "run_resume",
+  "run_pause",
+  "run_cancel",
   "unexpected_issue_report",
+  "guidance_update",
 ]);
-const LEASE_FIELDS = new Set(["token", "pid", "hostname", "acquiredAt"]);
 const ACTION_FIELDS = new Set([
   "schemaVersion",
   "keyHash",
@@ -76,13 +75,42 @@ function actionIdentity(key, tool, actionArguments) {
   ) {
     throw actionError("MCP action input is invalid.");
   }
+  let legacyArgumentsHash = null;
+  if (["run_pause", "run_cancel"].includes(tool)) {
+    if (
+      !isRecord(actionArguments) ||
+      Object.keys(actionArguments).some(
+        (field) => !["runId", "expectedRevision", "timing"].includes(field),
+      )
+    )
+      throw actionError("Stop action arguments are invalid.");
+    const timing = actionArguments.timing ?? "immediate";
+    if (
+      !STOP_TIMINGS.has(timing) ||
+      (Object.hasOwn(actionArguments, "timing") &&
+        actionArguments.timing !== timing)
+    )
+      throw actionError("Stop action timing is invalid.");
+    if (timing === "immediate") {
+      legacyArgumentsHash = hash(
+        canonicalJson({
+          runId: actionArguments.runId,
+          expectedRevision: actionArguments.expectedRevision,
+        }),
+      );
+    }
+    actionArguments = { ...actionArguments, timing };
+  }
   return Object.freeze({
     keyHash: hash(key),
     argumentsHash: hash(canonicalJson(actionArguments)),
+    legacyArgumentsHash,
   });
 }
 
 function parseRecord(source, keyHash) {
+  if (Buffer.byteLength(source) > MAX_ACTION_BYTES)
+    throw actionError("MCP action record is too large.");
   let value;
   try {
     value = JSON.parse(source);
@@ -97,7 +125,9 @@ function parseRecord(source, keyHash) {
   if (
     !isRecord(value) ||
     Object.keys(value).some((field) => !ACTION_FIELDS.has(field)) ||
-    value.schemaVersion !== ACTION_SCHEMA_VERSION ||
+    ![1, 2, ACTION_SCHEMA_VERSION].includes(value.schemaVersion) ||
+    (value.schemaVersion === 1 &&
+      ["run_pause", "run_cancel"].includes(value.tool)) ||
     value.keyHash !== keyHash ||
     !TOOLS.has(value.tool) ||
     !/^[a-f0-9]{64}$/u.test(value.argumentsHash) ||
@@ -112,6 +142,38 @@ function parseRecord(source, keyHash) {
     updatedAt < createdAt
   ) {
     throw actionError("MCP action record is invalid.");
+  }
+  if (["run_pause", "run_cancel"].includes(value.tool)) {
+    assertRunId(value.context.runId);
+    if (Object.keys(value.context).length !== 1)
+      throw actionError("Stop action context is invalid.");
+    if (value.status === "completed") {
+      const result = value.result;
+      const modern = Object.hasOwn(result, "timing");
+      if (
+        Object.keys(result).length !== (modern ? 8 : 5) ||
+        (modern && (value.schemaVersion < 3 || !validStopTiming(result))) ||
+        result.runId !== value.context.runId ||
+        result.requestId !== keyHash ||
+        result.kind !==
+          (value.tool === "run_pause"
+            ? "pause_requested"
+            : "cancel_requested") ||
+        !Number.isSafeInteger(result.expectedRevision) ||
+        result.expectedRevision < 1 ||
+        !Number.isSafeInteger(result.revision) ||
+        result.revision <= result.expectedRevision ||
+        hash(
+          canonicalJson({
+            runId: result.runId,
+            expectedRevision: result.expectedRevision,
+            ...(modern ? { timing: result.timing } : {}),
+          }),
+        ) !== value.argumentsHash
+      ) {
+        throw actionError("Stop action receipt is invalid.");
+      }
+    }
   }
   return value;
 }
@@ -131,41 +193,6 @@ function processIsAlive(pid) {
   }
 }
 
-function parseLease(source) {
-  let value;
-  try {
-    value = JSON.parse(source);
-  } catch (cause) {
-    throw new RunStoreError("MCP action lease contains invalid JSON.", {
-      cause,
-      code: "ERR_INVALID_MCP_ACTION_LEASE",
-    });
-  }
-  const acquiredAt = new Date(value?.acquiredAt);
-  if (
-    !isRecord(value) ||
-    Object.keys(value).some((field) => !LEASE_FIELDS.has(field)) ||
-    typeof value.token !== "string" ||
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
-      value.token,
-    ) ||
-    !Number.isSafeInteger(value.pid) ||
-    value.pid < 1 ||
-    typeof value.hostname !== "string" ||
-    value.hostname.length === 0 ||
-    value.hostname.length > 255 ||
-    /[\p{Cc}\p{Zl}\p{Zp}]/u.test(value.hostname) ||
-    Number.isNaN(acquiredAt.valueOf()) ||
-    acquiredAt.toISOString() !== value.acquiredAt
-  ) {
-    throw actionError(
-      "MCP action lease is invalid.",
-      "ERR_INVALID_MCP_ACTION_LEASE",
-    );
-  }
-  return value;
-}
-
 async function ensureDirectory(path) {
   await mkdir(path, { recursive: true, mode: 0o700 });
   const metadata = await lstat(path);
@@ -181,6 +208,7 @@ export function createActionStore({
   hostName = hostname(),
   processId = process.pid,
   processIsAlive: checkProcess = processIsAlive,
+  processIdentity = readProcessIdentity,
   onPublicationBoundary,
   tokenFactory = randomUUID,
 }) {
@@ -193,70 +221,41 @@ export function createActionStore({
     return notBefore !== undefined && current < notBefore ? notBefore : current;
   }
 
-  async function acquireLease(actionDirectory) {
-    const leasePath = join(actionDirectory, LEASE_FILENAME);
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      const lease = {
-        token: tokenFactory(),
-        pid: processId,
-        hostname: hostName,
-        acquiredAt: timestamp(),
-      };
-      const serializedLease = `${JSON.stringify(lease)}\n`;
-      parseLease(serializedLease);
-      try {
-        await publishExclusiveFile(leasePath, serializedLease, {
-          onPublicationBoundary,
-        });
-        return async () => {
-          const current = await readOptionalPublishedText(leasePath);
-          if (current !== null && parseLease(current).token === lease.token) {
-            await removeFile(leasePath);
-          }
-        };
-      } catch (cause) {
-        if (cause?.code !== "EEXIST") {
-          throw cause;
-        }
-      }
-      const source = await readOptionalPublishedText(leasePath);
-      if (source === null) {
-        continue;
-      }
-      const existing = parseLease(source);
-      if (existing.hostname !== hostName) {
-        throw actionError(
-          "An identical MCP action is already in progress.",
-          "ERR_MCP_ACTION_IN_PROGRESS",
-        );
-      }
-      const processAlive = await checkProcess(existing.pid);
-      if (typeof processAlive !== "boolean") {
-        throw actionError("MCP action liveness check is invalid.");
-      }
-      if (processAlive) {
-        throw actionError(
-          "An identical MCP action is already in progress.",
-          "ERR_MCP_ACTION_IN_PROGRESS",
-        );
-      }
-      const current = await readOptionalPublishedText(leasePath);
-      if (current !== null && parseLease(current).token === existing.token) {
-        await removeFile(leasePath);
-      }
-    }
-    throw actionError(
-      "MCP action lease could not be acquired.",
-      "ERR_MCP_ACTION_IN_PROGRESS",
-    );
-  }
+  const mutate = createMutationBoundary({
+    hostName,
+    processId,
+    processIsAlive: checkProcess,
+    processIdentity,
+    onPublicationBoundary,
+  });
+  const leases = createLeaseManager({
+    withMutation: (_record, operation, directory) =>
+      mutate(directory, operation),
+    activeLeaseDescription: "MCP action lease",
+    conflictCode: "ERR_MCP_ACTION_IN_PROGRESS",
+    invalidLeaseCode: "ERR_INVALID_MCP_ACTION_LEASE",
+    leaseDescription: "MCP action lease",
+    reclaimingLeaseDescription: "Reclaiming MCP action lease",
+    leaseSubject: () => "MCP action",
+    includeRunId: false,
+    requireMatchingRunId: false,
+    currentDate: () => new Date(timestamp()),
+    timestamp,
+    hostName,
+    processId,
+    processIsAlive: checkProcess,
+    processIdentity,
+    onPublicationBoundary,
+    staleMs: 0,
+    tokenFactory,
+  });
 
   async function begin({ key, tool, arguments: actionArguments, context }) {
     if (!isRecord(context)) {
       throw actionError("MCP action input is invalid.");
     }
 
-    const { keyHash, argumentsHash } = actionIdentity(
+    const { keyHash, argumentsHash, legacyArgumentsHash } = actionIdentity(
       key,
       tool,
       actionArguments,
@@ -273,7 +272,8 @@ export function createActionStore({
       }
     }
     await ensureDirectory(actionDirectory);
-    const release = await acquireLease(actionDirectory);
+    const lease = await leases.acquire(actionDirectory, null);
+    const release = () => lease.release();
     const recordPath = join(actionDirectory, ACTION_FILENAME);
 
     try {
@@ -297,10 +297,15 @@ export function createActionStore({
         if (Buffer.byteLength(serialized) > MAX_ACTION_BYTES) {
           throw actionError("MCP action record is too large.");
         }
+        parseRecord(serialized, keyHash);
         await atomicWriteFile(recordPath, serialized);
       } else {
         record = parseRecord(source, keyHash);
-        if (record.tool !== tool || record.argumentsHash !== argumentsHash) {
+        if (
+          record.tool !== tool ||
+          (record.argumentsHash !== argumentsHash &&
+            record.argumentsHash !== legacyArgumentsHash)
+        ) {
           throw actionError(
             "Idempotency key was already used with different arguments.",
             "ERR_MCP_IDEMPOTENCY_CONFLICT",
@@ -311,8 +316,11 @@ export function createActionStore({
       let released = false;
       return Object.freeze({
         created,
+        get legacyIdentity() {
+          return record.argumentsHash === legacyArgumentsHash;
+        },
         get record() {
-          return Object.freeze(record);
+          return deepFreeze(structuredClone(record));
         },
         async updateContext(nextContext) {
           if (
@@ -324,6 +332,7 @@ export function createActionStore({
           }
           const updated = {
             ...record,
+            schemaVersion: ACTION_SCHEMA_VERSION,
             context: nextContext,
             updatedAt: timestamp(record.updatedAt),
           };
@@ -331,9 +340,10 @@ export function createActionStore({
           if (Buffer.byteLength(serialized) > MAX_ACTION_BYTES) {
             throw actionError("MCP action record is too large.");
           }
+          parseRecord(serialized, keyHash);
           await atomicWriteFile(recordPath, serialized);
           record = updated;
-          return Object.freeze(updated);
+          return deepFreeze(structuredClone(updated));
         },
         async complete(result) {
           if (released || record.status !== "intent" || !isRecord(result)) {
@@ -341,6 +351,7 @@ export function createActionStore({
           }
           const completed = {
             ...record,
+            schemaVersion: ACTION_SCHEMA_VERSION,
             status: "completed",
             result,
             updatedAt: timestamp(record.updatedAt),
@@ -349,9 +360,10 @@ export function createActionStore({
           if (Buffer.byteLength(serialized) > MAX_ACTION_BYTES) {
             throw actionError("MCP action receipt is too large.");
           }
+          parseRecord(serialized, keyHash);
           await atomicWriteFile(recordPath, serialized);
           record = completed;
-          return Object.freeze(completed);
+          return deepFreeze(structuredClone(completed));
         },
         async release() {
           if (!released) {
@@ -367,7 +379,7 @@ export function createActionStore({
   }
 
   async function read({ key, tool, arguments: actionArguments }) {
-    const { keyHash, argumentsHash } = actionIdentity(
+    const { keyHash, argumentsHash, legacyArgumentsHash } = actionIdentity(
       key,
       tool,
       actionArguments,
@@ -403,13 +415,17 @@ export function createActionStore({
       return null;
     }
     const record = parseRecord(source, keyHash);
-    if (record.tool !== tool || record.argumentsHash !== argumentsHash) {
+    if (
+      record.tool !== tool ||
+      (record.argumentsHash !== argumentsHash &&
+        record.argumentsHash !== legacyArgumentsHash)
+    ) {
       throw actionError(
         "Idempotency key was already used with different arguments.",
         "ERR_MCP_IDEMPOTENCY_CONFLICT",
       );
     }
-    return Object.freeze(record);
+    return deepFreeze(structuredClone(record));
   }
 
   return Object.freeze({ begin, read });

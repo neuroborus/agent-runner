@@ -108,10 +108,18 @@ test("clarifies and bootstraps through independent source-session forks", async 
     fixture.calls.worker[1].prompt,
     /\.agents.*current plan step explicitly require them.*not a user question/u,
   );
+  assert.match(
+    fixture.calls.worker[1].prompt,
+    /Do not modify the resolved project configuration during a run/u,
+  );
   assert.doesNotMatch(fixture.calls.worker[2].prompt, /\.agents/u);
   assert.match(
     fixture.calls.worker[2].recoveryPrompt,
     /\.agents.*current plan step explicitly require them.*not a user question/u,
+  );
+  assert.match(
+    fixture.calls.worker[2].recoveryPrompt,
+    /Do not modify the resolved project configuration during a run/u,
   );
   assert.deepEqual(fixture.calls.reviewer[0].session, {
     mode: "fork",
@@ -250,12 +258,12 @@ test("accepts the advertised maximum bootstrap inventory", async (t) => {
     { length: MAX_BOOTSTRAP_ITEMS },
     (_, index) => ({
       id: `C${index + 1}`,
-      command: `node --test test/check-${index + 1}.test.js`,
+      command: `node validation/check-${index + 1}.js`,
     }),
   );
   const validationInfrastructure = Array.from(
     { length: MAX_BOOTSTRAP_ITEMS },
-    (_, index) => `test/check-${index + 1}.test.js`,
+    (_, index) => `validation/check-${index + 1}.js`,
   );
   const ready = (role) => ({
     ...bootstrapReady(role),
@@ -267,7 +275,7 @@ test("accepts the advertised maximum bootstrap inventory", async (t) => {
   let implementationStarted = false;
   const fixture = await createFixture(t, {
     async prepareProject(projectPath) {
-      await mkdir(join(projectPath, "test"));
+      await mkdir(join(projectPath, "validation"));
       await Promise.all(
         validationInfrastructure.map((path) =>
           writeFile(join(projectPath, path), "// validation fixture\n"),
@@ -296,11 +304,11 @@ test("persists and finalizes a disjoint maximum role-derived inventory", async (
   const roleInventory = (role) => ({
     requiredChecks: Array.from({ length: MAX_BOOTSTRAP_ITEMS }, (_, index) => ({
       id: `C${index + 1}`,
-      command: `node --test validation/${role}-${index + 1}.test.js`,
+      command: `node validation/${role}-${index + 1}.js`,
     })),
     validationInfrastructure: Array.from(
       { length: MAX_BOOTSTRAP_ITEMS },
-      (_, index) => `validation/${role}-${index + 1}.test.js`,
+      (_, index) => `validation/${role}-${index + 1}.js`,
     ),
   });
   const workerInventory = roleInventory("worker");
@@ -362,6 +370,16 @@ test("persists and finalizes a disjoint maximum role-derived inventory", async (
     MAX_VALIDATION_ITEMS,
   );
   assert.equal(state.finalizationResult.checks.length, MAX_VALIDATION_ITEMS);
+  for (const field of ["requiredChecks", "validationInfrastructure"]) {
+    const extra =
+      field === "requiredChecks"
+        ? { id: "C513", command: "node validation/extra.js" }
+        : "validation/extra.js";
+    assert.throws(() =>
+      normalizePipelineState({ ...state, [field]: [...state[field], extra] }),
+    );
+  }
+
   assert.equal(
     state.validationInfrastructureFingerprint,
     hash(JSON.stringify(derivedPaths.map((path) => [path, `// ${path}\n`]))),

@@ -9,6 +9,16 @@ import { createActionStore } from "./actions.js";
 import { atomicWriteFile, resolveRunArtifactPath } from "./files.js";
 import { createStateJournal } from "./journal.js";
 import { createLeaseManager } from "./lease.js";
+import { createMutationBoundary } from "./mutation.js";
+import { inspectProcessOwner, readProcessIdentity } from "./process-owner.js";
+import { createStopService } from "./stops.js";
+import { projectOperatorStop } from "./stop-projection.js";
+import {
+  assertRunCanAdvance,
+  assertStopProgress,
+  assertRunCanReleaseOwnership,
+  runRetainsOwnership,
+} from "./stop-policy.js";
 import {
   assertRunId,
   deepFreeze,
@@ -41,6 +51,7 @@ const CREATE_RUN_FIELDS = new Set([
   "pipelineStateVersion",
   "projectPath",
   "taskPath",
+  "projectConfigurationProtection",
   "roles",
   "counters",
   "hashes",
@@ -120,6 +131,20 @@ async function canonicalPotentialPath(path) {
       if (cause?.code !== "ENOENT") {
         throw cause;
       }
+      try {
+        const metadata = await lstat(currentPath);
+        // Another creator may have made this directory after realpath failed.
+        // Resolve it again so containment still uses its canonical path.
+        if (metadata.isDirectory()) continue;
+        throw new RunStoreError(
+          "State path cannot resolve through a dangling link.",
+          {
+            code: "ERR_UNSAFE_STATE_ROOT",
+          },
+        );
+      } catch (inspectionCause) {
+        if (inspectionCause?.code !== "ENOENT") throw inspectionCause;
+      }
       const parentPath = dirname(currentPath);
       if (parentPath === currentPath) {
         throw cause;
@@ -130,14 +155,17 @@ async function canonicalPotentialPath(path) {
   }
 }
 
-function assertStateRootOutside(stateRoot, projectPath, taskPath) {
+function assertDisjointStateRoot(stateRoot, projectPath, taskPath) {
   for (const [boundaryPath, name] of [
     [projectPath, "project"],
     [taskPath, "task directory"],
   ]) {
-    if (isWithin(boundaryPath, stateRoot)) {
+    if (
+      isWithin(boundaryPath, stateRoot) ||
+      isWithin(stateRoot, boundaryPath)
+    ) {
       throw new RunStoreError(
-        `State root must remain outside the ${name}: ${stateRoot}.`,
+        `State root and ${name} must remain disjoint: ${stateRoot}.`,
         { code: "ERR_UNSAFE_STATE_ROOT" },
       );
     }
@@ -188,9 +216,11 @@ export function createRunStore({
   hostName = hostname(),
   processId = process.pid,
   processIsAlive = defaultProcessIsAlive,
+  processIdentity = readProcessIdentity,
   leaseStaleMs = DEFAULT_LEASE_STALE_MS,
   onLeasePublicationBoundary = async () => {},
   onTransitionBoundary = async () => {},
+  resolveStopBoundary = null,
 } = {}) {
   if (typeof stateRoot !== "string" || !isAbsolute(stateRoot)) {
     throw new RunStoreError("State root must be an absolute path.", {
@@ -198,10 +228,13 @@ export function createRunStore({
     });
   }
   if (
+    (resolveStopBoundary !== null &&
+      typeof resolveStopBoundary !== "function") ||
     typeof clock !== "function" ||
     typeof runIdFactory !== "function" ||
     typeof leaseTokenFactory !== "function" ||
     typeof processIsAlive !== "function" ||
+    typeof processIdentity !== "function" ||
     typeof onLeasePublicationBoundary !== "function" ||
     typeof onTransitionBoundary !== "function" ||
     typeof hostName !== "string" ||
@@ -246,18 +279,64 @@ export function createRunStore({
       : currentTimestamp;
   }
 
-  const journal = createStateJournal({ onTransitionBoundary });
+  const journal = createStateJournal({
+    onTransitionBoundary,
+    resolveStopBoundary,
+  });
+  const mutate = createMutationBoundary({
+    hostName,
+    processId,
+    processIsAlive,
+    processIdentity,
+    onPublicationBoundary: onLeasePublicationBoundary,
+  });
+  async function withRunMutation(record, operation, leaseDirectory) {
+    let directory;
+    try {
+      directory = await getRunDirectory(record.runId);
+    } catch (cause) {
+      if (cause?.code !== "ERR_RUN_NOT_FOUND") throw cause;
+      // Guidance owners have no run; serialize their writes in the lease directory.
+      directory = leaseDirectory;
+    }
+    return mutate(directory, operation);
+  }
+  async function beforeRelease(record) {
+    let run;
+    try {
+      run = await loadRun(record.runId);
+    } catch (cause) {
+      if (cause?.code === "ERR_RUN_NOT_FOUND") return;
+      throw cause;
+    }
+    assertRunCanReleaseOwnership(run);
+  }
   const runLeases = createLeaseManager({
+    withMutation: withRunMutation,
+    beforeRelease,
     currentDate,
     hostName,
     processId,
     processIsAlive,
+    processIdentity,
     onPublicationBoundary: onLeasePublicationBoundary,
     staleMs: leaseStaleMs,
     timestamp,
     tokenFactory: leaseTokenFactory,
   });
   const worktreeLeases = createLeaseManager({
+    withMutation: withRunMutation,
+    beforeRelease,
+    async canReclaim(record, requestingRunId) {
+      if (record.runId === requestingRunId) return true;
+      try {
+        const current = await loadRun(record.runId);
+        return !runRetainsOwnership(current);
+      } catch (cause) {
+        if (cause?.code === "ERR_RUN_NOT_FOUND") return true;
+        throw cause;
+      }
+    },
     activeLeaseDescription: "Worktree lease",
     conflictCode: "ERR_WORKTREE_LEASED",
     currentDate,
@@ -267,6 +346,7 @@ export function createRunStore({
     leaseSubject: (runId) => `Run ${runId}'s Git worktree`,
     processId,
     processIsAlive,
+    processIdentity,
     onPublicationBoundary: onLeasePublicationBoundary,
     reclaimingLeaseDescription: "Reclaiming worktree lease",
     requireMatchingRunId: false,
@@ -279,6 +359,7 @@ export function createRunStore({
     hostName,
     processId,
     processIsAlive,
+    processIdentity,
     onPublicationBoundary: onLeasePublicationBoundary,
     stateRoot: requestedStateRoot,
     tokenFactory: leaseTokenFactory,
@@ -334,13 +415,13 @@ export function createRunStore({
       canonicalDirectory(projectPath, "Project path"),
       canonicalPotentialPath(requestedStateRoot),
     ]);
-    assertStateRootOutside(
+    assertDisjointStateRoot(
       potentialStateRoot,
       canonicalProjectPath,
       canonicalProjectPath,
     );
     const { rootPath } = await ensureRoot();
-    assertStateRootOutside(
+    assertDisjointStateRoot(
       rootPath,
       canonicalProjectPath,
       canonicalProjectPath,
@@ -403,10 +484,10 @@ export function createRunStore({
       canonicalDirectory(input.taskPath, "Task path"),
       canonicalPotentialPath(requestedStateRoot),
     ]);
-    assertStateRootOutside(potentialStateRoot, projectPath, taskPath);
+    assertDisjointStateRoot(potentialStateRoot, projectPath, taskPath);
 
     const { rootPath, runsPath } = await ensureRoot();
-    assertStateRootOutside(rootPath, projectPath, taskPath);
+    assertDisjointStateRoot(rootPath, projectPath, taskPath);
 
     let runId = input.runId;
     let runDirectory;
@@ -452,6 +533,10 @@ export function createRunStore({
           runtimeCompatibility: RUNTIME_COMPATIBILITY,
           projectPath,
           taskPath,
+          projectConfigurationProtection:
+            input.projectConfigurationProtection === undefined
+              ? null
+              : input.projectConfigurationProtection,
           roles: input.roles,
           counters: input.counters === undefined ? {} : input.counters,
           hashes: input.hashes === undefined ? {} : input.hashes,
@@ -465,6 +550,8 @@ export function createRunStore({
               input.childSessions === undefined ? [] : input.childSessions,
           },
           activeTurn: null,
+          executionProcess: null,
+          stopRequest: null,
           pipelineState:
             input.pipelineState === undefined ? {} : input.pipelineState,
           createdAt,
@@ -516,7 +603,7 @@ export function createRunStore({
       canonicalDirectory(taskPath, "Task path"),
       canonicalPotentialPath(requestedStateRoot),
     ]);
-    assertStateRootOutside(potentialStateRoot, project, task);
+    assertDisjointStateRoot(potentialStateRoot, project, task);
     return Object.freeze({ projectPath: project, taskPath: task });
   }
 
@@ -537,7 +624,7 @@ export function createRunStore({
 
   async function loadSnapshot(runDirectory, runId) {
     const snapshot = await journal.loadSnapshot(runDirectory, runId);
-    assertStateRootOutside(
+    assertDisjointStateRoot(
       runDirectory,
       snapshot.state.projectPath,
       snapshot.state.taskPath,
@@ -550,9 +637,20 @@ export function createRunStore({
     return deepFreeze((await loadSnapshot(runDirectory, runId)).state);
   }
 
+  // Internal runtime evidence: the run and complete validated journal come
+  // from one authoritative snapshot. Public projections must not return events.
+  async function loadRunHistory(runId) {
+    const runDirectory = await getRunDirectory(runId);
+    const snapshot = await loadSnapshot(runDirectory, runId);
+    return deepFreeze({ run: snapshot.state, events: snapshot.events });
+  }
+
   async function runIsLeased(runId) {
     const runDirectory = await getRunDirectory(runId);
-    return runLeases.isLeased(runDirectory, runId);
+    const current = (await loadSnapshot(runDirectory, runId)).state;
+    return (
+      runRetainsOwnership(current) || runLeases.isLeased(runDirectory, runId)
+    );
   }
 
   async function runLeaseOwnerIsLive(runId) {
@@ -576,6 +674,24 @@ export function createRunStore({
     assertRunId(runId);
     const worktreeDirectory = await getWorktreeLeaseDirectory(projectPath);
     return worktreeLeases.owner(worktreeDirectory, runId);
+  }
+
+  async function withGuidanceLease(projectPath, operation) {
+    if (typeof operation !== "function") {
+      throw new RunStoreError("Guidance publication requires an operation.", {
+        code: "ERR_INVALID_RUN_STORE_OPTIONS",
+      });
+    }
+    await validateStateBoundary({ projectPath, taskPath: projectPath });
+    const lease = await acquireWorktreeLease(projectPath, randomUUID());
+    const assertOwnership = () =>
+      worktreeLeases.runExclusive(lease, async () => {});
+    try {
+      await assertOwnership();
+      return await operation(assertOwnership);
+    } finally {
+      await lease.release();
+    }
   }
 
   async function waitForRunChange(
@@ -731,7 +847,19 @@ export function createRunStore({
     });
   }
 
-  async function transitionRun(lease, patch, { activity } = {}) {
+  async function transitionRun(
+    lease,
+    patch,
+    { activity, expectedRevision } = {},
+  ) {
+    if (
+      expectedRevision !== undefined &&
+      (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1)
+    ) {
+      throw new RunStoreError("Expected run revision is invalid.", {
+        code: "ERR_RUN_REVISION_CHANGED",
+      });
+    }
     const normalizedPatch = normalizeTransitionPatch(patch);
     const normalizedActivity = normalizePublicActivity(activity);
     if (
@@ -746,6 +874,15 @@ export function createRunStore({
 
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
+      assertRunCanAdvance(snapshot.state, resolveStopBoundary);
+      if (
+        expectedRevision !== undefined &&
+        snapshot.state.revision !== expectedRevision
+      ) {
+        throw new RunStoreError("Run changed before transition.", {
+          code: "ERR_RUN_REVISION_CHANGED",
+        });
+      }
       if (
         normalizedActivity === null &&
         Object.entries(normalizedPatch).every(([field, value]) =>
@@ -766,6 +903,7 @@ export function createRunStore({
         },
         record.runId,
       );
+      assertStopProgress(snapshot.state, nextState, resolveStopBoundary);
       await journal.appendTransition(
         runDirectory,
         nextState,
@@ -810,6 +948,7 @@ export function createRunStore({
     }
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
+      assertRunCanAdvance(snapshot.state, resolveStopBoundary);
       if (!isDeepStrictEqual(snapshot.state.activeTurn, normalized)) {
         throw new RunStoreError("Active agent turn does not match.", {
           code: "ERR_INVALID_AGENT_TURN",
@@ -835,6 +974,7 @@ export function createRunStore({
 
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
+      assertRunCanAdvance(snapshot.state, resolveStopBoundary);
       if (
         snapshot.state.sessionLineage.children.some(
           (child) => child.sessionId === normalizedChild.sessionId,
@@ -881,7 +1021,11 @@ export function createRunStore({
       );
     }
 
-    return runLeases.runExclusive(lease, async ({ runDirectory }) => {
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
+      assertRunCanAdvance(
+        (await loadSnapshot(runDirectory, record.runId)).state,
+        resolveStopBoundary,
+      );
       const artifactPath = await resolveRunArtifactPath(
         runDirectory,
         relativePath,
@@ -927,6 +1071,9 @@ export function createRunStore({
           revision: event.revision,
           recordedAt: event.recordedAt,
           ...event.activity,
+          ...(event.state.stopRequest == null
+            ? {}
+            : { stop: projectOperatorStop(event.state) }),
         });
         if (activities.length === limit) {
           break;
@@ -937,7 +1084,103 @@ export function createRunStore({
     return deepFreeze({ activities, cursor });
   }
 
+  const stops = createStopService({
+    resolveStopBoundary,
+    actions,
+    getRunDirectory,
+    loadSnapshot,
+    journal,
+    mutate,
+    runLeases,
+    timestamp,
+  });
+  async function inspectRunLeaseOwner(runId) {
+    return runLeases.inspect(await getRunDirectory(runId), runId);
+  }
+  async function recordExecutionProcess(lease, pid, proof = null) {
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
+      const snapshot = await loadSnapshot(runDirectory, record.runId);
+      if (pid !== null) {
+        assertRunCanAdvance(snapshot.state, resolveStopBoundary);
+        if (snapshot.state.executionProcess !== null) {
+          throw new RunStoreError(
+            "The preceding execution process must stop first.",
+            {
+              code: "ERR_EXECUTION_PROCESS_ACTIVE",
+            },
+          );
+        }
+      } else if (snapshot.state.executionProcess === null)
+        return snapshot.state;
+      const identity = pid === null ? null : await processIdentity(pid);
+      if (
+        proof !== null &&
+        !isDeepStrictEqual(identity, proof.processIdentity)
+      ) {
+        throw new RunStoreError(
+          "Execution identity changed before registration.",
+          {
+            code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+          },
+        );
+      }
+      const next = normalizeRunState(
+        {
+          ...snapshot.state,
+          executionProcess:
+            pid === null
+              ? null
+              : {
+                  pid,
+                  hostname: hostName,
+                  processIdentity: identity,
+                  namespaceId: proof?.namespaceId ?? null,
+                },
+          revision: snapshot.state.revision + 1,
+          updatedAt: timestamp(snapshot.state.updatedAt),
+        },
+        record.runId,
+      );
+      await journal.appendTransition(runDirectory, next, snapshot, {
+        actor: "runner",
+        phase: "execution",
+        kind: pid === null ? "stopped" : "started",
+        message:
+          pid === null
+            ? "Owned execution process stopped."
+            : "Owned execution process recorded before launch.",
+      });
+      return deepFreeze(next);
+    });
+  }
+  async function inspectExecutionProcess(runId) {
+    const record = (await loadRun(runId)).executionProcess;
+    const localIdentity =
+      record?.hostname === hostName ? await processIdentity(processId) : null;
+    return record === null
+      ? null
+      : deepFreeze({
+          ...record,
+          status: await inspectProcessOwner(record, {
+            hostName,
+            processIsAlive,
+            processIdentity,
+          }),
+          previousBoot:
+            record.processIdentity !== null &&
+            localIdentity !== null &&
+            record.processIdentity.bootId !== localIdentity.bootId,
+        });
+  }
   return Object.freeze({
+    recordExecutionProcess,
+    inspectExecutionProcess,
+    requestOperatorStop: stops.request,
+    recordStopActivity: stops.activity,
+    completeOperatorStop: stops.complete,
+    settleCheckpoint: stops.settleCheckpoint,
+    loadStopCheckpoint: stops.checkpoint,
+    inspectRunLeaseOwner,
     beginAction: actions.begin,
     rootPath: requestedStateRoot,
     acquireRunLease,
@@ -946,6 +1189,7 @@ export function createRunStore({
     getRunDirectory,
     finishAgentTurn,
     loadRun,
+    loadRunHistory,
     migrateRun,
     readPublicActivity,
     readAction: actions.read,
@@ -959,6 +1203,7 @@ export function createRunStore({
     waitForRunChange,
     worktreeIsLeased,
     worktreeLeaseOwner,
+    withGuidanceLease,
     writeRunArtifact,
   });
 }

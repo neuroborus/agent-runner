@@ -11,6 +11,19 @@ Start with the [`docs` map and change gate](docs/README.md). Architecture is
 documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), and each pipeline
 owns its specification under its workspace.
 
+Read the [operator guide](docs/OPERATOR_GUIDE.md) for the complete CLI/MCP
+supervision procedure, pause recovery, validation boundaries, and safe
+project-local operating guidance.
+
+| Mode          | Quality | Speed | Token consumption | Meaning                                                         |
+| ------------- | ------- | ----- | ----------------- | --------------------------------------------------------------- |
+| `lazy`        | ★★★☆☆   | ★★★★★ | ★★☆☆☆             | Lower-consumption self-review without an independent Reviewer.  |
+| `independent` | ★★★★☆   | ★★★☆☆ | ★★★★☆             | Recommended default with genuinely independent semantic review. |
+| `combined`    | ★★★★★   | ★★☆☆☆ | ★★★★★             | Primary self-convergence followed by the full independent gate. |
+
+More token stars mean greater consumption. Ratings are relative guidance, not
+measured provider guarantees.
+
 ## Core Guarantees
 
 - Pipelines own their roles, inputs, prompts, state machines, and output policy.
@@ -18,12 +31,13 @@ owns its specification under its workspace.
 - Every pipeline starts with a bounded, read-only `CLARIFY` phase.
 - After clarification closes, a blocking material product decision pauses the
   pipeline through `PRODUCT_DECISION_REQUIRED`.
-- Every built-in pipeline supports `independent` and `lazy` execution modes.
+- Every built-in pipeline supports `independent`, `lazy`, and `combined` modes.
   `independent` is the default and recommended choice because it provides
   genuinely independent semantic review, at the cost of more provider context
   and tokens. `lazy` is an explicit lower-consumption choice that uses only the
   primary agent and does not provide independent review; it is never selected
-  automatically.
+  automatically. `combined` adds primary
+  convergence followed by independent review.
 - Codex and Claude can be selected independently for each pipeline role.
 - Read-only agent turns include repository-mutation verification.
 - Codex writable turns expose an existing real project `.agents` directory,
@@ -51,8 +65,8 @@ owns its specification under its workspace.
 - Git
 - Codex CLI 0.147.0 or newer stable and/or Claude Code 2.1.233 or newer stable,
   depending on the selected role backends
-- `bubblewrap` for trusted validation and the V1 Claude backend on Linux, plus
-  `socat` for the Claude backend
+- Linux with usable PID namespaces and system-installed `bubblewrap` for owned
+  execution and trusted validation, plus `socat` for the Claude backend
 
 The project uses native ES modules. External runtime dependencies comprise the
 official Node MCP server SDK and its schema library.
@@ -110,9 +124,18 @@ A target repository may optionally provide an ignored, untracked
 ignored path with `--project-config`. A project file may select aliases already
 trusted by the runner, set backend/model/context defaults, override pipeline
 roles and limits, and select a normalized repository-relative `artifactRoot`.
-Its accepted fields select runner-trusted aliases, execution preferences,
-pipeline settings, and the artifact root. Agent Runner expects an existing
-ignored, untracked, confined regular file.
+It may also define exact `trustedCommands` vectors under the same contract as
+the runner catalog; profile implementations remain runner-owned. Agent Runner
+expects an existing ignored, untracked, confined regular file.
+
+For a run that uses this file, Agent Runner persists its canonical path,
+content hash, file identity, and real-directory ancestry before agent work.
+The runner checks that record around provider turns and before recovery,
+trusted validation, commit, handoff, and stop reconciliation. Removal, content
+drift, replacement, hard links, symbolic links, or redirected ancestors pause
+the run as `project_configuration_changed`; restoring similar content does not
+authorize that run to continue. Legacy runs with no protection record remain
+compatible and do not infer one from current files.
 
 For execution preferences, CLI/MCP role values win over CLI/MCP run-wide
 values, then project-role and project-wide values, runner-role and runner-wide
@@ -144,40 +167,91 @@ explicit and shows `claude-primary` and `claude-secondary` aliases.
 
 Pipeline settings use these defaults:
 
-| Pipeline         | Setting                  |       Default |
-| ---------------- | ------------------------ | ------------: |
-| `plan-authoring` | `mode`                   | `independent` |
-| `plan-authoring` | `maxRevisionRounds`      |            20 |
-| `plan-authoring` | `stagnationWindowRounds` |             3 |
-| `plan-execution` | `mode`                   | `independent` |
-| `plan-execution` | `maxFixRoundsPerStep`    |            20 |
-| `plan-execution` | `finalization`           |        `auto` |
-| `plan-execution` | `maxDisputesPerFinding`  |             5 |
-| `plan-execution` | `maxSameFindingRounds`   |             5 |
-| `plan-execution` | `stagnationWindowRounds` |             3 |
-| `plan-execution` | `trustedChecks`          |          `[]` |
-| `polishing`      | `mode`                   | `independent` |
-| `polishing`      | `maxFixRounds`           |            20 |
-| `polishing`      | `finalization`           |        `auto` |
-| `polishing`      | `maxDisputesPerFinding`  |             5 |
-| `polishing`      | `maxSameFindingRounds`   |             5 |
-| `polishing`      | `stagnationWindowRounds` |             3 |
-| `polishing`      | `trustedChecks`          |          `[]` |
+| Pipeline         | Setting                    |       Default |
+| ---------------- | -------------------------- | ------------: |
+| `plan-authoring` | `mode`                     | `independent` |
+| `plan-authoring` | `maxRevisionRounds`        |            20 |
+| `plan-authoring` | `preferredCommitLineLimit` |           900 |
+| `plan-authoring` | `stagnationWindowRounds`   |             3 |
+| `plan-execution` | `mode`                     | `independent` |
+| `plan-execution` | `maxFixRoundsPerStep`      |            20 |
+| `plan-execution` | `finalization`             |        `auto` |
+| `plan-execution` | `maxDisputesPerFinding`    |             5 |
+| `plan-execution` | `maxSameFindingRounds`     |             5 |
+| `plan-execution` | `stagnationWindowRounds`   |             3 |
+| `plan-execution` | `trustedChecks`            |          `[]` |
+| `polishing`      | `mode`                     | `independent` |
+| `polishing`      | `maxFixRounds`             |            20 |
+| `polishing`      | `finalization`             |        `auto` |
+| `polishing`      | `maxDisputesPerFinding`    |             5 |
+| `polishing`      | `maxSameFindingRounds`     |             5 |
+| `polishing`      | `stagnationWindowRounds`   |             3 |
+| `polishing`      | `trustedChecks`            |          `[]` |
 
-`mode` accepts exactly `independent` and `lazy`. A missing value resolves to
-`independent`. The tracked [example](.agent-runner.example.json) selects
+`mode` accepts `independent`, `lazy`, and `combined` in every pipeline. A missing value
+resolves to `independent`. The tracked [example](.agent-runner.example.json) selects
 `independent` explicitly for every pipeline. Runner and ignored project
-configuration may select either value, and `--mode` or MCP `run_start.mode`
-has highest precedence. Configuration remains strictly validated for every
+configuration may select a descriptor-supported value, and `--mode` or MCP
+`run_start.mode` has highest precedence. Configuration remains strictly validated for every
 declared role, but a lazy run resolves, probes, persists, and invokes only its
 Planner or Worker. Reviewer and Arbiter configuration stays available in the
 configuration files for a later independent run without being resolved or
 exposed by the lazy run.
 
+Combined authoring adds Planner check/fix and a separate clean confirmation
+before the complete independent Reviewer gate. Reviewer revisions restart
+primary convergence; self findings return directly to fixing. Only independent
+finding resolution can use a fresh Arbiter. All agent turns remain read-only;
+the runner writes the validated plan. For example:
+
+Combined execution runs Worker check/fix and a separate read-only clean
+confirmation before the complete independent candidate Reviewer gate. Both
+candidate approvals bind the same content fingerprint. Finalization may format
+that content; a distinct Reviewer terminal confirmation approves its resulting
+fingerprint and validation evidence before one-shot commit authorization.
+Content repairs restart primary convergence. Self-findings go directly to fixing;
+independent findings retain disputes, withdrawals, exact recorded overrides, and
+fresh on-demand arbitration. Unresolved bootstrap disagreements and primary
+exhaustion pause without arbitration. Corrections remain bounded and interrupted
+work is charged once; resume preserves the saved mode and consumed commits remain
+verification-only.
+
+Combined polishing uses independent bootstrap, Worker check/fix and read-only
+clean confirmation, independent candidate review, finalization, and a distinct
+Reviewer terminal confirmation. Content repairs restart primary convergence;
+unchanged resolutions reuse only fingerprint-current finalization. Self-findings
+return directly to fixing; only independent finding resolution may invoke Arbiter.
+Unresolved bootstrap and exhausted primary budgets pause. Handoff remains
+runner-owned staging without a commit, and resume preserves accepted evidence
+and correction accounting.
+
+```bash
+agent-run run plan-authoring --project /path/to/repository --task /path/to/task --mode combined
+agent-run run plan-execution --project /path/to/repository --task /path/to/task --mode combined
+agent-run run polishing --project /path/to/repository --task /path/to/task --mode combined
+```
+
+The equivalent MCP `run_start` request uses the selected `pipelineId`
+(`plan-authoring`, `plan-execution`, or `polishing`) and `"mode": "combined"`. Saved mode and bounded correction progress survive
+resume; changing configuration does not switch an existing run.
+
+`preferredCommitLineLimit` is a positive-integer planning target for anticipated
+additions plus deletions per commit, including tests and documentation. Set it
+under `pipelines.plan-authoring` in runner configuration or the safe project
+overlay; project values take precedence. Planner and Plan Reviewer prefer
+cohesive commits within the target, with smaller commits welcome. A larger
+indivisible change remains valid when the plan explains why it cannot be split
+safely. This heuristic changes neither the plan format nor execution validation.
+The resolved value is persisted and reused on resume; legacy runs receive 900.
+`agent-run pipelines` lists descriptor-owned setting defaults, and MCP
+`pipelines_list` exposes the same defaults.
+
 The stagnation window detects consecutive blocked correction rounds. In
 independent mode the first full window invokes one fresh Arbiter and a second
 full window pauses for the user. Lazy mode has no Arbiter and pauses at the
 first full window. Harder configured limits take precedence.
+For authoring, only independent Reviewer findings are eligible for arbitration;
+self-review and deterministic structural exhaustion pause without it.
 
 For plan execution and polishing, `finalization: "auto"` uses a conventional
 confined repository `finalization` skill when present. The fallback derives the
@@ -189,11 +263,15 @@ the dedicated fingerprint-bound finalization turn.
 
 Required checks that need loopback listeners, Docker, a local database, or a
 comparable host service may be delegated to the runner's trusted validation
-executor. The runner-root catalog accepts at most 256 aliases; each pipeline
-run may select at most 32 of them. Exact direct arguments may contain line
-feeds for multiline scripts; other control characters remain invalid. Only the
-runner-root configuration may define an alias, its exact inventory command, and
-its executable/argument vector:
+executor. Runner-root and safe project configuration may each define
+`trustedCommands` using exact inventory commands and executable/argument
+vectors. Catalogs merge in root-then-project order: identical same-name
+definitions deduplicate, while conflicting definitions reject configuration
+even when unselected. The merged catalog accepts at most 256 aliases; each
+pipeline run may select at most 32, preserving selection order in the snapshot.
+Trusted commands execute in finalization's required-check inventory order.
+Exact direct arguments may contain line feeds for multiline scripts; other control
+characters remain invalid. This example works in either configuration source:
 
 ```json
 {
@@ -213,18 +291,29 @@ its executable/argument vector:
 }
 ```
 
-An ignored project configuration may select `service-tests` through the same
-pipeline setting. Runner configuration owns its command, vector, environment,
-and executable. Selection resolves to a durable fingerprinted snapshot before
-agent work, and resume uses that snapshot. The runner executes the vector
-directly. Before agent work, it resolves bubblewrap from fixed system locations
-to a canonical absolute executable protected by system-owned file and parent
+An ignored project configuration may select root or project aliases through
+the same pipeline setting, replacing that pipeline's root selection. The tracked
+configuration example demonstrates `repository-check` in both writable pipelines.
+Definitions cannot contain shell-string substitutes, environment or credential
+fields, or extra host authority; profile implementations remain runner-owned.
+Selection resolves to a durable fingerprinted snapshot before agent work, and
+resume uses that snapshot. Later project configuration changes trigger the
+protected-input guard. The runner owns the execution environment and executes
+the vector directly. Before agent work, it resolves bubblewrap from fixed system
+locations to a canonical absolute executable protected by system-owned file and parent
 permissions. The pinned path is reverified on resume and execution. Its network
 namespace has a minimal read-only system and repository view, private runtime
 and temporary storage, a hidden user home, and a finite non-credential
 environment. Rootless Docker and command-owned services run inside the same
-mount, network, and PID namespaces. A private PID namespace and an outer
-process group retire that complete service tree before reconciliation. A
+mount, network, and PID namespaces. The runner records its owned supervisor
+identity and retires the complete tree, including detached descendants, before
+reconciliation. Native-sandbox provider processes prefer private PID ownership
+when the full nested shape is available. If nesting is unavailable on the
+initial host namespace, only an explicitly declared provider may use
+session/token ownership while its native sandbox remains mandatory;
+ordinary processes retain private PID isolation. Nested runner tests reuse that
+already-private PID namespace through the same distinct owned session when its
+policy denies another PID namespace; no sandbox authority is added. A
 readiness signal classifies isolation setup failures separately from executed
 check failures. Workspace, Git, ref, remote, identity,
 and validation-infrastructure snapshots must remain stable. Isolation or
@@ -248,6 +337,25 @@ rate, quota, credit, or spend-limit rejection, the rejected native turn is
 invoked once and the pipeline pauses as `backend_unavailable`. Durable workflow
 state and safe workspace changes are preserved, and resume reconstructs the
 pending request from runner state.
+
+Codex rejects incompatible response schemas locally with
+`ERR_INVALID_CODEX_SCHEMA` before provider activity. This terminal input error
+does not trigger provider retries or output correction. Pipeline validation
+still enforces constraints such as unique finalization finding IDs when the
+provider-compatible schema cannot express them.
+
+Codex recognizes bounded structured non-transient HTTP client errors even when
+the native failure is marked `other`. HTTP 400 `invalid_request_error` /
+`invalid_json_schema` is terminal `ERR_CODEX_TURN_FAILED` with
+`turn_bad_request`; it does not trigger provider retries, output correction,
+or `backend_unavailable`. Native error details are discarded.
+
+Opaque Codex `turn_other` failures use at most one fresh reconstruction for
+ordinary non-commit turns, with the complete durable recovery request and observed
+workspace. A repeated failure pauses as `backend_unavailable` at the safe
+checkpoint; restore provider availability and resume the same run. Native
+error details are discarded, source forks are never replaced by fresh context,
+and local-commit turns never use this retry or replay a commit effect.
 
 ## Task Inputs
 
@@ -306,9 +414,26 @@ agent-run run plan-execution --project /path/to/repository --task /path/to/task
 agent-run run polishing --project /path/to/repository --task /path/to/task
 agent-run resume --run <run-id>
 agent-run status --run <run-id>
+agent-run guidance --project /path/to/repository
+agent-run guidance edit --project /path/to/repository
 agent-run pipelines
 agent-run mcp
 ```
+
+`guidance` prints the complete common operator guide and local additions.
+`guidance edit` opens the entire local Markdown in `$VISUAL`, then `$EDITOR`
+if the preferred editor cannot launch. Both commands accept
+`--project-config <path>` using the same configuration rules as a new run.
+For editors that launch a separate window, configure their wait flag so the
+command remains open until editing is complete.
+
+Edits use a private temporary copy outside the project. A successful editor
+exit validates and atomically publishes the result only if the original local
+hash, destination, configuration, and execution ownership still permit it.
+An unchanged close is a checked no-op, including when no local file exists.
+An empty edited document removes all additions. Editor failure, unsafe content,
+or a concurrent change preserves the local document; reread and reconcile a
+stale edit. These commands do not create a pipeline run.
 
 Run-wide preferences use `--profile`, `--model`, and `--context-size`.
 Role-specific values use derived flags such as `--worker-profile`,
@@ -347,8 +472,8 @@ agent-run run plan-execution \
 `--fork-from` remains an opaque native ID. Participating primary and review
 roles must match the source backend. A known source profile supplies `current`
 for those roles and every explicit participating-role profile must match it; an
-unknown source profile requires `current` inheritance. In independent mode,
-the first eligible turn in each pipeline-owned primary or review checkpoint
+unknown source profile requires `current` inheritance. In independent and
+combined modes, the first eligible turn in each pipeline-owned primary or review checkpoint
 forks the source independently.
 Those children are direct siblings with independent later histories, and every
 Arbiter starts fresh. In lazy mode, the source is forked exactly once into the
@@ -396,9 +521,9 @@ ID, pipeline state-schema version, and an explicit runtime compatibility tuple
 independent from the package version. Compatible legacy state is migrated by
 the owning pipeline under the per-run lease; incompatible readers return a
 specific version-skew error while preserving the run. The mode-aware pipeline
-versions are plan-authoring version 3, plan-execution version 14, and polishing
-version 10. Their ordered migrations resolve every supported legacy run to
-`independent` without moving terminal workflows or replaying role turns,
+versions are plan-authoring version 5, plan-execution version 17, and polishing
+version 13. Their ordered migrations resolve missing legacy modes to
+`independent` and preserve explicitly saved modes without moving terminal workflows or replaying role turns,
 commits, or handoffs. Complete write-ahead events precede atomic state
 replacement; recovery repairs a lagging state file and derived progress.
 Mutating runs require one per-run execution lease. Plan execution and polishing
@@ -423,6 +548,19 @@ or read-only mutation without replaying an accepted effect or counting a round
 twice. The one-time source-fork marker prevents reconstruction from forking the
 source again.
 
+Legacy plan-execution failures at terminal `CONFIRM` can also offer action-free
+resume in either mode. Status shows that action only when the durable journal
+proves candidate acceptance, passing finalization, and the exact opaque
+`ERR_CODEX_TURN_FAILED` / `turn_other` failure. Run
+`agent-run resume --run <run-id>`, or submit MCP `run_resume` with the current
+revision, a null action, and an idempotency key. Recovery revalidates inputs,
+Git safety, content, infrastructure, and retained check evidence before
+confirmation; it preserves completed commits and counters and replays no
+implementation, finalization, or consumed commit effect. A proven
+`pendingCorrection: true` accounting marker is retained. Missing or inconsistent
+history, migration-only acceptance, and genuinely pending work fail closed.
+See the [operator guide](docs/OPERATOR_GUIDE.md) for recovery boundaries.
+
 Plan execution and polishing accept one applicable resume action at a time:
 
 ```bash
@@ -430,9 +568,44 @@ agent-run resume --run <run-id> --extra-fix-rounds 3
 agent-run resume --run <run-id> --override-finding R7
 ```
 
+An operator can also request a durable pause or terminal cancellation. The
+short CLI form reads the run once, binds that revision to a fresh idempotency
+key, and submits the request:
+
+```bash
+agent-run pause --run <run-id>
+agent-run cancel --run <run-id>
+```
+
+Timing defaults to `immediate`. To let the selected execution step finish:
+
+```bash
+agent-run pause --run <run-id> --timing after-current-commit
+agent-run cancel --run <run-id> --timing after-current-commit
+```
+
+This timing also accepts suspended execution steps, but rejects clarification,
+bootstrap, missing steps, authoring, and polishing. The stop settles at the
+verified commit before the next step, or at the reconciled checkpoint if the
+step pauses, fails, or is interrupted; it never does extra work to obtain a
+commit. A final-step pause resumes through `DONE` without agent work; cancel
+retains completed commits in terminal `CANCELED`. Status shows requested and
+effective timing, target step, and settlement. See
+[operator guidance](docs/OPERATOR_GUIDE.md) for recovery semantics.
+
+For repeatable automation, supply both captured values explicitly. Retry an
+uncertain request with exactly the same revision, key, and timing; never refresh a stale
+request silently:
+
+```bash
+agent-run pause --run <run-id> --expected-revision 42 --idempotency-key <key>
+agent-run cancel --run <run-id> --expected-revision 42 --idempotency-key <key>
+```
+
 `run` and `resume` exit with status `2` when they return a persisted pause.
-Invalid input and startup or execution failures exit with status `1`; `status`
-exits successfully when it can read the requested run.
+Accepted `pause` and `cancel` requests and readable `status` calls exit
+successfully. Invalid input and startup or execution failures exit with status
+`1`.
 
 Resume after editing the reported clarification artifact or resolving a
 reported retryable blocker. After clarification closes, only a
@@ -453,16 +626,27 @@ convergence. Independent mode uses Reviewer passes; lazy mode alternates a
 writable Worker `CHECK_AND_FIX` turn with a separate read-only candidate
 `CLEAN_CONFIRM`. The stable candidate then runs the dedicated finalization gate
 using the configured guidance policy and one distinct read-only terminal
-confirmation over the resulting content and validation fingerprints. Any
-terminal finding returns through candidate convergence. Matching successful
-finalization evidence is reused for a fresh confirmation, while a content or
-validation-infrastructure change reruns the complete finalization gate. Lazy
+confirmation over the resulting content and validation fingerprints. Content
+findings return through candidate convergence. Terminal rejection of validation
+evidence invalidates finalization immediately; pure evidence findings rerun
+complete finalization directly without code fixing. Mixed findings resolve
+content first, then require replacement finalization. Two automatic semantic
+retries per step are durable across interruption and provider unavailability;
+exhaustion pauses as `finalization_evidence_rejected` at `FINALIZE`, where an
+explicit retry grants one additional attempt. Matching successful evidence from
+ordinary non-rejection findings remains reusable for a fresh confirmation;
+content or validation-infrastructure drift reruns the complete gate. Lazy
 mode has no review dispute or Arbiter path. Remote state remains read-only.
 If an unexpected runner-owned invariant rejects a finalization transition,
 status retains a resumable `FINALIZE` checkpoint and exposes only a bounded
 diagnostic through both the CLI and MCP.
 
-Polishing follows the same mode-specific, fingerprint-bound ordering.
+Polishing follows the same mode-specific, fingerprint-bound ordering and
+terminal evidence-rejection recovery, with two automatic semantic retries per
+run. Pure evidence rejection preserves candidate acceptance; mixed findings
+converge content before replacement finalization. Exhaustion exposes the same
+explicit additional-attempt action, and recovery never grants an agent index
+access or replays a completed handoff.
 Independent candidate review, or lazy check/fix plus candidate clean
 confirmation, converges before full finalization. Finalization may format the
 accepted candidate; one distinct read-only Reviewer or Worker confirmation then
@@ -511,26 +695,53 @@ The MCP process starts from the pinned local installation. The server uses a
 local STDIO transport with stdout reserved for protocol messages. It
 exposes:
 
+- `guidance_read`
+- `guidance_update`
 - `pipelines_list`
 - `run_start`
 - `run_status`
 - `run_activity`
+- `run_cancel`
+- `run_pause`
 - `run_wait`
 - `run_respond`
 - `run_resume`
 - `unexpected_issue_report` when runner-local issue reporting is enabled
+
+Call `guidance_read` once before first managing a run for each project, using
+`projectPath` and optional `projectConfigurationPath`. It returns the complete
+`commonContent`, `localContent`, and `combinedContent`, plus the resolved paths
+and `localHash` needed for editing. The startup reminder remains present when
+issue reporting is disabled.
+
+After execution releases ownership, use `guidance_update` to replace the entire
+local Markdown with a stable project operating lesson. Supply the same project
+selectors, full `localContent`, `expectedHash` from the read's `localHash`, and
+a unique `idempotencyKey`. A null hash requires an absent file; empty content
+means no local additions. MCP never opens an editor or replaces the common
+guide. Keep task requirements in task context or tracked project documentation
+and secrets, transcripts, and raw provider output out of local guidance.
+
+Retry an interrupted update with the same key and arguments. A completed retry
+returns its recorded `projectPath`, `localPath`, `localHash`, and `updated`
+receipt without overwriting later CLI or MCP edits. For a stale edit, reread,
+reconcile the entire document, and submit a new mutation with a new key. See
+the [operator guide](docs/OPERATOR_GUIDE.md#7-report-defects-and-maintain-useful-local-guidance)
+for a complete replacement example and common safety precedence.
 
 Use `pipelines_list` to discover the registry, then start with `run_start` and a
 unique opaque idempotency key. It persists the run, returns a durable `runId`,
 and launches detached execution. Its additive `projectConfigurationPath`
 selects the same confined project file as `--project-config`; `profile`,
 `model`, and `contextSize` set run-wide selections; the same fields inside a
-`roleOverrides` entry take precedence. Optional `mode` accepts only
-`independent` and `lazy` and overrides project and runner configuration.
+`roleOverrides` entry take precedence. Optional `mode` overrides project and
+runner configuration and is validated by the selected descriptor. All pipelines
+accept `independent`, `lazy`, and `combined`.
 `independent` is the default and recommended option for genuinely independent
 semantic review, but it consumes more provider context and tokens. `lazy` is
 opt-in for lower consumption and does not provide independent review; a
-controlling agent must never select it automatically. `sourceSession.profile`
+controlling agent must never select it automatically. `combined` adds primary
+convergence before the full independent review gate. `sourceSession.profile`
 carries a known trusted source alias while its `id` remains opaque. These
 optional fields are additive; the minimal fresh-start request is:
 
@@ -558,8 +769,8 @@ with that choice. An unknown profile offers `current` inheritance. Add
 }
 ```
 
-Independent mode then forks the complete source context into primary and review
-roles, so each child can consume provider context and quota. Lazy mode forks it
+Independent and combined modes then fork the complete source context into
+primary and review roles, so each child can consume provider context and quota. Lazy mode forks it
 once into the primary role and never invokes Reviewer or Arbiter. Recommend a
 fresh start for a long, multi-topic, or uncertain current session. The
 configured artifact root applies to runner-owned execution, polishing, and
@@ -608,11 +819,29 @@ only non-pause exception is a null action at the exact revision of a nonterminal
 persisted active turn with no live execution owner; stale revisions, non-null
 actions, and concurrent owners are rejected.
 
+Use `run_pause` or `run_cancel` with `expectedRevision` from the inspected
+status or wait result and a unique `idempotencyKey`. A pause preserves the
+reconciled checkpoint for an action-free resume; cancellation reaches terminal
+`CANCELED` and cannot be revived. Exact retries use the same arguments and key.
+Older or conflicting requests fail instead of silently adopting a newer
+revision. The optional `timing` field accepts `immediate` (the default) or
+`after-current-commit` under the same execution-only rules as the CLI. Omitted
+and explicit immediate timing identify the same request. An immediate cancel
+can supersede a deferred pause; supersession cannot delay an earlier stop.
+Receipts retain their acceptance timing and target even on later replay.
+Status and waits retain `pendingStop` and add `stop`, which includes requested
+and effective timing, target step, `state` (`pending`, `applicable`, or `settled`),
+and nullable settlement (`quiescent` or `commit`, with the verified SHA).
+Activity entries carry the stop summary at that event's revision. Waits treat
+`CANCELED` as terminal and canceling a wait does not cancel the run.
+
 Mutating tools persist an action intent before mutation and a receipt before
 returning. Exact retries return the original result, while reusing a key with
 different arguments is rejected. Issue reporting uses that contract for its
-single local file creation. Runs continue in detached local children, so
-MCP disconnects and wait cancellation affect only the client call. A detached
+single local file creation. Accepted stop requests notify the live execution
+owner or start detached same-run reconciliation when ownership was lost. Runs
+continue in detached local children, so MCP disconnects and wait cancellation
+affect only the client call. A detached
 start or resume rejects active canonical-worktree ownership before launch and
 withholds its receipt after launch until the run advances or the child owns the
 worktree. Losing a concurrent ownership race keeps the durable idempotency
@@ -679,7 +908,6 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   │   │   └── workspace-storage.js
 │   │   └── index.js
 │   ├── clarifications/
-│   │   ├── editor.js
 │   │   ├── files.js
 │   │   ├── index.js
 │   │   └── service.js
@@ -690,11 +918,18 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   │   ├── parsing.js
 │   │   ├── profiles.js
 │   │   └── resolution.js
+│   ├── editor.js
 │   ├── git/
 │   │   ├── command.js
 │   │   ├── commit.js
 │   │   ├── content.js
 │   │   ├── handoff.js
+│   │   ├── index.js
+│   │   └── service.js
+│   ├── guidance/
+│   │   ├── content.js
+│   │   ├── contract.js
+│   │   ├── files.js
 │   │   ├── index.js
 │   │   └── service.js
 │   ├── index.js
@@ -743,10 +978,18 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   │   ├── local-commit.test.js
 │   │   ├── polishing-handoff.test.js
 │   │   └── repository-safety.test.js
+│   ├── guidance/
+│   │   ├── cli.test.js
+│   │   ├── content-and-safety.test.js
+│   │   ├── documentation.test.js
+│   │   ├── editing.test.js
+│   │   ├── publication.test.js
+│   │   └── support/
 │   ├── integration/
 │   │   └── workflows.test.js
 │   ├── mcp/
 │   │   ├── control-plane.test.js
+│   │   ├── guidance.test.js
 │   │   └── issue-reporting.test.js
 │   ├── state/
 │   │   ├── persistence.test.js
@@ -756,6 +999,7 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   ├── product/
 │   ├── ARCHITECTURE.md
 │   ├── CONVENTIONS.md
+│   ├── OPERATOR_GUIDE.md
 │   └── README.md
 ├── .agents/skills/
 ├── AGENTS.md

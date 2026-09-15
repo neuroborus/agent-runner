@@ -33,6 +33,7 @@ function commandResult({ pipelineId = "plan-execution", state = "DONE" } = {}) {
     directoryPath: `/state/runs/${RUN_ID}`,
     run: {
       runId: RUN_ID,
+      revision: 7,
       pipelineId,
       taskPath: "/task",
       pause:
@@ -74,9 +75,117 @@ function fakeRunner(overrides = {}) {
     async status() {
       return commandResult();
     },
+    async requestOperatorStop(input) {
+      return {
+        runId: input.runId,
+        requestId: "a".repeat(64),
+        kind: input.kind,
+        expectedRevision: input.expectedRevision,
+        revision: input.expectedRevision + 1,
+      };
+    },
     ...overrides,
   };
 }
+
+test("guidance prints the complete shared rendering without constructing a pipeline runner", async () => {
+  const stdout = createSink();
+  const stderr = createSink();
+  const environment = { VISUAL: "preferred" };
+  const content =
+    "# Common\n\nComplete guide.\n\n# Local\n\nComplete additions.\n";
+  const exitCode = await main(
+    [
+      "guidance",
+      "--project",
+      "/project",
+      "--project-config",
+      "LOCAL_ARTIFACTS/custom.json",
+    ],
+    {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      environment,
+      createCommandRunner: () => assert.fail("must not construct a runner"),
+      createCommandGuidance(options) {
+        assert.deepEqual(options, { env: environment });
+        return {
+          async read(input) {
+            assert.deepEqual(input, {
+              projectPath: "/project",
+              projectConfigurationPath: "LOCAL_ARTIFACTS/custom.json",
+            });
+            return { combinedContent: content };
+          },
+        };
+      },
+    },
+  );
+  assert.equal(exitCode, 0);
+  assert.equal(stdout.read(), content);
+  assert.equal(stderr.read(), "");
+});
+
+test("guidance edit reports whole-document updates and unchanged closes", async () => {
+  for (const updated of [true, false]) {
+    const stdout = createSink();
+    const stderr = createSink();
+    const exitCode = await main(["guidance", "edit", "--project", "/project"], {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      createCommandRunner: () => assert.fail("must not construct a runner"),
+      guidance: {
+        async edit(input) {
+          assert.deepEqual(input, { projectPath: "/project" });
+          return { updated };
+        },
+      },
+    });
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout.read(),
+      updated ? "Local guidance updated.\n" : "Local guidance unchanged.\n",
+    );
+    assert.equal(stderr.read(), "");
+  }
+});
+
+test("guidance rejects unsupported actions, extra arguments, duplicate selectors, and run options", async () => {
+  for (const args of [
+    ["guidance"],
+    ["guidance", "edit"],
+    ["guidance", "add", "--project", "/project"],
+    ["guidance", "edit", "extra", "--project", "/project"],
+    ["guidance", "--project", "/project", "--project", "/other"],
+    [
+      "guidance",
+      "--project",
+      "/project",
+      "--project-config",
+      "a",
+      "--project-config",
+      "b",
+    ],
+    ["guidance", "--project", "/project", "--mode", "lazy"],
+    ["guidance", "--project", "/project", "--run", RUN_ID],
+    ["guidance", "--project", "/project", "--task", "/task"],
+  ]) {
+    const stdout = createSink();
+    const stderr = createSink();
+    assert.equal(
+      await main(args, {
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        createCommandRunner: () => assert.fail("must not construct a runner"),
+        createCommandGuidance: () =>
+          assert.fail("must not dispatch invalid input"),
+      }),
+      1,
+    );
+    assert.equal(stdout.read(), "");
+    assert.notEqual(stderr.read(), "");
+  }
+});
 
 test("help describes the required commands", async () => {
   const stdout = createSink();
@@ -90,8 +199,12 @@ test("help describes the required commands", async () => {
   assert.equal(exitCode, 0);
   assert.match(stdout.read(), /agent-run run <pipeline> --project/);
   assert.match(stdout.read(), /agent-run resume --run/);
+  assert.match(stdout.read(), /agent-run pause --run/);
+  assert.match(stdout.read(), /agent-run cancel --run/);
   assert.match(stdout.read(), /agent-run status --run/);
   assert.match(stdout.read(), /agent-run mcp/);
+  assert.match(stdout.read(), /agent-run guidance --project/);
+  assert.match(stdout.read(), /agent-run guidance edit --project/);
   assert.match(stdout.read(), /plan-authoring/);
   assert.match(stdout.read(), /plan-execution/);
   assert.match(stdout.read(), /polishing/);
@@ -103,11 +216,183 @@ test("help describes the required commands", async () => {
   assert.match(stdout.read(), /no independent review/u);
   assert.match(
     stdout.read(),
-    /independent forks primary and review roles separately/u,
+    /independent and combined fork primary and review roles separately/u,
   );
   assert.match(stdout.read(), /lazy forks once into the primary role/u);
   assert.doesNotMatch(stdout.read(), /unexpected_issue_report|issue report/iu);
   assert.equal(stderr.read(), "");
+});
+
+test("pause and cancel capture one revision and idempotency key for CLI shorthand", async () => {
+  for (const command of ["pause", "cancel"]) {
+    const stdout = createSink();
+    const stderr = createSink();
+    const calls = [];
+    let statusCalls = 0;
+    let keyCalls = 0;
+    const exitCode = await main([command, "--run", RUN_ID], {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      idempotencyKeyFactory() {
+        keyCalls += 1;
+        return `${command}-key`;
+      },
+      runner: fakeRunner({
+        async status() {
+          statusCalls += 1;
+          return commandResult();
+        },
+        async requestOperatorStop(input) {
+          calls.push(input);
+          return {
+            runId: RUN_ID,
+            requestId: "a".repeat(64),
+            kind: input.kind,
+            expectedRevision: input.expectedRevision,
+            revision: 8,
+          };
+        },
+      }),
+    });
+    assert.equal(exitCode, 0);
+    assert.equal(statusCalls, 1);
+    assert.equal(keyCalls, 1);
+    assert.deepEqual(calls, [
+      {
+        runId: RUN_ID,
+        kind: command === "pause" ? "pause_requested" : "cancel_requested",
+        expectedRevision: 7,
+        idempotencyKey: `${command}-key`,
+      },
+    ]);
+    assert.match(stdout.read(), /requested.*revision 8/iu);
+    assert.equal(stderr.read(), "");
+  }
+});
+
+test("pause and cancel preserve explicit automation identities without refreshing stale requests", async () => {
+  let statusCalls = 0;
+  let request;
+  const stderr = createSink();
+  const runner = fakeRunner({
+    async status() {
+      statusCalls += 1;
+      return commandResult();
+    },
+    async requestOperatorStop(input) {
+      request = input;
+      throw new Error("Operator stop revision is stale.");
+    },
+  });
+  assert.equal(
+    await main(
+      [
+        "cancel",
+        "--run",
+        RUN_ID,
+        "--expected-revision",
+        "4",
+        "--idempotency-key",
+        "repeatable-cancel",
+      ],
+      { stdout: createSink().stream, stderr: stderr.stream, runner },
+    ),
+    1,
+  );
+  assert.equal(statusCalls, 0);
+  assert.deepEqual(request, {
+    runId: RUN_ID,
+    kind: "cancel_requested",
+    expectedRevision: 4,
+    idempotencyKey: "repeatable-cancel",
+  });
+  assert.match(stderr.read(), /stale/u);
+});
+
+test("CLI stop timing is validated before inspection and preserves explicit arguments", async () => {
+  for (const command of ["pause", "cancel"]) {
+    for (const timing of ["immediate", "after-current-commit", "later", ""]) {
+      const calls = [];
+      const stderr = createSink();
+      const stdout = createSink();
+      const result = await main(
+        [
+          command,
+          "--run",
+          RUN_ID,
+          "--timing",
+          timing,
+          "--expected-revision",
+          "4",
+          "--idempotency-key",
+          "timed-stop",
+        ],
+        {
+          stdout: stdout.stream,
+          stderr: stderr.stream,
+          runner: fakeRunner({
+            status: () =>
+              assert.fail("Explicit requests must not refresh status."),
+            async requestOperatorStop(input) {
+              calls.push(input);
+              return {
+                ...input,
+                revision: 5,
+                effectiveTiming: "immediate",
+                targetBoundary: null,
+              };
+            },
+          }),
+        },
+      );
+      if (["immediate", "after-current-commit"].includes(timing)) {
+        assert.equal(result, 0, stderr.read());
+        assert.deepEqual(calls, [
+          {
+            runId: RUN_ID,
+            kind: command === "pause" ? "pause_requested" : "cancel_requested",
+            expectedRevision: 4,
+            idempotencyKey: "timed-stop",
+            timing,
+          },
+        ]);
+        assert.match(stdout.read(), /Effective stop timing: immediate/u);
+      } else {
+        assert.equal(result, 1);
+        assert.equal(calls.length, 0);
+        assert.match(stderr.read(), /timing/u);
+      }
+    }
+  }
+});
+
+test("pause and cancel require a complete valid explicit identity", async () => {
+  for (const args of [
+    ["pause", "--run", RUN_ID, "--expected-revision", "4"],
+    ["pause", "--run", RUN_ID, "--idempotency-key", "key"],
+    [
+      "cancel",
+      "--run",
+      RUN_ID,
+      "--expected-revision",
+      "0",
+      "--idempotency-key",
+      "key",
+    ],
+  ]) {
+    const stderr = createSink();
+    assert.equal(
+      await main(args, {
+        stdout: createSink().stream,
+        stderr: stderr.stream,
+        runner: fakeRunner({
+          requestOperatorStop: () => assert.fail("must not dispatch"),
+        }),
+      }),
+      1,
+    );
+    assert.notEqual(stderr.read(), "");
+  }
 });
 
 test("mcp dispatches the STDIO server without constructing a runner", async () => {
@@ -255,6 +540,49 @@ for (const args of [
   });
 }
 
+test("CLI status retains bounded settlement and normalizes legacy stop timing", async () => {
+  for (const settlement of [
+    null,
+    { kind: "quiescent", commit: null },
+    { kind: "commit", commit: "c".repeat(40) },
+  ]) {
+    const result = commandResult();
+    result.run.stopRequest = {
+      kind: "pause_requested",
+      acceptedRevision: 3,
+      reconciledRevision: 5,
+      requestId: "private-request",
+      checkpoint: { private: "secret" },
+      ...(settlement === null
+        ? {}
+        : {
+            timing: "after-current-commit",
+            effectiveTiming: "after-current-commit",
+            targetBoundary: { step: 1 },
+            settlement,
+          }),
+    };
+    const stdout = createSink();
+    assert.equal(
+      await main(["status", "--run", RUN_ID], {
+        stdout: stdout.stream,
+        stderr: createSink().stream,
+        runner: fakeRunner({ status: async () => result }),
+      }),
+      0,
+    );
+    assert.match(stdout.read(), /Stop state: settled/u);
+    if (settlement === null) {
+      assert.match(stdout.read(), /Stop timing: immediate/u);
+      assert.doesNotMatch(stdout.read(), /Stop settlement:/u);
+    } else {
+      assert.match(stdout.read(), /Stop target step: 1/u);
+      assert.ok(stdout.read().includes(`Stop settlement: ${settlement.kind}`));
+    }
+    assert.doesNotMatch(stdout.read(), /private-request|secret/u);
+  }
+});
+
 test("status dispatches and renders concise persisted state", async () => {
   const stdout = createSink();
   const stderr = createSink();
@@ -266,7 +594,12 @@ test("status dispatches and renders concise persisted state", async () => {
     runner: fakeRunner({
       async status(runId) {
         requestedRunId = runId;
-        return commandResult({ state: "WAITING_FOR_USER" });
+        const result = commandResult({ state: "WAITING_FOR_USER" });
+        result.run.stopRequest = {
+          kind: "pause_requested",
+          reconciledRevision: null,
+        };
+        return result;
       },
     }),
   });
@@ -276,6 +609,7 @@ test("status dispatches and renders concise persisted state", async () => {
   assert.match(stdout.read(), new RegExp(`Run: ${RUN_ID}`, "u"));
   assert.match(stdout.read(), /Mode: independent/u);
   assert.match(stdout.read(), /State: WAITING_FOR_USER/u);
+  assert.match(stdout.read(), /Stop pending: pause/u);
   assert.match(stdout.read(), /Pause: fix_limit_reached/u);
   assert.match(stdout.read(), /Explanation: The current step reached/u);
   assert.match(stdout.read(), /--extra-fix-rounds 1/u);
@@ -481,7 +815,38 @@ test("run rejects an invalid pipeline mode", async () => {
 
   assert.equal(exitCode, 1);
   assert.equal(invoked, false);
-  assert.match(stderr.read(), /--mode must be independent or lazy/u);
+  assert.match(stderr.read(), /--mode must be independent, lazy, or combined/u);
+});
+
+test("CLI combined selection follows the selected pipeline descriptor", async () => {
+  for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
+    let request;
+    const stderr = createSink();
+    const exitCode = await main(
+      [
+        "run",
+        pipelineId,
+        "--project",
+        "/tmp/project",
+        "--task",
+        "/tmp/task",
+        "--mode",
+        "combined",
+      ],
+      {
+        stdout: createSink().stream,
+        stderr: stderr.stream,
+        runner: fakeRunner({
+          async run(input) {
+            request = input;
+            return commandResult({ pipelineId });
+          },
+        }),
+      },
+    );
+    assert.equal(exitCode, 0);
+    assert.deepEqual(request.settingOverrides, { mode: "combined" });
+  }
 });
 
 test("fork profile requires a source session", async () => {
@@ -845,5 +1210,9 @@ test("pipelines lists the statically registered pipelines", async () => {
   assert.match(stdout.read(), /^plan-authoring\t/mu);
   assert.match(stdout.read(), /^plan-execution\t/mu);
   assert.match(stdout.read(), /^polishing\t/mu);
+  assert.match(
+    stdout.read(),
+    /Settings \(defaults\):.*preferredCommitLineLimit=900/u,
+  );
   assert.equal(stderr.read(), "");
 });

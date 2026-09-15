@@ -7,6 +7,9 @@ import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
 
 import packageMetadata from "../../package.json" with { type: "json" };
+import * as planAuthoringSchemas from "../../pipelines/plan-authoring/src/schemas.js";
+import * as planExecutionSchemas from "../../pipelines/plan-execution/src/schemas.js";
+import * as polishingSchemas from "../../pipelines/polishing/src/schemas.js";
 import {
   CODEX_BACKEND_ID,
   CodexAdapterError,
@@ -23,6 +26,14 @@ import {
 const PROJECT_PATH = process.cwd();
 const EXPECTED_HEAD = "a".repeat(40);
 const HELP = "--disable\n--enable\n--listen\n--strict-config\n";
+const CODEX_CORE_SHELL_ENVIRONMENT_NAMES = Object.freeze([
+  "HOME",
+  "LOGNAME",
+  "PATH",
+  "SHELL",
+  "USER",
+]);
+const OWNED_PROCESS_ENVIRONMENT_NAME = "AGENT_RUNNER_OWNED_PROCESS";
 const STRICT_SCHEMA = Object.freeze({
   type: "object",
   properties: {
@@ -92,7 +103,7 @@ function completedTurn(threadId, turnId, output = "done", items = []) {
   };
 }
 
-function failedTurn(threadId, turnId, error) {
+function failedTurn(threadId, turnId, error, items = []) {
   return {
     method: "turn/completed",
     params: {
@@ -102,13 +113,35 @@ function failedTurn(threadId, turnId, error) {
         itemsView: "full",
         status: "failed",
         error,
-        items: [],
+        items,
       },
     },
   };
 }
 
-function isolatedConfiguration() {
+function httpClientErrorMessage({
+  status = "400 Bad Request",
+  type = "invalid_request_error",
+  code = "invalid_json_schema",
+  pretty = false,
+} = {}) {
+  const body = JSON.stringify(
+    {
+      error: {
+        message:
+          "DO_NOT_RETAIN_NATIVE_MESSAGE: finalizationFindingIds uses unsupported uniqueItems.",
+        type,
+        param: "DO_NOT_RETAIN_SCHEMA_PATH",
+        code,
+      },
+    },
+    null,
+    pretty ? 2 : undefined,
+  );
+  return `unexpected status ${status}: ${pretty ? `\n${body}\n` : body}`;
+}
+
+function isolatedConfiguration(shellEnvironment = {}) {
   return {
     features: {
       apps: false,
@@ -143,11 +176,15 @@ function isolatedConfiguration() {
     },
     notify: [],
     shell_environment_policy: {
-      inherit: "core",
+      inherit: "all",
       ignore_default_excludes: false,
-      exclude: null,
-      set: {},
-      include_only: null,
+      exclude: [],
+      set: shellEnvironment,
+      include_only: [
+        ...CODEX_CORE_SHELL_ENVIRONMENT_NAMES,
+        OWNED_PROCESS_ENVIRONMENT_NAME,
+        ...Object.keys(shellEnvironment),
+      ],
       filters: null,
       experimental_use_profile: false,
     },
@@ -162,6 +199,8 @@ function createFixture({
   executeHandle,
   handle,
   help = HELP,
+  ownedCompletionFailure,
+  retainedOwnedContainment = false,
   spawnError = false,
   storageCleanupError = false,
   storagePreparationError = false,
@@ -269,9 +308,9 @@ function createFixture({
         case "model/list":
           return { result: { data: [{ id: "gpt-test" }], nextCursor: null } };
         case "config/read": {
-          const config = isolatedConfiguration();
-          config.shell_environment_policy.set =
-            workspaceStorage?.shellEnvironment ?? {};
+          const config = isolatedConfiguration(
+            workspaceStorage?.shellEnvironment,
+          );
           return {
             result: {
               config,
@@ -324,6 +363,9 @@ function createFixture({
           messages,
           processIndex,
         })) ?? defaultResponse(message);
+      if (response?.pending === true) {
+        return;
+      }
       if (response?.stdoutError === true) {
         setImmediate(() => {
           stdout.emit("error", new Error("test stdout failure"));
@@ -357,6 +399,7 @@ function createFixture({
     }
 
     let input = "";
+    let killCalls = 0;
     child.stdin = new Writable({
       write(chunk, _encoding, callback) {
         input += chunk.toString("utf8");
@@ -368,7 +411,7 @@ function createFixture({
       },
       final(callback) {
         callback();
-        close();
+        if (!retainedOwnedContainment) close();
       },
     });
     if (closeError) {
@@ -379,13 +422,35 @@ function createFixture({
     child.stdout = stdout;
     child.stderr = stderr;
     child.kill = () => {
+      killCalls += 1;
       close();
       return true;
     };
+    if (ownedCompletionFailure !== undefined) {
+      const completionState = {
+        observed: false,
+        observedBeforeRejection: false,
+      };
+      child.ownedCompletion = Promise.resolve()
+        .then(() => options.onProcess(987_654))
+        .then(async () => {
+          child.ownedContainmentRetained = retainedOwnedContainment;
+          if (!retainedOwnedContainment) await options.onProcess(null);
+          completionState.observedBeforeRejection = completionState.observed;
+          throw ownedCompletionFailure;
+        });
+      child.ownedCompletion.catch = function observe(...argumentsList) {
+        completionState.observed = true;
+        return Promise.prototype.catch.apply(this, argumentsList);
+      };
+      child.ownedCompletionState = completionState;
+    }
     processes.push({
       file,
       argumentsList,
       messages,
+      killCalls: () => killCalls,
+      ownedCompletionState: child.ownedCompletionState,
       options,
       workspaceStorage,
     });
@@ -413,6 +478,87 @@ function request(overrides = {}) {
     ...overrides,
   };
 }
+
+test("marks only Codex native-sandbox executions as provider-owned", async () => {
+  const fixture = createFixture();
+  await fixture.adapter.run(request({ onProcess: async () => {} }));
+
+  assert.equal(
+    fixture.processes[0].options.ownershipMode,
+    "native-sandbox-provider",
+  );
+  const discovery = fixture.executeCalls.find(({ argumentsList }) =>
+    argumentsList.includes("mcp"),
+  );
+  assert.equal(discovery.options.ownershipMode, undefined);
+});
+
+test(
+  "observes early owned completion failure and preserves teardown",
+  { timeout: 5_000 },
+  async () => {
+    const failure = Object.assign(new Error("owned completion failed"), {
+      code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    });
+    const fixture = createFixture({ ownedCompletionFailure: failure });
+    const registrations = [];
+
+    await assert.rejects(
+      fixture.adapter.run(
+        request({ onProcess: async (pid) => registrations.push(pid) }),
+      ),
+      (cause) => cause === failure,
+    );
+    assert.equal(
+      fixture.processes[0].ownedCompletionState.observedBeforeRejection,
+      true,
+    );
+    assert.deepEqual(registrations, [987_654, null]);
+  },
+);
+
+test(
+  "propagates owned completion failure while the protocol remains open",
+  { timeout: 5_000 },
+  async () => {
+    const failure = Object.assign(new Error("owned completion failed"), {
+      code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    });
+    const timeoutFailure = new Error("owned completion failure timed out");
+    const fixture = createFixture({
+      ownedCompletionFailure: failure,
+      retainedOwnedContainment: true,
+      handle({ message }) {
+        if (message.method === "initialize") {
+          return { pending: true };
+        }
+        return undefined;
+      },
+    });
+    let timeout;
+
+    try {
+      await assert.rejects(
+        Promise.race([
+          fixture.adapter.run(request({ onProcess: async () => {} })),
+          new Promise((_, reject) => {
+            timeout = setTimeout(() => reject(timeoutFailure), 1_000);
+          }),
+        ]),
+        (cause) => cause === failure,
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
+    assert.equal(
+      fixture.processes[0].messages.some(
+        ({ method }) => method === "initialize",
+      ),
+      true,
+    );
+    assert.equal(fixture.processes[0].killCalls(), 0);
+  },
+);
 
 test("creates and cleans owner-confined Codex workspace storage", async (t) => {
   const parentPath = await mkdtemp(
@@ -593,10 +739,13 @@ test("advertises local commits only with an enforceable isolated sandbox", async
   assert.equal(fixture.processes.length, 0);
 });
 
-test("removes ambient Git redirection and identity overrides", async () => {
+test("restricts command environment without changing provider environment", async () => {
+  const ownershipProof = "b".repeat(64);
   const fixture = createFixture({
     env: {
       ...process.env,
+      AGENT_RUNNER_OWNED_PROCESS: ownershipProof,
+      AGENT_RUNNER_UNRELATED_PARENT: "unrelated-parent-value",
       AGENT_RUNNER_TEST_TOKEN: "provider-token",
       EMAIL: "override@example.invalid",
       Email: "mixed-case@example.invalid",
@@ -629,6 +778,14 @@ test("removes ambient Git redirection and identity overrides", async () => {
     fixture.processes[0].options.env.AGENT_RUNNER_TEST_TOKEN,
     "provider-token",
   );
+  assert.equal(
+    fixture.processes[0].options.env.AGENT_RUNNER_OWNED_PROCESS,
+    ownershipProof,
+  );
+  assert.equal(
+    fixture.processes[0].options.env.AGENT_RUNNER_UNRELATED_PARENT,
+    "unrelated-parent-value",
+  );
   assert.equal(fixture.processes[0].options.env.GIT_DIR, undefined);
   assert.equal(fixture.processes[0].options.env.TMPDIR, "/ambient/tmp");
   assert.equal(
@@ -638,6 +795,20 @@ test("removes ambient Git redirection and identity overrides", async () => {
   assert.equal(
     fixture.processes[0].options.env.XDG_RUNTIME_DIR,
     "/ambient/runtime",
+  );
+  const shellPolicy = fixture.processes[0].argumentsList.find((argument) =>
+    argument.startsWith("shell_environment_policy="),
+  );
+  assert.match(shellPolicy, /inherit="all"/u);
+  assert.match(shellPolicy, /ignore_default_excludes=false,exclude=\[\]/u);
+  assert.match(shellPolicy, /set=\{TMPDIR=/u);
+  assert.match(
+    shellPolicy,
+    /include_only=\["HOME","LOGNAME","PATH","SHELL","USER","AGENT_RUNNER_OWNED_PROCESS","TMPDIR","XDG_CACHE_HOME","XDG_RUNTIME_DIR"\]/u,
+  );
+  assert.doesNotMatch(
+    shellPolicy,
+    /AGENT_RUNNER_UNRELATED_PARENT|unrelated-parent-value|AGENT_RUNNER_TEST_TOKEN|provider-token/u,
   );
   assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
 });
@@ -749,8 +920,9 @@ test("runs a structured read-only turn with an explicit model", async () => {
     "-c",
     "notify=[]",
     "-c",
-    'shell_environment_policy={inherit="core",ignore_default_excludes=false,' +
-      "experimental_use_profile=false,set={}}",
+    'shell_environment_policy={inherit="all",ignore_default_excludes=false,' +
+      'exclude=[],set={},include_only=["HOME","LOGNAME","PATH","SHELL",' +
+      '"USER","AGENT_RUNNER_OWNED_PROCESS"],experimental_use_profile=false}',
     "-c",
     "memories.generate_memories=false",
     "-c",
@@ -989,12 +1161,15 @@ test("limits workspace writes to the requested repository", async () => {
   );
   assert.ok(
     fixture.processes[0].argumentsList.includes(
-      'shell_environment_policy={inherit="core",' +
+      'shell_environment_policy={inherit="all",' +
         "ignore_default_excludes=false," +
-        "experimental_use_profile=false," +
+        "exclude=[]," +
         `set={TMPDIR=${JSON.stringify(storage.shellEnvironment.TMPDIR)},` +
         `XDG_CACHE_HOME=${JSON.stringify(storage.shellEnvironment.XDG_CACHE_HOME)},` +
-        `XDG_RUNTIME_DIR=${JSON.stringify(storage.shellEnvironment.XDG_RUNTIME_DIR)}}}`,
+        `XDG_RUNTIME_DIR=${JSON.stringify(storage.shellEnvironment.XDG_RUNTIME_DIR)}},` +
+        'include_only=["HOME","LOGNAME","PATH","SHELL","USER",' +
+        '"AGENT_RUNNER_OWNED_PROCESS","TMPDIR","XDG_CACHE_HOME",' +
+        '"XDG_RUNTIME_DIR"],experimental_use_profile=false}',
     ),
   );
   assert.equal((await fixture.adapter.probe()).gitMetadataWriteBlocked, true);
@@ -1106,56 +1281,80 @@ test("rejects an incorrect workspace shell-environment projection", async () => 
   );
 });
 
-test("rejects substitution of an explicit model", async () => {
-  const fixture = createFixture({
-    handle({ message }) {
-      if (message.method === "turn/start") {
-        const turnId = "rerouted-turn";
-        return {
-          result: { turn: { id: turnId } },
-          notification: [
-            {
-              method: "model/rerouted",
-              params: {
-                threadId: message.params.threadId,
-                turnId,
-                fromModel: "gpt-test",
-                toModel: "gpt-other",
-                reason: "test",
-              },
-            },
-            completedTurn(message.params.threadId, turnId),
-          ],
-        };
-      }
-      return undefined;
-    },
-  });
+test("rejects substitution of an explicit model", async (t) => {
+  for (const status of ["completed", "failed"]) {
+    await t.test(status, async () => {
+      const fixture = createFixture({
+        handle({ message }) {
+          if (message.method === "turn/start") {
+            const turnId = "rerouted-turn";
+            return {
+              result: { turn: { id: turnId } },
+              notification: [
+                {
+                  method: "model/rerouted",
+                  params: {
+                    threadId: message.params.threadId,
+                    turnId,
+                    fromModel: "gpt-test",
+                    toModel: "gpt-other",
+                    reason: "test",
+                  },
+                },
+                status === "completed"
+                  ? completedTurn(message.params.threadId, turnId)
+                  : failedTurn(message.params.threadId, turnId, {
+                      message: httpClientErrorMessage(),
+                      codexErrorInfo: "other",
+                    }),
+              ],
+            };
+          }
+          return undefined;
+        },
+      });
 
-  await assert.rejects(
-    fixture.adapter.run(
-      request({ access: "workspace-write", model: "gpt-test" }),
-    ),
-    hasCode("ERR_CODEX_MODEL_REROUTED"),
-  );
-  assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
+      await assert.rejects(
+        fixture.adapter.run(
+          request({ access: "workspace-write", model: "gpt-test" }),
+        ),
+        hasCode("ERR_CODEX_MODEL_REROUTED"),
+      );
+      assert.equal(fixture.processes.length, 1);
+      assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
+    });
+  }
 });
 
 test("fails before starting a thread when isolation is incomplete", async () => {
-  const configurations = Array.from({ length: 9 }, isolatedConfiguration);
+  const configurations = Array.from({ length: 16 }, isolatedConfiguration);
   configurations[0].mcp_servers["configured-server"].enabled = true;
   configurations[1].features.multi_agent = true;
-  configurations[2].shell_environment_policy.inherit = "all";
-  delete configurations[3].mcp_servers["configured-server"];
-  configurations[4].features.code_mode_host = false;
-  configurations[5] = { nativeOutput: "sensitive-native-output" };
-  configurations[6].memories.generate_memories = true;
-  configurations[7].notify.push("sensitive-native-output");
-  configurations[8].web_search = "enabled";
+  configurations[2].shell_environment_policy.inherit = "core";
+  configurations[3].shell_environment_policy.ignore_default_excludes = true;
+  configurations[4].shell_environment_policy.exclude.push("UNEXPECTED");
+  configurations[5].shell_environment_policy.set.UNEXPECTED = "value";
+  configurations[6].shell_environment_policy.include_only.reverse();
+  configurations[7].shell_environment_policy.filters = [];
+  configurations[8].shell_environment_policy.experimental_use_profile = true;
+  configurations[9].shell_environment_policy.unexpected = true;
+  delete configurations[10].mcp_servers["configured-server"];
+  configurations[11].features.code_mode_host = false;
+  configurations[12] = { nativeOutput: "sensitive-native-output" };
+  configurations[13].memories.generate_memories = true;
+  configurations[14].notify.push("sensitive-native-output");
+  configurations[15].web_search = "enabled";
 
   const diagnostics = [
     "isolation_mcp",
     "isolation_feature",
+    "isolation_shell_environment",
+    "isolation_shell_environment",
+    "isolation_shell_environment",
+    "isolation_shell_environment",
+    "isolation_shell_environment",
+    "isolation_shell_environment",
+    "isolation_shell_environment",
     "isolation_shell_environment",
     "isolation_mcp",
     "isolation_command_host",
@@ -1385,6 +1584,210 @@ test("validates strict schemas and structured output", async () => {
   );
 });
 
+test("rejects incompatible schemas before provider activity or recovery", async (t) => {
+  const array = { type: "array", items: { type: "string" } };
+  const object = (value) => ({
+    type: "object",
+    properties: { value },
+    required: ["value"],
+    additionalProperties: false,
+  });
+  const variants = [
+    ["nested uniqueItems", object({ ...array, uniqueItems: true })],
+    ["false uniqueItems", object({ ...array, uniqueItems: false })],
+    [
+      "items uniqueItems",
+      object({ ...array, items: { ...array, uniqueItems: true } }),
+    ],
+    [
+      "anyOf uniqueItems",
+      object({ anyOf: [{ ...array, uniqueItems: true }, { type: "null" }] }),
+    ],
+    [
+      "definition uniqueItems",
+      {
+        ...object({ $ref: "#/$defs/value" }),
+        $defs: { value: { ...array, uniqueItems: true } },
+      },
+    ],
+    ...[
+      "allOf",
+      "oneOf",
+      "not",
+      "if",
+      "then",
+      "else",
+      "dependentRequired",
+      "dependentSchemas",
+      "patternProperties",
+      "contains",
+      "prefixItems",
+      "default",
+      "unknownKeyword",
+    ].map((keyword) => [keyword, object({ type: "string", [keyword]: [] })]),
+    ["boolean schema", object(true)],
+    ["tuple items", object({ ...array, items: [{ type: "string" }] })],
+    ["missing items", object({ type: "array" })],
+    ["unknown type", object({ type: "date" })],
+    ["empty types", object({ type: [] })],
+    ["duplicate types", object({ type: ["string", "string"] })],
+    ["empty anyOf", object({ anyOf: [] })],
+    ["malformed anyOf", object({ anyOf: { type: "string" } })],
+    ["root anyOf", { ...object({ type: "string" }), anyOf: [STRICT_SCHEMA] }],
+    ["unsupported format", object({ type: "string", format: "uri" })],
+    ...["[", "(?=a)a", "(?!a)b", "(?<=a)b", "(?<!a)b", "(a)\\1"].map(
+      (pattern) => [
+        `unsupported pattern ${pattern}`,
+        object({ type: "string", pattern }),
+      ],
+    ),
+    ["malformed array bound", object({ ...array, maxItems: "32" })],
+    ["negative string bound", object({ type: "string", minLength: -1 })],
+    ["external reference", object({ $ref: "https://example.invalid/schema" })],
+    ["missing reference", object({ $ref: "#/$defs/missing" })],
+    ...["broken%", "broken%FF"].map((name) => [
+      `malformed reference escape ${name}`,
+      {
+        ...object({ $ref: `#/$defs/${name}` }),
+        $defs: { [name]: { type: "string" } },
+      },
+    ]),
+    [
+      "literal reference",
+      object({ $ref: "#/properties/value/const", const: { type: "string" } }),
+    ],
+    ...["REVIEW_SCHEMA", "CLEAN_CONFIRM_SCHEMA"].map((name) => {
+      const schema = structuredClone(planExecutionSchemas[name]);
+      schema.properties.finalizationFindingIds.uniqueItems = true;
+      return [name, schema];
+    }),
+  ];
+  for (const [name, schema] of variants) {
+    await t.test(name, async () => {
+      for (const access of ["read-only", "workspace-write"]) {
+        const fixture = createFixture();
+        await assert.rejects(
+          fixture.adapter.run(
+            request({
+              access,
+              schema,
+              session: { mode: "continue", id: "previous-thread" },
+            }),
+          ),
+          (error) => {
+            assert.ok(hasCode("ERR_INVALID_CODEX_SCHEMA")(error));
+            assert.equal(error.recoverable, false);
+            assert.equal(error.failureClass, undefined);
+            assert.equal(error.cause, undefined);
+            return true;
+          },
+        );
+        assert.deepEqual(fixture.executeCalls, []);
+        assert.deepEqual(fixture.processes, []);
+        assert.deepEqual(fixture.workspaceStorages, []);
+      }
+    });
+  }
+});
+
+test("sends compatible schemas without interpreting property names or literal data as keywords", async () => {
+  const schema = {
+    type: "object",
+    properties: {
+      uniqueItems: { type: "string", pattern: "^[()?=]+\\\\1$" },
+      properties: { enum: [{ type: "object", uniqueItems: true, oneOf: [] }] },
+      allOf: { const: { type: "object", uniqueItems: true } },
+      nested: {
+        anyOf: [{ $ref: "#/$defs/unique~1Items~0%20value" }, { type: "null" }],
+      },
+      count: {
+        type: ["number", "null"],
+        minimum: 0,
+        maximum: 10,
+        multipleOf: 0.5,
+      },
+      date: {
+        type: "string",
+        format: "date",
+        description: "uniqueItems is literal text",
+      },
+    },
+    required: ["uniqueItems", "properties", "allOf", "nested", "count", "date"],
+    additionalProperties: false,
+    $defs: {
+      "unique/Items~ value": { $ref: "#/$defs/uniqueItems" },
+      uniqueItems: {
+        type: "object",
+        properties: {
+          children: {
+            type: "array",
+            items: { $ref: "#/$defs/uniqueItems" },
+            minItems: 0,
+            maxItems: 3,
+          },
+        },
+        required: ["children"],
+        additionalProperties: false,
+      },
+    },
+  };
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method !== "turn/start") {
+        return undefined;
+      }
+      assert.deepEqual(message.params.outputSchema, schema);
+      return {
+        result: { turn: { id: "schema-turn" } },
+        notification: completedTurn(
+          message.params.threadId,
+          "schema-turn",
+          "{}",
+        ),
+      };
+    },
+  });
+  await fixture.adapter.run(request({ schema }));
+  assert.equal(fixture.processes.length, 1);
+});
+
+test("accepts every Runner-owned pipeline response schema", async (t) => {
+  for (const [pipeline, schemas] of Object.entries({
+    "plan-authoring": planAuthoringSchemas,
+    "plan-execution": planExecutionSchemas,
+    polishing: polishingSchemas,
+  })) {
+    for (const [name, schema] of Object.entries(schemas)) {
+      await t.test(`${pipeline}/${name}`, async () => {
+        const fixture = createFixture({
+          handle({ message }) {
+            if (message.method !== "turn/start") {
+              return undefined;
+            }
+            assert.deepEqual(message.params.outputSchema, schema);
+            return {
+              result: { turn: { id: "schema-turn" } },
+              notification: completedTurn(
+                message.params.threadId,
+                "schema-turn",
+                "{}",
+              ),
+            };
+          },
+        });
+        await fixture.adapter.run(request({ schema }));
+        assert.equal(fixture.processes.length, 1);
+        assert.equal(
+          fixture.processes[0].messages.filter(
+            ({ method }) => method === "turn/start",
+          ).length,
+          1,
+        );
+      });
+    }
+  }
+});
+
 test("falls back to a fresh session when continuation is unavailable", async () => {
   const fixture = createFixture({
     handle({ message }) {
@@ -1599,6 +2002,14 @@ test("creates an authorized commit through a networkless sandbox", async () => {
     additionalProperties: false,
   });
   const gitCall = fixture.executeCalls.find(({ file }) => file === "git");
+  assert.equal(gitCall.options.ownershipMode, undefined);
+  assert.ok(
+    fixture.executeCalls.some(
+      ({ argumentsList, options }) =>
+        argumentsList[0] === "sandbox" &&
+        options.ownershipMode === "native-sandbox-provider",
+    ),
+  );
   assert.deepEqual(gitCall.argumentsList, [
     "-C",
     PROJECT_PATH,
@@ -1951,6 +2362,39 @@ test("does not invoke the commit executor when Codex is not ready", async () => 
   );
 });
 
+test("preserves immutable and primitive abort reasons before local commit execution", async () => {
+  for (const reason of [
+    Object.freeze(new Error("Operator pause")),
+    "Operator cancel",
+  ]) {
+    const fixture = createFixture();
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          access: "local-commit",
+          authorizationId: "authorization-1",
+          commit: {
+            expectedHead: EXPECTED_HEAD,
+            message: "feat(test): create commit",
+          },
+          signal: AbortSignal.abort(reason),
+        }),
+      ),
+      (error) => {
+        assert.ok(error instanceof CodexAdapterError);
+        assert.equal(error.effectStarted, false);
+        assert.equal(error.cause, reason);
+        return true;
+      },
+    );
+    assert.equal(fixture.processes.length, 0);
+    assert.equal(
+      fixture.executeCalls.filter(({ file }) => file === "git").length,
+      0,
+    );
+  }
+});
+
 test("never replays an interrupted local-commit turn", async () => {
   let turns = 0;
   const fixture = createFixture({
@@ -2075,6 +2519,60 @@ test("never replays when a partial completed turn cannot be hydrated", async () 
   assert.equal(fixture.processes.length, 1);
 });
 
+test("rejects invalid terminal turn statuses without recovery", async (t) => {
+  for (const status of ["inProgress", "not-a-terminal-status"]) {
+    for (const hydrated of [false, true]) {
+      const source = hydrated ? "hydrated" : "notification";
+      await t.test(`${status}/${source}`, async () => {
+        const fixture = createFixture({
+          handle({ message }) {
+            if (
+              message.method !== "turn/start" &&
+              !(hydrated && message.method === "thread/read")
+            ) {
+              return undefined;
+            }
+            const turnId = "invalid-status-turn";
+            const notification = failedTurn(message.params.threadId, turnId, {
+              message: httpClientErrorMessage(),
+              codexErrorInfo: "other",
+            });
+            notification.params.turn.status = status;
+            if (message.method === "thread/read") {
+              return {
+                result: {
+                  thread: {
+                    id: message.params.threadId,
+                    turns: [notification.params.turn],
+                  },
+                },
+              };
+            }
+            if (hydrated) {
+              notification.params.turn.status = "failed";
+              notification.params.turn.itemsView = "summary";
+            }
+            return { result: { turn: { id: turnId } }, notification };
+          },
+        });
+
+        await assert.rejects(fixture.adapter.run(request()), (error) => {
+          assert.ok(hasCode("ERR_CODEX_PROTOCOL")(error));
+          assert.equal(error.recoverable, false);
+          return true;
+        });
+        assert.equal(fixture.processes.length, 1);
+        assert.equal(
+          fixture.processes[0].messages.filter(
+            ({ method }) => method === "turn/start",
+          ).length,
+          1,
+        );
+      });
+    }
+  }
+});
+
 test("classifies recognized terminal turn failures without retaining native details", async (t) => {
   const variants = [
     [
@@ -2119,7 +2617,10 @@ test("classifies recognized terminal turn failures without retaining native deta
           return {
             result: { turn: { id: "failed-turn" } },
             notification: failedTurn(message.params.threadId, "failed-turn", {
-              message: "DO_NOT_RETAIN_NATIVE_MESSAGE",
+              message:
+                diagnosticClass === "turn_other"
+                  ? "DO_NOT_RETAIN_NATIVE_MESSAGE"
+                  : httpClientErrorMessage(),
               codexErrorInfo,
               additionalDetails: "DO_NOT_RETAIN_ADDITIONAL_DETAILS",
             }),
@@ -2131,6 +2632,7 @@ test("classifies recognized terminal turn failures without retaining native deta
         assert.ok(
           hasDiagnostic("ERR_CODEX_TURN_FAILED", diagnosticClass)(error),
         );
+        assert.equal(error.recoverable, diagnosticClass === "turn_other");
         assert.equal(error.cause, undefined);
         const retainedError = JSON.stringify({
           ...error,
@@ -2140,7 +2642,553 @@ test("classifies recognized terminal turn failures without retaining native deta
         assert.doesNotMatch(retainedError, /httpStatusCode|turnKind/u);
         return true;
       });
+      assert.equal(
+        fixture.processes.length,
+        diagnosticClass === "turn_other" ? 2 : 1,
+      );
     });
+  }
+});
+
+test("rejects structured HTTP client failures marked other without provider recovery", async (t) => {
+  for (const [status, type, code] of [
+    ["400 Bad Request", "invalid_request_error", "invalid_json_schema"],
+    ["400", "invalid_request_error", null],
+    ["401 Unauthorized", "authentication_error", "invalid_api_key"],
+    ["403 Forbidden", "permission_error", null],
+    ["404 Not Found", "invalid_request_error", "model_not_found"],
+    ["422 Unprocessable Entity", "invalid_request_error", "invalid_value"],
+  ]) {
+    for (const access of ["read-only", "workspace-write", "local-commit"]) {
+      await t.test(`${status}/${access}`, async () => {
+        const fixture = createFixture({
+          version: "0.154.0",
+          handle({ message }) {
+            if (message.method !== "turn/start") {
+              return undefined;
+            }
+            return {
+              result: { turn: { id: "rejected-turn" } },
+              notification: failedTurn(
+                message.params.threadId,
+                "rejected-turn",
+                {
+                  message:
+                    httpClientErrorMessage({
+                      status,
+                      type,
+                      code,
+                      pretty: access === "workspace-write",
+                    }) +
+                    (access === "read-only"
+                      ? ""
+                      : ", url: https://example.test/DO_NOT_RETAIN_URL, cf-ray: DO_NOT_RETAIN_RAY, request id: DO_NOT_RETAIN_REQUEST_ID"),
+                  codexErrorInfo:
+                    access === "read-only" ? "other" : { other: null },
+                  additionalDetails: "DO_NOT_RETAIN_ADDITIONAL_DETAILS",
+                },
+              ),
+            };
+          },
+        });
+
+        await assert.rejects(
+          fixture.adapter.run(
+            request({
+              access,
+              prompt: "DO_NOT_RETAIN_PROMPT",
+              recoveryPrompt: "DO_NOT_RETAIN_RECOVERY_PROMPT",
+              session: { mode: "continue", id: "previous-thread" },
+              ...(access === "local-commit"
+                ? {
+                    authorizationId: "authorization-1",
+                    commit: {
+                      expectedHead: EXPECTED_HEAD,
+                      message: "feat(test): create commit",
+                    },
+                  }
+                : {}),
+            }),
+          ),
+          (error) => {
+            assert.ok(
+              hasDiagnostic("ERR_CODEX_TURN_FAILED", "turn_bad_request")(error),
+            );
+            assert.equal(error.message, "Codex turn failed.");
+            for (const failure of [
+              error,
+              normalizeAdapterFailure("codex", error),
+            ]) {
+              assert.equal(failure.recoverable, false);
+              assert.equal(failure.ambiguous, false);
+              assert.equal(failure.failureClass, undefined);
+              assert.equal(
+                failure.effectStarted,
+                access === "local-commit" ? false : undefined,
+              );
+              assert.equal(failure.cause, undefined);
+              assert.doesNotMatch(
+                JSON.stringify({ ...failure, message: failure.message }),
+                /DO_NOT_RETAIN|uniqueItems|invalid_json_schema/u,
+              );
+            }
+            return true;
+          },
+        );
+        assert.equal(fixture.processes.length, 1);
+        assert.deepEqual(
+          fixture.processes[0].messages
+            .filter(
+              ({ method }) =>
+                method.startsWith("thread/") || method === "turn/start",
+            )
+            .map(({ method }) => method),
+          ["thread/resume", "turn/start"],
+        );
+        assert.equal(
+          fixture.executeCalls.filter(({ file }) => file === "git").length,
+          0,
+        );
+      });
+    }
+  }
+});
+
+test("keeps malformed, ambiguous, and transient HTTP lookalikes on bounded opaque recovery", async (t) => {
+  const message = httpClientErrorMessage();
+  const variants = [
+    ["unstructured", "HTTP 400 invalid_request_error invalid_json_schema"],
+    ["quoted failure", `The transcript reported: ${message}`],
+    ["missing status", message.slice(message.indexOf("{"))],
+    ["wrong reason", message.replace("Bad Request", "Internal Server Error")],
+    ["invalid status", message.replace("400", "0400")],
+    ["invalid JSON", message.slice(0, -1)],
+    ["trailing JSON", `${message} {}`],
+    ["unknown suffix", `${message}, unexpected status 503: {}`],
+    ["duplicate suffix", `${message}, request id: one, request id: two`],
+    [
+      "missing envelope",
+      'unexpected status 400 Bad Request: {"type":"invalid_request_error"}',
+    ],
+    ["null envelope", 'unexpected status 400 Bad Request: {"error":null}'],
+    ["array envelope", 'unexpected status 400 Bad Request: {"error":[]}'],
+    ["extra envelope", message.replace('{"error":', '{"status":503,"error":')],
+    [
+      "duplicate envelope",
+      message.replace('{"error":', '{"error":null,"error":'),
+    ],
+    ["missing type", message.replace('"type":"invalid_request_error",', "")],
+    [
+      "non-string message",
+      message.replace(/"message":"[^"]*"/u, '"message":null'),
+    ],
+    [
+      "nested param",
+      message.replace(
+        '"param":"DO_NOT_RETAIN_SCHEMA_PATH"',
+        '"param":{"status":503}',
+      ),
+    ],
+    [
+      "duplicate type",
+      message.replace('"type":', '"type":"server_error","type":'),
+    ],
+    [
+      "escaped duplicate",
+      message.replace('"type":', '"ty\\u0070e":"server_error","type":'),
+    ],
+    ["unknown type", httpClientErrorMessage({ type: "server_error" })],
+    ["unknown code", httpClientErrorMessage({ code: "unrecognized" })],
+    ["non-string code", httpClientErrorMessage({ code: 400 })],
+    ["quota code", httpClientErrorMessage({ code: "insufficient_quota" })],
+    ["rate code", httpClientErrorMessage({ code: "rate_limit_exceeded" })],
+    [
+      "context code",
+      httpClientErrorMessage({ code: "context_length_exceeded" }),
+    ],
+    [
+      "oversized",
+      message.replace("DO_NOT_RETAIN_NATIVE_MESSAGE", "x".repeat(16_384)),
+    ],
+    [
+      "oversized UTF-8",
+      message.replace("DO_NOT_RETAIN_NATIVE_MESSAGE", "€".repeat(6_000)),
+    ],
+    ...[408, 409, 425, 429, 500, 502, 503, 504].map((status) => [
+      `transient ${status}`,
+      httpClientErrorMessage({ status: String(status) }),
+    ]),
+  ];
+  for (const [name, nativeMessage] of variants) {
+    await t.test(name, async () => {
+      const fixture = createFixture({
+        handle({ message }) {
+          if (message.method !== "turn/start") {
+            return undefined;
+          }
+          return {
+            result: { turn: { id: "opaque-turn" } },
+            notification: failedTurn(message.params.threadId, "opaque-turn", {
+              message: nativeMessage,
+              codexErrorInfo: "other",
+              additionalDetails: httpClientErrorMessage(),
+            }),
+          };
+        },
+      });
+      await assert.rejects(fixture.adapter.run(request()), (error) => {
+        assert.ok(hasDiagnostic("ERR_CODEX_TURN_FAILED", "turn_other")(error));
+        assert.equal(error.recoverable, true);
+        assert.equal(error.cause, undefined);
+        assert.doesNotMatch(
+          JSON.stringify({ ...error, message: error.message }),
+          /DO_NOT_RETAIN|unexpected status/u,
+        );
+        return true;
+      });
+      assert.equal(fixture.processes.length, 2);
+      const methods = fixture.processes.flatMap(({ messages }) =>
+        messages.map(({ method }) => method),
+      );
+      assert.equal(
+        methods.filter((method) => method === "turn/start").length,
+        2,
+      );
+      assert.equal(methods.includes("thread/compact/start"), false);
+    });
+  }
+});
+
+test("reconstructs opaque turn failures once from the complete recovery prompt", async (t) => {
+  for (const access of ["read-only", "workspace-write"]) {
+    for (const mode of ["fresh", "continue"]) {
+      for (const recoveryPrompt of [undefined, "Complete durable context."]) {
+        await t.test(
+          `${access}/${mode}/${recoveryPrompt ?? "fallback"}`,
+          async () => {
+            const fixture = createFixture({
+              handle({ message, processIndex }) {
+                if (message.method !== "turn/start" || processIndex !== 0) {
+                  return undefined;
+                }
+                return {
+                  result: { turn: { id: "opaque-turn" } },
+                  notification: failedTurn(
+                    message.params.threadId,
+                    "opaque-turn",
+                    {
+                      message: "DO_NOT_RETAIN_NATIVE_MESSAGE",
+                      codexErrorInfo: "other",
+                      additionalDetails: "DO_NOT_RETAIN_ADDITIONAL_DETAILS",
+                    },
+                    [
+                      {
+                        type: "commandExecution",
+                        command: "git diff HEAD",
+                        status: "failed",
+                      },
+                      ...(access === "workspace-write"
+                        ? [
+                            {
+                              type: "fileChange",
+                              changes: [],
+                              status: "completed",
+                            },
+                          ]
+                        : []),
+                    ],
+                  ),
+                };
+              },
+            });
+            const result = await fixture.adapter.run(
+              request({
+                access,
+                prompt: "Short current request.",
+                ...(recoveryPrompt === undefined ? {} : { recoveryPrompt }),
+                ...(mode === "continue"
+                  ? { session: { mode, id: "previous-thread" } }
+                  : {}),
+              }),
+            );
+
+            assert.equal(result.sessionId, "thread-1");
+            assert.equal(result.output, "done");
+            assert.equal(fixture.processes.length, 2);
+            assert.deepEqual(
+              fixture.processes.map(({ messages }) =>
+                messages
+                  .filter(({ method }) => method.startsWith("thread/"))
+                  .map(({ method }) => method),
+              ),
+              [
+                [mode === "continue" ? "thread/resume" : "thread/start"],
+                ["thread/start"],
+              ],
+            );
+            const turns = fixture.processes.flatMap(({ messages }) =>
+              messages.filter(({ method }) => method === "turn/start"),
+            );
+            assert.equal(turns.length, 2);
+            assert.equal(
+              turns[0].params.input[0].text,
+              "Short current request.",
+            );
+            assert.equal(
+              turns[1].params.input[0].text,
+              "The previous Codex session could not continue. Reconstruct context from " +
+                "this durable request and the observed current workspace. Preserve valid " +
+                "progress and do not repeat completed work.\n\n" +
+                (recoveryPrompt ?? "Short current request."),
+            );
+            assert.doesNotMatch(JSON.stringify(result), /DO_NOT_RETAIN/u);
+            assert.doesNotMatch(JSON.stringify(turns[1]), /DO_NOT_RETAIN/u);
+            if (access === "workspace-write") {
+              assert.deepEqual(
+                fixture.workspaceStorages.map(
+                  ({ cleanupCalls }) => cleanupCalls,
+                ),
+                [1, 1],
+              );
+              assert.equal(
+                fixture.workspaceStorages[1].previousCleanupCalls,
+                1,
+              );
+            }
+          },
+        );
+      }
+    }
+  }
+});
+
+test("propagates a second opaque or terminal turn failure without another retry", async (t) => {
+  for (const access of ["read-only", "workspace-write"]) {
+    for (const mode of ["fresh", "continue"]) {
+      for (const secondVariant of ["other", "unauthorized"]) {
+        await t.test(`${access}/${mode}/${secondVariant}`, async () => {
+          const fixture = createFixture({
+            handle({ message, processIndex }) {
+              if (message.method !== "turn/start") {
+                return undefined;
+              }
+              return {
+                result: { turn: { id: "failed-turn" } },
+                notification: failedTurn(
+                  message.params.threadId,
+                  "failed-turn",
+                  {
+                    message: "DO_NOT_RETAIN_NATIVE_MESSAGE",
+                    codexErrorInfo: {
+                      [processIndex === 0 ? "other" : secondVariant]:
+                        "DO_NOT_RETAIN_VARIANT_DETAILS",
+                    },
+                    additionalDetails: "DO_NOT_RETAIN_ADDITIONAL_DETAILS",
+                  },
+                ),
+              };
+            },
+          });
+
+          await assert.rejects(
+            fixture.adapter.run(
+              request({
+                access,
+                ...(mode === "continue"
+                  ? { session: { mode, id: "previous-thread" } }
+                  : {}),
+              }),
+            ),
+            (error) => {
+              assert.ok(
+                hasDiagnostic(
+                  "ERR_CODEX_TURN_FAILED",
+                  `turn_${secondVariant}`,
+                )(error),
+              );
+              assert.equal(error.message, "Codex turn failed.");
+              for (const failure of [
+                error,
+                normalizeAdapterFailure("codex", error),
+              ]) {
+                assert.equal(failure.recoverable, secondVariant === "other");
+                assert.equal(failure.ambiguous, false);
+                assert.equal(failure.effectStarted, undefined);
+                assert.equal(failure.cause, undefined);
+                assert.doesNotMatch(
+                  JSON.stringify({ ...failure, message: failure.message }),
+                  /DO_NOT_RETAIN/u,
+                );
+              }
+              return true;
+            },
+          );
+          assert.equal(fixture.processes.length, 2);
+          const methods = fixture.processes.flatMap(({ messages }) =>
+            messages.map(({ method }) => method),
+          );
+          assert.equal(
+            methods.filter((method) => method === "turn/start").length,
+            2,
+          );
+          assert.equal(methods.includes("thread/compact/start"), false);
+        });
+      }
+    }
+  }
+});
+
+test("other turn failures cannot hide forbidden operations", async (t) => {
+  for (const nativeMessage of [
+    "DO_NOT_RETAIN_NATIVE_MESSAGE",
+    httpClientErrorMessage(),
+  ]) {
+    for (const [item, code, diagnosticClass] of [
+      [
+        { type: "subAgentActivity", kind: "spawned" },
+        "ERR_CODEX_ISOLATION",
+        "operation_multi_agent",
+      ],
+      [
+        {
+          type: "commandExecution",
+          command: "git push origin main",
+          status: "completed",
+        },
+        "ERR_CODEX_REMOTE_WRITE_ATTEMPT",
+        "operation_remote_write",
+      ],
+      [
+        { type: "fileChange", changes: [], status: "completed" },
+        "ERR_CODEX_READ_ONLY_POLICY",
+        "operation_read_only_write",
+      ],
+      [null, "ERR_CODEX_PROTOCOL", undefined],
+    ]) {
+      await t.test(
+        `${diagnosticClass ?? code}/${nativeMessage.startsWith("unexpected") ? "structured" : "opaque"}`,
+        async () => {
+          const fixture = createFixture({
+            handle({ message, processIndex }) {
+              if (message.method !== "turn/start" || processIndex !== 0) {
+                return undefined;
+              }
+              const notification = failedTurn(
+                message.params.threadId,
+                "failed-turn",
+                {
+                  message: nativeMessage,
+                  codexErrorInfo: "other",
+                },
+                [item],
+              );
+              return { result: { turn: { id: "failed-turn" } }, notification };
+            },
+          });
+          await assert.rejects(fixture.adapter.run(request()), (error) => {
+            assert.ok(hasDiagnostic(code, diagnosticClass)(error));
+            assert.equal(error.recoverable, false);
+            assert.equal(error.cause, undefined);
+            assert.doesNotMatch(
+              JSON.stringify(error),
+              /DO_NOT_RETAIN|git push/u,
+            );
+            return true;
+          });
+          assert.equal(fixture.processes.length, 1);
+        },
+      );
+    }
+  }
+});
+
+test("never replaces a source fork or replays a local commit after an opaque turn failure", async (t) => {
+  for (const access of ["read-only", "workspace-write", "local-commit"]) {
+    const modes =
+      access === "local-commit" ? ["fresh", "continue", "fork"] : ["fork"];
+    for (const mode of modes) {
+      await t.test(`${access}/${mode}`, async () => {
+        const fixture = createFixture({
+          handle({ message }) {
+            if (message.method !== "turn/start") {
+              return undefined;
+            }
+            return {
+              result: { turn: { id: "failed-turn" } },
+              notification: failedTurn(message.params.threadId, "failed-turn", {
+                message: "DO_NOT_RETAIN_NATIVE_MESSAGE",
+                codexErrorInfo: "other",
+              }),
+            };
+          },
+        });
+        await assert.rejects(
+          fixture.adapter.run(
+            request({
+              access,
+              ...(mode === "fresh"
+                ? {}
+                : { session: { mode, id: "source-thread" } }),
+              ...(access === "local-commit"
+                ? {
+                    authorizationId: "authorization-1",
+                    commit: {
+                      expectedHead: EXPECTED_HEAD,
+                      message: "feat(test): create commit",
+                    },
+                  }
+                : {}),
+            }),
+          ),
+          (error) => {
+            assert.ok(
+              hasDiagnostic("ERR_CODEX_TURN_FAILED", "turn_other")(error),
+            );
+            for (const failure of [
+              error,
+              normalizeAdapterFailure("codex", error),
+            ]) {
+              assert.equal(failure.recoverable, true);
+              assert.equal(
+                failure.effectStarted,
+                access === "local-commit" ? false : undefined,
+              );
+              assert.equal(failure.cause, undefined);
+              assert.doesNotMatch(
+                JSON.stringify({ ...failure, message: failure.message }),
+                /DO_NOT_RETAIN/u,
+              );
+            }
+            return true;
+          },
+        );
+        assert.equal(fixture.processes.length, 1);
+        assert.deepEqual(
+          fixture.processes[0].messages
+            .filter(
+              ({ method }) =>
+                method.startsWith("thread/") || method === "turn/start",
+            )
+            .map(({ method }) => method),
+          [
+            mode === "fresh"
+              ? "thread/start"
+              : `thread/${mode === "continue" ? "resume" : "fork"}`,
+            "turn/start",
+          ],
+        );
+        assert.equal(
+          fixture.executeCalls.filter(({ file }) => file === "git").length,
+          0,
+        );
+        assert.equal(
+          fixture.executeCalls.filter(
+            ({ argumentsList }) => argumentsList[0] === "sandbox",
+          ).length,
+          1,
+        );
+      });
+    }
   }
 });
 
@@ -2258,6 +3306,7 @@ test("discards unknown terminal turn classifications", async () => {
 
   await assert.rejects(fixture.adapter.run(request()), (error) => {
     assert.ok(hasCode("ERR_CODEX_TURN_FAILED")(error));
+    assert.equal(error.recoverable, false);
     assert.equal(error.diagnosticClass, undefined);
     assert.equal(error.cause, undefined);
     assert.doesNotMatch(
@@ -2494,8 +3543,10 @@ test(
   },
   async () => {
     const adapter = createCodexAdapter();
+    const registrations = [];
     const result = await adapter.run(
       request({
+        onProcess: async (pid) => registrations.push(pid),
         prompt:
           "Use a repository command to read package.json. Return JSON with " +
           "packageName set to its name field and commandWorked set to true. " +
@@ -2515,5 +3566,7 @@ test(
       packageName: packageMetadata.name,
       commandWorked: true,
     });
+    assert.equal(Number.isSafeInteger(registrations[0]), true);
+    assert.equal(registrations.at(-1), null);
   },
 );

@@ -294,6 +294,11 @@ export const REVIEW_SCHEMA = deepFreeze({
       enum: ["UNCHANGED", "ACCEPTED", "REJECTED"],
     },
     validationEvidence: TEXT_LIST,
+    finalizationFindingIds: {
+      type: "array",
+      maxItems: MAX_ITEMS,
+      items: { type: "string", pattern: "^R[1-9][0-9]{0,8}$" },
+    },
     ...DECISION_PROPERTIES,
   },
   required: [
@@ -301,6 +306,7 @@ export const REVIEW_SCHEMA = deepFreeze({
     "findings",
     "validationChange",
     "validationEvidence",
+    "finalizationFindingIds",
     "question",
     "options",
     "whyBlocked",
@@ -366,6 +372,11 @@ export const CLEAN_CONFIRM_SCHEMA = deepFreeze({
       enum: ["UNCHANGED", "ACCEPTED", "REJECTED"],
     },
     validationEvidence: TEXT_LIST,
+    finalizationFindingIds: {
+      type: "array",
+      maxItems: MAX_ITEMS,
+      items: { type: "string", pattern: "^R[1-9][0-9]{0,8}$" },
+    },
     ...DECISION_PROPERTIES,
   },
   required: [
@@ -373,6 +384,7 @@ export const CLEAN_CONFIRM_SCHEMA = deepFreeze({
     "findings",
     "validationChange",
     "validationEvidence",
+    "finalizationFindingIds",
     "question",
     "options",
     "whyBlocked",

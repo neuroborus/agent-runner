@@ -7,5 +7,9 @@ export {
   parseRunnerConfiguration,
   PROJECT_CONFIG_FILENAME,
 } from "./parsing.js";
-export { loadProjectConfiguration, loadRunnerConfiguration } from "./files.js";
+export {
+  assertProjectConfigurationProtected,
+  loadProjectConfiguration,
+  loadRunnerConfiguration,
+} from "./files.js";
 export { resolvePipelineConfiguration } from "./resolution.js";

@@ -13,6 +13,7 @@ import { polishingPipeline } from "../src/index.js";
 import {
   MAX_BOOTSTRAP_ITEMS,
   MAX_VALIDATION_ITEMS,
+  normalizePipelineState,
 } from "../src/workflow-contract.js";
 import {
   SOURCE_SESSION,
@@ -95,11 +96,11 @@ test("persists and finalizes a disjoint maximum role-derived inventory", async (
   const roleInventory = (role) => ({
     requiredChecks: Array.from({ length: MAX_BOOTSTRAP_ITEMS }, (_, index) => ({
       id: `C${index + 1}`,
-      command: `node --test validation/${role}-${index + 1}.test.js`,
+      command: `node validation/${role}-${index + 1}.js`,
     })),
     validationInfrastructure: Array.from(
       { length: MAX_BOOTSTRAP_ITEMS },
-      (_, index) => `validation/${role}-${index + 1}.test.js`,
+      (_, index) => `validation/${role}-${index + 1}.js`,
     ),
   });
   const workerInventory = roleInventory("worker");
@@ -167,6 +168,15 @@ test("persists and finalizes a disjoint maximum role-derived inventory", async (
     MAX_VALIDATION_ITEMS,
   );
   assert.equal(state.finalizationResult.checks.length, MAX_VALIDATION_ITEMS);
+  for (const field of ["requiredChecks", "validationInfrastructure"]) {
+    const extra =
+      field === "requiredChecks"
+        ? { id: "C513", command: "node validation/extra.js" }
+        : "validation/extra.js";
+    assert.throws(() =>
+      normalizePipelineState({ ...state, [field]: [...state[field], extra] }),
+    );
+  }
   assert.equal(state.validationInfrastructureFingerprint, expectedFingerprint);
   assert.equal(
     state.finalizationResult.validationInfrastructureFingerprint,
@@ -481,10 +491,18 @@ test("prepares a dirty worktree through independent source-session bootstraps", 
     fixture.calls.worker[1].prompt,
     /\.agents.*unless the user's task explicitly requires them.*not a user question/u,
   );
+  assert.match(
+    fixture.calls.worker[1].prompt,
+    /Do not modify the resolved project configuration during a run/u,
+  );
   assert.doesNotMatch(fixture.calls.worker[2].prompt, /\.agents/u);
   assert.match(
     fixture.calls.worker[2].recoveryPrompt,
     /\.agents.*unless the user's task explicitly requires them.*not a user question/u,
+  );
+  assert.match(
+    fixture.calls.worker[2].recoveryPrompt,
+    /Do not modify the resolved project configuration during a run/u,
   );
   assert.deepEqual(fixture.calls.worker[3].session, {
     mode: "fork",
@@ -832,6 +850,7 @@ test("invalidates dependent work before product-decision bootstrap re-entry", as
         status: "PRODUCT_DECISION_REQUIRED",
         findings: [],
         validationChange: "UNCHANGED",
+        finalizationFindingIds: [],
         validationEvidence: [],
       }),
       bootstrapReady("Reviewer"),

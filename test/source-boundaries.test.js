@@ -238,3 +238,94 @@ test("pipeline source does not branch on registered provider IDs", async () => {
     );
   }
 });
+
+test("operator guidance stays outside pipeline roles and run reconstruction", async () => {
+  const { files, imports } = await sourceImports();
+  for (const { importer, specifier } of imports) {
+    if (!specifier.includes("guidance/")) continue;
+    const path = relative(ROOT, importer);
+    assert.ok(
+      path === "src/index.js" ||
+        path === "src/cli.js" ||
+        path.startsWith("src/mcp/") ||
+        path.startsWith("src/guidance/"),
+      path,
+    );
+  }
+  for (const path of files.filter(
+    (path) =>
+      isWithin(join(ROOT, "pipelines"), path) ||
+      isWithin(join(ROOT, "src/runner"), path),
+  )) {
+    const source = await readFile(path, "utf8");
+    assert.doesNotMatch(
+      source,
+      /OPERATOR_GUIDE\.md|agent-runner\/rules\.md|guidance_(?:read|update)|createGuidanceService/u,
+      relative(ROOT, path),
+    );
+  }
+  const root = await import("../src/index.js");
+  const guidance = await import("../src/guidance/index.js");
+  assert.equal(root.createGuidanceService, guidance.createGuidanceService);
+  assert.deepEqual(
+    Object.keys(guidance).sort(),
+    ["GuidanceError", "MAX_GUIDANCE_BYTES", "createGuidanceService"].sort(),
+  );
+});
+
+test("project configuration protection stays behind the config index and runner", async () => {
+  const { imports } = await sourceImports();
+  const configFiles = join(ROOT, "src/config/files.js");
+  const consumers = imports
+    .filter(
+      ({ importer, specifier }) =>
+        specifier.startsWith(".") &&
+        resolve(dirname(importer), specifier) === configFiles,
+    )
+    .map(({ importer }) => relative(ROOT, importer));
+  assert.deepEqual(consumers, ["src/config/index.js"]);
+
+  const runnerSource = await readFile(
+    join(ROOT, "src/runner/service.js"),
+    "utf8",
+  );
+  assert.match(
+    runnerSource,
+    /assertProjectConfigurationProtected[\s\S]*from "\.\.\/config\/index\.js"/u,
+  );
+  for (const pipeline of ["plan-authoring", "plan-execution", "polishing"]) {
+    const sources = await walk(
+      join(ROOT, "pipelines", pipeline, "src"),
+      (path) => extname(path) === ".js",
+    );
+    for (const path of sources) {
+      assert.doesNotMatch(
+        await readFile(path, "utf8"),
+        /projectConfigurationProtection|assertProjectConfigurationProtected/u,
+        relative(ROOT, path),
+      );
+    }
+  }
+});
+
+test("shared editor mechanics stay in root capabilities and outside MCP and pipelines", async () => {
+  const { imports } = await sourceImports();
+  const editorPath = join(ROOT, "src/editor.js");
+  const consumers = [];
+  for (const { importer, specifier } of imports) {
+    if (
+      specifier.startsWith(".") &&
+      resolve(dirname(importer), specifier) === editorPath
+    )
+      consumers.push(relative(ROOT, importer));
+  }
+  assert.deepEqual(consumers.sort(), [
+    "src/clarifications/service.js",
+    "src/guidance/service.js",
+    "src/index.js",
+  ]);
+  const root = await import("../src/index.js");
+  const editor = await import("../src/editor.js");
+  assert.equal(root.openConfiguredEditor, editor.openConfiguredEditor);
+  assert.equal(root.EditorError, editor.EditorError);
+});

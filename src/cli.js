@@ -1,12 +1,30 @@
+import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
 
 import packageMetadata from "../package.json" with { type: "json" };
+import { createGuidanceService } from "./guidance/index.js";
 import { DETACHED_RUNTIME_COMPATIBILITY_ENV, serveMcp } from "./mcp/index.js";
 import { getPipeline, listPipelines } from "./pipeline-registry.js";
 import { createRunner, parseSourceSession } from "./runner/index.js";
-import { RUNTIME_VERSION_SKEW_EXIT_CODE } from "./state/index.js";
+import {
+  projectOperatorStop,
+  RUNTIME_VERSION_SKEW_EXIT_CODE,
+} from "./state/index.js";
 
 const COMMAND_OPTIONS = Object.freeze({
+  guidance: Object.freeze(["project", "project-config"]),
+  pause: Object.freeze([
+    "run",
+    "expected-revision",
+    "idempotency-key",
+    "timing",
+  ]),
+  cancel: Object.freeze([
+    "run",
+    "expected-revision",
+    "idempotency-key",
+    "timing",
+  ]),
   resume: Object.freeze(["run", "extra-fix-rounds", "override-finding"]),
   status: Object.freeze(["run"]),
   pipelines: Object.freeze([]),
@@ -22,6 +40,9 @@ const COMMON_RUN_OPTIONS = Object.freeze([
   "project-config",
 ]);
 const REQUIRED_COMMAND_OPTIONS = Object.freeze({
+  guidance: Object.freeze(["project"]),
+  pause: Object.freeze(["run"]),
+  cancel: Object.freeze(["run"]),
   resume: Object.freeze(["run"]),
   status: Object.freeze(["run"]),
   pipelines: Object.freeze([]),
@@ -44,6 +65,9 @@ const OPTIONS = Object.freeze({
   help: { type: "boolean", short: "h" },
   version: { type: "boolean", short: "v" },
   run: { type: "string" },
+  "expected-revision": { type: "string" },
+  "idempotency-key": { type: "string" },
+  timing: { type: "string" },
   "extra-fix-rounds": { type: "string" },
   "override-finding": { type: "string" },
   "fork-from": { type: "string" },
@@ -65,9 +89,13 @@ const PIPELINE_USAGE = PIPELINES.map(
 const USAGE = `Agent Runner
 
 Usage:
-  agent-run run <pipeline> --project <repo> --task <task-dir> [--mode <independent|lazy>] [--clarify] [--profile <alias>] [--fork-from <backend>:<session-id>]
+  agent-run run <pipeline> --project <repo> --task <task-dir> [--mode <independent|lazy|combined>] [--clarify] [--profile <alias>] [--fork-from <backend>:<session-id>]
   agent-run resume --run <run-id> [--extra-fix-rounds <count> | --override-finding <finding-id>]
+  agent-run pause --run <run-id> [--timing immediate|after-current-commit] [--expected-revision <revision> --idempotency-key <key>]
+  agent-run cancel --run <run-id> [--timing immediate|after-current-commit] [--expected-revision <revision> --idempotency-key <key>]
   agent-run status --run <run-id>
+  agent-run guidance --project <repo> [--project-config <path>]
+  agent-run guidance edit --project <repo> [--project-config <path>]
   agent-run pipelines
   agent-run mcp
 
@@ -76,12 +104,14 @@ ${PIPELINE_USAGE}
 
 Options:
       --clarify            Open the clarification editor before agent questions
-      --mode               Select independent or lazy pipeline execution
+      --mode               Select a mode supported by the pipeline descriptor
                            independent is default and recommended for genuinely
                            independent review, but uses more context and tokens;
-                           lazy is opt-in, uses less, and has no independent review
+                           lazy is opt-in, uses less, and has no independent review;
+                           combined adds primary convergence before independent review
+                           and is available for all three pipelines
       --fork-from          Fork a compatible backend session into active roles
-                           independent forks primary and review roles separately;
+                           independent and combined fork primary and review roles separately;
                            lazy forks once into the primary role
       --fork-profile       Trusted profile alias used by the source session
       --profile            Set the run-wide trusted profile alias
@@ -94,6 +124,11 @@ Options:
       --<role>-context-size Override a role decimal token context size
       --extra-fix-rounds   Grant a positive additional fix budget on resume
       --override-finding   Override one applicable open finding on resume
+      --expected-revision  Bind an explicit pause or cancel request revision
+      --idempotency-key    Bind an explicit pause or cancel retry identity
+      --timing             immediate (default) or after-current-commit for pause/cancel
+                           Deferred stops require a selected execution step; pauses,
+                           failures, or interruptions settle without extra work
   -h, --help               Show this help
   -v, --version            Show version
 `;
@@ -136,6 +171,16 @@ function pauseActionLine(runId, action) {
   return `  Override finding ${action.action.findingId} with: agent-run resume --run ${runId} --override-finding ${action.action.findingId}`;
 }
 
+function stopTimingLines(stop) {
+  return [
+    `Stop timing: ${stop.timing ?? "immediate"}`,
+    `Effective stop timing: ${stop.effectiveTiming ?? "immediate"}`,
+    ...(stop.targetStep == null
+      ? []
+      : [`Stop target step: ${stop.targetStep}`]),
+  ];
+}
+
 function runSummary({ directoryPath, run }) {
   const state = run.pipelineState;
   const pipeline = getPipeline(run.pipelineId);
@@ -150,6 +195,18 @@ function runSummary({ directoryPath, run }) {
   ];
   if (status.currentStep !== null) {
     lines.push(`Step: ${status.currentStep}`);
+  }
+  const stop = projectOperatorStop(run);
+  if (stop !== null) {
+    lines.push(
+      `Stop ${stop.state === "settled" ? "settled" : "pending"}: ${stop.kind === "cancel_requested" ? "cancel" : "pause"}`,
+      `Stop state: ${stop.state}`,
+      ...stopTimingLines(stop),
+    );
+    if (stop.settlement !== null)
+      lines.push(
+        `Stop settlement: ${stop.settlement.kind}${stop.settlement.commit === null ? "" : ` ${stop.settlement.commit}`}`,
+      );
   }
   if (pause !== null) {
     lines.push(`Pause: ${pause.reason}`);
@@ -210,6 +267,25 @@ function workflowExitCode(run) {
     return 2;
   }
   return run.pipelineState.workflowState === "FAILED" ? 1 : 0;
+}
+
+function explicitStopIdentity(values) {
+  const revision = values["expected-revision"];
+  const key = values["idempotency-key"];
+  if ((revision === undefined) !== (key === undefined)) {
+    throw new Error(
+      "Use --expected-revision and --idempotency-key together, or omit both.",
+    );
+  }
+  if (revision === undefined) return null;
+  if (!/^[1-9][0-9]*$/u.test(revision)) {
+    throw new Error("--expected-revision must be a positive integer.");
+  }
+  const expectedRevision = Number(revision);
+  if (!Number.isSafeInteger(expectedRevision)) {
+    throw new Error("--expected-revision is too large.");
+  }
+  return { expectedRevision, idempotencyKey: key };
 }
 
 function roleOverrides(pipeline, values) {
@@ -298,8 +374,11 @@ export async function main(
     stderr = process.stderr,
     runner,
     createCommandRunner = createRunner,
+    guidance,
+    createCommandGuidance = createGuidanceService,
     startMcp = serveMcp,
     environment = process.env,
+    idempotencyKeyFactory = randomUUID,
   } = {},
 ) {
   let parsed;
@@ -308,6 +387,7 @@ export async function main(
       args,
       allowPositionals: true,
       strict: true,
+      tokens: true,
       options: OPTIONS,
     });
   } catch (error) {
@@ -346,7 +426,7 @@ export async function main(
     return 1;
   }
 
-  const maximumPositionals = command === "run" ? 2 : 1;
+  const maximumPositionals = ["run", "guidance"].includes(command) ? 2 : 1;
   if (positionals.length > maximumPositionals) {
     stderr.write(
       `Unexpected argument: ${positionals[maximumPositionals]}\n\n${USAGE}`,
@@ -358,6 +438,23 @@ export async function main(
   let supportedOptions = COMMAND_OPTIONS[command];
   let requiredOptions = REQUIRED_COMMAND_OPTIONS[command];
   let commandLabel = command;
+
+  if (command === "guidance") {
+    if (positionals[1] !== undefined && positionals[1] !== "edit") {
+      stderr.write(`Unknown guidance action: ${positionals[1]}\n\n${USAGE}`);
+      return 1;
+    }
+    const seen = new Set();
+    for (const token of parsed.tokens.filter(
+      (token) => token.kind === "option",
+    )) {
+      if (seen.has(token.name)) {
+        stderr.write(`Option '--${token.name}' may be supplied only once.\n`);
+        return 1;
+      }
+      seen.add(token.name);
+    }
+  }
 
   if (command === "run") {
     const pipelineId = positionals[1];
@@ -406,7 +503,15 @@ export async function main(
 
   if (command === "pipelines") {
     const output = PIPELINES.map(
-      (entry) => `${entry.id}\t${entry.description}`,
+      (entry) =>
+        `${entry.id}\t${entry.description}\n  Settings (defaults): ${Object.entries(
+          entry.settings,
+        )
+          .map(
+            ([name, definition]) =>
+              `${name}=${JSON.stringify(definition.defaultValue)}`,
+          )
+          .join(", ")}`,
     ).join("\n");
     stdout.write(`${output}\n`);
     return 0;
@@ -422,6 +527,31 @@ export async function main(
   }
 
   try {
+    if (command === "guidance") {
+      const service = guidance ?? createCommandGuidance({ env: environment });
+      const input = {
+        projectPath: values.project,
+        ...(values["project-config"] === undefined
+          ? {}
+          : { projectConfigurationPath: values["project-config"] }),
+      };
+      if (positionals[1] === "edit") {
+        const receipt = await service.edit(input);
+        stdout.write(
+          receipt.updated
+            ? "Local guidance updated.\n"
+            : "Local guidance unchanged.\n",
+        );
+      } else {
+        const { combinedContent } = await service.read(input);
+        stdout.write(
+          combinedContent.endsWith("\n")
+            ? combinedContent
+            : `${combinedContent}\n`,
+        );
+      }
+      return 0;
+    }
     const commandRunner =
       runner ??
       createCommandRunner({
@@ -475,6 +605,35 @@ export async function main(
       });
       stdout.write(runSummary(result));
       return workflowExitCode(result.run);
+    }
+    if (["pause", "cancel"].includes(command)) {
+      if (
+        values.timing !== undefined &&
+        !["immediate", "after-current-commit"].includes(values.timing)
+      ) {
+        throw new Error("--timing must be immediate or after-current-commit.");
+      }
+      const explicit = explicitStopIdentity(values);
+      const identity = explicit ?? {
+        expectedRevision: (await commandRunner.status(values.run)).run.revision,
+        idempotencyKey: idempotencyKeyFactory(),
+      };
+      const receipt = await commandRunner.requestOperatorStop({
+        runId: values.run,
+        kind: command === "pause" ? "pause_requested" : "cancel_requested",
+        ...identity,
+        ...(values.timing === undefined ? {} : { timing: values.timing }),
+      });
+      stdout.write(
+        `${command === "pause" ? "Pause" : "Cancellation"} requested for run ${receipt.runId} at revision ${receipt.revision}.\n`,
+      );
+      stdout.write(
+        `${stopTimingLines({
+          ...receipt,
+          targetStep: receipt.targetBoundary?.step ?? null,
+        }).join("\n")}\n`,
+      );
+      return 0;
     }
     const result = await commandRunner.status(values.run);
     stdout.write(runSummary(result));

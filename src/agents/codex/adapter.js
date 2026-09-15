@@ -3,6 +3,7 @@ import { lstatSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
+import { executeOwnedProcess, spawnOwnedProcess } from "../owned-process.js";
 import packageMetadata from "../../../package.json" with { type: "json" };
 import {
   createAdapterContract,
@@ -17,6 +18,7 @@ import {
   executeCodexLocalCommit,
   probeCodexLocalCommit,
 } from "./local-commit.js";
+import { assertCodexSchema } from "./schema.js";
 import {
   assertCodexWorkspaceStorage,
   createCodexWorkspaceStorage,
@@ -62,6 +64,26 @@ const TERMINAL_TURN_DIAGNOSTICS = Object.freeze({
   unauthorized: "turn_unauthorized",
   usageLimitExceeded: "turn_usage_limit_exceeded",
 });
+const MAX_HTTP_ERROR_BYTES = 16_384;
+const CLIENT_ERROR_STATUSES = new Map([
+  [400, "Bad Request"],
+  [401, "Unauthorized"],
+  [403, "Forbidden"],
+  [404, "Not Found"],
+  [405, "Method Not Allowed"],
+  [413, "Payload Too Large"],
+  [415, "Unsupported Media Type"],
+  [422, "Unprocessable Entity"],
+]);
+const CLIENT_ERROR_CODES = new Set([
+  "invalid_api_key",
+  "invalid_json_schema",
+  "invalid_parameter",
+  "invalid_value",
+  "missing_required_parameter",
+  "model_not_found",
+  "unsupported_parameter",
+]);
 const CODEX_DIAGNOSTIC_CLASSES = new Set([
   ...Object.values(CAPABILITY_DIAGNOSTICS),
   ...Object.values(TERMINAL_TURN_DIAGNOSTICS),
@@ -109,14 +131,43 @@ const DISABLED_FEATURES = Object.freeze([
   "skill_mcp_dependency_install",
 ]);
 const EMPTY_SHELL_ENVIRONMENT = Object.freeze({});
+const CODEX_CORE_SHELL_ENVIRONMENT_NAMES = Object.freeze([
+  "HOME",
+  "LOGNAME",
+  "PATH",
+  "SHELL",
+  "USER",
+]);
+const OWNED_PROCESS_ENVIRONMENT_NAME = "AGENT_RUNNER_OWNED_PROCESS";
+const SHELL_ENVIRONMENT_POLICY_FIELDS = Object.freeze([
+  "exclude",
+  "experimental_use_profile",
+  "filters",
+  "ignore_default_excludes",
+  "include_only",
+  "inherit",
+  "set",
+]);
+
+function shellEnvironmentNames(environment) {
+  return [
+    ...CODEX_CORE_SHELL_ENVIRONMENT_NAMES,
+    OWNED_PROCESS_ENVIRONMENT_NAME,
+    ...Object.keys(environment),
+  ];
+}
 
 function shellEnvironmentPolicy(environment) {
   const values = Object.entries(environment)
     .map(([name, value]) => `${name}=${JSON.stringify(value)}`)
     .join(",");
+  const names = shellEnvironmentNames(environment)
+    .map((name) => JSON.stringify(name))
+    .join(",");
   return (
-    'shell_environment_policy={inherit="core",ignore_default_excludes=false,' +
-    `experimental_use_profile=false,set={${values}}}`
+    'shell_environment_policy={inherit="all",ignore_default_excludes=false,' +
+    `exclude=[],set={${values}},include_only=[${names}],` +
+    "experimental_use_profile=false}"
   );
 }
 
@@ -240,6 +291,7 @@ const SAFE_TURN_ITEM_TYPES = new Set([
   "userMessage",
 ]);
 const TERMINAL_ITEM_STATUSES = new Set(["completed", "declined", "failed"]);
+const TERMINAL_TURN_STATUSES = new Set(["completed", "failed", "interrupted"]);
 
 export function normalizeCodexDiagnosticClass(value) {
   return CODEX_DIAGNOSTIC_CLASSES.has(value) ? value : undefined;
@@ -438,6 +490,22 @@ function sameEnvironment(actual, expected) {
   );
 }
 
+function sameNames(actual, expected) {
+  return (
+    Array.isArray(actual) &&
+    actual.length === expected.length &&
+    actual.every((name, index) => name === expected[index])
+  );
+}
+
+function hasExactFields(value, fields) {
+  return (
+    isRecord(value) &&
+    Object.keys(value).length === fields.length &&
+    fields.every((field) => Object.hasOwn(value, field))
+  );
+}
+
 function assertIsolatedConfiguration(
   value,
   expectedMcpServers,
@@ -448,6 +516,9 @@ function assertIsolatedConfiguration(
   const memories = config?.memories;
   const mcpServers = config?.mcp_servers;
   const shellEnvironment = config?.shell_environment_policy;
+  const expectedShellEnvironmentNames = shellEnvironmentNames(
+    expectedShellEnvironment,
+  );
   let diagnosticClass;
   if (!isRecord(config) || !isRecord(features)) {
     diagnosticClass = "isolation_effective_configuration";
@@ -464,13 +535,13 @@ function assertIsolatedConfiguration(
   } else if (!Array.isArray(config.notify) || config.notify.length !== 0) {
     diagnosticClass = "isolation_notification";
   } else if (
-    !isRecord(shellEnvironment) ||
-    shellEnvironment.inherit !== "core" ||
+    !hasExactFields(shellEnvironment, SHELL_ENVIRONMENT_POLICY_FIELDS) ||
+    shellEnvironment.inherit !== "all" ||
     shellEnvironment.ignore_default_excludes !== false ||
     shellEnvironment.experimental_use_profile !== false ||
     !sameEnvironment(shellEnvironment.set, expectedShellEnvironment) ||
-    shellEnvironment.exclude !== null ||
-    shellEnvironment.include_only !== null ||
+    !sameNames(shellEnvironment.exclude, []) ||
+    !sameNames(shellEnvironment.include_only, expectedShellEnvironmentNames) ||
     shellEnvironment.filters !== null
   ) {
     diagnosticClass = "isolation_shell_environment";
@@ -731,6 +802,78 @@ function terminalTurnDiagnosticClass(turn) {
     : undefined;
 }
 
+function hasStructuredClientError(message) {
+  if (
+    typeof message !== "string" ||
+    message.length > MAX_HTTP_ERROR_BYTES ||
+    Buffer.byteLength(message, "utf8") > MAX_HTTP_ERROR_BYTES
+  ) {
+    return false;
+  }
+  // Recognize the native HTTP wrapper, never a status mentioned in prose,
+  // additionalDetails, or an arbitrary codexErrorInfo payload.
+  const match =
+    /^unexpected status ([0-9]{3})(?: ([A-Za-z ]+))?: [\t\r\n ]*(\{[\s\S]*\})[\t\r\n ]*((?:, (?:url|cf-ray|request id): [^,\s{}]+)*)$/u.exec(
+      message,
+    );
+  if (match === null) {
+    return false;
+  }
+  const [, statusText, reason, body, metadata] = match;
+  const status = Number(statusText);
+  if (
+    !CLIENT_ERROR_STATUSES.has(status) ||
+    (reason !== undefined && reason !== CLIENT_ERROR_STATUSES.get(status))
+  ) {
+    return false;
+  }
+  const metadataKeys = [...metadata.matchAll(/, ([^:]+):/gu)].map(
+    (entry) => entry[1],
+  );
+  if (new Set(metadataKeys).size !== metadataKeys.length) {
+    return false;
+  }
+  let envelope;
+  try {
+    envelope = JSON.parse(body);
+  } catch {
+    return false;
+  }
+  if (
+    !isRecord(envelope) ||
+    Object.keys(envelope).length !== 1 ||
+    !isRecord(envelope.error)
+  ) {
+    return false;
+  }
+  const error = envelope.error;
+  const keys = Object.keys(error);
+  if (
+    keys.some((key) => !["message", "type", "param", "code"].includes(key)) ||
+    typeof error.message !== "string" ||
+    !(
+      error.type === "invalid_request_error" ||
+      (status === 401 && error.type === "authentication_error") ||
+      (status === 403 && error.type === "permission_error")
+    ) ||
+    (error.param !== undefined &&
+      error.param !== null &&
+      typeof error.param !== "string") ||
+    (error.code !== undefined &&
+      error.code !== null &&
+      !CLIENT_ERROR_CODES.has(error.code))
+  ) {
+    return false;
+  }
+  // This envelope is shallow and all values are scalar. Count JSON keys while
+  // consuming whole strings to reject duplicates, including escaped names,
+  // which JSON.parse would otherwise silently overwrite.
+  const keyCount = [...body.matchAll(/"(?:[^"\\]|\\.)*"\s*(:)?/gsu)].filter(
+    (entry) => entry[1] !== undefined,
+  ).length;
+  return keyCount === keys.length + 1;
+}
+
 function hasFullItemsView(turn) {
   return turn.itemsView === undefined || turn.itemsView === "full";
 }
@@ -751,7 +894,7 @@ function assertCompletedTurnEnvelope(value, threadId, turnId) {
     value.turn.id.length === 0 ||
     (turnId !== undefined && value.turn.id !== turnId) ||
     !Array.isArray(value.turn.items) ||
-    typeof value.turn.status !== "string"
+    !TERMINAL_TURN_STATUSES.has(value.turn.status)
   ) {
     throw invalidCompletedTurn();
   }
@@ -927,6 +1070,15 @@ async function runTurn(
       );
     }
   }
+  if (
+    request.model !== undefined &&
+    client.receivedNotification("model/rerouted")
+  ) {
+    throw new CodexAdapterError(
+      `Codex substituted the requested model: ${request.model}.`,
+      { code: "ERR_CODEX_MODEL_REROUTED" },
+    );
+  }
   if (turn.status === "interrupted") {
     throw new CodexAdapterError("Codex turn was interrupted.", {
       ambiguous: true,
@@ -935,7 +1087,7 @@ async function runTurn(
     });
   }
   if (turn.status !== "completed") {
-    const diagnosticClass = terminalTurnDiagnosticClass(turn);
+    let diagnosticClass = terminalTurnDiagnosticClass(turn);
     if (diagnosticClass === TERMINAL_TURN_DIAGNOSTICS.usageLimitExceeded) {
       throw new CodexAdapterError("Codex usage capacity is unavailable.", {
         code: "ERR_CODEX_USAGE_LIMIT",
@@ -943,9 +1095,17 @@ async function runTurn(
         recoverable: true,
       });
     }
+    if (diagnosticClass === TERMINAL_TURN_DIAGNOSTICS.other) {
+      // Classification and recovery cannot hide policy or protocol violations.
+      auditItems(turn.items, request);
+      if (hasStructuredClientError(turn.error.message)) {
+        diagnosticClass = TERMINAL_TURN_DIAGNOSTICS.badRequest;
+      }
+    }
     throw new CodexAdapterError("Codex turn failed.", {
       code: "ERR_CODEX_TURN_FAILED",
       diagnosticClass,
+      recoverable: diagnosticClass === TERMINAL_TURN_DIAGNOSTICS.other,
     });
   }
   return turn;
@@ -1257,7 +1417,11 @@ export function createCodexAdapter(options = {}) {
     let result;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        result = await execute(
+        result = await (
+          request.onProcess !== undefined && execute === executeFile
+            ? executeOwnedProcess
+            : execute
+        )(
           codexBinary,
           nativeArguments(request, [
             "-C",
@@ -1271,10 +1435,22 @@ export function createCodexAdapter(options = {}) {
             env: processEnvironment,
             maxBuffer: 1024 * 1024,
             timeout: MCP_DISCOVERY_TIMEOUT_MS,
+            ...(request.signal === undefined ? {} : { signal: request.signal }),
+            ...(request.onProcess === undefined
+              ? {}
+              : { onProcess: request.onProcess }),
           },
         );
         break;
-      } catch {
+      } catch (cause) {
+        request.signal?.throwIfAborted();
+        if (
+          [
+            "ERR_EXECUTION_PROCESS_ACTIVE",
+            "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+          ].includes(cause?.code)
+        )
+          throw cause;
         if (attempt === 1) {
           throw new CodexAdapterError(
             "Codex MCP configuration is temporarily unavailable.",
@@ -1343,20 +1519,40 @@ export function createCodexAdapter(options = {}) {
   }
 
   async function createAuthorizedCommit(request) {
+    let effectStarted = false;
     try {
+      request.signal?.throwIfAborted();
       await executeCodexLocalCommit({
         codexBinary,
         cwd: request.cwd,
         env: commandEnvironment,
-        execute,
+        execute: (file, args, executionOptions) => {
+          const options =
+            request.onProcess === undefined
+              ? executionOptions
+              : {
+                  ...executionOptions,
+                  signal: request.signal,
+                  onProcess: request.onProcess,
+                };
+          return request.onProcess !== undefined && execute === executeFile
+            ? executeOwnedProcess(file, args, options)
+            : execute(file, args, options);
+        },
+        beforeEffect: () => {
+          request.signal?.throwIfAborted();
+          effectStarted = true;
+        },
         expectedHead: request.commit.expectedHead,
         message: request.commit.message,
       });
     } catch (cause) {
+      if (cause?.effectStarted === false) effectStarted = false;
       throw new CodexAdapterError(
         "Authorized local commit outcome requires Git-state verification.",
         {
-          ambiguous: true,
+          ambiguous: effectStarted,
+          effectStarted,
           cause,
           code: "ERR_CODEX_LOCAL_COMMIT_INTERRUPTED",
         },
@@ -1365,67 +1561,92 @@ export function createCodexAdapter(options = {}) {
   }
 
   async function runAttempt(request, { fresh = false, recovery = false } = {}) {
+    request.signal?.throwIfAborted();
     const workspaceStorage = await prepareWorkspaceStorage(request);
     try {
       const launch = await appServerLaunch(request, workspaceStorage);
       let child;
       try {
-        child = spawnProcess(codexBinary, launch.argumentsList, {
+        request.signal?.throwIfAborted();
+        const launchProcess =
+          request.onProcess !== undefined && spawnProcess === spawn
+            ? spawnOwnedProcess
+            : spawnProcess;
+        child = launchProcess(codexBinary, launch.argumentsList, {
           cwd: request.cwd,
           env: processEnvironment,
           stdio: ["pipe", "pipe", "pipe"],
+          ...(request.onProcess === undefined
+            ? {}
+            : {
+                signal: request.signal,
+                onProcess: request.onProcess,
+                ownershipMode: "native-sandbox-provider",
+              }),
         });
       } catch (cause) {
         throw processError("Cannot start Codex app-server.", cause);
       }
-      const client = createCodexAppServerClient(child, CodexAdapterError);
+      const ownedCompletion = child.ownedCompletion;
+      const ownedFailureSignal =
+        ownedCompletion === undefined
+          ? undefined
+          : new Promise((_, reject) => {
+              ownedCompletion.catch(reject);
+            });
+      ownedFailureSignal?.catch(() => {});
+      const client = createCodexAppServerClient(
+        child,
+        CodexAdapterError,
+        request.signal,
+      );
       let result;
       let operationFailed = false;
       try {
-        await client.request("initialize", {
-          clientInfo: {
-            name: "agent_runner",
-            title: "Agent Runner",
-            version: packageMetadata.version,
-          },
-          capabilities: null,
-        });
-        client.notify("initialized", {});
-        assertIsolatedConfiguration(
-          await client.request("config/read", { includeLayers: false }),
-          launch.mcpServerNames,
-          workspaceStorage?.shellEnvironment ?? EMPTY_SHELL_ENVIRONMENT,
-        );
-        await validateModel(client, request.model);
-        const threadId = await selectThread(client, request, fresh);
-        const turn = await runTurn(
-          client,
-          request,
-          threadId,
-          turnPrompt(request, recovery),
-          turnPrompt(request, "compact"),
-          workspaceStorage,
-        );
-        if (
-          request.model !== undefined &&
-          client.receivedNotification("model/rerouted")
-        ) {
-          throw new CodexAdapterError(
-            `Codex substituted the requested model: ${request.model}.`,
-            { code: "ERR_CODEX_MODEL_REROUTED" },
+        const protocolOperation = (async () => {
+          await client.request("initialize", {
+            clientInfo: {
+              name: "agent_runner",
+              title: "Agent Runner",
+              version: packageMetadata.version,
+            },
+            capabilities: null,
+          });
+          client.notify("initialized", {});
+          assertIsolatedConfiguration(
+            await client.request("config/read", { includeLayers: false }),
+            launch.mcpServerNames,
+            workspaceStorage?.shellEnvironment ?? EMPTY_SHELL_ENVIRONMENT,
           );
-        }
-        result = normalizeResult(turn, request, threadId);
+          await validateModel(client, request.model);
+          const threadId = await selectThread(client, request, fresh);
+          const turn = await runTurn(
+            client,
+            request,
+            threadId,
+            turnPrompt(request, recovery),
+            turnPrompt(request, "compact"),
+            workspaceStorage,
+          );
+          return normalizeResult(turn, request, threadId);
+        })();
+        result = await (ownedFailureSignal === undefined
+          ? protocolOperation
+          : Promise.race([protocolOperation, ownedFailureSignal]));
       } catch (cause) {
         operationFailed = true;
         throw cause;
       } finally {
         try {
-          await client.close();
+          await client.close({
+            retainProcess: child.ownedContainmentRetained === true,
+          });
         } catch (cause) {
           if (!operationFailed) {
             throw cause;
           }
+        } finally {
+          await ownedCompletion;
         }
       }
       return result;
@@ -1437,6 +1658,7 @@ export function createCodexAdapter(options = {}) {
   async function run(value) {
     const request = normalizeRequest(value);
     try {
+      assertCodexSchema(outputSchemaFor(request), CodexAdapterError);
       await assertCapabilities(request);
     } catch (cause) {
       if (
@@ -1451,6 +1673,20 @@ export function createCodexAdapter(options = {}) {
     try {
       result = await runAttempt(request);
     } catch (cause) {
+      if (request.signal?.aborted) {
+        if (request.access === "local-commit") {
+          throw new CodexAdapterError(
+            "Local commit stopped before execution.",
+            {
+              cause,
+              code: cause?.code ?? "ERR_CODEX_LOCAL_COMMIT_INTERRUPTED",
+              effectStarted: false,
+            },
+          );
+        }
+        throw cause;
+      }
+      request.signal?.throwIfAborted();
       if (
         cause instanceof CodexAdapterError &&
         cause.recoverable &&

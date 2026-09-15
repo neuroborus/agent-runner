@@ -9,6 +9,15 @@ import {
 } from "../../src/agents/claude/index.js";
 import { STRUCTURED_OUTPUT_FAILURE_CLASS } from "../../src/agents/index.js";
 
+import {
+  BOOTSTRAP_SCHEMA as EXECUTION_BOOTSTRAP_SCHEMA,
+  FINALIZATION_SCHEMA as EXECUTION_FINALIZATION_SCHEMA,
+} from "../../pipelines/plan-execution/src/schemas.js";
+import {
+  BOOTSTRAP_SCHEMA as POLISHING_BOOTSTRAP_SCHEMA,
+  FINALIZATION_SCHEMA as POLISHING_FINALIZATION_SCHEMA,
+} from "../../pipelines/polishing/src/schemas.js";
+
 const PROJECT_PATH = process.cwd();
 const EXPECTED_HEAD = "a".repeat(40);
 const SOURCE_SESSION = "11111111-1111-4111-8111-111111111111";
@@ -185,6 +194,19 @@ function turnCalls(fixture) {
       file === "claude" && argumentsList.includes("-p"),
   );
 }
+
+test("marks only Claude native-sandbox executions as provider-owned", async () => {
+  const fixture = createFixture();
+  await fixture.adapter.run(request({ onProcess: async () => {} }));
+
+  const turn = turnCalls(fixture)[0];
+  const metadata = fixture.calls.find(
+    ({ file, argumentsList }) =>
+      file === "git" && argumentsList.includes("--absolute-git-dir"),
+  );
+  assert.equal(turn.options.ownershipMode, "native-sandbox-provider");
+  assert.equal(metadata.options.ownershipMode, undefined);
+});
 
 test("constructs and probes enforceable Claude capabilities", async () => {
   assert.doesNotThrow(() => createClaudeAdapter());
@@ -1539,6 +1561,16 @@ test("creates one exact authorized commit in a networkless sandbox", async () =>
     }),
   );
 
+  const metadata = fixture.calls.find(
+    ({ file, argumentsList }) =>
+      file === "git" && argumentsList.includes("--absolute-git-dir"),
+  );
+  const commitSandbox = localCommitSandboxCalls(fixture).find(
+    ({ options }) => options.ownershipMode === "native-sandbox-provider",
+  );
+  assert.equal(metadata.options.ownershipMode, undefined);
+  assert.ok(commitSandbox);
+
   assert.equal(
     option(turnCalls(fixture)[0].argumentsList, "--permission-mode"),
     "plan",
@@ -1602,6 +1634,36 @@ test("proves a rejected local-commit policy did not start the effect", async () 
       error.effectStarted === false,
   );
   assert.equal(localCommitSandboxCalls(fixture).length, 1);
+});
+
+test("preserves immutable and primitive abort reasons before local commit execution", async () => {
+  for (const reason of [
+    Object.freeze(new Error("Operator pause")),
+    "Operator cancel",
+  ]) {
+    const fixture = createFixture();
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          access: "local-commit",
+          authorizationId: "authorization-1",
+          commit: {
+            expectedHead: EXPECTED_HEAD,
+            message: "feat(test): create commit",
+          },
+          signal: AbortSignal.abort(reason),
+        }),
+      ),
+      (error) => {
+        assert.ok(error instanceof ClaudeAdapterError);
+        assert.equal(error.effectStarted, false);
+        assert.equal(error.cause, reason);
+        return true;
+      },
+    );
+    assert.equal(turnCalls(fixture).length, 0);
+    assert.equal(fixture.calls.filter(({ file }) => file === "git").length, 0);
+  }
 });
 
 test("never replays an interrupted local-commit turn", async () => {
@@ -1688,3 +1750,55 @@ test(
     assert.equal(response.structured.ok, true);
   },
 );
+
+test("expanded pipeline inventory schemas preserve strict Claude preflight and sandboxing", async (t) => {
+  for (const [name, schema, access] of [
+    ["execution bootstrap", EXECUTION_BOOTSTRAP_SCHEMA, "read-only"],
+    [
+      "execution finalization",
+      EXECUTION_FINALIZATION_SCHEMA,
+      "workspace-write",
+    ],
+    ["polishing bootstrap", POLISHING_BOOTSTRAP_SCHEMA, "read-only"],
+    [
+      "polishing finalization",
+      POLISHING_FINALIZATION_SCHEMA,
+      "workspace-write",
+    ],
+  ]) {
+    await t.test(name, async () => {
+      const baseline = createFixture();
+      await baseline.adapter.run(request({ access, schema: STRICT_SCHEMA }));
+      const fixture = createFixture();
+      await fixture.adapter.run(request({ access, schema }));
+      const turn = turnCalls(fixture)[0];
+      assert.deepEqual(
+        JSON.parse(option(turn.argumentsList, "--json-schema")),
+        schema,
+      );
+      const settings = JSON.parse(option(turn.argumentsList, "--settings"));
+      assert.deepEqual(
+        settings,
+        JSON.parse(option(turnCalls(baseline)[0].argumentsList, "--settings")),
+      );
+      assert.equal(settings.sandbox.enabled, true);
+      assert.equal(settings.sandbox.failIfUnavailable, true);
+      assert.equal(settings.sandbox.allowUnsandboxedCommands, false);
+      assert.equal(settings.sandbox.enableWeakerNestedSandbox, false);
+      assert.notEqual(settings.sandbox.network.allowAllUnixSockets, true);
+      assert.deepEqual(settings.sandbox.network.deniedDomains, ["*"]);
+      assert.ok(settings.permissions.deny.includes("Bash(git commit *)"));
+      assert.ok(
+        settings.sandbox.filesystem.denyWrite.includes(`${PROJECT_PATH}/.git`),
+      );
+      if (access === "read-only")
+        assert.ok(settings.sandbox.filesystem.denyWrite.includes(PROJECT_PATH));
+      const unsupported = createFixture({ nativeSandbox: false });
+      await assert.rejects(
+        unsupported.adapter.run(request({ access, schema })),
+        hasCode("ERR_UNSUPPORTED_CLAUDE_CAPABILITY"),
+      );
+      assert.equal(turnCalls(unsupported).length, 0);
+    });
+  }
+});

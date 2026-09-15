@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import {
   access,
   chmod,
@@ -16,6 +17,7 @@ import { isAbsolute, join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
+import { readProcessIdentity } from "../src/agents/index.js";
 import { createGitService } from "../src/git/index.js";
 import {
   createTrustedValidationService,
@@ -78,6 +80,105 @@ function snapshot(alias, command, executable, argumentsList) {
     [alias],
   );
 }
+
+test("forwards sandbox ownership through trusted execution without changing containment", async () => {
+  for (const ownershipMode of [
+    "native-sandbox-provider",
+    undefined,
+    "ordinary",
+  ]) {
+    for (const descendantsStopped of [false, true]) {
+      const projectPath = process.cwd();
+      const before = { projectPath, contentFingerprint: hash("content") };
+      const trusted = snapshot("check", "node check.js", "node", ["check.js"]);
+      const environment = { PATH: "/usr/bin" };
+      const signal = new AbortController().signal;
+      const onProcess = async () => {};
+      let execution;
+      let launch;
+      let inspected = false;
+      const service = createTrustedValidationService({
+        environment,
+        git: {
+          async snapshot() {
+            return before;
+          },
+          async assertUnchanged(value) {
+            assert.equal(value, before);
+            inspected = true;
+          },
+        },
+        sandboxCommand(command) {
+          return {
+            command,
+            environment,
+            ownershipMode,
+            readinessRequired: true,
+          };
+        },
+        runCommand(command, options) {
+          execution = { command, options };
+          return runExactCommand(command, {
+            ...options,
+            spawnProcess(file, argumentsList, spawnOptions) {
+              launch = { file, argumentsList, options: spawnOptions };
+              const child = new EventEmitter();
+              child.pid = 123;
+              child.stdio = [null, null, null, null, new EventEmitter()];
+              child.ownedCompletion = Promise.resolve({
+                outcome: { type: "close", exitCode: 7, signal: null },
+                descendantsStopped,
+              });
+              queueMicrotask(() => {
+                child.stdio[4].emit("data", Buffer.from([1]));
+                child.emit("close", 0, null);
+              });
+              return child;
+            },
+          });
+        },
+        terminationGraceMs: 123,
+        timeoutMs: 456,
+      });
+
+      const result = await service.execute({
+        bindings: {
+          contentFingerprint: before.contentFingerprint,
+          validationInfrastructureFingerprint: hash("infrastructure"),
+          commandFingerprint: trusted.commandFingerprint,
+          configurationFingerprint: trusted.configurationFingerprint,
+        },
+        commandIdentity: trusted.commands[0].identity,
+        projectPath,
+        snapshot: trusted,
+        signal,
+        onProcess,
+      });
+
+      assert.deepEqual(execution.command, trusted.commands[0]);
+      assert.equal(execution.options.timeoutMs, 456);
+      assert.equal(execution.options.readinessRequired, true);
+      assert.deepEqual(launch, {
+        file: "node",
+        argumentsList: ["check.js"],
+        options: {
+          cwd: projectPath,
+          detached: true,
+          env: environment,
+          shell: false,
+          stdio: ["ignore", "ignore", "ignore", "pipe"],
+          signal,
+          onProcess,
+          descendantGraceMs: 123,
+          ownershipMode: ownershipMode ?? "ordinary",
+        },
+      });
+      assert.equal(inspected, true);
+      assert.equal(result.status, descendantsStopped ? "BLOCKED" : "FAIL");
+      assert.equal(result.exitCode, descendantsStopped ? null : 7);
+    }
+  }
+});
 
 test("bounds each snapshot independently from the command catalog", () => {
   const definitions = Object.fromEntries(
@@ -243,6 +344,8 @@ test("isolates host-control and remote-write probes", async (t) => {
     ["--eval", "process.exit(0)"],
   );
   let execution;
+  const launcherPath = "/runner-owned/bwrap";
+  const launcherChecks = [];
   const service = createTrustedValidationService({
     environment: {
       ...process.env,
@@ -254,6 +357,17 @@ test("isolates host-control and remote-write probes", async (t) => {
       SSH_AUTH_SOCK: "/tmp/do-not-expose-agent.sock",
     },
     git,
+    // This test inspects construction only; installed launchers are host state.
+    resolveLauncher(executable) {
+      assert.equal(executable, null);
+      return launcherPath;
+    },
+    verifyLauncher(path, cwd) {
+      assert.equal(path, launcherPath);
+      assert.equal(cwd, projectPath);
+      launcherChecks.push(path);
+      return path;
+    },
     async runCommand(command, options) {
       execution = { command, options };
       return {
@@ -276,6 +390,8 @@ test("isolates host-control and remote-write probes", async (t) => {
   });
 
   assert.equal(result.status, "PASS");
+  assert.deepEqual(launcherChecks, [launcherPath, launcherPath]);
+  assert.equal(execution.command.executable, launcherPath);
   assert.equal(isAbsolute(execution.command.executable), true);
   assert.notEqual(execution.command.executable, fakeLauncher);
   assert.notEqual(execution.command.executable, "bwrap");
@@ -319,6 +435,7 @@ test("isolates host-control and remote-write probes", async (t) => {
     ),
   );
   assert.equal(execution.options.readinessRequired, true);
+  assert.equal(execution.options.ownershipMode, "native-sandbox-provider");
   assert.equal(execution.options.environment.DOCKER_CONFIG, undefined);
   assert.equal(execution.options.environment.DOCKER_HOST, undefined);
   assert.equal(execution.options.environment.GH_TOKEN, undefined);
@@ -327,7 +444,6 @@ test("isolates host-control and remote-write probes", async (t) => {
   assert.equal(execution.options.environment.HOME, "/nonexistent");
   assert.equal(execution.options.environment.GIT_SSH_COMMAND, "/bin/false");
   assert.equal(execution.options.environment.GIT_CONFIG_GLOBAL, "/dev/null");
-
   const shadowed = createTrustedValidationService({
     bubblewrapExecutable: fakeLauncher,
     git,
@@ -336,6 +452,47 @@ test("isolates host-control and remote-write probes", async (t) => {
     shadowed.preflight({ projectPath }),
     (cause) => cause.code === "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE",
   );
+});
+
+test("rejects a changed trusted launcher before executing its command", async (t) => {
+  const projectPath = await repository(t);
+  const git = createGitService();
+  const trusted = snapshot(
+    "launcher-check",
+    "node launcher validation",
+    process.execPath,
+    ["--eval", "process.exit(0)"],
+  );
+  let verified = false;
+  const service = createTrustedValidationService({
+    git,
+    resolveLauncher: () => "/runner-owned/bwrap",
+    verifyLauncher(path) {
+      if (verified) {
+        throw Object.assign(new Error("Launcher changed."), {
+          code: "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE",
+        });
+      }
+      verified = true;
+      return path;
+    },
+    runCommand() {
+      assert.fail("A changed launcher must not execute a command.");
+    },
+  });
+  await service.preflight({ projectPath });
+
+  const result = await service.execute({
+    bindings: await bindings(git, projectPath, trusted),
+    commandIdentity: trusted.commands[0].identity,
+    projectPath,
+    snapshot: trusted,
+  });
+
+  assert.equal(result.status, "BLOCKED");
+  assert.deepEqual(result.evidence, [
+    "Runner-trusted command launcher-check could not start in the required isolated executor.",
+  ]);
 });
 
 test("distinguishes isolation setup denial from command failure", async (t) => {
@@ -536,6 +693,162 @@ test("terminates persistent descendants after successful trusted commands", asyn
   });
   const childPid = Number.parseInt(await readFile(pidPath, "utf8"), 10);
   assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
+});
+
+test("supervised trusted commands preserve readiness, exit status, and descendant rejection", async (t) => {
+  const projectPath = await repository(t);
+  const recorded = [];
+  const recordedIdentities = new Map();
+  let registrationSideEffect;
+  const options = {
+    cwd: projectPath,
+    environment: process.env,
+    timeoutMs: 4000,
+    terminationGraceMs: 100,
+    onProcess: async (pid, proof) => {
+      recorded.push(pid);
+      if (pid !== null) recordedIdentities.set(pid, proof.processIdentity);
+      if (pid !== null) registrationSideEffect?.();
+    },
+  };
+  const failed = await runExactCommand(
+    {
+      executable: process.execPath,
+      arguments: [
+        "-e",
+        "require('node:fs').writeSync(3, Buffer.from([1])); process.exit(7)",
+      ],
+    },
+    { ...options, readinessRequired: true },
+  );
+  assert.equal(failed.status, "FAIL");
+  assert.equal(failed.exitCode, 7);
+  assert.equal(recorded.length, 2);
+  assert.equal(recorded[1], null);
+
+  let neighbor;
+  let neighborClosed;
+  registrationSideEffect = () => {
+    neighbor = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      stdio: "ignore",
+    });
+    neighborClosed = new Promise((resolve) => neighbor.once("close", resolve));
+  };
+  const concurrent = await runExactCommand(
+    { executable: process.execPath, arguments: ["-e", "process.exit(0)"] },
+    options,
+  );
+  registrationSideEffect = undefined;
+  t.after(async () => {
+    if (neighbor.exitCode === null && neighbor.signalCode === null)
+      neighbor.kill("SIGKILL");
+    await neighborClosed;
+  });
+  assert.equal(concurrent.status, "PASS");
+  assert.doesNotThrow(() => process.kill(neighbor.pid, 0));
+  neighbor.kill("SIGKILL");
+  await neighborClosed;
+
+  const detachedIdentityPath = join(projectPath, "detached-identity.json");
+  let detachedIdentity;
+  t.after(async () => {
+    if (detachedIdentity === undefined) return;
+    const currentIdentity = await readProcessIdentity(detachedIdentity.pid);
+    if (
+      currentIdentity?.bootId === detachedIdentity.bootId &&
+      currentIdentity.startTicks === detachedIdentity.startTicks
+    ) {
+      try {
+        process.kill(detachedIdentity.pid, "SIGKILL");
+      } catch {}
+    }
+  });
+  for (const command of [
+    {
+      executable: "/bin/bash",
+      arguments: ["-c", "(trap '' HUP TERM; while :; do :; done) &"],
+    },
+    {
+      executable: "/bin/bash",
+      arguments: [
+        "-c",
+        "set -m; (child=$BASHPID; kill -0 -- -$child || exit 1; trap '' HUP TERM; while :; do :; done) &",
+      ],
+    },
+    {
+      detached: true,
+      executable: process.execPath,
+      arguments: [
+        "-e",
+        "const { spawn } = require('node:child_process'); " +
+          "const { readFileSync, writeFileSync } = require('node:fs'); " +
+          "function launch(attempt = 0) { " +
+          "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], " +
+          "{ detached: true, stdio: 'ignore' }); " +
+          "child.once('error', (cause) => { " +
+          "if (cause.code === 'EAGAIN' && attempt < 20) " +
+          "setTimeout(() => launch(attempt + 1), 25); " +
+          "else process.exitCode = 1; }); " +
+          "child.once('spawn', () => { " +
+          "const stat = readFileSync('/proc/' + child.pid + '/stat', 'utf8'); " +
+          "const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\\s+/); " +
+          `writeFileSync(${JSON.stringify(detachedIdentityPath)}, JSON.stringify({ ` +
+          "pid: child.pid, bootId: readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(), " +
+          "startTicks: fields[19] })); child.unref(); }); } launch();",
+      ],
+    },
+  ]) {
+    const { detached, ...request } = command;
+    const recordedBefore = recorded.length;
+    const leaked = await runExactCommand(request, options);
+    assert.deepEqual(leaked, {
+      status: "BLOCKED",
+      exitCode: null,
+      signal: null,
+      timedOut: false,
+      reason: "process-tree",
+    });
+    assert.equal(recorded.length, recordedBefore + 2);
+    assert.equal(recorded.at(-1), null);
+    const supervisorPid = recorded.at(-2);
+    assert.notDeepEqual(
+      await readProcessIdentity(supervisorPid),
+      recordedIdentities.get(supervisorPid),
+    );
+    if (detached) {
+      detachedIdentity = JSON.parse(
+        await readFile(detachedIdentityPath, "utf8"),
+      );
+      const { pid, ...processIdentity } = detachedIdentity;
+      assert.notDeepEqual(await readProcessIdentity(pid), processIdentity);
+      detachedIdentity = undefined;
+    }
+  }
+  const signaled = await runExactCommand(
+    {
+      executable: process.execPath,
+      arguments: ["-e", "process.kill(process.pid, 'SIGTERM')"],
+    },
+    options,
+  );
+  assert.deepEqual(signaled, {
+    status: "FAIL",
+    exitCode: null,
+    signal: "SIGTERM",
+    timedOut: false,
+    reason: "exit",
+  });
+  const missing = await runExactCommand(
+    { executable: join(projectPath, "missing-command"), arguments: [] },
+    options,
+  );
+  assert.deepEqual(missing, {
+    status: "BLOCKED",
+    exitCode: null,
+    signal: null,
+    timedOut: false,
+    reason: "spawn",
+  });
 });
 
 test("preserves a failed trusted command after descendants retire", async (t) => {

@@ -1,8 +1,9 @@
-import { isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 import { isAdapterDiagnosticClass } from "../agents/index.js";
+import { validStopTiming, validStopSettlement } from "./stop-contract.js";
 
-export const RUN_STATE_SCHEMA_VERSION = 3;
+export const RUN_STATE_SCHEMA_VERSION = 7;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
   runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
@@ -18,6 +19,10 @@ const ACTIVITY_RUN_STATE_SCHEMA_VERSION = 3;
 const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   LEGACY_RUN_STATE_SCHEMA_VERSION,
   2,
+  3,
+  4,
+  5,
+  6,
   RUN_STATE_SCHEMA_VERSION,
 ]);
 
@@ -35,12 +40,15 @@ const STATE_FIELDS = new Set([
   "runtimeCompatibility",
   "projectPath",
   "taskPath",
+  "projectConfigurationProtection",
   "roles",
   "counters",
   "hashes",
   "pause",
   "sessionLineage",
   "activeTurn",
+  "executionProcess",
+  "stopRequest",
   "pipelineState",
   "createdAt",
   "updatedAt",
@@ -74,6 +82,23 @@ const RUNTIME_COMPATIBILITY_FIELDS = new Set([
   "runnerVersion",
   "runStateVersion",
 ]);
+const PROJECT_CONFIGURATION_PROTECTION_FIELDS = new Set([
+  "schemaVersion",
+  "path",
+  "projectPath",
+  "relativePath",
+  "contentHash",
+  "identity",
+  "ancestors",
+]);
+const FILE_IDENTITY_FIELDS = new Set([
+  "device",
+  "inode",
+  "size",
+  "modifiedNs",
+  "changedNs",
+]);
+const ANCESTOR_IDENTITY_FIELDS = new Set(["path", "device", "inode"]);
 const MAX_STATE_BYTES = 1024 * 1024;
 const MAX_JSON_DEPTH = 20;
 const MAX_COLLECTION_LENGTH = 10_000;
@@ -162,6 +187,34 @@ function assertInputText(value, path, maximumLength = MAX_INPUT_TEXT_LENGTH) {
 
 function normalizePause(value) {
   const pause = cloneRecord(value, "run.pause");
+  const operatorReason = ["operator_paused", "operator_canceled"].includes(
+    pause.reason,
+  );
+  if (operatorReason !== Object.hasOwn(pause, "operatorResume")) {
+    fail("Operator resume checkpoint is invalid.");
+  }
+  if (operatorReason) {
+    const checkpoint = pause.operatorResume;
+    assertRecord(checkpoint, "run.pause.operatorResume");
+    rejectUnknownFields(
+      checkpoint,
+      new Set(["workflowState", "pause", "activeTurn"]),
+      "run.pause.operatorResume",
+    );
+    if (
+      Object.keys(checkpoint).length !== 3 ||
+      typeof checkpoint.workflowState !== "string" ||
+      !/^[A-Z][A-Z_]{0,63}$/u.test(checkpoint.workflowState) ||
+      Object.hasOwn(checkpoint.pause ?? {}, "operatorResume") ||
+      ["operator_paused", "operator_canceled"].includes(
+        checkpoint.pause?.reason,
+      )
+    )
+      fail("Operator resume checkpoint is invalid.");
+    checkpoint.activeTurn = normalizeActiveTurn(checkpoint.activeTurn);
+    checkpoint.pause =
+      checkpoint.pause === null ? null : normalizePause(checkpoint.pause);
+  }
   if (
     Object.hasOwn(pause, "diagnosticClass") &&
     !isAdapterDiagnosticClass(pause.diagnosticClass)
@@ -376,6 +429,101 @@ function normalizeRuntimeCompatibility(value, schemaVersion) {
   return { ...value };
 }
 
+function decimalIdentity(value, path) {
+  if (typeof value !== "string" || !/^(?:0|[1-9][0-9]*)$/u.test(value)) {
+    fail(`${path} must be a decimal identity.`);
+  }
+  return value;
+}
+
+function normalizeProjectConfigurationProtection(value, state) {
+  if ((value === undefined && state.schemaVersion < 6) || value === null) {
+    return null;
+  }
+  assertRecord(value, "run.projectConfigurationProtection");
+  rejectUnknownFields(
+    value,
+    PROJECT_CONFIGURATION_PROTECTION_FIELDS,
+    "run.projectConfigurationProtection",
+  );
+  if (
+    Object.keys(value).length !==
+      PROJECT_CONFIGURATION_PROTECTION_FIELDS.size ||
+    value.schemaVersion !== 1 ||
+    value.projectPath !== state.projectPath ||
+    typeof value.path !== "string" ||
+    !isAbsolute(value.path) ||
+    resolve(value.path) !== value.path ||
+    typeof value.relativePath !== "string" ||
+    value.relativePath.length === 0 ||
+    value.relativePath.includes("\\") ||
+    resolve(state.projectPath, value.relativePath) !== value.path ||
+    relative(state.projectPath, value.path).split(sep).join("/") !==
+      value.relativePath ||
+    typeof value.contentHash !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(value.contentHash)
+  ) {
+    fail("run.projectConfigurationProtection is invalid.");
+  }
+  assertRecord(value.identity, "run.projectConfigurationProtection.identity");
+  rejectUnknownFields(
+    value.identity,
+    FILE_IDENTITY_FIELDS,
+    "run.projectConfigurationProtection.identity",
+  );
+  if (Object.keys(value.identity).length !== FILE_IDENTITY_FIELDS.size) {
+    fail("run.projectConfigurationProtection.identity is invalid.");
+  }
+  const identity = Object.fromEntries(
+    [...FILE_IDENTITY_FIELDS].map((field) => [
+      field,
+      decimalIdentity(
+        value.identity[field],
+        `run.projectConfigurationProtection.identity.${field}`,
+      ),
+    ]),
+  );
+  if (!Array.isArray(value.ancestors) || value.ancestors.length === 0) {
+    fail("run.projectConfigurationProtection.ancestors is invalid.");
+  }
+  const expectedPaths = [];
+  for (let current = dirname(value.path); ; current = dirname(current)) {
+    expectedPaths.unshift(current);
+    if (current === state.projectPath) break;
+    if (current === dirname(current)) {
+      fail("run.projectConfigurationProtection.ancestors is invalid.");
+    }
+  }
+  if (value.ancestors.length !== expectedPaths.length) {
+    fail("run.projectConfigurationProtection.ancestors is invalid.");
+  }
+  const ancestors = value.ancestors.map((ancestor, index) => {
+    const path = `run.projectConfigurationProtection.ancestors[${index}]`;
+    assertRecord(ancestor, path);
+    rejectUnknownFields(ancestor, ANCESTOR_IDENTITY_FIELDS, path);
+    if (
+      Object.keys(ancestor).length !== ANCESTOR_IDENTITY_FIELDS.size ||
+      ancestor.path !== expectedPaths[index]
+    ) {
+      fail(`${path} is invalid.`);
+    }
+    return {
+      path: ancestor.path,
+      device: decimalIdentity(ancestor.device, `${path}.device`),
+      inode: decimalIdentity(ancestor.inode, `${path}.inode`),
+    };
+  });
+  return {
+    schemaVersion: 1,
+    path: value.path,
+    projectPath: value.projectPath,
+    relativePath: value.relativePath,
+    contentHash: value.contentHash,
+    identity,
+    ancestors,
+  };
+}
+
 export function assertRunId(runId) {
   if (typeof runId !== "string" || !RUN_ID_PATTERN.test(runId)) {
     fail("Run ID is invalid.", "ERR_INVALID_RUN_ID");
@@ -480,6 +628,158 @@ function normalizeActiveTurn(value, schemaVersion = RUN_STATE_SCHEMA_VERSION) {
   };
 }
 
+function normalizeStopRequest(value, state) {
+  if (value === undefined && state.schemaVersion < 4) return null;
+  if (value === null) return null;
+  if (state.schemaVersion < 4)
+    fail("Legacy state cannot contain a stop request.");
+  assertRecord(value, "run.stopRequest");
+  const legacy = !Object.hasOwn(value, "timing");
+  if (
+    legacy &&
+    ["effectiveTiming", "targetBoundary", "settlement", "identityVersion"].some(
+      (field) => Object.hasOwn(value, field),
+    )
+  )
+    fail("Partial stop timing is invalid.");
+  if (legacy) {
+    value = {
+      ...value,
+      timing: "immediate",
+      effectiveTiming: "immediate",
+      targetBoundary: null,
+      settlement: null,
+      identityVersion: 1,
+    };
+  }
+  const fields = new Set([
+    "requestId",
+    "kind",
+    "expectedRevision",
+    "acceptedRevision",
+    "requestedAt",
+    "checkpoint",
+    "reconciledRevision",
+    "timing",
+    "effectiveTiming",
+    "targetBoundary",
+    "settlement",
+    "identityVersion",
+  ]);
+  rejectUnknownFields(value, fields, "run.stopRequest");
+  if (
+    Object.keys(value).length !== fields.size ||
+    !validStopTiming(value) ||
+    ![1, 2].includes(value.identityVersion) ||
+    (state.schemaVersion < 7 && value.identityVersion !== 1) ||
+    (value.identityVersion === 1 &&
+      (value.timing !== "immediate" || value.settlement !== null)) ||
+    (value.settlement !== null &&
+      (!validStopSettlement(value.settlement) ||
+        value.reconciledRevision === null)) ||
+    (value.identityVersion === 2 &&
+      value.reconciledRevision !== null &&
+      value.settlement === null) ||
+    !["pause_requested", "cancel_requested"].includes(value.kind) ||
+    !Number.isSafeInteger(value.expectedRevision) ||
+    value.expectedRevision < 1 ||
+    !Number.isSafeInteger(value.acceptedRevision) ||
+    value.acceptedRevision <= value.expectedRevision ||
+    value.acceptedRevision > state.revision ||
+    (value.reconciledRevision !== null &&
+      (!Number.isSafeInteger(value.reconciledRevision) ||
+        value.reconciledRevision <= value.acceptedRevision ||
+        value.reconciledRevision > state.revision))
+  ) {
+    fail("run.stopRequest is invalid.");
+  }
+  assertContextKey(value.requestId, "run.stopRequest.requestId");
+  normalizeTimestamp(value.requestedAt, "run.stopRequest.requestedAt");
+  if (
+    value.requestedAt < state.createdAt ||
+    value.requestedAt > state.updatedAt
+  )
+    fail("Stop request timestamp is invalid.");
+  if (
+    value.kind === "cancel_requested" &&
+    value.reconciledRevision !== null &&
+    state.pipelineState?.workflowState !== "CANCELED"
+  )
+    fail("Reconciled cancellation must remain terminal.");
+  const checkpoint = value.checkpoint;
+  assertRecord(checkpoint, "run.stopRequest.checkpoint");
+  rejectUnknownFields(
+    checkpoint,
+    new Set(["revision", "workflowState", "activeTurn", "resumeAction"]),
+    "run.stopRequest.checkpoint",
+  );
+  if (
+    Object.keys(checkpoint).length !== 4 ||
+    !Number.isSafeInteger(checkpoint.revision) ||
+    checkpoint.revision < 1 ||
+    checkpoint.revision > value.expectedRevision ||
+    typeof checkpoint.workflowState !== "string" ||
+    !/^[A-Z][A-Z_]{0,63}$/u.test(checkpoint.workflowState) ||
+    checkpoint.resumeAction !== null
+  )
+    fail("Stop checkpoint is invalid.");
+  return {
+    ...value,
+    checkpoint: {
+      ...checkpoint,
+      activeTurn: normalizeActiveTurn(checkpoint.activeTurn),
+    },
+  };
+}
+
+export function validateProcessIdentity(value) {
+  if (value === null) return null;
+  if (
+    value === undefined ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.keys(value).length !== 2 ||
+    typeof value.bootId !== "string" ||
+    !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(value.bootId) ||
+    typeof value.startTicks !== "string" ||
+    !/^(?:0|[1-9][0-9]{0,31})$/u.test(value.startTicks)
+  ) {
+    throw new RunStoreError("Process identity is invalid.", {
+      code: "ERR_INVALID_PROCESS_IDENTITY",
+    });
+  }
+  return { bootId: value.bootId, startTicks: value.startTicks };
+}
+
+function normalizeExecutionProcess(value, schemaVersion) {
+  if ((value === undefined && schemaVersion < 5) || value === null) return null;
+  assertRecord(value, "run.executionProcess");
+  rejectUnknownFields(
+    value,
+    new Set(["pid", "hostname", "processIdentity", "namespaceId"]),
+    "run.executionProcess",
+  );
+  if (
+    schemaVersion < 5 ||
+    ![3, 4].includes(Object.keys(value).length) ||
+    (value.namespaceId != null &&
+      (typeof value.namespaceId !== "string" ||
+        !/^pid:\[\d{1,20}\]$/u.test(value.namespaceId))) ||
+    !Number.isSafeInteger(value.pid) ||
+    value.pid < 1 ||
+    typeof value.hostname !== "string" ||
+    value.hostname.length < 1 ||
+    value.hostname.length > 255 ||
+    UNSAFE_TEXT_PATTERN.test(value.hostname)
+  )
+    fail("Run execution process is invalid.");
+  return {
+    ...value,
+    processIdentity: validateProcessIdentity(value.processIdentity),
+    namespaceId: value.namespaceId ?? null,
+  };
+}
+
 export function normalizeRunState(value, expectedRunId) {
   assertRecord(value, "run");
   rejectUnknownFields(value, STATE_FIELDS, "run");
@@ -542,12 +842,21 @@ export function normalizeRunState(value, expectedRunId) {
     ),
     projectPath: value.projectPath,
     taskPath: value.taskPath,
+    projectConfigurationProtection: normalizeProjectConfigurationProtection(
+      value.projectConfigurationProtection,
+      value,
+    ),
     roles: normalizeRoles(value.roles),
     counters: cloneRecord(value.counters, "run.counters"),
     hashes: cloneRecord(value.hashes, "run.hashes"),
     pause,
     sessionLineage: normalizeSessionLineage(value.sessionLineage),
     activeTurn: normalizeActiveTurn(value.activeTurn, value.schemaVersion),
+    executionProcess: normalizeExecutionProcess(
+      value.executionProcess,
+      value.schemaVersion,
+    ),
+    stopRequest: normalizeStopRequest(value.stopRequest, value),
     pipelineState: cloneRecord(value.pipelineState, "run.pipelineState"),
     createdAt,
     updatedAt,

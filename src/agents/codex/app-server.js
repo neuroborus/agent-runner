@@ -11,7 +11,7 @@ function isRecord(value) {
   return prototype === Object.prototype || prototype === null;
 }
 
-export function createCodexAppServerClient(child, AdapterError) {
+export function createCodexAppServerClient(child, AdapterError, signal) {
   if (
     child === null ||
     typeof child !== "object" ||
@@ -54,6 +54,13 @@ export function createCodexAppServerClient(child, AdapterError) {
       waiter.reject(closedError);
     }
   }
+
+  const abort = () => {
+    rejectAll(signal.reason ?? new Error("Execution stopped."));
+    child.kill();
+  };
+  signal?.addEventListener("abort", abort, { once: true });
+  if (signal?.aborted) abort();
 
   function dispatchNotification(message) {
     const waiterIndex = waiters.findIndex(
@@ -176,6 +183,7 @@ export function createCodexAppServerClient(child, AdapterError) {
     );
   });
   child.once("close", () => {
+    signal?.removeEventListener("abort", abort);
     exited = true;
     if (!closing) {
       rejectAll(
@@ -246,7 +254,7 @@ export function createCodexAppServerClient(child, AdapterError) {
     });
   }
 
-  async function close() {
+  async function close({ retainProcess = false } = {}) {
     if (closing) {
       return closed;
     }
@@ -260,6 +268,13 @@ export function createCodexAppServerClient(child, AdapterError) {
         cause,
         code: "ERR_CODEX_PROCESS_EXITED",
       });
+    }
+    if (retainProcess) {
+      signal?.removeEventListener("abort", abort);
+      child.stdin.destroy();
+      child.stdout.destroy();
+      child.stderr.destroy();
+      return;
     }
     if (streamError === undefined && (await waitForExit(1_000))) {
       return;

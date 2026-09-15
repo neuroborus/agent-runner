@@ -3,6 +3,7 @@ import { realpath } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { promisify } from "node:util";
 
+import { executeOwnedProcess } from "../owned-process.js";
 import {
   createAdapterContract,
   deepFreeze,
@@ -1110,20 +1111,42 @@ export function createClaudeAdapter(options = {}) {
     }
   }
 
-  async function gitMetadataDirectories(cwd) {
+  async function gitMetadataDirectories(request) {
     let result;
     try {
-      result = await execute(
+      result = await (
+        request.onProcess !== undefined && execute === executeFile
+          ? executeOwnedProcess
+          : execute
+      )(
         "git",
-        ["-C", cwd, "rev-parse", "--absolute-git-dir", "--git-common-dir"],
+        [
+          "-C",
+          request.cwd,
+          "rev-parse",
+          "--absolute-git-dir",
+          "--git-common-dir",
+        ],
         {
           encoding: "utf8",
           env: processEnvironment,
           maxBuffer: 1024 * 1024,
           timeout: 10_000,
+          ...(request.signal === undefined ? {} : { signal: request.signal }),
+          ...(request.onProcess === undefined
+            ? {}
+            : { onProcess: request.onProcess }),
         },
       );
     } catch (cause) {
+      request.signal?.throwIfAborted();
+      if (
+        [
+          "ERR_EXECUTION_PROCESS_ACTIVE",
+          "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+        ].includes(cause?.code)
+      )
+        throw cause;
       throw new ClaudeAdapterError("Cannot resolve Git metadata paths.", {
         cause,
         code: "ERR_CLAUDE_ISOLATION",
@@ -1132,7 +1155,7 @@ export function createClaudeAdapter(options = {}) {
     const directories = processOutput(result.stdout)
       .trim()
       .split(/\r?\n/u)
-      .map((path) => (isAbsolute(path) ? path : resolve(cwd, path)));
+      .map((path) => (isAbsolute(path) ? path : resolve(request.cwd, path)));
     if (
       directories.length !== 2 ||
       directories.some(
@@ -1157,7 +1180,7 @@ export function createClaudeAdapter(options = {}) {
     }
     return Object.freeze([
       ...new Set([
-        resolve(cwd, ".git"),
+        resolve(request.cwd, ".git"),
         ...directories,
         ...canonicalDirectories,
       ]),
@@ -1165,7 +1188,8 @@ export function createClaudeAdapter(options = {}) {
   }
 
   async function runAttempt(request, { recovery, session } = {}) {
-    const gitDirectories = await gitMetadataDirectories(request.cwd);
+    request.signal?.throwIfAborted();
+    const gitDirectories = await gitMetadataDirectories(request);
     const selectedSession = session === undefined ? request.session : session;
     const argumentsList = commandArguments(
       request,
@@ -1175,14 +1199,34 @@ export function createClaudeAdapter(options = {}) {
     );
     let processResult;
     try {
-      processResult = await execute(claudeBinary, argumentsList, {
+      request.signal?.throwIfAborted();
+      processResult = await (
+        request.onProcess !== undefined && execute === executeFile
+          ? executeOwnedProcess
+          : execute
+      )(claudeBinary, argumentsList, {
         cwd: request.cwd,
         encoding: "utf8",
         env: executionEnvironment(processEnvironment, request),
         input: turnPrompt(request, recovery),
         maxBuffer: MAX_PROCESS_OUTPUT_BYTES,
+        ...(request.signal === undefined ? {} : { signal: request.signal }),
+        ...(request.onProcess === undefined
+          ? {}
+          : {
+              onProcess: request.onProcess,
+              ownershipMode: "native-sandbox-provider",
+            }),
       });
     } catch (cause) {
+      request.signal?.throwIfAborted();
+      if (
+        [
+          "ERR_EXECUTION_PROCESS_ACTIVE",
+          "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+        ].includes(cause?.code)
+      )
+        throw cause;
       const standardError = processOutput(cause?.stderr);
       if (PERMISSION_MODE_FALLBACK_PATTERN.test(standardError)) {
         throw new ClaudeAdapterError(
@@ -1265,20 +1309,40 @@ export function createClaudeAdapter(options = {}) {
   }
 
   async function createAuthorizedCommit(request) {
+    let effectStarted = false;
     try {
+      request.signal?.throwIfAborted();
       await executeClaudeLocalCommit({
         bubblewrapBinary: BUBBLEWRAP_BINARY,
         cwd: request.cwd,
         env: commandEnvironment,
-        execute,
+        execute: (file, args, executionOptions) => {
+          const options =
+            request.onProcess === undefined
+              ? executionOptions
+              : {
+                  ...executionOptions,
+                  signal: request.signal,
+                  onProcess: request.onProcess,
+                };
+          return request.onProcess !== undefined && execute === executeFile
+            ? executeOwnedProcess(file, args, options)
+            : execute(file, args, options);
+        },
+        beforeEffect: () => {
+          request.signal?.throwIfAborted();
+          effectStarted = true;
+        },
         expectedHead: request.commit.expectedHead,
         message: request.commit.message,
       });
     } catch (cause) {
+      if (cause?.effectStarted === false) effectStarted = false;
       throw new ClaudeAdapterError(
         "Authorized local commit outcome requires Git-state verification.",
         {
-          ambiguous: true,
+          ambiguous: effectStarted,
+          effectStarted,
           cause,
           code: "ERR_CLAUDE_LOCAL_COMMIT_INTERRUPTED",
         },
@@ -1311,6 +1375,19 @@ export function createClaudeAdapter(options = {}) {
     try {
       result = await runAttempt(request);
     } catch (cause) {
+      if (request.signal?.aborted) {
+        if (request.access === "local-commit") {
+          throw new ClaudeAdapterError(
+            "Local commit stopped before execution.",
+            {
+              cause,
+              code: cause?.code ?? "ERR_CLAUDE_LOCAL_COMMIT_INTERRUPTED",
+              effectStarted: false,
+            },
+          );
+        }
+        throw cause;
+      }
       if (!(cause instanceof ClaudeAdapterError)) {
         throw cause;
       }

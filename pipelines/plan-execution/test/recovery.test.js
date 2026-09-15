@@ -3,18 +3,25 @@ import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
+import { normalizeAdapterFailure } from "../../../src/agents/index.js";
 import { planExecutionPipeline } from "../src/index.js";
 import {
   CANDIDATE_CLEAN_CONFIRM_SCHEMA,
   CHECK_AND_FIX_SCHEMA,
+  CLEAN_CONFIRM_SCHEMA,
   FINALIZATION_SCHEMA,
+  FINDING_RESOLUTION_SCHEMA,
+  IMPLEMENTATION_SCHEMA,
+  REVIEW_SCHEMA,
 } from "../src/schemas.js";
 import {
   PLAN,
+  REQUIRED_CHECKS,
   SOURCE_SESSION,
   arbitrationResolved,
   bootstrapReady,
   checkAndFix,
+  checkResults,
   clarificationReady,
   cleanConfirmation,
   createFixture,
@@ -27,12 +34,275 @@ import {
   implementationBlocked,
   implementationCompleted,
   reconciliationDisagreement,
+  reconciliationResolved,
   resolution,
   reviewApproved,
   reviewFindings,
   terminalConfirmation,
   terminalLazyConfirmation,
+  trustedValidationSnapshot,
 } from "./support/index.js";
+
+function exhaustedCodexTurnFailure() {
+  return normalizeAdapterFailure(
+    "codex",
+    Object.assign(new Error("DO_NOT_RETAIN_NATIVE_MESSAGE"), {
+      code: "ERR_CODEX_TURN_FAILED",
+      diagnosticClass: "turn_other",
+      recoverable: true,
+      additionalDetails: "DO_NOT_RETAIN_ADDITIONAL_DETAILS",
+    }),
+  );
+}
+
+test("local Codex schema and structured bad-request failures stay terminal at CONFIRM", async (t) => {
+  for (const mode of ["independent", "lazy"]) {
+    for (const [code, diagnosticClass] of [
+      ["ERR_INVALID_CODEX_SCHEMA", undefined],
+      ["ERR_CODEX_TURN_FAILED", "turn_bad_request"],
+    ]) {
+      await t.test(`${mode}/${code}`, async (t) => {
+        let failures = 0;
+        const fixture = await createFixture(t, {
+          mode,
+          workWorker: [
+            implementationCompleted(),
+            checkAndFix(),
+            cleanConfirmation(),
+            finalizationPassed(),
+          ],
+          onRoleRun(_role, request) {
+            if (
+              [REVIEW_SCHEMA, CLEAN_CONFIRM_SCHEMA].includes(request.schema)
+            ) {
+              failures += 1;
+              throw normalizeAdapterFailure(
+                "codex",
+                Object.assign(new Error("DO_NOT_RETAIN_NATIVE_MESSAGE"), {
+                  code,
+                  diagnosticClass,
+                  recoverable: false,
+                  additionalDetails: "DO_NOT_RETAIN_ADDITIONAL_DETAILS",
+                }),
+              );
+            }
+          },
+        });
+
+        await assert.rejects(fixture.run(), (error) => {
+          assert.equal(error.code, code);
+          assert.equal(error.diagnosticClass, diagnosticClass);
+          assert.equal(error.recoverable, false);
+          assert.equal(error.failureClass, undefined);
+          assert.equal(error.cause, undefined);
+          return true;
+        });
+        assert.equal(failures, 1);
+        assert.equal(fixture.currentRun.pipelineState.workflowState, "FAILED");
+        assert.deepEqual(fixture.currentRun.pause, {
+          reason: "internal_failure",
+          code,
+          ...(diagnosticClass === undefined ? {} : { diagnosticClass }),
+        });
+        assert.equal(fixture.currentRun.activeTurn, null);
+        assert.equal(fixture.currentRun.counters.correctionRounds, 0);
+        assert.equal(fixture.currentRun.pipelineState.pendingCommit, null);
+        assert.equal(
+          fixture.calls.worker.filter(({ access }) => access === "local-commit")
+            .length,
+          0,
+        );
+        assert.equal(
+          fixture.calls.worker.filter(
+            ({ schema }) => schema === FINALIZATION_SCHEMA,
+          ).length,
+          1,
+        );
+        assert.doesNotMatch(
+          JSON.stringify({
+            run: fixture.currentRun,
+            transitions: fixture.transitions,
+          }),
+          /DO_NOT_RETAIN|backend_unavailable|provider-structured-output/u,
+        );
+        if (mode === "lazy") {
+          assert.equal(fixture.calls.reviewer.length, 0);
+          assert.equal(fixture.calls.arbiter.length, 0);
+        }
+      });
+    }
+  }
+});
+
+test("repeated opaque Codex failures pause at terminal CONFIRM without replaying finalized work", async (t) => {
+  for (const mode of ["independent", "lazy"]) {
+    await t.test(mode, async (t) => {
+      let failures = 0;
+      const fixture = await createFixture(t, {
+        mode,
+        workWorker: [
+          implementationCompleted(),
+          checkAndFix(),
+          cleanConfirmation(),
+          finalizationPassed(),
+        ],
+        onRoleRun(_role, request) {
+          if (
+            [REVIEW_SCHEMA, CLEAN_CONFIRM_SCHEMA].includes(request.schema) &&
+            failures < 2
+          ) {
+            failures += 1;
+            throw exhaustedCodexTurnFailure();
+          }
+        },
+      });
+
+      const firstPause = await fixture.run();
+      const secondPause = await fixture.run();
+      for (const paused of [firstPause, secondPause]) {
+        assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+        assert.deepEqual(paused.pause, {
+          code: "ERR_CODEX_TURN_FAILED",
+          resumeState: "CONFIRM",
+          reason: "backend_unavailable",
+        });
+        assert.equal(paused.activeTurn, null);
+        assert.equal(paused.pipelineState.finalizationResult.status, "PASS");
+        assert.equal(
+          paused.pipelineState.finalizedFingerprint,
+          paused.pipelineState.repositoryBaseline.contentFingerprint,
+        );
+        assert.equal(paused.pipelineState.reviewedFingerprint, null);
+        assert.equal(paused.pipelineState.pendingCommit, null);
+        assert.deepEqual(paused.counters, firstPause.counters);
+        assert.deepEqual(
+          paused.pipelineState.finalizationResult,
+          firstPause.pipelineState.finalizationResult,
+        );
+      }
+      assert.equal(failures, 2);
+      assert.equal(
+        fixture.calls.worker.filter(({ access }) => access === "local-commit")
+          .length,
+        0,
+      );
+      const completed = await fixture.run();
+      assert.equal(completed.pipelineState.workflowState, "DONE");
+      assert.equal(
+        fixture.calls.worker.filter(({ prompt }) =>
+          prompt.includes("Implement the changes"),
+        ).length,
+        1,
+      );
+      assert.equal(
+        fixture.calls.worker.filter(
+          ({ schema }) => schema === FINALIZATION_SCHEMA,
+        ).length,
+        1,
+      );
+      assert.equal(
+        fixture.calls.worker.filter(({ access }) => access === "local-commit")
+          .length,
+        1,
+      );
+      assert.doesNotMatch(
+        JSON.stringify(fixture.transitions),
+        /DO_NOT_RETAIN/u,
+      );
+      if (mode === "lazy") {
+        assert.equal(fixture.calls.reviewer.length, 0);
+        assert.equal(fixture.calls.arbiter.length, 0);
+      }
+    });
+  }
+});
+
+test("reconciles safe writable content before pausing an opaque Codex failure", async (t) => {
+  let rejected = false;
+  const fixture = await createFixture(t, {
+    async onRoleRun(_role, request) {
+      if (request.prompt.includes("Implement the changes") && !rejected) {
+        rejected = true;
+        await writeFile(
+          join(request.cwd, "partial.txt"),
+          "safe partial progress\n",
+        );
+        throw exhaustedCodexTurnFailure();
+      }
+    },
+  });
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "backend_unavailable");
+  assert.equal(paused.pause.resumeState, "IMPLEMENT");
+  assert.equal(paused.pipelineState.repositoryBaseline.clean, false);
+  assert.equal(
+    await readFile(join(fixture.projectPath, "partial.txt"), "utf8"),
+    "safe partial progress\n",
+  );
+  assert.equal((await fixture.run()).pipelineState.workflowState, "DONE");
+  assert.equal(
+    await readFile(join(fixture.projectPath, "partial.txt"), "utf8"),
+    "safe partial progress\n",
+  );
+  assert.doesNotMatch(JSON.stringify(fixture.transitions), /DO_NOT_RETAIN/u);
+});
+
+test("repository safety violations take precedence over opaque Codex failures", async (t) => {
+  for (const violation of ["read-only-content", "refs", "remote", "identity"]) {
+    await t.test(violation, async (t) => {
+      const fixture = await createFixture(t, {
+        async onRoleRun(_role, request, _count, repository) {
+          const applies =
+            violation === "read-only-content"
+              ? request.schema === REVIEW_SCHEMA
+              : request.prompt.includes("Implement the changes");
+          if (!applies) {
+            return;
+          }
+          if (violation === "read-only-content") {
+            await writeFile(
+              join(request.cwd, "unexpected.txt"),
+              "unsafe mutation\n",
+            );
+          } else if (violation === "refs") {
+            repository.changeRefs();
+          } else if (violation === "remote") {
+            repository.changeRemote();
+          } else {
+            repository.changeIdentity();
+          }
+          throw exhaustedCodexTurnFailure();
+        },
+      });
+      const paused = await fixture.run();
+      assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+      assert.equal(
+        paused.pause.reason,
+        {
+          "read-only-content": "read_only_agent_mutated_repository",
+          refs: "unexpected_git_ref_change",
+          remote: "unexpected_remote_configuration_change",
+          identity: "unexpected_git_identity_change",
+        }[violation],
+      );
+      assert.equal(
+        fixture.calls.worker.filter(({ access }) => access === "local-commit")
+          .length,
+        0,
+      );
+      assert.equal(
+        fixture.transitions.some(
+          ({ patch }) => patch?.pause?.reason === "backend_unavailable",
+        ),
+        false,
+      );
+      assert.doesNotMatch(
+        JSON.stringify(fixture.transitions),
+        /DO_NOT_RETAIN/u,
+      );
+    });
+  }
+});
 
 test("reconstructs an interrupted writable turn with partial content and staging", async (t) => {
   let interrupt = true;
@@ -1145,3 +1415,209 @@ test("preserves a partial fix before sandbox-blocked validation", async (t) => {
   const resumed = await fixture.run();
   assert.equal(resumed.pipelineState.workflowState, "DONE");
 });
+
+for (const mode of ["independent", "lazy"]) {
+  for (const [schema, checkpoint] of [
+    [IMPLEMENTATION_SCHEMA, "IMPLEMENT"],
+    ...(mode === "lazy" ? [[CHECK_AND_FIX_SCHEMA, "CHECK_AND_FIX"]] : []),
+    [FINDING_RESOLUTION_SCHEMA, "RESOLVE_FINDINGS"],
+  ]) {
+    for (const stopKind of [
+      "blocked",
+      "interrupted",
+      ...(checkpoint === "RESOLVE_FINDINGS" ? ["partial-blocked"] : []),
+    ]) {
+      test(`retains trusted delegation across ${mode} ${checkpoint} ${stopKind} recovery`, async (t) => {
+        const command = "npm run test:service";
+        const snapshot = trustedValidationSnapshot("service-check", command);
+        const requiredChecks = [...REQUIRED_CHECKS, { id: "C2", command }];
+        const bootstrap = (role) => ({
+          ...bootstrapReady(role),
+          requiredChecks,
+        });
+        const finalization = {
+          ...finalizationPassed(),
+          requiredChecks,
+          checks: [
+            ...checkResults("PASS"),
+            {
+              checkId: "C2",
+              command,
+              status: "NOT_RUN",
+              evidence: ["Reserved for the runner."],
+            },
+          ],
+        };
+        const needsResolution = checkpoint === "RESOLVE_FINDINGS";
+        const processLoss = new Error(
+          "Simulated process loss before a role response.",
+        );
+        let stopped = false;
+        let attempts = 0;
+        let trustedCalls = 0;
+        const targetCalls = [];
+        const fixture = await createFixture(t, {
+          mode,
+          modeSettings: { trustedChecks: ["service-check"] },
+          trustedValidation: snapshot,
+          worker: [
+            clarificationReady(),
+            bootstrap("Worker"),
+            ...(mode === "independent" ? [reconciliationResolved()] : []),
+          ],
+          reviewer: [bootstrap("Reviewer")],
+          workWorker: [implementationCompleted(), finalization, finalization],
+          onTrustedValidation(options) {
+            trustedCalls += 1;
+            assert.equal(
+              fixture.currentRun.pipelineState.workflowState,
+              "FINALIZE",
+            );
+            assert.deepEqual(options.snapshot, snapshot);
+            const failed = needsResolution && trustedCalls === 1;
+            return {
+              ...options.bindings,
+              commandIdentity: options.commandIdentity,
+              status: failed ? "FAIL" : "PASS",
+              exitCode: failed ? 1 : 0,
+              signal: null,
+              timedOut: false,
+              evidence: ["The runner executed the persisted vector."],
+            };
+          },
+        });
+        const runWorker = fixture.runtime.adapters.worker.run;
+        fixture.runtime.adapters.worker.run = async (request) => {
+          if (request.schema === schema) {
+            targetCalls.push(request);
+            attempts += 1;
+            for (const prompt of [request.prompt, request.recoveryPrompt]) {
+              const match =
+                /Exact runner-trusted commands reserved for FINALIZE:\n([^\n]+)/u.exec(
+                  prompt,
+                );
+              const delegated = JSON.parse(match?.[1] ?? "[]");
+              assert.deepEqual(delegated, [command]);
+              assert.ok(!delegated.includes(`${command} -- --generate`));
+              assert.ok(!delegated.includes("npm  run test:service"));
+              assert.match(
+                prompt,
+                /work not delegated to a selected runner-trusted command/u,
+              );
+            }
+            if (attempts === 1) {
+              fixture.calls.worker.push(request);
+              if (stopKind === "interrupted") {
+                stopped = true;
+                throw processLoss;
+              }
+              if (stopKind === "partial-blocked") {
+                await writeFile(
+                  join(request.cwd, "partial-repair.txt"),
+                  "safe partial repair\n",
+                );
+              }
+              return {
+                sessionId: request.session?.id ?? "blocked-worker",
+                structured: {
+                  status: "BLOCKED",
+                  ...(schema === FINDING_RESOLUTION_SCHEMA
+                    ? { decisions: [] }
+                    : { summary: "" }),
+                  reason:
+                    "An additional generation step requires an unavailable local service.",
+                  evidence: [
+                    `${command} -- --generate is not delegated to the runner.`,
+                  ],
+                  question: "",
+                  whyBlocked: "",
+                  options: [],
+                },
+              };
+            }
+          }
+          if (
+            [CHECK_AND_FIX_SCHEMA, FINDING_RESOLUTION_SCHEMA].includes(
+              request.schema,
+            )
+          ) {
+            fixture.calls.worker.push(request);
+            return {
+              sessionId: request.session?.id ?? "recovered-worker",
+              structured:
+                request.schema === CHECK_AND_FIX_SCHEMA
+                  ? checkAndFix()
+                  : resolution({ id: "F1", decision: "FIX" }),
+            };
+          }
+          return runWorker(request);
+        };
+        const transition = fixture.runtime.transition;
+        const finishAgentTurn = fixture.runtime.finishAgentTurn;
+        fixture.runtime.transition = async (...args) => {
+          if (stopped) throw processLoss;
+          return transition(...args);
+        };
+        fixture.runtime.finishAgentTurn = async (...args) => {
+          if (stopped) throw processLoss;
+          return finishAgentTurn(...args);
+        };
+
+        if (stopKind === "interrupted") {
+          await assert.rejects(
+            fixture.run({ trustedChecks: ["service-check"] }),
+            (error) => error === processLoss,
+          );
+          assert.notEqual(fixture.currentRun.activeTurn, null);
+          assert.equal(
+            fixture.currentRun.pipelineState.workflowState,
+            checkpoint,
+          );
+        } else {
+          const paused = await fixture.run({
+            trustedChecks: ["service-check"],
+          });
+          assert.equal(paused.pause.reason, "environment_blocked");
+          assert.equal(
+            paused.pause.resumeState,
+            stopKind === "partial-blocked"
+              ? mode === "lazy"
+                ? "CHECK_AND_FIX"
+                : "REVIEW"
+              : checkpoint,
+          );
+          assert.equal(paused.pipelineState.cleanConfirmationFingerprint, null);
+          if (stopKind === "partial-blocked") {
+            assert.equal(paused.pipelineState.finalizationResult, null);
+            assert.equal(
+              await readFile(
+                join(fixture.projectPath, "partial-repair.txt"),
+                "utf8",
+              ),
+              "safe partial repair\n",
+            );
+          }
+        }
+        assert.equal(trustedCalls, needsResolution ? 1 : 0);
+        stopped = false;
+        fixture.runtime.transition = transition;
+        fixture.runtime.finishAgentTurn = finishAgentTurn;
+
+        const completed = await fixture.run();
+
+        assert.equal(completed.pipelineState.workflowState, "DONE");
+        assert.deepEqual(completed.pipelineState.trustedValidation, snapshot);
+        assert.equal(trustedCalls, needsResolution ? 2 : 1);
+        if (stopKind === "interrupted") {
+          assert.equal(targetCalls.length, 2);
+          if (schema === CHECK_AND_FIX_SCHEMA) {
+            assert.equal(targetCalls[1].session?.mode, "continue");
+          } else {
+            assert.equal(targetCalls[1].session, undefined);
+            assert.equal(targetCalls[1].prompt, targetCalls[1].recoveryPrompt);
+          }
+        }
+      });
+    }
+  }
+}

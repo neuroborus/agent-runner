@@ -223,7 +223,7 @@ export function createTrustedValidationSnapshot(
   const commands = Object.freeze(
     selections.map((alias) => {
       const command = normalizedDefinitions[alias];
-      if (command === undefined) {
+      if (!Object.hasOwn(normalizedDefinitions, alias)) {
         throw new TrustedValidationError(
           `Trusted validation selects unknown command: ${alias}.`,
           { code: "ERR_UNKNOWN_TRUSTED_COMMAND" },
@@ -411,7 +411,10 @@ export function createTrustedValidationService(options = {}) {
     commandIdentity: identity,
     projectPath,
     snapshot,
+    signal,
+    onProcess,
   }) {
+    signal?.throwIfAborted();
     if (
       typeof git.snapshot !== "function" ||
       typeof git.assertUnchanged !== "function"
@@ -463,11 +466,22 @@ export function createTrustedValidationService(options = {}) {
       result = await runCommand(execution.command, {
         cwd: before.projectPath,
         environment: execution.environment,
+        ownershipMode: execution.ownershipMode,
         readinessRequired: execution.readinessRequired ?? false,
         terminationGraceMs,
         timeoutMs,
+        signal,
+        onProcess,
       });
     } catch (cause) {
+      if (
+        signal?.aborted ||
+        [
+          "ERR_EXECUTION_PROCESS_ACTIVE",
+          "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+        ].includes(cause?.code)
+      )
+        throw cause;
       if (cause?.code === "ERR_TRUSTED_VALIDATION_PROCESS_TREE_ACTIVE") {
         throw cause;
       }

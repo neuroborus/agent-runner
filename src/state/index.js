@@ -1,4 +1,5 @@
 export { createRunStore, resolveStateRoot } from "./service.js";
+export { projectOperatorStop } from "./stop-projection.js";
 export {
   deepFreeze,
   RUNTIME_COMPATIBILITY,

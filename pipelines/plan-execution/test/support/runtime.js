@@ -32,6 +32,8 @@ import {
   migratePlanExecutionStateV11,
   migratePlanExecutionStateV12,
   migratePlanExecutionStateV13,
+  migratePlanExecutionStateV14,
+  migratePlanExecutionStateV15,
   planExecutionPipeline,
   runPlanExecution,
 } from "../../src/index.js";
@@ -239,7 +241,13 @@ function migrateVersionOneState(state) {
   const versionThirteen = migratePlanExecutionStateV12({
     pipelineState: versionTwelve,
   });
-  return migratePlanExecutionStateV13({ pipelineState: versionThirteen });
+  return migratePlanExecutionStateV15({
+    pipelineState: migratePlanExecutionStateV14({
+      pipelineState: migratePlanExecutionStateV13({
+        pipelineState: versionThirteen,
+      }),
+    }),
+  });
 }
 
 async function prepareValidationMigration(t, fixtureOptions) {
@@ -486,6 +494,7 @@ function cleanConfirmation(validationChange = "UNCHANGED") {
     status: "CLEAN",
     findings: [],
     validationChange,
+    finalizationFindingIds: [],
     validationEvidence:
       validationChange === "UNCHANGED"
         ? []
@@ -554,6 +563,7 @@ function reviewApproved(validationChange = "UNCHANGED") {
     status: "APPROVED",
     findings: [],
     validationChange,
+    finalizationFindingIds: [],
     validationEvidence:
       validationChange === "UNCHANGED"
         ? []
@@ -726,6 +736,7 @@ function reviewFindings(...ids) {
       suggestedAction: `Fix ${id}.`,
     })),
     validationChange: "UNCHANGED",
+    finalizationFindingIds: [],
     validationEvidence: [],
     ...emptyDecision(),
   };
@@ -735,6 +746,7 @@ function reviewRejected(...ids) {
   return {
     ...reviewFindings(...ids),
     validationChange: "REJECTED",
+    finalizationFindingIds: [],
     validationEvidence: [
       "The candidate validation infrastructure change is not authorized.",
     ],
@@ -746,6 +758,7 @@ function reviewProductDecision() {
     status: "PRODUCT_DECISION_REQUIRED",
     findings: [],
     validationChange: "UNCHANGED",
+    finalizationFindingIds: [],
     validationEvidence: [],
     question: "Which public behavior should the review require?",
     options: ["Behavior A", "Behavior B"],
@@ -1400,7 +1413,11 @@ async function createFixture(
             ? Object.fromEntries(
                 Object.entries(structured).filter(
                   ([field]) =>
-                    !["validationChange", "validationEvidence"].includes(field),
+                    ![
+                      "validationChange",
+                      "validationEvidence",
+                      "finalizationFindingIds",
+                    ].includes(field),
                 ),
               )
             : structured;
@@ -1516,7 +1533,7 @@ async function createFixture(
     revision: 1,
     runId,
     pipelineId: "plan-execution",
-    pipelineStateVersion: 14,
+    pipelineStateVersion: 17,
     projectPath,
     taskPath,
     roles: Object.fromEntries(
@@ -1532,7 +1549,7 @@ async function createFixture(
     pipelineState: createPlanExecutionState({
       artifactRoot,
       proactiveClarification,
-      ...(mode === "lazy"
+      ...(mode !== "independent"
         ? { settings: { ...SETTINGS, ...modeSettings, mode } }
         : {}),
       ...(trustedValidation === undefined ? {} : { trustedValidation }),
@@ -1833,6 +1850,9 @@ async function createFixture(
       await onTransition?.(currentRun, patch, options);
       return currentRun;
     },
+    async settleVerifiedCommit(patch, options) {
+      return this.transition(patch, options);
+    },
     async startAgentTurn(activeTurn, { pipelineState } = {}) {
       currentRun = {
         ...currentRun,
@@ -1892,7 +1912,7 @@ async function createFixture(
   ) {
     currentRun = {
       ...currentRun,
-      pipelineStateVersion: 14,
+      pipelineStateVersion: 17,
       pipelineState,
       pause,
       revision: currentRun.revision + 1,

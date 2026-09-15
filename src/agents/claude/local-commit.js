@@ -159,6 +159,7 @@ export async function executeClaudeLocalCommit({
   execute,
   expectedHead,
   message,
+  beforeEffect = () => {},
 }) {
   const gitResult = await execute(
     "git",
@@ -190,6 +191,7 @@ export async function executeClaudeLocalCommit({
   const canonicalGitDirectories = await Promise.all(
     gitDirectories.map((gitDirectory) => realpath(gitDirectory)),
   );
+  await beforeEffect();
   await execute(
     bubblewrapBinary,
     sandboxArguments(cwd, canonicalGitDirectories, [
@@ -204,6 +206,7 @@ export async function executeClaudeLocalCommit({
       encoding: "utf8",
       env,
       maxBuffer: MAX_COMMIT_OUTPUT_BYTES,
+      ownershipMode: "native-sandbox-provider",
     },
   );
 }

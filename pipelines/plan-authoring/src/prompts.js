@@ -19,7 +19,11 @@ const PLAN_FORMAT_INSTRUCTIONS =
   "trailing period. Put implementation details below it.";
 
 export const AGENT_GUIDANCE_SCOPE_INSTRUCTIONS =
-  "Do not propose or approve project `.agents` changes unless the user's task explicitly requires them; treat a violation as a finding, not a user question.";
+  "Do not propose or approve project `.agents` changes unless the user's task explicitly requires them; treat a violation as a finding, not a user question. Do not modify the resolved project configuration during a run.";
+
+export function preferredCommitLineInstructions(limit) {
+  return `Prefer each proposed commit to stay at or below ${limit} anticipated changed lines, counted as additions plus deletions, including tests and documentation. Smaller cohesive commits are welcome. This is a planning heuristic, not a hard maximum or a validation or execution limit. When one coherent change cannot be split safely, keep the larger commit and state a concise reason in the plan identifying the indivisible change. Do not invent artificial boundaries or reject a plan solely for exceeding the target.`;
+}
 
 export const DRAFT_INSTRUCTIONS = `Write a concise commit-by-commit plan for the requested changes. Keep the plan idiomatic and minimal, follow the project's conventions, and ensure it contains no contradictions.
 
@@ -32,6 +36,7 @@ For PRODUCT_DECISION_REQUIRED, set plan to ""; use the product-decision fields.`
 export const REVIEW_INSTRUCTIONS = `Review the plan and verify that it is correct, idiomatic, minimal, consistent with the project's conventions, and free of contradictions.
 
 ${PLAN_FORMAT_INSTRUCTIONS}
+Assess the complete draft independently. In combined mode, prior Planner confirmation does not substitute for your review.
 Do not modify the repository or artifact files.
 ${PRODUCT_DECISION_INSTRUCTIONS}
 For APPROVED, set findings, options, and evidence to [], and question and whyBlocked to "".
@@ -51,13 +56,14 @@ For PRODUCT_DECISION_REQUIRED, set plan to ""; use the product-decision fields.`
 export const CLEAN_CONFIRM_INSTRUCTIONS = `Review the plan and verify that it is correct, idiomatic, minimal, consistent with the project's conventions, and free of contradictions.
 
 ${PLAN_FORMAT_INSTRUCTIONS}
+A CLEAN result confirms primary convergence; in combined mode an independent Reviewer must still approve this same draft.
 Do not modify the repository or artifact files. Return CLEAN only when there are no problems; otherwise return concrete findings without editing the plan.
 ${PRODUCT_DECISION_INSTRUCTIONS}
 For CLEAN, set findings, options, and evidence to [], and question and whyBlocked to "".
 For FINDINGS, provide one or more findings with unique stable lowercase kebab-case IDs, descriptions, and evidence; set question and whyBlocked to "", and options and evidence to [].
 For PRODUCT_DECISION_REQUIRED, set findings to []; use the product-decision fields.`;
 
-export const LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS = `Your previous structured lazy checkpoint result was rejected by provider or deterministic validation. Return a complete replacement result using the same checkpoint schema.
+export const LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS = `Your previous structured primary-convergence checkpoint result was rejected by provider or deterministic validation. Return a complete replacement result using the same checkpoint schema.
 Correct every identified field-and-constraint violation from the complete durable draft and current repository evidence. Do not repeat or quote the rejected result, findings, provider output, prompt, or transcript; do not ask an ordinary clarification question or modify repository content or artifact files. Preserve the original CHECK_AND_FIX or CLEAN_CONFIRM semantics exactly. A still-invalid replacement pauses for an explicit retry and never writes plan.md or supplies accepted progress early.`;
 
 export const FINDING_RESOLUTION_INSTRUCTIONS = `For each finding below, fix the plan idiomatically and minimally, following the project's conventions.

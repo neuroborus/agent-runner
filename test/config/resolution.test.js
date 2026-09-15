@@ -106,6 +106,7 @@ test("role resolution normalizes configuration objects", () => {
     settings: {
       maxRevisionRounds: 4,
       mode: "independent",
+      preferredCommitLineLimit: 900,
       stagnationWindowRounds: 3,
     },
     sourceProfile: null,
@@ -138,6 +139,33 @@ test("lazy plan authoring resolves only the Planner role", () => {
   assert.deepEqual(Object.keys(resolved.roles), ["planner"]);
   assert.equal(resolved.settings.mode, "lazy");
 });
+
+for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
+  test(`combined ${pipelineId} resolves all independent roles from saved selections`, () => {
+    const resolved = resolvePipelineConfiguration(pipelineId, {
+      schemaVersion: 1,
+      defaultBackend: "codex",
+      pipelines: {
+        [pipelineId]: {
+          mode: "combined",
+          roles: {
+            reviewer: { backend: "claude", model: "review-model" },
+            arbiter: { model: "arbitration-model" },
+          },
+        },
+      },
+    });
+    assert.equal(resolved.settings.mode, "combined");
+    assert.deepEqual(Object.keys(resolved.roles), [
+      pipelineId === "plan-authoring" ? "planner" : "worker",
+      "reviewer",
+      "arbiter",
+    ]);
+    assert.equal(resolved.roles.reviewer.backend, "claude");
+    assert.equal(resolved.roles.reviewer.model, "review-model");
+    assert.equal(resolved.roles.arbiter.model, "arbitration-model");
+  });
+}
 
 test("lazy plan execution resolves only the Worker role", () => {
   const resolved = resolvePipelineConfiguration("plan-execution", {
@@ -175,6 +203,59 @@ test("lazy polishing resolves only the Worker role", () => {
 
   assert.deepEqual(Object.keys(resolved.roles), ["worker"]);
   assert.equal(resolved.settings.mode, "lazy");
+});
+
+test("preferred commit line targets validate and resolve through configuration precedence", () => {
+  const configuration = (value) => ({
+    schemaVersion: 1,
+    defaultBackend: "codex",
+    pipelines: { "plan-authoring": { preferredCommitLineLimit: value } },
+  });
+  const resolve = (root, project) =>
+    resolvePipelineConfiguration("plan-authoring", root, {}, {}, null, project)
+      .settings.preferredCommitLineLimit;
+
+  assert.equal(resolve({ schemaVersion: 1, defaultBackend: "codex" }), 900);
+  assert.equal(resolve(configuration(700)), 700);
+  assert.equal(resolve(configuration(700), configuration(450)), 450);
+  assert.equal(resolve(configuration(1)), 1);
+  assert.equal(
+    resolve(configuration(Number.MAX_SAFE_INTEGER)),
+    Number.MAX_SAFE_INTEGER,
+  );
+  for (const invalid of [
+    0,
+    -1,
+    1.5,
+    "900",
+    null,
+    true,
+    Number.MAX_SAFE_INTEGER + 1,
+  ]) {
+    assert.throws(
+      () => resolve(configuration(invalid)),
+      /preferredCommitLineLimit/u,
+    );
+    assert.throws(
+      () => resolve(configuration(700), configuration(invalid)),
+      /preferredCommitLineLimit/u,
+    );
+  }
+  assert.throws(
+    () =>
+      resolvePipelineConfiguration(
+        "plan-execution",
+        configuration(700),
+        {},
+        {},
+        null,
+        {
+          schemaVersion: 1,
+          pipelines: { "plan-execution": { preferredCommitLineLimit: 900 } },
+        },
+      ),
+    /preferredCommitLineLimit/u,
+  );
 });
 
 test("setting overrides take precedence over project and runner settings", () => {
@@ -303,7 +384,7 @@ test("project configuration is a strict partial overlay", () => {
   });
 });
 
-test("only runner configuration defines exact trusted command vectors", () => {
+test("project selections preserve exact runner command vectors", () => {
   const runnerConfiguration = parseRunnerConfiguration(
     JSON.stringify({
       schemaVersion: 1,

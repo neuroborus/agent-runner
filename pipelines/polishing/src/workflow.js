@@ -3,6 +3,23 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import {
+  clearedCandidateAndConfirmationGate,
+  clearedCandidateAndTerminalGate,
+  clearedGateAfterResolvedFindings,
+  clearedTerminalGate,
+  finalizationGatePassed,
+  handoffGatePassed,
+} from "./gate-evidence.js";
+import {
+  candidateCheckpoint,
+  combinedReview,
+  primaryFindings,
+  findingResolutionCheckpoint,
+  polishingPolicy,
+  selectRoleSession,
+} from "./mode-policy.js";
+
+import {
   AGENT_GUIDANCE_SCOPE_INSTRUCTIONS,
   BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
   BOOTSTRAP_CORRECTION_INSTRUCTIONS,
@@ -17,6 +34,7 @@ import {
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
   FINALIZATION_CORRECTION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
+  FINALIZATION_RECOVERY_INSTRUCTIONS,
   finalizationBootstrapInstructions,
   finalizationGuidanceInstructions,
   FINDING_ARBITRATION_INSTRUCTIONS,
@@ -53,6 +71,9 @@ import {
   assertRuntime,
   assertSettings,
   createPolishingState,
+  finalizationFeedbackFindings,
+  findingFingerprint,
+  MAX_SEMANTIC_FINALIZATION_RETRIES,
   CONVENTIONAL_FINALIZATION_SKILL_PATHS,
   diagnosticCode,
   disputeHistoryCapacity,
@@ -491,7 +512,7 @@ function normalizeConfirmationRoleOutput(
   if (
     result.status !== "PRODUCT_DECISION_REQUIRED" &&
     ((validationChanged && result.validationChange === "UNCHANGED") ||
-      (!validationChanged && result.validationChange !== "UNCHANGED"))
+      (!validationChanged && result.validationChange === "ACCEPTED"))
   ) {
     throw invalidRoleOutput(
       "Confirmation validation-change decision does not match finalization evidence.",
@@ -500,15 +521,22 @@ function normalizeConfirmationRoleOutput(
         field: "validationChange",
         constraint: validationChanged
           ? "accepted-or-rejected-for-changed-validation"
-          : "unchanged-for-unchanged-validation",
+          : "unchanged-or-rejected-for-unchanged-validation",
       },
     );
   }
   return result;
 }
 
-export async function runPolishing({ action, run, runtime, settings }) {
+export async function runPolishing({
+  action,
+  run,
+  runtime,
+  settings,
+  operatorStop = false,
+}) {
   assertRun(run);
+  if (run.pipelineState.workflowState === "CANCELED") return run;
   assertRuntime(runtime, Object.keys(run.roles));
   const resumeAction = normalizeResumeAction(action);
   if (run.pipelineState.settings === null) {
@@ -541,67 +569,11 @@ export async function runPolishing({ action, run, runtime, settings }) {
       .join("\n\n");
   }
 
-  function clearedTerminalGate() {
-    return {
-      finalizationResult: null,
-      finalizedFingerprint: null,
-      confirmationCorrection: null,
-      pendingConfirmationCorrection: null,
-      cleanConfirmationFingerprint: null,
-      reviewResult: null,
-      reviewedFingerprint: null,
-    };
-  }
-
-  function clearedCandidateAndTerminalGate() {
-    return {
-      ...clearedTerminalGate(),
-      reviewCorrection: null,
-      pendingReviewCorrection: null,
-      candidateReviewResult: null,
-      candidateReviewedFingerprint: null,
-      candidateConfirmationFingerprint: null,
-      candidateMigrationPending: false,
-      lazyCorrections: [],
-      pendingLazyCorrection: null,
-    };
-  }
-
-  function clearedCandidateAndConfirmationGate(current = state()) {
-    const retainFinalization = current.finalizationResult?.status === "PASS";
-    return {
-      finalizationResult: retainFinalization
-        ? current.finalizationResult
-        : null,
-      finalizedFingerprint: retainFinalization
-        ? current.finalizedFingerprint
-        : null,
-      reviewCorrection: null,
-      pendingReviewCorrection: null,
-      confirmationCorrection: null,
-      pendingConfirmationCorrection: null,
-      candidateReviewResult: null,
-      candidateReviewedFingerprint: null,
-      candidateConfirmationFingerprint: null,
-      candidateMigrationPending: false,
-      cleanConfirmationFingerprint: null,
-      reviewResult: null,
-      reviewedFingerprint: null,
-    };
-  }
-
-  function clearedGateAfterResolvedFindings(current = state()) {
-    return current.finalizationResult?.status === "PASS"
-      ? clearedCandidateAndConfirmationGate(current)
-      : clearedCandidateAndTerminalGate();
-  }
-
   async function checkpointAfterCandidateConvergence(fingerprint) {
     const current = state();
     const finalization = current.finalizationResult;
     if (
-      finalization?.status === "PASS" &&
-      current.finalizedFingerprint === fingerprint &&
+      finalizationGatePassed(current, fingerprint) &&
       (await validationInfrastructureFingerprint(
         finalization.validationInfrastructure,
       )) === finalization.validationInfrastructureFingerprint
@@ -655,6 +627,14 @@ export async function runPolishing({ action, run, runtime, settings }) {
     );
   }
 
+  function prefinalizationTrustedCommands() {
+    const commands = state().trustedValidation.commands.map(
+      ({ command }) => command,
+    );
+    return `Exact runner-trusted commands reserved for FINALIZE:
+${JSON.stringify(commands)}`;
+  }
+
   function trustedValidationInstructions() {
     const commands = state().trustedValidation.commands.map(
       ({ alias, command, identity }) => ({ alias, command, identity }),
@@ -705,6 +685,11 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           }
         : {}),
       polishSummary: null,
+      finalizationRecovery: {
+        ...current.finalizationRecovery,
+        pending: false,
+        feedback: null,
+      },
       finalizationCorrection: null,
       pendingFinalizationCorrection: null,
       ...clearedCandidateAndTerminalGate(),
@@ -735,6 +720,18 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       publicActivity,
     } = {},
   ) {
+    if (
+      nextPipelineState.repositoryBaseline?.contentFingerprint !==
+      state().repositoryBaseline?.contentFingerprint
+    ) {
+      nextPipelineState = {
+        ...nextPipelineState,
+        finalizationRecovery: {
+          ...nextPipelineState.finalizationRecovery,
+          feedback: null,
+        },
+      };
+    }
     const patch = {
       counters: nextCounters,
       hashes: nextHashes,
@@ -1197,25 +1194,16 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     const latestSession = [...currentRun.sessionLineage.children]
       .reverse()
       .find((child) => child.role === role);
-    const lazyPrimary = state().settings.mode === "lazy" && role === "worker";
-    const previousSession =
-      !recovering &&
-      role !== "arbiter" &&
-      (lazyPrimary || latestSession?.contextKey === contextKey) &&
-      latestSession !== undefined
-        ? latestSession.sessionId
-        : undefined;
-    const sourceSession = currentRun.sessionLineage.source;
-    const session = freshSession
-      ? undefined
-      : previousSession !== undefined
-        ? { id: previousSession, mode: "continue" }
-        : !recovering &&
-            sourceSession !== null &&
-            role !== "arbiter" &&
-            (!lazyPrimary || !state().lazySourceForkConsumed)
-          ? { id: sourceSession, mode: "fork" }
-          : undefined;
+    const { session, previousSession, consumeSourceFork } = selectRoleSession({
+      settings: state().settings,
+      role,
+      latestSession,
+      contextKey,
+      sourceSession: currentRun.sessionLineage.source,
+      sourceForkConsumed: state().lazySourceForkConsumed,
+      recovering,
+      freshSession,
+    });
     const configuration = currentRun.roles[role];
     const recoveryPrompt = completeRolePrompt(buildPrompt(context));
     const executionPreferences = Object.fromEntries(
@@ -1242,7 +1230,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     let agentError;
     currentRun = await runtime.startAgentTurn(
       turn,
-      lazyPrimary && session?.mode === "fork"
+      consumeSourceFork
         ? {
             pipelineState: {
               ...state(),
@@ -1298,10 +1286,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
             contentChangingCorrection || contentChangingLazyCheck
               ? {
                   ...current,
-                  workflowState:
-                    current.settings.mode === "lazy"
-                      ? "CHECK_AND_FIX"
-                      : "REVIEW",
+                  workflowState: candidateCheckpoint(current.settings),
                   repositoryBaseline: nextRepositoryBaseline,
                   ...clearedCandidateAndTerminalGate(),
                   previousFindings:
@@ -1743,7 +1728,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     };
   }
 
-  async function validateBootstrapInventory(result, context) {
+  async function validateValidationInventory(result, context) {
     if (!Array.isArray(result.validationInfrastructure)) {
       return result;
     }
@@ -1759,7 +1744,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           throw cause;
         }
         throw invalidRoleOutput(
-          "Bootstrap validation infrastructure path is unsafe.",
+          "Validation infrastructure path is unsafe.",
           context,
           {
             field: `validationInfrastructure[${index}]`,
@@ -1774,7 +1759,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         inspection.relativePath !== path
       ) {
         throw invalidRoleOutput(
-          "Bootstrap validation infrastructure path is not a canonical repository file.",
+          "Validation infrastructure path is not a canonical repository file.",
           context,
           {
             field: `validationInfrastructure[${index}]`,
@@ -1832,7 +1817,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         if (output === null) {
           return null;
         }
-        const result = await validateBootstrapInventory(
+        const result = await validateValidationInventory(
           normalize(output),
           context,
         );
@@ -1894,19 +1879,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
   function invalidatedLegacyValidation(current) {
     return {
       ...current,
-      reviewCorrection: null,
-      pendingReviewCorrection: null,
-      confirmationCorrection: null,
-      pendingConfirmationCorrection: null,
-      candidateReviewResult: null,
-      candidateReviewedFingerprint: null,
-      candidateConfirmationFingerprint: null,
-      candidateMigrationPending: false,
-      finalizationResult: null,
-      finalizedFingerprint: null,
-      cleanConfirmationFingerprint: null,
-      reviewResult: null,
-      reviewedFingerprint: null,
+      ...clearedCandidateAndConfirmationGate(current),
+      ...clearedTerminalGate(),
       previousFindings:
         current.findings.length === 0
           ? current.previousFindings
@@ -1938,9 +1912,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         ...invalidatedLegacyValidation(current),
         workflowState: resumePolishing
           ? "POLISH"
-          : current.settings.mode === "lazy"
-            ? "CHECK_AND_FIX"
-            : "REVIEW",
+          : candidateCheckpoint(current.settings),
         additionalFixRounds,
       },
       {
@@ -1972,8 +1944,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     await transition(
       {
         ...current,
-        workflowState:
-          current.settings.mode === "lazy" ? "CHECK_AND_FIX" : "REVIEW",
+        workflowState: candidateCheckpoint(current.settings),
         candidateMigrationPending: false,
         additionalFixRounds,
       },
@@ -2090,6 +2061,12 @@ ${JSON.stringify(
     if (result.status === "RESOLVED") {
       return completeValidationMigration("worker");
     }
+    if (!polishingPolicy(state().settings).bootstrapArbitration) {
+      await pause("bootstrap_disagreement", {
+        resumeState: state().workflowState,
+      });
+      return false;
+    }
     await transition(
       {
         ...state(),
@@ -2108,6 +2085,8 @@ ${JSON.stringify(
   }
 
   async function arbitrateValidationMigration() {
+    if (!polishingPolicy(state().settings).bootstrapArbitration)
+      return reconcileValidationMigration();
     const arbitration = await runBootstrapContract({
       role: "arbiter",
       schema: BOOTSTRAP_ARBITRATION_SCHEMA,
@@ -2256,6 +2235,143 @@ ${JSON.stringify(
     );
   }
 
+  async function routeFinalizationRejection(result, fingerprint) {
+    const current = state();
+    if (
+      result.validationChange !== "REJECTED" ||
+      (polishingPolicy(current.settings).independentReview &&
+        validationRejectionIsOverridden(result.findings, fingerprint))
+    ) {
+      return false;
+    }
+    const findings = result.findings.filter(
+      ({ id }) =>
+        !polishingPolicy(current.settings).independentReview ||
+        !findingOverrideApplies(id, fingerprint),
+    );
+    const evidenceIds = result.finalizationFindingIds.filter((id) =>
+      findings.some((finding) => finding.id === id),
+    );
+    const contentFindings = findings.filter(
+      ({ id }) => !evidenceIds.includes(id),
+    );
+    const pure = contentFindings.length === 0;
+    const feedback = {
+      contentFingerprint: fingerprint,
+      validationInfrastructureFingerprint:
+        await validationInfrastructureFingerprint(
+          current.validationInfrastructure,
+        ),
+      findings,
+      finalizationFindingIds: evidenceIds,
+    };
+    const progress = pure
+      ? null
+      : correctionUpdate({
+          fingerprint,
+          finalizationIssueIds: [],
+          findingIds: contentFindings.map(({ id }) => id),
+        });
+    await transition(
+      {
+        ...current,
+        ...(pure ? clearedTerminalGate() : clearedCandidateAndTerminalGate()),
+        workflowState: pure
+          ? "FINALIZE"
+          : findingResolutionCheckpoint(current.settings),
+        finalizationRecovery: {
+          ...current.finalizationRecovery,
+          required: true,
+          pending: false,
+          feedback,
+        },
+        findings: contentFindings,
+        previousFindings: result.findings,
+        pendingDisputes: [],
+        reviewReconsideration: [],
+        pendingCorrection: false,
+        ...(pure
+          ? {}
+          : {
+              correctionHistory: progress.history,
+              sameFindingRounds: progress.sameFindingRounds,
+              blockedSinceStagnation: progress.blockedSinceStagnation,
+            }),
+      },
+      {
+        nextCounters: progress?.counters ?? counters(),
+        publicActivity: activity(
+          "runner",
+          "finalization",
+          "evidence-rejected",
+          pure
+            ? "Terminal validation evidence rejected; repeat complete finalization."
+            : "Terminal validation evidence invalidated; resolve content findings before fresh finalization.",
+        ),
+      },
+    );
+    return true;
+  }
+
+  async function prepareFinalizationRecovery() {
+    let recovery = state().finalizationRecovery;
+    if (!recovery.required) return true;
+    if (
+      recovery.feedback !== null &&
+      (recovery.feedback.contentFingerprint !== (await contentFingerprint()) ||
+        recovery.feedback.validationInfrastructureFingerprint !==
+          (await validationInfrastructureFingerprint(
+            state().validationInfrastructure,
+          )))
+    ) {
+      recovery = { ...recovery, feedback: null };
+      await transition({ ...state(), finalizationRecovery: recovery });
+    }
+    if (recovery.pending) return true;
+    if (
+      recovery.attempts >=
+      MAX_SEMANTIC_FINALIZATION_RETRIES + recovery.additionalAttempts
+    ) {
+      await pause("finalization_evidence_rejected", {
+        explanation:
+          "Terminal confirmation repeatedly rejected finalization evidence. Correct the reported evidence without weakening the established inventory, then explicitly retry complete finalization.",
+        evidence: finalizationFeedbackFindings(state()).map(
+          ({ id }) => `Finalization evidence finding ${id} remains unresolved.`,
+        ),
+        resumeState: "FINALIZE",
+      });
+      return false;
+    }
+    await transition(
+      {
+        ...state(),
+        finalizationRecovery: {
+          ...recovery,
+          attempts: recovery.attempts + 1,
+          pending: true,
+        },
+      },
+      {
+        publicActivity: activity(
+          "runner",
+          "finalization",
+          "evidence-retry",
+          "Reserved one semantic finalization recovery attempt.",
+        ),
+      },
+    );
+    return true;
+  }
+
+  function completedFinalizationRecovery() {
+    return {
+      ...state().finalizationRecovery,
+      required: false,
+      pending: false,
+      feedback: null,
+    };
+  }
+
   function latestFindingEntries(entries) {
     const byFinding = new Map();
     for (const entry of entries) {
@@ -2377,9 +2493,9 @@ ${JSON.stringify(
     });
   }
 
-  function exhaustedStableFindingIds() {
-    return state()
-      .findings.map(({ id }) => id)
+  function exhaustedStableFindingIds(findings = state().findings) {
+    return findings
+      .map(({ id }) => id)
       .filter(
         (id) =>
           (state().sameFindingRounds[id] ?? 0) >=
@@ -2389,42 +2505,13 @@ ${JSON.stringify(
 
   async function prepareHandoffIfReady() {
     const current = state();
-    const candidateAccepted =
-      current.candidateReviewResult?.status === "APPROVED" ||
-      (current.candidateReviewResult?.status === "FINDINGS" &&
-        current.candidateReviewResult.findingIds.every((id) =>
-          findingOverrideApplies(id, current.candidateReviewedFingerprint),
-        ));
-    const confirmationAccepted =
-      ["UNCHANGED", "ACCEPTED"].includes(
-        current.reviewResult?.validationChange,
-      ) ||
-      (current.reviewResult?.validationChange === "REJECTED" &&
-        validationRejectionIsOverridden(
-          current.previousFindings,
-          current.reviewedFingerprint,
-        ));
-    if (
-      current.finalizationResult?.status !== "PASS" ||
-      !candidateAccepted ||
-      current.findings.length !== 0 ||
-      current.pendingDisputes.length !== 0 ||
-      current.finalizedFingerprint === null ||
-      current.reviewedFingerprint !== current.finalizedFingerprint ||
-      !confirmationAccepted ||
-      (current.settings.mode === "lazy" &&
-        current.candidateConfirmationFingerprint !==
-          current.candidateReviewedFingerprint) ||
-      (current.settings.mode === "lazy" &&
-        current.cleanConfirmationFingerprint !== current.finalizedFingerprint)
-    ) {
+    if (!handoffGatePassed(current)) {
       return false;
     }
     if ((await contentFingerprint()) !== current.finalizedFingerprint) {
       await transition({
         ...current,
-        workflowState:
-          current.settings.mode === "lazy" ? "CHECK_AND_FIX" : "REVIEW",
+        workflowState: candidateCheckpoint(current.settings),
         ...clearedCandidateAndTerminalGate(),
         previousFindings: current.previousFindings,
         pendingCorrection: true,
@@ -2448,13 +2535,23 @@ ${JSON.stringify(
     return true;
   }
 
-  async function runHandoff() {
+  async function runHandoff(verificationOnly = false) {
     const current = state();
-    const repositoryBaseline = await runtime.git.stagePolishingHandoff({
+    if (!handoffGatePassed(current)) {
+      throw workflowError("Polishing handoff requires accepted gate evidence.");
+    }
+    const handoffOptions = {
       expectedSnapshot: current.repositoryBaseline,
       finalizedFingerprint: current.finalizedFingerprint,
       reviewedFingerprint: current.reviewedFingerprint,
-    });
+    };
+    const inspected = verificationOnly
+      ? await runtime.git.inspectPolishingHandoff(handoffOptions)
+      : null;
+    if (inspected?.status === "untouched") return false;
+    const repositoryBaseline = verificationOnly
+      ? inspected.snapshot
+      : await runtime.git.stagePolishingHandoff(handoffOptions);
     await transition(
       {
         ...current,
@@ -2516,8 +2613,7 @@ ${JSON.stringify(
     await transition(
       {
         ...invalidatedLegacyValidation(current),
-        workflowState:
-          current.settings.mode === "lazy" ? "CHECK_AND_FIX" : "REVIEW",
+        workflowState: candidateCheckpoint(current.settings),
         workerValidation: null,
         reviewerValidation: null,
         validationMigrationDisagreement: null,
@@ -2536,6 +2632,36 @@ ${JSON.stringify(
 
   async function applyResumeAction() {
     if (resumeAction === null) {
+      if (
+        state().workflowState === "WAITING_FOR_USER" &&
+        currentRun.pause.reason === "finalization_evidence_rejected"
+      ) {
+        if (
+          (await readCurrentInputs()) === null ||
+          !(await verifyPersistedRepository())
+        )
+          return false;
+        const recovery = state().finalizationRecovery;
+        await transition(
+          {
+            ...state(),
+            workflowState: "FINALIZE",
+            finalizationRecovery: {
+              ...recovery,
+              additionalAttempts: recovery.additionalAttempts + 1,
+            },
+          },
+          {
+            pause: null,
+            publicActivity: activity(
+              "runner",
+              "finalization",
+              "evidence-retry-authorized",
+              "One additional semantic finalization attempt explicitly authorized.",
+            ),
+          },
+        );
+      }
       return;
     }
     const current = state();
@@ -2582,36 +2708,50 @@ ${JSON.stringify(
       );
       return;
     }
-    const finding = current.findings.find(
-      ({ id }) => id === resumeAction.findingId,
-    );
+    const recovery = current.finalizationRecovery;
+    const fingerprint = findingFingerprint(current);
+    const finding = [
+      ...current.findings,
+      ...finalizationFeedbackFindings(current),
+    ].find(({ id }) => id === resumeAction.findingId);
     if (
-      current.settings.mode === "lazy" ||
+      !polishingPolicy(current.settings).independentReview ||
+      (combinedReview(current.settings) &&
+        currentRun.pause.resumeState === "CHECK_AND_FIX") ||
       finding === undefined ||
-      (current.reviewedFingerprint === null &&
-        current.candidateReviewedFingerprint === null &&
-        (current.finalizationResult?.status !== "PASS" ||
-          current.finalizedFingerprint === null)) ||
-      !["fix_limit_reached", "no_progress"].includes(currentRun.pause.reason)
+      fingerprint === null ||
+      findingOverrideApplies(resumeAction.findingId, fingerprint) ||
+      ![
+        "fix_limit_reached",
+        "no_progress",
+        "finalization_evidence_rejected",
+      ].includes(currentRun.pause.reason)
     ) {
       throw workflowError("Finding override is not applicable.");
     }
     if (!(await verifyPersistedRepository())) {
       return;
     }
-    const findingFingerprint =
-      current.reviewedFingerprint ??
-      current.candidateReviewedFingerprint ??
-      (current.finalizationResult?.status === "PASS"
-        ? current.finalizedFingerprint
-        : null);
-    if ((await contentFingerprint()) !== findingFingerprint) {
+    if ((await contentFingerprint()) !== fingerprint) {
       await pause("unsafe_git_state", {
         code: "ERR_OVERRIDE_FINGERPRINT_CHANGED",
       });
       return;
     }
     const findings = current.findings.filter(({ id }) => id !== finding.id);
+    const feedback =
+      recovery.feedback === null
+        ? null
+        : {
+            ...recovery.feedback,
+            findings: recovery.feedback.findings.filter(
+              ({ id }) => id !== resumeAction.findingId,
+            ),
+            finalizationFindingIds:
+              recovery.feedback.finalizationFindingIds.filter(
+                (id) => id !== resumeAction.findingId,
+              ),
+          };
     const pendingDisputes = current.pendingDisputes.filter(
       ({ findingId }) => findingId !== finding.id,
     );
@@ -2622,16 +2762,53 @@ ${JSON.stringify(
         ...current.findingOverrides.filter(
           ({ findingId }) => findingId !== finding.id,
         ),
-        { findingId: finding.id, fingerprint: findingFingerprint },
+        { findingId: finding.id, fingerprint },
       ],
     });
     const blockersResolved =
       findings.length === 0 && pendingDisputes.length === 0;
+    if (currentRun.pause.reason === "finalization_evidence_rejected") {
+      const resolved = feedback.finalizationFindingIds.length === 0;
+      await transition(
+        {
+          ...state(),
+          ...findingDecisions,
+          workflowState: resolved ? "FINALIZE" : "WAITING_FOR_USER",
+          finalizationRecovery: {
+            ...recovery,
+            feedback,
+            additionalAttempts:
+              recovery.additionalAttempts + (resolved ? 1 : 0),
+          },
+        },
+        {
+          pause: resolved
+            ? null
+            : {
+                ...currentRun.pause,
+                evidence: feedback.finalizationFindingIds.map(
+                  (id) =>
+                    `Finalization evidence finding ${id} remains unresolved.`,
+                ),
+              },
+          publicActivity: activity(
+            "runner",
+            "finalization",
+            "finding-overridden",
+            `Finalization finding ${resumeAction.findingId} explicitly overridden; replacement evidence is still required.`,
+          ),
+        },
+      );
+      return resolved;
+    }
     await transition(
       {
         ...current,
+        finalizationRecovery: { ...recovery, feedback },
         ...(blockersResolved ? clearedGateAfterResolvedFindings(current) : {}),
-        workflowState: blockersResolved ? "REVIEW" : "RESOLVE_FINDINGS",
+        workflowState: blockersResolved
+          ? candidateCheckpoint(current.settings)
+          : "RESOLVE_FINDINGS",
         findings,
         pendingDisputes,
         ...findingDecisions,
@@ -2925,6 +3102,10 @@ The runner will derive validation inventories from the independently accepted ro
       return productDecision(result.decision, "BOOTSTRAP");
     }
     if (result.status === "DISAGREEMENT") {
+      if (!polishingPolicy(state().settings).bootstrapArbitration) {
+        await pause("bootstrap_disagreement", { resumeState: "BOOTSTRAP" });
+        return false;
+      }
       await transition(
         { ...state(), bootstrapDisagreement: result.disagreement },
         {
@@ -2960,6 +3141,8 @@ The runner will derive validation inventories from the independently accepted ro
   }
 
   async function arbitrateBootstrap() {
+    if (!polishingPolicy(state().settings).bootstrapArbitration)
+      return reconcileBootstrap();
     const result = await runBootstrapContract({
       role: "arbiter",
       schema: BOOTSTRAP_ARBITRATION_SCHEMA,
@@ -3026,6 +3209,8 @@ The runner will derive validation inventories from the independently accepted ro
       POLISH_SCHEMA,
       (evidence) => `${POLISH_INSTRUCTIONS}
 
+${prefinalizationTrustedCommands()}
+
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
 ${evidence}${
@@ -3057,8 +3242,7 @@ ${evidence}${
     await transition(
       {
         ...state(),
-        workflowState:
-          state().settings.mode === "lazy" ? "CHECK_AND_FIX" : "REVIEW",
+        workflowState: candidateCheckpoint(state().settings),
         polishSummary: result.summary,
         ...clearedCandidateAndTerminalGate(),
         previousFindings:
@@ -3086,6 +3270,7 @@ ${evidence}${
   }
 
   async function runFinalizationTurn() {
+    if (!(await prepareFinalizationRecovery())) return false;
     const persistedCorrection = state().pendingFinalizationCorrection;
     const beforeFingerprint =
       persistedCorrection?.contentFingerprint ?? (await contentFingerprint());
@@ -3118,22 +3303,13 @@ ${evidence}${
 ${PRODUCT_DECISION_INSTRUCTIONS}
 ${finalizationGuidanceInstructions(selectedGuidance)}
 
+${state().finalizationRecovery.required ? FINALIZATION_RECOVERY_INSTRUCTIONS + "\n\nAccepted evidence findings:\n" + JSON.stringify(finalizationFeedbackFindings(state())) : ""}
+
 ${trustedValidationInstructions()}
 
 ${evidence}
 
-Established required-check inventory:
-${JSON.stringify(state().requiredChecks, null, 2)}
-
-Established validation infrastructure:
-${JSON.stringify(
-  {
-    paths: state().validationInfrastructure,
-    fingerprint: state().validationInfrastructureFingerprint,
-  },
-  null,
-  2,
-)}${
+${establishedValidationPrompt(state())}${
               correction === undefined
                 ? ""
                 : `\n\n${FINALIZATION_CORRECTION_INSTRUCTIONS}\n\nCorrection diagnostic:\n${JSON.stringify(correction, null, 2)}`
@@ -3150,10 +3326,55 @@ ${JSON.stringify(
           if (output === null) {
             return null;
           }
-          const result = normalizeFinalizationRoleOutput(
-            output,
-            state().trustedValidation.commands.map(({ command }) => command),
+          const result = await validateValidationInventory(
+            normalizeFinalizationRoleOutput(
+              output,
+              state().trustedValidation.commands.map(({ command }) => command),
+            ),
+            context,
           );
+          if (
+            state().finalizationRecovery.required &&
+            ![
+              "SKILL_MISSING",
+              "SKILL_INVALID",
+              "PRODUCT_DECISION_REQUIRED",
+            ].includes(result.status)
+          ) {
+            if (
+              state().requiredChecks.some(
+                (check) =>
+                  !result.requiredChecks.some(
+                    (candidate) =>
+                      candidate.id === check.id &&
+                      candidate.command === check.command,
+                  ),
+              )
+            ) {
+              throw invalidRoleOutput(
+                "Finalization recovery cannot weaken the established checks.",
+                context,
+                {
+                  field: "requiredChecks",
+                  constraint: "preserves-established-checks",
+                },
+              );
+            }
+            if (
+              state().validationInfrastructure.some(
+                (path) => !result.validationInfrastructure.includes(path),
+              )
+            ) {
+              throw invalidRoleOutput(
+                "Finalization recovery cannot remove established infrastructure.",
+                context,
+                {
+                  field: "validationInfrastructure",
+                  constraint: "preserves-established-infrastructure",
+                },
+              );
+            }
+          }
           if (
             selectedGuidance.skillPath === null &&
             ["SKILL_MISSING", "SKILL_INVALID"].includes(result.status)
@@ -3181,7 +3402,11 @@ ${JSON.stringify(
             );
           }
           if (
-            !["SKILL_MISSING", "SKILL_INVALID"].includes(result.status) &&
+            ![
+              "SKILL_MISSING",
+              "SKILL_INVALID",
+              "PRODUCT_DECISION_REQUIRED",
+            ].includes(result.status) &&
             state().trustedValidation.commands.some(
               ({ command }) =>
                 !result.requiredChecks.some(
@@ -3444,6 +3669,7 @@ ${JSON.stringify(
           ...state(),
           workflowState: "RESOLVE_FINDINGS",
           finalizationResult,
+          finalizationRecovery: completedFinalizationRecovery(),
           finalizedFingerprint: null,
           confirmationCorrection: null,
           pendingConfirmationCorrection: null,
@@ -3474,6 +3700,7 @@ ${JSON.stringify(
         ...state(),
         workflowState: "CONFIRM",
         finalizationResult,
+        finalizationRecovery: completedFinalizationRecovery(),
         finalizedFingerprint: fingerprint,
         confirmationCorrection: null,
         pendingConfirmationCorrection: null,
@@ -3495,7 +3722,7 @@ ${JSON.stringify(
     return true;
   }
 
-  function lazyValidationPrompt(current) {
+  function establishedValidationPrompt(current) {
     return `Established validation tuple:
 ${JSON.stringify(
   {
@@ -3509,7 +3736,11 @@ ${JSON.stringify(
   },
   null,
   2,
-)}
+)}`;
+  }
+
+  function confirmationValidationPrompt(current) {
+    return `${establishedValidationPrompt(current)}
 
 Candidate validation tuple and finalization evidence:
 ${JSON.stringify(current.finalizationResult, null, 2)}`;
@@ -3615,7 +3846,9 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
       });
       return false;
     }
-    const stableFindingIds = exhaustedStableFindingIds();
+    const stableFindingIds = exhaustedStableFindingIds(
+      primaryFindings(current),
+    );
     if (current.pendingLazyCorrection === null && stableFindingIds.length > 0) {
       await pause("no_progress", {
         findingIds: stableFindingIds,
@@ -3648,14 +3881,20 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
           CHECK_AND_FIX_SCHEMA,
           (evidence) => `${CHECK_AND_FIX_INSTRUCTIONS}
 
+${prefinalizationTrustedCommands()}
+
 ${evidence}
 
 Concrete findings from the preceding clean confirmation:
-${JSON.stringify(state().findings, null, 2)}${lazyCorrectionPrompt(correction)}`,
+${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(correction)}`,
           {
             access: "workspace-write",
             checkpoint:
-              correction === null ? "work" : "lazy-correction:check-and-fix",
+              correction === null
+                ? combinedReview(current.settings)
+                  ? "primary-check"
+                  : "work"
+                : "lazy-correction:check-and-fix",
             freshSession: correction !== null,
             recoveryContext: workContext({ includePolishSummary: true }),
           },
@@ -3710,16 +3949,20 @@ ${JSON.stringify(state().findings, null, 2)}${lazyCorrectionPrompt(correction)}`
         const nextCounters = alreadyCharged
           ? counters()
           : { ...counters(), fixRounds: counters().fixRounds + 1 };
-        const fixingConfirmationFindings = current.findings.length > 0;
+        const fixingConfirmationFindings = primaryFindings(current).length > 0;
         await transition(
           {
             ...state(),
             workflowState: "CLEAN_CONFIRM",
             ...clearedCandidateAndConfirmationGate(current),
             pendingLazyCorrection: null,
-            previousFindings: fixingConfirmationFindings
-              ? current.findings
-              : current.previousFindings,
+            previousFindings:
+              !combinedReview(current.settings) && fixingConfirmationFindings
+                ? current.findings
+                : current.previousFindings,
+            primaryFindings: combinedReview(current.settings)
+              ? current.primaryFindings
+              : [],
             findings: [],
             pendingCorrection:
               current.pendingCorrection || fixingConfirmationFindings,
@@ -3792,10 +4035,14 @@ ${evidence}
 Inspected candidate fingerprint: ${inspectedFingerprint}
 
 Previous candidate-confirmation findings:
-${JSON.stringify(state().previousFindings, null, 2)}${lazyCorrectionPrompt(correction)}`,
+${JSON.stringify(combinedReview(current.settings) ? current.primaryFindings : current.previousFindings, null, 2)}${lazyCorrectionPrompt(correction)}`,
           {
             checkpoint:
-              correction === null ? "work" : "lazy-correction:clean-confirm",
+              correction === null
+                ? combinedReview(current.settings)
+                  ? "primary-clean"
+                  : "work"
+                : "lazy-correction:clean-confirm",
             freshSession: correction !== null,
             recoveryContext: workContext({ includePolishSummary: true }),
           },
@@ -3805,7 +4052,9 @@ ${JSON.stringify(state().previousFindings, null, 2)}${lazyCorrectionPrompt(corre
         }
         const result = normalizeCandidateReviewRoleOutput(
           output,
-          current.previousFindings,
+          combinedReview(current.settings)
+            ? current.primaryFindings
+            : current.previousFindings,
           { clean: true },
         );
         const confirmedFingerprint = await contentFingerprint();
@@ -3856,11 +4105,19 @@ ${JSON.stringify(state().previousFindings, null, 2)}${lazyCorrectionPrompt(corre
               ...state(),
               workflowState: "CHECK_AND_FIX",
               pendingLazyCorrection: null,
-              candidateReviewResult,
-              candidateReviewedFingerprint: confirmedFingerprint,
+              ...(combinedReview(current.settings)
+                ? {
+                    primaryFindings: result.findings,
+                    candidateReviewResult: null,
+                    candidateReviewedFingerprint: null,
+                  }
+                : {
+                    candidateReviewResult,
+                    candidateReviewedFingerprint: confirmedFingerprint,
+                    findings: result.findings,
+                    previousFindings: result.findings,
+                  }),
               candidateConfirmationFingerprint: null,
-              findings: result.findings,
-              previousFindings: result.findings,
               correctionHistory: progress.history,
               sameFindingRounds: progress.sameFindingRounds,
               pendingCorrection: false,
@@ -3878,19 +4135,29 @@ ${JSON.stringify(state().previousFindings, null, 2)}${lazyCorrectionPrompt(corre
           );
           return true;
         }
-        const checkpoint =
-          await checkpointAfterCandidateConvergence(confirmedFingerprint);
+        const checkpoint = combinedReview(current.settings)
+          ? { workflowState: "REVIEW" }
+          : await checkpointAfterCandidateConvergence(confirmedFingerprint);
         await transition(
           {
             ...state(),
             ...checkpoint,
             pendingLazyCorrection: null,
-            candidateReviewResult,
-            candidateReviewedFingerprint: confirmedFingerprint,
+            candidateReviewResult: combinedReview(current.settings)
+              ? null
+              : candidateReviewResult,
+            candidateReviewedFingerprint: combinedReview(current.settings)
+              ? null
+              : confirmedFingerprint,
             candidateConfirmationFingerprint: confirmedFingerprint,
+            primaryFindings: [],
             findings: [],
-            previousFindings: [],
-            pendingCorrection: false,
+            previousFindings: combinedReview(current.settings)
+              ? current.previousFindings
+              : [],
+            pendingCorrection: combinedReview(current.settings)
+              ? current.pendingCorrection
+              : false,
           },
           {
             publicActivity: activity(
@@ -3899,7 +4166,9 @@ ${JSON.stringify(state().previousFindings, null, 2)}${lazyCorrectionPrompt(corre
               "clean",
               checkpoint.workflowState === "CONFIRM"
                 ? "Worker accepted an unchanged candidate; retained finalization evidence remains current."
-                : "Worker accepted an unchanged candidate for terminal finalization.",
+                : checkpoint.workflowState === "REVIEW"
+                  ? "Worker accepted an unchanged candidate for independent review."
+                  : "Worker accepted an unchanged candidate for terminal finalization.",
             ),
           },
         );
@@ -3929,6 +4198,15 @@ ${JSON.stringify(state().previousFindings, null, 2)}${lazyCorrectionPrompt(corre
         return null;
       }
       const fingerprint = await contentFingerprint();
+      if (
+        combinedReview(current.settings) &&
+        current.candidateConfirmationFingerprint !== fingerprint
+      ) {
+        await pause("unsafe_git_state", {
+          code: "ERR_READ_ONLY_REPOSITORY_CHANGED",
+        });
+        return null;
+      }
       const correctionScope = await reviewCorrectionScope(current, fingerprint);
       if (
         current.reviewCorrection !== null &&
@@ -4205,7 +4483,7 @@ ${evidence}
 Finalized content fingerprint: ${inspectedFingerprint}
 Validation-infrastructure fingerprint: ${inspectedValidationFingerprint}
 
-${lazyValidationPrompt(current)}
+${confirmationValidationPrompt(current)}
 
 Previous terminal-confirmation findings:
 ${JSON.stringify(current.previousFindings, null, 2)}${
@@ -4251,6 +4529,8 @@ ${JSON.stringify(current.previousFindings, null, 2)}${
         if (result.status === "PRODUCT_DECISION_REQUIRED") {
           return productDecision(result.decision, "BOOTSTRAP");
         }
+        if (await routeFinalizationRejection(result, confirmedFingerprint))
+          return true;
         const reviewResult = {
           status: result.status === "CLEAN" ? "APPROVED" : "FINDINGS",
           validationChange: result.validationChange,
@@ -4412,7 +4692,7 @@ ${PRODUCT_DECISION_INSTRUCTIONS}
 
 ${evidence}
 
-${lazyValidationPrompt(current)}
+${confirmationValidationPrompt(current)}
 
 Previous terminal-confirmation findings:
 ${JSON.stringify(current.previousFindings, null, 2)}
@@ -4518,6 +4798,8 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}${
       );
       return true;
     }
+    if (await routeFinalizationRejection(result, reviewedFingerprint))
+      return true;
     const reviewResult = {
       status: result.status,
       validationChange: result.validationChange,
@@ -4684,7 +4966,7 @@ ${JSON.stringify(current.pendingDisputes, null, 2)}`,
           : {}),
         workflowState:
           findings.length === 0 && pendingDisputes.length === 0
-            ? "REVIEW"
+            ? candidateCheckpoint(current.settings)
             : "RESOLVE_FINDINGS",
         findings,
         pendingDisputes,
@@ -4767,7 +5049,7 @@ ${JSON.stringify(priorFindingDecisions([dispute.findingId]), null, 2)}`,
           : {}),
         workflowState:
           findings.length === 0 && pendingDisputes.length === 0
-            ? "REVIEW"
+            ? candidateCheckpoint(current.settings)
             : state().workflowState,
         findings,
         pendingDisputes,
@@ -4850,12 +5132,11 @@ ${JSON.stringify(
       return true;
     }
     if (result.direction === "RECONSIDER_FINDINGS") {
-      const retainedFinalization =
-        current.finalizationResult?.status === "PASS";
+      const retainedFinalization = finalizationGatePassed(current);
       await transition(
         {
           ...current,
-          ...(retainedFinalization
+          ...(retainedFinalization || combinedReview(current.settings)
             ? {
                 ...clearedCandidateAndConfirmationGate(current),
                 previousFindings: current.findings,
@@ -4867,7 +5148,7 @@ ${JSON.stringify(
                 candidateReviewResult: null,
                 candidateReviewedFingerprint: null,
               }),
-          workflowState: "REVIEW",
+          workflowState: candidateCheckpoint(current.settings),
           blockedSinceStagnation: 0,
           stagnationArbitrationUsed: true,
           stagnationDirection: direction,
@@ -4905,10 +5186,7 @@ ${JSON.stringify(
 
   async function runResolutionTurn() {
     const current = state();
-    if (
-      current.findings.length === 0 &&
-      current.finalizationResult?.status === "PASS"
-    ) {
+    if (current.findings.length === 0 && finalizationGatePassed(current)) {
       await prepareHandoffIfReady();
       return true;
     }
@@ -4950,7 +5228,10 @@ ${JSON.stringify(
       current.blockedSinceStagnation >= current.settings.stagnationWindowRounds
     ) {
       if (
-        current.settings.mode === "lazy" ||
+        !polishingPolicy(current.settings).arbitration ||
+        (combinedReview(current.settings) &&
+          (current.findings.length === 0 ||
+            current.finalizationResult?.status === "FAIL")) ||
         current.stagnationArbitrationUsed
       ) {
         await pause("no_progress", {
@@ -4994,7 +5275,9 @@ ${JSON.stringify(
     const turn = await runRole(
       "worker",
       FINDING_RESOLUTION_SCHEMA,
-      (evidence) => `${FINDING_RESOLUTION_INSTRUCTIONS}${
+      (evidence) => `${FINDING_RESOLUTION_INSTRUCTIONS}
+
+${prefinalizationTrustedCommands()}${
         budgetExhausted
           ? "\nThe fix budget is exhausted: do not modify the repository and return DISPUTE only where valid; a required FIX will pause for additional budget."
           : ""
@@ -5124,11 +5407,10 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
       await transition(
         {
           ...state(),
-          ...(changed || current.finalizationResult?.status !== "PASS"
+          ...(changed || !finalizationGatePassed(current)
             ? clearedCandidateAndTerminalGate()
             : clearedCandidateAndConfirmationGate(current)),
-          workflowState:
-            current.settings.mode === "lazy" ? "CHECK_AND_FIX" : "REVIEW",
+          workflowState: candidateCheckpoint(current.settings),
           previousFindings:
             current.findings.length === 0
               ? current.previousFindings
@@ -5171,6 +5453,77 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
 
   assertResumeActionApplicable();
   try {
+    if (operatorStop) {
+      if (state().workflowState === "HANDOFF") {
+        await runHandoff(true);
+        return currentRun;
+      }
+      if (state().repositoryBaseline !== null) {
+        const current = state();
+        const writable =
+          interruptedTurn !== null &&
+          interruptedTurnIsWritable(interruptedTurn);
+        const inspected = await runtime.git.reconcileInterrupted(
+          current.repositoryBaseline,
+          {
+            allowWorkspaceChanges: writable,
+            allowIndexChanges: false,
+          },
+        );
+        if (
+          current.pendingEdit === null &&
+          (await readCurrentInputs()) === null
+        )
+          return currentRun;
+        if (
+          inspected.contentFingerprint !==
+          current.repositoryBaseline.contentFingerprint
+        ) {
+          const fixing = ["check-and-fix", "resolve-findings"].includes(
+            interruptedTurn?.phase,
+          );
+          const samePhase =
+            current.workflowState === "POLISH" ||
+            current.workflowState === "CHECK_AND_FIX";
+          const workflowState = samePhase
+            ? current.workflowState
+            : candidateCheckpoint(current.settings);
+          const alreadyCharged =
+            interruptedTurn?.phase === "check-and-fix"
+              ? current.pendingLazyCorrection?.fixRoundCharged === true
+              : current.pendingCorrection;
+          await transition(
+            {
+              ...current,
+              ...clearedCandidateAndTerminalGate(),
+              workflowState,
+              repositoryBaseline: inspected,
+              ...(interruptedTurn?.phase === "check-and-fix"
+                ? markPendingLazyCorrectionCharged(current)
+                : {}),
+              previousFindings: current.findings.length
+                ? current.findings
+                : current.previousFindings,
+              findings: [],
+              reviewReconsideration: [],
+              pendingCorrection: fixing || current.pendingCorrection,
+            },
+            {
+              nextCounters: {
+                ...counters(),
+                fixRounds:
+                  counters().fixRounds + (fixing && !alreadyCharged ? 1 : 0),
+              },
+            },
+          );
+          if (!samePhase) {
+            currentRun = await runtime.finishAgentTurn(interruptedTurn);
+            interruptedTurn = null;
+          }
+        }
+      }
+      return currentRun;
+    }
     if (!(await recoverInterruptedTurn())) {
       return currentRun;
     }
@@ -5184,8 +5537,8 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
       }
       return currentRun;
     }
-    if (resumeAction !== null && !resumeActionSuperseded) {
-      await applyResumeAction();
+    if (!resumeActionSuperseded) {
+      if ((await applyResumeAction()) === false) return currentRun;
     }
     if (state().workflowState === "WAITING_FOR_USER") {
       if (state().pendingEdit !== null) {
@@ -5201,6 +5554,7 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
           ].includes(currentRun.pause.reason)) ||
         ([
           "backend_unavailable",
+          "bootstrap_disagreement",
           "environment_blocked",
           "finalization_cannot_pass",
           "finalization_skill_invalid",
@@ -5403,7 +5757,7 @@ ${evidence}`,
           }
           continue;
         }
-        if (current.settings.mode === "lazy") {
+        if (!polishingPolicy(current.settings).independentBootstrap) {
           if (!(await completeLazyBootstrap())) {
             return currentRun;
           }
@@ -5464,7 +5818,7 @@ ${evidence}`,
 
       if (current.workflowState === "CONFIRM") {
         const confirmed =
-          current.settings.mode === "lazy"
+          polishingPolicy(current.settings).terminalConfirmer === "worker"
             ? await runLazyConfirmationTurn()
             : await runIndependentConfirmationTurn();
         if (!confirmed) {
@@ -5497,6 +5851,15 @@ ${evidence}`,
       );
     }
   } catch (cause) {
+    if (cause?.code === "ERR_PROJECT_CONFIGURATION_CHANGED") {
+      throw cause;
+    }
+    if (
+      operatorStop &&
+      cause?.code === "ERR_INTERRUPTED_REPOSITORY_CONTROL_CHANGED"
+    ) {
+      return pause(interruptedControlChange(cause), { code: cause.code });
+    }
     if (cause?.code === "ERR_READ_ONLY_REPOSITORY_CHANGED") {
       return pause("read_only_agent_mutated_repository", {
         code: cause.code,

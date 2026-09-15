@@ -106,6 +106,7 @@ test("resolves the external state root and creates a complete run", async (t) =>
   assert.equal(created.state.revision, 1);
   assert.equal(created.state.projectPath, projectPath);
   assert.equal(created.state.taskPath, taskPath);
+  assert.equal(created.state.projectConfigurationProtection, null);
   assert.deepEqual(created.state.sessionLineage, {
     source: "codex:source-session",
     sourceProfile: null,
@@ -312,6 +313,7 @@ test("migrates a legacy run envelope as one leased journal transition", async (t
   legacyState.schemaVersion = 1;
   delete legacyState.runtimeCompatibility;
   delete legacyState.activeTurn;
+  delete legacyState.projectConfigurationProtection;
   const legacyEvent = JSON.parse((await readFile(eventsPath, "utf8")).trim());
   legacyEvent.schemaVersion = 1;
   legacyEvent.state = legacyState;
@@ -325,6 +327,7 @@ test("migrates a legacy run envelope as one leased journal transition", async (t
   const legacyRun = await store.loadRun(created.state.runId);
   assert.equal(legacyRun.schemaVersion, 1);
   assert.equal(legacyRun.runtimeCompatibility, null);
+  assert.equal(legacyRun.projectConfigurationProtection, null);
   assert.equal(await readFile(statePath, "utf8"), legacyStateSource);
   assert.equal(await readFile(eventsPath, "utf8"), legacyEventSource);
 
@@ -350,6 +353,7 @@ test("migrates a legacy run envelope as one leased journal transition", async (t
   assert.equal(migrated.schemaVersion, RUN_STATE_SCHEMA_VERSION);
   assert.equal(migrated.revision, 2);
   assert.deepEqual(migrated.runtimeCompatibility, RUNTIME_COMPATIBILITY);
+  assert.equal(migrated.projectConfigurationProtection, null);
   assert.deepEqual(await resumedStore.loadRun(created.state.runId), migrated);
   const events = (await readFile(eventsPath, "utf8"))
     .trimEnd()
@@ -686,5 +690,51 @@ test("repairs only a partial final event and rejects invalid durable state", asy
     reopenedStore.loadRun(created.state.runId),
     (error) =>
       error instanceof RunStoreError && error.code === "ERR_INVALID_RUN_STATE",
+  );
+});
+
+test("loads revision-bound private history without repairing files and rejects stale transitions", async (t) => {
+  const { created, store } = await createFixture(t);
+  const next = await store.transitionRun(created.lease, {
+    counters: { fixRounds: 1 },
+  });
+  const statePath = join(created.directoryPath, "state.json");
+  const eventsPath = join(created.directoryPath, "events.jsonl");
+  await writeFile(statePath, JSON.stringify(created.state));
+  await appendFile(eventsPath, '{"partial":');
+  const before = await Promise.all([
+    readFile(statePath, "utf8"),
+    readFile(eventsPath, "utf8"),
+  ]);
+  const history = await store.loadRunHistory(created.state.runId);
+  assert.deepEqual(history.run, next);
+  assert.equal(history.events.length, 2);
+  assert.deepEqual(history.events.at(-1).state, history.run);
+  assert.ok(Object.isFrozen(history.events[0].state.pipelineState));
+  await assert.rejects(
+    store.transitionRun(
+      created.lease,
+      { counters: { fixRounds: 2 } },
+      {
+        expectedRevision: created.state.revision,
+      },
+    ),
+    { code: "ERR_RUN_REVISION_CHANGED" },
+  );
+  assert.deepEqual(
+    await Promise.all([
+      readFile(statePath, "utf8"),
+      readFile(eventsPath, "utf8"),
+    ]),
+    before,
+  );
+  await store.transitionRun(
+    created.lease,
+    { counters: { fixRounds: 2 } },
+    { expectedRevision: next.revision },
+  );
+  assert.equal(
+    (await store.loadRunHistory(created.state.runId)).run.revision,
+    3,
   );
 });

@@ -29,8 +29,18 @@ test("tracked example is valid and local configuration is ignored", async () => 
   assert.equal(configuration.defaultProfile, "current");
   assert.equal(configuration.defaultModel, "current");
   assert.equal(configuration.defaultContextSize, "current");
-  assert.deepEqual(configuration.trustedCommands, {});
+  assert.deepEqual(configuration.trustedCommands, {
+    "repository-check": {
+      command: "npm run check",
+      executable: "npm",
+      arguments: ["run", "check"],
+    },
+  });
   assert.equal(configuration.pipelines["plan-authoring"].mode, "independent");
+  assert.equal(
+    configuration.pipelines["plan-authoring"].preferredCommitLineLimit,
+    900,
+  );
   assert.equal(configuration.pipelines["plan-execution"].mode, "independent");
   assert.equal(configuration.pipelines.polishing.mode, "independent");
   assert.deepEqual(configuration.pipelines["plan-authoring"].roles.reviewer, {
@@ -47,7 +57,11 @@ test("tracked example is valid and local configuration is ignored", async () => 
   });
   assert.equal(configuration.pipelines["plan-execution"].finalization, "auto");
   assert.equal(configuration.pipelines.polishing.finalization, "auto");
-  assert.deepEqual(configuration.pipelines.polishing.trustedChecks, []);
+  for (const pipelineId of ["plan-execution", "polishing"]) {
+    assert.deepEqual(configuration.pipelines[pipelineId].trustedChecks, [
+      "repository-check",
+    ]);
+  }
   assert.match(gitignore, /^\/\.agent-runner\.json$/mu);
   assert.ok(Object.isFrozen(configuration));
   assert.ok(Object.isFrozen(configuration.pipelines));
@@ -70,6 +84,7 @@ test("minimal configuration uses pipeline-owned setting defaults", () => {
   assert.deepEqual(configuration.pipelines["plan-authoring"], {
     maxRevisionRounds: 20,
     mode: "independent",
+    preferredCommitLineLimit: 900,
     stagnationWindowRounds: 3,
     roles: {},
   });
@@ -93,6 +108,23 @@ test("minimal configuration uses pipeline-owned setting defaults", () => {
     trustedChecks: [],
     roles: {},
   });
+});
+
+test("combined availability follows every pipeline descriptor", () => {
+  for (const parse of [
+    parseRunnerConfiguration,
+    (source) => parseProjectConfiguration(source, { schemaVersion: 1 }),
+  ]) {
+    for (const pipeline of ["plan-authoring", "plan-execution", "polishing"]) {
+      const source = JSON.stringify({
+        schemaVersion: 1,
+        pipelines: {
+          [pipeline]: { mode: "combined" },
+        },
+      });
+      assert.equal(parse(source).pipelines[pipeline].mode, "combined");
+    }
+  }
 });
 
 test("configuration rejects unsupported shapes and values", () => {
@@ -163,7 +195,7 @@ test("configuration rejects unsupported shapes and values", () => {
     ],
     [
       '{"schemaVersion":1,"pipelines":{"plan-authoring":{"mode":"automatic"}}}',
-      /mode must be independent or lazy/u,
+      /mode must be independent, lazy, or combined/u,
     ],
     [
       '{"schemaVersion":1,"pipelines":{"plan-authoring":{"stagnationWindowRounds":0}}}',
@@ -183,7 +215,7 @@ test("configuration rejects unsupported shapes and values", () => {
     ],
     [
       '{"schemaVersion":1,"pipelines":{"plan-execution":{"mode":"automatic"}}}',
-      /mode must be independent or lazy/u,
+      /mode must be independent, lazy, or combined/u,
     ],
     [
       '{"schemaVersion":1,"pipelines":{"polishing":{"finalization":"checks/finalize.md"}}}',
@@ -191,7 +223,7 @@ test("configuration rejects unsupported shapes and values", () => {
     ],
     [
       '{"schemaVersion":1,"pipelines":{"polishing":{"mode":"automatic"}}}',
-      /mode must be independent or lazy/u,
+      /mode must be independent, lazy, or combined/u,
     ],
     [
       '{"schemaVersion":1,"pipelines":{"plan-execution":{"maxDisputesPerFinding":0}}}',
@@ -363,7 +395,7 @@ test("project configuration rejects untrusted and unsafe fields", () => {
     [{ credentials: {} }, /credentials/u],
     [{ binary: "/usr/bin/codex" }, /binary/u],
     [{ environment: {} }, /environment/u],
-    [{ trustedCommands: {} }, /trustedCommands/u],
+    [{ trustedCommands: [] }, /trustedCommands/u],
     [
       {
         pipelines: {

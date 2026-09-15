@@ -1,6 +1,20 @@
 import { join } from "node:path";
 
 import {
+  clearedCandidateAndTerminalGate,
+  finalizationGatePassed,
+} from "./gate-evidence.js";
+import {
+  candidateCheckpoint,
+  executionPolicy,
+  combinedReview,
+} from "./mode-policy.js";
+import { resolveStopBoundary } from "./commit-checkpoint.js";
+import {
+  canRecoverLegacyConfirmation,
+  prepareLegacyConfirmationRecovery,
+} from "./legacy-confirmation-recovery.js";
+import {
   createPlanExecutionState,
   MAX_CLARIFICATION_ROUNDS,
   PlanExecutionWorkflowError,
@@ -11,6 +25,10 @@ import {
   assertRun as validateRun,
   DEFAULT_FINALIZATION_POLICY,
   EMPTY_TRUSTED_VALIDATION,
+  MAX_SEMANTIC_FINALIZATION_RETRIES,
+  createFinalizationRecovery,
+  finalizationFeedbackFindings,
+  findingFingerprint,
   isFinalizationPolicy,
   resolveActiveRoles,
   sha256,
@@ -62,7 +80,7 @@ function positiveIntegerSetting(defaultValue) {
   });
 }
 
-const PIPELINE_MODES = Object.freeze(["independent", "lazy"]);
+const PIPELINE_MODES = Object.freeze(["independent", "lazy", "combined"]);
 
 function pipelineMode(value) {
   return PIPELINE_MODES.includes(value);
@@ -93,7 +111,7 @@ const SETTINGS = Object.freeze({
   maxSameFindingRounds: positiveIntegerSetting(5),
   mode: Object.freeze({
     defaultValue: "independent",
-    errorMessage: "must be independent or lazy",
+    errorMessage: "must be independent, lazy, or combined",
     recommendedValue: "independent",
     validate: pipelineMode,
     values: PIPELINE_MODES,
@@ -116,12 +134,14 @@ const TASK_INPUTS = Object.freeze({
 });
 const RETRYABLE_PAUSE_REASONS = new Set([
   "backend_unavailable",
+  "bootstrap_disagreement",
   "confirmation_output_invalid",
   "environment_blocked",
   "finalization_cannot_pass",
   "finalization_skill_invalid",
   "finalization_skill_missing",
   "finalization_transition_invalid",
+  "finalization_evidence_rejected",
   "local_artifacts_not_ignored",
   "lazy_output_invalid",
   "review_output_invalid",
@@ -140,9 +160,14 @@ const RESUMABLE_WORKFLOW_STATES = new Set([
   "COMMIT",
 ]);
 const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
+  operator_paused:
+    "The operator paused this run; resume restores its checkpoint and any existing blockers.",
+  operator_canceled: "The operator canceled this run; it cannot resume.",
   arbiter_cannot_resolve:
     "The Arbiter could not resolve the current blocking dispute.",
   backend_unavailable: "The selected backend is temporarily unavailable.",
+  bootstrap_disagreement:
+    "Independent bootstrap summaries remain unresolved. Retry reconciliation after clarifying the repository evidence; combined mode cannot arbitrate bootstrap.",
   bootstrap_inventory_capacity_exhausted:
     "A complete bootstrap validation inventory exceeds the supported bounded capacity.",
   clarification_answers_required:
@@ -165,6 +190,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "The explicitly configured finalization skill is invalid.",
   finalization_skill_missing:
     "The explicitly configured finalization skill is missing.",
+  finalization_evidence_rejected:
+    "Terminal confirmation exhausted semantic finalization retries; correct evidence and explicitly retry complete finalization.",
   finalization_transition_invalid:
     "The runner could not persist validated finalization evidence.",
   fix_limit_reached: "The current step reached its configured fix limit.",
@@ -180,6 +207,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "Optional proactive execution clarification input is pending.",
   product_decision_required:
     "A material product decision is required before execution can continue.",
+  project_configuration_changed:
+    "The resolved project configuration changed; this run cannot continue.",
   read_only_agent_mutated_repository:
     "A read-only turn contaminated the repository; abandon this run and restart from an uncontaminated worktree.",
   review_output_invalid:
@@ -202,6 +231,7 @@ const PUBLIC_DETAIL_REASONS = new Set([
   "finalization_skill_invalid",
   "finalization_skill_missing",
   "finalization_transition_invalid",
+  "finalization_evidence_rejected",
   "plan_revision_required",
   "lazy_output_invalid",
   "review_output_invalid",
@@ -296,7 +326,39 @@ function resumeActionApplies(run, action) {
   }
 }
 
+function publicFindings(state) {
+  return [
+    ...new Map(
+      [
+        ...(Array.isArray(state.findings) ? state.findings : []),
+        ...(Array.isArray(state.primaryFindings) ? state.primaryFindings : []),
+        ...finalizationFeedbackFindings(state),
+      ].map((finding) => [finding.id, finding]),
+    ).values(),
+  ];
+}
+
 function projectPause(run) {
+  if (["operator_paused", "operator_canceled"].includes(run.pause?.reason)) {
+    const retained = run.pause.operatorResume?.pause;
+    const explanation = PUBLIC_PAUSE_EXPLANATIONS[run.pause.reason];
+    return Object.freeze({
+      reason: run.pause.reason,
+      code: publicCode(retained?.code),
+      explanation,
+      evidence: Object.freeze(
+        Object.hasOwn(PUBLIC_PAUSE_EXPLANATIONS, retained?.reason ?? "")
+          ? [`Retained blocker: ${PUBLIC_PAUSE_EXPLANATIONS[retained.reason]}`]
+          : [],
+      ),
+      resumeState: null,
+      nextActions: Object.freeze(
+        run.pause.reason === "operator_paused"
+          ? [Object.freeze({ type: "resume", action: null })]
+          : [],
+      ),
+    });
+  }
   if (run.pause === null) {
     return null;
   }
@@ -310,6 +372,19 @@ function projectPause(run) {
     ? PUBLIC_PAUSE_EXPLANATIONS[reason]
     : "No public diagnostic is available for this pause.";
   const nextActions = [];
+  if (canRecoverLegacyConfirmation(run)) {
+    return Object.freeze({
+      reason: "internal_failure",
+      code: "ERR_CODEX_TURN_FAILED",
+      explanation:
+        "Journal-proven legacy terminal confirmation can be retried after safety revalidation.",
+      evidence: Object.freeze([]),
+      resumeState: "CONFIRM",
+      nextActions: Object.freeze([
+        Object.freeze({ type: "resume", action: null }),
+      ]),
+    });
+  }
   if (
     run.pipelineState.workflowState === "WAITING_FOR_USER" &&
     run.pause.inputRequest !== undefined &&
@@ -349,9 +424,7 @@ function projectPause(run) {
           Object.freeze({ type: "resume", action: extraFixRounds }),
         );
       }
-      for (const finding of Array.isArray(run.pipelineState.findings)
-        ? run.pipelineState.findings
-        : []) {
+      for (const finding of publicFindings(run.pipelineState)) {
         const override = Object.freeze({
           type: "override-finding",
           findingId: finding.id,
@@ -393,11 +466,9 @@ function projectStatus(run) {
     currentStep: state.currentStep,
     planPath: state.planPath ?? join(run.taskPath, "plan.md"),
     findings: Object.freeze(
-      Array.isArray(state.findings)
-        ? state.findings.map(({ id, problem }) =>
-            Object.freeze({ id, summary: problem }),
-          )
-        : [],
+      publicFindings(state).map(({ id, problem }) =>
+        Object.freeze({ id, summary: problem }),
+      ),
     ),
     completedCommits: Object.freeze(
       Array.isArray(state.completedCommits) ? [...state.completedCommits] : [],
@@ -409,6 +480,16 @@ function projectStatus(run) {
 }
 
 function validateResumeAction(run, action) {
+  if (run.pause?.reason === "project_configuration_changed") {
+    throw new Error("A run with changed project configuration cannot resume.");
+  }
+  if (
+    run.pause?.reason === "operator_paused" &&
+    run.pipelineState.workflowState === "WAITING_FOR_USER" &&
+    action === null
+  )
+    return;
+  if (action === null && canRecoverLegacyConfirmation(run)) return;
   const state = run.pipelineState;
   if (state.workflowState !== "WAITING_FOR_USER") {
     throw new Error("Only a persisted paused run can be resumed.");
@@ -418,6 +499,24 @@ function validateResumeAction(run, action) {
       throw new Error("A pending input edit does not accept a resume action.");
     }
     return;
+  }
+  if (
+    action === null &&
+    run.pause?.reason === "finalization_evidence_rejected"
+  ) {
+    const recovery = state.finalizationRecovery;
+    if (
+      run.pause.resumeState === "FINALIZE" &&
+      recovery.required &&
+      !recovery.pending &&
+      recovery.attempts ===
+        MAX_SEMANTIC_FINALIZATION_RETRIES + recovery.additionalAttempts &&
+      Number.isSafeInteger(
+        recovery.additionalAttempts + MAX_SEMANTIC_FINALIZATION_RETRIES + 1,
+      )
+    )
+      return;
+    throw new Error("Semantic finalization retry is not applicable.");
   }
   if (
     action === null &&
@@ -447,24 +546,23 @@ function validateResumeAction(run, action) {
   }
   if (action?.type === "override-finding") {
     if (
-      state.settings?.mode === "lazy" ||
-      !["fix_limit_reached", "no_progress", "dispute_limit_reached"].includes(
-        run.pause?.reason,
+      !executionPolicy(state.settings).independentReview ||
+      (combinedReview(state.settings) &&
+        run.pause?.resumeState === "CHECK_AND_FIX") ||
+      ![
+        "fix_limit_reached",
+        "no_progress",
+        "dispute_limit_reached",
+        "finalization_evidence_rejected",
+      ].includes(run.pause?.reason) ||
+      findingFingerprint(state) === null ||
+      ![...state.findings, ...finalizationFeedbackFindings(state)].some(
+        ({ id }) => id === action.findingId,
       ) ||
-      (state.reviewedFingerprint === null &&
-        state.candidateReviewedFingerprint === null &&
-        (state.finalizationResult?.status !== "PASS" ||
-          state.finalizedFingerprint === null)) ||
-      !state.findings?.some(({ id }) => id === action.findingId) ||
       state.findingOverrides.some(
         ({ findingId, fingerprint }) =>
           findingId === action.findingId &&
-          fingerprint ===
-            (state.reviewedFingerprint ??
-              state.candidateReviewedFingerprint ??
-              (state.finalizationResult?.status === "PASS"
-                ? state.finalizedFingerprint
-                : null)),
+          fingerprint === findingFingerprint(state),
       )
     ) {
       throw new Error("Finding override is not applicable.");
@@ -481,12 +579,14 @@ function validateResumeAction(run, action) {
         (!state.preflightComplete ||
           ([
             "backend_unavailable",
+            "bootstrap_disagreement",
             "confirmation_output_invalid",
             "environment_blocked",
             "finalization_cannot_pass",
             "finalization_skill_invalid",
             "finalization_skill_missing",
             "finalization_transition_invalid",
+            "finalization_evidence_rejected",
             "lazy_output_invalid",
             "review_output_invalid",
           ].includes(run.pause?.reason) &&
@@ -999,15 +1099,12 @@ export function migratePlanExecutionStateV13(run) {
   const preserveAcceptedGate =
     (immutableTerminal || verificationOnly) && preservedFingerprint !== null;
   const preserveLegacyConfirmation =
-    (immutableTerminal || verificationOnly) &&
-    current.finalizationResult?.status === "PASS";
+    (immutableTerminal || verificationOnly) && finalizationGatePassed(current);
   return Object.freeze({
     ...current,
     workflowState:
       needsCandidateMigration && !paused
-        ? current.settings?.mode === "lazy"
-          ? "CHECK_AND_FIX"
-          : "REVIEW"
+        ? candidateCheckpoint(current.settings)
         : current.workflowState,
     reviewCorrection: null,
     pendingReviewCorrection: null,
@@ -1028,21 +1125,18 @@ export function migratePlanExecutionStateV13(run) {
       ? preservedFingerprint
       : null,
     candidateConfirmationFingerprint:
-      preserveAcceptedGate && current.settings?.mode === "lazy"
+      preserveAcceptedGate &&
+      executionPolicy(current.settings).primaryConvergence
         ? preservedFingerprint
         : null,
     candidateMigrationPending: needsCandidateMigration && paused,
     ...(needsCandidateMigration
       ? {
+          ...clearedCandidateAndTerminalGate(),
+          candidateMigrationPending: paused,
           finalizationCorrections: Object.freeze([]),
           pendingFinalizationCorrection: null,
           lazyCorrections: Object.freeze([]),
-          pendingLazyCorrection: null,
-          cleanConfirmationFingerprint: null,
-          finalizationResult: null,
-          finalizedFingerprint: null,
-          reviewResult: null,
-          reviewedFingerprint: null,
           previousFindings:
             current.findings.length === 0
               ? current.previousFindings
@@ -1056,9 +1150,30 @@ export function migratePlanExecutionStateV13(run) {
   });
 }
 
+export function migratePlanExecutionStateV14(run) {
+  return Object.freeze({
+    ...run.pipelineState,
+    finalizationRecovery: createFinalizationRecovery(),
+  });
+}
+
+export function migratePlanExecutionStateV15(run) {
+  // Capacity expansion preserves all accepted evidence and consumed effects.
+  return Object.freeze({ ...run.pipelineState });
+}
+
+export function migratePlanExecutionStateV16(run) {
+  // The leased runner migration preserves saved modes, budgets, and effects.
+  return Object.freeze({
+    ...run.pipelineState,
+    primaryFindings: Object.freeze([]),
+  });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
-  stateVersion: 14,
+  resolveStopBoundary,
+  stateVersion: 17,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1073,6 +1188,9 @@ export const planExecutionPipeline = Object.freeze({
     11: migratePlanExecutionStateV11,
     12: migratePlanExecutionStateV12,
     13: migratePlanExecutionStateV13,
+    14: migratePlanExecutionStateV14,
+    15: migratePlanExecutionStateV15,
+    16: migratePlanExecutionStateV16,
   }),
   roles: ROLES,
   resolveActiveRoles,
@@ -1088,6 +1206,23 @@ export const planExecutionPipeline = Object.freeze({
     status: projectStatus,
   }),
   validateResumeAction,
+  prepareRecovery(run, history) {
+    prepareLegacyConfirmationRecovery(run, history, (historicalRun) => {
+      let current = historicalRun;
+      while (
+        current.pipelineStateVersion < planExecutionPipeline.stateVersion
+      ) {
+        const migration =
+          planExecutionPipeline.migrations[current.pipelineStateVersion];
+        current = {
+          ...current,
+          pipelineState: migration(current),
+          pipelineStateVersion: current.pipelineStateVersion + 1,
+        };
+      }
+      return current;
+    });
+  },
   workflow: Object.freeze({
     createState: createPlanExecutionState,
     run: runPlanExecution,

@@ -871,3 +871,47 @@ test("snapshots detect refs, remote configuration, and identity without exposing
       error.changes.includes("identity"),
   );
 });
+
+test("validation-infrastructure fingerprints accept 512 paths without widening other path lists", async (t) => {
+  const { repositoryPath, service } = await createFixture(t);
+  const paths = Array.from(
+    { length: 512 },
+    (_, index) => `validation-${index}.json`,
+  );
+  await Promise.all(
+    paths.map((path) => writeFile(join(repositoryPath, path), "{}\n")),
+  );
+  const before = await service.validationInfrastructureFingerprint({
+    projectPath: repositoryPath,
+    paths,
+  });
+  assert.equal(
+    await service.validationInfrastructureFingerprint({
+      projectPath: repositoryPath,
+      paths: [...paths].reverse(),
+    }),
+    before,
+  );
+  await writeFile(join(repositoryPath, paths[511]), '{"changed":true}\n');
+  assert.notEqual(
+    await service.validationInfrastructureFingerprint({
+      projectPath: repositoryPath,
+      paths,
+    }),
+    before,
+  );
+  await assert.rejects(
+    service.validationInfrastructureFingerprint({
+      projectPath: repositoryPath,
+      paths: [...paths, "extra.json"],
+    }),
+    { code: "ERR_INVALID_GIT_OPTIONS" },
+  );
+  await assert.rejects(
+    service.contentFingerprint({
+      projectPath: repositoryPath,
+      allowedPaths: paths.slice(0, 257),
+    }),
+    { code: "ERR_INVALID_GIT_OPTIONS" },
+  );
+});

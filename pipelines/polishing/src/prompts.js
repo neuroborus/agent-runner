@@ -1,7 +1,7 @@
 import { MAX_BOOTSTRAP_ITEMS } from "./workflow-contract.js";
 
 export const AGENT_GUIDANCE_SCOPE_INSTRUCTIONS =
-  "Do not make or approve project `.agents` changes unless the user's task explicitly requires them; treat a violation as a finding, not a user question.";
+  "Do not make or approve project `.agents` changes unless the user's task explicitly requires them; treat a violation as a finding, not a user question. Do not modify the resolved project configuration during a run.";
 
 export const NO_DELEGATION_INSTRUCTIONS = `Produce this turn's result yourself as the authorized role. Do not delegate, spawn subagents, or use multi-agent collaboration.`;
 
@@ -17,8 +17,11 @@ For READY, return exactly {"status":"READY","questions":[],"reason":"","question
 For QUESTIONS, provide one or more actionable questions with question and whyItMatters; set reason, question, and whyBlocked to "", and options and evidence to [].
 For PRODUCT_DECISION_REQUIRED, set questions to [] and reason to ""; use the product-decision fields.`;
 
+const VALIDATION_INFRASTRUCTURE_INSTRUCTIONS = `Validation infrastructure means files that own validation commands, discovery, runners, configuration, or mandatory finalization guidance. Exclude ordinary source, individual tests, fixtures, and generated output merely consumed by checks. Classify by the file's responsibility, not its name or extension.`;
+
 export const BOOTSTRAP_INSTRUCTIONS = `Study the repository, task, existing changes, clarifications, project instructions, relevant finalization guidance, other relevant skills, project checks, tests, and Git history independently and without modifying the repository.
 Return a concise bootstrap summary covering the task, current change set, relevant architecture and files, invariants, risks, and the complete project finalization procedure using the provided schema. Independently identify every required check as a stable C-prefixed ID and exact command, plus every repository-relative file that controls those checks, package scripts, test discovery, test runners, or validation configuration.
+${VALIDATION_INFRASTRUCTURE_INSTRUCTIONS}
 Cover every substantive validation requirement, but keep the summary and required-check inventory staging-independent. Do not require staging, a staged handoff, index mutation or inspection, an implicit worktree-versus-index assertion, an alternate index, or commit preparation. Staging and staged-handoff inspection belong only to HANDOFF. Express an applicable content check against HEAD or explicit trees instead of the index.
 Required-check IDs must be unique. Exact commands must be unique, single-line, and already normalized without leading or trailing whitespace. Validation-infrastructure paths must be unique, existing, canonical repository-relative regular files; never return a symlink or a path through a symlink, including a symlink alias of a canonical path.
 Each inventory field has a per-role capacity of ${MAX_BOOTSTRAP_ITEMS} items. If the complete requiredChecks or validationInfrastructure inventory would exceed that capacity, do not truncate it or invent a placeholder. Check requiredChecks first, then validationInfrastructure, and return CAPACITY_EXHAUSTED for the first over-capacity field with capacityField set to its exact field name and capacityLimit set to ${MAX_BOOTSTRAP_ITEMS}.
@@ -45,19 +48,27 @@ For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-dec
 export const BOOTSTRAP_CORRECTION_INSTRUCTIONS = `Your previous structured bootstrap result was rejected by deterministic validation. Make one read-only correction and return a complete replacement result using the same schema.
 Correct only the identified contract violation using current repository evidence. Do not execute the rejected command, run staging-dependent validation, repeat or quote the rejected result, ask an ordinary clarification question, or modify the repository. Preserve the exceptional PRODUCT_DECISION_REQUIRED outcome and its required product-decision fields when its existing criteria are met. Preserve the CAPACITY_EXHAUSTED outcome and its capacity fields on the same basis. A repeated invalid result fails closed.`;
 
+export const FINALIZATION_RECOVERY_INSTRUCTIONS = `Terminal confirmation rejected the previous finalization evidence. Run the complete project finalization procedure again and return fresh evidence under the unchanged full contract.
+Use only the bounded accepted findings below as correction feedback. They never authorize omitting, substituting, removing, or weakening an established check or infrastructure entry. Reinspect the repository and both inventories; do not reuse the rejected PASS or infer its native output. Apply only project-required formatting or generation, preserving ordinary finalization permissions. Content concerns have their own repair route; this turn is not discretionary code fixing.`;
+
 export const FINALIZATION_CORRECTION_INSTRUCTIONS = `Your previous structured finalization result was rejected by deterministic validation. Make one read-only correction and return a complete replacement result using the same finalization schema.
 Correct only the identified contract violation using current repository evidence. Re-execute only corrected staging-independent checks as needed to produce complete direct evidence. Do not execute the rejected command, run staging-dependent validation, repeat or quote the rejected result, ask an ordinary clarification question, or modify repository content, staging, history, refs, remotes, or Git identity. Preserve the exceptional PRODUCT_DECISION_REQUIRED outcome and its required product-decision fields when its existing criteria are met. A repeated invalid result fails closed.`;
+
+const PREFINALIZATION_VALIDATION_INSTRUCTIONS = `The established required-check inventory is input only to the dedicated FINALIZE gate. Do not execute or attest it in this turn.
+Selected runner-trusted commands must never execute inside an agent turn. Their agent-sandbox limitations must not cause BLOCKED or prevent applicable content repairs and semantic review; the runner executes their persisted exact vectors during FINALIZE.`;
 
 export const POLISH_INSTRUCTIONS = `Polish the existing local repository changes into a correct, idiomatic, minimal result that satisfies the task and follows the target project's conventions.
 
 You may modify safe workspace content when correctness requires it. Do not stage or unstage changes or alter the Git index or other Git metadata. Do not create a commit, change HEAD or refs, alter remotes or Git identity, or perform a remote write. The runner alone stages the finalized and reviewed content during handoff. Preserve unrelated work. Before returning, perform a concise self-review.
-The established required-check inventory is input only to the dedicated FINALIZE gate. Do not execute it in this turn or perform generic commit preparation.
+${PREFINALIZATION_VALIDATION_INSTRUCTIONS}
+Do not perform generic commit preparation.
 For COMPLETED, provide summary; set reason, question, and whyBlocked to "", and options and evidence to [].
-For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or comparable external constraints. Set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
+For BLOCKED, use only for external environment constraints affecting work not delegated to a selected runner-trusted command. Set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
 For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-decision fields.
 Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.`;
 
 export const FINALIZATION_INSTRUCTIONS = `Run the complete project finalization procedure in this dedicated turn, including project-required formatting or generated output and staging-independent content review. Do not perform unrelated fixes, stage or unstage changes, alter the Git index or other Git metadata, or create a commit.
+${VALIDATION_INFRASTRUCTURE_INSTRUCTIONS}
 Keep the finalization inventory staging-independent. When project finalization guidance includes staging or generic commit preparation, defer staging, staged/index-relative inspection, and staged handoff to the runner-owned HANDOFF; omit alternate-index workarounds and commit preparation because polishing prohibits them. Do not run git add or inspect the staged diff in this turn. Express each applicable content check against HEAD or explicit trees. This phase-owned deferral is neither a validation blocker nor a skipped required check and must not prevent PASS. After candidate convergence and the fingerprint-bound finalization and terminal-confirmation gate pass, HANDOFF alone stages and performs fixed runner-owned staged-handoff hygiene; it never creates a commit.
 Use PASS only after every agent-executed required check succeeds without being skipped, excluded, substituted, replaced, or weakened. Return the complete requiredChecks and validationInfrastructure actually used, and exactly one ordered checks entry for every required check with bounded direct evidence. Return NOT_RUN only for a command explicitly listed as runner-trusted in the turn context; the runner executes that persisted vector before it accepts the gate. Do not use any other host-reported or user-attested results.
 Changes to package scripts, test discovery, test runners, validation configuration, the check inventory, or its infrastructure paths are allowed only when the task requires them; never make them merely to evade an environmental blocker.
@@ -88,7 +99,8 @@ ${required ? "This skill is explicitly configured, so a missing, escaping, or in
 For PASS, FAIL, SKILL_MISSING, SKILL_INVALID, or BLOCKED, set skillPath to ${JSON.stringify(skillPath)}.`;
 }
 
-export const CANDIDATE_REVIEW_INSTRUCTIONS = `Review the complete current change set independently against the task, resolved context, architecture, tests, edge cases, minimality, and project conventions.
+export const CANDIDATE_REVIEW_INSTRUCTIONS = `In combined mode, independently review the complete candidate even after Worker clean confirmation; primary approval does not replace this gate.
+Review the complete current change set independently against the task, resolved context, architecture, tests, edge cases, minimality, and project conventions.
 
 Do not modify the repository. Review the complete result as a semantic candidate. Do not run the project finalization procedure, attest finalization evidence, or perform generic handoff preparation; those remain owned by FINALIZE, CONFIRM, and HANDOFF.
 Reuse an existing R-prefixed ID for an unchanged finding. Report every actionable blocker, but do not report preferences or already-resolved issues.
@@ -100,23 +112,26 @@ export const REVIEW_INSTRUCTIONS = `Confirm the finalized change set is correct,
 
 Do not modify the repository. This is the distinct terminal confirmation over finalized content and evidence, not candidate review or generic handoff preparation. Reuse an existing R-prefixed ID for an unchanged finding. Report every actionable blocker, but do not report preferences or already-resolved issues.
 Verify the exact required-check evidence and reject omissions, skips, substitutions, weakening, fingerprint mismatch, or validation-infrastructure changes that the task does not authorize.
-Use validationChange UNCHANGED when no change occurred, ACCEPTED with validationEvidence when an authorized change remains complete, or REJECTED with validationEvidence and a finding when it is evasive or unauthorized.
-For APPROVED, set findings, options, and evidence to []; set question and whyBlocked to "".
+Return finalizationFindingIds as the unique subset of finding IDs concerning only finalization evidence and requiring no repository edit. It must be empty unless validationChange is REJECTED. Split mixed evidence and content concerns into separate findings; content findings must never appear in this subset. Pure evidence rejection reruns the complete finalization procedure; content findings follow ordinary repair.
+Use validationChange UNCHANGED when no inventory or infrastructure change occurred and validation evidence is sufficient, ACCEPTED with validationEvidence when an authorized change remains complete, or REJECTED with validationEvidence and a finding when evidence is insufficient or a change is evasive or unauthorized. Evidence rejection is valid even when inventories are unchanged.
+For APPROVED, set finalizationFindingIds to []; set findings, options, and evidence to []; set question and whyBlocked to "".
 For FINDINGS, provide one or more findings with stable IDs, repository-relative file, problem, reason, and suggestedAction; set question and whyBlocked to "", and options and evidence to [].
-For PRODUCT_DECISION_REQUIRED, set findings and validationEvidence to [], and validationChange to UNCHANGED; use the product-decision fields.`;
+For PRODUCT_DECISION_REQUIRED, set findings, finalizationFindingIds, and validationEvidence to [], and validationChange to UNCHANGED; use the product-decision fields.`;
 
 export const CHECK_AND_FIX_INSTRUCTIONS = `Review the changes and verify that they are correct, idiomatic, minimal, and consistent with the project's conventions. If you find any problems, fix them idiomatically and minimally, following the project's conventions.
 
 Review the complete current result as a semantic candidate. Do not run the project finalization procedure, attest finalization evidence, or perform generic handoff preparation; those remain owned by FINALIZE, CONFIRM, and HANDOFF. Do not stage, unstage, or commit.
 When candidate-confirmation findings are supplied, resolve them before reporting UNCHANGED; use UNCHANGED only when no supplied candidate-confirmation finding remains.
+${PREFINALIZATION_VALIDATION_INSTRUCTIONS}
 For CHANGED, use only when you changed repository content; provide summary and set reason, question, and whyBlocked to "", and options and evidence to [].
 For UNCHANGED, use only when you found no problem and changed no repository content; provide summary and set reason, question, and whyBlocked to "", and options and evidence to [].
-For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or a comparable external constraint. Set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
+For BLOCKED, use only for external environment constraints affecting work not delegated to a selected runner-trusted command. Set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
 For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-decision fields.
 Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
 ${PRODUCT_DECISION_INSTRUCTIONS}`;
 
-export const CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS = `Review the candidate changes and verify that they are correct, idiomatic, minimal, and consistent with the project's conventions.
+export const CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS = `This confirms primary convergence in lazy or combined mode. In combined mode, independent review still follows; self-findings go directly to Worker fixing without dispute, override, or arbitration.
+Review the candidate changes and verify that they are correct, idiomatic, minimal, and consistent with the project's conventions.
 
 Do not modify the repository. Return CLEAN only when there are no problems; otherwise return concrete findings without editing the content.
 Do not run the project finalization procedure, attest finalization, validate terminal evidence, or perform generic handoff preparation; those remain owned by FINALIZE, CONFIRM, and HANDOFF.
@@ -129,13 +144,14 @@ export const CLEAN_CONFIRM_INSTRUCTIONS = `Confirm the finalized changes are cor
 
 Do not modify the repository. This is the distinct terminal confirmation over finalized content and evidence. Return CLEAN only when there are no problems; otherwise return concrete findings without editing the content.
 Verify the exact required-check evidence and reject omissions, skips, substitutions, weakening, fingerprint mismatch, or validation-infrastructure changes that the task does not authorize.
-Use validationChange UNCHANGED when no change occurred, ACCEPTED with validationEvidence when an authorized change remains complete, or REJECTED with validationEvidence and a finding when it is evasive or unauthorized.
-For CLEAN, set question and whyBlocked to "", and findings, options, and evidence to [].
+Return finalizationFindingIds as the unique subset of finding IDs concerning only finalization evidence and requiring no repository edit. It must be empty unless validationChange is REJECTED. Split mixed evidence and content concerns into separate findings; content findings must never appear in this subset. Pure evidence rejection reruns the complete finalization procedure; content findings follow ordinary repair.
+Use validationChange UNCHANGED when no inventory or infrastructure change occurred and validation evidence is sufficient, ACCEPTED with validationEvidence when an authorized change remains complete, or REJECTED with validationEvidence and a finding when evidence is insufficient or a change is evasive or unauthorized. Evidence rejection is valid even when inventories are unchanged.
+For CLEAN, set finalizationFindingIds to []; set question and whyBlocked to "", and findings, options, and evidence to [].
 For FINDINGS, provide one or more findings with unique stable R-prefixed numeric IDs, a repository-relative file, and populated problem, reason, and suggestedAction fields; set question and whyBlocked to "", and options and evidence to [].
-For PRODUCT_DECISION_REQUIRED, set findings and validationEvidence to [], and validationChange to UNCHANGED; use the product-decision fields.
+For PRODUCT_DECISION_REQUIRED, set findings, finalizationFindingIds, and validationEvidence to [], and validationChange to UNCHANGED; use the product-decision fields.
 ${PRODUCT_DECISION_INSTRUCTIONS}`;
 
-export const LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS = `Your previous structured lazy checkpoint result was rejected by provider or deterministic validation. Return one complete replacement result using the same checkpoint schema.
+export const LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS = `Your previous structured primary checkpoint result was rejected by provider or deterministic validation. Return one complete replacement result using the same checkpoint schema.
 Correct every identified field-and-constraint violation from current repository evidence and the complete durable checkpoint context. Do not quote or retain the rejected result, disclose provider diagnostics, ask an ordinary clarification question, or provide finalization, confirmation, review, approval, staging, or handoff evidence early. A CHECK_AND_FIX correction remains workspace-writable but must not change the index; report actual safe content mutation exactly. A CLEAN_CONFIRM correction remains repository-read-only. Preserve the original checkpoint semantics exactly. A repeated invalid result pauses the pipeline.`;
 
 export const REVIEW_CORRECTION_INSTRUCTIONS = `Your previous structured candidate-review result was rejected by deterministic validation. Make the pending read-only correction and return a complete replacement result using the same candidate-review schema.
@@ -146,9 +162,10 @@ Correct every identified field-and-constraint violation from current repository 
 
 export const FINDING_RESOLUTION_INSTRUCTIONS = `Resolve every current blocker in one batch. Fix each valid blocker idiomatically and minimally. Dispute an incorrect Reviewer finding only with concise evidence. Modify safe workspace content only; do not stage or unstage changes or alter the Git index. The runner owns final staging after finalization and review.
 
-Do not run the project finalization procedure, execute the established required-check inventory, perform generic commit preparation, or create a commit. Those actions remain owned by FINALIZE or HANDOFF as applicable. Finalization failures must be fixed and cannot be disputed. A finding already upheld by the Arbiter must be fixed.
+Do not run the project finalization procedure, perform generic commit preparation, or create a commit. Those actions remain owned by FINALIZE or HANDOFF as applicable. Finalization failures must be fixed and cannot be disputed. A finding already upheld by the Arbiter must be fixed.
+${PREFINALIZATION_VALIDATION_INSTRUCTIONS}
 For RESOLVED, return exactly one decision per blocker; every decision requires reason; DISPUTE requires evidence, while FIX evidence may be []. Set top-level reason, question, and whyBlocked to "", and options and evidence to [].
-For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or comparable external constraints. Set decisions and options to []; provide reason and evidence; set question and whyBlocked to "".
+For BLOCKED, use only for external environment constraints affecting work not delegated to a selected runner-trusted command. Set decisions and options to []; provide reason and evidence; set question and whyBlocked to "".
 For PRODUCT_DECISION_REQUIRED, set decisions to [] and reason to ""; use the product-decision fields.
 Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.`;
 

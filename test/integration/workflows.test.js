@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -13,6 +14,12 @@ import { isAbsolute, join, relative, sep } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
+import { createLegacyRecoveryFixture } from "../../pipelines/plan-execution/test/support/index.js";
+import { resolveStopBoundary } from "../../src/pipeline-registry.js";
+import {
+  createTrustedValidationService,
+  createTrustedValidationSnapshot,
+} from "../../src/trusted-validation/index.js";
 import {
   createClarificationService,
   createGitService,
@@ -24,6 +31,197 @@ import {
 } from "../../src/index.js";
 
 const executeFile = promisify(execFile);
+
+test("CLI legacy confirmation resume reaches the ordinary commit gate", async (t) => {
+  const fixture = await createLegacyRecoveryFixture(t, {
+    mode: "independent",
+    pendingCorrection: false,
+    steps: 1,
+  });
+  const stdout = sink();
+  const stderr = sink();
+  const before = fixture.calls.length;
+  assert.equal(
+    await main(["resume", "--run", fixture.runId], {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      runner: fixture.openRunner(),
+    }),
+    0,
+  );
+  assert.equal(fixture.calls.length - before, 2);
+  assert.equal(
+    (await fixture.store.loadRun(fixture.runId)).pipelineState.workflowState,
+    "DONE",
+  );
+  assert.doesNotMatch(
+    stdout.value() + stderr.value(),
+    /PRIVATE_LEGACY_PROVIDER_PAYLOAD/u,
+  );
+});
+
+test("legacy recovery shares CLI and MCP actions and survives a disconnected wait", async (t) => {
+  const entered = deferred();
+  const release = deferred();
+  let hold = false;
+  const fixture = await createLegacyRecoveryFixture(t, {
+    steps: 1,
+    onConfirmation: async () => {
+      if (hold) {
+        entered.resolve();
+        await release.promise;
+      }
+    },
+  });
+  const stdout = sink();
+  const stderr = sink();
+  const runner = fixture.openRunner();
+  const exitCode = await main(["status", "--run", fixture.runId], {
+    stdout: stdout.stream,
+    stderr: stderr.stream,
+    createCommandRunner: () => runner,
+  });
+  assert.equal(exitCode, 0);
+  assert.match(stdout.value(), /CONFIRM/u);
+  assert.match(stdout.value(), /resume/u);
+  const process = detached(fixture.openRunner());
+  const control = createMcpControlPlane({
+    runStore: fixture.store,
+    runner,
+    launchRun: process.launchRun,
+  });
+  const before = await control.runStatus({ runId: fixture.runId });
+  assert.equal(before.pause.resumeState, "CONFIRM");
+  hold = true;
+  try {
+    await control.runResume({
+      runId: fixture.runId,
+      expectedRevision: before.revision,
+      action: null,
+      idempotencyKey: "legacy-disconnect",
+    });
+    await entered.promise;
+    const running = await control.runStatus({ runId: fixture.runId });
+    const cancellation = new AbortController();
+    const wait = control.runWait(
+      {
+        runId: fixture.runId,
+        cursor: running.revision,
+        timeoutMs: 10_000,
+        progress: false,
+      },
+      { signal: cancellation.signal },
+    );
+    cancellation.abort();
+    await assert.rejects(wait, { name: "AbortError" });
+    assert.equal(await fixture.store.runIsLeased(fixture.runId), true);
+  } finally {
+    release.resolve();
+    await process.settle();
+  }
+  const done = await createMcpControlPlane({
+    runStore: fixture.openStore(),
+    runner: fixture.openRunner(),
+  }).runStatus({ runId: fixture.runId });
+  assert.equal(done.status, "DONE");
+  assert.equal(
+    fixture.calls.filter(({ access }) => access === "local-commit").length,
+    1,
+  );
+});
+
+test("MCP pause and cancellation reconcile through the shared active runner", async (t) => {
+  for (const action of ["pause", "cancel"]) {
+    const paths = await fixture(t);
+    const implementationGate = {
+      entered: deferred(),
+      release: deferred(),
+    };
+    const codex = createBackend("codex", { implementationGate });
+    const { runner, runStore } = runtime(
+      paths,
+      { codex },
+      { schemaVersion: 1, defaultBackend: "codex" },
+    );
+    const activeRun = runner.run({
+      pipelineId: "plan-execution",
+      projectPath: paths.projectPath,
+      taskPath: paths.taskPath,
+      roleOverrides: {},
+      sourceSession: null,
+    });
+    await within(
+      implementationGate.entered.promise,
+      30_000,
+      "Execution did not reach implementation.",
+    );
+
+    const control = createMcpControlPlane({ runner, runStore });
+    const running = await onlyRun(runStore);
+    const input = {
+      runId: running.runId,
+      expectedRevision: running.revision,
+      idempotencyKey: `integration-${action}`,
+    };
+    const requestStop =
+      action === "pause" ? control.runPause : control.runCancel;
+    const receipt = await requestStop(input);
+    assert.equal(receipt.kind, `${action}_requested`);
+    assert.deepEqual(
+      (await control.runStatus({ runId: running.runId })).pendingStop,
+      {
+        kind: `${action}_requested`,
+        revision: receipt.revision,
+        timing: "immediate",
+        effectiveTiming: "immediate",
+        targetStep: null,
+      },
+    );
+    assert.ok(
+      (
+        await control.runActivity({
+          runId: running.runId,
+          cursor: running.revision,
+          limit: 10,
+        })
+      ).activities.some(({ kind }) => kind === `${action}-requested`),
+    );
+
+    implementationGate.release.resolve();
+    const stopped = await within(
+      activeRun,
+      30_000,
+      `Execution did not reconcile the ${action}.`,
+    );
+    assert.deepEqual(await requestStop(input), receipt);
+    const projected = await control.runWait({
+      runId: running.runId,
+      cursor: 0,
+      timeoutMs: 0,
+      progress: false,
+    });
+    assert.equal(projected.pendingStop, null);
+    if (action === "pause") {
+      assert.equal(stopped.run.pipelineState.workflowState, "WAITING_FOR_USER");
+      assert.equal(stopped.run.pause.reason, "operator_paused");
+      assert.equal(projected.pause.reason, "operator_paused");
+      assert.deepEqual(projected.pause.nextActions, [
+        { type: "resume", action: null },
+      ]);
+    } else {
+      assert.equal(stopped.run.pipelineState.workflowState, "CANCELED");
+      assert.equal(projected.status, "CANCELED");
+      await assert.rejects(
+        control.runResume({
+          runId: running.runId,
+          expectedRevision: projected.revision,
+          action: null,
+          idempotencyKey: "revive-canceled",
+        }),
+      );
+    }
+  }
+});
 const TWO_STEP_PLAN = `## Commit 1: feat(feature): add value
 
 Add the requested value.
@@ -31,6 +229,884 @@ Add the requested value.
 ## Commit 2: test(feature): cover value
 
 Cover the requested value.`;
+
+const SOURCE_SESSION = "11111111-1111-4111-8111-111111111111";
+
+// Reopen the public runner with an empty adapter session set. Durable state,
+// not a surviving native conversation, must supply each resumed checkpoint.
+async function combinedScenario(t, pipelineId, hooks = {}) {
+  const paths = await fixture(t, {
+    plan: pipelineId === "plan-authoring" ? null : TWO_STEP_PLAN,
+  });
+  if (pipelineId === "polishing") {
+    await writeFile(
+      join(paths.projectPath, "src/base.js"),
+      "export const base = 2;\n",
+    );
+  }
+  const configurationPath = join(
+    paths.projectPath,
+    "LOCAL_ARTIFACTS/agent-runner.json",
+  );
+  await mkdir(join(paths.projectPath, "LOCAL_ARTIFACTS"));
+  await writeFile(
+    configurationPath,
+    JSON.stringify({
+      schemaVersion: 1,
+      pipelines: { [pipelineId]: { mode: "lazy" } },
+    }),
+  );
+  const runStore = createRunStore({
+    stateRoot: paths.stateRoot,
+    resolveStopBoundary,
+  });
+  const calls = [];
+  const git = createGitService();
+  let handoffs = 0;
+  let loads = 0;
+  let runId;
+  let runner;
+  let generation = 0;
+  function reopen() {
+    const backend = createBackend("codex", {
+      sessionPrefix: `codex-${generation++}`,
+    });
+    const sessions = new Set();
+    runner = createRunner({
+      runStore,
+      git: {
+        ...git,
+        async stagePolishingHandoff(input) {
+          handoffs += 1;
+          return git.stagePolishingHandoff(input);
+        },
+      },
+      clarifications: createClarificationService({ interactive: false }),
+      loadConfiguration: async () => {
+        assert.equal(loads++, 0, "Resume must use saved configuration.");
+        return parseRunnerConfiguration(
+          JSON.stringify({
+            schemaVersion: 1,
+            defaultBackend: "codex",
+            pipelines: {
+              [pipelineId]: { mode: "independent", ...hooks.settings },
+            },
+          }),
+        );
+      },
+      adapters: {
+        codex: {
+          ...backend,
+          async run(request) {
+            const durable = await runStore.loadRun(runId);
+            const turn = { ...durable.activeTurn, request };
+            calls.push(turn);
+            if (
+              request.access !== "local-commit" &&
+              request.session?.mode === "continue" &&
+              !sessions.has(request.session.id)
+            ) {
+              assert.equal(typeof request.recoveryPrompt, "string");
+              assert.ok(
+                request.recoveryPrompt.includes(
+                  "Implement the requested value.",
+                ),
+              );
+              request = {
+                ...request,
+                session: undefined,
+                prompt: request.recoveryPrompt,
+              };
+            }
+            await hooks.beforeTurn?.(turn, durable, {
+              runner,
+              configurationPath,
+            });
+            const supplied = await hooks.result?.(turn, durable);
+            const response =
+              supplied === undefined
+                ? await backend.run(request)
+                : {
+                    output: "structured",
+                    sessionId: `checkpoint-${calls.length}`,
+                    structured:
+                      request.schema?.properties?.result?.anyOf === undefined
+                        ? supplied
+                        : { result: supplied },
+                  };
+            sessions.add(response.sessionId);
+            await hooks.afterTurn?.(
+              turn,
+              durable,
+              response.structured.result ?? response.structured,
+            );
+            return response;
+          },
+        },
+      },
+    });
+    return runner;
+  }
+  const prepared = await reopen().create({
+    pipelineId,
+    projectPath: paths.projectPath,
+    taskPath: paths.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    settingOverrides: { mode: "combined" },
+    sourceSession: { backend: "codex", id: SOURCE_SESSION },
+  });
+  runId = prepared.run.runId;
+  return {
+    ...paths,
+    runId,
+    runStore,
+    calls,
+    reopen,
+    resume: (action = null) => runner.resume({ runId, action }),
+    control: () => createMcpControlPlane({ runner, runStore }),
+    get handoffs() {
+      return handoffs;
+    },
+  };
+}
+
+function providerInterruption() {
+  return Object.assign(
+    new Error("The provider stopped before returning a checkpoint."),
+    { recoverable: true },
+  );
+}
+
+function reviewFinding() {
+  return {
+    id: "R1",
+    file: "src/base.js",
+    problem: "The base value needs review.",
+    reason: "The proposed value must match the task.",
+    suggestedAction: "Verify the base value.",
+  };
+}
+
+const EMPTY_DECISION = {
+  question: "",
+  options: [],
+  whyBlocked: "",
+  evidence: [],
+};
+
+for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
+  test(`combined ${pipelineId} retains self-findings across interrupted fixing without arbitration`, async (t) => {
+    let reported = false;
+    let interrupted = false;
+    const authoring = pipelineId === "plan-authoring";
+    const finding = authoring
+      ? {
+          id: "base-value",
+          description: "Verify the planned base value.",
+          evidence: ["The draft should explain how the value is verified."],
+        }
+      : reviewFinding();
+    const scenario = await combinedScenario(t, pipelineId, {
+      beforeTurn(turn) {
+        if (reported && !interrupted && turn.phase === "check-and-fix") {
+          interrupted = true;
+          assert.ok(turn.request.recoveryPrompt.includes(finding.id));
+          throw providerInterruption();
+        }
+      },
+      afterTurn(turn, durable, result) {
+        if (!reported && turn.phase === "clean-confirm") {
+          reported = true;
+          result.status = "FINDINGS";
+          result.findings = [finding];
+        }
+      },
+    });
+    const paused = (await scenario.resume()).run;
+    assert.equal(
+      paused.pause.resumeState,
+      "CHECK_AND_FIX",
+      JSON.stringify(paused.pause),
+    );
+    const findings = authoring
+      ? paused.pipelineState.findings
+      : paused.pipelineState.primaryFindings;
+    assert.deepEqual(findings, [finding]);
+    assert.equal(
+      scenario.calls.some(({ phase }) => phase === "review"),
+      false,
+    );
+    const count = scenario.calls.length;
+    scenario.reopen();
+    const completed = (await scenario.resume()).run;
+    assert.equal(
+      completed.pipelineState.workflowState,
+      "DONE",
+      JSON.stringify(completed.pause),
+    );
+    assert.deepEqual(
+      scenario.calls.slice(count, count + 3).map(({ phase }) => phase),
+      ["check-and-fix", "clean-confirm", "review"],
+    );
+    assert.ok(
+      scenario.calls[count].request.recoveryPrompt.includes(finding.id),
+    );
+    assert.equal(
+      scenario.calls.some(({ role }) => role === "arbiter"),
+      false,
+    );
+  });
+}
+
+for (const pipelineId of ["plan-execution", "polishing"]) {
+  test(`combined ${pipelineId} charges interrupted primary correction once`, async (t) => {
+    let changed = false;
+    let interrupted = false;
+    const scenario = await combinedScenario(t, pipelineId, {
+      settings:
+        pipelineId === "polishing"
+          ? { maxFixRounds: 2 }
+          : { maxFixRoundsPerStep: 2 },
+      async result(turn, durable) {
+        if (turn.phase !== "check-and-fix") return;
+        if (!changed) {
+          changed = true;
+          await writeFile(
+            join(turn.request.cwd, "src/base.js"),
+            "export const base = 7;\n",
+          );
+          return { status: "INVALID" };
+        }
+        if (
+          durable.pipelineState.pendingLazyCorrection !== null &&
+          !interrupted
+        ) {
+          interrupted = true;
+          assert.equal(turn.request.access, "workspace-write");
+          assert.equal(turn.request.session, undefined);
+          throw providerInterruption();
+        }
+      },
+      afterTurn(turn, durable) {
+        if (
+          turn.phase === "confirm" &&
+          (pipelineId === "polishing" ||
+            durable.pipelineState.currentStep === 1)
+        ) {
+          assert.equal(durable.counters.fixRounds, 1);
+          assert.equal(durable.pipelineState.lazyCorrections.length, 1);
+          assert.equal(
+            durable.pipelineState.lazyCorrections[0].fixRoundCharged,
+            true,
+          );
+        }
+      },
+    });
+    const paused = (await scenario.resume()).run;
+    assert.ok(interrupted);
+    assert.equal(paused.pause.resumeState, "CHECK_AND_FIX");
+    assert.equal(paused.counters.fixRounds, 1);
+    const pending = paused.pipelineState.pendingLazyCorrection;
+    assert.ok(pending);
+    assert.equal(pending.fixRoundCharged, true);
+    assert.equal(paused.pipelineState.lazyCorrections.length, 1);
+    assert.equal(
+      await readFile(join(scenario.projectPath, "src/base.js"), "utf8"),
+      "export const base = 7;\n",
+    );
+    const count = scenario.calls.length;
+    scenario.reopen();
+    const completed = (await scenario.resume()).run;
+    assert.equal(
+      completed.pipelineState.workflowState,
+      "DONE",
+      JSON.stringify(completed.pause),
+    );
+    assert.equal(scenario.calls[count].request.access, "workspace-write");
+    assert.equal(scenario.calls[count].request.session, undefined);
+    assert.equal(completed.pipelineState.pendingLazyCorrection, null);
+    assert.equal(completed.counters.correctionRounds, 0);
+    if (pipelineId === "polishing")
+      assert.equal(completed.counters.fixRounds, 1);
+    assert.equal(
+      scenario.calls.some(({ role }) => role === "arbiter"),
+      false,
+    );
+  });
+
+  test(`combined ${pipelineId} retains exact overrides across interrupted reconvergence`, async (t) => {
+    let overrideAccepted = false;
+    let interrupted = false;
+    const scenario = await combinedScenario(t, pipelineId, {
+      settings: { maxSameFindingRounds: 1 },
+      beforeTurn(turn, durable) {
+        if (
+          overrideAccepted &&
+          !interrupted &&
+          turn.phase === "check-and-fix"
+        ) {
+          interrupted = true;
+          assert.equal(
+            durable.pipelineState.findingOverrides[0].findingId,
+            "R1",
+          );
+          throw providerInterruption();
+        }
+      },
+      result(turn) {
+        if (turn.phase === "resolve-findings")
+          return {
+            status: "RESOLVED",
+            decisions: [
+              {
+                id: "R1",
+                decision: "FIX",
+                reason: "The value was checked without changing content.",
+                evidence: [],
+              },
+            ],
+            reason: "",
+            ...EMPTY_DECISION,
+          };
+      },
+      afterTurn(turn, durable, result) {
+        if (
+          turn.phase === "review" &&
+          (pipelineId === "polishing" ||
+            durable.pipelineState.currentStep === 1)
+        ) {
+          result.status = "FINDINGS";
+          result.findings = [reviewFinding()];
+        }
+      },
+    });
+    const paused = (await scenario.resume()).run;
+    assert.equal(paused.pause.reason, "no_progress");
+    overrideAccepted = true;
+    const waiting = (
+      await scenario.resume({ type: "override-finding", findingId: "R1" })
+    ).run;
+    assert.ok(interrupted);
+    const overrides = waiting.pipelineState.findingOverrides;
+    assert.deepEqual(overrides, [
+      {
+        findingId: "R1",
+        fingerprint: paused.pipelineState.candidateReviewedFingerprint,
+      },
+    ]);
+    scenario.reopen();
+    const completed = (await scenario.resume()).run;
+    assert.equal(
+      completed.pipelineState.workflowState,
+      "DONE",
+      JSON.stringify(completed.pause),
+    );
+    if (pipelineId === "polishing")
+      assert.deepEqual(completed.pipelineState.findingOverrides, overrides);
+    assert.equal(
+      scenario.calls.some(({ role }) => role === "arbiter"),
+      false,
+    );
+  });
+
+  for (const changed of [false, true]) {
+    test(`combined ${pipelineId} retains only valid finalization after ${changed ? "changed" : "unchanged"} resolution and interruption`, async (t) => {
+      let reported = false;
+      let resolved = false;
+      let interrupted = false;
+      let finalization;
+      const scenario = await combinedScenario(t, pipelineId, {
+        beforeTurn(turn) {
+          if (resolved && !interrupted && turn.phase === "check-and-fix") {
+            interrupted = true;
+            throw providerInterruption();
+          }
+        },
+        async result(turn, durable) {
+          if (turn.phase === "resolve-findings") {
+            assert.equal(durable.pipelineState.findings[0].id, "R1");
+            if (changed)
+              await writeFile(
+                join(turn.request.cwd, "src/base.js"),
+                "export const base = 3;\n",
+              );
+            resolved = true;
+            return {
+              status: "RESOLVED",
+              decisions: [
+                {
+                  id: "R1",
+                  decision: "FIX",
+                  reason: "Verified and resolved the value concern.",
+                  evidence: [],
+                },
+              ],
+              reason: "",
+              ...EMPTY_DECISION,
+            };
+          }
+        },
+        afterTurn(turn, durable, result) {
+          if (!reported && turn.phase === "confirm") {
+            reported = true;
+            finalization = durable.pipelineState.finalizationResult;
+            result.status = "FINDINGS";
+            result.findings = [reviewFinding()];
+          }
+        },
+      });
+      const paused = (await scenario.resume()).run;
+      assert.equal(
+        paused.pause.resumeState,
+        "CHECK_AND_FIX",
+        JSON.stringify(paused.pause),
+      );
+      assert.equal(paused.pipelineState.candidateReviewResult, null);
+      assert.equal(paused.pipelineState.reviewedFingerprint, null);
+      assert.deepEqual(
+        paused.pipelineState.finalizationResult,
+        changed ? null : finalization,
+      );
+      const counters = paused.counters.fixRounds;
+      assert.equal(counters, 2);
+      const count = scenario.calls.length;
+      scenario.reopen();
+      const completed = (await scenario.resume()).run;
+      assert.equal(
+        completed.pipelineState.workflowState,
+        "DONE",
+        JSON.stringify(completed.pause),
+      );
+      assert.deepEqual(
+        scenario.calls.slice(count, count + 3).map(({ phase }) => phase),
+        ["check-and-fix", "clean-confirm", "review"],
+      );
+      const finalizations = scenario.calls.filter(
+        ({ phase }) => phase === "finalize",
+      ).length;
+      assert.equal(
+        finalizations,
+        (pipelineId === "plan-execution" ? 2 : 1) + Number(changed),
+      );
+      if (pipelineId === "polishing")
+        assert.equal(completed.counters.fixRounds, counters + 1);
+      assert.equal(
+        scenario.calls.some(({ role }) => role === "arbiter"),
+        false,
+      );
+    });
+  }
+
+  test(`combined ${pipelineId} reconstructs disputed findings and fresh arbitration`, async (t) => {
+    let reported = false;
+    let interrupted = false;
+    const scenario = await combinedScenario(t, pipelineId, {
+      settings: { maxDisputesPerFinding: 1 },
+      beforeTurn(turn) {
+        if (turn.role === "arbiter" && !interrupted) {
+          interrupted = true;
+          throw providerInterruption();
+        }
+      },
+      result(turn) {
+        if (turn.role === "arbiter") {
+          assert.equal(turn.request.session, undefined);
+          assert.equal(turn.request.access, "read-only");
+          assert.match(turn.request.recoveryPrompt, /R1/u);
+          return {
+            direction: "WORKER_CORRECT",
+            rationale: "The recorded Worker evidence resolves the concern.",
+            ...EMPTY_DECISION,
+          };
+        }
+        if (turn.request.prompt.includes("Worker disputes:"))
+          return {
+            status: "RESOLVED",
+            decisions: [
+              {
+                id: "R1",
+                direction: "UPHOLD",
+                reason: "The Reviewer still disputes that interpretation.",
+                evidence: [],
+              },
+            ],
+            ...EMPTY_DECISION,
+          };
+        if (turn.phase === "resolve-findings")
+          return {
+            status: "RESOLVED",
+            decisions: [
+              {
+                id: "R1",
+                decision: "DISPUTE",
+                reason: "The existing value matches the task.",
+                evidence: ["src/base.js contains the required value."],
+              },
+            ],
+            reason: "",
+            ...EMPTY_DECISION,
+          };
+      },
+      afterTurn(turn, durable, result) {
+        if (!reported && turn.phase === "review") {
+          reported = true;
+          result.status = "FINDINGS";
+          result.findings = [reviewFinding()];
+        }
+      },
+    });
+    const paused = (await scenario.resume()).run;
+    assert.ok(interrupted);
+    assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+    assert.equal(paused.pipelineState.findings[0].id, "R1");
+    assert.equal(
+      paused.pipelineState.disputeHistory.at(-1).direction,
+      "UPHOLD",
+    );
+    const count = scenario.calls.length;
+    scenario.reopen();
+    const completed = (await scenario.resume()).run;
+    assert.equal(
+      completed.pipelineState.workflowState,
+      "DONE",
+      JSON.stringify(completed.pause),
+    );
+    assert.equal(scenario.calls[count].role, "arbiter");
+    assert.ok(
+      scenario.calls
+        .filter(({ role }) => role === "arbiter")
+        .every(({ request }) => request.session === undefined),
+    );
+    assert.deepEqual(
+      scenario.calls.slice(count + 1, count + 4).map(({ phase }) => phase),
+      ["check-and-fix", "clean-confirm", "review"],
+    );
+    if (pipelineId === "polishing") {
+      assert.equal(
+        completed.pipelineState.findingArbitrations[0].direction,
+        "WORKER_CORRECT",
+      );
+      assert.equal(completed.pipelineState.disputeCounts.R1, 1);
+    }
+  });
+}
+
+for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
+  for (const kind of ["pause", "cancel"]) {
+    const timings =
+      pipelineId === "plan-execution"
+        ? ["immediate", "after-current-commit"]
+        : ["immediate"];
+    for (const timing of timings) {
+      test(`combined ${pipelineId} reconciles ${timing} ${kind} at primary confirmation`, async (t) => {
+        let receipt;
+        let stopInput;
+        let stoppedAt;
+        const scenario = await combinedScenario(t, pipelineId, {
+          async beforeTurn(turn, durable, { runner }) {
+            if (receipt || turn.phase !== "clean-confirm") return;
+            stoppedAt = scenario.calls.length;
+            const control = createMcpControlPlane({
+              runner,
+              runStore: scenario.runStore,
+            });
+            const requestStop =
+              kind === "pause" ? control.runPause : control.runCancel;
+            stopInput = {
+              runId: durable.runId,
+              expectedRevision: durable.revision,
+              idempotencyKey: `${kind}-${timing}`,
+              timing,
+            };
+            if (pipelineId !== "plan-execution") {
+              await assert.rejects(
+                requestStop({
+                  ...stopInput,
+                  idempotencyKey: "unsupported-deferred",
+                  timing: "after-current-commit",
+                }),
+              );
+              assert.equal(
+                (await scenario.runStore.loadRun(durable.runId)).stopRequest,
+                null,
+              );
+            }
+            receipt = await requestStop(stopInput);
+          },
+        });
+        const result = (await scenario.resume()).run;
+        assert.ok(receipt);
+        assert.equal(
+          result.pipelineState.workflowState,
+          kind === "pause" ? "WAITING_FOR_USER" : "CANCELED",
+        );
+        if (kind === "pause")
+          assert.equal(result.pause.reason, "operator_paused");
+        const later = scenario.calls.slice(stoppedAt);
+        assert.equal(
+          later.some(
+            ({ phase }) =>
+              phase === "implement" ||
+              phase === "polish" ||
+              phase === "check-and-fix",
+          ),
+          false,
+        );
+        if (timing === "immediate") assert.equal(later.length, 0);
+        else
+          assert.deepEqual(
+            later.map(({ phase }) => phase),
+            ["review", "finalize", "confirm", "commit"],
+          );
+        const commits = scenario.calls.filter(
+          ({ request }) => request.access === "local-commit",
+        ).length;
+        assert.equal(commits, timing === "after-current-commit" ? 1 : 0);
+        assert.equal(scenario.handoffs, 0);
+        const control = scenario.control();
+        assert.deepEqual(
+          await (kind === "pause" ? control.runPause : control.runCancel)(
+            stopInput,
+          ),
+          receipt,
+        );
+        if (kind === "cancel") {
+          const turns = scenario.calls.length;
+          await assert.rejects(
+            control.runResume({
+              runId: scenario.runId,
+              expectedRevision: result.revision,
+              action: null,
+              idempotencyKey: "cannot-revive",
+            }),
+          );
+          assert.equal(scenario.calls.length, turns);
+        } else {
+          scenario.reopen();
+          const resumed = (await scenario.resume()).run;
+          assert.equal(
+            resumed.pipelineState.workflowState,
+            "DONE",
+            JSON.stringify(resumed.pause),
+          );
+          assert.equal(
+            scenario.calls.filter(
+              ({ request }) => request.access === "local-commit",
+            ).length,
+            pipelineId === "plan-execution" ? 2 : 0,
+          );
+          assert.equal(scenario.handoffs, pipelineId === "polishing" ? 1 : 0);
+        }
+      });
+    }
+  }
+}
+
+for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
+  for (const mutation of ["content", "index", "history", "configuration"]) {
+    test(`combined ${pipelineId} rejects ${mutation} mutation during clean confirmation`, async (t) => {
+      let mutated = false;
+      const scenario = await combinedScenario(t, pipelineId, {
+        async beforeTurn(turn, durable, { configurationPath }) {
+          if (mutated || turn.phase !== "clean-confirm") return;
+          mutated = true;
+          assert.equal(turn.request.access, "read-only");
+          if (mutation === "configuration") {
+            await writeFile(
+              configurationPath,
+              JSON.stringify({
+                schemaVersion: 1,
+                pipelines: { [pipelineId]: { mode: "independent" } },
+              }),
+            );
+          } else if (mutation === "history") {
+            await executeFile("git", [
+              "-C",
+              turn.request.cwd,
+              "commit",
+              "--allow-empty",
+              "-qm",
+              "chore(test): unauthorized history",
+            ]);
+          } else if (mutation === "index") {
+            await executeFile("git", [
+              "-C",
+              turn.request.cwd,
+              "update-index",
+              "--force-remove",
+              "src/base.js",
+            ]);
+          } else {
+            await writeFile(
+              join(turn.request.cwd, "src/base.js"),
+              "export const base = 99;\n",
+            );
+          }
+        },
+      });
+      const result = (await scenario.resume()).run;
+      assert.ok(mutated);
+      assert.equal(
+        result.pipelineState.workflowState,
+        "WAITING_FOR_USER",
+        JSON.stringify(result.pause),
+      );
+      assert.equal(
+        result.pause.reason,
+        mutation === "configuration"
+          ? "project_configuration_changed"
+          : pipelineId === "plan-authoring"
+            ? "read_only_mutation"
+            : "read_only_agent_mutated_repository",
+      );
+      assert.equal(scenario.calls.at(-1).phase, "clean-confirm");
+      if (mutation === "index") {
+        assert.equal(
+          await readFile(join(scenario.projectPath, "src/base.js"), "utf8"),
+          `export const base = ${pipelineId === "polishing" ? 2 : 1};\n`,
+        );
+      }
+      assert.equal(scenario.handoffs, 0);
+      assert.equal(
+        scenario.calls.some(({ request }) => request.access === "local-commit"),
+        false,
+      );
+      if (pipelineId !== "plan-authoring") {
+        assert.equal(result.pipelineState.finalizationResult, null);
+        assert.equal(result.pipelineState.candidateReviewResult, null);
+      }
+    });
+  }
+}
+
+for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
+  const phases =
+    pipelineId === "plan-authoring"
+      ? ["check-and-fix", "clean-confirm", "review"]
+      : ["check-and-fix", "clean-confirm", "review", "finalize", "confirm"];
+  for (const phase of phases) {
+    test(`combined ${pipelineId} reconstructs interrupted ${phase} from durable gates`, async (t) => {
+      let interrupted = false;
+      const scenario = await combinedScenario(t, pipelineId, {
+        async beforeTurn(turn) {
+          if (!interrupted && turn.phase === phase) {
+            const projected = await scenario
+              .control()
+              .runStatus({ runId: scenario.runId });
+            assert.equal(projected.mode, "combined");
+            assert.deepEqual(projected.execution, {
+              state: "running",
+              phase,
+              role: ["review", "confirm"].includes(phase)
+                ? "reviewer"
+                : pipelineId === "plan-authoring"
+                  ? "planner"
+                  : "worker",
+            });
+            interrupted = true;
+            throw providerInterruption();
+          }
+        },
+      });
+      const control = scenario.control();
+      const initial = await control.runStatus({ runId: scenario.runId });
+      assert.equal(initial.mode, "combined");
+      const paused = (await scenario.resume()).run;
+      assert.equal(
+        paused.pipelineState.workflowState,
+        "WAITING_FOR_USER",
+        JSON.stringify(paused.pause),
+      );
+      assert.equal(
+        paused.pause.resumeState,
+        phase.toUpperCase().replaceAll("-", "_"),
+      );
+      assert.deepEqual(Object.keys(paused.roles), [
+        pipelineId === "plan-authoring" ? "planner" : "worker",
+        "reviewer",
+        "arbiter",
+      ]);
+      const count = scenario.calls.length;
+      const finalized = paused.pipelineState.finalizationResult;
+      scenario.reopen();
+      const completed = (await scenario.resume()).run;
+      assert.equal(
+        completed.pipelineState.workflowState,
+        "DONE",
+        JSON.stringify(completed.pause),
+      );
+      assert.equal(completed.pipelineState.settings.mode, "combined");
+      assert.equal(scenario.calls[count].phase, phase);
+      assert.equal(
+        scenario.calls.some(({ role }) => role === "arbiter"),
+        false,
+      );
+      const firstReview = scenario.calls.find(
+        ({ phase }) => phase === "review",
+      );
+      assert.equal(firstReview.request.session?.mode, "fork");
+      assert.equal(firstReview.request.session.id, SOURCE_SESSION);
+      const resumed = scenario.calls.slice(count).map(({ phase }) => phase);
+      assert.deepEqual(
+        resumed.slice(0, phases.length - phases.indexOf(phase)),
+        phases.slice(phases.indexOf(phase)),
+      );
+      assert.ok(
+        completed.sessionLineage.children.some(
+          ({ role }) => role === "reviewer",
+        ),
+      );
+      assert.equal(completed.pipelineState.lazySourceForkConsumed, false);
+      if (pipelineId === "plan-authoring") {
+        assert.ok(
+          scenario.calls.every(({ request }) => request.access === "read-only"),
+        );
+        assert.equal(
+          await readFile(join(scenario.taskPath, "plan.md"), "utf8"),
+          TWO_STEP_PLAN,
+        );
+      } else {
+        assert.equal(
+          completed.pipelineState.candidateConfirmationFingerprint,
+          completed.pipelineState.candidateReviewedFingerprint,
+        );
+        assert.equal(
+          completed.pipelineState.reviewedFingerprint,
+          completed.pipelineState.finalizedFingerprint,
+        );
+        assert.equal(completed.counters.correctionRounds, 0);
+        if (phase === "confirm") {
+          assert.equal(
+            scenario.calls
+              .slice(count)
+              .filter(({ phase }) => phase === "finalize").length,
+            pipelineId === "plan-execution" ? 1 : 0,
+          );
+          if (pipelineId === "polishing")
+            assert.deepEqual(
+              completed.pipelineState.finalizationResult,
+              finalized,
+            );
+        }
+      }
+      const turns = scenario.calls.length;
+      await scenario.resume();
+      assert.equal(
+        scenario.calls.length,
+        turns,
+        "Completed effects must not replay.",
+      );
+      assert.equal(scenario.handoffs, pipelineId === "polishing" ? 1 : 0);
+      assert.equal(
+        scenario.calls.filter(
+          ({ request }) => request.access === "local-commit",
+        ).length,
+        pipelineId === "plan-execution" ? 2 : 0,
+      );
+    });
+  }
+}
 
 function sink() {
   let value = "";
@@ -89,7 +1165,9 @@ function createBackend(
     failAuthoringClarification = false,
     failExecutionClarification = false,
     implementationGate = null,
+    polishingGate = null,
     rejectSource = false,
+    sessionPrefix = backend,
   } = {},
 ) {
   const calls = [];
@@ -104,7 +1182,7 @@ function createBackend(
       return request.session.id;
     }
     sessionSequence += 1;
-    return `${backend}-${role}-${sessionSequence}`;
+    return `${sessionPrefix}-${role}-${sessionSequence}`;
   }
 
   async function implement(request) {
@@ -178,7 +1256,48 @@ function createBackend(
 
       let role = "worker";
       let structured;
-      if (request.prompt.includes("Study the task, existing clarifications")) {
+      if (
+        request.prompt.includes(
+          "Return the complete revised plan only when content changed.",
+        ) ||
+        request.prompt.includes(
+          "Concrete findings from the preceding clean confirmation:",
+        )
+      ) {
+        const authoring = request.prompt.includes(
+          "Return the complete revised plan",
+        );
+        role = authoring ? "planner" : "worker";
+        structured = {
+          status: "UNCHANGED",
+          ...(authoring
+            ? { plan: "" }
+            : { summary: "The candidate needs no repair.", reason: "" }),
+          question: "",
+          options: [],
+          whyBlocked: "",
+          evidence: [],
+        };
+      } else if (
+        request.prompt.includes(
+          "A CLEAN result confirms primary convergence",
+        ) ||
+        request.prompt.includes("Inspected candidate fingerprint:")
+      ) {
+        role = request.prompt.includes("primary convergence")
+          ? "planner"
+          : "worker";
+        structured = {
+          status: "CLEAN",
+          findings: [],
+          question: "",
+          options: [],
+          whyBlocked: "",
+          evidence: [],
+        };
+      } else if (
+        request.prompt.includes("Study the task, existing clarifications")
+      ) {
         role = "planner";
         authoringClarifications += 1;
         if (failAuthoringClarification && authoringClarifications === 1) {
@@ -303,6 +1422,10 @@ function createBackend(
       } else if (
         request.prompt.includes("Polish the existing local repository changes")
       ) {
+        if (polishingGate !== null) {
+          polishingGate.entered.resolve();
+          await polishingGate.release.promise;
+        }
         structured = {
           status: "COMPLETED",
           summary:
@@ -360,6 +1483,10 @@ function createBackend(
           findings: [],
           validationChange: "UNCHANGED",
           validationEvidence: [],
+          ...(request.prompt.includes("Confirm the finalized changes") ||
+          request.prompt.includes("Confirm the finalized change set")
+            ? { finalizationFindingIds: [] }
+            : {}),
           question: "",
           options: [],
           whyBlocked: "",
@@ -962,10 +2089,15 @@ test("runs registered workflows through recoverable MCP controls", async (t) => 
     entered: deferred(),
     release: deferred(),
   };
+  const polishingGate = {
+    entered: deferred(),
+    release: deferred(),
+  };
   const codex = createBackend("codex", {
     authoringQuestion: true,
     failExecutionClarification: true,
     implementationGate,
+    polishingGate,
   });
   const { runner, runStore } = runtime(
     paths,
@@ -975,6 +2107,7 @@ test("runs registered workflows through recoverable MCP controls", async (t) => 
   const pipelineProcess = detached(runner);
   t.after(async () => {
     implementationGate.release.resolve();
+    polishingGate.release.resolve();
     try {
       await pipelineProcess.settle();
     } finally {
@@ -997,7 +2130,7 @@ test("runs registered workflows through recoverable MCP controls", async (t) => 
     roleOverrides: {},
     sourceSession: null,
   });
-  const authoringPause = await control.runWait(
+  await control.runWait(
     {
       runId: authored.runId,
       cursor: 0,
@@ -1011,6 +2144,8 @@ test("runs registered workflows through recoverable MCP controls", async (t) => 
       },
     },
   );
+  await pipelineProcess.settle();
+  const authoringPause = await control.runStatus({ runId: authored.runId });
   assert.equal(authoringPause.status, "WAITING_FOR_USER");
   assert.equal(authoringPause.pendingInput.questions[0].id, "q1");
   assert.equal(
@@ -1036,12 +2171,14 @@ test("runs registered workflows through recoverable MCP controls", async (t) => 
     expectedRevision: authoringPause.revision,
     answers: [{ questionId: "q1", answer: "Expose the value directly." }],
   });
-  const authoringDone = await control.runWait({
+  await control.runWait({
     runId: authored.runId,
     cursor: authoringPause.activityCursor,
     timeoutMs: 5_000,
     progress: false,
   });
+  await pipelineProcess.settle();
+  const authoringDone = await control.runStatus({ runId: authored.runId });
   assert.equal(authoringDone.status, "DONE");
   assert.match(
     await readFile(join(paths.taskPath, "clarifications.md"), "utf8"),
@@ -1061,12 +2198,14 @@ test("runs registered workflows through recoverable MCP controls", async (t) => 
     roleOverrides: {},
     sourceSession: null,
   });
-  const executionPause = await control.runWait({
+  await control.runWait({
     runId: execution.runId,
     cursor: 0,
     timeoutMs: 5_000,
     progress: false,
   });
+  await pipelineProcess.settle();
+  const executionPause = await control.runStatus({ runId: execution.runId });
   assert.equal(executionPause.status, "WAITING_FOR_USER");
   assert.deepEqual(executionPause.pause, {
     reason: "backend_unavailable",
@@ -1170,13 +2309,25 @@ test("runs registered workflows through recoverable MCP controls", async (t) => 
     }),
     polishing,
   );
-  const polishingDone = await afterDisconnect.runWait({
+  await within(
+    polishingGate.entered.promise,
+    30_000,
+    "Polishing did not reach the Worker turn.",
+  );
+  const polishingWait = await afterDisconnect.runWait({
     runId: polishing.runId,
     cursor: 0,
-    timeoutMs: 5_000,
+    timeoutMs: 10,
     progress: false,
   });
+  assert.equal(polishingWait.timedOut, true);
+  assert.notEqual(polishingWait.status, "DONE");
+  polishingGate.release.resolve();
   await pipelineProcess.settle();
+  // A timed-out wait remains a snapshot even after detached execution settles.
+  const polishingDone = await afterDisconnect.runStatus({
+    runId: polishing.runId,
+  });
   assert.equal(
     polishingDone.status,
     "DONE",
@@ -1198,4 +2349,676 @@ test("runs registered workflows through recoverable MCP controls", async (t) => 
     await gitOutput(paths.projectPath, ["status", "--porcelain"]),
     "M  src/base.js",
   );
+});
+
+async function projectCommandScenario(t, pipelineId, hooks = {}) {
+  const paths = await fixture(t);
+  if (pipelineId === "polishing") {
+    await writeFile(
+      join(paths.projectPath, "src/base.js"),
+      "export const base = 2;\n",
+    );
+  }
+  const configurationPath = join(
+    paths.projectPath,
+    "LOCAL_ARTIFACTS/agent-runner.json",
+  );
+  const definition = {
+    command: "node project-only validation",
+    executable: process.execPath,
+    arguments: ["--eval", "process.exit(0)", "argument with spaces"],
+  };
+  const projectConfiguration = {
+    schemaVersion: 1,
+    trustedCommands: { "project-check": definition },
+    pipelines: {
+      [pipelineId]: {
+        ...(hooks.mode === undefined ? {} : { mode: hooks.mode }),
+        trustedChecks: ["project-check"],
+      },
+    },
+  };
+  await mkdir(join(paths.projectPath, "LOCAL_ARTIFACTS"));
+  await writeFile(configurationPath, JSON.stringify(projectConfiguration));
+  const expected = createTrustedValidationSnapshot(
+    projectConfiguration.trustedCommands,
+    ["project-check"],
+  );
+  const requiredChecks = [
+    { id: "C1", command: "git diff --check HEAD" },
+    { id: "C2", command: definition.command },
+  ];
+  const runStore = createRunStore({ stateRoot: paths.stateRoot });
+  const git = createGitService();
+  const calls = [];
+  const executions = [];
+  let handoffs = 0;
+  let loads = 0;
+  let runId;
+  let rootConfiguration = { schemaVersion: 1, defaultBackend: "codex" };
+  const backend = createBackend("codex");
+  const adapters = {
+    codex: {
+      ...backend,
+      async run(request) {
+        const durable = await runStore.loadRun(runId);
+        assert.deepEqual(durable.pipelineState.trustedValidation, expected);
+        assert.equal(
+          durable.projectConfigurationProtection.path,
+          configurationPath,
+        );
+        calls.push(request);
+        await hooks.beforeTurn?.(request, durable, {
+          configurationPath,
+          projectConfiguration,
+        });
+        const response = await backend.run(request);
+        const result = response.structured.result ?? response.structured;
+        if (result.requiredChecks !== undefined) {
+          result.requiredChecks = requiredChecks;
+          if (result.checks !== undefined) {
+            result.checks.push({
+              checkId: "C2",
+              command: definition.command,
+              status: "NOT_RUN",
+              evidence: [
+                "Reserved for the runner's selected project-check vector.",
+              ],
+            });
+          }
+        }
+        await hooks.afterTurn?.(request, durable, result);
+        if (
+          request.prompt.includes("Implement the changes described") ||
+          request.prompt.includes(
+            "Polish the existing local repository changes",
+          )
+        ) {
+          assert.match(
+            request.prompt,
+            /Selected runner-trusted commands must never execute inside an agent turn/u,
+          );
+          assert.ok(request.prompt.includes(definition.command));
+        }
+        return response;
+      },
+    },
+  };
+  const trustedValidation = createTrustedValidationService({
+    git,
+    environment: {
+      ...process.env,
+      GH_TOKEN: "PRIVATE_CREDENTIAL",
+      SSH_AUTH_SOCK: "/private/agent.sock",
+    },
+    // Inspect the real sandbox construction; no host launcher or process runs.
+    resolveLauncher: () => "/usr/bin/bwrap",
+    verifyLauncher: (path) => path,
+    async runCommand(command, options) {
+      executions.push(command);
+      assert.ok(
+        calls
+          .at(-1)
+          .prompt.includes("Run the complete project finalization procedure"),
+      );
+      assert.equal(command.executable, "/usr/bin/bwrap");
+      assert.deepEqual(command.arguments.slice(-4), [
+        definition.executable,
+        ...definition.arguments,
+      ]);
+      for (const flag of [
+        "--unshare-net",
+        "--unshare-pid",
+        "--cap-drop",
+        "--ro-bind",
+        "--tmpfs",
+      ]) {
+        assert.ok(command.arguments.includes(flag), flag);
+      }
+      assert.equal(command.arguments.includes("--bind"), false);
+      assert.equal(options.environment.GH_TOKEN, undefined);
+      assert.equal(options.environment.SSH_AUTH_SOCK, undefined);
+      assert.equal(options.environment.GIT_SSH_COMMAND, "/bin/false");
+      assert.equal(options.environment.GIT_CONFIG_GLOBAL, "/dev/null");
+      assert.equal(options.readinessRequired, true);
+      await hooks.execute?.(paths);
+      return {
+        status: "PASS",
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        reason: "exit",
+        stdout: "PRIVATE_EXECUTOR_OUTPUT",
+        stderr: "PRIVATE_EXECUTOR_OUTPUT",
+      };
+    },
+  });
+  let runner;
+  function openRunner() {
+    runner = createRunner({
+      adapters,
+      runStore,
+      clarifications: createClarificationService({ interactive: false }),
+      git: {
+        ...git,
+        async stagePolishingHandoff(options) {
+          handoffs += 1;
+          const result = await git.stagePolishingHandoff(options);
+          await hooks.afterHandoff?.(runner, await runStore.loadRun(runId));
+          return result;
+        },
+      },
+      loadConfiguration: async () => {
+        loads += 1;
+        return parseRunnerConfiguration(JSON.stringify(rootConfiguration));
+      },
+      trustedValidation,
+    });
+    return runner;
+  }
+  const prepared = await openRunner().create({
+    pipelineId,
+    projectPath: paths.projectPath,
+    taskPath: paths.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    sourceSession: null,
+  });
+  runId = prepared.run.runId;
+  assert.deepEqual(prepared.run.pipelineState.trustedValidation, expected);
+  assert.equal(calls.length, 0);
+  assert.equal(executions.length, 0);
+  return {
+    ...paths,
+    configurationPath,
+    runId,
+    runStore,
+    expected,
+    calls,
+    executions,
+    resume: () => runner.resume({ runId, action: null }),
+    reopen() {
+      rootConfiguration = {
+        schemaVersion: 1,
+        defaultBackend: "claude",
+        trustedCommands: {
+          replacement: { command: "false", executable: "false", arguments: [] },
+        },
+        pipelines: { [pipelineId]: { trustedChecks: ["replacement"] } },
+      };
+      return openRunner();
+    },
+    get loads() {
+      return loads;
+    },
+    get handoffs() {
+      return handoffs;
+    },
+  };
+}
+
+for (const pipelineId of ["plan-execution", "polishing"]) {
+  for (const rejectEvidence of [false, true]) {
+    test(`combined ${pipelineId} ${rejectEvidence ? "reruns rejected" : "reuses interrupted"} trusted finalization evidence`, async (t) => {
+      let confirmations = 0;
+      const scenario = await projectCommandScenario(t, pipelineId, {
+        mode: "combined",
+        beforeTurn(request, durable) {
+          if (durable.activeTurn.phase !== "confirm") return;
+          confirmations += 1;
+          if (!rejectEvidence && confirmations === 1)
+            throw providerInterruption();
+        },
+        afterTurn(request, durable, result) {
+          if (
+            rejectEvidence &&
+            durable.activeTurn.phase === "confirm" &&
+            confirmations === 1
+          ) {
+            result.status = "FINDINGS";
+            result.validationChange = "REJECTED";
+            result.validationEvidence = [
+              "Fresh complete evidence is required.",
+            ];
+            result.findings = [
+              {
+                id: "R1",
+                file: "src/base.js",
+                problem: "Validation evidence is insufficient.",
+                reason: "The terminal gate requires a fresh complete run.",
+                suggestedAction: "Repeat finalization without editing content.",
+              },
+            ];
+            result.finalizationFindingIds = ["R1"];
+          }
+        },
+      });
+      let completed = (await scenario.resume()).run;
+      if (!rejectEvidence) {
+        assert.equal(completed.pause.resumeState, "CONFIRM");
+        assert.equal(scenario.executions.length, 1);
+        const finalization = completed.pipelineState.finalizationResult;
+        scenario.reopen();
+        completed = (await scenario.resume()).run;
+        if (pipelineId === "polishing")
+          assert.deepEqual(
+            completed.pipelineState.finalizationResult,
+            finalization,
+          );
+      }
+      assert.equal(
+        completed.pipelineState.workflowState,
+        "DONE",
+        JSON.stringify(completed.pause),
+      );
+      const ordinary = pipelineId === "plan-execution" ? 2 : 1;
+      assert.equal(
+        scenario.executions.length,
+        ordinary + Number(rejectEvidence),
+      );
+      assert.deepEqual(
+        completed.pipelineState.trustedValidation,
+        scenario.expected,
+      );
+      assert.equal(completed.counters.correctionRounds, 0);
+      assert.equal(
+        scenario.calls.filter(({ prompt }) =>
+          prompt.includes(
+            "Concrete findings from the preceding clean confirmation:",
+          ),
+        ).length,
+        ordinary,
+      );
+      assert.equal(scenario.handoffs, pipelineId === "polishing" ? 1 : 0);
+      const calls = scenario.calls.length;
+      const executions = scenario.executions.length;
+      await scenario.resume();
+      assert.equal(scenario.calls.length, calls);
+      assert.equal(scenario.executions.length, executions);
+    });
+  }
+
+  test(`project command snapshots survive interruption and complete ${pipelineId}`, async (t) => {
+    let interrupted = false;
+    const scenario = await projectCommandScenario(t, pipelineId, {
+      beforeTurn(request) {
+        if (
+          !interrupted &&
+          request.prompt.includes(
+            "Run the complete project finalization procedure",
+          )
+        ) {
+          interrupted = true;
+          const error = new Error("Temporary provider interruption.");
+          error.recoverable = true;
+          throw error;
+        }
+      },
+    });
+    const initialHead = await gitOutput(scenario.projectPath, [
+      "rev-parse",
+      "HEAD",
+    ]);
+    const paused = (await scenario.resume()).run;
+    assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+    assert.equal(paused.pause.resumeState, "FINALIZE");
+    assert.equal(scenario.executions.length, 0);
+    assert.deepEqual(paused.pipelineState.trustedValidation, scenario.expected);
+    scenario.reopen();
+    const completed = (await scenario.resume()).run;
+    assert.equal(completed.pipelineState.workflowState, "DONE");
+    assert.equal(scenario.loads, 1);
+    assert.deepEqual(
+      completed.pipelineState.trustedValidation,
+      scenario.expected,
+    );
+    assert.equal(
+      scenario.executions.length,
+      pipelineId === "plan-execution" ? 2 : 1,
+    );
+    assert.equal(scenario.handoffs, pipelineId === "polishing" ? 1 : 0);
+    assert.equal(
+      scenario.calls.filter(({ access }) => access === "local-commit").length,
+      pipelineId === "plan-execution" ? 2 : 0,
+    );
+    if (pipelineId === "plan-execution") {
+      assert.equal(completed.pipelineState.completedCommits.length, 2);
+    } else {
+      assert.equal(
+        await gitOutput(scenario.projectPath, ["rev-parse", "HEAD"]),
+        initialHead,
+      );
+    }
+    const evidence = completed.pipelineState.finalizationResult.checks.find(
+      ({ checkId }) => checkId === "C2",
+    );
+    assert.equal(evidence.executor, "runner");
+    assert.equal(
+      evidence.commandIdentity,
+      scenario.expected.commands[0].identity,
+    );
+    const durable = await readFile(
+      join(scenario.stateRoot, "runs", scenario.runId, "events.jsonl"),
+      "utf8",
+    );
+    assert.doesNotMatch(durable, /PRIVATE_EXECUTOR_OUTPUT|PRIVATE_CREDENTIAL/u);
+    const turns = scenario.calls.length;
+    const executions = scenario.executions.length;
+    await scenario.resume();
+    assert.equal(scenario.calls.length, turns);
+    assert.equal(scenario.executions.length, executions);
+  });
+
+  for (const access of ["read-only", "workspace-write"]) {
+    for (const mutation of ["content", "replacement"]) {
+      test(`project command guard blocks ${pipelineId} ${access} ${mutation}`, async (t) => {
+        let mutated = false;
+        const scenario = await projectCommandScenario(t, pipelineId, {
+          async beforeTurn(
+            request,
+            durable,
+            { configurationPath, projectConfiguration },
+          ) {
+            if (mutated || request.access !== access) return;
+            mutated = true;
+            if (mutation === "replacement") {
+              const replacement = `${configurationPath}.replacement`;
+              await writeFile(
+                replacement,
+                JSON.stringify(projectConfiguration),
+              );
+              await rename(replacement, configurationPath);
+            } else {
+              await writeFile(
+                configurationPath,
+                JSON.stringify({
+                  ...projectConfiguration,
+                  trustedCommands: {},
+                }),
+              );
+            }
+          },
+        });
+        const initialHead = await gitOutput(scenario.projectPath, [
+          "rev-parse",
+          "HEAD",
+        ]);
+        const blocked = (await scenario.resume()).run;
+        assert.equal(mutated, true);
+        assert.equal(blocked.pause.reason, "project_configuration_changed");
+        assert.deepEqual(
+          blocked.pipelineState.trustedValidation,
+          scenario.expected,
+        );
+        const calls = scenario.calls.length;
+        await scenario.resume();
+        assert.equal(scenario.calls.length, calls);
+        assert.equal(scenario.executions.length, 0);
+        assert.equal(scenario.handoffs, 0);
+        assert.equal(
+          await gitOutput(scenario.projectPath, ["rev-parse", "HEAD"]),
+          initialHead,
+        );
+        assert.equal(
+          scenario.calls.some(({ access }) => access === "local-commit"),
+          false,
+        );
+      });
+    }
+  }
+
+  test(`project command execution retains Git mutation guards in ${pipelineId}`, async (t) => {
+    const scenario = await projectCommandScenario(t, pipelineId, {
+      execute: (paths) =>
+        writeFile(
+          join(paths.projectPath, "src/base.js"),
+          "unauthorized validation write\n",
+        ),
+    });
+    const initialHead = await gitOutput(scenario.projectPath, [
+      "rev-parse",
+      "HEAD",
+    ]);
+    const blocked = (await scenario.resume()).run;
+    assert.equal(blocked.pipelineState.workflowState, "WAITING_FOR_USER");
+    assert.equal(blocked.pause.reason, "unsafe_git_state");
+    assert.equal(scenario.executions.length, 1);
+    assert.equal(scenario.handoffs, 0);
+    assert.equal(
+      scenario.calls.some(({ access }) => access === "local-commit"),
+      false,
+    );
+    assert.equal(
+      await gitOutput(scenario.projectPath, ["rev-parse", "HEAD"]),
+      initialHead,
+    );
+  });
+}
+
+test("project command drift preserves an already verified commit", async (t) => {
+  let preserved;
+  const scenario = await projectCommandScenario(t, "plan-execution", {
+    async beforeTurn(request, durable, { configurationPath }) {
+      if (durable.pipelineState.completedCommits.length !== 1 || preserved)
+        return;
+      preserved = durable.pipelineState.completedCommits;
+      await writeFile(configurationPath, '{"schemaVersion":1}\n');
+    },
+  });
+  const blocked = (await scenario.resume()).run;
+  assert.equal(blocked.pause.reason, "project_configuration_changed");
+  assert.equal(preserved.length, 1);
+  assert.deepEqual(blocked.pipelineState.completedCommits, preserved);
+  const head = await gitOutput(scenario.projectPath, ["rev-parse", "HEAD"]);
+  const turns = scenario.calls.length;
+  await scenario.resume();
+  assert.deepEqual(
+    (await scenario.runStore.loadRun(scenario.runId)).pipelineState
+      .completedCommits,
+    preserved,
+  );
+  assert.equal(scenario.calls.length, turns);
+  assert.equal(
+    await gitOutput(scenario.projectPath, ["rev-parse", "HEAD"]),
+    head,
+  );
+});
+
+test("project command drift preserves completed polishing handoff evidence", async (t) => {
+  const scenario = await projectCommandScenario(t, "polishing", {
+    async afterHandoff(runner, run) {
+      await runner.requestOperatorStop({
+        runId: run.runId,
+        kind: "pause_requested",
+        expectedRevision: run.revision,
+        idempotencyKey: "project-command-handoff",
+      });
+    },
+  });
+  const paused = (await scenario.resume()).run;
+  assert.equal(paused.pause.reason, "operator_paused");
+  assert.equal(paused.pause.operatorResume.workflowState, "DONE");
+  const baseline = paused.pipelineState.repositoryBaseline;
+  const finalization = paused.pipelineState.finalizationResult;
+  const reviewedFingerprint = paused.pipelineState.reviewedFingerprint;
+  assert.ok(finalization);
+  assert.equal(reviewedFingerprint, paused.pipelineState.finalizedFingerprint);
+  const turns = scenario.calls.length;
+  await writeFile(scenario.configurationPath, '{"schemaVersion":1}\n');
+  const blocked = (await scenario.resume()).run;
+  assert.equal(blocked.pause.reason, "project_configuration_changed");
+  assert.deepEqual(blocked.pipelineState.repositoryBaseline, baseline);
+  assert.deepEqual(blocked.pipelineState.finalizationResult, finalization);
+  assert.equal(blocked.pipelineState.reviewedFingerprint, reviewedFingerprint);
+  assert.equal(scenario.calls.length, turns);
+  assert.equal(scenario.handoffs, 1);
+});
+
+test("polishing migrates legacy 64/128 evidence under lease without replaying a completed handoff", async (t) => {
+  const paths = await fixture(t, { plan: null });
+  const inventory = (role) => ({
+    requiredChecks: Array.from({ length: 64 }, (_, index) => ({
+      id: `C${index + 1}`,
+      command: `node validation/${role}-${index}.js`,
+    })),
+    validationInfrastructure: Array.from(
+      { length: 64 },
+      (_, index) => `validation/${role}-${index}.js`,
+    ),
+  });
+  const worker = inventory("worker");
+  const reviewer = inventory("reviewer");
+  const merged = {
+    requiredChecks: [...worker.requiredChecks, ...reviewer.requiredChecks].map(
+      ({ command }, index) => ({ id: `C${index + 1}`, command }),
+    ),
+    validationInfrastructure: [
+      ...worker.validationInfrastructure,
+      ...reviewer.validationInfrastructure,
+    ],
+  };
+  await mkdir(join(paths.projectPath, "validation"));
+  await Promise.all(
+    merged.validationInfrastructure.map((path) =>
+      writeFile(join(paths.projectPath, path), "// validation runner\n"),
+    ),
+  );
+  const store = createRunStore({ stateRoot: paths.stateRoot });
+  const git = createGitService();
+  const backend = createBackend("codex");
+  let calls = 0;
+  let handoffs = 0;
+  let runId;
+  let runner;
+  const adapters = {
+    codex: {
+      ...backend,
+      async run(request) {
+        calls += 1;
+        const response = await backend.run(request);
+        const result = response.structured;
+        if (result.requiredChecks !== undefined) {
+          Object.assign(
+            result,
+            result.checks === undefined
+              ? request.prompt.includes("As Reviewer")
+                ? reviewer
+                : worker
+              : merged,
+          );
+          if (result.checks !== undefined)
+            result.checks = merged.requiredChecks.map(({ id, command }) => ({
+              checkId: id,
+              command,
+              status: "PASS",
+              evidence: ["Fixture check passed."],
+            }));
+        }
+        return response;
+      },
+    },
+  };
+  function openRunner(loadConfiguration) {
+    return createRunner({
+      adapters,
+      runStore: store,
+      clarifications: createClarificationService({ interactive: false }),
+      git: {
+        ...git,
+        async stagePolishingHandoff(options) {
+          handoffs += 1;
+          const result = await git.stagePolishingHandoff(options);
+          const run = await store.loadRun(runId);
+          await runner.requestOperatorStop({
+            runId,
+            kind: "pause_requested",
+            expectedRevision: run.revision,
+            idempotencyKey: "capacity-handoff",
+          });
+          return result;
+        },
+      },
+      loadConfiguration,
+    });
+  }
+  runner = openRunner(async () =>
+    parseRunnerConfiguration(
+      JSON.stringify({
+        schemaVersion: 1,
+        defaultBackend: "codex",
+        pipelines: { polishing: { finalization: "none" } },
+      }),
+    ),
+  );
+  const prepared = await runner.create({
+    pipelineId: "polishing",
+    projectPath: paths.projectPath,
+    taskPath: paths.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    sourceSession: null,
+  });
+  runId = prepared.run.runId;
+  const paused = (await runner.resume({ runId })).run;
+  assert.equal(paused.pause.operatorResume.workflowState, "DONE");
+  assert.equal(paused.pipelineState.workerValidation.requiredChecks.length, 64);
+  assert.equal(paused.pipelineState.requiredChecks.length, 128);
+  assert.equal(handoffs, 1);
+  const turns = calls;
+  const statePath = join(prepared.directoryPath, "state.json");
+  const eventsPath = join(prepared.directoryPath, "events.jsonl");
+  async function downgrade() {
+    const state = JSON.parse(await readFile(statePath, "utf8"));
+    const events = (await readFile(eventsPath, "utf8"))
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    for (const saved of [state, ...events.map((event) => event.state)])
+      saved.pipelineStateVersion = 11;
+    await writeFile(statePath, `${JSON.stringify(state)}\n`);
+    await writeFile(
+      eventsPath,
+      `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+    );
+  }
+  await downgrade();
+  runner = openRunner(async () => {
+    throw new Error("Resume reloaded configuration.");
+  });
+  const before = await Promise.all([readFile(statePath), readFile(eventsPath)]);
+  const lease = await store.acquireRunLease(runId);
+  try {
+    assert.equal((await runner.status(runId)).run.pipelineStateVersion, 13);
+    await assert.rejects(runner.resume({ runId }), { code: "ERR_RUN_LEASED" });
+    assert.deepEqual(
+      await Promise.all([readFile(statePath), readFile(eventsPath)]),
+      before,
+    );
+  } finally {
+    await lease.release();
+  }
+  const completed = (await runner.resume({ runId })).run;
+  assert.equal(completed.pipelineStateVersion, 13);
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.deepEqual(
+    completed.pipelineState.finalizationResult,
+    paused.pipelineState.finalizationResult,
+  );
+  assert.deepEqual(completed.counters, paused.counters);
+  assert.equal(calls, turns);
+  assert.equal(handoffs, 1);
+  const history = await store.loadRunHistory(runId);
+  const migrations = history.events.filter(
+    ({ activity }) => activity?.kind === "migrated",
+  );
+  assert.equal(migrations.length, 1);
+  assert.deepEqual(migrations[0].state.pipelineState, paused.pipelineState);
+  assert.equal(migrations[0].state.pipelineStateVersion, 13);
+  const terminalState = completed.pipelineState;
+  await downgrade();
+  const terminal = (await runner.resume({ runId })).run;
+  assert.deepEqual(terminal.pipelineState, terminalState);
+  assert.equal(terminal.pipelineStateVersion, 13);
+  assert.equal(calls, turns);
+  assert.equal(handoffs, 1);
 });

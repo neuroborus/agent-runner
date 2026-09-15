@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {
+import filesystem, {
   access,
   appendFile,
   link,
@@ -13,6 +13,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -95,6 +96,167 @@ test("rejects invalid run-store options", async (t) => {
     (error) =>
       error instanceof RunStoreError &&
       error.code === "ERR_INVALID_RUN_STORE_OPTIONS",
+  );
+});
+
+test("state resolution accepts appearing directories while rejecting links and files", async (t) => {
+  for (const kind of ["root", "ancestor", "symlink", "dangling-link", "file"]) {
+    await t.test(kind, async (t) => {
+      const { projectPath, taskPath, workspace } = await createFixture(t);
+      const parentPath = join(workspace, "concurrent");
+      const stateRoot = join(parentPath, "state");
+      const linkTarget = join(workspace, "link-target");
+      const appearingPath = kind === "ancestor" ? parentPath : stateRoot;
+      const nativeRealpath = filesystem.realpath;
+      let appeared = false;
+      const mockedRealpath = t.mock.method(
+        filesystem,
+        "realpath",
+        async (path, ...options) => {
+          try {
+            return await nativeRealpath(path, ...options);
+          } catch (cause) {
+            if (
+              cause?.code === "ENOENT" &&
+              path === appearingPath &&
+              !appeared
+            ) {
+              // Reproduce another creator winning between realpath and lstat.
+              appeared = true;
+              await mkdir(parentPath, { recursive: true });
+              if (kind === "root") await mkdir(stateRoot);
+              if (kind === "symlink") {
+                await mkdir(linkTarget);
+                await symlink(linkTarget, stateRoot);
+              }
+              if (kind === "dangling-link")
+                await symlink(linkTarget, stateRoot);
+              if (kind === "file")
+                await writeFile(stateRoot, "Not a directory.");
+            }
+            throw cause;
+          }
+        },
+      );
+      syncBuiltinESMExports();
+      try {
+        const store = createRunStore({ stateRoot });
+        if (kind === "root" || kind === "ancestor") {
+          const created = await store.createRun(
+            runInput(projectPath, taskPath),
+          );
+          t.after(() => created.lease.release().catch(() => {}));
+          assert.equal(
+            created.directoryPath,
+            join(stateRoot, "runs", created.state.runId),
+          );
+          assert.deepEqual(
+            await store.loadRun(created.state.runId),
+            created.state,
+          );
+        } else {
+          await assert.rejects(
+            store.createRun(runInput(projectPath, taskPath)),
+            {
+              code: "ERR_UNSAFE_STATE_ROOT",
+            },
+          );
+          await assert.rejects(access(join(linkTarget, "runs")), {
+            code: "ENOENT",
+          });
+          if (kind === "dangling-link")
+            await assert.rejects(access(linkTarget), { code: "ENOENT" });
+        }
+        assert.equal(appeared, true);
+      } finally {
+        mockedRealpath.mock.restore();
+        syncBuiltinESMExports();
+      }
+    });
+  }
+});
+
+test("guidance publication shares execution ownership and releases it on failure", async (t) => {
+  const fixture = await createFixture(t);
+  const { projectPath, store, created } = fixture;
+  await assert.rejects(
+    store.withGuidanceLease(projectPath, async (assertOwnership) => {
+      await assertOwnership();
+      await assert.rejects(
+        store.acquireWorktreeLease(projectPath, created.state.runId),
+        { code: "ERR_WORKTREE_LEASED" },
+      );
+      await assert.rejects(
+        store.withGuidanceLease(projectPath, async () => {}),
+        { code: "ERR_WORKTREE_LEASED" },
+      );
+      throw new Error("Publication interrupted.");
+    }),
+    /Publication interrupted/u,
+  );
+  const lease = await store.acquireWorktreeLease(
+    projectPath,
+    created.state.runId,
+  );
+  await lease.release();
+});
+
+test("state boundaries reject containing project or task trees before initialization", async (t) => {
+  const workspace = await mkdtemp(
+    join(tmpdir(), "agent-runner-state-overlap-"),
+  );
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  const stateRoot = join(workspace, "state");
+  const nested = join(stateRoot, "actions");
+  const outside = join(workspace, "outside");
+  await mkdir(nested, { recursive: true });
+  await mkdir(outside);
+  const store = createRunStore({ stateRoot });
+  for (const [projectPath, taskPath] of [
+    [nested, outside],
+    [outside, nested],
+  ]) {
+    await assert.rejects(
+      store.validateStateBoundary({ projectPath, taskPath }),
+      { code: "ERR_UNSAFE_STATE_ROOT" },
+    );
+    await assert.rejects(store.createRun(runInput(projectPath, taskPath)), {
+      code: "ERR_UNSAFE_STATE_ROOT",
+    });
+  }
+  await assert.rejects(
+    store.withGuidanceLease(nested, async () => {}),
+    {
+      code: "ERR_UNSAFE_STATE_ROOT",
+    },
+  );
+  assert.deepEqual(await readdir(stateRoot), ["actions"]);
+  assert.deepEqual(await readdir(nested), []);
+});
+
+test("guidance action intents preserve metadata and replay bounded receipts", async (t) => {
+  const { store } = await createFixture(t);
+  const identity = {
+    key: "guidance-test-key",
+    tool: "guidance_update",
+    arguments: { localContentHash: "a".repeat(64), expectedHash: null },
+    context: { phase: "reserved" },
+  };
+  const action = await store.beginAction(identity);
+  const result = { localHash: "a".repeat(64), updated: true };
+  try {
+    assert.equal(action.record.status, "intent");
+    await action.complete(result);
+  } finally {
+    await action.release();
+  }
+  assert.deepEqual((await store.readAction(identity)).result, result);
+  await assert.rejects(
+    store.readAction({
+      ...identity,
+      arguments: { localContentHash: "b".repeat(64), expectedHash: null },
+    }),
+    { code: "ERR_MCP_IDEMPOTENCY_CONFLICT" },
   );
 });
 
@@ -254,6 +416,45 @@ test("publishes a complete run lease before contention can observe it", async (t
     ),
     false,
   );
+});
+
+test("retries lease publication that races its initial file inspection", async (t) => {
+  const { created, store } = await createFixture(t);
+  const leasePath = join(created.directoryPath, ".lease");
+  const temporaryPath = join(
+    created.directoryPath,
+    `..lease.publish.${process.pid}.11111111-1111-4111-8111-111111111111.tmp`,
+  );
+  await writeFile(temporaryPath, await readFile(leasePath));
+  const nativeLstat = filesystem.lstat;
+  let armed = true;
+  const mockedLstat = t.mock.method(
+    filesystem,
+    "lstat",
+    async (path, ...options) => {
+      const metadata = await nativeLstat(path, ...options);
+      if (armed && path === leasePath) {
+        armed = false;
+        await rm(leasePath);
+        await link(temporaryPath, leasePath);
+      }
+      return metadata;
+    },
+  );
+  syncBuiltinESMExports();
+  t.after(() => {
+    mockedLstat.mock.restore();
+    syncBuiltinESMExports();
+  });
+  assert.equal(await store.runIsLeased(created.state.runId), true);
+  assert.equal((await lstat(leasePath)).nlink, 1);
+  await assert.rejects(access(temporaryPath), { code: "ENOENT" });
+  const unsafeLink = join(created.directoryPath, "unexpected-lease-link");
+  await link(leasePath, unsafeLink);
+  await assert.rejects(store.runIsLeased(created.state.runId), {
+    code: "ERR_UNSAFE_STATE_FILE",
+  });
+  await rm(unsafeLink);
 });
 
 test("serializes ownership by canonical worktree without locking status", async (t) => {
@@ -695,6 +896,7 @@ test("grants one owner during concurrent stale recovery", async (t) => {
   for (const { reason } of rejected) {
     assert.ok(
       reason instanceof RunStoreError && reason.code === "ERR_RUN_LEASED",
+      reason,
     );
   }
   await acquired[0].value.release();

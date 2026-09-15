@@ -16,6 +16,7 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
+import { createLegacyRecoveryFixture } from "../../pipelines/plan-execution/test/support/index.js";
 import {
   createClarificationService,
   createDetachedRuntimeCompatibilityToken,
@@ -36,6 +37,8 @@ import {
   MCP_INSTRUCTIONS,
 } from "../../src/mcp/index.js";
 
+import { resolveStopBoundary } from "../../src/pipeline-registry.js";
+
 const RUN_ID = "11111111-1111-4111-8111-111111111111";
 const SECOND_RUN_ID = "22222222-2222-4222-8222-222222222222";
 const THIRD_RUN_ID = "33333333-3333-4333-8333-333333333333";
@@ -45,6 +48,137 @@ const SIXTH_RUN_ID = "66666666-6666-4666-8666-666666666666";
 const SEVENTH_RUN_ID = "77777777-7777-4777-8777-777777777777";
 const RESPONSE_HASH = "a".repeat(64);
 const executeFile = promisify(execFile);
+
+test("MCP legacy recovery keeps exact revisions, idempotent receipts, and detached ownership", async (t) => {
+  const fixture = await createLegacyRecoveryFixture(t, { steps: 1 });
+  let launches = 0;
+  let continuation;
+  const controlOptions = {
+    runner: fixture.openRunner(),
+    runStore: fixture.store,
+    launchRun(runId, action, options) {
+      launches += 1;
+      assert.equal(
+        options.expectedRuntimeCompatibility,
+        DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
+      );
+      continuation = fixture.openRunner().resume({ runId, action });
+      continuation.then(
+        () => options.onExit(0),
+        () => options.onExit(1),
+      );
+    },
+  };
+  const control = createMcpControlPlane(controlOptions);
+  const status = await control.runStatus({ runId: fixture.runId });
+  assert.equal(status.status, "FAILED");
+  assert.equal(status.pause.resumeState, "CONFIRM");
+  assert.deepEqual(status.pause.nextActions, [
+    { type: "resume", action: null },
+  ]);
+  assert.doesNotMatch(
+    JSON.stringify(status),
+    /PRIVATE_LEGACY_PROVIDER_PAYLOAD|events|candidateReviewResult/u,
+  );
+  const request = {
+    runId: fixture.runId,
+    expectedRevision: fixture.failed.revision,
+    action: null,
+    idempotencyKey: "legacy-recovery",
+  };
+  await assert.rejects(
+    control.runResume({
+      ...request,
+      expectedRevision: request.expectedRevision - 1,
+      idempotencyKey: "stale-legacy",
+    }),
+    /stale/u,
+  );
+  await assert.rejects(
+    control.runResume({
+      ...request,
+      action: { type: "extra-fix-rounds", amount: 1 },
+      idempotencyKey: "invalid-legacy",
+    }),
+    /paused/u,
+  );
+  const competing = await fixture.store.acquireWorktreeLease(
+    fixture.projectPath,
+    SECOND_RUN_ID,
+  );
+  try {
+    await assert.rejects(control.runResume(request), {
+      code: "ERR_WORKTREE_LEASED",
+    });
+  } finally {
+    await competing.release();
+  }
+  assert.equal(launches, 0);
+  const receipt = await control.runResume(request);
+  assert.deepEqual(receipt, { runId: fixture.runId });
+  assert.deepEqual(await control.runResume(request), receipt);
+  await continuation;
+  assert.deepEqual(
+    await createMcpControlPlane(controlOptions).runResume(request),
+    receipt,
+  );
+  await assert.rejects(
+    control.runResume({
+      ...request,
+      expectedRevision: request.expectedRevision + 1,
+    }),
+    /idempotency|different|match/iu,
+  );
+  assert.equal(launches, 1);
+});
+
+test("MCP legacy recovery repairs an interrupted receipt without another dispatch", async (t) => {
+  const fixture = await createLegacyRecoveryFixture(t, { steps: 1 });
+  const receiptFailure = new Error("Simulated receipt interruption");
+  let failReceipt = true;
+  let launches = 0;
+  let continuation;
+  const store = {
+    ...fixture.store,
+    async beginAction(...args) {
+      const action = await fixture.store.beginAction(...args);
+      return {
+        ...action,
+        async complete(receipt) {
+          if (failReceipt) {
+            failReceipt = false;
+            throw receiptFailure;
+          }
+          return action.complete(receipt);
+        },
+      };
+    },
+  };
+  const options = {
+    runStore: store,
+    runner: fixture.openRunner(),
+    launchRun(runId, action) {
+      launches += 1;
+      continuation = fixture.openRunner().resume({ runId, action });
+      continuation.catch(() => {});
+    },
+  };
+  const request = {
+    runId: fixture.runId,
+    expectedRevision: fixture.failed.revision,
+    action: null,
+    idempotencyKey: "interrupted-legacy-receipt",
+  };
+  await assert.rejects(
+    createMcpControlPlane(options).runResume(request),
+    (cause) => cause === receiptFailure,
+  );
+  await continuation;
+  assert.deepEqual(await createMcpControlPlane(options).runResume(request), {
+    runId: fixture.runId,
+  });
+  assert.equal(launches, 1);
+});
 
 async function childNodeStdoutIsAvailable() {
   const marker = "agent-runner-child-stdio-probe";
@@ -58,6 +192,29 @@ async function childNodeStdoutIsAvailable() {
   } catch {
     return false;
   }
+}
+
+async function requireChildNodeStdout(
+  t,
+  { probe = childNodeStdoutIsAvailable, argumentsList = process.execArgv } = {},
+) {
+  if (await probe()) {
+    return true;
+  }
+  // Explicit selection must establish coverage rather than pass through a skip.
+  if (
+    argumentsList.some(
+      (argument) =>
+        argument === "--test-name-pattern" ||
+        argument.startsWith("--test-name-pattern="),
+    )
+  ) {
+    assert.fail(
+      "Explicitly selected STDIO tests require nested Node stdout; skipping is not permitted.",
+    );
+  }
+  t.skip("Nested Node stdout is unavailable in this environment.");
+  return false;
 }
 
 async function workspace(t, prefix = "agent-runner-mcp-") {
@@ -214,6 +371,9 @@ async function createStoredRun(
 
 function storedRunner(store, paths) {
   return {
+    requestOperatorStop(input) {
+      return store.requestOperatorStop(input);
+    },
     validateBoundary(input) {
       return store.validateStateBoundary(input);
     },
@@ -300,22 +460,113 @@ test("projects descriptor-owned pipeline mode guidance", async () => {
   assert.match(MCP_INSTRUCTIONS, /lazy is opt-in/u);
   assert.match(MCP_INSTRUCTIONS, /does not provide independent review/u);
   assert.match(MCP_INSTRUCTIONS, /never select it automatically/u);
+  assert.match(MCP_INSTRUCTIONS, /run_pause or run_cancel/u);
+  assert.match(MCP_INSTRUCTIONS, /never refresh a stale revision silently/u);
 
   const control = createMcpControlPlane({ runner: {}, runStore: {} });
   const { pipelines } = await control.pipelinesList();
+  assert.deepEqual(
+    pipelines.find(({ id }) => id === "plan-authoring").settings
+      .preferredCommitLineLimit,
+    { defaultValue: 900 },
+  );
   for (const pipeline of pipelines) {
     assert.deepEqual(pipeline.settings.mode, {
       defaultValue: "independent",
       recommendedValue: "independent",
-      values: ["independent", "lazy"],
+      values: ["independent", "lazy", "combined"],
     });
     assert.ok(pipeline.runOptions.includes("mode"));
   }
 });
 
+for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
+  test(`MCP combined ${pipelineId} starts preserve mode in receipts and public projections`, async (t) => {
+    const paths = await workspace(t, "agent-runner-mcp-combined-");
+    const store = createRunStore({ stateRoot: paths.stateRoot });
+    let launches = 0;
+    const control = createMcpControlPlane({
+      runner: storedRunner(store, paths),
+      runStore: store,
+      runIdFactory: () => RUN_ID,
+      async launchRun(id) {
+        launches += 1;
+        return advanceMutatingStoredRun(store, id);
+      },
+    });
+    const input = {
+      idempotencyKey: "combined-start",
+      pipelineId,
+      projectPath: paths.projectPath,
+      taskPath: paths.taskPath,
+      mode: "combined",
+      proactiveClarification: false,
+      roleOverrides: {},
+      sourceSession: null,
+    };
+    assert.deepEqual(await control.runStart(input), { runId: RUN_ID });
+    assert.deepEqual(await control.runStart(input), { runId: RUN_ID });
+    assert.equal(launches, 1);
+    assert.equal((await control.runStatus({ runId: RUN_ID })).mode, "combined");
+    assert.equal(
+      (await control.runActivity({ runId: RUN_ID, cursor: 0, limit: 50 })).mode,
+      "combined",
+    );
+    await assert.rejects(
+      control.runStart({ ...input, mode: "independent" }),
+      (error) => error.code === "ERR_MCP_IDEMPOTENCY_CONFLICT",
+    );
+  });
+}
+
+test("broad STDIO discovery may skip when child stdout is unavailable", async () => {
+  const skipped = [];
+  assert.equal(
+    await requireChildNodeStdout(
+      { skip: (reason) => skipped.push(reason) },
+      { probe: async () => false, argumentsList: [] },
+    ),
+    false,
+  );
+  assert.deepEqual(skipped, [
+    "Nested Node stdout is unavailable in this environment.",
+  ]);
+});
+
+test("explicitly selected STDIO checks cannot pass through an unavailable probe", async () => {
+  for (const argumentsList of [
+    ["--test-name-pattern=protocol-clean|detached worktree"],
+    ["--test-name-pattern", "protocol-clean|detached worktree"],
+  ]) {
+    await assert.rejects(
+      requireChildNodeStdout(
+        { skip: () => assert.fail("A selected test must not be skipped.") },
+        { probe: async () => false, argumentsList },
+      ),
+      {
+        code: "ERR_ASSERTION",
+        message:
+          "Explicitly selected STDIO tests require nested Node stdout; skipping is not permitted.",
+      },
+    );
+  }
+});
+
+test("available child stdout permits selected STDIO assertions to run", async () => {
+  assert.equal(
+    await requireChildNodeStdout(
+      { skip: () => assert.fail("An available test must not be skipped.") },
+      {
+        probe: async () => true,
+        argumentsList: ["--test-name-pattern=protocol-clean|detached worktree"],
+      },
+    ),
+    true,
+  );
+});
+
 test("serves protocol-clean STDIO discovery through the official SDK", async (t) => {
-  if (!(await childNodeStdoutIsAvailable())) {
-    t.skip("Nested Node stdout is unavailable in this environment.");
+  if (!(await requireChildNodeStdout(t))) {
     return;
   }
   const paths = await workspace(t, "agent-runner-mcp-protocol-");
@@ -349,7 +600,7 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
   assert.match(MCP_INSTRUCTIONS, /never select it automatically/u);
   assert.match(
     MCP_INSTRUCTIONS,
-    /In independent mode the primary and review roles fork/u,
+    /In independent and combined modes the primary and review roles fork/u,
   );
   assert.match(
     MCP_INSTRUCTIONS,
@@ -357,8 +608,12 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
   );
   const { tools } = await client.listTools();
   assert.deepEqual(tools.map((tool) => tool.name).sort(), [
+    "guidance_read",
+    "guidance_update",
     "pipelines_list",
     "run_activity",
+    "run_cancel",
+    "run_pause",
     "run_respond",
     "run_resume",
     "run_start",
@@ -374,6 +629,24 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
     tools.find((tool) => tool.name === "run_start").annotations.destructiveHint,
     true,
   );
+  for (const name of ["run_pause", "run_cancel"]) {
+    const tool = tools.find((candidate) => candidate.name === name);
+    assert.equal(tool.annotations.readOnlyHint, false);
+    assert.deepEqual(tool.inputSchema.required.sort(), [
+      "expectedRevision",
+      "idempotencyKey",
+      "runId",
+    ]);
+    assert.match(tool.description, /same idempotency key and revision/u);
+    assert.deepEqual(tool.inputSchema.properties.timing.enum, [
+      "immediate",
+      "after-current-commit",
+    ]);
+  }
+  assert.match(
+    tools.find((tool) => tool.name === "run_wait").description,
+    /completion, cancellation, failure/u,
+  );
   const startTool = tools.find((tool) => tool.name === "run_start");
   assert.match(startTool.description, /user deliberately selects/u);
   assert.match(
@@ -382,7 +655,7 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
   );
   assert.doesNotMatch(startTool.description, /by default/u);
   const modeSchema = startTool.inputSchema.properties.mode;
-  assert.deepEqual(modeSchema.enum, ["independent", "lazy"]);
+  assert.deepEqual(modeSchema.enum, ["independent", "lazy", "combined"]);
   assert.match(modeSchema.description, /default and recommended/u);
   assert.match(modeSchema.description, /higher context\/token use/u);
   assert.match(modeSchema.description, /without independent review/u);
@@ -427,7 +700,7 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
     assert.deepEqual(pipeline.settings.mode, {
       defaultValue: "independent",
       recommendedValue: "independent",
-      values: ["independent", "lazy"],
+      values: ["independent", "lazy", "combined"],
     });
     assert.ok(pipeline.runOptions.includes("mode"));
   }
@@ -454,8 +727,7 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
 });
 
 test("reports unexpected issues from a detached worktree over fresh STDIO", async (t) => {
-  if (!(await childNodeStdoutIsAvailable())) {
-    t.skip("Nested Node stdout is unavailable in this environment.");
+  if (!(await requireChildNodeStdout(t))) {
     return;
   }
   const paths = await workspace(t, "agent-runner-mcp-detached-report-");
@@ -593,6 +865,350 @@ test("persists exact action receipts and rejects idempotency collisions", async 
     }),
     (error) => error.code === "ERR_MCP_IDEMPOTENCY_CONFLICT",
   );
+});
+
+test("persists stop receipts, projects pending stops, and starts one ownerless reconciliation", async (t) => {
+  const paths = await workspace(t, "agent-runner-mcp-stop-");
+  const store = createRunStore({ stateRoot: paths.stateRoot });
+  const initial = await createStoredRun(store, paths);
+  const runner = storedRunner(store, paths);
+  let ownerIsLive = false;
+  const launches = [];
+  const control = createMcpControlPlane({
+    runner,
+    runStore: {
+      ...store,
+      async runLeaseOwnerIsLive() {
+        return ownerIsLive;
+      },
+    },
+    async launchRun(runId, action, options) {
+      launches.push({ runId, action, options });
+      ownerIsLive = true;
+    },
+  });
+  const pauseInput = {
+    runId: initial.runId,
+    expectedRevision: initial.revision,
+    idempotencyKey: "pause-key",
+  };
+  const pause = await control.runPause(pauseInput);
+  assert.deepEqual(pause, {
+    runId: initial.runId,
+    requestId: pause.requestId,
+    timing: "immediate",
+    effectiveTiming: "immediate",
+    targetBoundary: null,
+    kind: "pause_requested",
+    expectedRevision: initial.revision,
+    revision: initial.revision + 1,
+  });
+  assert.match(pause.requestId, /^[a-f0-9]{64}$/u);
+  assert.deepEqual(await control.runPause(pauseInput), pause);
+  assert.deepEqual(
+    await control.runPause({ ...pauseInput, timing: "immediate" }),
+    pause,
+  );
+  await assert.rejects(
+    control.runPause({ ...pauseInput, timing: "after-current-commit" }),
+    { code: "ERR_MCP_IDEMPOTENCY_CONFLICT" },
+  );
+  assert.equal(launches.length, 1);
+  assert.equal(launches[0].runId, initial.runId);
+  assert.equal(launches[0].action, null);
+  assert.equal(
+    launches[0].options.expectedRuntimeCompatibility,
+    DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
+  );
+  assert.equal(typeof launches[0].options.onExit, "function");
+  const status = await control.runStatus({ runId: initial.runId });
+  assert.deepEqual(status.pendingStop, {
+    timing: "immediate",
+    effectiveTiming: "immediate",
+    targetStep: null,
+    kind: "pause_requested",
+    revision: initial.revision + 1,
+  });
+  assert.doesNotMatch(JSON.stringify(status), new RegExp(pause.requestId, "u"));
+  await assert.rejects(
+    control.runPause({
+      ...pauseInput,
+      expectedRevision: initial.revision + 1,
+    }),
+    { code: "ERR_MCP_IDEMPOTENCY_CONFLICT" },
+  );
+  await assert.rejects(
+    control.runPause({
+      ...pauseInput,
+      idempotencyKey: "stale-pause",
+    }),
+    { code: "ERR_STALE_RUN_REVISION" },
+  );
+  await assert.rejects(
+    control.runPause({
+      ...pauseInput,
+      expectedRevision: pause.revision,
+      idempotencyKey: "competing-pause",
+    }),
+    { code: "ERR_STOP_PENDING" },
+  );
+
+  const cancelInput = {
+    runId: initial.runId,
+    expectedRevision: pause.revision,
+    idempotencyKey: "cancel-key",
+  };
+  const cancel = await control.runCancel(cancelInput);
+  assert.equal(cancel.kind, "cancel_requested");
+  assert.equal(cancel.revision, pause.revision + 1);
+  assert.deepEqual(
+    (await control.runStatus({ runId: initial.runId })).pendingStop,
+    {
+      kind: "cancel_requested",
+      revision: cancel.revision,
+      timing: "immediate",
+      effectiveTiming: "immediate",
+      targetStep: null,
+    },
+  );
+});
+
+test("MCP deferred timing preserves replay, supersession, waits, and historical settlement", async (t) => {
+  const paths = await workspace(t, "agent-runner-mcp-deferred-");
+  const store = createRunStore({
+    stateRoot: paths.stateRoot,
+    resolveStopBoundary,
+  });
+  const initial = await createStoredRun(store, paths, {
+    pipelineId: "plan-execution",
+    workflowState: "IMPLEMENT",
+    state: {
+      currentStep: 1,
+      completedCommits: [],
+      repositoryBaseline: { head: "a".repeat(40) },
+      canonicalPlan:
+        "## Commit 1: feat(test): add behavior\n\nImplement behavior.\n",
+    },
+  });
+  const lease = await store.acquireRunLease(initial.runId);
+  const control = createMcpControlPlane({
+    runner: storedRunner(store, paths),
+    runStore: store,
+    launchRun: () => assert.fail("A live owner must not be replaced."),
+  });
+  const input = {
+    runId: initial.runId,
+    expectedRevision: initial.revision,
+    idempotencyKey: "deferred-pause",
+    timing: "after-current-commit",
+  };
+  const receipt = await control.runPause(input);
+  assert.equal(receipt.targetBoundary.step, 1);
+  assert.equal(receipt.timing, "after-current-commit");
+  assert.deepEqual(await control.runPause(input), receipt);
+  await assert.rejects(control.runPause({ ...input, timing: "immediate" }), {
+    code: "ERR_MCP_IDEMPOTENCY_CONFLICT",
+  });
+  await assert.rejects(
+    control.runCancel({
+      ...input,
+      idempotencyKey: "stale-cancel",
+      expectedRevision: receipt.revision + 10,
+    }),
+    { code: "ERR_STALE_RUN_REVISION" },
+  );
+  const changed = await store.waitForRunChange(initial.runId, {
+    afterRevision: initial.revision,
+    timeoutMs: 100,
+  });
+  assert.equal(changed.revision, receipt.revision);
+  const pending = await control.runStatus({ runId: initial.runId });
+  assert.equal(pending.stop.state, "pending");
+  assert.equal(pending.stop.targetStep, 1);
+  const abort = new AbortController();
+  const waiting = control.runWait(
+    { runId: initial.runId, cursor: receipt.revision, timeoutMs: 10000 },
+    { signal: abort.signal },
+  );
+  abort.abort();
+  await assert.rejects(waiting, { name: "AbortError" });
+  assert.equal((await store.loadRun(initial.runId)).revision, receipt.revision);
+  const cancel = await control.runCancel({
+    ...input,
+    idempotencyKey: "immediate-cancel",
+    expectedRevision: receipt.revision,
+    timing: "immediate",
+  });
+  assert.equal(cancel.effectiveTiming, "immediate");
+  assert.equal(
+    (await control.runStatus({ runId: initial.runId })).stop.state,
+    "applicable",
+  );
+  await store.settleCheckpoint(lease, (run) => ({
+    patch: {
+      pipelineState: { ...run.pipelineState, workflowState: "CANCELED" },
+      pause: {
+        reason: "operator_canceled",
+        resumeAction: null,
+        operatorResume: {
+          workflowState: "IMPLEMENT",
+          pause: null,
+          activeTurn: null,
+        },
+      },
+    },
+    settlement: { kind: "quiescent", commit: null },
+    activity: {
+      actor: "runner",
+      phase: "stop",
+      kind: "canceled",
+      message: "Operator canceled.",
+    },
+  }));
+  await lease.release();
+  const settled = await control.runWait({
+    runId: initial.runId,
+    cursor: receipt.revision,
+    timeoutMs: 0,
+  });
+  assert.equal(settled.stop.state, "settled");
+  assert.deepEqual(settled.stop.settlement, {
+    kind: "quiescent",
+    commit: null,
+  });
+  const page = await control.runActivity({
+    runId: initial.runId,
+    cursor: 0,
+    limit: 100,
+  });
+  assert.equal(
+    page.activities.find((entry) => entry.revision === receipt.revision).stop
+      .state,
+    "pending",
+  );
+  assert.equal(page.activities.at(-1).stop.state, "settled");
+  assert.doesNotMatch(
+    JSON.stringify(page),
+    /requestId|baselineHead|checkpoint/u,
+  );
+  assert.deepEqual(await control.runPause(input), receipt);
+});
+
+test("MCP timing rejects unsupported checkpoints and invalid inputs without mutations", async (t) => {
+  for (const [pipelineId, workflowState, currentStep] of [
+    ["plan-execution", "CLARIFY", 1],
+    ["plan-execution", "BOOTSTRAP", 1],
+    ["plan-execution", "IMPLEMENT", null],
+    ["plan-execution", "DONE", null],
+    ["plan-authoring", "IMPLEMENT", 1],
+    ["polishing", "POLISH", 1],
+  ]) {
+    const paths = await workspace(t, "agent-runner-mcp-timing-");
+    const store = createRunStore({
+      stateRoot: paths.stateRoot,
+      resolveStopBoundary,
+    });
+    const initial = await createStoredRun(store, paths, {
+      pipelineId,
+      workflowState,
+      state: { currentStep },
+    });
+    const control = createMcpControlPlane({
+      runner: storedRunner(store, paths),
+      runStore: store,
+      launchRun: () => assert.fail("Rejected requests must not launch work."),
+    });
+    for (const method of [control.runPause, control.runCancel]) {
+      const input = {
+        runId: initial.runId,
+        expectedRevision: initial.revision,
+        idempotencyKey:
+          method === control.runPause
+            ? "unsupported-pause"
+            : "unsupported-cancel",
+        timing: "after-current-commit",
+      };
+      await assert.rejects(method(input), {
+        code:
+          workflowState === "DONE"
+            ? "ERR_RUN_TERMINAL"
+            : "ERR_STOP_BOUNDARY_UNSUPPORTED",
+      });
+      for (const timing of ["later", "", null, 1]) {
+        await assert.rejects(method({ ...input, timing }));
+      }
+      assert.equal(
+        (await store.loadRun(initial.runId)).revision,
+        initial.revision,
+      );
+    }
+  }
+});
+
+test("recovers an ownerless stop after the requesting client disconnects", async (t) => {
+  for (const timing of ["immediate", "after-current-commit"]) {
+    await t.test(timing, async (t) => {
+      const paths = await workspace(t, "agent-runner-mcp-stop-disconnect-");
+      const store = createRunStore({
+        stateRoot: paths.stateRoot,
+        resolveStopBoundary,
+      });
+      const initial = await createStoredRun(store, paths, {
+        pipelineId: "plan-execution",
+        workflowState: "IMPLEMENT",
+        state: {
+          currentStep: 1,
+          completedCommits: [],
+          repositoryBaseline: { head: "a".repeat(40) },
+          canonicalPlan:
+            "## Commit 1: feat(test): add behavior\n\nImplement behavior.\n",
+        },
+      });
+      const runner = storedRunner(store, paths);
+      let ownerIsLive = false;
+      const abort = new AbortController();
+      const runStore = {
+        ...store,
+        async runLeaseOwnerIsLive() {
+          return ownerIsLive;
+        },
+      };
+      const input = {
+        runId: initial.runId,
+        expectedRevision: initial.revision,
+        idempotencyKey: "disconnected-cancel",
+        timing,
+      };
+      await assert.rejects(
+        createMcpControlPlane({
+          runner,
+          runStore,
+          async launchRun() {
+            abort.abort();
+          },
+        }).runCancel(input, { signal: abort.signal }),
+        { name: "AbortError" },
+      );
+      assert.equal(
+        (await runner.status(initial.runId)).run.stopRequest.kind,
+        "cancel_requested",
+      );
+
+      let launches = 0;
+      const receipt = await createMcpControlPlane({
+        runner,
+        runStore,
+        async launchRun() {
+          launches += 1;
+          ownerIsLive = true;
+        },
+      }).runCancel(input);
+      assert.equal(receipt.kind, "cancel_requested");
+      assert.equal(receipt.revision, initial.revision + 1);
+      assert.equal(launches, 1);
+      assert.equal(receipt.timing, timing);
+    });
+  }
 });
 
 test("reconciles an incomplete start intent after run creation", async (t) => {
@@ -1423,6 +2039,7 @@ test("resumes only an action valid for the persisted pause", async (t) => {
       additionalFixRounds: 0,
       finalizationResult: { status: "PASS" },
       findings: [{ id: "R1", problem: "Review is incomplete." }],
+      findingOverrides: [],
       reviewedFingerprint: "a".repeat(64),
       settings: { maxFixRounds: 5 },
     },
@@ -1435,6 +2052,8 @@ test("resumes only an action valid for the persisted pause", async (t) => {
     revision: 1,
     activityCursor: 1,
     status: "WAITING_FOR_USER",
+    pendingStop: null,
+    stop: null,
     execution: { state: "idle", role: null, phase: null },
     currentStep: null,
     pause: {
