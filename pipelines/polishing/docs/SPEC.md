@@ -28,6 +28,7 @@ pipelines/polishing/
 │   └── SPEC.md
 ├── src/
 │   ├── index.js
+│   ├── mode-policy.js
 │   ├── prompts.js
 │   ├── schemas.js
 │   ├── workflow-contract.js
@@ -39,6 +40,26 @@ The workspace owns its roles, settings, input interpretation, prompts, strict
 schemas, persisted-state validation, explicit JavaScript state machine, retry
 policy, and completion criteria. Root modules retain their documented
 ownership; pipeline registration remains static.
+
+The private `mode-policy.js` separates active roles, independent bootstrap,
+primary convergence, independent review, terminal confirmer, arbitration, and
+primary session scope. The workflow, persisted validator, resume-action checks,
+and legacy migration use these decisions without changing the accepted
+`independent` and `lazy` modes. `combined` remains unavailable.
+
+Content repairs, interrupted repairs, and migration re-entry share candidate
+routing: `REVIEW` for independent mode and `CHECK_AND_FIX` for lazy mode.
+Terminal content findings use independent finding resolution or direct primary
+fixing; pure evidence rejection still repeats finalization. Policy selection
+never grants permissions: agent turns remain unable to change the index, and
+handoff staging remains runner-owned.
+
+Session selection retains a single run-wide Worker source fork in lazy mode and
+separate primary/review checkpoint forks in independent mode. Recovery and output
+correction can reconstruct fresh sessions; Arbiter contexts are always fresh.
+The existing `lazyCorrections`, `pendingLazyCorrection`, and
+`lazySourceForkConsumed` fields, bounded accounting, and state version remain
+unchanged. Large turn implementations and Git reconciliation stay in the workflow.
 
 ## Inputs And Change Set
 
