@@ -66,15 +66,16 @@ contract.
 
 All pipelines additionally require:
 
-- Own one `mode` setting with exactly `independent` and `lazy`; resolve a
-  missing value and every legacy run to `independent`, persist the resolved
-  value at creation, and never reload it on resume.
+- Own one descriptor-defined `mode` setting. All pipelines support
+  `independent` and `lazy`; only plan-authoring additionally supports `combined`.
+  Missing and legacy missing modes resolve to `independent`. Persist the
+  resolved value at creation and preserve it on resume.
 - Validate configured role values deterministically, but in lazy mode resolve,
   probe, persist, source-session-check, invoke, and publicly project only the
   Planner or Worker. Preserve inactive Reviewer and Arbiter configuration for
   a future independent run without exposing provider-private values.
 - Fork a deliberately supplied source session independently by primary and
-  review checkpoints in independent mode. In lazy mode fork it exactly once
+  review checkpoints in independent and combined modes. In lazy mode fork it exactly once
   into the logical primary role for the entire run, then continue the child or
   reconstruct the same role without reforking the source.
 - In lazy mode alternate a writable primary-agent `CHECK_AND_FIX` turn with a
@@ -98,6 +99,18 @@ All pipelines additionally require:
 - Create repository-local clarification artifacts only when `git check-ignore`
   confirms their resolved path is ignored; never alter target ignore rules
   automatically.
+
+`plan-authoring` additionally requires:
+
+- In combined mode, converge the durable draft with Planner `CHECK_AND_FIX`
+  and a distinct `CLEAN_CONFIRM`, then require the complete independent
+  Reviewer gate before deterministic validation and runner-owned artifact writing.
+- Reviewer revisions restart primary convergence and invalidate dependent
+  approvals. Self-confirmation findings go directly to fixing; self-review and
+  structural exhaustion pause without arbitration. Only independent finding
+  resolution may invoke the fresh Arbiter. Count accepted corrections once.
+- Keep every agent turn repository-read-only, including check/fix; agents return
+  drafts as structured output and never write artifacts directly.
 
 `plan-execution` additionally requires:
 

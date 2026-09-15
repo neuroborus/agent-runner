@@ -20,6 +20,7 @@ import {
   migratePlanAuthoringStateV1,
   migratePlanAuthoringStateV2,
   migratePlanAuthoringStateV3,
+  migratePlanAuthoringStateV4,
   planAuthoringPipeline,
   runPlanAuthoring,
 } from "../src/index.js";
@@ -441,7 +442,7 @@ async function createFixture(
   let currentRun = {
     revision: 1,
     pipelineId: "plan-authoring",
-    pipelineStateVersion: 4,
+    pipelineStateVersion: 5,
     projectPath,
     taskPath,
     roles: Object.fromEntries(
@@ -680,7 +681,7 @@ test("writes one validated plan through independent source-session forks", async
 });
 
 test("selects lazy Planner-only mode and migrates legacy runs to independent", async (t) => {
-  assert.equal(planAuthoringPipeline.stateVersion, 4);
+  assert.equal(planAuthoringPipeline.stateVersion, 5);
   assert.equal(
     planAuthoringPipeline.resolveActiveRoles(),
     planAuthoringPipeline.roles,
@@ -2586,4 +2587,344 @@ test("revision exhaustion takes priority over stagnation in both supported modes
       await assert.rejects(readFile(fixture.planPath), { code: "ENOENT" });
     });
   }
+});
+
+test("combined converges before each independent review and invalidates revised approvals", async (t) => {
+  const turns = [];
+  const fixture = await createFixture(t, {
+    mode: "combined",
+    sourceSession: SOURCE_SESSION,
+    planner: [
+      ready(),
+      draft(),
+      checkUnchanged(),
+      clean(),
+      draft(REVISED_PLAN),
+      checkUnchanged(),
+      clean(),
+    ],
+    reviewer: [findings("revise-behavior"), approved()],
+    async onRoleRun(role, request) {
+      const state = fixture.currentRun.pipelineState;
+      turns.push(`${role}:${state.workflowState}`);
+      assert.equal(request.access, "read-only");
+      await assert.rejects(readFile(fixture.planPath), { code: "ENOENT" });
+      if (state.workflowState === "REVIEW") {
+        assert.equal(
+          state.cleanConfirmationFingerprint,
+          state.draftFingerprint,
+        );
+        assert.equal(state.reviewApproved, false);
+      }
+      if (state.workflowState === "CHECK_AND_FIX") {
+        assert.equal(state.cleanConfirmationFingerprint, null);
+        assert.equal(state.reviewApproved, false);
+      }
+    },
+  });
+  const completed = await fixture.run();
+  assert.deepEqual(turns, [
+    "planner:CLARIFY",
+    "planner:DRAFT",
+    "planner:CHECK_AND_FIX",
+    "planner:CLEAN_CONFIRM",
+    "reviewer:REVIEW",
+    "planner:REVISE",
+    "planner:CHECK_AND_FIX",
+    "planner:CLEAN_CONFIRM",
+    "reviewer:REVIEW",
+  ]);
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(
+    completed.pipelineState.cleanConfirmationFingerprint,
+    hash(REVISED_PLAN),
+  );
+  assert.equal(completed.counters.revisionRounds, 3);
+  assert.equal(completed.counters.correctionRounds, 1);
+  assert.equal(await readFile(fixture.planPath, "utf8"), REVISED_PLAN);
+  assert.equal(fixture.calls.arbiter.length, 0);
+  assert.equal(completed.pipelineState.lazySourceForkConsumed, false);
+  assert.deepEqual(
+    fixture.calls.planner.slice(0, 2).map(({ session }) => session),
+    [
+      { id: SOURCE_SESSION, mode: "fork" },
+      { id: SOURCE_SESSION, mode: "fork" },
+    ],
+  );
+  assert.deepEqual(fixture.calls.reviewer[0].session, {
+    id: SOURCE_SESSION,
+    mode: "fork",
+  });
+  assert.notEqual(
+    fixture.calls.reviewer[0].session.id,
+    fixture.calls.planner[2].session.id,
+  );
+});
+
+test("combined self findings and structural failures pause without arbitration", async (t) => {
+  for (const structural of [false, true]) {
+    await t.test(structural ? "structural" : "self findings", async (t) => {
+      const fixture = await createFixture(t, {
+        mode: "combined",
+        planner: [
+          ready(),
+          draft(structural ? "not a plan" : PLAN),
+          checkUnchanged(),
+          structural ? clean() : findings("self-finding"),
+        ],
+        reviewer: structural ? [approved()] : [],
+        arbiter: [],
+      });
+      const result = await fixture.run({ stagnationWindowRounds: 1 });
+      assert.equal(result.pause.reason, "plan_revision_not_converging");
+      assert.ok(
+        fixture.transitions.some(
+          ({ patch }) =>
+            patch?.pipelineState?.workflowState === "CHECK_AND_FIX",
+        ),
+      );
+      assert.equal(result.pipelineState.reviewApproved, false);
+      assert.equal(result.pipelineState.cleanConfirmationFingerprint, null);
+      assert.equal(result.counters.revisionRounds, 1);
+      assert.equal(result.counters.correctionRounds, 1);
+      assert.equal(fixture.calls.arbiter.length, 0);
+      await assert.rejects(readFile(fixture.planPath), { code: "ENOENT" });
+    });
+  }
+});
+
+test("independent structural exhaustion pauses without invoking an Arbiter", async (t) => {
+  const fixture = await createFixture(t, {
+    planner: [ready(), draft("not a plan"), draft("still not a plan")],
+    reviewer: [approved(), approved()],
+    arbiter: [],
+  });
+
+  const result = await fixture.run({ stagnationWindowRounds: 1 });
+
+  assert.equal(result.pause.reason, "plan_revision_not_converging");
+  assert.equal(result.pipelineState.blockerKind, "validation");
+  assert.equal(result.pipelineState.arbitrationUsed, false);
+  assert.equal(result.counters.revisionRounds, 1);
+  assert.equal(result.counters.correctionRounds, 1);
+  assert.equal(fixture.calls.arbiter.length, 0);
+  await assert.rejects(readFile(fixture.planPath), { code: "ENOENT" });
+});
+
+test("combined self repairs reconverge and accepted correction work counts once", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "combined",
+    planner: [
+      ready(),
+      draft(),
+      invalidUnchanged("rejected"),
+      checkUnchanged(),
+      findings("self-finding"),
+      checkChanged(),
+      checkUnchanged(),
+      clean(),
+    ],
+  });
+  const result = await fixture.run();
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.counters.revisionRounds, 3);
+  assert.equal(result.counters.correctionRounds, 1);
+  assert.equal(result.pipelineState.lazyCorrections.length, 1);
+  assert.equal(fixture.calls.reviewer.length, 1);
+  assert.equal(fixture.calls.arbiter.length, 0);
+});
+
+test("combined invokes a fresh Arbiter only for independent finding resolution", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "combined",
+    sourceSession: SOURCE_SESSION,
+    planner: [
+      ready(),
+      draft(),
+      checkUnchanged(),
+      clean(),
+      draft(REVISED_PLAN),
+      checkUnchanged(),
+      clean(),
+    ],
+    reviewer: [findings("review-finding"), approved()],
+    arbiter: [continueRevision()],
+  });
+  const result = await fixture.run({ stagnationWindowRounds: 1 });
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(fixture.calls.arbiter.length, 1);
+  assert.equal(fixture.calls.arbiter[0].session, undefined);
+  assert.equal(result.pipelineState.arbitrationUsed, true);
+});
+
+test("combined reconsideration retains confirmation without another primary turn", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "combined",
+    planner: [ready(), draft(), checkUnchanged(), clean()],
+    reviewer: [findings("review-finding"), approved()],
+    arbiter: [reconsiderFindings("review-finding")],
+  });
+  const result = await fixture.run({ stagnationWindowRounds: 1 });
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.pipelineState.cleanConfirmationFingerprint, hash(PLAN));
+  assert.equal(result.counters.revisionRounds, 1);
+  assert.equal(fixture.calls.planner.length, 4);
+  assert.equal(fixture.calls.reviewer.length, 2);
+});
+
+test("combined revision exhaustion precedes arbitration and never writes a plan", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "combined",
+    planner: [ready(), draft(), checkUnchanged(), clean()],
+    reviewer: [findings("review-finding")],
+    arbiter: [],
+  });
+  const result = await fixture.run({
+    maxRevisionRounds: 1,
+    stagnationWindowRounds: 1,
+  });
+  assert.equal(result.pause.reason, "plan_revision_limit_reached");
+  assert.equal(result.counters.revisionRounds, 1);
+  assert.equal(result.counters.correctionRounds, 1);
+  assert.equal(fixture.calls.arbiter.length, 0);
+  await assert.rejects(readFile(fixture.planPath), { code: "ENOENT" });
+});
+
+test("combined correction exhaustion resumes the same durable attempt", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "combined",
+    planner: [
+      ready(),
+      draft(),
+      invalidUnchanged("secret one"),
+      invalidUnchanged("secret two"),
+      checkUnchanged(),
+      clean(),
+    ],
+  });
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "lazy_output_invalid");
+  assert.equal(paused.pipelineState.lazyCorrections.length, 1);
+  assert.equal(paused.pipelineState.pendingLazyCorrection.attempt, 1);
+  assert.equal(paused.counters.revisionRounds, 0);
+  assert.equal(fixture.calls.reviewer.length, 0);
+  assert.doesNotMatch(JSON.stringify(paused), /secret one|secret two/u);
+  const result = await fixture.run({ mode: "independent" });
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.pipelineState.settings.mode, "combined");
+  assert.equal(result.counters.revisionRounds, 1);
+  assert.equal(result.pipelineState.lazyCorrections.length, 1);
+  assert.equal(result.pipelineState.pendingLazyCorrection, null);
+  assert.equal(fixture.calls.reviewer.length, 1);
+  assert.equal(fixture.calls.arbiter.length, 0);
+});
+
+test("combined interrupted confirmation resumes with saved mode and no recounting", async (t) => {
+  let interrupted = false;
+  const fixture = await createFixture(t, {
+    mode: "combined",
+    planner: [ready(), draft(), checkUnchanged(), clean()],
+    sourceSession: SOURCE_SESSION,
+    onRoleRun(role, _request, callNumber) {
+      if (role === "planner" && callNumber === 4 && !interrupted) {
+        interrupted = true;
+        throw Object.assign(new Error("Provider interrupted."), {
+          recoverable: true,
+        });
+      }
+    },
+  });
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "backend_unavailable");
+  Object.assign(fixture.currentRun, {
+    activeTurn: { role: "planner", phase: "clean-confirm" },
+    pause: null,
+    pipelineState: { ...paused.pipelineState, workflowState: "CLEAN_CONFIRM" },
+  });
+  const result = await fixture.run({ mode: "lazy" });
+  assert.equal(result.pipelineState.settings.mode, "combined");
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.counters.revisionRounds, 1);
+  assert.equal(fixture.calls.planner[4].session, undefined);
+  assert.equal(fixture.calls.reviewer.length, 1);
+});
+
+test("combined rejects mutation and missing primary approval before independent review", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "combined",
+    planner: [ready(), draft(), checkUnchanged(), clean()],
+    async onRoleRun(role, _request, callNumber) {
+      if (role === "planner" && callNumber === 4) {
+        await writeFile(
+          join(fixture.projectPath, "contamination.txt"),
+          "bad\n",
+        );
+      }
+    },
+  });
+  const result = await fixture.run();
+  assert.equal(result.pause.reason, "read_only_mutation");
+  assert.equal(fixture.calls.reviewer.length, 0);
+  const forged = structuredClone(result);
+  forged.pause = null;
+  Object.assign(forged.pipelineState, {
+    workflowState: "REVIEW",
+    draft: PLAN,
+    draftFingerprint: hash(PLAN),
+    blockerKind: null,
+    findings: [],
+    validationIssues: [],
+    canonicalPlan: null,
+  });
+  assert.throws(
+    () => planAuthoringPipeline.workflow.validateRun(forged),
+    /primary confirmation/u,
+  );
+});
+
+test("version four migration preserves progress and defaults only missing mode", async (t) => {
+  for (const mode of ["independent", "lazy"]) {
+    const fixture = await createFixture(t, {
+      mode,
+      planner:
+        mode === "lazy"
+          ? [ready(), draft(), checkUnchanged(), clean()]
+          : [ready(), draft()],
+    });
+    const completed = await fixture.run();
+    const before = structuredClone(completed.pipelineState);
+    const migrated = migratePlanAuthoringStateV4(completed);
+    assert.deepEqual(migrated, before);
+    assert.deepEqual(completed.pipelineState, before);
+  }
+  const state = createPlanAuthoringState();
+  assert.deepEqual(
+    migratePlanAuthoringStateV4({ pipelineState: state }),
+    state,
+  );
+  const initial = structuredClone(
+    createPlanAuthoringState({
+      settings: {
+        mode: "independent",
+        maxRevisionRounds: 15,
+        stagnationWindowRounds: 3,
+        preferredCommitLineLimit: 900,
+      },
+    }),
+  );
+  delete initial.settings.mode;
+  assert.equal(
+    migratePlanAuthoringStateV4({ pipelineState: initial }).settings.mode,
+    "independent",
+  );
+  assert.throws(
+    () =>
+      migratePlanAuthoringStateV4({
+        pipelineState: {
+          ...initial,
+          settings: { ...initial.settings, mode: "combined" },
+        },
+      }),
+    /Unsupported legacy/u,
+  );
 });

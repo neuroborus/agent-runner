@@ -216,7 +216,7 @@ test("help describes the required commands", async () => {
   assert.match(stdout.read(), /no independent review/u);
   assert.match(
     stdout.read(),
-    /independent forks primary and review roles separately/u,
+    /independent and combined fork primary and review roles separately/u,
   );
   assert.match(stdout.read(), /lazy forks once into the primary role/u);
   assert.doesNotMatch(stdout.read(), /unexpected_issue_report|issue report/iu);
@@ -815,7 +815,44 @@ test("run rejects an invalid pipeline mode", async () => {
 
   assert.equal(exitCode, 1);
   assert.equal(invoked, false);
-  assert.match(stderr.read(), /--mode must be independent or lazy/u);
+  assert.match(stderr.read(), /--mode must be independent, lazy, or combined/u);
+});
+
+test("CLI combined selection follows the selected pipeline descriptor", async () => {
+  for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
+    let request;
+    const stderr = createSink();
+    const exitCode = await main(
+      [
+        "run",
+        pipelineId,
+        "--project",
+        "/tmp/project",
+        "--task",
+        "/tmp/task",
+        "--mode",
+        "combined",
+      ],
+      {
+        stdout: createSink().stream,
+        stderr: stderr.stream,
+        runner: fakeRunner({
+          async run(input) {
+            request = input;
+            return commandResult({ pipelineId });
+          },
+        }),
+      },
+    );
+    if (pipelineId === "plan-authoring") {
+      assert.equal(exitCode, 0);
+      assert.deepEqual(request.settingOverrides, { mode: "combined" });
+    } else {
+      assert.equal(exitCode, 1);
+      assert.equal(request, undefined);
+      assert.match(stderr.read(), /mode must be independent or lazy/u);
+    }
+  }
 });
 
 test("fork profile requires a source session", async () => {

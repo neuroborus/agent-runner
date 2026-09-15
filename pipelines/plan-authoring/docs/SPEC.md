@@ -40,12 +40,16 @@ preferredCommitLineLimit = 900
 stagnationWindowRounds = 3
 ```
 
-`mode` accepts exactly `independent` and `lazy`. Missing values resolve to
+`mode` accepts `independent`, `lazy`, and `combined`. Missing values resolve to
 `independent`, which remains the default and recommended mode because the
 separate Plan Reviewer provides genuinely independent semantic review, at the
 cost of more provider context and tokens. `lazy` is an explicit
 lower-consumption choice that uses only the Planner and does not provide
-independent review. It is never selected automatically.
+independent review. It is never selected automatically. `combined` is an
+explicit choice that adds Planner convergence and clean confirmation before the
+complete independent Reviewer gate. It resolves Planner, Reviewer, and on-demand
+Arbiter with independent checkpoint isolation. Availability belongs to each
+pipeline descriptor: execution and polishing still reject `combined`.
 
 `preferredCommitLineLimit` must be a positive safe integer. Planner and Plan
 Reviewer prefer each proposed commit to stay within that anticipated additions
@@ -101,10 +105,10 @@ derived profile, model, and context-size flags. Run-wide `--profile`, `--model`,
 and `--context-size` defaults apply below role-specific CLI values. `--mode`
 selects the descriptor setting. A new run may also use
 `--fork-from <backend>:<session-id>` and optional separate
-`--fork-profile <trusted-alias>` when the Planner and, in independent mode,
-Reviewer match the source. Known source profiles supply those roles' `current`
+`--fork-profile <trusted-alias>` when the Planner and, in independent or
+combined mode, Reviewer match the source. Known source profiles supply those roles' `current`
 profile; unknown source profiles require `current` and omit the native
-override. In independent mode, each Planner and
+override. In independent and combined modes, each Planner and
 Reviewer checkpoint's first eligible turn forks the source independently and
 every Arbiter remains fresh. In lazy mode, the source is forked exactly once
 into the logical Planner for the entire run. Later checkpoints continue that
@@ -127,10 +131,10 @@ settings including mode, the initial repository baseline, hashes, revision
 and clarification counters, pause state, optional source-session reference and
 resolved profile, direct child role/session IDs with accepted-input and
 pipeline-checkpoint context keys, and opaque plan-authoring state.
-Drafts, findings, correction-round snapshots, stagnation evidence, the lazy
+Drafts, findings, correction-round snapshots, stagnation evidence, the primary
 clean-confirmation fingerprint, one-time lazy source-fork marker, and bounded
-lazy-checkpoint correction ledger and pending marker remain pipeline-owned
-structured data in the external run state rather than task artifacts. A lazy
+checkpoint correction ledger and pending marker remain pipeline-owned
+structured data in the external run state rather than task artifacts. A
 correction record contains only attempt `1`, its `CHECK_AND_FIX` or
 `CLEAN_CONFIRM` phase, the exact draft fingerprint, and bounded Planner
 field-and-constraint diagnostics; rejected output is never persisted.
@@ -219,6 +223,13 @@ position, drafts, evidence, counters, source lineage, pending corrections, and
 terminal outcomes unchanged. Status may project the migration without writing;
 resume persists it under the existing per-run lease before agent work. New runs
 persist the resolved value at creation and resume never re-resolves it.
+
+Pipeline state version 5 enables combined mode. The ordered version-4 migration
+preserves saved independent/lazy modes and all progress, counters, approvals,
+correction scopes, source lineage, artifacts, and terminal outcomes. Missing
+mode defaults to independent; unsupported legacy values fail closed. No
+configuration is reloaded, role is replayed, or artifact is written. Lock-free
+projection may migrate in memory; continuation persists under the existing lease.
 
 ## Operator Pause And Cancellation
 
@@ -347,6 +358,16 @@ CLARIFY → ANALYZE → DRAFT → REVIEW → VALIDATE → WRITE_PLAN → DONE
                          ▼
                        REVISE ────────────┘
 
+combined:
+CLARIFY → ANALYZE → DRAFT → CHECK_AND_FIX
+CHECK_AND_FIX ── changed ──▶ CHECK_AND_FIX
+CHECK_AND_FIX ── unchanged ──▶ CLEAN_CONFIRM
+CLEAN_CONFIRM ── findings ──▶ CHECK_AND_FIX
+CLEAN_CONFIRM ── CLEAN ──▶ REVIEW
+REVIEW ── findings ──▶ REVISE → CHECK_AND_FIX
+REVIEW ── approved ──▶ VALIDATE → WRITE_PLAN → DONE
+VALIDATE ── invalid ──▶ CHECK_AND_FIX
+
 lazy:
 CLARIFY → ANALYZE → DRAFT → CHECK_AND_FIX
 CHECK_AND_FIX ── changed ──▶ CHECK_AND_FIX
@@ -469,6 +490,14 @@ findings, or the narrowly allowed product-decision outcome. Findings return to
 shared plan validation and atomic writing. Deterministic validation issues also
 return to `CHECK_AND_FIX`, and any draft change clears confirmation evidence.
 
+In combined mode, the same primary convergence loop precedes independent
+review. A primary `CLEAN` records only the inspected draft fingerprint, not
+Reviewer approval. Reviewer findings route to `REVISE`; the accepted draft
+clears both approvals and restarts `CHECK_AND_FIX`, even if its text is unchanged.
+Reviewer reconsideration may retain primary confirmation while the same draft
+is unchanged. Deterministic failures return directly to primary fixing. Neither
+self-confirmation findings nor structural exhaustion can invoke an Arbiter.
+
 An invalid provider or deterministic `CHECK_AND_FIX` or `CLEAN_CONFIRM` result
 does not consume revision or correction budgets, retain the rejected result, or
 advance accepted progress. The pipeline reduces the failure to bounded
@@ -495,17 +524,21 @@ pipeline generates or rewrites a subject.
 The initial draft does not consume the revision budget. In independent mode,
 each completed Planner revision followed by review, and when approved
 deterministic validation, that returns to revision is one blocked correction
-round. In lazy mode, each valid completed `CHECK_AND_FIX` turn consumes one
-revision round, while a valid confirmation finding or deterministic validation
+round. In lazy and combined modes, each valid completed `CHECK_AND_FIX` turn
+consumes one revision round, while a valid confirmation finding or deterministic validation
 rejection after that turn records one blocked correction round. Invalid
-checkpoint output and its one automatic correction consume neither counter.
+checkpoint output consumes neither counter; its accepted replacement charges
+the ordinary successful turn exactly once. Combined Planner `REVISE` work also
+consumes one revision round; the subsequent convergence passes keep their own
+ordinary charges. Reviewer and confirmation turns do not consume revision rounds.
 Persist exact finding IDs,
 validation issues, and the draft fingerprint as bounded diagnostic evidence.
 Finding-ID changes are evidence rather than a reason to reset the counter; do
 not use fuzzy matching or heuristic progress scores.
 
-In independent mode, after `stagnationWindowRounds` consecutive blocked
-correction rounds, invoke the fresh read-only Arbiter once. Give it only the
+In independent and combined modes, after `stagnationWindowRounds` consecutive
+blocked correction rounds, invoke the fresh read-only Arbiter once only for
+independent finding resolution (`REVISE` with Reviewer findings). Give it only the
 current draft, compact correction history, current blockers, finalized inputs,
 and repository evidence. Its strict result may continue revision, request a
 plan restructure, require Reviewer reconsideration of the current findings, or
@@ -515,6 +548,8 @@ direction unless it names exactly the currently open finding IDs. A second full
 blocked window pauses with `plan_revision_not_converging`; a second stagnation
 arbitration is forbidden. Lazy mode has no Arbiter and pauses at the first full
 blocked window with the same non-convergence reason.
+Structural exhaustion pauses without arbitration in every mode; the Arbiter
+cannot resolve deterministic plan validation failures.
 
 `maxRevisionRounds` defaults to `20`. When no further revision is authorized,
 pause with `plan_revision_limit_reached` and do not write `plan.md`. Arbitration
@@ -539,8 +574,8 @@ path is ignored and untracked.
 
 The private `src/review-policy.js` module owns pure decisions for primary
 convergence, independent review, session scope, correction accounting, and
-arbitration eligibility. It maps only the existing `independent` and `lazy`
-modes; these decisions are not new settings or persisted fields.
+arbitration eligibility. It maps `independent`, `lazy`, and `combined` modes;
+these internal decisions are not separate settings or persisted fields.
 `workflow-contract.js` uses the same policy to validate checkpoint eligibility,
 confirmation evidence, and session lineage. `workflow.js` retains turn execution,
 repository and input guards, durable transitions, and the final plan writer.
@@ -552,8 +587,9 @@ fingerprint cannot obtain another automatic correction for the same phase.
 Blocked-round accounting counts each completed revision at most once. Revision
 exhaustion takes precedence over stagnation; a pending output correction remains
 the same attempt. Only independent review can request the one fresh Arbiter.
-Persisted `lazy*` fields, state versions, supported modes, and migration behavior
-remain unchanged. No large turn implementation moves into the policy module.
+Persisted `lazy*` correction field names remain stable and are reused for
+combined primary convergence. The one-time source-fork marker remains lazy-only.
+No large turn implementation moves into the policy module.
 
 ## V1 Boundaries
 

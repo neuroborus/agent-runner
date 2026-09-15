@@ -56,7 +56,7 @@ access and never changes `HEAD`.
 Ignored files are outside the polishing change set. Task inputs inside the
 repository must not overlap writable changes.
 
-## Independent and lazy modes
+## Review modes
 
 `independent` is the default and recommended mode. A primary role produces the
 work and a separately configured Reviewer supplies genuine semantic review;
@@ -70,7 +70,16 @@ alternates between a writable check-and-fix pass and a distinct read-only clean
 confirmation. Findings go directly back to fixing; lazy mode never invokes a
 Reviewer or Arbiter. The runner never selects lazy mode automatically.
 
-Both modes retain the same clarification, persistence, Git, redaction, and
+`combined` is currently available only in plan authoring. It converges the
+durable draft with Planner check/fix and a separate clean confirmation, then
+requires the full independent Reviewer gate. Reviewer revisions restart primary
+convergence; self findings return to fixing. Self-review and structural
+exhaustion pause without arbitration. Only independent finding resolution may
+invoke the fresh Arbiter. Every authoring agent turn remains repository-read-only;
+the runner writes the deterministically validated artifact. Pipeline descriptors
+own mode availability; execution and polishing still reject combined.
+
+All supported modes retain the same clarification, persistence, Git, redaction, and
 effect-safety guarantees.
 
 ## Clarification and product decisions

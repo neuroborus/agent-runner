@@ -27,7 +27,8 @@ project-local operating guidance.
   genuinely independent semantic review, at the cost of more provider context
   and tokens. `lazy` is an explicit lower-consumption choice that uses only the
   primary agent and does not provide independent review; it is never selected
-  automatically.
+  automatically. Authoring additionally offers `combined` for primary
+  convergence followed by independent review.
 - Codex and Claude can be selected independently for each pipeline role.
 - Read-only agent turns include repository-mutation verification.
 - Codex writable turns expose an existing real project `.agents` directory,
@@ -178,15 +179,30 @@ Pipeline settings use these defaults:
 | `polishing`      | `stagnationWindowRounds`   |             3 |
 | `polishing`      | `trustedChecks`            |          `[]` |
 
-`mode` accepts exactly `independent` and `lazy`. A missing value resolves to
-`independent`. The tracked [example](.agent-runner.example.json) selects
+`mode` accepts `independent` and `lazy` in every pipeline, plus `combined` in
+plan authoring. Execution and polishing reject combined. A missing value
+resolves to `independent`. The tracked [example](.agent-runner.example.json) selects
 `independent` explicitly for every pipeline. Runner and ignored project
-configuration may select either value, and `--mode` or MCP `run_start.mode`
-has highest precedence. Configuration remains strictly validated for every
+configuration may select a descriptor-supported value, and `--mode` or MCP
+`run_start.mode` has highest precedence. Configuration remains strictly validated for every
 declared role, but a lazy run resolves, probes, persists, and invokes only its
 Planner or Worker. Reviewer and Arbiter configuration stays available in the
 configuration files for a later independent run without being resolved or
 exposed by the lazy run.
+
+Combined authoring adds Planner check/fix and a separate clean confirmation
+before the complete independent Reviewer gate. Reviewer revisions restart
+primary convergence; self findings return directly to fixing. Only independent
+finding resolution can use a fresh Arbiter. All agent turns remain read-only;
+the runner writes the validated plan. For example:
+
+```bash
+agent-run run plan-authoring --project /path/to/repository --task /path/to/task --mode combined
+```
+
+The equivalent MCP `run_start` request uses `"pipelineId": "plan-authoring"`
+and `"mode": "combined"`. Saved mode and bounded correction progress survive
+resume; changing configuration does not switch an existing run.
 
 `preferredCommitLineLimit` is a positive-integer planning target for anticipated
 additions plus deletions per commit, including tests and documentation. Set it
@@ -203,6 +219,8 @@ The stagnation window detects consecutive blocked correction rounds. In
 independent mode the first full window invokes one fresh Arbiter and a second
 full window pauses for the user. Lazy mode has no Arbiter and pauses at the
 first full window. Harder configured limits take precedence.
+For authoring, only independent Reviewer findings are eligible for arbitration;
+self-review and deterministic structural exhaustion pause without it.
 
 For plan execution and polishing, `finalization: "auto"` uses a conventional
 confined repository `finalization` skill when present. The fallback derives the
@@ -423,8 +441,8 @@ agent-run run plan-execution \
 `--fork-from` remains an opaque native ID. Participating primary and review
 roles must match the source backend. A known source profile supplies `current`
 for those roles and every explicit participating-role profile must match it; an
-unknown source profile requires `current` inheritance. In independent mode,
-the first eligible turn in each pipeline-owned primary or review checkpoint
+unknown source profile requires `current` inheritance. In independent and
+combined modes, the first eligible turn in each pipeline-owned primary or review checkpoint
 forks the source independently.
 Those children are direct siblings with independent later histories, and every
 Arbiter starts fresh. In lazy mode, the source is forked exactly once into the
@@ -685,12 +703,14 @@ unique opaque idempotency key. It persists the run, returns a durable `runId`,
 and launches detached execution. Its additive `projectConfigurationPath`
 selects the same confined project file as `--project-config`; `profile`,
 `model`, and `contextSize` set run-wide selections; the same fields inside a
-`roleOverrides` entry take precedence. Optional `mode` accepts only
-`independent` and `lazy` and overrides project and runner configuration.
+`roleOverrides` entry take precedence. Optional `mode` overrides project and
+runner configuration and is validated by the selected descriptor. All pipelines
+accept `independent` and `lazy`; only plan authoring accepts `combined`.
 `independent` is the default and recommended option for genuinely independent
 semantic review, but it consumes more provider context and tokens. `lazy` is
 opt-in for lower consumption and does not provide independent review; a
-controlling agent must never select it automatically. `sourceSession.profile`
+controlling agent must never select it automatically. `combined` adds Planner
+convergence before the full independent review gate. `sourceSession.profile`
 carries a known trusted source alias while its `id` remains opaque. These
 optional fields are additive; the minimal fresh-start request is:
 
@@ -718,8 +738,8 @@ with that choice. An unknown profile offers `current` inheritance. Add
 }
 ```
 
-Independent mode then forks the complete source context into primary and review
-roles, so each child can consume provider context and quota. Lazy mode forks it
+Independent and combined modes then fork the complete source context into
+primary and review roles, so each child can consume provider context and quota. Lazy mode forks it
 once into the primary role and never invokes Reviewer or Arbiter. Recommend a
 fresh start for a long, multi-topic, or uncertain current session. The
 configured artifact root applies to runner-owned execution, polishing, and
