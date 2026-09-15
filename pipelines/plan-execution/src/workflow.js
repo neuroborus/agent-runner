@@ -6036,6 +6036,7 @@ ${step.subject}`),
     currentRun = await runtime.settleVerifiedCommit(checkpoint.patch, {
       activity: checkpoint.activity,
       expectedPipelineState: currentRun.pipelineState,
+      verifiedCommit: verified.head,
     });
     commitCheckpointSettlement = false;
     assertRun(currentRun);

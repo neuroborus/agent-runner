@@ -1,6 +1,25 @@
 import { parseCommitPlan } from "@agent-runner/commit-plan";
 import { createFinalizationRecovery } from "./workflow-contract.js";
 
+// Selected steps remain targets while suspended; terminal acceptance is state-owned.
+export function resolveStopBoundary(run) {
+  const current = run.pipelineState;
+  if (
+    !Number.isSafeInteger(current.currentStep) ||
+    current.currentStep < 1 ||
+    ["CLARIFY", "BOOTSTRAP"].includes(current.workflowState) ||
+    current.repositoryBaseline === null ||
+    current.currentStep > parseCommitPlan(current.canonicalPlan).steps.length
+  )
+    return null;
+  return {
+    capability: "verified-commit-v1",
+    step: current.currentStep,
+    completedCommits: current.completedCommits.length,
+    baselineHead: current.repositoryBaseline.head,
+  };
+}
+
 // Construct progress only after the consumed effect and its clean baseline verify.
 export function verifiedCommitCheckpoint({
   current,
@@ -77,7 +96,12 @@ export function verifiedCommitCheckpoint({
       },
       activeTurn: null,
       hashes,
-      pause,
+      // Successful verification resolves a prior failure to observe this effect.
+      pause: ["commit_failed", "commit_contract_violated"].includes(
+        pause?.reason,
+      )
+        ? null
+        : pause,
       ...(configurationChanged
         ? {
             pause: {

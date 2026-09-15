@@ -16,15 +16,18 @@ import { promisify } from "node:util";
 import {
   createClarificationService,
   createGitService,
+  createMcpControlPlane,
   createRunner,
   createRunStore,
   DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
   getPipeline,
+  main,
   parseRunnerConfiguration,
   RUN_STATE_SCHEMA_VERSION,
   RunnerError,
 } from "../src/index.js";
 import { spawnOwnedProcess } from "../src/agents/index.js";
+import { resolveStopBoundary } from "../src/pipeline-registry.js";
 import { preparePipelineMigration } from "../src/runner/index.js";
 import { createLegacyRecoveryFixture } from "../pipelines/plan-execution/test/support/index.js";
 
@@ -1366,81 +1369,97 @@ test("operator cancellation supersedes pause during trusted validation without a
 });
 
 test("operator stop after host loss reclaims ownership and reconciles before further provider work", async (t) => {
-  const fixture = await operatorFixture(t, "plan-execution");
-  const BOOT_A = "11111111-1111-4111-8111-111111111111";
-  const BOOT_B = "22222222-2222-4222-8222-222222222222";
-  const options = {
-    stateRoot: fixture.stateRoot,
-    hostName: "recovery-host",
-    processId: 100,
-    processIsAlive: () => true,
-    processIdentity: (pid) => ({ bootId: BOOT_A, startTicks: String(pid) }),
-    leaseStaleMs: 0,
-  };
-  const store = createRunStore(options);
-  const delegate = createExecutionAdapter();
-  const runner = runnerFor(
-    fixture,
-    {
-      codex: {
-        ...delegate,
-        async run(request) {
-          await request.onProcess(4242);
-          throw new Error("Simulated execution-owner loss");
+  for (const timing of ["immediate", "after-current-commit"])
+    await t.test(timing, async (t) => {
+      const fixture = await operatorFixture(t, "plan-execution");
+      const BOOT_A = "11111111-1111-4111-8111-111111111111";
+      const BOOT_B = "22222222-2222-4222-8222-222222222222";
+      const options = {
+        stateRoot: fixture.stateRoot,
+        resolveStopBoundary,
+        hostName: "recovery-host",
+        processId: 100,
+        processIsAlive: () => true,
+        processIdentity: (pid) => ({ bootId: BOOT_A, startTicks: String(pid) }),
+        leaseStaleMs: 0,
+      };
+      const store = createRunStore(options);
+      const delegate = createExecutionAdapter();
+      const runner = runnerFor(
+        fixture,
+        {
+          codex: {
+            ...delegate,
+            async run(request) {
+              if (
+                timing === "after-current-commit" &&
+                !request.prompt.includes("Implement the changes described")
+              )
+                return delegate.run(request);
+              await request.onProcess(4242);
+              throw new Error("Simulated execution-owner loss");
+            },
+          },
         },
-      },
-    },
-    { runStore: store },
-  );
-  const runId = (
-    await runner.create({
-      pipelineId: "plan-execution",
-      projectPath: fixture.projectPath,
-      taskPath: fixture.taskPath,
-      proactiveClarification: false,
-      roleOverrides: {},
-      sourceSession: null,
-    })
-  ).run.runId;
-  await assert.rejects(runner.resume({ runId, action: null }), {
-    code: "ERR_EXECUTION_PROCESS_ACTIVE",
-  });
-  const checkpoint = await store.loadRun(runId);
-  const rebooted = createRunStore({
-    ...options,
-    processId: 200,
-    processIdentity: (pid) => ({ bootId: BOOT_B, startTicks: String(pid) }),
-  });
-  const recoveredRunner = runnerFor(
-    fixture,
-    {
-      codex: {
-        ...delegate,
-        async run() {
-          assert.fail("Stop recovery must not invoke a provider");
+        { runStore: store },
+      );
+      const runId = (
+        await runner.create({
+          pipelineId: "plan-execution",
+          projectPath: fixture.projectPath,
+          taskPath: fixture.taskPath,
+          proactiveClarification: false,
+          roleOverrides: {},
+          sourceSession: null,
+        })
+      ).run.runId;
+      await assert.rejects(runner.resume({ runId, action: null }), {
+        code: "ERR_EXECUTION_PROCESS_ACTIVE",
+      });
+      const checkpoint = await store.loadRun(runId);
+      const rebooted = createRunStore({
+        ...options,
+        processId: 200,
+        processIdentity: (pid) => ({ bootId: BOOT_B, startTicks: String(pid) }),
+      });
+      const recoveredRunner = runnerFor(
+        fixture,
+        {
+          codex: {
+            ...delegate,
+            async run() {
+              assert.fail("Stop recovery must not invoke a provider");
+            },
+          },
         },
-      },
-    },
-    { runStore: rebooted },
-  );
-  await recoveredRunner.requestOperatorStop({
-    runId,
-    kind: "cancel_requested",
-    expectedRevision: checkpoint.revision,
-    idempotencyKey: "reboot-stop",
-  });
-  const canceled = (await recoveredRunner.resume({ runId, action: null })).run;
-  assert.equal(canceled.pipelineState.workflowState, "CANCELED");
-  assert.equal(canceled.executionProcess, null);
-  assert.deepEqual(
-    canceled.pause.operatorResume.activeTurn,
-    checkpoint.activeTurn,
-  );
-  assert.equal(await rebooted.runIsLeased(runId), false);
-  assert.equal(
-    await rebooted.worktreeIsLeased(fixture.projectPath, runId),
-    false,
-  );
+        { runStore: rebooted },
+      );
+      await recoveredRunner.requestOperatorStop({
+        runId,
+        kind: "cancel_requested",
+        expectedRevision: checkpoint.revision,
+        idempotencyKey: "reboot-stop",
+        timing,
+      });
+      const canceled = (await recoveredRunner.resume({ runId, action: null }))
+        .run;
+      assert.equal(canceled.pipelineState.workflowState, "CANCELED");
+      assert.equal(canceled.executionProcess, null);
+      assert.deepEqual(canceled.stopRequest.settlement, {
+        kind: "quiescent",
+        commit: null,
+      });
+      assert.equal(canceled.pipelineState.completedCommits.length, 0);
+      assert.deepEqual(
+        canceled.pause.operatorResume.activeTurn,
+        checkpoint.activeTurn,
+      );
+      assert.equal(await rebooted.runIsLeased(runId), false);
+      assert.equal(
+        await rebooted.worktreeIsLeased(fixture.projectPath, runId),
+        false,
+      );
+    });
 });
 
 function runnerFor(
@@ -3091,14 +3110,19 @@ for (const pauseReason of ["local_artifacts_not_ignored", "unsafe_git_state"]) {
 }
 
 test("verified commit settlement stops before the next Worker and retains configuration blockers", async (t) => {
-  for (const [kind, steps, drift] of [
+  for (const [kind, steps, drift, timing = "immediate"] of [
     ["pause_requested", 1, false],
     ["cancel_requested", 1, false],
     ["pause_requested", 2, false],
     ["cancel_requested", 2, false],
     ["pause_requested", 1, true],
+    ["pause_requested", 1, false, "after-current-commit"],
+    ["cancel_requested", 1, false, "after-current-commit"],
+    ["pause_requested", 2, false, "after-current-commit"],
+    ["cancel_requested", 2, false, "after-current-commit"],
+    ["pause_requested", 1, true, "after-current-commit"],
   ]) {
-    await t.test(`${kind}/${steps}/${drift}`, async (t) => {
+    await t.test(`${kind}/${steps}/${drift}/${timing}`, async (t) => {
       const fixture = await operatorFixture(t, "plan-execution");
       if (steps === 2)
         await writeFile(
@@ -3114,7 +3138,10 @@ test("verified commit settlement stops before the next Worker and retains config
         await mkdir(join(fixture.projectPath, "LOCAL_ARTIFACTS"));
         await writeFile(configPath, '{"schemaVersion":1}\n');
       }
-      const store = createRunStore({ stateRoot: fixture.stateRoot });
+      const store = createRunStore({
+        stateRoot: fixture.stateRoot,
+        resolveStopBoundary,
+      });
       const git = createGitService();
       const delegate = createExecutionAdapter();
       let runId,
@@ -3127,6 +3154,56 @@ test("verified commit settlement stops before the next Worker and retains config
           codex: {
             ...delegate,
             async run(request) {
+              if (
+                timing === "after-current-commit" &&
+                request.prompt.includes("Implement the changes described")
+              ) {
+                const current = await store.loadRun(runId);
+                await runner.requestOperatorStop({
+                  runId,
+                  kind,
+                  timing,
+                  expectedRevision: current.revision,
+                  idempotencyKey: "deferred-stop",
+                });
+                const pending = (await runner.status(runId)).run.stopRequest;
+                assert.equal(pending.targetBoundary.step, 1);
+                assert.equal(pending.effectiveTiming, timing);
+                const control = createMcpControlPlane({
+                  runner,
+                  runStore: store,
+                });
+                assert.deepEqual(
+                  (await control.runStatus({ runId })).pendingStop,
+                  {
+                    kind,
+                    revision: pending.acceptedRevision,
+                    timing,
+                    effectiveTiming: timing,
+                    targetStep: 1,
+                  },
+                );
+                let output = "";
+                assert.equal(
+                  await main(["status", "--run", runId], {
+                    createCommandRunner: () => runner,
+                    stdout: {
+                      write: (text) => {
+                        output += text;
+                      },
+                    },
+                    stderr: {
+                      write: (text) => {
+                        throw new Error(text);
+                      },
+                    },
+                  }),
+                  0,
+                );
+                assert.match(output, /Stop timing: after-current-commit/u);
+                assert.match(output, /Stop target step: 1/u);
+                assert.equal(request.signal.aborted, false);
+              }
               if (verifiedCalls > 0) callsAfterVerification += 1;
               if (request.access === "local-commit") commits += 1;
               return delegate.run(request);
@@ -3141,7 +3218,7 @@ test("verified commit settlement stops before the next Worker and retains config
               const verified = await git.verifyCommit(authorization);
               verifiedCalls += 1;
               const current = await store.loadRun(runId);
-              if (kind === "cancel_requested") {
+              if (timing === "immediate" && kind === "cancel_requested") {
                 await store.requestOperatorStop({
                   runId,
                   kind: "pause_requested",
@@ -3149,12 +3226,13 @@ test("verified commit settlement stops before the next Worker and retains config
                   idempotencyKey: "verified-pause",
                 });
               }
-              await store.requestOperatorStop({
-                runId,
-                kind,
-                expectedRevision: current.revision,
-                idempotencyKey: "verified-stop",
-              });
+              if (timing === "immediate")
+                await store.requestOperatorStop({
+                  runId,
+                  kind,
+                  expectedRevision: current.revision,
+                  idempotencyKey: "verified-stop",
+                });
               if (drift)
                 await writeFile(
                   configPath,
@@ -3198,6 +3276,10 @@ test("verified commit settlement stops before the next Worker and retains config
       assert.equal(stopped.pipelineState.pendingCommit, null);
       assert.equal(stopped.activeTurn, null);
       assert.equal(stopped.stopRequest.reconciledRevision, stopped.revision);
+      assert.deepEqual(stopped.stopRequest.settlement, {
+        kind: "commit",
+        commit: stopped.pipelineState.completedCommits[0],
+      });
       assert.equal(verifiedCalls, 1);
       assert.equal(commits, 1);
       assert.equal(callsAfterVerification, 0);
@@ -3217,6 +3299,17 @@ test("verified commit settlement stops before the next Worker and retains config
           "DONE",
         );
         assert.equal(callsAfterVerification, 0);
+        const terminal = await store.loadRun(runId);
+        await assert.rejects(
+          runner.requestOperatorStop({
+            runId,
+            kind,
+            timing: "after-current-commit",
+            expectedRevision: terminal.revision,
+            idempotencyKey: "after-done",
+          }),
+          { code: "ERR_RUN_TERMINAL" },
+        );
       }
     });
   }
@@ -3279,4 +3372,371 @@ test("interrupted verified checkpoint publication preserves progress without rep
     "DONE",
   );
   assert.equal(commits, 1);
+});
+
+test("deferred stops settle quiescent failures and suspended steps without further turns", async (t) => {
+  for (const kind of ["pause_requested", "cancel_requested"]) {
+    for (const outcome of kind === "pause_requested"
+      ? ["blocked", "failed", "suspended", "superseded"]
+      : ["blocked", "failed", "suspended"]) {
+      await t.test(`${kind}/${outcome}`, async (t) => {
+        const fixture = await operatorFixture(t, "plan-execution");
+        const store = createRunStore({
+          stateRoot: fixture.stateRoot,
+          resolveStopBoundary,
+        });
+        const delegate = createExecutionAdapter();
+        let runId,
+          primaryTurns = 0,
+          laterTurns = 0;
+        const runner = runnerFor(
+          fixture,
+          {
+            codex: {
+              ...delegate,
+              async run(request) {
+                if (primaryTurns > 0) laterTurns += 1;
+                if (!request.prompt.includes("Implement the changes described"))
+                  return delegate.run(request);
+                primaryTurns += 1;
+                if (outcome !== "suspended") {
+                  const current = await store.loadRun(runId);
+                  await runner.requestOperatorStop({
+                    runId,
+                    kind,
+                    timing: "after-current-commit",
+                    expectedRevision: current.revision,
+                    idempotencyKey: "deferred-fallback",
+                  });
+                  assert.equal(request.signal.aborted, false);
+                  if (outcome === "superseded") {
+                    const aborted = new Promise((resolve) =>
+                      request.signal.addEventListener("abort", resolve, {
+                        once: true,
+                      }),
+                    );
+                    await runner.requestOperatorStop({
+                      runId,
+                      kind: "cancel_requested",
+                      timing: "immediate",
+                      expectedRevision: current.revision,
+                      idempotencyKey: "immediate-cancel",
+                    });
+                    await aborted;
+                    request.signal.throwIfAborted();
+                  }
+                }
+                await writeFile(
+                  join(request.cwd, "partial.js"),
+                  "export const partial = true;\n",
+                );
+                throw Object.assign(new Error("test checkpoint failure"), {
+                  code: "ERR_TEST_CHECKPOINT",
+                  recoverable: outcome !== "failed",
+                });
+              },
+            },
+          },
+          { runStore: store },
+        );
+        runId = (
+          await runner.create({
+            pipelineId: "plan-execution",
+            projectPath: fixture.projectPath,
+            taskPath: fixture.taskPath,
+            proactiveClarification: false,
+            roleOverrides: {},
+            sourceSession: null,
+          })
+        ).run.runId;
+        let stopped = (await runner.resume({ runId })).run;
+        if (outcome === "suspended") {
+          assert.equal(stopped.pause.reason, "backend_unavailable");
+          await runner.requestOperatorStop({
+            runId,
+            kind,
+            timing: "after-current-commit",
+            expectedRevision: stopped.revision,
+            idempotencyKey: "suspended-stop",
+          });
+          stopped = (await runner.resume({ runId })).run;
+        }
+        const canceled =
+          kind === "cancel_requested" || outcome === "superseded";
+        assert.equal(
+          stopped.pipelineState.workflowState,
+          canceled ? "CANCELED" : "WAITING_FOR_USER",
+        );
+        assert.equal(
+          stopped.pause.reason,
+          canceled ? "operator_canceled" : "operator_paused",
+        );
+        assert.deepEqual(stopped.stopRequest.settlement, {
+          kind: "quiescent",
+          commit: null,
+        });
+        assert.equal(stopped.pipelineState.completedCommits.length, 0);
+        assert.equal(primaryTurns, 1);
+        assert.equal(laterTurns, 0);
+        if (outcome !== "superseded") {
+          assert.equal(
+            await readFile(join(fixture.projectPath, "partial.js"), "utf8"),
+            "export const partial = true;\n",
+          );
+          assert.equal(
+            stopped.pause.operatorResume.pause.code,
+            "ERR_TEST_CHECKPOINT",
+          );
+          assert.equal(
+            stopped.pause.operatorResume.pause.reason,
+            outcome === "failed" ? "internal_failure" : "backend_unavailable",
+          );
+          assert.equal(
+            stopped.pause.operatorResume.workflowState,
+            outcome === "failed" ? "FAILED" : "WAITING_FOR_USER",
+          );
+        } else {
+          assert.equal(stopped.stopRequest.effectiveTiming, "immediate");
+        }
+        if (!canceled) {
+          const restored = (await runner.resume({ runId })).run;
+          assert.equal(
+            restored.pipelineState.workflowState,
+            outcome === "failed" ? "FAILED" : "WAITING_FOR_USER",
+          );
+          assert.equal(laterTurns, 0);
+        }
+      });
+    }
+  }
+});
+
+test("commit-boundary capability rejects unselected steps and other pipelines", async (t) => {
+  for (const pipelineId of ["plan-execution", "plan-authoring", "polishing"]) {
+    await t.test(pipelineId, async (t) => {
+      const fixture = await operatorFixture(t, pipelineId);
+      const store = createRunStore({
+        stateRoot: fixture.stateRoot,
+        resolveStopBoundary,
+      });
+      const delegate = createExecutionAdapter();
+      const runner = runnerFor(
+        fixture,
+        {
+          codex: {
+            ...delegate,
+            async run(request) {
+              if (
+                request.prompt.includes("Provide a concise bootstrap summary")
+              ) {
+                const current = await store.loadRun(run.runId);
+                await assert.rejects(
+                  runner.requestOperatorStop({
+                    runId: run.runId,
+                    kind: "pause_requested",
+                    timing: "after-current-commit",
+                    expectedRevision: current.revision,
+                    idempotencyKey: "live-bootstrap",
+                  }),
+                  { code: "ERR_STOP_BOUNDARY_UNSUPPORTED" },
+                );
+                throw Object.assign(new Error("Bootstrap suspended"), {
+                  recoverable: true,
+                });
+              }
+              return delegate.run(request);
+            },
+          },
+        },
+        { runStore: store },
+      );
+      const { run } = await runner.create({
+        pipelineId,
+        projectPath: fixture.projectPath,
+        taskPath: fixture.taskPath,
+        proactiveClarification: false,
+        roleOverrides: {},
+        sourceSession: null,
+      });
+      await assert.rejects(
+        runner.requestOperatorStop({
+          runId: run.runId,
+          kind: "pause_requested",
+          timing: "after-current-commit",
+          expectedRevision: run.revision,
+          idempotencyKey: "no-step",
+        }),
+        { code: "ERR_STOP_BOUNDARY_UNSUPPORTED" },
+      );
+      assert.equal((await store.loadRun(run.runId)).stopRequest, null);
+      if (pipelineId === "plan-execution") {
+        const suspended = (await runner.resume({ runId: run.runId })).run;
+        assert.equal(suspended.pause.reason, "backend_unavailable");
+        assert.equal(suspended.pipelineState.currentStep, null);
+        await assert.rejects(
+          runner.requestOperatorStop({
+            runId: run.runId,
+            kind: "pause_requested",
+            timing: "after-current-commit",
+            expectedRevision: suspended.revision,
+            idempotencyKey: "suspended-bootstrap",
+          }),
+          { code: "ERR_STOP_BOUNDARY_UNSUPPORTED" },
+        );
+      }
+    });
+  }
+});
+
+test("deferred settlement publication recovers the final checkpoint without another commit", async (t) => {
+  const fixture = await operatorFixture(t, "plan-execution");
+  let interrupt = true;
+  let runId;
+  const store = createRunStore({
+    stateRoot: fixture.stateRoot,
+    resolveStopBoundary,
+    onTransitionBoundary: async (point) => {
+      if (
+        interrupt &&
+        point === "event-appended" &&
+        runId !== undefined &&
+        (await store.loadRun(runId)).pipelineState.completedCommits.length === 1
+      ) {
+        interrupt = false;
+        throw new Error("verified publication interrupted");
+      }
+    },
+  });
+  const delegate = createExecutionAdapter();
+  let commits = 0;
+  const runner = runnerFor(
+    fixture,
+    {
+      codex: {
+        ...delegate,
+        async run(request) {
+          if (request.prompt.includes("Implement the changes described")) {
+            const current = await store.loadRun(runId);
+            await runner.requestOperatorStop({
+              runId,
+              kind: "pause_requested",
+              timing: "after-current-commit",
+              expectedRevision: current.revision,
+              idempotencyKey: "publish-stop",
+            });
+          }
+          if (request.access === "local-commit") commits += 1;
+          return delegate.run(request);
+        },
+      },
+    },
+    { runStore: store },
+  );
+  runId = (
+    await runner.create({
+      pipelineId: "plan-execution",
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+      proactiveClarification: false,
+      roleOverrides: {},
+      sourceSession: null,
+    })
+  ).run.runId;
+  await assert.rejects(
+    runner.resume({ runId, action: null }),
+    /verified publication interrupted/u,
+  );
+  const persisted = await store.loadRun(runId);
+  assert.equal(persisted.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(persisted.pause.operatorResume.workflowState, "DONE");
+  assert.deepEqual(persisted.stopRequest.settlement, {
+    kind: "commit",
+    commit: persisted.pipelineState.completedCommits[0],
+  });
+  assert.equal(persisted.pipelineState.completedCommits.length, 1);
+  assert.equal(persisted.pipelineState.pendingCommit, null);
+  assert.equal(
+    (await runner.resume({ runId, action: null })).run.pipelineState
+      .workflowState,
+    "DONE",
+  );
+  assert.equal(commits, 1);
+});
+
+test("deferred cancellation recovers interrupted commit verification without invoking another effect", async (t) => {
+  const fixture = await operatorFixture(t, "plan-execution");
+  const store = createRunStore({
+    stateRoot: fixture.stateRoot,
+    resolveStopBoundary,
+  });
+  const git = createGitService();
+  let verifications = 0;
+  const delegate = createExecutionAdapter();
+  let runner,
+    runId,
+    commits = 0;
+  runner = runnerFor(
+    fixture,
+    {
+      codex: {
+        ...delegate,
+        async run(request) {
+          if (request.access === "local-commit") commits += 1;
+          if (request.prompt.includes("Implement the changes described")) {
+            const current = await store.loadRun(runId);
+            await runner.requestOperatorStop({
+              runId,
+              kind: "cancel_requested",
+              timing: "after-current-commit",
+              expectedRevision: current.revision,
+              idempotencyKey: "cancel-commit",
+            });
+          }
+          return delegate.run(request);
+        },
+      },
+    },
+    {
+      runStore: store,
+      git: {
+        ...git,
+        async verifyCommit(authorization) {
+          verifications += 1;
+          if (verifications === 1)
+            throw new Error("Verification interrupted after effect");
+          return git.verifyCommit(authorization);
+        },
+      },
+    },
+  );
+  runId = (
+    await runner.create({
+      pipelineId: "plan-execution",
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+      proactiveClarification: false,
+      roleOverrides: {},
+      sourceSession: null,
+    })
+  ).run.runId;
+  const stopped = (await runner.resume({ runId, action: null })).run;
+  assert.equal(stopped.pipelineState.workflowState, "CANCELED");
+  assert.equal(stopped.pipelineState.completedCommits.length, 1);
+  assert.equal(stopped.pipelineState.pendingCommit, null);
+  assert.equal(stopped.pause.operatorResume.workflowState, "DONE");
+  assert.equal(
+    (
+      await executeFile("git", ["-C", fixture.projectPath, "rev-parse", "HEAD"])
+    ).stdout.trim(),
+    stopped.pipelineState.completedCommits[0],
+  );
+  await assert.rejects(runner.resume({ runId, action: null }), {
+    code: "ERR_RUN_CANCELED",
+  });
+  assert.equal(commits, 1);
+  assert.equal(verifications, 2);
+  assert.deepEqual(stopped.stopRequest.settlement, {
+    kind: "commit",
+    commit: stopped.pipelineState.completedCommits[0],
+  });
 });

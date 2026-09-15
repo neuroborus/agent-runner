@@ -19,6 +19,7 @@ import {
   DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
   getPipeline,
   listPipelines,
+  resolveStopBoundary,
 } from "../pipeline-registry.js";
 import {
   createRunner,
@@ -463,7 +464,7 @@ export function createMcpControlPlane(options = {}) {
   const providers = options.providers ?? PROVIDER_REGISTRY;
   const detachedCompatibilityToken =
     options.detachedCompatibilityToken ?? DETACHED_RUNTIME_COMPATIBILITY_TOKEN;
-  const runStore = options.runStore ?? createRunStore();
+  const runStore = options.runStore ?? createRunStore({ resolveStopBoundary });
   let guidance = options.guidance;
   function guidanceService() {
     guidance ??= createGuidanceService({

@@ -28,6 +28,10 @@ export function listPipelines() {
   return Object.freeze([...PIPELINES.values()]);
 }
 
+export function resolveStopBoundary(run) {
+  return getPipeline(run.pipelineId)?.resolveStopBoundary?.(run) ?? null;
+}
+
 export function createDetachedRuntimeCompatibilityToken({
   pipelines = listPipelines(),
   runtimeCompatibility = RUNTIME_COMPATIBILITY,

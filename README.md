@@ -528,6 +528,11 @@ agent-run pause --run <run-id>
 agent-run cancel --run <run-id>
 ```
 
+Status shows pending requested/effective timing and the target step. The runner
+service supports `after-current-commit` for a selected execution step, settling
+at its verified commit or quiescent interruption; CLI/MCP stop inputs remain
+immediate. See [operator guidance](docs/OPERATOR_GUIDE.md) for recovery semantics.
+
 For repeatable automation, supply both captured values explicitly. Retry an
 uncertain request with exactly the same revision and key; never refresh a stale
 request silently:

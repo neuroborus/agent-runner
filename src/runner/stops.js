@@ -10,6 +10,13 @@ export function stopPending(run) {
   );
 }
 
+function stopImmediately(run) {
+  return (
+    stopPending(run) &&
+    run.stopRequest.effectiveTiming !== "after-current-commit"
+  );
+}
+
 function stopError() {
   return Object.assign(
     new RunnerError("Operator stop requested.", {
@@ -41,7 +48,7 @@ export function createStopMonitor({ runId, lease, runStore, publish }) {
 
   async function detect(current = null) {
     current ??= await runStore.loadRun(runId);
-    if (!stopPending(current)) return current;
+    if (!stopImmediately(current)) return current;
     if (stopping === null) {
       if (!controller.signal.aborted) controller.abort(stopError());
       stopping = (async () => {
@@ -62,7 +69,7 @@ export function createStopMonitor({ runId, lease, runStore, publish }) {
 
   const watching = (async () => {
     let current = await runStore.loadRun(runId);
-    while (!closed && !stopPending(current)) {
+    while (!closed && !stopImmediately(current)) {
       current = await runStore.waitForRunChange(runId, {
         afterRevision: current.revision,
         timeoutMs: 1_000,
@@ -186,6 +193,7 @@ export function stopSettlement(
 
 function reconciliationRuntime(runtime, initialRun) {
   let current = initialRun;
+  let settlement = { kind: "quiescent", commit: null };
   const rejectEffect = () => {
     throw new RunnerError(
       "Stop reconciliation cannot start execution or write artifacts.",
@@ -232,7 +240,10 @@ function reconciliationRuntime(runtime, initialRun) {
         preflight: rejectEffect,
       }),
       transition: async (patch) => update(patch),
-      settleVerifiedCommit: async (patch) => update(patch),
+      settleVerifiedCommit: async (patch, { verifiedCommit }) => {
+        settlement = { kind: "commit", commit: verifiedCommit };
+        return update(patch);
+      },
       startAgentTurn: async (activeTurn, { pipelineState } = {}) =>
         update({
           activeTurn,
@@ -244,6 +255,7 @@ function reconciliationRuntime(runtime, initialRun) {
       writeRunArtifact: rejectEffect,
     }),
     current: () => current,
+    settlement: () => settlement,
   };
 }
 
@@ -302,7 +314,7 @@ export async function reconcileOperatorStop({
         configurationFailure,
       );
       outcomeActivity = settlement.activity;
-      return settlement;
+      return { ...settlement, settlement: simulated.settlement() };
     },
     { validate: pipeline.workflow.validateRun },
   );

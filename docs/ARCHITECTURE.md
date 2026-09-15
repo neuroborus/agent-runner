@@ -756,7 +756,9 @@ The private `src/state/stop-policy.js` owns three distinct decisions: whether a
 request awaits reconciliation, whether that request blocks execution, and
 whether unresolved stop accounting or a recorded execution process retains
 ownership. Immediate requests block execution. Deferred requests retain ownership
-while allowing progress within their immutable target. Envelope validation owns
+while allowing progress within their immutable target. The runner monitor keeps
+watching for immediate cancellation supersession without aborting deferred work.
+Envelope validation owns
 shape; the stop service owns acceptance, supersession, and receipt accounting.
 
 State accepts `after-current-commit` only with a trusted synchronous
@@ -766,15 +768,27 @@ The bounded `verified-commit-v1` evidence contains the positive step number,
 completed-commit count, and baseline SHA; no provider data or free text is stored.
 Ordinary writes cannot change that boundary; only leased atomic settlement can
 record progress together with the stop outcome. Unsupported resolver results or
-persisted capabilities fail closed, including during history reads. Production
-registration and deferred CLI/MCP inputs remain unavailable at this stage.
+persisted capabilities fail closed, including during history reads. The root
+pipeline registry supplies execution's boundary resolver to the runner
+and MCP stores. Execution accepts a selected step, including suspended
+checkpoints; clarification, bootstrap, absent steps, and the other pipelines
+reject deferred requests. Direct state stores without that capability still
+fail closed. Deferred CLI/MCP request inputs remain unavailable.
 
 Cancellation supersession retains the original suspended checkpoint and cannot
 delay an earlier immediate stop. Requested timing remains visible when effective
 timing is immediate; a still-deferred cancellation retains the earlier target.
 Settlement records either a verified commit SHA or a quiescent fallback, and
 becomes immutable with the reconciliation revision. Workflow meaning and commit
-verification remain the pipeline/runner's responsibility.
+verification remain the pipeline/runner's responsibility. Execution supplies the
+verified SHA to both ordinary checkpoint settlement and verification-only recovery.
+The state mutation records progress and the latest requested outcome together.
+If the target pauses, fails, or loses its owner before verification, recovery
+reconciles effects and applies the request at the quiescent checkpoint without
+invoking another role. Underlying failures, blockers, and consumed authorization
+evidence remain in the operator checkpoint. A final-commit pause suspends `DONE`;
+resume reaches `DONE` without agent work. Final-commit cancellation retains all
+completed commits in `CANCELED`.
 
 The common advancement guard applies inside the mutation boundary to workflow
 transitions, provider-turn records, session/artifact writes, and execution
@@ -825,8 +839,8 @@ when applicable and retains protected-configuration blockers beneath the stop.
 Successful settlement clears the active commit turn and consumed authorization
 in the same event as progress. Publication errors escape without writing failure
 state from an older local snapshot; journal recovery preserves an already
-published checkpoint without replaying the commit. Deferred timing remains
-unsupported.
+published checkpoint without replaying the commit. Deferred requests use the
+same settlement path and retain explicit commit or quiescent accounting.
 
 ### Common envelope and pipeline migrations
 
