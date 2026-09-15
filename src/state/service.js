@@ -14,6 +14,10 @@ import { inspectProcessOwner, readProcessIdentity } from "./process-owner.js";
 import { createStopService } from "./stops.js";
 import {
   assertRunCanAdvance,
+  assertRunCanReleaseOwnership,
+  runRetainsOwnership,
+} from "./stop-policy.js";
+import {
   assertRunId,
   deepFreeze,
   normalizeChildSession,
@@ -25,7 +29,6 @@ import {
   RUNTIME_VERSION_SKEW_EXIT_CODE,
   RUN_STATE_SCHEMA_VERSION,
   RunStoreError,
-  stopIsPending,
 } from "./validation.js";
 
 export {
@@ -298,20 +301,7 @@ export function createRunStore({
       if (cause?.code === "ERR_RUN_NOT_FOUND") return;
       throw cause;
     }
-    if (stopIsPending(run)) {
-      throw new RunStoreError(
-        "Stop reconciliation must finish before releasing ownership.",
-        {
-          code: "ERR_STOP_RECONCILIATION_REQUIRED",
-        },
-      );
-    }
-    if (run.executionProcess !== null) {
-      throw new RunStoreError(
-        "Owned execution must stop before releasing ownership.",
-        { code: "ERR_EXECUTION_PROCESS_ACTIVE" },
-      );
-    }
+    assertRunCanReleaseOwnership(run);
   }
   const runLeases = createLeaseManager({
     withMutation: withRunMutation,
@@ -333,7 +323,7 @@ export function createRunStore({
       if (record.runId === requestingRunId) return true;
       try {
         const current = await loadRun(record.runId);
-        return !stopIsPending(current) && current.executionProcess === null;
+        return !runRetainsOwnership(current);
       } catch (cause) {
         if (cause?.code === "ERR_RUN_NOT_FOUND") return true;
         throw cause;
@@ -651,9 +641,7 @@ export function createRunStore({
     const runDirectory = await getRunDirectory(runId);
     const current = (await loadSnapshot(runDirectory, runId)).state;
     return (
-      stopIsPending(current) ||
-      current.executionProcess !== null ||
-      runLeases.isLeased(runDirectory, runId)
+      runRetainsOwnership(current) || runLeases.isLeased(runDirectory, runId)
     );
   }
 

@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-09-15
+
+- **Stop enforcement and ownership accounting have separate policies.** State's
+  private stop policy distinguishes pending requests, blocked advancement, and
+  retained ownership. Every immediate pending stop still blocks ordinary writes;
+  process retirement can complete without releasing unresolved stop accounting.
+  Reconciled cancellation remains terminal but does not retain a worktree.
+  Mutation serialization, receipt replay, and same-run recovery stay unchanged;
+  deferred timing is not yet accepted.
+
 ## 2026-09-14
 
 - **Polishing inventories match complete validation ownership.** Polishing now

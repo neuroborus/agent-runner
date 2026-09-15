@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 
+import { stopIsPending } from "./stop-policy.js";
 import {
   assertRunId,
   deepFreeze,
@@ -9,7 +10,6 @@ import {
   RUNTIME_COMPATIBILITY,
   RUN_STATE_SCHEMA_VERSION,
   RunStoreError,
-  stopIsPending,
 } from "./validation.js";
 
 const KINDS = new Map([
