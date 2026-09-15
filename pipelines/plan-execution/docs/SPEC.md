@@ -1335,6 +1335,24 @@ use independent finding resolution or direct primary fixing; pure evidence
 rejection still repeats finalization without code-fix accounting. The terminal
 confirmer and journal recovery use the same role decision.
 
+The private `gate-evidence.js` owns composable evidence predicates and
+invalidation. A candidate record must name its inspected fingerprint; independent
+approval requires approval or exact fingerprint-bound finding overrides, while
+lazy approval requires the primary clean confirmation. Passing finalization has
+its own resulting fingerprint, and terminal confirmation must match that result
+with no unresolved findings or disputes before new commit authorization. A
+formatter may change the candidate fingerprint without rewriting candidate proof.
+
+Persisted validation and workflow routing use the same predicates. Content repairs,
+including interrupted repairs reconciled for a stop, clear dependent approvals;
+unchanged finding resolutions clear candidate and confirmation approval but may
+retain passing finalization. Reuse still requires fresh content and infrastructure
+fingerprint checks after candidate convergence. Existing correction scopes and
+budgets are preserved. Migration uses the same invalidation rules without
+reopening consumed commits, and legacy confirmation recovery additionally requires
+its validated journal proof. Successful settlement clears evidence for the next
+step and retains the final step's evidence at `DONE`.
+
 Session selection is independent of routing: lazy's logical Worker consumes
 its source fork once across all checkpoints, independent Worker and Reviewer
 contexts fork by checkpoint, and recovery or explicit output correction reconstructs

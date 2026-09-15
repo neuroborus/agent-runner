@@ -1,5 +1,9 @@
 import { isDeepStrictEqual } from "node:util";
 
+import {
+  candidateGatePassed,
+  finalizationGatePassed,
+} from "./gate-evidence.js";
 import { executionPolicy } from "./mode-policy.js";
 import { assertRun } from "./workflow-contract.js";
 
@@ -326,8 +330,7 @@ function proveHistory(run, history, migrate) {
       !contentChanged &&
       event.state.pipelineStateVersion >= 14 &&
       ["FINALIZE", "CONFIRM"].includes(state.workflowState) &&
-      state.candidateReviewedFingerprint ===
-        state.repositoryBaseline.contentFingerprint &&
+      candidateGatePassed(state, state.repositoryBaseline.contentFingerprint) &&
       (policy.primaryConvergence
         ? before.workflowState === "CLEAN_CONFIRM" &&
           completedTurn?.role === "worker" &&
@@ -357,8 +360,7 @@ function proveHistory(run, history, migrate) {
       completedTurn?.role === "worker" &&
       completedTurn.phase === "finalize" &&
       isActivity(event, "worker", "finalization", ["passed"]) &&
-      state.finalizationResult?.status === "PASS" &&
-      state.finalizedFingerprint === state.repositoryBaseline.contentFingerprint
+      finalizationGatePassed(state, state.repositoryBaseline.contentFingerprint)
     ) {
       finalization = state.finalizationResult;
     }

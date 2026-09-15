@@ -1,4 +1,5 @@
 import { parseCommitPlan } from "@agent-runner/commit-plan";
+import { clearedCandidateAndTerminalGate } from "./gate-evidence.js";
 import { createFinalizationRecovery } from "./workflow-contract.js";
 
 // Selected steps remain targets while suspended; terminal acceptance is state-owned.
@@ -37,16 +38,7 @@ export function verifiedCommitCheckpoint({
     ? {}
     : {
         implementationDirection: null,
-        finalizationResult: null,
-        finalizedFingerprint: null,
-        reviewCorrection: null,
-        pendingReviewCorrection: null,
-        candidateReviewResult: null,
-        candidateReviewedFingerprint: null,
-        candidateConfirmationFingerprint: null,
-        cleanConfirmationFingerprint: null,
-        reviewResult: null,
-        reviewedFingerprint: null,
+        ...clearedCandidateAndTerminalGate(),
         findings: [],
         previousFindings: [],
         pendingDisputes: [],

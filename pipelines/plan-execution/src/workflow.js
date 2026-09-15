@@ -13,6 +13,16 @@ import {
   findingResolutionCheckpoint,
   selectRoleSession,
 } from "./mode-policy.js";
+import {
+  candidateGatePassed,
+  finalizationGatePassed,
+  commitGatePassed,
+  clearedTerminalGate,
+  clearedConfirmationGate,
+  clearedCandidateAndTerminalGate,
+  clearedCandidateAndConfirmationGate,
+  clearedGateAfterResolvedFindings,
+} from "./gate-evidence.js";
 import { verifiedCommitCheckpoint } from "./commit-checkpoint.js";
 import { canRecoverLegacyConfirmation } from "./legacy-confirmation-recovery.js";
 import {
@@ -716,67 +726,17 @@ ${JSON.stringify(commands, null, 2)}
 Include every listed command exactly once in requiredChecks. Do not execute these commands in an agent turn. During finalization, return NOT_RUN for only these checks with evidence that each is reserved for the runner; the runner will execute their persisted exact vectors outside the agent turn.`;
   }
 
-  function clearedTerminalGate() {
-    return {
-      finalizationResult: null,
-      finalizedFingerprint: null,
-      confirmationCorrection: null,
-      pendingConfirmationCorrection: null,
-      cleanConfirmationFingerprint: null,
-      reviewResult: null,
-      reviewedFingerprint: null,
-    };
-  }
-
-  function clearedCandidateAndTerminalGate() {
-    return {
-      ...clearedTerminalGate(),
-      reviewCorrection: null,
-      pendingReviewCorrection: null,
-      candidateReviewResult: null,
-      candidateReviewedFingerprint: null,
-      candidateConfirmationFingerprint: null,
-      candidateMigrationPending: false,
-      lazyCorrections: [],
-      pendingLazyCorrection: null,
-    };
-  }
-
-  function clearedCandidateAndConfirmationGate(current = state()) {
-    const retainFinalization = current.finalizationResult?.status === "PASS";
-    return {
-      finalizationResult: retainFinalization
-        ? current.finalizationResult
-        : null,
-      finalizedFingerprint: retainFinalization
-        ? current.finalizedFingerprint
-        : null,
-      reviewCorrection: null,
-      pendingReviewCorrection: null,
-      confirmationCorrection: null,
-      pendingConfirmationCorrection: null,
-      candidateReviewResult: null,
-      candidateReviewedFingerprint: null,
-      candidateConfirmationFingerprint: null,
-      candidateMigrationPending: false,
-      cleanConfirmationFingerprint: null,
-      reviewResult: null,
-      reviewedFingerprint: null,
-    };
-  }
-
-  function clearedGateAfterResolvedFindings(current = state()) {
-    return current.finalizationResult?.status === "PASS"
-      ? clearedCandidateAndConfirmationGate(current)
-      : clearedCandidateAndTerminalGate();
-  }
-
-  async function checkpointAfterCandidateConvergence(fingerprint) {
-    const current = state();
+  async function checkpointAfterCandidateConvergence(fingerprint, evidence) {
+    const current = { ...state(), ...evidence };
+    if (!candidateGatePassed(current, fingerprint)) {
+      throw workflowError(
+        "Candidate convergence has no matching approval.",
+        "ERR_INVALID_PLAN_EXECUTION_STATE",
+      );
+    }
     const finalization = current.finalizationResult;
     if (
-      finalization?.status === "PASS" &&
-      current.finalizedFingerprint === fingerprint &&
+      finalizationGatePassed(current, fingerprint) &&
       (await validationInfrastructureFingerprint(
         finalization.validationInfrastructure,
       )) === finalization.validationInfrastructureFingerprint
@@ -1012,6 +972,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     await transition(
       {
         ...current,
+        ...clearedCandidateAndTerminalGate(),
         workflowState: "WAITING_FOR_USER",
         clarificationFrozen: false,
         pendingEdit: null,
@@ -1025,29 +986,14 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         pendingBootstrapCorrection: null,
         finalizationCorrections: [],
         pendingFinalizationCorrection: null,
-        reviewCorrection: null,
-        pendingReviewCorrection: null,
-        confirmationCorrection: null,
-        pendingConfirmationCorrection: null,
-        lazyCorrections: [],
-        pendingLazyCorrection: null,
-        candidateReviewResult: null,
-        candidateReviewedFingerprint: null,
-        candidateConfirmationFingerprint: null,
-        candidateMigrationPending: false,
-        cleanConfirmationFingerprint: null,
         compatibilityCheckRequired: false,
         currentStep: null,
         reviewerStep: null,
         implementationDirection: null,
-        finalizationResult: null,
-        finalizedFingerprint: null,
         requiredChecks: null,
         validationInfrastructure: null,
         validationInfrastructureFingerprint: null,
         validationMigrationPending: false,
-        reviewResult: null,
-        reviewedFingerprint: null,
         findings: [],
         previousFindings: [],
         pendingDisputes: [],
@@ -1822,6 +1768,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         },
         nextPipelineState: {
           ...current,
+          ...clearedCandidateAndTerminalGate(),
           clarificationFrozen: false,
           workerSummary: bootstrapDecision ? null : current.workerSummary,
           reviewerSummary: bootstrapDecision ? null : current.reviewerSummary,
@@ -1844,19 +1791,6 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
             pending: false,
             feedback: null,
           },
-          finalizationResult: null,
-          finalizedFingerprint: null,
-          reviewCorrection: null,
-          pendingReviewCorrection: null,
-          confirmationCorrection: null,
-          pendingConfirmationCorrection: null,
-          lazyCorrections: [],
-          pendingLazyCorrection: null,
-          candidateReviewResult: null,
-          candidateReviewedFingerprint: null,
-          candidateConfirmationFingerprint: null,
-          candidateMigrationPending: false,
-          cleanConfirmationFingerprint: null,
           requiredChecks: bootstrapDecision ? null : current.requiredChecks,
           validationInfrastructure: bootstrapDecision
             ? null
@@ -1867,8 +1801,6 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           validationMigrationPending: bootstrapDecision
             ? false
             : current.validationMigrationPending,
-          reviewResult: null,
-          reviewedFingerprint: null,
           findings: [],
           previousFindings:
             current.findings.length === 0
@@ -2292,21 +2224,12 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
   function invalidatedLegacyValidation(current) {
     return {
       ...current,
+      ...clearedCandidateAndTerminalGate(),
+      // Inventory migration retains the existing bounded correction ledger.
+      lazyCorrections: current.lazyCorrections,
+      pendingLazyCorrection: current.pendingLazyCorrection,
       finalizationCorrections: [],
       pendingFinalizationCorrection: null,
-      reviewCorrection: null,
-      pendingReviewCorrection: null,
-      confirmationCorrection: null,
-      pendingConfirmationCorrection: null,
-      candidateReviewResult: null,
-      candidateReviewedFingerprint: null,
-      candidateConfirmationFingerprint: null,
-      candidateMigrationPending: false,
-      cleanConfirmationFingerprint: null,
-      finalizationResult: null,
-      finalizedFingerprint: null,
-      reviewResult: null,
-      reviewedFingerprint: null,
       previousFindings:
         current.findings.length === 0
           ? current.previousFindings
@@ -3355,7 +3278,7 @@ The runner will derive validation inventories from the independently accepted ro
     await transition(
       {
         ...state(),
-        ...(blockersResolved ? clearedGateAfterResolvedFindings() : {}),
+        ...(blockersResolved ? clearedGateAfterResolvedFindings(state()) : {}),
         workflowState: blockersResolved ? "REVIEW" : "RESOLVE_FINDINGS",
         findings,
         pendingDisputes,
@@ -3907,11 +3830,7 @@ ${
             finalizationResult,
             finalizationRecovery: completedFinalizationRecovery(),
             finalizedFingerprint: null,
-            confirmationCorrection: null,
-            pendingConfirmationCorrection: null,
-            cleanConfirmationFingerprint: null,
-            reviewResult: null,
-            reviewedFingerprint: null,
+            ...clearedConfirmationGate(),
             findings: [],
             pendingDisputes: state().pendingDisputes,
             correctionHistory: correction.history,
@@ -3943,11 +3862,7 @@ ${
           finalizationResult,
           finalizationRecovery: completedFinalizationRecovery(),
           finalizedFingerprint: fingerprint,
-          confirmationCorrection: null,
-          pendingConfirmationCorrection: null,
-          cleanConfirmationFingerprint: null,
-          reviewResult: null,
-          reviewedFingerprint: null,
+          ...clearedConfirmationGate(),
           findings: [],
           pendingDisputes: state().pendingDisputes,
           reviewReconsideration: [],
@@ -4369,8 +4284,14 @@ ${JSON.stringify(state().previousFindings, null, 2)}${lazyCorrectionPrompt(corre
           );
           return true;
         }
-        const checkpoint =
-          await checkpointAfterCandidateConvergence(confirmedFingerprint);
+        const checkpoint = await checkpointAfterCandidateConvergence(
+          confirmedFingerprint,
+          {
+            candidateReviewResult,
+            candidateReviewedFingerprint: confirmedFingerprint,
+            candidateConfirmationFingerprint: confirmedFingerprint,
+          },
+        );
         await transition(
           {
             ...state(),
@@ -4867,7 +4788,10 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
     }
     const checkpoint =
       state().pendingDisputes.length === 0
-        ? await checkpointAfterCandidateConvergence(reviewedFingerprint)
+        ? await checkpointAfterCandidateConvergence(reviewedFingerprint, {
+            candidateReviewResult,
+            candidateReviewedFingerprint: reviewedFingerprint,
+          })
         : { workflowState: "RESOLVE_FINDINGS" };
     await transition(
       {
@@ -5465,8 +5389,7 @@ ${JSON.stringify(
       return true;
     }
     if (result.direction === "RECONSIDER_FINDINGS") {
-      const retainedFinalization =
-        current.finalizationResult?.status === "PASS";
+      const retainedFinalization = finalizationGatePassed(current);
       await transition(
         {
           ...state(),
@@ -5775,8 +5698,7 @@ ${JSON.stringify(
       }
       const fingerprint = await contentFingerprint();
       if (
-        fingerprint !== current.finalizedFingerprint ||
-        fingerprint !== current.reviewedFingerprint ||
+        !commitGatePassed(current, fingerprint) ||
         !(await verifyPersistedRepository())
       ) {
         if (state().workflowState !== "WAITING_FOR_USER") {

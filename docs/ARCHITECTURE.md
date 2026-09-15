@@ -134,6 +134,18 @@ and output-correction contexts. Permissions, one-shot commit verification, and b
 correction accounting remain with their existing workflow operations; policy
 selection grants no additional repository authority or supported modes.
 
+Execution's private `gate-evidence.js` composes primary clean evidence,
+independent candidate approval, passing finalization, and terminal confirmation.
+Persisted validation, normal routing, migration invalidation, journal-proven
+recovery, stop reconciliation, and new commit authorization share these predicates
+and resets. Candidate approval stays bound to the inspected content; finalization
+may format it, so its resulting fingerprint requires distinct terminal approval.
+Content repairs clear dependent evidence. Unchanged resolutions reconverge the
+candidate and retain passing finalization only subject to fresh content and
+infrastructure checks. Correction ledgers keep their existing bounded accounting.
+Consumed effects still bypass new authorization and use verification-only recovery;
+the shared predicates neither replace journal provenance nor grant Git authority.
+
 The root CLI owns `--clarify` as a common run-lifecycle option. Role and
 pipeline-specific options remain in pipeline descriptors.
 
