@@ -1322,6 +1322,29 @@ FAILED
 remain actions within the owning independent-mode states rather than separate
 persisted states.
 
+The private `mode-policy.js` owns the separate decisions for active roles,
+independent bootstrap, primary convergence, independent review, terminal
+confirmer, arbitration eligibility, and session lineage. Only `independent`
+and `lazy` remain accepted. The descriptor and persisted settings contract
+validate modes; policy selection does not introduce another configuration API.
+
+Implementation, content-changing finding resolution, migration re-entry, and
+stop reconciliation share candidate routing: `REVIEW` for independent mode,
+`CHECK_AND_FIX` for lazy mode. Content findings from terminal evidence rejection
+use independent finding resolution or direct primary fixing; pure evidence
+rejection still repeats finalization without code-fix accounting. The terminal
+confirmer and journal recovery use the same role decision.
+
+Session selection is independent of routing: lazy's logical Worker consumes
+its source fork once across all checkpoints, independent Worker and Reviewer
+contexts fork by checkpoint, and recovery or explicit output correction reconstructs
+freshly. Arbiters never inherit a source or prior child. Existing persisted
+`lazyCorrections`, `pendingLazyCorrection`, and `lazySourceForkConsumed` shapes
+remain unchanged. Accepted or reconciled repair work is charged once; invalid
+output replacement does not renew budgets. Worker access, read-only guards,
+protected-input checks, and commit authorization remain in the owning turn and
+reconciliation paths, independent of mode selection.
+
 Only the runner controls transitions.
 
 ---

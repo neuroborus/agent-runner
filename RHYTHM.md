@@ -7,6 +7,12 @@ remain in the owning documentation.
 
 ## 2026-09-15
 
+- **Execution mode responsibilities are private pipeline policy.** Active roles,
+  bootstrap, convergence, terminal confirmation, arbitration, and session scope
+  now have distinct decisions shared by workflow, validation, and recovery.
+  The two accepted modes, persisted correction evidence, bounded accounting,
+  and repository authorization boundaries retain their existing behavior.
+
 - **Combined authoring converges before independent review.** Authoring alone
   exposes an explicit combined mode, reusing primary check/fix and clean
   confirmation before the complete Reviewer gate. Revisions invalidate both

@@ -7,6 +7,12 @@ import {
   serializeCommitPlan,
 } from "@agent-runner/commit-plan";
 
+import {
+  candidateCheckpoint,
+  executionPolicy,
+  findingResolutionCheckpoint,
+  selectRoleSession,
+} from "./mode-policy.js";
 import { verifiedCommitCheckpoint } from "./commit-checkpoint.js";
 import { canRecoverLegacyConfirmation } from "./legacy-confirmation-recovery.js";
 import {
@@ -1452,25 +1458,16 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     const latestSession = [...currentRun.sessionLineage.children]
       .reverse()
       .find((child) => child.role === role);
-    const lazyPrimary = state().settings.mode === "lazy" && role === "worker";
-    const previousSession =
-      !recovering &&
-      role !== "arbiter" &&
-      (lazyPrimary || latestSession?.contextKey === contextKey) &&
-      latestSession !== undefined
-        ? latestSession.sessionId
-        : undefined;
-    const sourceSession = currentRun.sessionLineage.source;
-    const session = freshSession
-      ? undefined
-      : previousSession !== undefined
-        ? { id: previousSession, mode: "continue" }
-        : !recovering &&
-            sourceSession !== null &&
-            role !== "arbiter" &&
-            (!lazyPrimary || !state().lazySourceForkConsumed)
-          ? { id: sourceSession, mode: "fork" }
-          : undefined;
+    const { session, previousSession, consumeSourceFork } = selectRoleSession({
+      settings: state().settings,
+      role,
+      latestSession,
+      contextKey,
+      sourceSession: currentRun.sessionLineage.source,
+      sourceForkConsumed: state().lazySourceForkConsumed,
+      recovering,
+      freshSession,
+    });
     const roleConfiguration = currentRun.roles[role];
     const recoveryPrompt = completeRolePrompt(buildPrompt(context));
     const executionPreferences = Object.fromEntries(
@@ -1497,7 +1494,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     let agentError;
     currentRun = await runtime.startAgentTurn(
       turn,
-      lazyPrimary && session?.mode === "fork"
+      consumeSourceFork
         ? {
             pipelineState: {
               ...state(),
@@ -1555,10 +1552,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
               ? {
                   ...current,
                   ...clearedCandidateAndTerminalGate(),
-                  workflowState:
-                    current.settings.mode === "lazy"
-                      ? "CHECK_AND_FIX"
-                      : "REVIEW",
+                  workflowState: candidateCheckpoint(current.settings),
                   repositoryBaseline: nextRepositoryBaseline,
                   previousFindings:
                     current.findings.length === 0
@@ -2353,9 +2347,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
             ...invalidatedLegacyValidation(current),
             workflowState: resumeImplementation
               ? "IMPLEMENT"
-              : current.settings.mode === "lazy"
-                ? "CHECK_AND_FIX"
-                : "REVIEW",
+              : candidateCheckpoint(current.settings),
             additionalFixRounds,
           },
       {
@@ -2389,8 +2381,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     await transition(
       {
         ...current,
-        workflowState:
-          current.settings.mode === "lazy" ? "CHECK_AND_FIX" : "REVIEW",
+        workflowState: candidateCheckpoint(current.settings),
         candidateMigrationPending: false,
         additionalFixRounds,
       },
@@ -2717,14 +2708,14 @@ ${JSON.stringify(
     const current = state();
     if (
       result.validationChange !== "REJECTED" ||
-      (current.settings.mode !== "lazy" &&
+      (executionPolicy(current.settings).independentReview &&
         validationRejectionIsOverridden(result.findings, fingerprint))
     ) {
       return false;
     }
     const findings = result.findings.filter(
       ({ id }) =>
-        current.settings.mode === "lazy" ||
+        !executionPolicy(current.settings).independentReview ||
         !findingOverrideApplies(id, fingerprint),
     );
     const evidenceIds = result.finalizationFindingIds.filter((id) =>
@@ -2756,9 +2747,7 @@ ${JSON.stringify(
         ...(pure ? clearedTerminalGate() : clearedCandidateAndTerminalGate()),
         workflowState: pure
           ? "FINALIZE"
-          : current.settings.mode === "lazy"
-            ? "CHECK_AND_FIX"
-            : "RESOLVE_FINDINGS",
+          : findingResolutionCheckpoint(current.settings),
         finalizationRecovery: {
           ...current.finalizationRecovery,
           required: true,
@@ -2768,7 +2757,7 @@ ${JSON.stringify(
         findings: contentFindings,
         previousFindings: result.findings,
         pendingDisputes:
-          pure || current.settings.mode === "lazy"
+          pure || !executionPolicy(current.settings).independentReview
             ? []
             : terminalDisputes(contentFindings, current),
         reviewReconsideration: [],
@@ -2779,10 +2768,9 @@ ${JSON.stringify(
               correctionHistory: progress.history,
               sameFindingRounds: progress.sameFindingRounds,
               blockedSinceStagnation: progress.blockedSinceStagnation,
-              reviewerStep:
-                current.settings.mode === "lazy"
-                  ? current.reviewerStep
-                  : current.currentStep,
+              reviewerStep: !executionPolicy(current.settings).independentReview
+                ? current.reviewerStep
+                : current.currentStep,
             }),
       },
       {
@@ -3278,7 +3266,7 @@ The runner will derive validation inventories from the independently accepted ro
       return true;
     }
     if (
-      state().settings.mode === "lazy" ||
+      !executionPolicy(state().settings).independentReview ||
       ![
         "fix_limit_reached",
         "no_progress",
@@ -3454,8 +3442,7 @@ ${step.body}${
     await transition(
       {
         ...state(),
-        workflowState:
-          state().settings.mode === "lazy" ? "CHECK_AND_FIX" : "REVIEW",
+        workflowState: candidateCheckpoint(state().settings),
         implementationDirection: null,
         ...clearedCandidateAndTerminalGate(),
         lazyCorrections: [],
@@ -5534,7 +5521,7 @@ ${JSON.stringify(
   async function runResolutionTurn() {
     const current = state();
     if (
-      current.settings.mode === "independent" &&
+      executionPolicy(current.settings).arbitration &&
       current.finalizationResult?.status !== "FAIL"
     ) {
       const arbitration = current.pendingDisputes.find(disputeNeedsArbitration);
@@ -5558,7 +5545,7 @@ ${JSON.stringify(
       current.blockedSinceStagnation >= current.settings.stagnationWindowRounds
     ) {
       if (
-        current.settings.mode === "lazy" ||
+        !executionPolicy(current.settings).arbitration ||
         current.stagnationArbitrationUsed
       ) {
         await pause("no_progress", {
@@ -5724,8 +5711,7 @@ ${JSON.stringify(
           ...(changed || current.finalizationResult?.status !== "PASS"
             ? clearedCandidateAndTerminalGate()
             : clearedCandidateAndConfirmationGate(current)),
-          workflowState:
-            current.settings.mode === "lazy" ? "CHECK_AND_FIX" : "REVIEW",
+          workflowState: candidateCheckpoint(current.settings),
           previousFindings:
             current.findings.length === 0
               ? current.previousFindings
@@ -6089,7 +6075,7 @@ ${step.subject}`),
           pause: null,
           expectedRevision: recoveryRevision,
           nextActiveTurn: activeTurn(
-            current.settings.mode === "lazy" ? "worker" : "reviewer",
+            executionPolicy(current.settings).terminalConfirmer,
             "CONFIRM",
           ),
           publicActivity: activity(
@@ -6152,9 +6138,7 @@ ${step.subject}`),
             current.workflowState === "CHECK_AND_FIX";
           const workflowState = samePhase
             ? current.workflowState
-            : current.settings.mode === "lazy"
-              ? "CHECK_AND_FIX"
-              : "REVIEW";
+            : candidateCheckpoint(current.settings);
           const alreadyCharged =
             interruptedTurn?.phase === "check-and-fix"
               ? current.pendingLazyCorrection?.fixRoundCharged === true
@@ -6455,7 +6439,7 @@ ${evidence}`,
           }
           continue;
         }
-        if (current.settings.mode === "lazy") {
+        if (!executionPolicy(current.settings).independentBootstrap) {
           if (!(await completeLazyBootstrap())) {
             return currentRun;
           }
@@ -6495,7 +6479,7 @@ ${evidence}`,
 
       if (current.workflowState === "CONFIRM") {
         const confirmed =
-          current.settings.mode === "lazy"
+          executionPolicy(current.settings).terminalConfirmer === "worker"
             ? await runLazyConfirmationTurn()
             : await runIndependentConfirmationTurn();
         if (!confirmed) {

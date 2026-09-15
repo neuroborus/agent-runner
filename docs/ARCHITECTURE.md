@@ -123,6 +123,17 @@ through its static descriptor. The descriptor also selects the active roles
 from its resolved settings, including all mode semantics; pipeline states remain
 workspace-owned rather than becoming root runtime policy.
 
+Execution's private `mode-policy.js` separates active roles, independent
+bootstrap, primary convergence, independent review, terminal confirmer,
+arbitration, and primary session scope. The workflow, persisted-state validator,
+resume-action checks, migrations, and journal-proven confirmation recovery use
+those decisions. Ordinary and stop-reconciled content repairs rejoin the same
+candidate checkpoint. Session selection preserves one run-wide Worker source
+fork in lazy mode, checkpoint forks in independent mode, and fresh arbitration
+and output-correction contexts. Permissions, one-shot commit verification, and bounded
+correction accounting remain with their existing workflow operations; policy
+selection grants no additional repository authority or supported modes.
+
 The root CLI owns `--clarify` as a common run-lifecycle option. Role and
 pipeline-specific options remain in pipeline descriptors.
 
