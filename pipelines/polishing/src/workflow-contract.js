@@ -2,6 +2,11 @@ import { createHash } from "node:crypto";
 import { isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
+import {
+  candidateGatePassed,
+  finalizationGatePassed,
+  handoffGatePassed,
+} from "./gate-evidence.js";
 import { polishingPolicy } from "./mode-policy.js";
 
 export const MAX_CLARIFICATION_ROUNDS = 3;
@@ -3137,53 +3142,6 @@ function normalizeFindingOverrides(value) {
   return value;
 }
 
-function findingIsOverridden(findingOverrides, findingId, fingerprint) {
-  return findingOverrides.some(
-    (entry) =>
-      entry.findingId === findingId && entry.fingerprint === fingerprint,
-  );
-}
-
-function reviewGatePassed({
-  findingOverrides,
-  findings,
-  previousFindings,
-  reviewedFingerprint,
-  reviewResult,
-}) {
-  const findingsAccepted =
-    reviewResult?.status === "APPROVED" ||
-    (reviewResult?.status === "FINDINGS" &&
-      reviewedFingerprint !== null &&
-      findings.length === 0 &&
-      previousFindings.length > 0 &&
-      previousFindings.every(({ id }) =>
-        findingIsOverridden(findingOverrides, id, reviewedFingerprint),
-      ));
-  return (
-    findingsAccepted &&
-    reviewedFingerprint !== null &&
-    reviewResult.fingerprint === reviewedFingerprint
-  );
-}
-
-function candidateReviewGatePassed({
-  candidateReviewResult,
-  candidateReviewedFingerprint,
-  findingOverrides,
-}) {
-  if (candidateReviewResult?.status === "APPROVED") {
-    return true;
-  }
-  return (
-    candidateReviewResult?.status === "FINDINGS" &&
-    candidateReviewedFingerprint !== null &&
-    candidateReviewResult.findingIds.every((id) =>
-      findingIsOverridden(findingOverrides, id, candidateReviewedFingerprint),
-    )
-  );
-}
-
 function assertSnapshot(value) {
   if (
     !isRecord(value) ||
@@ -3590,23 +3548,17 @@ export function normalizePipelineState(value) {
     value.stagnationDirection,
   );
   const findingOverrides = normalizeFindingOverrides(value.findingOverrides);
-  const acceptedReviewGate = reviewGatePassed({
+  const gateState = {
+    ...value,
+    candidateReviewResult,
+    finalizationResult,
+    reviewResult,
     findingOverrides,
     findings,
     previousFindings,
-    reviewedFingerprint: value.reviewedFingerprint,
-    reviewResult,
-  });
-  const acceptedCandidateReview = candidateReviewGatePassed({
-    candidateReviewResult,
-    candidateReviewedFingerprint: value.candidateReviewedFingerprint,
-    findingOverrides,
-  });
-  const acceptedCandidateGate = policy.primaryConvergence
-    ? acceptedCandidateReview &&
-      value.candidateConfirmationFingerprint ===
-        value.candidateReviewedFingerprint
-    : acceptedCandidateReview;
+    pendingDisputes,
+  };
+  const acceptedCandidateGate = candidateGatePassed(gateState);
   if (
     (value.finalizedFingerprint !== null &&
       !HASH_PATTERN.test(value.finalizedFingerprint)) ||
@@ -4149,8 +4101,7 @@ export function normalizePipelineState(value) {
   }
   if (
     value.workflowState === "CONFIRM" &&
-    (finalizationResult?.status !== "PASS" ||
-      value.finalizedFingerprint === null ||
+    (!finalizationGatePassed(gateState) ||
       !acceptedCandidateGate ||
       reviewResult !== null ||
       value.reviewedFingerprint !== null ||
@@ -4159,16 +4110,7 @@ export function normalizePipelineState(value) {
   ) {
     throw workflowError("Polishing confirmation state is inconsistent.");
   }
-  const completionReady =
-    finalizationResult?.status === "PASS" &&
-    value.finalizedFingerprint !== null &&
-    acceptedCandidateGate &&
-    value.reviewedFingerprint === value.finalizedFingerprint &&
-    acceptedReviewGate &&
-    (policy.terminalConfirmer !== "worker" ||
-      value.cleanConfirmationFingerprint === value.finalizedFingerprint) &&
-    findings.length === 0 &&
-    pendingDisputes.length === 0;
+  const completionReady = handoffGatePassed(gateState);
   const finalizationBlocked =
     finalizationResult?.status === "FAIL" &&
     finalizationResult.issues.length > 0;
@@ -4180,10 +4122,7 @@ export function normalizePipelineState(value) {
   ) {
     throw workflowError("Polishing finding resolution has no blockers.");
   }
-  if (
-    ["HANDOFF", "DONE"].includes(value.workflowState) &&
-    (!completionReady || value.reviewReconsideration.length !== 0)
-  ) {
+  if (["HANDOFF", "DONE"].includes(value.workflowState) && !completionReady) {
     throw workflowError("Completed polishing state is inconsistent.");
   }
   if (

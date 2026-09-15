@@ -7,6 +7,12 @@ remain in the owning documentation.
 
 ## 2026-09-15
 
+- **Polishing gate evidence has one owner.** Pipeline-private predicates bind
+  candidate approval to inspected content and handoff to the separately finalized
+  and confirmed content. Routing, validation, migration, and recovery now share
+  acceptance and invalidation rules, preserving valid unchanged-resolution reuse
+  and completed staging evidence without expanding agent permissions.
+
 - **Polishing mode responsibilities are explicit.** A private policy separates
   role participation, bootstrap, convergence, review, arbitration, and session
   lineage so ordinary and interrupted repair routes agree. Supported modes,

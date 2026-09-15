@@ -10,6 +10,7 @@ import {
 } from "../src/index.js";
 import {
   CHECK_AND_FIX_SCHEMA,
+  CLEAN_CONFIRM_SCHEMA,
   FINALIZATION_SCHEMA,
   REVIEW_SCHEMA,
 } from "../src/schemas.js";
@@ -273,62 +274,84 @@ test("rejects Git-index mutation during lazy check/fix", async (t) => {
   assert.equal(result.pipelineState.cleanConfirmationFingerprint, null);
 });
 
-test("recovers a verified runner handoff after DONE persistence is interrupted", async (t) => {
-  const processLoss = new Error("Runner process stopped after staging.");
-  const fixture = await createIntegrationFixture(t);
-  const transition = fixture.runtime.transition;
-  let interrupt = true;
-  fixture.runtime.transition = async (patch, options) => {
-    if (
-      interrupt &&
-      ["DONE", "FAILED"].includes(patch.pipelineState.workflowState)
-    ) {
-      throw processLoss;
-    }
-    return transition(patch, options);
-  };
+for (const mode of ["independent", "lazy"]) {
+  test(`${mode} recovers a verified runner handoff after DONE persistence is interrupted`, async (t) => {
+    const processLoss = new Error("Runner process stopped after staging.");
+    const fixture = await createIntegrationFixture(t, {
+      mode,
+      ...(mode === "lazy"
+        ? {
+            worker: [
+              clarificationReady(),
+              bootstrapReady("Worker"),
+              polishingCompleted(),
+              checkAndFix(),
+              candidateClean(),
+              finalizationPassed(),
+              cleanConfirmation(),
+            ],
+          }
+        : {}),
+    });
+    const transition = fixture.runtime.transition;
+    let interrupt = true;
+    fixture.runtime.transition = async (patch, options) => {
+      if (
+        interrupt &&
+        ["DONE", "FAILED"].includes(patch.pipelineState.workflowState)
+      ) {
+        throw processLoss;
+      }
+      return transition(patch, options);
+    };
 
-  await assert.rejects(fixture.run(), (error) => error === processLoss);
-  assert.equal(fixture.currentRun.pipelineState.workflowState, "HANDOFF");
-  const finalizationCalls = fixture.calls.worker.filter(
-    ({ schema }) => schema === FINALIZATION_SCHEMA,
-  ).length;
-  const confirmationCalls = fixture.calls.reviewer.filter(
-    ({ schema }) => schema === REVIEW_SCHEMA,
-  ).length;
-  assert.equal(finalizationCalls, 1);
-  assert.equal(confirmationCalls, 1);
-  assert.notEqual(
-    fixture.currentRun.pipelineState.repositoryBaseline.indexFingerprint,
-    (await fixture.runtime.git.snapshot({ projectPath: fixture.projectPath }))
-      .indexFingerprint,
-  );
+    await assert.rejects(fixture.run(), (error) => error === processLoss);
+    assert.equal(fixture.currentRun.pipelineState.workflowState, "HANDOFF");
+    const finalizationCalls = fixture.calls.worker.filter(
+      ({ schema }) => schema === FINALIZATION_SCHEMA,
+    ).length;
+    const confirmer = mode === "lazy" ? "worker" : "reviewer";
+    const confirmationSchema =
+      mode === "lazy" ? CLEAN_CONFIRM_SCHEMA : REVIEW_SCHEMA;
+    const confirmationCalls = fixture.calls[confirmer].filter(
+      ({ schema }) => schema === confirmationSchema,
+    ).length;
+    assert.equal(finalizationCalls, 1);
+    assert.equal(confirmationCalls, 1);
+    assert.notEqual(
+      fixture.currentRun.pipelineState.repositoryBaseline.indexFingerprint,
+      (await fixture.runtime.git.snapshot({ projectPath: fixture.projectPath }))
+        .indexFingerprint,
+    );
 
-  interrupt = false;
-  fixture.runtime.transition = transition;
-  await fixture.recover();
-  const completed = await fixture.run();
+    interrupt = false;
+    fixture.runtime.transition = transition;
+    await fixture.recover();
+    const completed = await fixture.run();
 
-  assert.equal(completed.pipelineState.workflowState, "DONE");
-  assert.equal(
-    fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
-      .length,
-    finalizationCalls,
-  );
-  assert.equal(
-    fixture.calls.reviewer.filter(({ schema }) => schema === REVIEW_SCHEMA)
-      .length,
-    confirmationCalls,
-  );
-  assert.equal(
-    completed.pipelineState.repositoryBaseline.indexFingerprint,
-    (await fixture.runtime.git.snapshot({ projectPath: fixture.projectPath }))
-      .indexFingerprint,
-  );
-  assert.ok(
-    fixture.calls.worker.every(({ access }) => access !== "local-commit"),
-  );
-});
+    assert.equal(completed.pipelineState.workflowState, "DONE");
+    assert.equal(
+      fixture.calls.worker.filter(
+        ({ schema }) => schema === FINALIZATION_SCHEMA,
+      ).length,
+      finalizationCalls,
+    );
+    assert.equal(
+      fixture.calls[confirmer].filter(
+        ({ schema }) => schema === confirmationSchema,
+      ).length,
+      confirmationCalls,
+    );
+    assert.equal(
+      completed.pipelineState.repositoryBaseline.indexFingerprint,
+      (await fixture.runtime.git.snapshot({ projectPath: fixture.projectPath }))
+        .indexFingerprint,
+    );
+    assert.ok(
+      fixture.calls.worker.every(({ access }) => access !== "local-commit"),
+    );
+  });
+}
 
 test("reconciles version-5 HANDOFF before completion or validation rediscovery", async (t) => {
   for (const effect of ["complete", "untouched"]) {

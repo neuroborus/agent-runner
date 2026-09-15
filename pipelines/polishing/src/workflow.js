@@ -3,6 +3,14 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import {
+  clearedCandidateAndConfirmationGate,
+  clearedCandidateAndTerminalGate,
+  clearedGateAfterResolvedFindings,
+  clearedTerminalGate,
+  finalizationGatePassed,
+  handoffGatePassed,
+} from "./gate-evidence.js";
+import {
   candidateCheckpoint,
   findingResolutionCheckpoint,
   polishingPolicy,
@@ -559,67 +567,11 @@ export async function runPolishing({
       .join("\n\n");
   }
 
-  function clearedTerminalGate() {
-    return {
-      finalizationResult: null,
-      finalizedFingerprint: null,
-      confirmationCorrection: null,
-      pendingConfirmationCorrection: null,
-      cleanConfirmationFingerprint: null,
-      reviewResult: null,
-      reviewedFingerprint: null,
-    };
-  }
-
-  function clearedCandidateAndTerminalGate() {
-    return {
-      ...clearedTerminalGate(),
-      reviewCorrection: null,
-      pendingReviewCorrection: null,
-      candidateReviewResult: null,
-      candidateReviewedFingerprint: null,
-      candidateConfirmationFingerprint: null,
-      candidateMigrationPending: false,
-      lazyCorrections: [],
-      pendingLazyCorrection: null,
-    };
-  }
-
-  function clearedCandidateAndConfirmationGate(current = state()) {
-    const retainFinalization = current.finalizationResult?.status === "PASS";
-    return {
-      finalizationResult: retainFinalization
-        ? current.finalizationResult
-        : null,
-      finalizedFingerprint: retainFinalization
-        ? current.finalizedFingerprint
-        : null,
-      reviewCorrection: null,
-      pendingReviewCorrection: null,
-      confirmationCorrection: null,
-      pendingConfirmationCorrection: null,
-      candidateReviewResult: null,
-      candidateReviewedFingerprint: null,
-      candidateConfirmationFingerprint: null,
-      candidateMigrationPending: false,
-      cleanConfirmationFingerprint: null,
-      reviewResult: null,
-      reviewedFingerprint: null,
-    };
-  }
-
-  function clearedGateAfterResolvedFindings(current = state()) {
-    return current.finalizationResult?.status === "PASS"
-      ? clearedCandidateAndConfirmationGate(current)
-      : clearedCandidateAndTerminalGate();
-  }
-
   async function checkpointAfterCandidateConvergence(fingerprint) {
     const current = state();
     const finalization = current.finalizationResult;
     if (
-      finalization?.status === "PASS" &&
-      current.finalizedFingerprint === fingerprint &&
+      finalizationGatePassed(current, fingerprint) &&
       (await validationInfrastructureFingerprint(
         finalization.validationInfrastructure,
       )) === finalization.validationInfrastructureFingerprint
@@ -1925,19 +1877,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
   function invalidatedLegacyValidation(current) {
     return {
       ...current,
-      reviewCorrection: null,
-      pendingReviewCorrection: null,
-      confirmationCorrection: null,
-      pendingConfirmationCorrection: null,
-      candidateReviewResult: null,
-      candidateReviewedFingerprint: null,
-      candidateConfirmationFingerprint: null,
-      candidateMigrationPending: false,
-      finalizationResult: null,
-      finalizedFingerprint: null,
-      cleanConfirmationFingerprint: null,
-      reviewResult: null,
-      reviewedFingerprint: null,
+      ...clearedCandidateAndConfirmationGate(current),
+      ...clearedTerminalGate(),
       previousFindings:
         current.findings.length === 0
           ? current.previousFindings
@@ -2554,35 +2495,7 @@ ${JSON.stringify(
 
   async function prepareHandoffIfReady() {
     const current = state();
-    const candidateAccepted =
-      current.candidateReviewResult?.status === "APPROVED" ||
-      (current.candidateReviewResult?.status === "FINDINGS" &&
-        current.candidateReviewResult.findingIds.every((id) =>
-          findingOverrideApplies(id, current.candidateReviewedFingerprint),
-        ));
-    const confirmationAccepted =
-      ["UNCHANGED", "ACCEPTED"].includes(
-        current.reviewResult?.validationChange,
-      ) ||
-      (current.reviewResult?.validationChange === "REJECTED" &&
-        validationRejectionIsOverridden(
-          current.previousFindings,
-          current.reviewedFingerprint,
-        ));
-    if (
-      current.finalizationResult?.status !== "PASS" ||
-      !candidateAccepted ||
-      current.findings.length !== 0 ||
-      current.pendingDisputes.length !== 0 ||
-      current.finalizedFingerprint === null ||
-      current.reviewedFingerprint !== current.finalizedFingerprint ||
-      !confirmationAccepted ||
-      (polishingPolicy(current.settings).primaryConvergence &&
-        current.candidateConfirmationFingerprint !==
-          current.candidateReviewedFingerprint) ||
-      (polishingPolicy(current.settings).terminalConfirmer === "worker" &&
-        current.cleanConfirmationFingerprint !== current.finalizedFingerprint)
-    ) {
+    if (!handoffGatePassed(current)) {
       return false;
     }
     if ((await contentFingerprint()) !== current.finalizedFingerprint) {
@@ -2614,6 +2527,9 @@ ${JSON.stringify(
 
   async function runHandoff(verificationOnly = false) {
     const current = state();
+    if (!handoffGatePassed(current)) {
+      throw workflowError("Polishing handoff requires accepted gate evidence.");
+    }
     const handoffOptions = {
       expectedSnapshot: current.repositoryBaseline,
       finalizedFingerprint: current.finalizedFingerprint,
@@ -5151,8 +5067,7 @@ ${JSON.stringify(
       return true;
     }
     if (result.direction === "RECONSIDER_FINDINGS") {
-      const retainedFinalization =
-        current.finalizationResult?.status === "PASS";
+      const retainedFinalization = finalizationGatePassed(current);
       await transition(
         {
           ...current,
@@ -5206,10 +5121,7 @@ ${JSON.stringify(
 
   async function runResolutionTurn() {
     const current = state();
-    if (
-      current.findings.length === 0 &&
-      current.finalizationResult?.status === "PASS"
-    ) {
+    if (current.findings.length === 0 && finalizationGatePassed(current)) {
       await prepareHandoffIfReady();
       return true;
     }
@@ -5427,7 +5339,7 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
       await transition(
         {
           ...state(),
-          ...(changed || current.finalizationResult?.status !== "PASS"
+          ...(changed || !finalizationGatePassed(current)
             ? clearedCandidateAndTerminalGate()
             : clearedCandidateAndConfirmationGate(current)),
           workflowState: candidateCheckpoint(current.settings),
