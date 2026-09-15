@@ -1164,6 +1164,7 @@ export function createRunStore({
     requestOperatorStop: stops.request,
     recordStopActivity: stops.activity,
     completeOperatorStop: stops.complete,
+    settleCheckpoint: stops.settleCheckpoint,
     loadStopCheckpoint: stops.checkpoint,
     inspectRunLeaseOwner,
     beginAction: actions.begin,

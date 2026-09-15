@@ -39,6 +39,7 @@ import {
   reconcileOperatorStop,
   restoreOperatorPause,
   stopPending,
+  stopSettlement,
 } from "./stops.js";
 import {
   defaultAdapters,
@@ -338,6 +339,46 @@ export function createRunner(options = {}) {
         await publish(activity, next);
         return next;
       },
+      async settleVerifiedCommit(patch, { activity, expectedPipelineState }) {
+        let configurationFailure = null;
+        try {
+          await checkConfiguration();
+        } catch (cause) {
+          if (cause?.code !== "ERR_PROJECT_CONFIGURATION_CHANGED") throw cause;
+          configurationFailure = cause;
+        }
+        // Drain any already detected stop activity before taking the lease.
+        try {
+          await monitor?.check();
+        } catch (cause) {
+          if (cause?.code !== "ERR_OPERATOR_STOP_BEFORE_COMMIT") throw cause;
+        }
+        let settlementActivity;
+        const next = await runStore.settleCheckpoint(
+          lease,
+          (latest) => {
+            if (
+              !isDeepStrictEqual(latest.pipelineState, expectedPipelineState)
+            ) {
+              throw new RunnerError(
+                "Commit checkpoint changed before settlement.",
+                { code: "ERR_RUN_REVISION_CHANGED" },
+              );
+            }
+            const settlement = stopSettlement(
+              latest,
+              patch,
+              activity,
+              configurationFailure,
+            );
+            settlementActivity = settlement.activity;
+            return settlement;
+          },
+          { validate: pipeline.workflow.validateRun },
+        );
+        await publish(settlementActivity, next);
+        return next;
+      },
       async transition(patch, { activity, expectedRevision } = {}) {
         const next = await runStore.transitionRun(lease, patch, {
           activity,
@@ -483,7 +524,8 @@ export function createRunner(options = {}) {
     }
     if (
       configurationFailure !== null &&
-      latest.pipelineState.workflowState !== "CANCELED"
+      latest.pipelineState.workflowState !== "CANCELED" &&
+      latest.pause?.reason !== "operator_paused"
     ) {
       return pauseForProjectConfiguration(latest, lease);
     }

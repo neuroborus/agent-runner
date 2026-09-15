@@ -784,6 +784,25 @@ durable accounting. Version-1 through version-3 run envelopes project a null
 request without read-side writes; stop acceptance can upgrade only the common
 envelope in its acceptance event while preserving pipeline state and history.
 
+Verified commit settlement uses the leased `settleCheckpoint` state operation.
+Its synchronous resolver reads the latest authoritative snapshot inside the
+mutation boundary; the runner supplies workflow patches and the pipeline
+validator checks the fully normalized result before journal publication. A
+recorded execution process prevents settlement. A pending stop must settle to
+its requested outcome, including a cancellation that superseded a pause during
+verification. No provider, Git, or artifact effects run inside the resolver.
+
+Execution's private `commit-checkpoint.js` constructs the verified SHA, clean
+repository baseline, completed-commit list, next step or `DONE`, evidence resets,
+and counters. Normal execution and verification-only stop recovery use that same
+construction. The runner wraps the checkpoint in an operator pause or cancellation
+when applicable and retains protected-configuration blockers beneath the stop.
+Successful settlement clears the active commit turn and consumed authorization
+in the same event as progress. Publication errors escape without writing failure
+state from an older local snapshot; journal recovery preserves an already
+published checkpoint without replaying the commit. Deferred timing remains
+unsupported.
+
 ### Common envelope and pipeline migrations
 
 Common envelope version 5 adds nullable `executionProcess` ownership. Legacy

@@ -5296,6 +5296,7 @@ export function assertRuntime(runtime, activeRoles = ROLES) {
   }
   for (const name of [
     "finishAgentTurn",
+    "settleVerifiedCommit",
     "readInputs",
     "recordChildSession",
     "startAgentTurn",
