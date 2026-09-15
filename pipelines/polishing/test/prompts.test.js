@@ -105,7 +105,7 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
   assert.match(BOOTSTRAP_INSTRUCTIONS, /unique, single-line/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /canonical repository-relative/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /symlink alias/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /capacity of 64 items/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /capacity of 256 items/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /CAPACITY_EXHAUSTED/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /staging-independent/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /HEAD or explicit trees/u);
@@ -332,4 +332,25 @@ test("writable candidate instructions defer checks without suppressing unrelated
       /NOT_RUN|requiredChecks|validationInfrastructure/u,
     );
   }
+});
+
+test("polishing discovery and finalization classify infrastructure by responsibility", () => {
+  for (const instructions of [
+    BOOTSTRAP_INSTRUCTIONS,
+    FINALIZATION_INSTRUCTIONS,
+  ]) {
+    assert.match(
+      instructions,
+      /own validation commands, discovery, runners, configuration, or mandatory finalization guidance/u,
+    );
+    assert.match(
+      instructions,
+      /Exclude ordinary source, individual tests, fixtures, and generated output merely consumed by checks/u,
+    );
+    assert.match(instructions, /responsibility, not its name or extension/u);
+  }
+  assert.match(
+    BOOTSTRAP_INSTRUCTIONS,
+    /Check requiredChecks first, then validationInfrastructure/u,
+  );
 });

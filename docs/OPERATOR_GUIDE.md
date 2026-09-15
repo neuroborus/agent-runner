@@ -93,15 +93,15 @@ on staging or changing commit history inside a script. Git inspection is not
 universally forbidden: the relevant distinction is which content and boundary
 the command actually checks.
 
-Execution bootstrap supports 256 checks and 256 infrastructure files per role,
-with up to 512 entries per merged or finalization field. Polishing retains
-64/128. Infrastructure means files owning commands, discovery, runners,
+Execution and polishing bootstrap each support 256 checks and 256 infrastructure
+files per role, with up to 512 entries per merged or finalization field.
+Infrastructure means files owning commands, discovery, runners,
 configuration, or mandatory finalization guidance, rather than every source,
 individual test, fixture, or generated file consumed by a check. Classify by
 responsibility, not filename. Report complete inventories; when capacity is
 exhausted, report `requiredChecks` first if both fields overflow. Do not omit
 entries or weaken checks. Byte limits remain unchanged, and legacy execution
-runs retain their saved evidence and completed work on migration.
+and polishing runs retain their saved evidence and completed work on migration.
 
 Commands requiring unavailable sandbox capabilities, IPC, sockets, or host
 services may need runner-trusted execution. Root and safe project

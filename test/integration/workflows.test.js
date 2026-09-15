@@ -1840,3 +1840,172 @@ test("project command drift preserves completed polishing handoff evidence", asy
   assert.equal(scenario.calls.length, turns);
   assert.equal(scenario.handoffs, 1);
 });
+
+test("polishing migrates legacy 64/128 evidence under lease without replaying a completed handoff", async (t) => {
+  const paths = await fixture(t, { plan: null });
+  const inventory = (role) => ({
+    requiredChecks: Array.from({ length: 64 }, (_, index) => ({
+      id: `C${index + 1}`,
+      command: `node validation/${role}-${index}.js`,
+    })),
+    validationInfrastructure: Array.from(
+      { length: 64 },
+      (_, index) => `validation/${role}-${index}.js`,
+    ),
+  });
+  const worker = inventory("worker");
+  const reviewer = inventory("reviewer");
+  const merged = {
+    requiredChecks: [...worker.requiredChecks, ...reviewer.requiredChecks].map(
+      ({ command }, index) => ({ id: `C${index + 1}`, command }),
+    ),
+    validationInfrastructure: [
+      ...worker.validationInfrastructure,
+      ...reviewer.validationInfrastructure,
+    ],
+  };
+  await mkdir(join(paths.projectPath, "validation"));
+  await Promise.all(
+    merged.validationInfrastructure.map((path) =>
+      writeFile(join(paths.projectPath, path), "// validation runner\n"),
+    ),
+  );
+  const store = createRunStore({ stateRoot: paths.stateRoot });
+  const git = createGitService();
+  const backend = createBackend("codex");
+  let calls = 0;
+  let handoffs = 0;
+  let runId;
+  let runner;
+  const adapters = {
+    codex: {
+      ...backend,
+      async run(request) {
+        calls += 1;
+        const response = await backend.run(request);
+        const result = response.structured;
+        if (result.requiredChecks !== undefined) {
+          Object.assign(
+            result,
+            result.checks === undefined
+              ? request.prompt.includes("As Reviewer")
+                ? reviewer
+                : worker
+              : merged,
+          );
+          if (result.checks !== undefined)
+            result.checks = merged.requiredChecks.map(({ id, command }) => ({
+              checkId: id,
+              command,
+              status: "PASS",
+              evidence: ["Fixture check passed."],
+            }));
+        }
+        return response;
+      },
+    },
+  };
+  function openRunner(loadConfiguration) {
+    return createRunner({
+      adapters,
+      runStore: store,
+      clarifications: createClarificationService({ interactive: false }),
+      git: {
+        ...git,
+        async stagePolishingHandoff(options) {
+          handoffs += 1;
+          const result = await git.stagePolishingHandoff(options);
+          const run = await store.loadRun(runId);
+          await runner.requestOperatorStop({
+            runId,
+            kind: "pause_requested",
+            expectedRevision: run.revision,
+            idempotencyKey: "capacity-handoff",
+          });
+          return result;
+        },
+      },
+      loadConfiguration,
+    });
+  }
+  runner = openRunner(async () =>
+    parseRunnerConfiguration(
+      JSON.stringify({
+        schemaVersion: 1,
+        defaultBackend: "codex",
+        pipelines: { polishing: { finalization: "none" } },
+      }),
+    ),
+  );
+  const prepared = await runner.create({
+    pipelineId: "polishing",
+    projectPath: paths.projectPath,
+    taskPath: paths.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    sourceSession: null,
+  });
+  runId = prepared.run.runId;
+  const paused = (await runner.resume({ runId })).run;
+  assert.equal(paused.pause.operatorResume.workflowState, "DONE");
+  assert.equal(paused.pipelineState.workerValidation.requiredChecks.length, 64);
+  assert.equal(paused.pipelineState.requiredChecks.length, 128);
+  assert.equal(handoffs, 1);
+  const turns = calls;
+  const statePath = join(prepared.directoryPath, "state.json");
+  const eventsPath = join(prepared.directoryPath, "events.jsonl");
+  async function downgrade() {
+    const state = JSON.parse(await readFile(statePath, "utf8"));
+    const events = (await readFile(eventsPath, "utf8"))
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    for (const saved of [state, ...events.map((event) => event.state)])
+      saved.pipelineStateVersion = 11;
+    await writeFile(statePath, `${JSON.stringify(state)}\n`);
+    await writeFile(
+      eventsPath,
+      `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+    );
+  }
+  await downgrade();
+  runner = openRunner(async () => {
+    throw new Error("Resume reloaded configuration.");
+  });
+  const before = await Promise.all([readFile(statePath), readFile(eventsPath)]);
+  const lease = await store.acquireRunLease(runId);
+  try {
+    assert.equal((await runner.status(runId)).run.pipelineStateVersion, 12);
+    await assert.rejects(runner.resume({ runId }), { code: "ERR_RUN_LEASED" });
+    assert.deepEqual(
+      await Promise.all([readFile(statePath), readFile(eventsPath)]),
+      before,
+    );
+  } finally {
+    await lease.release();
+  }
+  const completed = (await runner.resume({ runId })).run;
+  assert.equal(completed.pipelineStateVersion, 12);
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.deepEqual(
+    completed.pipelineState.finalizationResult,
+    paused.pipelineState.finalizationResult,
+  );
+  assert.deepEqual(completed.counters, paused.counters);
+  assert.equal(calls, turns);
+  assert.equal(handoffs, 1);
+  const history = await store.loadRunHistory(runId);
+  const migrations = history.events.filter(
+    ({ activity }) => activity?.kind === "migrated",
+  );
+  assert.equal(migrations.length, 1);
+  assert.deepEqual(migrations[0].state.pipelineState, paused.pipelineState);
+  assert.equal(migrations[0].state.pipelineStateVersion, 12);
+  const terminalState = completed.pipelineState;
+  await downgrade();
+  const terminal = (await runner.resume({ runId })).run;
+  assert.deepEqual(terminal.pipelineState, terminalState);
+  assert.equal(terminal.pipelineStateVersion, 12);
+  assert.equal(calls, turns);
+  assert.equal(handoffs, 1);
+});
