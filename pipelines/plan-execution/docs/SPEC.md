@@ -2394,6 +2394,23 @@ Once the gate passes:
 10. verify no unexpected non-ignored working-tree or index changes remain;
 11. persist the new SHA, mark the step completed, and continue to the next step.
 
+After verification, the pipeline-owned checkpoint helper constructs the completed
+SHA list and clean baseline, advances to the next step or `DONE`, and preserves
+the established evidence-reset and counter rules. `runtime.settleVerifiedCommit`
+then asks state to publish that checkpoint under the execution lease. The latest
+stop request is inspected inside the same mutation boundary: verified progress,
+active-turn retirement, consumed-authorization retirement, and any applicable
+operator outcome share one journal event. A superseding cancellation wins without
+losing verified progress. No next Worker turn starts after a settled stop.
+Protected project-configuration drift remains a blocker, including beneath an
+operator pause at the final `DONE` boundary.
+
+The ordinary path and consumed-effect recovery share `runCommitTurn` and its
+checkpoint helper. Settlement never creates or retries a commit. If publication
+is interrupted, propagate the error without overwriting possibly journaled
+progress from a stale local snapshot; resume recovers the journal or repeats only
+verification of the consumed effect. Deferred timing remains unavailable.
+
 The authorization permits one ordinary local commit only. It does not permit
 `commit --amend`, merge commits, rebases, resets, branch switches, tag creation,
 or any other history/ref mutation.

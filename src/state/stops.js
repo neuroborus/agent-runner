@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 
-import { stopIsPending } from "./stop-policy.js";
+import { assertRunCanAdvance, stopIsPending } from "./stop-policy.js";
 import {
   assertRunId,
   deepFreeze,
@@ -198,49 +198,94 @@ export function createStopService({
           "ERR_STOP_REQUEST_CHANGED",
         );
       }
-      const canceled = current.stopRequest.kind === "cancel_requested";
-      if (
-        normalizedPatch.pipelineState?.workflowState !==
-          (canceled ? "CANCELED" : "WAITING_FOR_USER") ||
-        normalizedPatch.pause?.reason !==
-          (canceled ? "operator_canceled" : "operator_paused")
-      ) {
+      return persistCheckpoint(runDirectory, snapshot, normalizedPatch, {
+        actor: "runner",
+        phase: "stop",
+        kind: "reconciled",
+        message:
+          outcomeMessage ??
+          (current.stopRequest.kind === "cancel_requested"
+            ? "Operator cancellation reconciled."
+            : "Operator pause reconciled."),
+      });
+    });
+  }
+
+  // The caller supplies workflow meaning synchronously from the latest snapshot.
+  // No provider or repository effects may run inside this serialized boundary.
+  async function settleCheckpoint(
+    lease,
+    resolve,
+    { validate = () => {} } = {},
+  ) {
+    if (typeof resolve !== "function" || typeof validate !== "function") {
+      reject("Checkpoint resolver is invalid.", "ERR_INVALID_RUN_TRANSITION");
+    }
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
+      const snapshot = await loadSnapshot(runDirectory, record.runId);
+      if (snapshot.state.executionProcess !== null) {
         reject(
-          "Stop reconciliation must record the requested outcome.",
-          "ERR_INVALID_STOP_RECONCILIATION",
+          "Owned execution must stop before checkpoint settlement.",
+          "ERR_EXECUTION_PROCESS_ACTIVE",
         );
       }
-      const next = normalizeRunState(
-        {
-          ...current,
-          ...normalizedPatch,
-          activeTurn: null,
-          stopRequest: {
-            ...current.stopRequest,
-            reconciledRevision: current.revision + 1,
-          },
-          revision: current.revision + 1,
-          updatedAt: timestamp(current.updatedAt),
-        },
-        record.runId,
+      if (!stopIsPending(snapshot.state)) assertRunCanAdvance(snapshot.state);
+      const { patch, activity } = resolve(
+        deepFreeze(structuredClone(snapshot.state)),
       );
-      await journal.appendTransition(
+      return persistCheckpoint(
         runDirectory,
-        next,
         snapshot,
-        normalizePublicActivity({
-          actor: "runner",
-          phase: "stop",
-          kind: "reconciled",
-          message:
-            outcomeMessage ??
-            (canceled
-              ? "Operator cancellation reconciled."
-              : "Operator pause reconciled."),
-        }),
+        normalizeTransitionPatch(patch),
+        activity,
+        validate,
       );
-      return deepFreeze(next);
     });
+  }
+
+  async function persistCheckpoint(
+    runDirectory,
+    snapshot,
+    patch,
+    activity,
+    validate = () => {},
+  ) {
+    const current = snapshot.state;
+    const pending = stopIsPending(current);
+    const canceled = current.stopRequest?.kind === "cancel_requested";
+    if (
+      pending &&
+      (patch.pipelineState?.workflowState !==
+        (canceled ? "CANCELED" : "WAITING_FOR_USER") ||
+        patch.pause?.reason !==
+          (canceled ? "operator_canceled" : "operator_paused"))
+    ) {
+      reject(
+        "Stop reconciliation must record the requested outcome.",
+        "ERR_INVALID_STOP_RECONCILIATION",
+      );
+    }
+    const next = normalizeRunState(
+      {
+        ...current,
+        ...patch,
+        activeTurn: null,
+        stopRequest: pending
+          ? { ...current.stopRequest, reconciledRevision: current.revision + 1 }
+          : current.stopRequest,
+        revision: current.revision + 1,
+        updatedAt: timestamp(current.updatedAt),
+      },
+      current.runId,
+    );
+    validate(deepFreeze(next));
+    await journal.appendTransition(
+      runDirectory,
+      next,
+      snapshot,
+      normalizePublicActivity(activity),
+    );
+    return deepFreeze(next);
   }
 
   async function checkpoint(runId) {
@@ -275,5 +320,11 @@ export function createStopService({
     });
   }
 
-  return Object.freeze({ request, complete, checkpoint, activity });
+  return Object.freeze({
+    request,
+    complete,
+    checkpoint,
+    activity,
+    settleCheckpoint,
+  });
 }

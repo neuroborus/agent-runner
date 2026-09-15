@@ -133,6 +133,57 @@ export function createStopMonitor({ runId, lease, runStore, publish }) {
   });
 }
 
+// Wrap a pipeline-owned checkpoint without losing its underlying blocker.
+export function stopSettlement(
+  current,
+  patch,
+  activity,
+  configurationFailure = null,
+) {
+  if (configurationFailure !== null) {
+    patch = {
+      ...patch,
+      pipelineState: {
+        ...patch.pipelineState,
+        workflowState: "WAITING_FOR_USER",
+      },
+      pause: {
+        reason: "project_configuration_changed",
+        code: "ERR_PROJECT_CONFIGURATION_CHANGED",
+      },
+      activeTurn: null,
+    };
+  }
+  if (!stopPending(current)) return { patch, activity };
+  const canceled = current.stopRequest.kind === "cancel_requested";
+  return {
+    patch: {
+      ...patch,
+      pipelineState: {
+        ...patch.pipelineState,
+        workflowState: canceled ? "CANCELED" : "WAITING_FOR_USER",
+      },
+      pause: {
+        reason: canceled ? "operator_canceled" : "operator_paused",
+        resumeAction: null,
+        operatorResume: {
+          workflowState: patch.pipelineState.workflowState,
+          pause: patch.pause,
+          activeTurn: patch.activeTurn ?? null,
+        },
+      },
+    },
+    activity: {
+      actor: "runner",
+      phase: "stop",
+      kind: "reconciled",
+      message: canceled
+        ? "Operator cancellation reconciled."
+        : "Operator pause reconciled.",
+    },
+  };
+}
+
 function reconciliationRuntime(runtime, initialRun) {
   let current = initialRun;
   const rejectEffect = () => {
@@ -181,6 +232,7 @@ function reconciliationRuntime(runtime, initialRun) {
         preflight: rejectEffect,
       }),
       transition: async (patch) => update(patch),
+      settleVerifiedCommit: async (patch) => update(patch),
       startAgentTurn: async (activeTurn, { pipelineState } = {}) =>
         update({
           activeTurn,
@@ -233,48 +285,27 @@ export async function reconcileOperatorStop({
     runtime: simulated.runtime,
   });
   reconciled ??= simulated.current();
-  current = await runStore.loadRun(run.runId);
-  const canceled = current.stopRequest.kind === "cancel_requested";
-  const checkpoint =
-    configurationFailure === null
-      ? {
-          workflowState: reconciled.pipelineState.workflowState,
+  let outcomeActivity;
+  const completed = await runStore.settleCheckpoint(
+    lease,
+    (latest) => {
+      const settlement = stopSettlement(
+        latest,
+        {
+          counters: reconciled.counters,
+          hashes: reconciled.hashes,
+          pipelineState: reconciled.pipelineState,
           pause: reconciled.pause,
           activeTurn: reconciled.activeTurn,
-        }
-      : {
-          workflowState: "WAITING_FOR_USER",
-          pause: {
-            reason: "project_configuration_changed",
-            code: "ERR_PROJECT_CONFIGURATION_CHANGED",
-          },
-          activeTurn: null,
-        };
-  const outcomeActivity = {
-    actor: "runner",
-    phase: "stop",
-    kind: "reconciled",
-    message: canceled
-      ? "Operator cancellation reconciled."
-      : "Operator pause reconciled.",
-  };
-  const completed = await runStore.completeOperatorStop(lease, {
-    requestId: current.stopRequest.requestId,
-    patch: {
-      counters: reconciled.counters,
-      hashes: reconciled.hashes,
-      pipelineState: {
-        ...reconciled.pipelineState,
-        workflowState: canceled ? "CANCELED" : "WAITING_FOR_USER",
-      },
-      pause: {
-        reason: canceled ? "operator_canceled" : "operator_paused",
-        resumeAction: null,
-        operatorResume: checkpoint,
-      },
+        },
+        null,
+        configurationFailure,
+      );
+      outcomeActivity = settlement.activity;
+      return settlement;
     },
-    outcomeMessage: outcomeActivity.message,
-  });
+    { validate: pipeline.workflow.validateRun },
+  );
   await publish(outcomeActivity, completed);
   return completed;
 }

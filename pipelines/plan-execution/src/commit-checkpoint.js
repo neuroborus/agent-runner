@@ -1,0 +1,110 @@
+import { parseCommitPlan } from "@agent-runner/commit-plan";
+import { createFinalizationRecovery } from "./workflow-contract.js";
+
+// Construct progress only after the consumed effect and its clean baseline verify.
+export function verifiedCommitCheckpoint({
+  current,
+  counters,
+  hashes,
+  pause,
+  verified,
+  nextRepositoryBaseline,
+  configurationChanged,
+}) {
+  const completedCommits = [...current.completedCommits, verified.head];
+  const stepCount = parseCommitPlan(current.canonicalPlan).steps.length;
+  const done = current.currentStep === stepCount;
+  const nextStepState = done
+    ? {}
+    : {
+        implementationDirection: null,
+        finalizationResult: null,
+        finalizedFingerprint: null,
+        reviewCorrection: null,
+        pendingReviewCorrection: null,
+        candidateReviewResult: null,
+        candidateReviewedFingerprint: null,
+        candidateConfirmationFingerprint: null,
+        cleanConfirmationFingerprint: null,
+        reviewResult: null,
+        reviewedFingerprint: null,
+        findings: [],
+        previousFindings: [],
+        pendingDisputes: [],
+        disputeCounts: {},
+        disputeHistory: [],
+        findingArbitrations: [],
+        correctionHistory: [],
+        sameFindingRounds: {},
+        pendingCorrection: false,
+        blockedSinceStagnation: 0,
+        stagnationArbitrationUsed: false,
+        stagnationDirection: null,
+        reviewReconsideration: [],
+        additionalFixRounds: 0,
+        findingOverrides: [],
+      };
+  const pipelineState = {
+    ...current,
+    ...nextStepState,
+    workflowState: configurationChanged
+      ? "WAITING_FOR_USER"
+      : done
+        ? "DONE"
+        : "IMPLEMENT",
+    validationMigrationPending: done
+      ? false
+      : current.validationMigrationPending,
+    repositoryBaseline: nextRepositoryBaseline,
+    currentStep: done ? null : current.currentStep + 1,
+    reviewerStep: null,
+    finalizationCorrections: [],
+    pendingFinalizationCorrection: null,
+    reviewCorrection: null,
+    pendingReviewCorrection: null,
+    confirmationCorrection: null,
+    pendingConfirmationCorrection: null,
+    lazyCorrections: [],
+    pendingLazyCorrection: null,
+    pendingCommit: null,
+    completedCommits,
+  };
+  return {
+    patch: {
+      pipelineState: {
+        ...pipelineState,
+        finalizationRecovery: createFinalizationRecovery(),
+      },
+      activeTurn: null,
+      hashes,
+      pause,
+      ...(configurationChanged
+        ? {
+            pause: {
+              reason: "project_configuration_changed",
+              code: "ERR_PROJECT_CONFIGURATION_CHANGED",
+            },
+          }
+        : {}),
+      counters: done
+        ? counters
+        : {
+            ...counters,
+            fixRounds: 0,
+            correctionRounds: 0,
+          },
+    },
+    activity: activity(
+      configurationChanged ? "runner" : "worker",
+      "commit",
+      configurationChanged ? "configuration-changed" : "created",
+      configurationChanged
+        ? `Commit ${current.currentStep} was verified before project configuration drift stopped the run.`
+        : `Commit ${current.currentStep} created: ${verified.head}.`,
+    ),
+  };
+}
+
+function activity(actor, phase, kind, message) {
+  return { actor, phase, kind, message };
+}

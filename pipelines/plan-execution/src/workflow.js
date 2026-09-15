@@ -7,6 +7,7 @@ import {
   serializeCommitPlan,
 } from "@agent-runner/commit-plan";
 
+import { verifiedCommitCheckpoint } from "./commit-checkpoint.js";
 import { canRecoverLegacyConfirmation } from "./legacy-confirmation-recovery.js";
 import {
   AGENT_GUIDANCE_SCOPE_INSTRUCTIONS,
@@ -666,6 +667,7 @@ export async function runPlanExecution({
   let interruptedTurn = run.activeTurn;
   let interruptedRepositoryReconciled = false;
   let legacyRecoveryPersistence = false;
+  let commitCheckpointSettlement = false;
 
   function state() {
     return normalizePipelineState(currentRun.pipelineState);
@@ -5968,7 +5970,6 @@ ${step.subject}`),
     let verified;
     try {
       verified = await runtime.git.verifyCommit(pendingCommit.authorization);
-      await finishCommitTurn();
     } catch (cause) {
       if (
         !["ERR_COMMIT_NOT_CREATED", "ERR_COMMIT_CONTRACT_VIOLATED"].includes(
@@ -6012,99 +6013,33 @@ ${step.subject}`),
       nextRepositoryBaseline.head !== verified.head ||
       nextRepositoryBaseline.clean !== true
     ) {
+      await finishCommitTurn();
       await pause("commit_contract_violated", {
         code: "ERR_COMMIT_CONTRACT_VIOLATED",
       });
       return false;
     }
-    const completedCommits = [...current.completedCommits, verified.head];
-    const stepCount = parseCommitPlan(current.canonicalPlan).steps.length;
-    const done = current.currentStep === stepCount;
-    const configurationChanged =
-      agentError?.code === "ERR_PROJECT_CONFIGURATION_CHANGED";
-    const nextStepState = done
-      ? {}
-      : {
-          implementationDirection: null,
-          finalizationResult: null,
-          finalizedFingerprint: null,
-          reviewCorrection: null,
-          pendingReviewCorrection: null,
-          candidateReviewResult: null,
-          candidateReviewedFingerprint: null,
-          candidateConfirmationFingerprint: null,
-          cleanConfirmationFingerprint: null,
-          reviewResult: null,
-          reviewedFingerprint: null,
-          findings: [],
-          previousFindings: [],
-          pendingDisputes: [],
-          disputeCounts: {},
-          disputeHistory: [],
-          findingArbitrations: [],
-          correctionHistory: [],
-          sameFindingRounds: {},
-          pendingCorrection: false,
-          blockedSinceStagnation: 0,
-          stagnationArbitrationUsed: false,
-          stagnationDirection: null,
-          reviewReconsideration: [],
-          additionalFixRounds: 0,
-          findingOverrides: [],
-        };
-    await transition(
-      {
-        ...state(),
-        ...nextStepState,
-        workflowState: configurationChanged
-          ? "WAITING_FOR_USER"
-          : done
-            ? "DONE"
-            : "IMPLEMENT",
-        validationMigrationPending: done
-          ? false
-          : current.validationMigrationPending,
-        repositoryBaseline: nextRepositoryBaseline,
-        currentStep: done ? null : current.currentStep + 1,
-        reviewerStep: null,
-        finalizationCorrections: [],
-        pendingFinalizationCorrection: null,
-        reviewCorrection: null,
-        pendingReviewCorrection: null,
-        confirmationCorrection: null,
-        pendingConfirmationCorrection: null,
-        lazyCorrections: [],
-        pendingLazyCorrection: null,
-        pendingCommit: null,
-        completedCommits,
-      },
-      {
-        ...(configurationChanged
-          ? {
-              pause: {
-                reason: "project_configuration_changed",
-                code: "ERR_PROJECT_CONFIGURATION_CHANGED",
-              },
-            }
-          : {}),
-        nextCounters: done
-          ? counters()
-          : {
-              ...counters(),
-              fixRounds: 0,
-              correctionRounds: 0,
-            },
-        publicActivity: activity(
-          configurationChanged ? "runner" : "worker",
-          "commit",
-          configurationChanged ? "configuration-changed" : "created",
-          configurationChanged
-            ? `Commit ${current.currentStep} was verified before project configuration drift stopped the run.`
-            : `Commit ${current.currentStep} created: ${verified.head}.`,
-        ),
-      },
-    );
-    return !configurationChanged;
+    const checkpoint = verifiedCommitCheckpoint({
+      current: state(),
+      counters: counters(),
+      hashes: currentRun.hashes,
+      pause: currentRun.pause,
+      verified,
+      nextRepositoryBaseline,
+      configurationChanged:
+        agentError?.code === "ERR_PROJECT_CONFIGURATION_CHANGED",
+    });
+    assertRun({ ...currentRun, ...checkpoint.patch });
+    // A publication failure may already have journaled progress. Never replace
+    // that checkpoint with a failure assembled from this older local snapshot.
+    commitCheckpointSettlement = true;
+    currentRun = await runtime.settleVerifiedCommit(checkpoint.patch, {
+      activity: checkpoint.activity,
+      expectedPipelineState: currentRun.pipelineState,
+    });
+    commitCheckpointSettlement = false;
+    assertRun(currentRun);
+    return !["WAITING_FOR_USER", "CANCELED"].includes(state().workflowState);
   }
 
   try {
@@ -6608,7 +6543,11 @@ ${evidence}`,
       );
     }
   } catch (cause) {
-    if (legacyRecoveryPersistence || cause?.code === "ERR_RUN_REVISION_CHANGED")
+    if (
+      commitCheckpointSettlement ||
+      legacyRecoveryPersistence ||
+      cause?.code === "ERR_RUN_REVISION_CHANGED"
+    )
       throw cause;
     if (cause?.code === "ERR_PROJECT_CONFIGURATION_CHANGED") {
       throw cause;

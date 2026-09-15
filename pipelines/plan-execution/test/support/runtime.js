@@ -1850,6 +1850,9 @@ async function createFixture(
       await onTransition?.(currentRun, patch, options);
       return currentRun;
     },
+    async settleVerifiedCommit(patch, options) {
+      return this.transition(patch, options);
+    },
     async startAgentTurn(activeTurn, { pipelineState } = {}) {
       currentRun = {
         ...currentRun,

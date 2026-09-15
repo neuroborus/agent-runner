@@ -1240,3 +1240,130 @@ test("process ownership alone blocks advancement until its durable record is ret
   await f.lease.release();
   assert.equal(await f.store.runIsLeased(f.input.runId), false);
 });
+
+test("checkpoint settlement reads the latest stop and publishes progress atomically", async (t) => {
+  for (const kind of [null, "pause_requested", "cancel_requested"]) {
+    for (const boundary of [
+      "event-appended",
+      "state-replaced",
+      "progress-replaced",
+    ]) {
+      await t.test(`${kind ?? "ordinary"}/${boundary}`, async (t) => {
+        let interrupt = false;
+        const f = await fixture(t, {
+          onTransitionBoundary: async (point) => {
+            if (interrupt && point === boundary) {
+              interrupt = false;
+              throw new Error("settlement interrupted");
+            }
+          },
+        });
+        let receipt;
+        if (kind !== null)
+          receipt = await f.store.requestOperatorStop({ ...f.input, kind });
+        const before = await f.store.loadRun(f.input.runId);
+        interrupt = true;
+        await assert.rejects(
+          f.store.settleCheckpoint(f.lease, (latest) => {
+            assert.equal(latest.revision, before.revision);
+            assert.equal(latest.stopRequest?.kind ?? null, kind);
+            const canceled = kind === "cancel_requested";
+            return {
+              patch: {
+                pipelineState: {
+                  ...latest.pipelineState,
+                  workflowState:
+                    kind === null
+                      ? "DONE"
+                      : canceled
+                        ? "CANCELED"
+                        : "WAITING_FOR_USER",
+                  completedCommits: ["verified-sha"],
+                },
+                counters: { rounds: 7 },
+                pause:
+                  kind === null
+                    ? null
+                    : {
+                        reason: canceled
+                          ? "operator_canceled"
+                          : "operator_paused",
+                        resumeAction: null,
+                        operatorResume: {
+                          workflowState: "DONE",
+                          pause: null,
+                          activeTurn: null,
+                        },
+                      },
+              },
+              activity: {
+                actor: "runner",
+                phase: "commit",
+                kind: "settled",
+                message: "Verified progress settled.",
+              },
+            };
+          }),
+          /settlement interrupted/u,
+        );
+        const recovered = await f.store.recoverRun(f.lease);
+        assert.equal(recovered.revision, before.revision + 1);
+        assert.deepEqual(recovered.pipelineState.completedCommits, [
+          "verified-sha",
+        ]);
+        assert.equal(recovered.counters.rounds, 7);
+        assert.equal(recovered.activeTurn, null);
+        if (kind !== null) {
+          assert.equal(
+            recovered.stopRequest.reconciledRevision,
+            recovered.revision,
+          );
+          assert.deepEqual(
+            await f.store.requestOperatorStop({ ...f.input, kind }),
+            receipt,
+          );
+        }
+        await f.lease.release();
+        assert.equal(await f.store.runIsLeased(f.input.runId), false);
+      });
+    }
+  }
+});
+
+test("checkpoint settlement cannot bypass owned processes or a pending stop outcome", async (t) => {
+  const f = await fixture(t);
+  const build = (current) => ({
+    patch: {
+      pipelineState: { ...current.pipelineState, workflowState: "DONE" },
+    },
+  });
+  await f.store.recordExecutionProcess(f.lease, 101);
+  await assert.rejects(f.store.settleCheckpoint(f.lease, build), {
+    code: "ERR_EXECUTION_PROCESS_ACTIVE",
+  });
+  const retired = await f.store.recordExecutionProcess(f.lease, null);
+  await assert.rejects(
+    f.store.settleCheckpoint(f.lease, build, {
+      validate() {
+        throw new Error("invalid pipeline checkpoint");
+      },
+    }),
+    /invalid pipeline checkpoint/u,
+  );
+  assert.equal(
+    (await f.store.loadRun(f.input.runId)).revision,
+    retired.revision,
+  );
+  const receipt = await f.store.requestOperatorStop({
+    ...f.input,
+    expectedRevision: retired.revision,
+  });
+  await assert.rejects(f.store.settleCheckpoint(f.lease, build), {
+    code: "ERR_INVALID_STOP_RECONCILIATION",
+  });
+  assert.equal(
+    (await f.store.loadRun(f.input.runId)).revision,
+    receipt.revision,
+  );
+  await complete(f, receipt);
+});

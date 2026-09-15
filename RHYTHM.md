@@ -7,6 +7,13 @@ remain in the owning documentation.
 
 ## 2026-09-15
 
+- **Verified commits settle progress and stops together.** Execution owns the
+  successful checkpoint construction; state owns its atomic leased publication.
+  The runner resolves the latest operator outcome while preserving the verified
+  SHA, next checkpoint, and protected-input blockers. Publication failure cannot
+  replace journaled progress with stale failure state, and consumed effects
+  remain verification-only during recovery.
+
 - **Stop enforcement and ownership accounting have separate policies.** State's
   private stop policy distinguishes pending requests, blocked advancement, and
   retained ownership. Every immediate pending stop still blocks ordinary writes;
