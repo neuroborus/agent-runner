@@ -528,13 +528,24 @@ agent-run pause --run <run-id>
 agent-run cancel --run <run-id>
 ```
 
-Status shows pending requested/effective timing and the target step. The runner
-service supports `after-current-commit` for a selected execution step, settling
-at its verified commit or quiescent interruption; CLI/MCP stop inputs remain
-immediate. See [operator guidance](docs/OPERATOR_GUIDE.md) for recovery semantics.
+Timing defaults to `immediate`. To let the selected execution step finish:
+
+```bash
+agent-run pause --run <run-id> --timing after-current-commit
+agent-run cancel --run <run-id> --timing after-current-commit
+```
+
+This timing also accepts suspended execution steps, but rejects clarification,
+bootstrap, missing steps, authoring, and polishing. The stop settles at the
+verified commit before the next step, or at the reconciled checkpoint if the
+step pauses, fails, or is interrupted; it never does extra work to obtain a
+commit. A final-step pause resumes through `DONE` without agent work; cancel
+retains completed commits in terminal `CANCELED`. Status shows requested and
+effective timing, target step, and settlement. See
+[operator guidance](docs/OPERATOR_GUIDE.md) for recovery semantics.
 
 For repeatable automation, supply both captured values explicitly. Retry an
-uncertain request with exactly the same revision and key; never refresh a stale
+uncertain request with exactly the same revision, key, and timing; never refresh a stale
 request silently:
 
 ```bash
@@ -762,8 +773,16 @@ status or wait result and a unique `idempotencyKey`. A pause preserves the
 reconciled checkpoint for an action-free resume; cancellation reaches terminal
 `CANCELED` and cannot be revived. Exact retries use the same arguments and key.
 Older or conflicting requests fail instead of silently adopting a newer
-revision. Status and wait expose a bounded `pendingStop` while reconciliation
-is in progress, and waits treat `CANCELED` as terminal.
+revision. The optional `timing` field accepts `immediate` (the default) or
+`after-current-commit` under the same execution-only rules as the CLI. Omitted
+and explicit immediate timing identify the same request. An immediate cancel
+can supersede a deferred pause; supersession cannot delay an earlier stop.
+Receipts retain their acceptance timing and target even on later replay.
+Status and waits retain `pendingStop` and add `stop`, which includes requested
+and effective timing, target step, `state` (`pending`, `applicable`, or `settled`),
+and nullable settlement (`quiescent` or `commit`, with the verified SHA).
+Activity entries carry the stop summary at that event's revision. Waits treat
+`CANCELED` as terminal and canceling a wait does not cancel the run.
 
 Mutating tools persist an action intent before mutation and a receipt before
 returning. Exact retries return the original result, while reusing a key with

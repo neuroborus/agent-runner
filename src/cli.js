@@ -6,12 +6,25 @@ import { createGuidanceService } from "./guidance/index.js";
 import { DETACHED_RUNTIME_COMPATIBILITY_ENV, serveMcp } from "./mcp/index.js";
 import { getPipeline, listPipelines } from "./pipeline-registry.js";
 import { createRunner, parseSourceSession } from "./runner/index.js";
-import { RUNTIME_VERSION_SKEW_EXIT_CODE } from "./state/index.js";
+import {
+  projectOperatorStop,
+  RUNTIME_VERSION_SKEW_EXIT_CODE,
+} from "./state/index.js";
 
 const COMMAND_OPTIONS = Object.freeze({
   guidance: Object.freeze(["project", "project-config"]),
-  pause: Object.freeze(["run", "expected-revision", "idempotency-key"]),
-  cancel: Object.freeze(["run", "expected-revision", "idempotency-key"]),
+  pause: Object.freeze([
+    "run",
+    "expected-revision",
+    "idempotency-key",
+    "timing",
+  ]),
+  cancel: Object.freeze([
+    "run",
+    "expected-revision",
+    "idempotency-key",
+    "timing",
+  ]),
   resume: Object.freeze(["run", "extra-fix-rounds", "override-finding"]),
   status: Object.freeze(["run"]),
   pipelines: Object.freeze([]),
@@ -54,6 +67,7 @@ const OPTIONS = Object.freeze({
   run: { type: "string" },
   "expected-revision": { type: "string" },
   "idempotency-key": { type: "string" },
+  timing: { type: "string" },
   "extra-fix-rounds": { type: "string" },
   "override-finding": { type: "string" },
   "fork-from": { type: "string" },
@@ -77,8 +91,8 @@ const USAGE = `Agent Runner
 Usage:
   agent-run run <pipeline> --project <repo> --task <task-dir> [--mode <independent|lazy>] [--clarify] [--profile <alias>] [--fork-from <backend>:<session-id>]
   agent-run resume --run <run-id> [--extra-fix-rounds <count> | --override-finding <finding-id>]
-  agent-run pause --run <run-id> [--expected-revision <revision> --idempotency-key <key>]
-  agent-run cancel --run <run-id> [--expected-revision <revision> --idempotency-key <key>]
+  agent-run pause --run <run-id> [--timing immediate|after-current-commit] [--expected-revision <revision> --idempotency-key <key>]
+  agent-run cancel --run <run-id> [--timing immediate|after-current-commit] [--expected-revision <revision> --idempotency-key <key>]
   agent-run status --run <run-id>
   agent-run guidance --project <repo> [--project-config <path>]
   agent-run guidance edit --project <repo> [--project-config <path>]
@@ -110,6 +124,9 @@ Options:
       --override-finding   Override one applicable open finding on resume
       --expected-revision  Bind an explicit pause or cancel request revision
       --idempotency-key    Bind an explicit pause or cancel retry identity
+      --timing             immediate (default) or after-current-commit for pause/cancel
+                           Deferred stops require a selected execution step; pauses,
+                           failures, or interruptions settle without extra work
   -h, --help               Show this help
   -v, --version            Show version
 `;
@@ -152,6 +169,16 @@ function pauseActionLine(runId, action) {
   return `  Override finding ${action.action.findingId} with: agent-run resume --run ${runId} --override-finding ${action.action.findingId}`;
 }
 
+function stopTimingLines(stop) {
+  return [
+    `Stop timing: ${stop.timing ?? "immediate"}`,
+    `Effective stop timing: ${stop.effectiveTiming ?? "immediate"}`,
+    ...(stop.targetStep == null
+      ? []
+      : [`Stop target step: ${stop.targetStep}`]),
+  ];
+}
+
 function runSummary({ directoryPath, run }) {
   const state = run.pipelineState;
   const pipeline = getPipeline(run.pipelineId);
@@ -167,14 +194,17 @@ function runSummary({ directoryPath, run }) {
   if (status.currentStep !== null) {
     lines.push(`Step: ${status.currentStep}`);
   }
-  if (run.stopRequest?.reconciledRevision === null) {
+  const stop = projectOperatorStop(run);
+  if (stop !== null) {
     lines.push(
-      `Stop pending: ${run.stopRequest.kind === "cancel_requested" ? "cancel" : "pause"}`,
-      `Stop timing: ${run.stopRequest.timing ?? "immediate"}`,
-      `Effective stop timing: ${run.stopRequest.effectiveTiming ?? "immediate"}`,
+      `Stop ${stop.state === "settled" ? "settled" : "pending"}: ${stop.kind === "cancel_requested" ? "cancel" : "pause"}`,
+      `Stop state: ${stop.state}`,
+      ...stopTimingLines(stop),
     );
-    if (run.stopRequest.targetBoundary != null)
-      lines.push(`Stop target step: ${run.stopRequest.targetBoundary.step}`);
+    if (stop.settlement !== null)
+      lines.push(
+        `Stop settlement: ${stop.settlement.kind}${stop.settlement.commit === null ? "" : ` ${stop.settlement.commit}`}`,
+      );
   }
   if (pause !== null) {
     lines.push(`Pause: ${pause.reason}`);
@@ -575,6 +605,12 @@ export async function main(
       return workflowExitCode(result.run);
     }
     if (["pause", "cancel"].includes(command)) {
+      if (
+        values.timing !== undefined &&
+        !["immediate", "after-current-commit"].includes(values.timing)
+      ) {
+        throw new Error("--timing must be immediate or after-current-commit.");
+      }
       const explicit = explicitStopIdentity(values);
       const identity = explicit ?? {
         expectedRevision: (await commandRunner.status(values.run)).run.revision,
@@ -584,9 +620,16 @@ export async function main(
         runId: values.run,
         kind: command === "pause" ? "pause_requested" : "cancel_requested",
         ...identity,
+        ...(values.timing === undefined ? {} : { timing: values.timing }),
       });
       stdout.write(
         `${command === "pause" ? "Pause" : "Cancellation"} requested for run ${receipt.runId} at revision ${receipt.revision}.\n`,
+      );
+      stdout.write(
+        `${stopTimingLines({
+          ...receipt,
+          targetStep: receipt.targetBoundary?.step ?? null,
+        }).join("\n")}\n`,
       );
       return 0;
     }

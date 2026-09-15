@@ -309,6 +309,63 @@ test("pause and cancel preserve explicit automation identities without refreshin
   assert.match(stderr.read(), /stale/u);
 });
 
+test("CLI stop timing is validated before inspection and preserves explicit arguments", async () => {
+  for (const command of ["pause", "cancel"]) {
+    for (const timing of ["immediate", "after-current-commit", "later", ""]) {
+      const calls = [];
+      const stderr = createSink();
+      const stdout = createSink();
+      const result = await main(
+        [
+          command,
+          "--run",
+          RUN_ID,
+          "--timing",
+          timing,
+          "--expected-revision",
+          "4",
+          "--idempotency-key",
+          "timed-stop",
+        ],
+        {
+          stdout: stdout.stream,
+          stderr: stderr.stream,
+          runner: fakeRunner({
+            status: () =>
+              assert.fail("Explicit requests must not refresh status."),
+            async requestOperatorStop(input) {
+              calls.push(input);
+              return {
+                ...input,
+                revision: 5,
+                effectiveTiming: "immediate",
+                targetBoundary: null,
+              };
+            },
+          }),
+        },
+      );
+      if (["immediate", "after-current-commit"].includes(timing)) {
+        assert.equal(result, 0, stderr.read());
+        assert.deepEqual(calls, [
+          {
+            runId: RUN_ID,
+            kind: command === "pause" ? "pause_requested" : "cancel_requested",
+            expectedRevision: 4,
+            idempotencyKey: "timed-stop",
+            timing,
+          },
+        ]);
+        assert.match(stdout.read(), /Effective stop timing: immediate/u);
+      } else {
+        assert.equal(result, 1);
+        assert.equal(calls.length, 0);
+        assert.match(stderr.read(), /timing/u);
+      }
+    }
+  }
+});
+
 test("pause and cancel require a complete valid explicit identity", async () => {
   for (const args of [
     ["pause", "--run", RUN_ID, "--expected-revision", "4"],
@@ -482,6 +539,49 @@ for (const args of [
     assert.match(stderr.read(), /is not valid for/);
   });
 }
+
+test("CLI status retains bounded settlement and normalizes legacy stop timing", async () => {
+  for (const settlement of [
+    null,
+    { kind: "quiescent", commit: null },
+    { kind: "commit", commit: "c".repeat(40) },
+  ]) {
+    const result = commandResult();
+    result.run.stopRequest = {
+      kind: "pause_requested",
+      acceptedRevision: 3,
+      reconciledRevision: 5,
+      requestId: "private-request",
+      checkpoint: { private: "secret" },
+      ...(settlement === null
+        ? {}
+        : {
+            timing: "after-current-commit",
+            effectiveTiming: "after-current-commit",
+            targetBoundary: { step: 1 },
+            settlement,
+          }),
+    };
+    const stdout = createSink();
+    assert.equal(
+      await main(["status", "--run", RUN_ID], {
+        stdout: stdout.stream,
+        stderr: createSink().stream,
+        runner: fakeRunner({ status: async () => result }),
+      }),
+      0,
+    );
+    assert.match(stdout.read(), /Stop state: settled/u);
+    if (settlement === null) {
+      assert.match(stdout.read(), /Stop timing: immediate/u);
+      assert.doesNotMatch(stdout.read(), /Stop settlement:/u);
+    } else {
+      assert.match(stdout.read(), /Stop target step: 1/u);
+      assert.ok(stdout.read().includes(`Stop settlement: ${settlement.kind}`));
+    }
+    assert.doesNotMatch(stdout.read(), /private-request|secret/u);
+  }
+});
 
 test("status dispatches and renders concise persisted state", async () => {
   const stdout = createSink();

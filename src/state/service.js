@@ -12,6 +12,7 @@ import { createLeaseManager } from "./lease.js";
 import { createMutationBoundary } from "./mutation.js";
 import { inspectProcessOwner, readProcessIdentity } from "./process-owner.js";
 import { createStopService } from "./stops.js";
+import { projectOperatorStop } from "./stop-projection.js";
 import {
   assertRunCanAdvance,
   assertStopProgress,
@@ -1070,6 +1071,9 @@ export function createRunStore({
           revision: event.revision,
           recordedAt: event.recordedAt,
           ...event.activity,
+          ...(event.state.stopRequest == null
+            ? {}
+            : { stop: projectOperatorStop(event.state) }),
         });
         if (activities.length === limit) {
           break;

@@ -37,6 +37,8 @@ import {
   MCP_INSTRUCTIONS,
 } from "../../src/mcp/index.js";
 
+import { resolveStopBoundary } from "../../src/pipeline-registry.js";
+
 const RUN_ID = "11111111-1111-4111-8111-111111111111";
 const SECOND_RUN_ID = "22222222-2222-4222-8222-222222222222";
 const THIRD_RUN_ID = "33333333-3333-4333-8333-333333333333";
@@ -597,6 +599,10 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
       "runId",
     ]);
     assert.match(tool.description, /same idempotency key and revision/u);
+    assert.deepEqual(tool.inputSchema.properties.timing.enum, [
+      "immediate",
+      "after-current-commit",
+    ]);
   }
   assert.match(
     tools.find((tool) => tool.name === "run_wait").description,
@@ -860,6 +866,14 @@ test("persists stop receipts, projects pending stops, and starts one ownerless r
   });
   assert.match(pause.requestId, /^[a-f0-9]{64}$/u);
   assert.deepEqual(await control.runPause(pauseInput), pause);
+  assert.deepEqual(
+    await control.runPause({ ...pauseInput, timing: "immediate" }),
+    pause,
+  );
+  await assert.rejects(
+    control.runPause({ ...pauseInput, timing: "after-current-commit" }),
+    { code: "ERR_MCP_IDEMPOTENCY_CONFLICT" },
+  );
   assert.equal(launches.length, 1);
   assert.equal(launches[0].runId, initial.runId);
   assert.equal(launches[0].action, null);
@@ -920,51 +934,242 @@ test("persists stop receipts, projects pending stops, and starts one ownerless r
   );
 });
 
-test("recovers an ownerless stop after the requesting client disconnects", async (t) => {
-  const paths = await workspace(t, "agent-runner-mcp-stop-disconnect-");
-  const store = createRunStore({ stateRoot: paths.stateRoot });
-  const initial = await createStoredRun(store, paths);
-  const runner = storedRunner(store, paths);
-  let ownerIsLive = false;
-  const abort = new AbortController();
-  const runStore = {
-    ...store,
-    async runLeaseOwnerIsLive() {
-      return ownerIsLive;
+test("MCP deferred timing preserves replay, supersession, waits, and historical settlement", async (t) => {
+  const paths = await workspace(t, "agent-runner-mcp-deferred-");
+  const store = createRunStore({
+    stateRoot: paths.stateRoot,
+    resolveStopBoundary,
+  });
+  const initial = await createStoredRun(store, paths, {
+    pipelineId: "plan-execution",
+    workflowState: "IMPLEMENT",
+    state: {
+      currentStep: 1,
+      completedCommits: [],
+      repositoryBaseline: { head: "a".repeat(40) },
+      canonicalPlan:
+        "## Commit 1: feat(test): add behavior\n\nImplement behavior.\n",
     },
-  };
+  });
+  const lease = await store.acquireRunLease(initial.runId);
+  const control = createMcpControlPlane({
+    runner: storedRunner(store, paths),
+    runStore: store,
+    launchRun: () => assert.fail("A live owner must not be replaced."),
+  });
   const input = {
     runId: initial.runId,
     expectedRevision: initial.revision,
-    idempotencyKey: "disconnected-cancel",
+    idempotencyKey: "deferred-pause",
+    timing: "after-current-commit",
   };
+  const receipt = await control.runPause(input);
+  assert.equal(receipt.targetBoundary.step, 1);
+  assert.equal(receipt.timing, "after-current-commit");
+  assert.deepEqual(await control.runPause(input), receipt);
+  await assert.rejects(control.runPause({ ...input, timing: "immediate" }), {
+    code: "ERR_MCP_IDEMPOTENCY_CONFLICT",
+  });
   await assert.rejects(
-    createMcpControlPlane({
-      runner,
-      runStore,
-      async launchRun() {
-        abort.abort();
-      },
-    }).runCancel(input, { signal: abort.signal }),
-    { name: "AbortError" },
+    control.runCancel({
+      ...input,
+      idempotencyKey: "stale-cancel",
+      expectedRevision: receipt.revision + 10,
+    }),
+    { code: "ERR_STALE_RUN_REVISION" },
   );
+  const changed = await store.waitForRunChange(initial.runId, {
+    afterRevision: initial.revision,
+    timeoutMs: 100,
+  });
+  assert.equal(changed.revision, receipt.revision);
+  const pending = await control.runStatus({ runId: initial.runId });
+  assert.equal(pending.stop.state, "pending");
+  assert.equal(pending.stop.targetStep, 1);
+  const abort = new AbortController();
+  const waiting = control.runWait(
+    { runId: initial.runId, cursor: receipt.revision, timeoutMs: 10000 },
+    { signal: abort.signal },
+  );
+  abort.abort();
+  await assert.rejects(waiting, { name: "AbortError" });
+  assert.equal((await store.loadRun(initial.runId)).revision, receipt.revision);
+  const cancel = await control.runCancel({
+    ...input,
+    idempotencyKey: "immediate-cancel",
+    expectedRevision: receipt.revision,
+    timing: "immediate",
+  });
+  assert.equal(cancel.effectiveTiming, "immediate");
   assert.equal(
-    (await runner.status(initial.runId)).run.stopRequest.kind,
-    "cancel_requested",
+    (await control.runStatus({ runId: initial.runId })).stop.state,
+    "applicable",
   );
-
-  let launches = 0;
-  const receipt = await createMcpControlPlane({
-    runner,
-    runStore,
-    async launchRun() {
-      launches += 1;
-      ownerIsLive = true;
+  await store.settleCheckpoint(lease, (run) => ({
+    patch: {
+      pipelineState: { ...run.pipelineState, workflowState: "CANCELED" },
+      pause: {
+        reason: "operator_canceled",
+        resumeAction: null,
+        operatorResume: {
+          workflowState: "IMPLEMENT",
+          pause: null,
+          activeTurn: null,
+        },
+      },
     },
-  }).runCancel(input);
-  assert.equal(receipt.kind, "cancel_requested");
-  assert.equal(receipt.revision, initial.revision + 1);
-  assert.equal(launches, 1);
+    settlement: { kind: "quiescent", commit: null },
+    activity: {
+      actor: "runner",
+      phase: "stop",
+      kind: "canceled",
+      message: "Operator canceled.",
+    },
+  }));
+  await lease.release();
+  const settled = await control.runWait({
+    runId: initial.runId,
+    cursor: receipt.revision,
+    timeoutMs: 0,
+  });
+  assert.equal(settled.stop.state, "settled");
+  assert.deepEqual(settled.stop.settlement, {
+    kind: "quiescent",
+    commit: null,
+  });
+  const page = await control.runActivity({
+    runId: initial.runId,
+    cursor: 0,
+    limit: 100,
+  });
+  assert.equal(
+    page.activities.find((entry) => entry.revision === receipt.revision).stop
+      .state,
+    "pending",
+  );
+  assert.equal(page.activities.at(-1).stop.state, "settled");
+  assert.doesNotMatch(
+    JSON.stringify(page),
+    /requestId|baselineHead|checkpoint/u,
+  );
+  assert.deepEqual(await control.runPause(input), receipt);
+});
+
+test("MCP timing rejects unsupported checkpoints and invalid inputs without mutations", async (t) => {
+  for (const [pipelineId, workflowState, currentStep] of [
+    ["plan-execution", "CLARIFY", 1],
+    ["plan-execution", "BOOTSTRAP", 1],
+    ["plan-execution", "IMPLEMENT", null],
+    ["plan-execution", "DONE", null],
+    ["plan-authoring", "IMPLEMENT", 1],
+    ["polishing", "POLISH", 1],
+  ]) {
+    const paths = await workspace(t, "agent-runner-mcp-timing-");
+    const store = createRunStore({
+      stateRoot: paths.stateRoot,
+      resolveStopBoundary,
+    });
+    const initial = await createStoredRun(store, paths, {
+      pipelineId,
+      workflowState,
+      state: { currentStep },
+    });
+    const control = createMcpControlPlane({
+      runner: storedRunner(store, paths),
+      runStore: store,
+      launchRun: () => assert.fail("Rejected requests must not launch work."),
+    });
+    for (const method of [control.runPause, control.runCancel]) {
+      const input = {
+        runId: initial.runId,
+        expectedRevision: initial.revision,
+        idempotencyKey:
+          method === control.runPause
+            ? "unsupported-pause"
+            : "unsupported-cancel",
+        timing: "after-current-commit",
+      };
+      await assert.rejects(method(input), {
+        code:
+          workflowState === "DONE"
+            ? "ERR_RUN_TERMINAL"
+            : "ERR_STOP_BOUNDARY_UNSUPPORTED",
+      });
+      for (const timing of ["later", "", null, 1]) {
+        await assert.rejects(method({ ...input, timing }));
+      }
+      assert.equal(
+        (await store.loadRun(initial.runId)).revision,
+        initial.revision,
+      );
+    }
+  }
+});
+
+test("recovers an ownerless stop after the requesting client disconnects", async (t) => {
+  for (const timing of ["immediate", "after-current-commit"]) {
+    await t.test(timing, async (t) => {
+      const paths = await workspace(t, "agent-runner-mcp-stop-disconnect-");
+      const store = createRunStore({
+        stateRoot: paths.stateRoot,
+        resolveStopBoundary,
+      });
+      const initial = await createStoredRun(store, paths, {
+        pipelineId: "plan-execution",
+        workflowState: "IMPLEMENT",
+        state: {
+          currentStep: 1,
+          completedCommits: [],
+          repositoryBaseline: { head: "a".repeat(40) },
+          canonicalPlan:
+            "## Commit 1: feat(test): add behavior\n\nImplement behavior.\n",
+        },
+      });
+      const runner = storedRunner(store, paths);
+      let ownerIsLive = false;
+      const abort = new AbortController();
+      const runStore = {
+        ...store,
+        async runLeaseOwnerIsLive() {
+          return ownerIsLive;
+        },
+      };
+      const input = {
+        runId: initial.runId,
+        expectedRevision: initial.revision,
+        idempotencyKey: "disconnected-cancel",
+        timing,
+      };
+      await assert.rejects(
+        createMcpControlPlane({
+          runner,
+          runStore,
+          async launchRun() {
+            abort.abort();
+          },
+        }).runCancel(input, { signal: abort.signal }),
+        { name: "AbortError" },
+      );
+      assert.equal(
+        (await runner.status(initial.runId)).run.stopRequest.kind,
+        "cancel_requested",
+      );
+
+      let launches = 0;
+      const receipt = await createMcpControlPlane({
+        runner,
+        runStore,
+        async launchRun() {
+          launches += 1;
+          ownerIsLive = true;
+        },
+      }).runCancel(input);
+      assert.equal(receipt.kind, "cancel_requested");
+      assert.equal(receipt.revision, initial.revision + 1);
+      assert.equal(launches, 1);
+      assert.equal(receipt.timing, timing);
+    });
+  }
 });
 
 test("reconciles an incomplete start intent after run creation", async (t) => {
@@ -1809,6 +2014,7 @@ test("resumes only an action valid for the persisted pause", async (t) => {
     activityCursor: 1,
     status: "WAITING_FOR_USER",
     pendingStop: null,
+    stop: null,
     execution: { state: "idle", role: null, phase: null },
     currentStep: null,
     pause: {
