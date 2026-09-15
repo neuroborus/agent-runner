@@ -32,6 +32,31 @@ report only failures that cannot be resolved safely within the current scope.
 - Verify that workspace dependencies point from the root runtime to pipelines and
   from pipelines to shared packages, never between pipelines.
 
+### Check operator-facing consistency
+
+Review these surfaces against the implemented descriptor and workflow contracts;
+update only the owners affected by the current change:
+
+- `README.md` and `docs/OPERATOR_GUIDE.md`: identical mode comparison tables,
+  including row order and the relative-ratings and token-consumption caveats;
+  supported modes, independent default/recommendation, and resume behavior.
+- `.agent-runner.example.json`: valid configuration, descriptor defaults,
+  `preferredCommitLineLimit`, and exact trusted command catalogs and selections.
+- CLI help (`agent-run --help` and `agent-run pipelines`) and MCP descriptions
+  (`pipelines_list`, `run_start`, `run_pause`, and `run_cancel`): supported
+  settings, role projections, and immediate/deferred stop availability agree
+  with the operator guide. Deferred stops require a selected execution step.
+- `docs/ARCHITECTURE.md`, owning `docs/product/` documents, and affected
+  `pipelines/*/docs/SPEC.md`: gate ordering, recovery, correction accounting,
+  source-session isolation, and commit/handoff authority remain consistent.
+- `docs/README.md`: map links and ownership cover the current documents;
+  `RHYTHM.md` records meaningful implemented decisions and their rationale.
+
+Keep this checklist in the canonical `.agents/skills/finalization/SKILL.md`.
+Do not copy it into phase prompts or create a Claude-specific skill copy.
+Review coverage does not automatically add every referenced document to the
+validation-infrastructure inventory; classify paths by their actual ownership.
+
 ## 2. Review Safety Boundaries
 
 - Verify that `plan-authoring` keeps project content read-only except for the
@@ -73,14 +98,23 @@ npm run check
 git diff --check HEAD
 ```
 
+Inside a pipeline, use the established required-check inventory. A command
+explicitly selected for runner-trusted execution must never execute in an agent
+turn: report it as `NOT_RUN` with its reserved runner identity. Only the runner
+executes its persisted exact vector and records the result. Keep every required
+check exactly once and in order; do not substitute, weaken, or omit checks or
+accept user-attested results. An agent-sandbox limitation of a selected command
+does not block agent content work. Fresh evidence after interruption or repair
+may require trusted checks to rerun; do not promise exactly-once execution.
+
 Add or update tests in the same change when behavior changes. Prefer fake adapters
 and temporary Git repositories. Keep live Codex/Claude calls opt-in and report
 them as skipped unless the task specifically requires them.
 
 Use the repository tests to import every root and workspace source module and to
-validate every local skill's frontmatter and interface metadata. If the current
-agent environment exposes an official skill validator, run it as an additional
-check; do not make finalization depend on a backend-specific installation path.
+validate every local skill's frontmatter and content without requiring local
+provider interface metadata. If the current agent environment exposes an
+official skill validator, run it as an additional check; do not make finalization depend on a backend-specific installation path.
 
 ## 4. Check Change Hygiene
 
@@ -106,8 +140,9 @@ or explicit-tree content check; leave staging completeness and staged-diff
 hygiene to the owning runner phase. Never retain a deferred index check as a
 required check that would make the content gate impossible to pass.
 
-When the user asks to finalize, finish the checks, then stage only the files that
-belong to the current change set. Stop there.
+Outside an Agent Runner pipeline, when the user asks to finalize, finish the
+checks, then stage only the files that belong to the current change set. Stop
+there.
 
 After staging, verify the exact staged change:
 

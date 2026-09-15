@@ -7,6 +7,14 @@ remain in the owning documentation.
 
 ## 2026-09-15
 
+- **Mode guidance and finalization coverage share canonical owners.** README and
+  the operator guide use one identical relative comparison of the three modes;
+  token stars indicate consumption, not provider guarantees. Independent stays
+  the default recommendation. The canonical finalization skill checks operator,
+  transport, example, and owning contract consistency while preserving
+  runner-trusted checks and phase-owned staging. Documentation regressions bind
+  these surfaces to descriptor defaults and supported commands.
+
 - **Combined polishing completes mode availability.** All three pipelines now
   support primary convergence followed by independent review. Polishing keeps
   self-findings separate, requires both candidate approvals and independent

@@ -34,9 +34,10 @@ problem.
 
 Each step converges semantically before its terminal gate: independent mode
 uses candidate Reviewer passes, while lazy mode alternates Worker check/fix and
-read-only candidate confirmation. The stable candidate then passes full
-finalization and one distinct read-only terminal confirmation immediately
-before the constrained commit.
+read-only candidate confirmation. Combined mode requires primary convergence
+followed by the complete independent candidate review. The stable candidate
+then passes full finalization and one distinct read-only terminal confirmation
+immediately before the constrained commit.
 
 The plan defines the authorized commit boundaries. Clarification may explain a
 requirement, but it cannot silently expand, reorder, or reinterpret those
@@ -66,9 +67,10 @@ separate.
 
 `lazy` is an explicit lower-consumption choice. It resolves and invokes only
 the Planner or Worker and provides no independent review. The primary role
-alternates between a writable check-and-fix pass and a distinct read-only clean
-confirmation. Findings go directly back to fixing; lazy mode never invokes a
-Reviewer or Arbiter. The runner never selects lazy mode automatically.
+alternates between a check-and-fix pass and a distinct read-only clean
+confirmation. Authoring returns draft changes as structured output; execution
+and polishing may change safe workspace content during check/fix. Findings go
+directly back to fixing; lazy mode never invokes a Reviewer or Arbiter. The runner never selects lazy mode automatically.
 
 `combined` is available in every pipeline. In authoring it converges the
 durable draft with Planner check/fix and a separate clean confirmation, then

@@ -4,6 +4,15 @@ Use this procedure when supervising Agent Runner through the CLI or its local
 STDIO MCP server. The [product documents](README.md) own the current guarantees;
 the pipeline specifications own exact workflow and recovery contracts.
 
+| Mode          | Quality | Speed | Token consumption | Meaning                                                         |
+| ------------- | ------- | ----- | ----------------- | --------------------------------------------------------------- |
+| `lazy`        | ★★★☆☆   | ★★★★★ | ★★☆☆☆             | Lower-consumption self-review without an independent Reviewer.  |
+| `independent` | ★★★★☆   | ★★★☆☆ | ★★★★☆             | Recommended default with genuinely independent semantic review. |
+| `combined`    | ★★★★★   | ★★☆☆☆ | ★★★★★             | Primary self-convergence followed by the full independent gate. |
+
+More token stars mean greater consumption. Ratings are relative guidance, not
+measured provider guarantees.
+
 ## 1. Choose the work and its owner
 
 Choose one pipeline for the intended outcome:
@@ -20,12 +29,12 @@ tokens. `lazy` is an explicit opt-in choice with lower consumption and no
 independent review. It uses the primary role's bounded check/fix and separate
 read-only clean confirmations. Never choose lazy automatically to save tokens.
 
-Plan authoring also supports explicit `combined` mode: Planner check/fix and
-clean confirmation precede independent Reviewer approval. Revisions restart
+In combined plan authoring, Planner check/fix and clean confirmation precede
+independent Reviewer approval. Revisions restart
 primary convergence. Self findings and structural exhaustion never trigger
 arbitration. All planning turns remain repository-read-only and artifact writes
-remain runner-owned. All three descriptors support combined. Resume retains the
-saved mode and correction budgets.
+remain runner-owned. Every pipeline supports all three modes; resume retains
+the saved mode and correction budgets.
 
 Combined polishing uses independent bootstrap, Worker check/fix and read-only
 clean confirmation, independent candidate review, finalization, and a distinct
@@ -77,6 +86,14 @@ A decision that conflicts with the plan requires a revised plan and a new
 execution run. Do not edit a frozen clarification transcript to override it,
 rewrite completed commits, or reuse a plan whose steps are already implemented.
 Prepare a new plan for the remaining work when required.
+
+Plan authoring's `preferredCommitLineLimit` defaults to 900 anticipated additions
+plus deletions per commit, including tests and documentation. Set this positive
+integer under `pipelines.plan-authoring` in runner or safe project configuration;
+project values take precedence. Prefer cohesive commits within the target. An
+indivisible larger change remains valid with a rationale in the plan. This is a
+planning preference, not an execution limit. Resume retains the saved target;
+legacy runs receive 900.
 
 Runner-root configuration defines trusted profile implementations. Both root
 and ignored, untracked project configuration may define exact trusted command
