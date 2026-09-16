@@ -52,7 +52,11 @@ export function assertStopProgress(previous, next, resolver) {
 }
 
 export function runRetainsOwnership(state) {
-  return stopIsPending(state) || state.executionProcess != null;
+  return (
+    stopIsPending(state) ||
+    state.executionProcess != null ||
+    state.executionResource != null
+  );
 }
 
 export function assertRunCanAdvance(state, resolver) {

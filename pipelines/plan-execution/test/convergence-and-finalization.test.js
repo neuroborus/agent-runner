@@ -1464,8 +1464,13 @@ test("validates runner-trusted evidence before attempting finalization advanceme
   );
 });
 
-test("rejects trusted validation binding drift and repository mutation", async (t) => {
-  for (const [name, code] of [
+test("rejects unsafe trusted execution and pauses unverifiable storage cleanup", async (t) => {
+  for (const [name, code, reason = "unsafe_git_state"] of [
+    [
+      "unverifiable storage cleanup",
+      "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE",
+      "environment_blocked",
+    ],
     ["binding drift", "ERR_TRUSTED_VALIDATION_BINDING_CHANGED"],
     ["repository mutation", "ERR_TRUSTED_VALIDATION_MUTATED_REPOSITORY"],
     ["unterminated process tree", "ERR_TRUSTED_VALIDATION_PROCESS_TREE_ACTIVE"],
@@ -1512,7 +1517,9 @@ test("rejects trusted validation binding drift and repository mutation", async (
       });
 
       assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
-      assert.equal(result.pause.reason, "unsafe_git_state");
+      assert.equal(result.pause.reason, reason);
+      if (reason === "environment_blocked")
+        assert.equal(result.pause.resumeState, "FINALIZE");
       assert.equal(result.pause.code, code);
     });
   }

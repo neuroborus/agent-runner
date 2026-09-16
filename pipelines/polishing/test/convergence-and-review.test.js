@@ -1417,7 +1417,12 @@ test("turns a runner-trusted polishing failure into a bounded issue", async (t) 
   );
 });
 
-for (const [name, code] of [
+for (const [name, code, reason = "unsafe_git_state"] of [
+  [
+    "unverifiable storage cleanup",
+    "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE",
+    "environment_blocked",
+  ],
   ["binding drift", "ERR_TRUSTED_VALIDATION_BINDING_CHANGED"],
   ["repository mutation", "ERR_TRUSTED_VALIDATION_MUTATED_REPOSITORY"],
 ]) {
@@ -1461,7 +1466,9 @@ for (const [name, code] of [
     const result = await fixture.run();
 
     assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
-    assert.equal(result.pause.reason, "unsafe_git_state");
+    assert.equal(result.pause.reason, reason);
+    if (reason === "environment_blocked")
+      assert.equal(result.pause.resumeState, "FINALIZE");
     assert.equal(result.pause.code, code);
   });
 }

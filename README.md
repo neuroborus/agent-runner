@@ -329,6 +329,35 @@ process-tree retirement failures block or fail closed. Agent and runner results
 form one complete ordered gate for the same content,
 validation-infrastructure, command, and trusted-configuration fingerprints.
 
+For an offline build whose project-provided `build.js` supports `--out-dir`, a
+trusted declaration can request transient output and cache storage:
+
+```json
+{
+  "schemaVersion": 1,
+  "trustedCommands": {
+    "offline-build": {
+      "command": "node build.js --out-dir /run/agent-runner/scratch/build",
+      "executable": "node",
+      "arguments": ["build.js", "--out-dir", "/run/agent-runner/scratch/build"],
+      "capabilities": { "scratch": true, "cache": true }
+    }
+  },
+  "pipelines": { "polishing": { "trustedChecks": ["offline-build"] } }
+}
+```
+
+This fragment works in runner configuration or its safe project overlay. The
+project must already have the build tool and dependencies. Scratch provides
+`AGENT_RUNNER_SCRATCH` and `TMPDIR`; cache provides `AGENT_RUNNER_CACHE`,
+`XDG_CACHE_HOME`, and npm's cache binding. Paths are fixed by the runner; exact
+argument vectors do not expand environment variables. Both directories are
+private to one execution and removed after its process tree retires. Repository
+writes and network access remain prohibited. Interrupted cache contents are not
+reused. An uncertain cleanup keeps ownership evidence for operator recovery;
+resume retries cleanup before new work. Pinned dependency acquisition remains
+unavailable in this version.
+
 Backend sessions are disposable. When a native context is full, the adapter
 compacts it and retries once; persistent pressure moves ordinary turns to a
 fresh session reconstructed from durable run state, artifacts, and the current

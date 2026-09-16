@@ -214,6 +214,32 @@ export function createRunner(options = {}) {
     return next;
   }
 
+  function storageForbiddenPaths(run) {
+    return [run.projectPath, run.taskPath, runStore.rootPath].filter(
+      (path) => typeof path === "string",
+    );
+  }
+
+  async function cleanupExecutionResource(run, lease) {
+    if (run.executionResource == null) return run;
+    if (
+      run.executionProcess !== null ||
+      typeof trustedValidation.recoverResources !== "function"
+    ) {
+      throw new RunnerError(
+        "Execution storage cleanup requires verified process retirement.",
+        { code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE" },
+      );
+    }
+    await trustedValidation.recoverResources({
+      resource: run.executionResource,
+      projectPath: run.projectPath,
+      storageForbiddenPaths: storageForbiddenPaths(run),
+      onResource: (value) => runStore.recordExecutionResource(lease, value),
+    });
+    return runStore.loadRun(run.runId);
+  }
+
   function runtimeFor(
     pipeline,
     lease,
@@ -289,13 +315,22 @@ export function createRunner(options = {}) {
           : {
               preflight: async (value) => {
                 await checkConfiguration();
-                await trustedValidation.preflight(value);
+                await trustedValidation.preflight({
+                  ...value,
+                  storageForbiddenPaths: storageForbiddenPaths(run),
+                });
                 await validatePersistedBoundary(run);
               },
               execute: async (request) => {
                 await checkConfiguration();
                 return monitor.invoke(
-                  (value) => trustedValidation.execute(value),
+                  (value) =>
+                    trustedValidation.execute({
+                      ...value,
+                      storageForbiddenPaths: storageForbiddenPaths(run),
+                      onResource: (resource) =>
+                        runStore.recordExecutionResource(lease, resource),
+                    }),
                   request,
                 );
               },
@@ -429,7 +464,8 @@ export function createRunner(options = {}) {
       configurationFailure !== null &&
       !stopPending(run) &&
       run.activeTurn === null &&
-      run.executionProcess === null
+      run.executionProcess === null &&
+      run.executionResource == null
     ) {
       return pauseForProjectConfiguration(run, lease);
     }
@@ -452,6 +488,7 @@ export function createRunner(options = {}) {
     const baseRuntime = runtimeFor(pipeline, lease, run, selected);
     if (stopPending(run))
       return reconcileOperatorStop({
+        cleanupResources: (current) => cleanupExecutionResource(current, lease),
         run,
         pipeline,
         lease,
@@ -473,13 +510,14 @@ export function createRunner(options = {}) {
         if (cause?.code !== "ERR_PROJECT_CONFIGURATION_CHANGED") throw cause;
         configurationFailure = cause;
       }
-      if (
-        configurationFailure !== null &&
-        !stopPending(run) &&
-        run.activeTurn === null
-      ) {
-        return pauseForProjectConfiguration(run, lease);
-      }
+    }
+    run = await cleanupExecutionResource(run, lease);
+    if (
+      configurationFailure !== null &&
+      !stopPending(run) &&
+      run.activeTurn === null
+    ) {
+      return pauseForProjectConfiguration(run, lease);
     }
     const monitor = createStopMonitor({
       runId: run.runId,
@@ -519,6 +557,7 @@ export function createRunner(options = {}) {
     const latest = await runStore.loadRun(run.runId);
     if (stopPending(latest)) {
       return reconcileOperatorStop({
+        cleanupResources: (current) => cleanupExecutionResource(current, lease),
         run: latest,
         pipeline,
         lease,
@@ -550,6 +589,7 @@ export function createRunner(options = {}) {
       configurationFailure = cause;
     }
     return reconcileOperatorStop({
+      cleanupResources: (current) => cleanupExecutionResource(current, lease),
       run: current,
       pipeline,
       lease,
@@ -679,7 +719,8 @@ export function createRunner(options = {}) {
         configurationChanged &&
         !stopPending(storedRun) &&
         storedRun.activeTurn === null &&
-        storedRun.executionProcess === null
+        storedRun.executionProcess === null &&
+        storedRun.executionResource == null
       ) {
         const pipeline = getPipeline(storedRun.pipelineId);
         if (pipeline === undefined) {
@@ -811,6 +852,10 @@ export function createRunner(options = {}) {
         await trustedValidation.preflight({
           projectPath,
           snapshot: resolved.trustedValidation,
+          storageForbiddenPaths: storageForbiddenPaths({
+            projectPath,
+            taskPath,
+          }),
         });
       } catch (cause) {
         if (
