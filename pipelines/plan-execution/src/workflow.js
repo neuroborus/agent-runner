@@ -1148,6 +1148,42 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     assertRun(currentRun);
   }
 
+  let trustedCapabilitiesChecked = false;
+
+  async function ensureTrustedCapabilities(
+    resumeState = state().workflowState,
+  ) {
+    if (
+      trustedCapabilitiesChecked ||
+      state().trustedValidation.commands.length === 0
+    )
+      return true;
+    try {
+      await runtime.trustedValidation.preflight({
+        projectPath: currentRun.projectPath,
+        snapshot: state().trustedValidation,
+      });
+    } catch (cause) {
+      if (
+        ![
+          "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE",
+          "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE",
+        ].includes(cause?.code)
+      )
+        throw cause;
+      await pause("environment_blocked", {
+        code: cause.code,
+        explanation:
+          "The frozen trusted execution request is unavailable. Repair the environment and resume; changing declarations requires a new run.",
+        evidence: ["Trusted execution preflight failed before provider work."],
+        ...(state().preflightComplete ? { resumeState } : {}),
+      });
+      return false;
+    }
+    trustedCapabilitiesChecked = true;
+    return true;
+  }
+
   async function ensureRoleCapabilities(role) {
     if (state().backendVersions[role] !== null) {
       return;
@@ -1372,6 +1408,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       recoveryContext = "",
     } = {},
   ) {
+    if (!(await ensureTrustedCapabilities())) return null;
     const turn = activeTurn(role, state().workflowState);
     const recovering = interruptedTurn !== null;
     if (recovering && !isDeepStrictEqual(interruptedTurn, turn)) {
@@ -2790,6 +2827,7 @@ ${JSON.stringify(
   }
 
   async function initializeInputs() {
+    if (!(await ensureTrustedCapabilities())) return false;
     const input = await readInputs();
     const discoveryOptions = {
       allowedPaths: [],
@@ -6013,6 +6051,24 @@ ${step.subject}`),
     return !["WAITING_FOR_USER", "CANCELED"].includes(state().workflowState);
   }
 
+  // Reconfirmation requires new provider work. Check its saved capabilities
+  // before changing journal-proven legacy recovery or active-turn evidence.
+  if (
+    !operatorStop &&
+    state().pendingCommit?.status !== "consumed" &&
+    (canRecoverLegacyConfirmation(currentRun) ||
+      (interruptedTurn !== null &&
+        !["DONE", "FAILED", "CANCELED"].includes(state().workflowState) &&
+        (state().workflowState !== "WAITING_FOR_USER" ||
+          currentRun.pause?.resumeState !== undefined))) &&
+    !(await ensureTrustedCapabilities(
+      canRecoverLegacyConfirmation(currentRun)
+        ? "CONFIRM"
+        : (currentRun.pause?.resumeState ?? state().workflowState),
+    ))
+  )
+    return currentRun;
+
   try {
     if (resumeAction === null && canRecoverLegacyConfirmation(currentRun)) {
       const recoveryRevision = currentRun.revision;
@@ -6242,6 +6298,17 @@ ${step.subject}`),
 
     while (true) {
       const current = state();
+      if (
+        !["DONE", "FAILED", "WAITING_FOR_USER", "CANCELED"].includes(
+          current.workflowState,
+        ) &&
+        !(
+          current.workflowState === "COMMIT" &&
+          current.pendingCommit?.status === "consumed"
+        ) &&
+        !(await ensureTrustedCapabilities())
+      )
+        return currentRun;
 
       if (
         current.validationMigrationPending &&

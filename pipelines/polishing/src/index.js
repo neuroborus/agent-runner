@@ -156,6 +156,7 @@ const RESUMABLE_WORKFLOW_STATES = new Set([
   "REVIEW",
   "RESOLVE_FINDINGS",
   "CONFIRM",
+  "HANDOFF",
 ]);
 const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   bootstrap_disagreement:

@@ -386,6 +386,31 @@ identities, an ordered command fingerprint, and a trusted-configuration
 fingerprint. Resume uses that durable snapshot without reloading configuration;
 later project configuration edits trigger the existing protected-input guard.
 
+Trusted declarations also accept the closed `capabilities` object described in
+the architecture: `scratch: true`, `cache: true`, and bounded pinned HTTPS
+`artifacts`. Root and project normalization are identical. New snapshots use
+version 2 and include normalized capabilities in identities and fingerprints;
+version-1 snapshots retain their exact restricted policy and evidence bindings.
+Migration never upgrades authority or reloads declarations.
+
+Unavailable frozen capabilities produce a durable `environment_blocked` pause
+before provider work. An early creation pause has `preflightComplete: false`,
+null baseline, backend versions, clarification path, and canonical plan, empty
+hashes, and no `resumeState`; null-action resume retries the saved request before
+ordinary `CLARIFY` preflight. Later pauses preserve their current checkpoint.
+This inspection neither executes nor attests checks. Scratch, cache, and artifact
+requests currently fail closed pending implementation. A consumed COMMIT is
+verified first, preserving its authorized progress before capabilities are
+checked for subsequent work. If an authorization is prepared but unconsumed,
+an unavailable trusted capability or isolation boundary preserves it in an
+`environment_blocked` pause targeting `COMMIT`. Retry rechecks capabilities
+before consuming that same authorization; it does not advance commit progress.
+An interrupted safety pause without a resume checkpoint retains its original
+reason; capability inspection cannot replace it with an environment retry.
+Status and immutable terminal reads do not probe
+capabilities. Environment repair permits retry; changed declarations require a
+new run and cannot justify weakening validation.
+
 Codex and Claude do **not** both need to be installed for every run. Independent
 mode preflight validates the selected Worker and Reviewer; the Arbiter backend
 may be validated when arbitration is first needed. Lazy mode validates only the

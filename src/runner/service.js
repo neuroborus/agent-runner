@@ -289,7 +289,8 @@ export function createRunner(options = {}) {
           : {
               preflight: async (value) => {
                 await checkConfiguration();
-                return trustedValidation.preflight(value);
+                await trustedValidation.preflight(value);
+                await validatePersistedBoundary(run);
               },
               execute: async (request) => {
                 await checkConfiguration();
@@ -804,16 +805,33 @@ export function createRunner(options = {}) {
       normalized.sourceSession,
       providers,
     );
+    let capabilityFailure = null;
     if ((resolved.trustedValidation?.commands.length ?? 0) > 0) {
-      await trustedValidation.preflight({ projectPath });
+      try {
+        await trustedValidation.preflight({
+          projectPath,
+          snapshot: resolved.trustedValidation,
+        });
+      } catch (cause) {
+        if (
+          ![
+            "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE",
+            "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE",
+          ].includes(cause?.code)
+        )
+          throw cause;
+        capabilityFailure = cause;
+      }
     }
-    await probeRequiredRoles(
-      pipeline,
-      resolved.roles,
-      adapters,
-      normalized.sourceSession,
-      providers,
-    );
+    if (capabilityFailure === null) {
+      await probeRequiredRoles(
+        pipeline,
+        resolved.roles,
+        adapters,
+        normalized.sourceSession,
+        providers,
+      );
+    }
     const pipelineState = pipeline.workflow.createState({
       artifactRoot: resolved.artifactRoot,
       proactiveClarification: normalized.proactiveClarification,
@@ -822,7 +840,7 @@ export function createRunner(options = {}) {
         ? {}
         : { trustedValidation: resolved.trustedValidation }),
     });
-    const created = await runStore.createRun({
+    let created = await runStore.createRun({
       ...(createOptions.runId === undefined
         ? {}
         : { runId: createOptions.runId }),
@@ -843,6 +861,24 @@ export function createRunner(options = {}) {
       },
     });
     try {
+      if (capabilityFailure !== null) {
+        const state = await runStore.transitionRun(created.lease, {
+          pipelineState: {
+            ...created.state.pipelineState,
+            workflowState: "WAITING_FOR_USER",
+          },
+          pause: {
+            reason: "environment_blocked",
+            code: capabilityFailure.code,
+            explanation:
+              "The frozen trusted execution request is unavailable. Repair the environment and resume; changing declarations requires a new run.",
+            evidence: [
+              "Trusted execution preflight failed before provider work.",
+            ],
+          },
+        });
+        created = { ...created, state };
+      }
       await publish(
         {
           actor: "runner",
@@ -868,11 +904,13 @@ export function createRunner(options = {}) {
   async function run(input) {
     const { created, pipeline } = await prepare(input);
     try {
-      await withWorktreeLease(
-        created.state,
-        () => execute(pipeline, created.state, created.lease),
-        created.lease,
-      );
+      if (created.state.pause?.reason !== "environment_blocked") {
+        await withWorktreeLease(
+          created.state,
+          () => execute(pipeline, created.state, created.lease),
+          created.lease,
+        );
+      }
     } finally {
       await releaseRunLease(created.lease, created.state.runId);
     }
@@ -969,14 +1007,6 @@ export function createRunner(options = {}) {
               },
             },
           );
-        }
-        if (
-          (recovered.pipelineState.trustedValidation?.commands.length ?? 0) > 0
-        ) {
-          await guardProjectConfiguration(recovered);
-          await trustedValidation.preflight({
-            projectPath: recovered.projectPath,
-          });
         }
         await validatePersistedBoundary(recovered);
         return execute(pipeline, recovered, lease, normalized.action);

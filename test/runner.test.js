@@ -2268,9 +2268,167 @@ test("resumes plan execution from its durable trusted-command snapshot", async (
   );
   assert.equal(configurationLoads, 1);
   assert.deepEqual(trustedPreflights, [
-    { projectPath: fixture.projectPath },
-    { projectPath: fixture.projectPath },
+    { projectPath: fixture.projectPath, snapshot: durableSnapshot },
+    { projectPath: fixture.projectPath, snapshot: durableSnapshot },
   ]);
+});
+
+test("unavailable trusted capabilities persist early pauses and retry frozen requests before providers", async (t) => {
+  for (const pipelineId of ["plan-execution", "polishing"]) {
+    await t.test(pipelineId, async (t) => {
+      const fixture = await createFixture(t);
+      await writeFile(
+        join(fixture.projectPath, ".gitignore"),
+        "/LOCAL_ARTIFACTS/\n",
+      );
+      await writeFile(
+        join(fixture.projectPath, "source.js"),
+        "export const value = 1;\n",
+      );
+      await writeFile(join(fixture.taskPath, "plan.md"), PLAN);
+      await executeFile("git", [
+        "-C",
+        fixture.projectPath,
+        "config",
+        "user.name",
+        "Test",
+      ]);
+      await executeFile("git", [
+        "-C",
+        fixture.projectPath,
+        "config",
+        "user.email",
+        "test@example.com",
+      ]);
+      await executeFile("git", ["-C", fixture.projectPath, "add", "."]);
+      await executeFile("git", [
+        "-C",
+        fixture.projectPath,
+        "commit",
+        "-qm",
+        "test: fixture",
+      ]);
+      if (pipelineId === "polishing")
+        await writeFile(
+          join(fixture.projectPath, "source.js"),
+          "export const value = 2;\n",
+        );
+      const configuration = {
+        schemaVersion: 1,
+        defaultBackend: "codex",
+        trustedCommands: {
+          build: {
+            command: "npm run build",
+            executable: "npm",
+            arguments: ["run", "build"],
+            capabilities: { scratch: true },
+          },
+        },
+        pipelines: { [pipelineId]: { trustedChecks: ["build"] } },
+      };
+      let unavailable = true;
+      let providerCalls = 0;
+      let loads = 0;
+      const requests = [];
+      const adapter = {
+        async probe() {
+          providerCalls += 1;
+          return {
+            version: "fake-1.0.0",
+            structuredOutput: true,
+            readOnly: true,
+            autonomousWrite: true,
+            gitMetadataWriteBlocked: true,
+            workspaceWrite: true,
+            localCommit: true,
+            remoteWriteBlocked: true,
+            nativeSessionContinuation: true,
+            nativeSessionFork: true,
+          };
+        },
+        async run() {
+          providerCalls += 1;
+          return {
+            output: "structured",
+            sessionId: PLANNER_SESSION,
+            structured: {
+              status: "PRODUCT_DECISION_REQUIRED",
+              questions: [],
+              reason: "",
+              question: "Which behavior should the fixture implement?",
+              options: [],
+              whyBlocked: "The fixture intentionally stops at clarification.",
+              evidence: ["The fixture task leaves behavior unspecified."],
+            },
+          };
+        },
+      };
+      const trustedValidation = {
+        async preflight({ snapshot }) {
+          requests.push(snapshot);
+          if (unavailable)
+            throw Object.assign(new Error("Unavailable fixture capability"), {
+              code: "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE",
+            });
+        },
+        async execute() {
+          assert.fail("Preflight must not execute checks.");
+        },
+      };
+      const runStore = createRunStore({ stateRoot: fixture.stateRoot });
+      const open = () =>
+        createRunner({
+          adapters: { codex: adapter },
+          clarifications: createClarificationService({ interactive: false }),
+          trustedValidation,
+          runStore,
+          async loadConfiguration() {
+            loads += 1;
+            assert.equal(loads, 1);
+            return parseRunnerConfiguration(JSON.stringify(configuration));
+          },
+        });
+      const runner = open();
+      const input = {
+        pipelineId,
+        projectPath: fixture.projectPath,
+        taskPath: fixture.taskPath,
+        proactiveClarification: false,
+        roleOverrides: {},
+        sourceSession: null,
+      };
+      const blocked =
+        pipelineId === "plan-execution"
+          ? await runner.run(input)
+          : await runner.create(input);
+      assert.equal(blocked.run.pause.reason, "environment_blocked");
+      assert.equal(blocked.run.pipelineState.preflightComplete, false);
+      assert.equal(blocked.run.pipelineState.repositoryBaseline, null);
+      assert.equal(blocked.run.pipelineState.backendVersions, null);
+      assert.deepEqual(blocked.run.hashes, {});
+      assert.equal(providerCalls, 0);
+      const runId = blocked.run.runId;
+      await runner.status(runId);
+      assert.equal(requests.length, 1);
+      const retried = await open().resume({ runId });
+      assert.equal(retried.run.pause.reason, "environment_blocked");
+      assert.equal(providerCalls, 0);
+      assert.equal(requests.length, 2);
+      configuration.trustedCommands.build.capabilities = { cache: true };
+      unavailable = false;
+      const resumed = await open().resume({ runId });
+      assert.equal(resumed.run.pause.reason, "product_decision_required");
+      assert.ok(providerCalls > 0);
+      assert.equal(loads, 1);
+      assert.equal(requests.length, 3);
+      for (const request of requests)
+        assert.deepEqual(request, blocked.run.pipelineState.trustedValidation);
+      assert.deepEqual(
+        resumed.run.pipelineState.trustedValidation,
+        blocked.run.pipelineState.trustedValidation,
+      );
+    });
+  }
 });
 
 test("submits input previewed from a compatible legacy run", async (t) => {

@@ -431,11 +431,13 @@ test("project selections preserve exact runner command vectors", () => {
   );
 
   assert.deepEqual(resolved.settings.trustedChecks, ["service-check"]);
+  assert.equal(resolved.trustedValidation.schemaVersion, 2);
   assert.deepEqual(resolved.trustedValidation.commands[0], {
     alias: "service-check",
     command: "npm run test:service",
     executable: "/opt/validation  tools/npm",
     arguments: ["run", "  test:service  "],
+    capabilities: {},
     identity: resolved.trustedValidation.commands[0].identity,
   });
   assert.match(
