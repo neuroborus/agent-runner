@@ -1772,6 +1772,39 @@ repairs and semantic review. Bootstrap inventory-reporting and finalization
 A selected runner-trusted command is the only exception to agent-side check
 execution during finalization. The runner-derived bootstrap inventory must
 contain its exact configured command.
+
+Trusted declarations optionally carry `capabilities`, a closed object with
+`scratch: true`, `cache: true`, and `artifacts: [{ url, sha256 }]`. Omit a
+capability to leave it disabled. Scratch and cache request isolated per-execution
+storage with runner-defined paths and environment bindings; declarations cannot
+choose host paths, mount points, or environment names. Artifacts request pinned
+acquisition outside the check sandbox, never network permission for the command.
+The artifact list contains 1–32 unique canonical HTTPS URLs and lowercase
+SHA-256 digests. URLs cannot carry credentials, fragments, nondefault ports,
+IP literals, or local/reserved hostnames. Public DNS, connection pinning,
+integrity, and resource limits must be enforced by the acquisition implementation.
+All three capabilities are currently declared but unavailable: preflight and
+direct execution fail closed until their isolated implementations exist.
+
+Root and safe project catalogs share strict normalization, including capability
+parameters. Capability changes participate in catalog conflict detection and
+command identities. New snapshots use schema version 2 with an explicit
+`capabilities` object on every command; configuration fingerprints bind that
+version and the complete normalized request. Version-1 snapshots retain their
+restricted policy, original identities, and fingerprints on migration/resume,
+so already accepted finalization evidence remains bound to its original policy.
+
+Creation checks the frozen request before provider probes. A valid unavailable
+request creates a durable `environment_blocked` run with incomplete preflight,
+no repository baseline, backend versions, input hashes, or agent activity.
+Malformed declarations remain configuration errors. Resume retries the saved
+request under the execution/worktree leases before new provider work; successful
+retry resumes ordinary preflight without reloading configuration. Later failures
+retain the applicable pipeline checkpoint. Capability inspection does not execute
+or attest checks. Consumed commits and completed handoffs are verified before
+capability checks needed for new work; status and immutable terminal reads do no
+capability work. Launcher discovery is lazy for the same reason.
+
 The finalization agent returns `NOT_RUN` only for those selected entries; after
 the agent turn reconciles, the root executor replaces each placeholder by
 running the exact persisted executable/argument vector directly without a

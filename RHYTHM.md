@@ -7,6 +7,12 @@ remain in the owning documentation.
 
 ## 2026-09-16
 
+- **Trusted execution requests freeze authority before provider work.** Closed
+  scratch/cache and pinned-artifact declarations participate in command and
+  snapshot fingerprints. Legacy snapshots retain their restricted authority and
+  evidence. Unavailable requests pause durably and retry the saved request;
+  consumed effects remain verifiable without requiring capabilities for new work.
+
 - **CLI and MCP expose one provider-neutral effort preference.** Run-wide and
   descriptor-derived role overrides share the portable enum and configuration
   precedence. `current` explicitly preserves the provider default. MCP intents

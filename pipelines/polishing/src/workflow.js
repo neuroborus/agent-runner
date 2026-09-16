@@ -966,6 +966,42 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     assertRun(currentRun);
   }
 
+  let trustedCapabilitiesChecked = false;
+
+  async function ensureTrustedCapabilities() {
+    if (
+      trustedCapabilitiesChecked ||
+      state().trustedValidation.commands.length === 0
+    )
+      return true;
+    try {
+      await runtime.trustedValidation.preflight({
+        projectPath: currentRun.projectPath,
+        snapshot: state().trustedValidation,
+      });
+    } catch (cause) {
+      if (
+        ![
+          "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE",
+          "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE",
+        ].includes(cause?.code)
+      )
+        throw cause;
+      await pause("environment_blocked", {
+        code: cause.code,
+        explanation:
+          "The frozen trusted execution request is unavailable. Repair the environment and resume; changing declarations requires a new run.",
+        evidence: ["Trusted execution preflight failed before provider work."],
+        ...(state().preflightComplete
+          ? { resumeState: state().workflowState }
+          : {}),
+      });
+      return false;
+    }
+    trustedCapabilitiesChecked = true;
+    return true;
+  }
+
   async function ensureRoleCapabilities(role) {
     if (state().backendVersions[role] !== null) {
       return;
@@ -1155,6 +1191,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       reportWorkspaceChange = false,
     } = {},
   ) {
+    if (!(await ensureTrustedCapabilities())) return null;
     const turn = activeTurn(role, state().workflowState);
     const recovering = interruptedTurn !== null;
     if (recovering && !isDeepStrictEqual(interruptedTurn, turn)) {
@@ -2545,13 +2582,17 @@ ${JSON.stringify(
       finalizedFingerprint: current.finalizedFingerprint,
       reviewedFingerprint: current.reviewedFingerprint,
     };
-    const inspected = verificationOnly
-      ? await runtime.git.inspectPolishingHandoff(handoffOptions)
-      : null;
-    if (inspected?.status === "untouched") return false;
-    const repositoryBaseline = verificationOnly
-      ? inspected.snapshot
-      : await runtime.git.stagePolishingHandoff(handoffOptions);
+    const inspected = await runtime.git.inspectPolishingHandoff(handoffOptions);
+    if (inspected.status === "untouched" && verificationOnly) return false;
+    if (
+      inspected.status === "untouched" &&
+      !(await ensureTrustedCapabilities())
+    )
+      return false;
+    const repositoryBaseline =
+      inspected.status === "complete"
+        ? inspected.snapshot
+        : await runtime.git.stagePolishingHandoff(handoffOptions);
     await transition(
       {
         ...current,
@@ -2853,6 +2894,7 @@ ${JSON.stringify(
   }
 
   async function initializeInputs() {
+    if (!(await ensureTrustedCapabilities())) return false;
     const inputs = await readInputs();
     let discovery;
     try {
@@ -5549,6 +5591,7 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
         (!state().preflightComplete &&
           [
             "backend_unavailable",
+            "environment_blocked",
             "local_artifacts_not_ignored",
             "unsafe_git_state",
           ].includes(currentRun.pause.reason)) ||
@@ -5573,6 +5616,7 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
             "REVIEW",
             "RESOLVE_FINDINGS",
             "CONFIRM",
+            "HANDOFF",
           ].includes(currentRun.pause.resumeState))
       ) {
         await transition(
@@ -5600,6 +5644,15 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
 
     while (true) {
       const current = state();
+      if (
+        !["DONE", "FAILED", "WAITING_FOR_USER", "CANCELED"].includes(
+          current.workflowState,
+        ) &&
+        !(current.workflowState === "HANDOFF") &&
+        !(await ensureTrustedCapabilities())
+      )
+        return currentRun;
+
       if (
         current.workflowState === "HANDOFF" &&
         current.validationMigrationPending

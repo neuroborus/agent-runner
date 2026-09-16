@@ -15,7 +15,7 @@ const MAX_COMMAND_DEFINITIONS = 256;
 const MAX_SELECTED_COMMANDS = 32;
 const MAX_TEXT_LENGTH = 4_000;
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1_000;
-const SNAPSHOT_SCHEMA_VERSION = 1;
+const SNAPSHOT_SCHEMA_VERSION = 2;
 const SNAPSHOT_FIELDS = Object.freeze([
   "schemaVersion",
   "commands",
@@ -81,6 +81,82 @@ function assertExactText(
   return value;
 }
 
+function capabilityError() {
+  return new TrustedValidationError(
+    "Trusted execution capabilities are invalid.",
+    { code: "ERR_INVALID_TRUSTED_VALIDATION" },
+  );
+}
+
+function normalizeCapabilities(value) {
+  if (
+    !isRecord(value) ||
+    Object.keys(value).some(
+      (key) => !["scratch", "cache", "artifacts"].includes(key),
+    )
+  ) {
+    throw capabilityError();
+  }
+  const normalized = {};
+  for (const key of ["scratch", "cache"]) {
+    if (Object.hasOwn(value, key)) {
+      if (value[key] !== true) throw capabilityError();
+      normalized[key] = true;
+    }
+  }
+  if (Object.hasOwn(value, "artifacts")) {
+    if (
+      !Array.isArray(value.artifacts) ||
+      value.artifacts.length === 0 ||
+      value.artifacts.length > 32
+    )
+      throw capabilityError();
+    normalized.artifacts = Object.freeze(
+      value.artifacts.map((artifact) => {
+        if (
+          !isRecord(artifact) ||
+          Object.keys(artifact).length !== 2 ||
+          !Object.hasOwn(artifact, "url") ||
+          !Object.hasOwn(artifact, "sha256") ||
+          typeof artifact.url !== "string" ||
+          artifact.url.length > 4000 ||
+          typeof artifact.sha256 !== "string" ||
+          !/^[a-f0-9]{64}$/u.test(artifact.sha256)
+        )
+          throw capabilityError();
+        let url;
+        try {
+          url = new URL(artifact.url);
+        } catch {
+          throw capabilityError();
+        }
+        // DNS and connection enforcement belong to acquisition, never the check.
+        if (
+          url.protocol !== "https:" ||
+          url.username ||
+          url.password ||
+          artifact.url.includes("#") ||
+          url.port ||
+          url.href !== artifact.url ||
+          !/^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/u.test(url.hostname) ||
+          /(?:^|\.)(?:localhost|local|internal|test|invalid)$/u.test(
+            url.hostname,
+          ) ||
+          /^[0-9.]+$/u.test(url.hostname)
+        )
+          throw capabilityError();
+        return Object.freeze({ url: url.href, sha256: artifact.sha256 });
+      }),
+    );
+    if (
+      new Set(normalized.artifacts.map(({ url }) => url)).size !==
+      normalized.artifacts.length
+    )
+      throw capabilityError();
+  }
+  return Object.freeze(normalized);
+}
+
 function commandIdentity(command) {
   return sha256(
     JSON.stringify({
@@ -88,6 +164,9 @@ function commandIdentity(command) {
       command: command.command,
       executable: command.executable,
       arguments: command.arguments,
+      ...(command.capabilities === undefined
+        ? {}
+        : { capabilities: command.capabilities }),
     }),
   );
 }
@@ -95,7 +174,12 @@ function commandIdentity(command) {
 function normalizeCommand(alias, value) {
   if (
     !ALIAS_PATTERN.test(alias) ||
-    !hasExactFields(value, ["command", "executable", "arguments"])
+    !hasExactFields(value, [
+      "command",
+      "executable",
+      "arguments",
+      ...(Object.hasOwn(value ?? {}, "capabilities") ? ["capabilities"] : []),
+    ])
   ) {
     throw new TrustedValidationError(`Trusted command ${alias} is invalid.`, {
       code: "ERR_INVALID_TRUSTED_VALIDATION",
@@ -134,6 +218,9 @@ function normalizeCommand(alias, value) {
     command,
     executable,
     arguments: argumentsList,
+    ...(Object.hasOwn(value, "capabilities")
+      ? { capabilities: normalizeCapabilities(value.capabilities) }
+      : {}),
   };
   return Object.freeze({
     ...normalized,
@@ -166,12 +253,19 @@ export function normalizeTrustedValidationDefinitions(definitions = {}) {
   return Object.freeze(
     Object.fromEntries(
       Object.entries(normalized).map(
-        ([alias, { command, executable, arguments: argumentsList }]) => [
+        ([
+          alias,
+          { command, executable, arguments: argumentsList, capabilities },
+        ]) => [
           alias,
           Object.freeze({
             command,
             executable,
             arguments: argumentsList,
+            ...(capabilities === undefined ||
+            Object.keys(capabilities).length === 0
+              ? {}
+              : { capabilities }),
           }),
         ],
       ),
@@ -179,20 +273,30 @@ export function normalizeTrustedValidationDefinitions(definitions = {}) {
   );
 }
 
-function snapshotFingerprints(commands) {
+function snapshotFingerprints(
+  commands,
+  schemaVersion = SNAPSHOT_SCHEMA_VERSION,
+) {
   return Object.freeze({
     commandFingerprint: sha256(
       JSON.stringify(commands.map(({ identity }) => identity)),
     ),
     configurationFingerprint: sha256(
       JSON.stringify({
-        schemaVersion: SNAPSHOT_SCHEMA_VERSION,
+        schemaVersion,
         commands: commands.map(
-          ({ alias, command, executable, arguments: argumentsList }) => ({
+          ({
             alias,
             command,
             executable,
             arguments: argumentsList,
+            capabilities,
+          }) => ({
+            alias,
+            command,
+            executable,
+            arguments: argumentsList,
+            ...(capabilities === undefined ? {} : { capabilities }),
           }),
         ),
       }),
@@ -229,7 +333,12 @@ export function createTrustedValidationSnapshot(
           { code: "ERR_UNKNOWN_TRUSTED_COMMAND" },
         );
       }
-      return command;
+      return normalizeCommand(alias, {
+        command: command.command,
+        executable: command.executable,
+        arguments: command.arguments,
+        capabilities: command.capabilities ?? {},
+      });
     }),
   );
   return Object.freeze({
@@ -242,7 +351,7 @@ export function createTrustedValidationSnapshot(
 export function validateTrustedValidationSnapshot(value) {
   if (
     !hasExactFields(value, SNAPSHOT_FIELDS) ||
-    value.schemaVersion !== SNAPSHOT_SCHEMA_VERSION ||
+    ![1, SNAPSHOT_SCHEMA_VERSION].includes(value.schemaVersion) ||
     !Array.isArray(value.commands) ||
     value.commands.length > MAX_SELECTED_COMMANDS ||
     !HASH_PATTERN.test(value.commandFingerprint) ||
@@ -255,9 +364,15 @@ export function validateTrustedValidationSnapshot(value) {
       },
     );
   }
+  const snapshotVersion = value.schemaVersion;
   const commands = Object.freeze(
     value.commands.map((value, index) => {
-      if (!hasExactFields(value, COMMAND_FIELDS)) {
+      if (
+        !hasExactFields(value, [
+          ...COMMAND_FIELDS,
+          ...(snapshotVersion === 2 ? ["capabilities"] : []),
+        ])
+      ) {
         throw new TrustedValidationError(
           `Trusted validation command ${index + 1} is invalid.`,
           { code: "ERR_INVALID_TRUSTED_VALIDATION" },
@@ -267,6 +382,7 @@ export function validateTrustedValidationSnapshot(value) {
         command: value.command,
         executable: value.executable,
         arguments: value.arguments,
+        ...(snapshotVersion === 2 ? { capabilities: value.capabilities } : {}),
       });
       if (normalized.identity !== value.identity) {
         throw new TrustedValidationError(
@@ -287,7 +403,7 @@ export function validateTrustedValidationSnapshot(value) {
       { code: "ERR_INVALID_TRUSTED_VALIDATION" },
     );
   }
-  const fingerprints = snapshotFingerprints(commands);
+  const fingerprints = snapshotFingerprints(commands, snapshotVersion);
   if (
     value.commandFingerprint !== fingerprints.commandFingerprint ||
     value.configurationFingerprint !== fingerprints.configurationFingerprint
@@ -298,7 +414,7 @@ export function validateTrustedValidationSnapshot(value) {
     );
   }
   return Object.freeze({
-    schemaVersion: SNAPSHOT_SCHEMA_VERSION,
+    schemaVersion: snapshotVersion,
     commands,
     ...fingerprints,
   });
@@ -387,23 +503,33 @@ export function createTrustedValidationService(options = {}) {
   }
   const defaultSandbox = options.sandboxCommand === undefined;
   let launcherPath = null;
-  let launcherError = null;
-  if (defaultSandbox) {
-    try {
-      launcherPath = resolveLauncher(options.bubblewrapExecutable ?? null);
-    } catch (cause) {
-      launcherError = cause;
+  function trustedLauncher(projectPath) {
+    launcherPath ??= resolveLauncher(options.bubblewrapExecutable ?? null);
+    launcherPath = verifyLauncher(launcherPath, projectPath);
+    return launcherPath;
+  }
+
+  function assertSupported(snapshot) {
+    if (snapshot === undefined) return;
+    const selected = validateTrustedValidationSnapshot(snapshot);
+    if (
+      selected.commands.some(
+        ({ capabilities }) => Object.keys(capabilities ?? {}).length > 0,
+      )
+    ) {
+      throw new TrustedValidationError(
+        "The frozen trusted execution capabilities are not available in this runner.",
+        { code: "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE" },
+      );
     }
   }
 
-  async function preflight({ projectPath }) {
+  async function preflight({ projectPath, snapshot }) {
+    assertSupported(snapshot);
     if (!defaultSandbox) {
       return;
     }
-    if (launcherError !== null) {
-      throw launcherError;
-    }
-    launcherPath = verifyLauncher(launcherPath, projectPath);
+    trustedLauncher(projectPath);
   }
 
   async function execute({
@@ -425,6 +551,7 @@ export function createTrustedValidationService(options = {}) {
       );
     }
     const trustedSnapshot = validateTrustedValidationSnapshot(snapshot);
+    assertSupported(trustedSnapshot);
     const normalizedBindings = normalizeBindings(bindings);
     if (
       trustedSnapshot.commandFingerprint !==
@@ -456,7 +583,7 @@ export function createTrustedValidationService(options = {}) {
     let result;
     try {
       const bubblewrapPath = defaultSandbox
-        ? verifyLauncher(launcherPath, before.projectPath)
+        ? trustedLauncher(before.projectPath)
         : null;
       const execution = await sandboxCommand(command, {
         bubblewrapPath,

@@ -1568,6 +1568,7 @@ async function createFixture(
     adapters,
     clarifications,
     trustedValidation: {
+      async preflight() {},
       async execute(options) {
         assert.notEqual(onTrustedValidation, undefined);
         return onTrustedValidation(options);

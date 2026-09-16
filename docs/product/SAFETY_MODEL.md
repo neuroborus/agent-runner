@@ -78,6 +78,14 @@ process signalling or repository effect.
 The runner connects that protocol to an owned-process abort boundary. Provider
 and trusted-command processes wait for durable registration before executing;
 runner loss closes their private control pipe and starts bounded cleanup.
+Trusted command capability requests are closed and fingerprinted. Scratch/cache
+declarations cannot name host paths or environment bindings. Artifact declarations
+pin canonical HTTPS URLs and SHA-256 digests; they do not authorize raw network,
+credentials, proxies, redirects, arbitrary mounts, or project-controlled trust.
+Unavailable capabilities block before provider work rather than broadening an
+agent or validation sandbox. Legacy snapshots retain their original restricted
+authority and evidence bindings. Status does not probe capabilities, and consumed
+commit/handoff verification precedes capability checks needed for new work.
 Private PID namespaces contain detached and reparented descendants. Provider
 processes that require another native sandbox use that mode only when the full
 nested shape is available. Otherwise, an explicitly declared provider alone may

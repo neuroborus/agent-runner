@@ -10,6 +10,9 @@ import {
 import {
   SOURCE_SESSION,
   bootstrapReady,
+  clarificationReady,
+  finalizationWithTrustedCheck,
+  trustedValidationSnapshot,
   createFixture,
   createRealGitFixture,
   executeFile,
@@ -443,7 +446,30 @@ test("resumes commit verification without replaying the Worker", async (t) => {
 
 test("verifies a consumed version-5 authorization before validation migration", async (t) => {
   let verificationUnavailable = true;
+  const trustedValidation = trustedValidationSnapshot();
+  const finalization = finalizationWithTrustedCheck(trustedValidation);
+  const requiredChecks = finalization.requiredChecks;
   const fixture = await createFixture(t, {
+    trustedValidation,
+    modeSettings: { trustedChecks: ["service-check"] },
+    worker: [
+      clarificationReady(),
+      { ...bootstrapReady("Worker"), requiredChecks },
+      reconciliationResolved(),
+    ],
+    reviewer: [{ ...bootstrapReady("Reviewer"), requiredChecks }],
+    workWorker: [implementationCompleted(), finalization],
+    onTrustedValidation(options) {
+      return {
+        ...options.bindings,
+        status: "PASS",
+        commandIdentity: options.commandIdentity,
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        evidence: ["Fixture trusted check passed."],
+      };
+    },
     onCommitVerify() {
       if (verificationUnavailable) {
         verificationUnavailable = false;
@@ -453,7 +479,7 @@ test("verifies a consumed version-5 authorization before validation migration", 
       }
     },
   });
-  const paused = await fixture.run();
+  const paused = await fixture.run({ trustedChecks: ["service-check"] });
   const roleCallCount = Object.values(fixture.calls).flat().length;
   const migrated = migratePlanExecutionStateV5({
     pipelineState: paused.pipelineState,
@@ -463,7 +489,10 @@ test("verifies a consumed version-5 authorization before validation migration", 
   assert.equal(migrated.validationMigrationPending, true);
   fixture.persistPipelineState(migrated, { pause: paused.pause });
 
-  const resumed = await fixture.run();
+  fixture.runtime.trustedValidation.preflight = async () => {
+    assert.fail("Consumed commit verification must precede capability checks.");
+  };
+  const resumed = await fixture.run({ trustedChecks: ["service-check"] });
 
   assert.equal(resumed.pipelineState.workflowState, "DONE");
   assert.equal(resumed.pipelineState.validationMigrationPending, false);
@@ -473,6 +502,130 @@ test("verifies a consumed version-5 authorization before validation migration", 
       .length,
     1,
   );
+});
+
+test("prepared commit authority survives an unavailable capability and resumes once", async (t) => {
+  const trustedValidation = trustedValidationSnapshot();
+  const finalization = finalizationWithTrustedCheck(trustedValidation);
+  const requiredChecks = finalization.requiredChecks;
+  const settings = { trustedChecks: ["service-check"] };
+  const interruption = new Error(
+    "Interrupted after preparing commit authority",
+  );
+  let interrupt = true;
+  const fixture = await createFixture(t, {
+    trustedValidation,
+    modeSettings: settings,
+    worker: [
+      clarificationReady(),
+      { ...bootstrapReady("Worker"), requiredChecks },
+      reconciliationResolved(),
+    ],
+    reviewer: [{ ...bootstrapReady("Reviewer"), requiredChecks }],
+    workWorker: [implementationCompleted(), finalization],
+    onTrustedValidation(options) {
+      return {
+        ...options.bindings,
+        status: "PASS",
+        commandIdentity: options.commandIdentity,
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        evidence: ["Fixture trusted check passed."],
+      };
+    },
+    onTransition(run) {
+      if (interrupt && run.pipelineState.pendingCommit?.status === "prepared") {
+        interrupt = false;
+        throw interruption;
+      }
+    },
+  });
+  await assert.rejects(
+    fixture.run(settings),
+    (cause) => cause === interruption,
+  );
+  const prepared = fixture.currentRun.pipelineState.pendingCommit;
+  assert.equal(prepared.status, "prepared");
+  const calls = Object.values(fixture.calls).flat().length;
+  for (const code of [
+    "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE",
+    "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE",
+  ]) {
+    fixture.runtime.trustedValidation.preflight = async () => {
+      throw Object.assign(new Error("Fixture unavailable capability"), {
+        code,
+      });
+    };
+    const paused = await fixture.run(settings);
+    assert.equal(paused.pause.reason, "environment_blocked");
+    assert.equal(paused.pause.resumeState, "COMMIT");
+    assert.deepEqual(paused.pipelineState.pendingCommit, prepared);
+    assert.deepEqual(paused.pipelineState.completedCommits, []);
+    assert.equal(Object.values(fixture.calls).flat().length, calls);
+    assert.throws(() =>
+      planExecutionPipeline.workflow.validateRun({
+        ...paused,
+        pause: { ...paused.pause, code: "ERR_UNRELATED_FAILURE" },
+      }),
+    );
+  }
+  fixture.runtime.trustedValidation.preflight = async () => {};
+  const completed = await fixture.run(settings);
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.pipelineState.completedCommits.length, 1);
+  assert.equal(
+    fixture.calls.worker.filter(({ access }) => access === "local-commit")
+      .length,
+    1,
+  );
+});
+
+test("interrupted safety pauses do not inspect capabilities before recovery is authorized", async (t) => {
+  const settings = { trustedChecks: ["service-check"] };
+  const fixture = await createFixture(t, {
+    trustedValidation: trustedValidationSnapshot(),
+    modeSettings: settings,
+    onRoleRun(_role, _request, _count, repository) {
+      repository.changeRefs();
+    },
+  });
+  const paused = await fixture.run(settings);
+  assert.equal(paused.pause.reason, "read_only_agent_mutated_repository");
+  fixture.repository.changeRefs("fixture-refs");
+  fixture.currentRun.activeTurn = { role: "worker", phase: "clarify" };
+  fixture.runtime.trustedValidation.preflight = async () => {
+    assert.fail("A safety pause must not probe capabilities for new work.");
+  };
+  const calls = Object.values(fixture.calls).flat().length;
+  const result = await fixture.run(settings);
+  assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(result.pause.reason, paused.pause.reason);
+  assert.equal(Object.values(fixture.calls).flat().length, calls);
+});
+
+test("immutable failed execution does not inspect trusted capabilities", async (t) => {
+  const failure = new Error("Fixture provider failure");
+  const fixture = await createFixture(t, {
+    trustedValidation: trustedValidationSnapshot(),
+    modeSettings: { trustedChecks: ["service-check"] },
+    onRoleRun() {
+      throw failure;
+    },
+  });
+  await assert.rejects(
+    fixture.run({ trustedChecks: ["service-check"] }),
+    (cause) => cause === failure,
+  );
+  assert.equal(fixture.currentRun.pipelineState.workflowState, "FAILED");
+  fixture.currentRun.activeTurn = { role: "worker", phase: "clarify" };
+  fixture.runtime.trustedValidation.preflight = async () => {
+    assert.fail("Immutable terminal reads must not probe capabilities.");
+  };
+  const calls = Object.values(fixture.calls).flat().length;
+  const result = await fixture.run({ trustedChecks: ["service-check"] });
+  assert.equal(result.pipelineState.workflowState, "FAILED");
+  assert.equal(Object.values(fixture.calls).flat().length, calls);
 });
 
 test("never replays a consumed authorization when no commit was created", async (t) => {

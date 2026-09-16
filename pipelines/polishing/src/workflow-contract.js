@@ -294,11 +294,16 @@ const PAUSE_RESUME_STATES = Object.freeze({
     "RESOLVE_FINDINGS",
   ]),
   environment_blocked: Object.freeze([
+    "CLARIFY",
+    "BOOTSTRAP",
     "POLISH",
     "FINALIZE",
     "CHECK_AND_FIX",
+    "CLEAN_CONFIRM",
     "REVIEW",
     "RESOLVE_FINDINGS",
+    "CONFIRM",
+    "HANDOFF",
   ]),
   finalization_cannot_pass: Object.freeze(["FINALIZE"]),
   finalization_evidence_rejected: Object.freeze(["FINALIZE"]),
@@ -354,6 +359,79 @@ export function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function capabilityError() {
+  return workflowError("Trusted execution capabilities are invalid.");
+}
+
+function normalizeCapabilities(value) {
+  if (
+    !isRecord(value) ||
+    Object.keys(value).some(
+      (key) => !["scratch", "cache", "artifacts"].includes(key),
+    )
+  ) {
+    throw capabilityError();
+  }
+  const normalized = {};
+  for (const key of ["scratch", "cache"]) {
+    if (Object.hasOwn(value, key)) {
+      if (value[key] !== true) throw capabilityError();
+      normalized[key] = true;
+    }
+  }
+  if (Object.hasOwn(value, "artifacts")) {
+    if (
+      !Array.isArray(value.artifacts) ||
+      value.artifacts.length === 0 ||
+      value.artifacts.length > 32
+    )
+      throw capabilityError();
+    normalized.artifacts = Object.freeze(
+      value.artifacts.map((artifact) => {
+        if (
+          !isRecord(artifact) ||
+          Object.keys(artifact).length !== 2 ||
+          !Object.hasOwn(artifact, "url") ||
+          !Object.hasOwn(artifact, "sha256") ||
+          typeof artifact.url !== "string" ||
+          artifact.url.length > 4000 ||
+          typeof artifact.sha256 !== "string" ||
+          !/^[a-f0-9]{64}$/u.test(artifact.sha256)
+        )
+          throw capabilityError();
+        let url;
+        try {
+          url = new URL(artifact.url);
+        } catch {
+          throw capabilityError();
+        }
+        // DNS and connection enforcement belong to acquisition, never the check.
+        if (
+          url.protocol !== "https:" ||
+          url.username ||
+          url.password ||
+          artifact.url.includes("#") ||
+          url.port ||
+          url.href !== artifact.url ||
+          !/^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/u.test(url.hostname) ||
+          /(?:^|\.)(?:localhost|local|internal|test|invalid)$/u.test(
+            url.hostname,
+          ) ||
+          /^[0-9.]+$/u.test(url.hostname)
+        )
+          throw capabilityError();
+        return Object.freeze({ url: url.href, sha256: artifact.sha256 });
+      }),
+    );
+    if (
+      new Set(normalized.artifacts.map(({ url }) => url)).size !==
+      normalized.artifacts.length
+    )
+      throw capabilityError();
+  }
+  return Object.freeze(normalized);
+}
+
 function trustedCommandIdentity(command) {
   return sha256(
     JSON.stringify({
@@ -361,24 +439,34 @@ function trustedCommandIdentity(command) {
       command: command.command,
       executable: command.executable,
       arguments: command.arguments,
+      ...(command.capabilities === undefined
+        ? {}
+        : { capabilities: command.capabilities }),
     }),
   );
 }
 
-function trustedValidationFingerprints(commands) {
+function trustedValidationFingerprints(commands, schemaVersion = 1) {
   return Object.freeze({
     commandFingerprint: sha256(
       JSON.stringify(commands.map(({ identity }) => identity)),
     ),
     configurationFingerprint: sha256(
       JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion,
         commands: commands.map(
-          ({ alias, command, executable, arguments: argumentsList }) => ({
+          ({
             alias,
             command,
             executable,
             arguments: argumentsList,
+            capabilities,
+          }) => ({
+            alias,
+            command,
+            executable,
+            arguments: argumentsList,
+            ...(capabilities === undefined ? {} : { capabilities }),
           }),
         ),
       }),
@@ -389,13 +477,17 @@ function trustedValidationFingerprints(commands) {
 function normalizeExactVectorText(
   value,
   name,
-  { allowEmpty = false, requireTrimmed = false } = {},
+  { allowEmpty = false, allowLineFeeds = false, requireTrimmed = false } = {},
 ) {
+  const inspected =
+    allowLineFeeds && typeof value === "string"
+      ? value.replaceAll("\n", "")
+      : value;
   if (
     typeof value !== "string" ||
     (!allowEmpty && value.length === 0) ||
     [...value].length > MAX_TEXT_LENGTH ||
-    /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(value) ||
+    /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(inspected) ||
     (requireTrimmed && value.trim() !== value)
   ) {
     throw workflowError(`${name} is invalid.`);
@@ -408,7 +500,7 @@ function normalizeTrustedValidation(value) {
     !isRecord(value) ||
     Object.keys(value).length !== TRUSTED_VALIDATION_FIELDS.length ||
     TRUSTED_VALIDATION_FIELDS.some((field) => !Object.hasOwn(value, field)) ||
-    value.schemaVersion !== 1 ||
+    ![1, 2].includes(value.schemaVersion) ||
     !Array.isArray(value.commands) ||
     value.commands.length > MAX_ITEMS ||
     !HASH_PATTERN.test(value.commandFingerprint) ||
@@ -416,14 +508,16 @@ function normalizeTrustedValidation(value) {
   ) {
     throw workflowError("Polishing trusted validation is invalid.");
   }
+  const commandFields = [
+    ...TRUSTED_COMMAND_FIELDS,
+    ...(value.schemaVersion === 2 ? ["capabilities"] : []),
+  ];
   const commands = Object.freeze(
     value.commands.map((command, index) => {
       if (
         !isRecord(command) ||
-        Object.keys(command).length !== TRUSTED_COMMAND_FIELDS.length ||
-        TRUSTED_COMMAND_FIELDS.some(
-          (field) => !Object.hasOwn(command, field),
-        ) ||
+        Object.keys(command).length !== commandFields.length ||
+        commandFields.some((field) => !Object.hasOwn(command, field)) ||
         !TRUSTED_ALIAS_PATTERN.test(command.alias) ||
         !Array.isArray(command.arguments) ||
         command.arguments.length > 64 ||
@@ -450,10 +544,13 @@ function normalizeTrustedValidation(value) {
             normalizeExactVectorText(
               argument,
               `trusted command ${command.alias} argument`,
-              { allowEmpty: true },
+              { allowEmpty: true, allowLineFeeds: true },
             ),
           ),
         ),
+        ...(value.schemaVersion === 2
+          ? { capabilities: normalizeCapabilities(command.capabilities) }
+          : {}),
         identity: command.identity,
       });
       if (trustedCommandIdentity(normalized) !== command.identity) {
@@ -471,14 +568,21 @@ function normalizeTrustedValidation(value) {
   ) {
     throw workflowError("Polishing trusted commands must be unique.");
   }
-  const fingerprints = trustedValidationFingerprints(commands);
+  const fingerprints = trustedValidationFingerprints(
+    commands,
+    value.schemaVersion,
+  );
   if (
     value.commandFingerprint !== fingerprints.commandFingerprint ||
     value.configurationFingerprint !== fingerprints.configurationFingerprint
   ) {
     throw workflowError("Polishing trusted validation fingerprint is invalid.");
   }
-  return Object.freeze({ schemaVersion: 1, commands, ...fingerprints });
+  return Object.freeze({
+    schemaVersion: value.schemaVersion,
+    commands,
+    ...fingerprints,
+  });
 }
 
 export const EMPTY_TRUSTED_VALIDATION = Object.freeze(
@@ -4776,7 +4880,8 @@ export function assertRuntime(runtime, activeRoles = ROLES) {
     !isRecord(runtime.clarifications) ||
     !isRecord(runtime.git) ||
     !isRecord(runtime.trustedValidation) ||
-    typeof runtime.trustedValidation.execute !== "function"
+    typeof runtime.trustedValidation.execute !== "function" ||
+    typeof runtime.trustedValidation.preflight !== "function"
   ) {
     throw workflowError("Polishing runtime is invalid.");
   }

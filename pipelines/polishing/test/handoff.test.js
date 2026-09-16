@@ -18,6 +18,7 @@ import { normalizePipelineState } from "../src/workflow-contract.js";
 import {
   SOURCE_SESSION,
   bootstrapReady,
+  candidateApproved,
   candidateClean,
   checkAndFix,
   clarificationReady,
@@ -32,8 +33,101 @@ import {
   reviewApproved,
   reviewFindings,
   runGit,
+  trustedValidationSnapshot,
   versionSevenState,
 } from "./support/index.js";
+
+for (const applied of [true, false]) {
+  test(`${applied ? "completed" : "untouched"} handoff recovery checks capabilities only before new effects`, async (t) => {
+    const trustedValidation = trustedValidationSnapshot();
+    const command = trustedValidation.commands[0].command;
+    const requiredChecks = [
+      ...finalizationPassed().requiredChecks,
+      { id: "C2", command },
+    ];
+    const finalization = {
+      ...finalizationPassed(),
+      requiredChecks,
+      checks: [
+        ...finalizationPassed().checks,
+        {
+          checkId: "C2",
+          command,
+          status: "NOT_RUN",
+          evidence: ["Reserved for runner execution."],
+        },
+      ],
+    };
+    const fixture = await createIntegrationFixture(t, {
+      trustedValidation,
+      modeSettings: { trustedChecks: ["service-check"] },
+      worker: [
+        clarificationReady(),
+        { ...bootstrapReady("Worker"), requiredChecks },
+        reconciliationResolved(),
+        polishingCompleted(),
+        finalization,
+      ],
+      reviewer: [
+        { ...bootstrapReady("Reviewer"), requiredChecks },
+        candidateApproved(),
+        reviewApproved(),
+      ],
+      onTrustedValidation(options) {
+        return {
+          ...options.bindings,
+          commandIdentity: options.commandIdentity,
+          status: "PASS",
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          evidence: ["Fixture trusted check passed."],
+        };
+      },
+    });
+    const git = fixture.runtime.git;
+    if (!applied)
+      fixture.runtime.git = {
+        ...git,
+        stagePolishingHandoff: async ({ expectedSnapshot }) => expectedSnapshot,
+      };
+    const transition = fixture.runtime.transition;
+    const interruption = new Error("Interrupted after staging");
+    fixture.runtime.transition = async (patch, options) => {
+      if (["DONE", "FAILED"].includes(patch.pipelineState.workflowState))
+        throw interruption;
+      return transition(patch, options);
+    };
+    await assert.rejects(fixture.run(), (cause) => cause === interruption);
+    assert.equal(fixture.currentRun.pipelineState.workflowState, "HANDOFF");
+    fixture.runtime.transition = transition;
+    fixture.runtime.git = git;
+    fixture.runtime.trustedValidation.preflight = async () => {
+      if (applied)
+        assert.fail(
+          "Completed handoff verification must precede capability checks.",
+        );
+      throw Object.assign(new Error("Fixture capability unavailable"), {
+        code: "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE",
+      });
+    };
+    const calls = Object.values(fixture.calls).flat().length;
+    let recovered = await fixture.run();
+    if (!applied) {
+      assert.equal(recovered.pause.reason, "environment_blocked");
+      assert.equal(recovered.pause.resumeState, "HANDOFF");
+      assert.equal(Object.values(fixture.calls).flat().length, calls);
+      fixture.runtime.trustedValidation.preflight = async () => {};
+      recovered = await fixture.run();
+    }
+    assert.equal(recovered.pipelineState.workflowState, "DONE");
+    assert.deepEqual(
+      recovered.pipelineState.trustedValidation,
+      trustedValidation,
+    );
+    assert.equal(Object.values(fixture.calls).flat().length, calls);
+  });
+}
 
 for (const testCase of [
   {

@@ -221,6 +221,24 @@ the complete selection and fingerprints it before agent work; resume uses the
 persisted snapshot without reloading configuration. Later project configuration
 edits trigger the existing protected-input guard.
 
+Trusted declarations also accept the architecture's closed `capabilities`
+object: `scratch: true`, `cache: true`, and bounded pinned HTTPS `artifacts`.
+Root and project normalization are identical. Version-2 snapshots include
+normalized capabilities in command identities and configuration fingerprints.
+Legacy version-1 snapshots retain their restricted policy, exact fingerprints,
+and evidence bindings without configuration reload or authority upgrades.
+
+Unavailable frozen requests create a durable `environment_blocked` pause before
+provider work. Early pauses retain `preflightComplete: false`, null baseline,
+backend versions and clarification path, empty hashes, and no `resumeState`.
+Null-action resume retries the saved request before ordinary `CLARIFY` preflight;
+later pauses retain their applicable checkpoint, including an untouched HANDOFF.
+Completed handoffs are verified before checking capabilities needed for new
+work. Status and immutable terminal reads perform no capability work. Inspection
+does not execute or attest required checks. Scratch, cache, and artifact requests
+currently fail closed pending implementation. Environment repair permits retry;
+changing declarations requires a new run and never permits weakened validation.
+
 Settings are stored in pipeline state at run creation and are not reloaded on
 resume. The root may load safe project overrides from an ignored
 `LOCAL_ARTIFACTS/agent-runner.json` or an explicitly selected confined ignored

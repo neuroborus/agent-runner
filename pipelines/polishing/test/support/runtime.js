@@ -1382,6 +1382,7 @@ async function createFixture(
     clarifications,
     git,
     trustedValidation: {
+      async preflight() {},
       async execute(options) {
         assert.notEqual(onTrustedValidation, undefined);
         return onTrustedValidation(options);
