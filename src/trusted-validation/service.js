@@ -9,6 +9,7 @@ import {
   verifyTrustedBubblewrap,
 } from "./execution.js";
 import { createResourceStorage } from "./resources.js";
+import { normalizeArtifacts } from "./artifact-contract.js";
 
 const ALIAS_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
@@ -107,54 +108,8 @@ function normalizeCapabilities(value) {
     }
   }
   if (Object.hasOwn(value, "artifacts")) {
-    if (
-      !Array.isArray(value.artifacts) ||
-      value.artifacts.length === 0 ||
-      value.artifacts.length > 32
-    )
-      throw capabilityError();
-    normalized.artifacts = Object.freeze(
-      value.artifacts.map((artifact) => {
-        if (
-          !isRecord(artifact) ||
-          Object.keys(artifact).length !== 2 ||
-          !Object.hasOwn(artifact, "url") ||
-          !Object.hasOwn(artifact, "sha256") ||
-          typeof artifact.url !== "string" ||
-          artifact.url.length > 4000 ||
-          typeof artifact.sha256 !== "string" ||
-          !/^[a-f0-9]{64}$/u.test(artifact.sha256)
-        )
-          throw capabilityError();
-        let url;
-        try {
-          url = new URL(artifact.url);
-        } catch {
-          throw capabilityError();
-        }
-        // DNS and connection enforcement belong to acquisition, never the check.
-        if (
-          url.protocol !== "https:" ||
-          url.username ||
-          url.password ||
-          artifact.url.includes("#") ||
-          url.port ||
-          url.href !== artifact.url ||
-          !/^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/u.test(url.hostname) ||
-          /(?:^|\.)(?:localhost|local|internal|test|invalid)$/u.test(
-            url.hostname,
-          ) ||
-          /^[0-9.]+$/u.test(url.hostname)
-        )
-          throw capabilityError();
-        return Object.freeze({ url: url.href, sha256: artifact.sha256 });
-      }),
-    );
-    if (
-      new Set(normalized.artifacts.map(({ url }) => url)).size !==
-      normalized.artifacts.length
-    )
-      throw capabilityError();
+    normalized.artifacts = normalizeArtifacts(value.artifacts);
+    if (normalized.artifacts === null) throw capabilityError();
   }
   return Object.freeze(normalized);
 }

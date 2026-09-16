@@ -7,6 +7,13 @@ remain in the owning documentation.
 
 ## 2026-09-16
 
+- **Pinned acquisition separates transport verification from runtime authority.**
+  The private primitive shares frozen artifact declaration rules, pins public
+  destinations with hostname TLS verification, and bounds transfer and retirement.
+  Digest-only publication follows integrity verification and transport closure;
+  uncertain ownership preserves files. Production requests remain unavailable
+  until durable resource ownership, mounting, and recovery are integrated.
+
 - **Trusted build storage is transient and durably owned.** Scratch/cache mounts
   stay outside repository and control paths. Intent and filesystem identity are
   journaled before launch; cleanup follows verified process retirement. Uncertain
