@@ -47,6 +47,14 @@ overlay. It is persisted for the run; legacy runs receive 900 without adopting
 current configuration. CLI pipeline listing and MCP pipeline metadata expose
 the descriptor-owned default. It does not restrict execution diff size.
 
+Pinned dependency declarations freeze canonical public HTTPS URLs and SHA-256
+digests alongside command vectors. During finalization, the runner downloads
+verified files into private storage and exposes a fixed read-only dependency
+mount to the network-isolated check. Acquisition failures pause for environment
+repair; resume cleans prior resources and retries the saved declarations. Changing
+a URL or digest requires a new run. Checks perform any extraction in declared
+scratch; the runner does not install host tools.
+
 ## CLI and MCP control
 
 The CLI provides run, resume, pause, cancel, status, pipeline discovery, and

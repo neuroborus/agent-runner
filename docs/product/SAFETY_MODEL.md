@@ -84,10 +84,19 @@ pin canonical HTTPS URLs and SHA-256 digests; they do not authorize raw network,
 credentials, proxies, redirects, arbitrary mounts, or project-controlled trust.
 Unavailable capabilities block before provider work rather than broadening an
 agent or validation sandbox. Legacy snapshots retain their original restricted
-authority and evidence bindings. Scratch/cache allocations have journaled intent
-and verified filesystem identity before launch, remain outside protected project
-and control paths, and are cleaned only after owned descendants retire. Uncertain
+authority and evidence bindings. Scratch/cache and dependency allocations have
+journaled intent and verified filesystem identity before downloading or launch,
+remain outside protected project and control paths, and are cleaned only after owned descendants retire. Uncertain
 ownership retains cleanup evidence and never authorizes deletion or cache reuse.
+Only digest-verified dependencies mount read-only at the runner-defined path.
+No partials, mutable shared downloads, automatic extraction, or host installation
+are exposed. Extraction must target declared scratch in the exact command.
+Acquisition validates and pins public HTTPS destinations, rejects redirects and
+inherited trust or credentials, and bounds bytes, time, and cancellation.
+Transports retire before publication or cleanup; uncertain retirement retains
+ownership. Journaled acquisition process identity also blocks cleanup after
+service reconstruction while the owner is live or unverifiable. Same-service
+transport retirement or verified owner death permits cleanup.
 Status does not probe capabilities. Consumed commit/handoff verification precedes
 capability checks needed for new work.
 Private PID namespaces contain detached and reparented descendants. Provider

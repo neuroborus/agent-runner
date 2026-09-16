@@ -236,7 +236,9 @@ later pauses retain their applicable checkpoint, including an untouched HANDOFF.
 Completed handoffs are verified before checking capabilities needed for new
 work. Status and immutable terminal reads perform no capability work. Inspection
 does not execute or attest required checks. Scratch/cache requests use isolated
-transient storage; artifact requests still fail closed. Environment repair permits retry;
+transient storage; artifact requests use bounded runner-owned acquisition and read-only mounts.
+Acquisition availability is checked when preparing finalization execution; this
+preflight inspects storage and isolation without downloading dependencies. Environment repair permits retry;
 changing declarations requires a new run and never permits weakened validation.
 
 Settings are stored in pipeline state at run creation and are not reloaded on
@@ -629,7 +631,9 @@ validation-migration correction ledger.
 ### Transient validation storage ownership
 
 Common envelope version 9 records trusted storage allocation intent and verified
-identity separately from process ownership. The root retires owned processes and
+identity separately from process ownership. Version 10 adds the acquiring runner
+identity and changes the runtime compatibility token. Leased migration preserves
+version-9 allocation records without new resource effects. The root retires owned processes and
 cleans recorded resources before resuming pipeline work or settling an operator
 stop. Legacy envelopes migrate to null storage ownership without allocation or
 provider activity. Only declared scratch/cache directories are writable, through
@@ -639,7 +643,17 @@ architecture. Required build output must stay outside the repository.
 Cleanup uncertainty preserves the resource record and pauses finalization as
 `environment_blocked` at `FINALIZE`; neither the check nor subsequent work is
 accepted until ownership is verified and cleanup finishes. Interrupted mutable
-cache contents are never reused. Status remains observational.
+cache contents and partial downloads are never reused. Pinned artifact requests
+share this durable allocation lifecycle, including artifact-only commands. The
+root journals verified directory ownership and the acquiring runner process
+identity before downloading. Journal failures preserve a resumable ownership
+blocker and the saved allocation. Recovery cannot delete its storage while that owner
+is live or unverifiable without service-observed transport retirement. It exposes only
+complete digest-verified files at `/run/agent-runner/dependencies`, read-only.
+The exact check remains network-isolated; extraction or setup belongs to its
+declared vector and must use declared scratch. Acquisition failures block
+`FINALIZE` before command launch with bounded redacted evidence; repaired
+environments retry the frozen request after cleanup. Status remains observational.
 
 ### Review And Findings
 

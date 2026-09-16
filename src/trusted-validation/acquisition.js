@@ -260,12 +260,13 @@ async function download(artifact, file, budget, outerSignal, transport) {
     signal.removeEventListener("abort", destroy);
     destroy();
     let cancelRetirement;
+    const retirement = Promise.all(resources.values());
     try {
       await Promise.race([
-        Promise.all(resources.values()),
+        retirement,
         new Promise((_, reject) => {
           cancelRetirement = schedule(
-            () => reject(failure("RETIREMENT")),
+            () => reject(Object.assign(failure("RETIREMENT"), { retirement })),
             limits.retirementMs,
           );
         }),
@@ -277,7 +278,7 @@ async function download(artifact, file, budget, outerSignal, transport) {
 }
 
 // Private primitive only. The caller must supply an exclusively owned directory
-// handle; durable allocation, mounting and recovery are not enabled here.
+// handle; the owning service handles durable allocation, mounting and recovery.
 export function createArtifactAcquirer({
   lookup = lookupAddresses,
   request = httpsRequest,
@@ -318,6 +319,7 @@ export function createArtifactAcquirer({
     );
     const budget = { bytes: 0 };
     const published = new Set();
+    let pendingRetirement;
     try {
       controller.signal.throwIfAborted();
       const info = await directory.stat();
@@ -364,6 +366,7 @@ export function createArtifactAcquirer({
           }
         } catch (cause) {
           retired = cause?.code !== "ERR_TRUSTED_ACQUISITION_RETIREMENT";
+          if (!retired) pendingRetirement = cause.retirement;
           if (linked) {
             await ownedFileEntry(target, file);
             await unlink(target);
@@ -385,6 +388,11 @@ export function createArtifactAcquirer({
       controller.signal.throwIfAborted();
       return Object.freeze([...published]);
     } catch (cause) {
+      // A filesystem close error must not hide outstanding transport ownership.
+      if (pendingRetirement)
+        throw Object.assign(failure("RETIREMENT"), {
+          retirement: pendingRetirement,
+        });
       if (cause?.code === "ERR_TRUSTED_ACQUISITION_RETIREMENT") throw cause;
       if (controller.signal.aborted) throw controller.signal.reason;
       if (cause?.code?.startsWith("ERR_TRUSTED_ACQUISITION_")) throw cause;

@@ -1161,11 +1161,23 @@ export function createRunStore({
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
       const previous = snapshot.state.executionResource;
-      if (normalized?.phase === "allocating")
+      const { owner: previousOwner, ...withoutOwner } = previous ?? {};
+      const settlesAcquisition =
+        previous?.phase === "acquiring" &&
+        isDeepStrictEqual(normalized, { ...withoutOwner, phase: "allocated" });
+      if (["allocating", "acquiring"].includes(normalized?.phase))
         assertRunCanAdvance(snapshot.state, resolveStopBoundary);
       if (
         (normalized?.phase === "allocating" && previous !== null) ||
+        (normalized?.phase === "acquiring" &&
+          (previous?.phase !== "allocated" ||
+            snapshot.state.executionProcess !== null ||
+            !isDeepStrictEqual(
+              { ...previous, phase: "acquiring", owner: normalized.owner },
+              normalized,
+            ))) ||
         (normalized?.phase === "allocated" &&
+          !settlesAcquisition &&
           (previous?.phase !== "allocating" ||
             !isDeepStrictEqual(
               { ...normalized, phase: "allocating", directory: null },

@@ -355,8 +355,39 @@ argument vectors do not expand environment variables. Both directories are
 private to one execution and removed after its process tree retires. Repository
 writes and network access remain prohibited. Interrupted cache contents are not
 reused. An uncertain cleanup keeps ownership evidence for operator recovery;
-resume retries cleanup before new work. Pinned dependency acquisition remains
-unavailable in this version.
+resume retries cleanup before new work.
+
+When a build needs a pinned public download, extend that command's `capabilities`
+with `artifacts`. For example (replace the illustrative URL and digest with the
+canonical HTTPS URL and verified SHA-256 of your file):
+
+```json
+{
+  "scratch": true,
+  "cache": true,
+  "artifacts": [
+    {
+      "url": "https://downloads.example.com/tool.tar.gz",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ]
+}
+```
+
+The build driver reads the verified file at
+`/run/agent-runner/dependencies/<sha256>` or uses `AGENT_RUNNER_DEPENDENCIES`.
+The mount is read-only. The runner acquires files before launching the exact
+check, which remains network-isolated. Acquisition requires public DNS and HTTPS
+with built-in TLS trust; redirects, proxies, credentials, and custom trust are
+unsupported. Limits are 64 MiB per file, 256 MiB total, and five minutes overall,
+with shorter DNS, connection, and inactivity deadlines. No automatic extraction
+or host setup occurs: the declared command must extract or prepare inputs in
+its declared scratch directory. Artifact-only commands need no scratch or cache
+if they only read verified files. Downloads are never reused across executions.
+Acquisition failures pause finalization as an environment blocker without running
+the check. Repair the environment and resume; changing declarations requires a
+new run. Do not delete uncertain resources until their ownership and transport
+or process retirement have been independently verified.
 
 Backend sessions are disposable. When a native context is full, the adapter
 compacts it and retries once; persistent pressure moves ordinary turns to a

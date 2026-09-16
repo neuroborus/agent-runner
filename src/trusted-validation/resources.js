@@ -3,13 +3,31 @@ import { constants } from "node:fs";
 import { access, lstat, mkdir, open, realpath, rm } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
+
+import { readProcessIdentity } from "../agents/index.js";
 
 const ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 export const STORAGE_PATHS = Object.freeze({
   scratch: "/run/agent-runner/scratch",
   cache: "/run/agent-runner/cache",
+  dependencies: "/run/agent-runner/dependencies",
 });
+
+export function needsStorage(capabilities = {}) {
+  return (
+    capabilities.scratch ||
+    capabilities.cache ||
+    capabilities.artifacts !== undefined
+  );
+}
+
+export function requestsMount(capabilities = {}, name) {
+  return name === "dependencies"
+    ? capabilities.artifacts !== undefined
+    : capabilities[name] === true;
+}
 
 function resourceError(cause) {
   return Object.assign(
@@ -46,6 +64,26 @@ function sameIdentity(left, right) {
   return left?.device === right?.device && left?.inode === right?.inode;
 }
 
+export async function acquisitionOwner() {
+  const processIdentity = await readProcessIdentity(process.pid);
+  if (processIdentity === null) throw resourceError();
+  return { pid: process.pid, processIdentity };
+}
+
+async function assertAcquisitionOwnerGone(owner) {
+  if (!owner || !Number.isSafeInteger(owner.pid) || owner.pid < 1)
+    throw resourceError();
+  try {
+    process.kill(owner.pid, 0);
+  } catch (cause) {
+    if (cause.code === "ESRCH") return;
+    throw resourceError(cause);
+  }
+  const current = await readProcessIdentity(owner.pid);
+  if (current === null || isDeepStrictEqual(current, owner.processIdentity))
+    throw resourceError();
+}
+
 export function createResourceStorage({
   storageRoot = join(tmpdir(), `agent-runner-validation-${process.getuid?.()}`),
 } = {}) {
@@ -73,9 +111,10 @@ export function createResourceStorage({
 
   async function preflight(forbiddenPaths, capabilities = {}) {
     try {
+      if (capabilities.artifacts !== undefined) await acquisitionOwner();
       for (const [name, target] of Object.entries(STORAGE_PATHS)) {
         if (
-          capabilities[name] === true &&
+          requestsMount(capabilities, name) &&
           forbiddenPaths.some(
             (path) => overlaps(path, target) || overlaps(target, path),
           )
@@ -156,11 +195,12 @@ export function createResourceStorage({
         )
           throw resourceError();
         const mounts = {};
+        const identities = {};
         for (const name of Object.keys(STORAGE_PATHS)) {
-          if (command.capabilities?.[name] !== true) continue;
+          if (!requestsMount(command.capabilities, name)) continue;
           await mkdir(join(`/proc/self/fd/${child.fd}`, name), { mode: 0o700 });
           const source = join(path, name);
-          await directoryIdentity(source);
+          identities[name] = await directoryIdentity(source);
           mounts[name] = source;
         }
         await child.sync();
@@ -170,12 +210,54 @@ export function createResourceStorage({
         )
           throw resourceError();
         signal?.throwIfAborted();
-        return { record: allocated, mounts };
+        return { record: allocated, mounts, identities };
       } finally {
         await child.close();
       }
     } finally {
       await parent.close();
+    }
+  }
+
+  async function verify({ record, mounts, identities }) {
+    try {
+      if (
+        !sameIdentity(await directoryIdentity(storageRoot), record.root) ||
+        !sameIdentity(
+          await directoryIdentity(join(storageRoot, record.id)),
+          record.directory,
+        )
+      )
+        throw resourceError();
+      for (const [name, path] of Object.entries(mounts)) {
+        if (!sameIdentity(await directoryIdentity(path), identities[name]))
+          throw resourceError();
+      }
+    } catch (cause) {
+      throw resourceError(cause);
+    }
+  }
+
+  async function openDependencies(allocation) {
+    await verify(allocation);
+    const directory = await open(
+      allocation.mounts.dependencies,
+      constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+    );
+    try {
+      const info = await directory.stat({ bigint: true });
+      if (
+        !sameIdentity(
+          { device: String(info.dev), inode: String(info.ino) },
+          allocation.identities.dependencies,
+        )
+      )
+        throw resourceError();
+      await verify(allocation);
+      return directory;
+    } catch (cause) {
+      await directory.close();
+      throw resourceError(cause);
     }
   }
 
@@ -186,9 +268,11 @@ export function createResourceStorage({
         !ID.test(record.id) ||
         record.hostname !== hostname() ||
         record.root?.path !== storageRoot ||
-        !["allocating", "allocated"].includes(record.phase)
+        !["allocating", "allocated", "acquiring"].includes(record.phase)
       )
         throw resourceError();
+      if (record.phase === "acquiring")
+        await assertAcquisitionOwnerGone(record.owner);
       await checkRoot(forbiddenPaths);
       if (!sameIdentity(await directoryIdentity(storageRoot), record.root))
         throw resourceError();
@@ -216,7 +300,7 @@ export function createResourceStorage({
         }
         if (child !== undefined) {
           if (
-            record.phase !== "allocated" ||
+            record.phase === "allocating" ||
             !child.isDirectory() ||
             child.uid !== BigInt(process.getuid()) ||
             (child.mode & 0o777n) !== 0o700n ||
@@ -240,5 +324,11 @@ export function createResourceStorage({
     }
   }
 
-  return Object.freeze({ preflight, allocate, cleanup });
+  return Object.freeze({
+    preflight,
+    allocate,
+    verify,
+    openDependencies,
+    cleanup,
+  });
 }
