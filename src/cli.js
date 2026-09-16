@@ -33,6 +33,7 @@ const COMMAND_OPTIONS = Object.freeze({
 const COMMON_RUN_OPTIONS = Object.freeze([
   "clarify",
   "context-size",
+  "effort",
   "fork-from",
   "fork-profile",
   "model",
@@ -56,6 +57,7 @@ const PIPELINE_RUN_OPTIONS = new Set(
   PIPELINES.flatMap((pipeline) => [
     ...pipeline.runOptions,
     ...pipeline.roles.map((role) => `${role}-context-size`),
+    ...pipeline.roles.map((role) => `${role}-effort`),
     ...pipeline.roles.map((role) => `${role}-model`),
     ...pipeline.roles.map((role) => `${role}-profile`),
   ]),
@@ -73,6 +75,7 @@ const OPTIONS = Object.freeze({
   "fork-from": { type: "string" },
   "fork-profile": { type: "string" },
   "context-size": { type: "string" },
+  effort: { type: "string" },
   model: { type: "string" },
   profile: { type: "string" },
   "project-config": { type: "string" },
@@ -117,10 +120,13 @@ Options:
       --profile            Set the run-wide trusted profile alias
       --project-config     Load an explicit ignored project configuration
       --model              Set the run-wide backend-native model
+      --effort             Set run-wide effort: current|low|medium|high|xhigh
+                           current retains the provider default
       --context-size       Set the run-wide decimal token context size
       --<role>             Override a role backend
       --<role>-profile     Override a role trusted profile alias
       --<role>-model       Override a role model
+      --<role>-effort      Override a role effort (same portable values)
       --<role>-context-size Override a role decimal token context size
       --extra-fix-rounds   Grant a positive additional fix budget on resume
       --override-finding   Override one applicable open finding on resume
@@ -288,6 +294,18 @@ function explicitStopIdentity(values) {
   return { expectedRevision, idempotencyKey: key };
 }
 
+function effortSelection(value, option) {
+  if (
+    value !== undefined &&
+    !["current", "low", "medium", "high", "xhigh"].includes(value)
+  ) {
+    throw new Error(
+      `--${option} must be current, low, medium, high, or xhigh.`,
+    );
+  }
+  return value;
+}
+
 function roleOverrides(pipeline, values) {
   return Object.fromEntries(
     pipeline.roles.flatMap((role) => {
@@ -295,11 +313,16 @@ function roleOverrides(pipeline, values) {
       const profile = values[`${role}-profile`];
       const model = values[`${role}-model`];
       const contextSize = values[`${role}-context-size`];
+      const effort = effortSelection(
+        values[`${role}-effort`],
+        `${role}-effort`,
+      );
       if (
         backend === undefined &&
         profile === undefined &&
         model === undefined &&
-        contextSize === undefined
+        contextSize === undefined &&
+        effort === undefined
       ) {
         return [];
       }
@@ -311,6 +334,7 @@ function roleOverrides(pipeline, values) {
             ...(profile === undefined ? {} : { profile }),
             ...(model === undefined ? {} : { model }),
             ...(contextSize === undefined ? {} : { contextSize }),
+            ...(effort === undefined ? {} : { effort }),
           },
         ],
       ];
@@ -319,7 +343,9 @@ function roleOverrides(pipeline, values) {
 }
 
 function executionOverrides(values) {
+  const effort = effortSelection(values.effort, "effort");
   return Object.freeze({
+    ...(effort === undefined ? {} : { effort }),
     ...(values.profile === undefined ? {} : { profile: values.profile }),
     ...(values.model === undefined ? {} : { model: values.model }),
     ...(values["context-size"] === undefined
@@ -473,6 +499,7 @@ export async function main(
       ...COMMON_RUN_OPTIONS,
       ...pipeline.runOptions,
       ...pipeline.roles.map((role) => `${role}-context-size`),
+      ...pipeline.roles.map((role) => `${role}-effort`),
       ...pipeline.roles.map((role) => `${role}-model`),
       ...pipeline.roles.map((role) => `${role}-profile`),
     ];

@@ -287,11 +287,13 @@ for each fresh report and persisted through its resolved reservation.
 `effort` resolve from its role-specific override, the run-wide override, its
 project-role value, the corresponding project-wide default, its pipeline-role
 runner value, the corresponding runner-wide default, then the built-in string
-`current`; a role-specific override has highest precedence. CLI/MCP currently
-expose profile, model, and context size; effort overrides use the internal
-runner input contract. A role-specific CLI override wins over a run-wide
-selection for the exposed fields. Explicit CLI/MCP pipeline-setting overrides
-take precedence over project pipeline
+`current`; a role-specific CLI override has highest precedence. CLI/MCP expose
+profile, model, context size, and effort through the same runner input contract.
+CLI uses `--effort` and descriptor-derived `--<role>-effort`; MCP uses `effort`
+and `roleOverrides.<role>.effort`. Both validate the portable enum before
+dispatch. MCP action identities include both selections before mutation;
+detached continuations resume the saved run without re-resolving them. Explicit
+CLI/MCP pipeline-setting overrides take precedence over project pipeline
 settings, which take precedence over runner settings and descriptor defaults.
 A profile alias is trusted runner configuration, pins one backend, and maps
 only to a native Codex profile name or an isolated Claude configuration

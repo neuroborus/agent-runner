@@ -330,9 +330,12 @@ workflow logic.
 Effort accepts only `current|low|medium|high|xhigh`, independently of model IDs.
 The shared root resolver applies role override → run override → project role →
 project `defaultEffort` → runner role → runner `defaultEffort` → `current`.
-Effort overrides currently use the internal runner contract. Validate all
-configured vocabulary, but resolve and persist only active roles; native
-translation stays in provider adapters. Every role turn carries saved explicit
+CLI `--effort` and descriptor-derived `--<role>-effort` map to MCP
+`run_start.effort` and `roleOverrides.<role>.effort` through the same runner
+contract. Both reject values outside the portable enum before dispatch; MCP
+intents bind the selections and detached continuations reuse saved effort.
+Validate all configured vocabulary, but resolve and persist only active roles;
+native translation stays in provider adapters. Every role turn carries saved explicit
 effort, including recovery and commit readiness; `current` omits the request override.
 Common envelope version 8 requires saved active-role effort. Legacy missing
 values migrate to `current` under the run lease without provider activity,

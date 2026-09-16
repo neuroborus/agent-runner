@@ -105,6 +105,17 @@ Repository-local artifacts must already be ignored. The runner never changes
 ignore rules automatically. Keep authoritative state in a separate tree from
 the project and task directories; neither may contain the other.
 
+Set portable effort with `defaultEffort` or role `effort` in runner/project
+configuration, CLI `--effort` and `--<role>-effort`, or MCP `run_start.effort`
+and `roleOverrides.<role>.effort`. Values are `current`, `low`, `medium`,
+`high`, and `xhigh`; keep effort separate from the model ID. A role override
+wins over a run-wide override, then project role/default, runner role/default,
+and finally `current`. Explicit `current` retains the effective provider
+default. Unsupported provider/model selections fail without downgrading.
+Resume and detached execution reuse saved effort; status, wait, and activity
+keep role configuration private. Retrying an MCP start requires the same effort
+values and idempotency key. To select different effort, start a new run.
+
 Select compatible role backends and profiles before starting. Leave the source
 session unset unless the user deliberately chooses to fork a compatible current
 session after being offered a fresh start. Use only a known trusted source

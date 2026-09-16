@@ -7,6 +7,13 @@ remain in the owning documentation.
 
 ## 2026-09-16
 
+- **CLI and MCP expose one provider-neutral effort preference.** Run-wide and
+  descriptor-derived role overrides share the portable enum and configuration
+  precedence. `current` explicitly preserves the provider default. MCP intents
+  bind effort before dispatch and detached work reuses the saved selection,
+  preventing retries from silently changing execution preferences. Public
+  supervision surfaces keep role configuration private.
+
 - **Effort is frozen with active role execution preferences.** Runner and safe
   project configuration share one portable vocabulary and override precedence.
   Inactive roles are validated but never resolved or persisted. Resume reuses

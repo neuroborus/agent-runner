@@ -149,9 +149,10 @@ selections.
 Root and safe ignored project configuration accept `defaultEffort`, with role
 `effort` values taking precedence within each layer. Portable effort values are
 `current`, `low`, `medium`, `high`, and `xhigh`; `current` retains the provider
-default. Effort uses the same precedence through internal runner overrides;
-CLI/MCP effort controls are not yet exposed. Only active roles persist the
-resolved selection, and resume reuses it without reloading configuration.
+default. Use `--effort` or MCP `run_start.effort` for a run-wide override, and
+`--<role>-effort` or `roleOverrides.<role>.effort` for a role override. Only
+active roles persist the resolved selection, and resume reuses it without
+reloading configuration.
 A selected profile supplies its backend; `defaultBackend` provides the fallback.
 Explicit decimal context sizes are validated by the chosen adapter and map to
 Codex's context window or Claude's auto-compaction token window.
@@ -442,11 +443,12 @@ An empty edited document removes all additions. Editor failure, unsafe content,
 or a concurrent change preserves the local document; reread and reconcile a
 stale edit. These commands do not create a pipeline run.
 
-Run-wide preferences use `--profile`, `--model`, and `--context-size`.
+Run-wide preferences use `--profile`, `--model`, `--context-size`, and `--effort`.
 Role-specific values use derived flags such as `--worker-profile`,
-`--reviewer-model`, or `--planner-context-size`; role-specific values win. Use
-the trusted alias, backend-native model ID, and decimal token string
-respectively:
+`--reviewer-model`, `--planner-context-size`, or `--worker-effort`; role-specific
+values win. Use a trusted alias, backend-native model ID, decimal token string,
+or portable effort value respectively. Effort accepts only
+`current|low|medium|high|xhigh`; select it separately from the model ID:
 
 ```bash
 agent-run run polishing \
@@ -455,6 +457,7 @@ agent-run run polishing \
   --mode independent \
   --profile claude-primary \
   --model sonnet \
+  --effort high \
   --worker-context-size 200000
 ```
 
@@ -742,8 +745,13 @@ Use `pipelines_list` to discover the registry, then start with `run_start` and a
 unique opaque idempotency key. It persists the run, returns a durable `runId`,
 and launches detached execution. Its additive `projectConfigurationPath`
 selects the same confined project file as `--project-config`; `profile`,
-`model`, and `contextSize` set run-wide selections; the same fields inside a
-`roleOverrides` entry take precedence. Optional `mode` overrides project and
+`model`, `contextSize`, and `effort` set run-wide selections; the same fields
+inside a
+`roleOverrides` entry take precedence. Effort uses the portable enum above;
+`current` overrides lower-precedence values with the native default. Retry a
+start with the same effort values and idempotency key. Detached execution and
+resume use persisted effort, while status, wait, and activity keep role
+configuration private. Optional `mode` overrides project and
 runner configuration and is validated by the selected descriptor. All pipelines
 accept `independent`, `lazy`, and `combined`.
 `independent` is the default and recommended option for genuinely independent
