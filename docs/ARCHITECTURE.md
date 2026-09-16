@@ -1786,6 +1786,39 @@ integrity, and resource limits must be enforced by the acquisition implementatio
 Scratch and cache are supported as isolated transient storage. Artifact
 acquisition remains unavailable and fails closed before provider work.
 
+The private `acquisition.js` primitive shares artifact declaration normalization
+with the snapshot contract. It is not exported by the capability index or wired
+to production execution. The caller supplies an exclusively owned mode-0700
+directory handle, never a destination filename. Descriptor-relative exclusive
+partials are hashed while streaming, synchronized, and published without replacing
+existing entries under their lowercase SHA-256 names with mode 0444. Identical
+digests share one published file, but every declared URL is acquired and verified.
+Cleanup rechecks entries against the open file's identity and preserves substitutes.
+Earlier verified files can remain after a later failure; callers must not expose
+an incomplete acquisition and remain responsible for the owned directory.
+Durable allocation, read-only mounting, and recovery integration must precede
+enabling production artifact requests.
+
+Acquisition resolves all addresses once (at most 64 answers), rejects the entire
+answer set if any address is not public unicast, and pins one numeric destination.
+The conservative address policy excludes IPv4 special-use ranges and IPv6 outside
+2000::/3, plus special-use, documentation and transition ranges within it. The
+declared hostname remains the HTTP Host and TLS verification name; the actual
+peer must match the pinned address. Each request uses a fresh connection, explicit
+Node built-in trust roots, TLS 1.2 or newer, no proxy environment, and a 16 KiB
+header limit. Only HTTP 200 and identity content encoding are accepted; redirects,
+ambiguous framing, incomplete bodies, and integrity mismatches fail closed.
+
+Limits are 64 MiB per file and 256 MiB across a sequential acquisition, including
+repeated digests. DNS has a 5-second deadline, connection establishment 10 seconds,
+body/header inactivity 15 seconds, and the whole acquisition 5 minutes. Cancellation
+and deadlines prevent subsequent publication. Requests, responses, and sockets
+must close before publication or partial cleanup; retirement has a separate
+1-second bound. Unverified retirement retains the partial for owned recovery.
+Late callbacks cannot publish files. Errors expose finite acquisition categories,
+not URLs, response bodies, or native transport diagnostics. Tests inject DNS,
+HTTPS and deadline scheduling without network access.
+
 Root and safe project catalogs share strict normalization, including capability
 parameters. Capability changes participate in catalog conflict detection and
 command identities. New snapshots use schema version 2 with an explicit
