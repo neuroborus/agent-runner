@@ -617,6 +617,28 @@ async function createFixture(
   };
 }
 
+test("carries saved effort through role turns and omits current", async (t) => {
+  for (const effort of ["current", "xhigh"]) {
+    const fixture = await createFixture(t);
+    fixture.currentRun.roles.planner.effort = effort;
+    fixture.currentRun.roles.reviewer.effort = "medium";
+    const result = await fixture.run();
+    assert.equal(result.pipelineState.workflowState, "DONE");
+    assert.ok(fixture.calls.planner.length > 0);
+    assert.ok(fixture.calls.reviewer.length > 0);
+    for (const request of fixture.calls.planner) {
+      assert.equal(request.effort, effort === "current" ? undefined : effort);
+    }
+    assert.ok(
+      fixture.calls.reviewer.every(({ effort }) => effort === "medium"),
+    );
+    assert.doesNotMatch(
+      JSON.stringify(planAuthoringPipeline.projections.status(result)),
+      /effort|xhigh|medium/u,
+    );
+  }
+});
+
 test("writes one validated plan through independent source-session forks", async (t) => {
   const fixture = await createFixture(t, {
     models: { planner: "planner-model", reviewer: "reviewer-model" },

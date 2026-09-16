@@ -7,6 +7,13 @@ remain in the owning documentation.
 
 ## 2026-09-16
 
+- **Effort is frozen with active role execution preferences.** Runner and safe
+  project configuration share one portable vocabulary and override precedence.
+  Inactive roles are validated but never resolved or persisted. Resume reuses
+  saved effort, while envelope version 8 migrates legacy missing values to
+  `current` under the existing lease without provider activity or rewriting
+  journal history. Configuration changes cannot silently alter resumed work.
+
 - **Effort incompatibility is a terminal adapter configuration failure.**
   Provider adapters accept portable effort separately from model identifiers,
   omit native overrides for `current`, and preserve explicit selections across

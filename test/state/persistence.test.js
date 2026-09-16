@@ -206,6 +206,120 @@ test("normalizes legacy role records for every pipeline without rewriting histor
   }
 });
 
+test("migrates version-7 active role effort without rewriting journal history", async (t) => {
+  for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
+    for (const mode of ["independent", "lazy"]) {
+      const { created, store } = await createFixture(t);
+      await created.lease.release();
+      const statePath = join(created.directoryPath, "state.json");
+      const eventsPath = join(created.directoryPath, "events.jsonl");
+      const progressPath = join(created.directoryPath, "progress.md");
+      const legacy = JSON.parse(await readFile(statePath, "utf8"));
+      const event = JSON.parse((await readFile(eventsPath, "utf8")).trim());
+      const primary = pipelineId === "plan-authoring" ? "planner" : "worker";
+      const active =
+        mode === "lazy" ? [primary] : [primary, "reviewer", "arbiter"];
+      legacy.pipelineId = pipelineId;
+      legacy.schemaVersion = 7;
+      legacy.runtimeCompatibility.runStateVersion = 7;
+      legacy.roles = Object.fromEntries(
+        active.map((role) => [
+          role,
+          {
+            backend: "codex",
+            model: "current",
+            profile: "current",
+            contextSize: "current",
+          },
+        ]),
+      );
+      legacy.pipelineState.settings = { mode };
+      event.schemaVersion = 7;
+      event.state = legacy;
+      const stateSource = `${JSON.stringify(legacy)}\n`;
+      const eventSource = `${JSON.stringify(event)}\n`;
+      await writeFile(statePath, stateSource);
+      await writeFile(eventsPath, eventSource);
+      const progress = await readFile(progressPath, "utf8");
+
+      const loaded = await store.loadRun(legacy.runId);
+      assert.deepEqual(Object.keys(loaded.roles), active);
+      assert.ok(
+        Object.values(loaded.roles).every(({ effort }) => effort === "current"),
+      );
+      assert.equal(await readFile(statePath, "utf8"), stateSource);
+      assert.equal(await readFile(eventsPath, "utf8"), eventSource);
+      assert.equal(await readFile(progressPath, "utf8"), progress);
+      const lease = await store.acquireRunLease(legacy.runId);
+      const migrated = await store.migrateRun(
+        lease,
+        {
+          pipelineState: loaded.pipelineState,
+          pipelineStateVersion: loaded.pipelineStateVersion,
+        },
+        {
+          activity: {
+            actor: "runner",
+            phase: "runtime",
+            kind: "migrated",
+            message: "Migrate saved effort.",
+          },
+        },
+      );
+      await lease.release();
+      assert.equal(migrated.schemaVersion, RUN_STATE_SCHEMA_VERSION);
+      assert.equal(migrated.revision, loaded.revision + 1);
+      assert.deepEqual(migrated.roles, loaded.roles);
+      for (const field of [
+        "pipelineState",
+        "sessionLineage",
+        "activeTurn",
+        "executionProcess",
+        "counters",
+        "hashes",
+        "stopRequest",
+      ])
+        assert.deepEqual(migrated[field], loaded[field]);
+      assert.ok((await readFile(eventsPath, "utf8")).startsWith(eventSource));
+      assert.deepEqual((await store.loadRun(legacy.runId)).roles, loaded.roles);
+    }
+  }
+});
+
+test("current persisted role effort is required and cannot change across events", async (t) => {
+  const { created, store } = await createFixture(t);
+  await created.lease.release();
+  const statePath = join(created.directoryPath, "state.json");
+  const eventsPath = join(created.directoryPath, "events.jsonl");
+  const initial = JSON.parse(await readFile(statePath, "utf8"));
+  const event = JSON.parse((await readFile(eventsPath, "utf8")).trim());
+  for (const effort of [undefined, null, "max", "HIGH", 1]) {
+    const invalid = structuredClone(initial);
+    if (effort === undefined) delete invalid.roles.worker.effort;
+    else invalid.roles.worker.effort = effort;
+    await writeFile(statePath, JSON.stringify(invalid));
+    await writeFile(
+      eventsPath,
+      `${JSON.stringify({ ...event, state: invalid })}\n`,
+    );
+    await assert.rejects(store.loadRun(initial.runId), {
+      code: "ERR_INVALID_RUN_STATE",
+    });
+  }
+  const changed = structuredClone(initial);
+  changed.revision += 1;
+  changed.roles.worker.effort = "high";
+  const nextEvent = { ...event, revision: changed.revision, state: changed };
+  await writeFile(statePath, JSON.stringify(changed));
+  await writeFile(
+    eventsPath,
+    `${JSON.stringify(event)}\n${JSON.stringify(nextEvent)}\n`,
+  );
+  await assert.rejects(store.loadRun(initial.runId), {
+    code: "ERR_INVALID_EVENT_LOG",
+  });
+});
+
 test("projects version-2 activity state for every pipeline without rewriting", async (t) => {
   for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
     const workspace = await mkdtemp(

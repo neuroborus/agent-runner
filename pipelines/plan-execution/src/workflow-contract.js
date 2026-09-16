@@ -4834,7 +4834,9 @@ export function assertRun(run) {
       !isRecord(run.roles[role]) ||
       Object.keys(run.roles[role]).some(
         (field) =>
-          !["backend", "profile", "model", "contextSize"].includes(field),
+          !["backend", "profile", "model", "contextSize", "effort"].includes(
+            field,
+          ),
       ) ||
       typeof run.roles[role].backend !== "string" ||
       run.roles[role].backend.length === 0 ||
@@ -4842,6 +4844,10 @@ export function assertRun(run) {
         run.roles[role].model !== null &&
         (typeof run.roles[role].model !== "string" ||
           run.roles[role].model.length === 0)) ||
+      (run.roles[role].effort !== undefined &&
+        !["current", "low", "medium", "high", "xhigh"].includes(
+          run.roles[role].effort,
+        )) ||
       ["profile", "contextSize"].some(
         (field) =>
           run.roles[role][field] !== undefined &&

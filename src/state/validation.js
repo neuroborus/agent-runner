@@ -3,7 +3,7 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { isAdapterDiagnosticClass } from "../agents/index.js";
 import { validStopTiming, validStopSettlement } from "./stop-contract.js";
 
-export const RUN_STATE_SCHEMA_VERSION = 7;
+export const RUN_STATE_SCHEMA_VERSION = 8;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
   runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
@@ -23,6 +23,7 @@ const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   4,
   5,
   6,
+  7,
   RUN_STATE_SCHEMA_VERSION,
 ]);
 
@@ -589,11 +590,21 @@ function normalizeSessionLineage(value) {
   return { source, sourceProfile, children };
 }
 
-function normalizeRoles(value) {
+export function normalizeRoles(value, { allowMissingEffort = true } = {}) {
   assertRecord(value, "run.roles");
   const roles = cloneRecord(value, "run.roles");
   for (const [role, configuration] of Object.entries(roles)) {
     assertRecord(configuration, `run.roles.${role}`);
+    if (allowMissingEffort && !Object.hasOwn(configuration, "effort")) {
+      configuration.effort = "current";
+    }
+    if (
+      !["current", "low", "medium", "high", "xhigh"].includes(
+        configuration.effort,
+      )
+    ) {
+      fail(`run.roles.${role}.effort is invalid.`);
+    }
     for (const field of ["profile", "model", "contextSize"]) {
       if (
         !Object.hasOwn(configuration, field) ||
@@ -846,7 +857,9 @@ export function normalizeRunState(value, expectedRunId) {
       value.projectConfigurationProtection,
       value,
     ),
-    roles: normalizeRoles(value.roles),
+    roles: normalizeRoles(value.roles, {
+      allowMissingEffort: value.schemaVersion < 8,
+    }),
     counters: cloneRecord(value.counters, "run.counters"),
     hashes: cloneRecord(value.hashes, "run.hashes"),
     pause,

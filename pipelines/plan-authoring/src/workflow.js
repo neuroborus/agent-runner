@@ -521,7 +521,7 @@ export async function runPlanAuthoring({
       promptWithSettings(evidenceContext),
     );
     const executionPreferences = Object.fromEntries(
-      ["profile", "model", "contextSize"].flatMap((field) =>
+      ["profile", "model", "contextSize", "effort"].flatMap((field) =>
         typeof roleConfiguration[field] === "string" &&
         roleConfiguration[field] !== "current"
           ? [[field, roleConfiguration[field]]]

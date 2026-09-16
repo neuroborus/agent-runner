@@ -316,8 +316,8 @@ and owns active-role selection. Independent and combined modes activate all thre
 Arbiter still probed on demand; lazy mode activates only the Worker.
 Role objects under `pipelines.plan-execution.roles` in the runner's
 `.agent-runner.json` or its safe project overlay may provide optional string
-`backend`, trusted `profile`, backend-specific `model`, and decimal
-`contextSize` selections. Project profile selections reference aliases defined
+`backend`, trusted `profile`, backend-specific `model`, decimal
+`contextSize`, and portable `effort` selections. Project profile selections reference aliases defined
 by runner-root configuration; the project cannot define profile implementations,
 credentials, provider binaries, or environment values. Role-specific CLI/MCP
 values take precedence over run-wide values, project values, runner values, and
@@ -326,6 +326,18 @@ its backend; conflicting explicit backend selection is invalid. `current`
 omits the corresponding native override and uses the effective source-session,
 process, profile, or backend default. Do not hard-code model names into
 workflow logic.
+
+Effort accepts only `current|low|medium|high|xhigh`, independently of model IDs.
+The shared root resolver applies role override → run override → project role →
+project `defaultEffort` → runner role → runner `defaultEffort` → `current`.
+Effort overrides currently use the internal runner contract. Validate all
+configured vocabulary, but resolve and persist only active roles; native
+translation stays in provider adapters. Every role turn carries saved explicit
+effort, including recovery and commit readiness; `current` omits the request override.
+Common envelope version 8 requires saved active-role effort. Legacy missing
+values migrate to `current` under the run lease without provider activity,
+configuration reload, or changes to progress and session evidence. Public
+status and activity omit these provider-private values.
 
 The descriptor also owns the positive-integer settings and built-in defaults
 listed under [Retry Limits and No-Progress Detection](#14-retry-limits-and-no-progress-detection),

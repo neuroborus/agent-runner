@@ -25,6 +25,7 @@ import {
   normalizeChildSession,
   normalizePublicActivity,
   normalizeRunState,
+  normalizeRoles,
   normalizeTransitionPatch,
   RUNTIME_COMPATIBILITY,
   RUNTIME_COMPATIBILITY_TOKEN,
@@ -537,7 +538,7 @@ export function createRunStore({
             input.projectConfigurationProtection === undefined
               ? null
               : input.projectConfigurationProtection,
-          roles: input.roles,
+          roles: normalizeRoles(input.roles),
           counters: input.counters === undefined ? {} : input.counters,
           hashes: input.hashes === undefined ? {} : input.hashes,
           pause: input.pause === undefined ? null : input.pause,

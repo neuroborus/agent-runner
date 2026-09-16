@@ -16,7 +16,7 @@ import {
 } from "./parsing.js";
 import { profileImplementation, selectedProfile } from "./profiles.js";
 
-const EXECUTION_FIELDS = new Set(["contextSize", "model", "profile"]);
+const EXECUTION_FIELDS = new Set(["contextSize", "effort", "model", "profile"]);
 
 function normalizeExecution(value, path, providers) {
   assertRecord(value, path);
@@ -258,6 +258,13 @@ export function resolvePipelineConfiguration(
           normalizedProjectConfiguration?.defaultModel ??
           configuredRole.model ??
           normalizedConfiguration.defaultModel,
+        effort:
+          override.effort ??
+          normalizedExecutionOverrides.effort ??
+          projectRole.effort ??
+          normalizedProjectConfiguration?.defaultEffort ??
+          configuredRole.effort ??
+          normalizedConfiguration.defaultEffort,
         contextSize:
           override.contextSize ??
           normalizedExecutionOverrides.contextSize ??

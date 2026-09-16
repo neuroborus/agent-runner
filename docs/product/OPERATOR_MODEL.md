@@ -23,6 +23,13 @@ pipeline settings, and an artifact root, but cannot add provider binaries,
 credentials, environment values, or new host authority. CLI and MCP overrides
 have the documented highest precedence.
 
+Both configuration layers accept portable `defaultEffort` and role `effort`
+values: `current`, `low`, `medium`, `high`, and `xhigh`. Effort stays separate
+from model selection and follows shared execution-preference precedence through
+internal runner overrides. Inactive role vocabulary is validated without
+resolving or exposing those roles. Legacy runs receive `current` without
+provider activity; public status and activity never expose saved role effort.
+
 Resolved active roles, settings, artifact root, trusted commands, and optional
 source-session lineage are frozen into a new run. Resume uses that snapshot and
 does not silently adopt later configuration changes. `independent` is the
