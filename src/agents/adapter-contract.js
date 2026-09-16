@@ -6,6 +6,7 @@ const REQUEST_FIELDS = Object.freeze([
   "authorizationId",
   "commit",
   "contextSize",
+  "effort",
   "cwd",
   "model",
   "profile",
@@ -16,7 +17,14 @@ const REQUEST_FIELDS = Object.freeze([
   "signal",
   "onProcess",
 ]);
-const EXECUTION_FIELDS = Object.freeze(["contextSize", "model", "profile"]);
+const EXECUTION_FIELDS = Object.freeze([
+  "contextSize",
+  "effort",
+  "model",
+  "profile",
+]);
+const EFFORT_VALUES = new Set(["current", "low", "medium", "high", "xhigh"]);
+export const EFFORT_DIAGNOSTIC_CLASS = "effort_unsupported";
 const SESSION_FIELDS = Object.freeze(["id", "mode"]);
 const COMMIT_FIELDS = Object.freeze(["expectedHead", "message"]);
 const OBJECT_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
@@ -296,7 +304,21 @@ export function createAdapterContract({ AdapterError, backendName }) {
 
   function normalizeExecutionOptions(value = {}) {
     assertFields(value, EXECUTION_FIELDS, `${backendName} execution options`);
+    if (value.effort !== undefined && !EFFORT_VALUES.has(value.effort)) {
+      throw optionsError(
+        "Effort must be current, low, medium, high, or xhigh.",
+      );
+    }
+    if (typeof value.model === "string" && /\s/u.test(value.model)) {
+      throw optionsError(
+        "Model must be one identifier; select effort separately.",
+      );
+    }
     return Object.freeze({
+      effort:
+        value.effort === undefined || value.effort === "current"
+          ? undefined
+          : value.effort,
       contextSize:
         value.contextSize === undefined || value.contextSize === "current"
           ? undefined
@@ -332,6 +354,7 @@ export function createAdapterContract({ AdapterError, backendName }) {
     const prompt = normalizePrompt(value.prompt, `${backendName} prompt`);
     const execution = normalizeExecutionOptions({
       contextSize: value.contextSize,
+      effort: value.effort,
       model: value.model,
       profile: value.profile,
     });
@@ -374,6 +397,14 @@ export function createAdapterContract({ AdapterError, backendName }) {
 
   return Object.freeze({
     assertFields,
+    effortError: () =>
+      new AdapterError(
+        "Selected effort is unsupported by the provider or model.",
+        {
+          code: "ERR_UNSUPPORTED_EFFORT",
+          diagnosticClass: EFFORT_DIAGNOSTIC_CLASS,
+        },
+      ),
     normalizeExecutionOptions,
     normalizeRequest,
   });

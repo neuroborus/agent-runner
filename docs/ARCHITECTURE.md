@@ -1399,6 +1399,34 @@ Adapter capability probes inspect the installed CLI and enforceable local
 isolation only. They do not apply a selected native profile and do not claim
 that its authentication or provider is usable; that is established by the
 first real turn under the effective profile.
+
+The shared adapter contract accepts optional `effort` in execution options and
+turn requests, validated by each registered provider through that contract.
+Its closed vocabulary is `current|low|medium|high|xhigh`; omission and `current`
+normalize to no override. Model identifiers cannot contain whitespace, so a
+combined model-and-effort string is rejected before provider activity.
+Native translation stays within the providers: Codex supplies
+`model_reasoning_effort` at process launch and `effort` on every `turn/start`;
+Claude supplies `--effort`, translating portable `xhigh` to native `max`.
+The supported Codex App Server baseline includes effort control. Claude's
+model-free help probe must advertise the requested native tier. These checks
+apply only to explicit selections and do not add requirements to `current`.
+Codex uses `model/list` reasoning-tier metadata when present. An explicit model
+is checked before thread selection; an inherited model uses the selected
+thread's effective model, falling back to effective configuration or the
+catalog default when unavailable. Missing tier metadata or an unlisted
+inherited model defers support to the provider instead of guessing a model
+capability. Every continued, forked, compacted, reconstructed, and
+commit-readiness turn retains the same effort.
+Both adapters normalize an unsupported explicit selection or bounded native
+effort/model rejection to non-recoverable `ERR_UNSUPPORTED_EFFORT` and
+`effort_unsupported`. Codex classifies relevant RPC errors before discarding
+their payloads and preserves that classification through thread recovery.
+Structured authentication, usage, and transient failures retain their existing
+semantics. A specific Claude effort rejection takes precedence over a generic
+turn-setup failure. Native rejection text is not retained, and commit-readiness
+failure cannot start or replay the constrained executor.
+
 On Linux, Claude proves native-turn sandbox support with a fixed, model-free
 bubblewrap invocation that runs `/usr/bin/true` through the resolved Claude
 executable's embedded `apply-seccomp` helper. The probe uses the same outer

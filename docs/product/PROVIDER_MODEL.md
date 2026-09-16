@@ -26,6 +26,27 @@ write blocking, native session behavior, and constrained local commit when the
 pipeline needs it. A capability probe does not prove authentication or provider
 availability; the first real turn under the selected profile establishes that.
 
+Adapter execution options and turn requests also accept the portable effort
+values `current`, `low`, `medium`, `high`, and `xhigh`. Effort is separate from
+the model identifier; identifiers containing whitespace, including combined
+model-and-effort strings, are invalid. Missing effort and `current` omit the
+native override and preserve the provider's effective default.
+
+Codex maps explicit effort to its reasoning-effort configuration and turn
+control. Claude uses `--effort`, mapping `xhigh` to native `max` only when the
+installed CLI advertises that tier. Explicit selections require native support;
+`current` adds no capability requirement. Codex checks discoverable model
+reasoning tiers before starting a turn, including the effective model of a
+continued or forked session. Model-specific support that cannot be discovered
+locally remains subject to provider rejection. Effort survives continuation,
+forking, compaction, fresh reconstruction, and local-commit readiness.
+
+Unsupported explicit selections and provider-reported effort/model
+incompatibilities produce terminal `ERR_UNSUPPORTED_EFFORT` with the bounded
+`effort_unsupported` diagnostic. They never silently downgrade, enter
+availability retry, or expose native error text. Rejected commit readiness
+retains `effectStarted: false`; the commit executor does not run.
+
 ## Registration
 
 Providers are registered through one frozen, source-controlled descriptor list.

@@ -11,7 +11,12 @@ function isRecord(value) {
   return prototype === Object.prototype || prototype === null;
 }
 
-export function createCodexAppServerClient(child, AdapterError, signal) {
+export function createCodexAppServerClient(
+  child,
+  AdapterError,
+  signal,
+  classifyRequestError,
+) {
   if (
     child === null ||
     typeof child !== "object" ||
@@ -124,10 +129,11 @@ export function createCodexAppServerClient(child, AdapterError, signal) {
       pending.delete(message.id);
       if (message.error !== undefined) {
         operation.reject(
-          new AdapterError("Codex app-server request failed.", {
-            code: "ERR_CODEX_RPC",
-            method: operation.method,
-          }),
+          classifyRequestError?.(message.error, operation.method) ??
+            new AdapterError("Codex app-server request failed.", {
+              code: "ERR_CODEX_RPC",
+              method: operation.method,
+            }),
         );
       } else if (message.result !== undefined) {
         operation.resolve(message.result);

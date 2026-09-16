@@ -2886,6 +2886,7 @@ test("never reads an Agent Runner configuration file in the target repository", 
     adapters: { codex: createAdapter() },
     clarifications: createClarificationService({ interactive: false }),
     git: createGitService(),
+    loadConfiguration: configurationLoader(),
     runStore: createRunStore({ stateRoot: fixture.stateRoot }),
   });
 

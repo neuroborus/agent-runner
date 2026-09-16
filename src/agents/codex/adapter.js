@@ -8,6 +8,7 @@ import packageMetadata from "../../../package.json" with { type: "json" };
 import {
   createAdapterContract,
   deepFreeze,
+  EFFORT_DIAGNOSTIC_CLASS,
   isEnvironment,
   isRecord,
   isolateGitEnvironment,
@@ -83,8 +84,10 @@ const CLIENT_ERROR_CODES = new Set([
   "missing_required_parameter",
   "model_not_found",
   "unsupported_parameter",
+  "unsupported_value",
 ]);
 const CODEX_DIAGNOSTIC_CLASSES = new Set([
+  EFFORT_DIAGNOSTIC_CLASS,
   ...Object.values(CAPABILITY_DIAGNOSTICS),
   ...Object.values(TERMINAL_TURN_DIAGNOSTICS),
   "isolation_command_host",
@@ -335,6 +338,7 @@ export class CodexAdapterError extends Error {
 
 const {
   assertFields,
+  effortError,
   normalizeExecutionOptions: normalizeContractExecutionOptions,
   normalizeRequest: normalizeContractRequest,
 } = createAdapterContract({
@@ -373,6 +377,7 @@ function normalizeRequest(value) {
 function executionOptionsFor(request) {
   return Object.freeze({
     contextSize: request.contextSize,
+    effort: request.effort,
     model: request.model,
     profile: request.profile,
   });
@@ -385,6 +390,12 @@ function nativeArguments(options, argumentsList) {
   }
   if (options.contextSize !== undefined) {
     result.push("-c", `model_context_window=${options.contextSize}`);
+  }
+  if (options.effort !== undefined) {
+    result.push(
+      "-c",
+      `model_reasoning_effort=${JSON.stringify(options.effort)}`,
+    );
   }
   result.push(...argumentsList);
   return result;
@@ -650,6 +661,9 @@ function turnOptions(request, threadId, prompt, workspaceStorage) {
   if (request.model !== undefined) {
     options.model = request.model;
   }
+  if (request.effort !== undefined) {
+    options.effort = request.effort;
+  }
   const outputSchema = outputSchemaFor(request);
   if (outputSchema !== undefined) {
     options.outputSchema = outputSchema;
@@ -671,8 +685,13 @@ function assertThreadResponse(value) {
   return value.thread.id;
 }
 
-async function validateModel(client, model) {
-  if (model === undefined) {
+async function validateModel(
+  client,
+  model,
+  effort,
+  { allowUnlisted = false } = {},
+) {
+  if (model === undefined && effort === undefined) {
     return;
   }
   const cursors = new Set();
@@ -688,12 +707,36 @@ async function validateModel(client, model) {
         code: "ERR_CODEX_PROTOCOL",
       });
     }
-    if (
-      result.data.some(
-        (entry) =>
-          isRecord(entry) && (entry.id === model || entry.model === model),
-      )
-    ) {
+    const selected = result.data.find(
+      (entry) =>
+        isRecord(entry) &&
+        (model === undefined
+          ? entry.isDefault === true
+          : entry.id === model || entry.model === model),
+    );
+    if (selected !== undefined) {
+      if (
+        effort !== undefined &&
+        selected.supportedReasoningEfforts !== undefined
+      ) {
+        const supported = selected.supportedReasoningEfforts;
+        if (
+          !Array.isArray(supported) ||
+          supported.some(
+            (entry) =>
+              !isRecord(entry) || typeof entry.reasoningEffort !== "string",
+          )
+        ) {
+          throw new CodexAdapterError(
+            "Codex returned invalid model capabilities.",
+            {
+              code: "ERR_CODEX_PROTOCOL",
+            },
+          );
+        }
+        if (!supported.some((entry) => entry.reasoningEffort === effort))
+          throw effortError();
+      }
       return;
     }
     if (result.nextCursor === null || result.nextCursor === undefined) {
@@ -711,6 +754,8 @@ async function validateModel(client, model) {
     cursors.add(result.nextCursor);
     cursor = result.nextCursor;
   }
+  // An undiscoverable native default must be checked by the provider itself.
+  if (model === undefined || allowUnlisted) return;
   throw new CodexAdapterError(`Codex model is unavailable: ${model}.`, {
     code: "ERR_CODEX_MODEL_UNAVAILABLE",
   });
@@ -723,7 +768,7 @@ async function selectThread(client, request, fresh) {
       ...options,
       serviceName: "agent_runner",
     });
-    return assertThreadResponse(result);
+    return { id: assertThreadResponse(result), model: result.model };
   }
   if (request.session.mode === "fork") {
     try {
@@ -740,11 +785,11 @@ async function selectThread(client, request, fresh) {
           code: "ERR_CODEX_PROTOCOL",
         });
       }
-      return threadId;
+      return { id: threadId, model: result.model };
     } catch (cause) {
       if (
         cause instanceof CodexAdapterError &&
-        cause.code === "ERR_CODEX_PROTOCOL"
+        ["ERR_CODEX_PROTOCOL", "ERR_UNSUPPORTED_EFFORT"].includes(cause.code)
       ) {
         throw cause;
       }
@@ -765,11 +810,11 @@ async function selectThread(client, request, fresh) {
         code: "ERR_CODEX_PROTOCOL",
       });
     }
-    return threadId;
+    return { id: threadId, model: result.model };
   } catch (cause) {
     if (
       cause instanceof CodexAdapterError &&
-      cause.code === "ERR_CODEX_PROTOCOL"
+      ["ERR_CODEX_PROTOCOL", "ERR_UNSUPPORTED_EFFORT"].includes(cause.code)
     ) {
       throw cause;
     }
@@ -802,7 +847,7 @@ function terminalTurnDiagnosticClass(turn) {
     : undefined;
 }
 
-function hasStructuredClientError(message) {
+function structuredClientError(message) {
   if (
     typeof message !== "string" ||
     message.length > MAX_HTTP_ERROR_BYTES ||
@@ -871,7 +916,52 @@ function hasStructuredClientError(message) {
   const keyCount = [...body.matchAll(/"(?:[^"\\]|\\.)*"\s*(:)?/gsu)].filter(
     (entry) => entry[1] !== undefined,
   ).length;
-  return keyCount === keys.length + 1;
+  return keyCount === keys.length + 1 ? { ...error, status } : false;
+}
+
+function rejectsEffort(message) {
+  return (
+    typeof message === "string" &&
+    Buffer.byteLength(message) <= MAX_HTTP_ERROR_BYTES &&
+    /\b(?:(?:model[._ -])?reasoning[._ -])?effort\b[^\n]{0,160}(?:not supported|unsupported|invalid|not available|only supported|must be|not allowed)|(?:unsupported|invalid|unknown|does not support)[^\n]{0,160}\b(?:(?:model[._ -])?reasoning[._ -])?effort\b/iu.test(
+      message,
+    )
+  );
+}
+
+function isEffortRejection(message) {
+  const rejection = structuredClientError(message);
+  if (rejection) {
+    return (
+      [400, 422].includes(rejection.status) &&
+      ([
+        "reasoning.effort",
+        "reasoning_effort",
+        "effort",
+        "model_reasoning_effort",
+      ].includes(rejection.param) ||
+        rejectsEffort(rejection.message))
+    );
+  }
+  return (
+    typeof message === "string" &&
+    !message.startsWith("unexpected status ") &&
+    rejectsEffort(message)
+  );
+}
+
+function effortRequestError(error, method, request) {
+  if (
+    request.effort !== undefined &&
+    ["turn/start", "thread/start", "thread/resume", "thread/fork"].includes(
+      method,
+    ) &&
+    isRecord(error) &&
+    [-32600, -32602, -32603, -32000].includes(error.code) &&
+    isEffortRejection(error.message)
+  )
+    return effortError();
+  return undefined;
 }
 
 function hasFullItemsView(turn) {
@@ -1095,10 +1185,22 @@ async function runTurn(
         recoverable: true,
       });
     }
-    if (diagnosticClass === TERMINAL_TURN_DIAGNOSTICS.other) {
+    if (
+      [
+        TERMINAL_TURN_DIAGNOSTICS.other,
+        TERMINAL_TURN_DIAGNOSTICS.badRequest,
+      ].includes(diagnosticClass)
+    ) {
       // Classification and recovery cannot hide policy or protocol violations.
       auditItems(turn.items, request);
-      if (hasStructuredClientError(turn.error.message)) {
+      const rejection = structuredClientError(turn.error.message);
+      if (
+        request.effort !== undefined &&
+        isEffortRejection(turn.error.message)
+      ) {
+        throw effortError();
+      }
+      if (rejection) {
         diagnosticClass = TERMINAL_TURN_DIAGNOSTICS.badRequest;
       }
     }
@@ -1379,8 +1481,15 @@ export function createCodexAdapter(options = {}) {
   }
 
   function probe(value) {
-    normalizeExecutionOptions(value);
+    const options = normalizeExecutionOptions(value);
     probePromise ??= inspectCapabilities();
+    if (options.effort !== undefined) {
+      return probePromise.then((capabilities) => {
+        // The supported App Server baseline includes the turn effort control.
+        if (!capabilities.structuredOutput) throw effortError();
+        return capabilities;
+      });
+    }
     return probePromise;
   }
 
@@ -1451,6 +1560,11 @@ export function createCodexAdapter(options = {}) {
           ].includes(cause?.code)
         )
           throw cause;
+        if (
+          request.effort !== undefined &&
+          (isEffortRejection(cause?.stderr) || isEffortRejection(cause?.stdout))
+        )
+          throw effortError();
         if (attempt === 1) {
           throw new CodexAdapterError(
             "Codex MCP configuration is temporarily unavailable.",
@@ -1599,6 +1713,7 @@ export function createCodexAdapter(options = {}) {
         child,
         CodexAdapterError,
         request.signal,
+        (error, method) => effortRequestError(error, method, request),
       );
       let result;
       let operationFailed = false;
@@ -1613,13 +1728,33 @@ export function createCodexAdapter(options = {}) {
             capabilities: null,
           });
           client.notify("initialized", {});
+          const configuration = await client.request("config/read", {
+            includeLayers: false,
+          });
           assertIsolatedConfiguration(
-            await client.request("config/read", { includeLayers: false }),
+            configuration,
             launch.mcpServerNames,
             workspaceStorage?.shellEnvironment ?? EMPTY_SHELL_ENVIRONMENT,
           );
-          await validateModel(client, request.model);
-          const threadId = await selectThread(client, request, fresh);
+          if (request.model !== undefined)
+            await validateModel(client, request.model, request.effort);
+          const selectedThread = await selectThread(client, request, fresh);
+          const threadId = selectedThread.id;
+          if (request.model === undefined && request.effort !== undefined) {
+            const model =
+              selectedThread.model ?? configuration.config.model ?? undefined;
+            if (
+              model !== undefined &&
+              (typeof model !== "string" || model.length === 0)
+            ) {
+              throw new CodexAdapterError("Codex returned an invalid model.", {
+                code: "ERR_CODEX_PROTOCOL",
+              });
+            }
+            await validateModel(client, model, request.effort, {
+              allowUnlisted: true,
+            });
+          }
           const turn = await runTurn(
             client,
             request,
