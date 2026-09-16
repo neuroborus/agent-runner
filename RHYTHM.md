@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-09-16
+
+- **Effort incompatibility is a terminal adapter configuration failure.**
+  Provider adapters accept portable effort separately from model identifiers,
+  omit native overrides for `current`, and preserve explicit selections across
+  session recovery and commit readiness. Native translation and discoverable
+  capability checks stay inside the adapters. Unsupported selections return
+  one bounded, provider-neutral failure instead of silently downgrading or
+  retrying through a fresh session. This keeps recovery from changing the
+  requested execution semantics or starting a rejected commit effect.
+
 ## 2026-09-15
 
 - **Mode guidance and finalization coverage share canonical owners.** README and

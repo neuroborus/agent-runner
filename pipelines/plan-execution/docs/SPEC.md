@@ -810,6 +810,7 @@ A request should contain only runner-level concepts such as:
   access: "read-only" | "workspace-write" | "local-commit",
   prompt,
   recoveryPrompt, // optional; defaults to prompt
+  effort: "current" | "low" | "medium" | "high" | "xhigh", // optional
   schema,
   session: { mode: "fork" | "continue", id }, // optional
   authorizationId, // local-commit only
@@ -818,6 +819,16 @@ A request should contain only runner-level concepts such as:
 ```
 
 Backend-specific CLI flags belong only inside the adapter.
+
+Adapter effort is independent of the model identifier. Missing effort or
+`current` omits the native override. Codex uses its reasoning-effort control;
+Claude maps `xhigh` to its advertised native `max` tier through `--effort`.
+Explicit selections require native support, preserve every session/recovery
+and commit-readiness path, and use discoverable model capabilities before a
+turn. Unsupported selections and provider-only effort/model rejections return
+non-recoverable `ERR_UNSUPPORTED_EFFORT` / `effort_unsupported` without native
+diagnostics, downgrade, or availability retry. A rejected readiness turn keeps
+the commit executor unstarted. See the provider model for the shared contract.
 
 `probe()` validates installed CLI features and enforceable local isolation. It
 does not apply a selected native profile or attest that the profile's

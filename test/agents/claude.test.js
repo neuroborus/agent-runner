@@ -7,7 +7,10 @@ import {
   ClaudeAdapterError,
   createClaudeAdapter,
 } from "../../src/agents/claude/index.js";
-import { STRUCTURED_OUTPUT_FAILURE_CLASS } from "../../src/agents/index.js";
+import {
+  STRUCTURED_OUTPUT_FAILURE_CLASS,
+  normalizeAdapterFailure,
+} from "../../src/agents/index.js";
 
 import {
   BOOTSTRAP_SCHEMA as EXECUTION_BOOTSTRAP_SCHEMA,
@@ -194,6 +197,219 @@ function turnCalls(fixture) {
       file === "claude" && argumentsList.includes("-p"),
   );
 }
+
+const EFFORT_HELP = `${HELP}\n--effort <level> Effort level (low, medium, high, max)`;
+
+test("maps portable Claude effort across sessions and commit readiness", async () => {
+  for (const effort of ["low", "medium", "high", "xhigh"]) {
+    for (const mode of [undefined, "continue", "fork"]) {
+      const fixture = createFixture({ help: EFFORT_HELP });
+      await fixture.adapter.run(
+        request({
+          effort,
+          ...(mode === undefined
+            ? {}
+            : { session: { id: SOURCE_SESSION, mode } }),
+        }),
+      );
+      assert.equal(
+        option(turnCalls(fixture)[0].argumentsList, "--effort"),
+        effort === "xhigh" ? "max" : effort,
+      );
+    }
+  }
+  const fixture = createFixture({ help: EFFORT_HELP });
+  await fixture.adapter.run(
+    request({
+      effort: "xhigh",
+      access: "local-commit",
+      authorizationId: "effort-commit",
+      commit: {
+        expectedHead: EXPECTED_HEAD,
+        message: "feat(test): preserve effort",
+      },
+    }),
+  );
+  assert.equal(option(turnCalls(fixture)[0].argumentsList, "--effort"), "max");
+});
+
+test("requires Claude effort support only for explicit selections", async () => {
+  for (const help of [
+    HELP,
+    `${HELP}\n--effort <level> Effort level (low, medium, high)`,
+  ]) {
+    const fixture = createFixture({ help });
+    await fixture.adapter.run(request({ effort: "current" }));
+    await assert.rejects(
+      fixture.adapter.probe({ effort: "xhigh" }),
+      hasDiagnostic("ERR_UNSUPPORTED_EFFORT", "effort_unsupported"),
+    );
+    await assert.rejects(
+      fixture.adapter.run(request({ effort: "xhigh" })),
+      hasCode("ERR_UNSUPPORTED_EFFORT"),
+    );
+    assert.equal(turnCalls(fixture).length, 1);
+    assert.equal(
+      option(turnCalls(fixture)[0].argumentsList, "--effort"),
+      undefined,
+    );
+  }
+  const fixture = createFixture({
+    help: `${HELP}\n--effort <level> Effort level\n    (low, medium, high)\n--extra <value>`,
+  });
+  await fixture.adapter.run(request({ effort: "high" }));
+  assert.equal(option(turnCalls(fixture)[0].argumentsList, "--effort"), "high");
+});
+
+test("preserves Claude effort during fresh reconstruction and compaction", async () => {
+  for (const recovery of ["fresh", "compact"]) {
+    let turns = 0;
+    const fixture = createFixture({
+      help: EFFORT_HELP,
+      handle({ call }) {
+        if (
+          call.file === "claude" &&
+          call.argumentsList.includes("-p") &&
+          turns++ === 0
+        ) {
+          throw processFailure(
+            result({
+              error: true,
+              sessionId: SOURCE_SESSION,
+              output:
+                recovery === "fresh"
+                  ? "Session not found"
+                  : "Context window exceeded",
+            }),
+          );
+        }
+      },
+    });
+    await fixture.adapter.run(
+      request({
+        effort: "high",
+        session: { id: SOURCE_SESSION, mode: "continue" },
+      }),
+    );
+    assert.equal(turns, 2);
+    for (const turn of turnCalls(fixture))
+      assert.equal(option(turn.argumentsList, "--effort"), "high");
+    assert.equal(
+      option(turnCalls(fixture)[1].argumentsList, "--resume"),
+      recovery === "fresh" ? undefined : SOURCE_SESSION,
+    );
+  }
+});
+
+test("normalizes Claude effort rejections without availability retry", async () => {
+  for (const status of [undefined, 400, 422]) {
+    for (const access of ["read-only", "workspace-write", "local-commit"]) {
+      const fixture = createFixture({
+        help: EFFORT_HELP,
+        handle({ call }) {
+          if (call.file === "claude" && call.argumentsList.includes("-p"))
+            throw processFailure(
+              result({
+                error: true,
+                output:
+                  "Effort max is not supported for this model PRIVATE_NATIVE_DETAIL",
+                ...(status === undefined ? {} : { api_error_status: status }),
+              }),
+            );
+        },
+      });
+      await assert.rejects(
+        fixture.adapter.run(
+          request({
+            effort: "xhigh",
+            access,
+            ...(access === "local-commit"
+              ? {
+                  authorizationId: "effort-rejected",
+                  commit: {
+                    expectedHead: EXPECTED_HEAD,
+                    message: "feat(test): reject effort",
+                  },
+                }
+              : {}),
+          }),
+        ),
+        (error) => {
+          assert.ok(
+            hasDiagnostic(
+              "ERR_UNSUPPORTED_EFFORT",
+              "effort_unsupported",
+            )(error),
+          );
+          assert.equal(error.recoverable, false);
+          assert.equal(error.cause, undefined);
+          assert.equal(
+            error.effectStarted,
+            access === "local-commit" ? false : undefined,
+          );
+          const normalized = normalizeAdapterFailure("claude", error);
+          assert.equal(normalized.code, "ERR_UNSUPPORTED_EFFORT");
+          assert.equal(normalized.diagnosticClass, "effort_unsupported");
+          assert.doesNotMatch(
+            JSON.stringify(normalized),
+            /PRIVATE_NATIVE_DETAIL/u,
+          );
+          return true;
+        },
+      );
+      assert.equal(turnCalls(fixture).length, 1);
+      assert.equal(localCommitSandboxCalls(fixture).length, 1); // Capability probe only.
+    }
+  }
+});
+
+test("keeps transient Claude status authoritative over effort-like prose", async () => {
+  const fixture = createFixture({
+    help: EFFORT_HELP,
+    handle({ call }) {
+      if (call.file === "claude" && call.argumentsList.includes("-p"))
+        throw processFailure(
+          result({
+            error: true,
+            api_error_status: 503,
+            output: "Effort is not supported",
+          }),
+        );
+    },
+  });
+  await assert.rejects(
+    fixture.adapter.run(request({ effort: "high" })),
+    hasCode("ERR_CLAUDE_PROVIDER_UNAVAILABLE"),
+  );
+  assert.equal(turnCalls(fixture).length, 1);
+});
+
+test("classifies explicit Claude effort rejection during turn setup as terminal", async () => {
+  const fixture = createFixture({
+    help: EFFORT_HELP,
+    handle({ call }) {
+      if (call.file === "claude" && call.argumentsList.includes("-p"))
+        throw processFailure(
+          result({
+            error: true,
+            terminal_reason: "turn_setup_failed",
+            output: "Effort max is not supported for this model",
+          }),
+        );
+    },
+  });
+  await assert.rejects(
+    fixture.adapter.run(request({ effort: "xhigh" })),
+    (error) => {
+      assert.ok(
+        hasDiagnostic("ERR_UNSUPPORTED_EFFORT", "effort_unsupported")(error),
+      );
+      assert.equal(error.recoverable, false);
+      return true;
+    },
+  );
+  assert.equal(turnCalls(fixture).length, 1);
+});
 
 test("marks only Claude native-sandbox executions as provider-owned", async () => {
   const fixture = createFixture();
@@ -565,12 +781,18 @@ test("omits current Claude execution overrides", async () => {
   });
 
   await fixture.adapter.run(
-    request({ profile: "current", model: "current", contextSize: "current" }),
+    request({
+      profile: "current",
+      model: "current",
+      contextSize: "current",
+      effort: "current",
+    }),
   );
 
   const turn = turnCalls(fixture)[0];
   assert.equal(option(turn.argumentsList, "--model"), undefined);
   assert.equal(option(turn.argumentsList, "--autocompact"), undefined);
+  assert.equal(option(turn.argumentsList, "--effort"), undefined);
   assert.equal(turn.options.env.CLAUDE_CONFIG_DIR, "/profiles/process-default");
 });
 

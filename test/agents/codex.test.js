@@ -479,6 +479,274 @@ function request(overrides = {}) {
   };
 }
 
+test("maps portable Codex effort across sessions and commit readiness", async () => {
+  for (const effort of ["low", "medium", "high", "xhigh"]) {
+    for (const mode of [undefined, "continue", "fork"]) {
+      const fixture = createFixture();
+      await fixture.adapter.run(
+        request({
+          effort,
+          model: "gpt-test",
+          ...(mode === undefined ? {} : { session: { id: "source", mode } }),
+        }),
+      );
+      const process = fixture.processes[0];
+      assert.ok(
+        process.argumentsList.includes(`model_reasoning_effort="${effort}"`),
+      );
+      assert.equal(
+        process.messages.find(({ method }) => method === "turn/start").params
+          .effort,
+        effort,
+      );
+    }
+  }
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method === "turn/start")
+        return {
+          result: { turn: { id: "ready" } },
+          notification: completedTurn(
+            message.params.threadId,
+            "ready",
+            '{"ready":true}',
+          ),
+        };
+    },
+  });
+  await fixture.adapter.run(
+    request({
+      effort: "xhigh",
+      access: "local-commit",
+      authorizationId: "effort-commit",
+      commit: {
+        expectedHead: EXPECTED_HEAD,
+        message: "feat(test): preserve effort",
+      },
+    }),
+  );
+  assert.equal(
+    fixture.processes[0].messages.find(({ method }) => method === "turn/start")
+      .params.effort,
+    "xhigh",
+  );
+});
+
+test("validates explicit Codex effort capabilities without model work", async () => {
+  const unsupportedCli = createFixture({ version: "0.146.0" });
+  await assert.rejects(
+    unsupportedCli.adapter.probe({ effort: "high" }),
+    hasDiagnostic("ERR_UNSUPPORTED_EFFORT", "effort_unsupported"),
+  );
+  assert.equal(unsupportedCli.processes.length, 0);
+  for (const model of ["gpt-test", "current"]) {
+    const fixture = createFixture({
+      handle({ message }) {
+        if (message.method === "model/list")
+          return {
+            result: {
+              data: [
+                {
+                  id: "gpt-test",
+                  isDefault: true,
+                  supportedReasoningEfforts: [{ reasoningEffort: "high" }],
+                },
+              ],
+              nextCursor: null,
+            },
+          };
+      },
+    });
+    await assert.rejects(
+      fixture.adapter.run(request({ model, effort: "xhigh" })),
+      hasCode("ERR_UNSUPPORTED_EFFORT"),
+    );
+    assert.equal(fixture.processes.length, 1);
+    assert.equal(
+      fixture.processes[0].messages.some(
+        ({ method }) => method === "turn/start",
+      ),
+      false,
+    );
+  }
+});
+
+test("checks effort against the effective resumed Codex model", async () => {
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method === "thread/resume")
+        return {
+          result: {
+            model: "session-model",
+            thread: { id: message.params.threadId },
+          },
+        };
+      if (message.method === "model/list")
+        return {
+          result: {
+            data: [
+              {
+                id: "default-model",
+                isDefault: true,
+                supportedReasoningEfforts: [{ reasoningEffort: "high" }],
+              },
+              {
+                id: "session-model",
+                supportedReasoningEfforts: [{ reasoningEffort: "xhigh" }],
+              },
+            ],
+            nextCursor: null,
+          },
+        };
+    },
+  });
+  await fixture.adapter.run(
+    request({ effort: "xhigh", session: { id: "source", mode: "continue" } }),
+  );
+  assert.equal(
+    fixture.processes[0].messages.find(({ method }) => method === "turn/start")
+      .params.effort,
+    "xhigh",
+  );
+});
+
+test("preserves Codex effort during fresh reconstruction and compaction", async () => {
+  for (const recovery of ["fresh", "compact"]) {
+    let turns = 0;
+    const fixture = createFixture({
+      handle({ message }) {
+        if (recovery === "fresh" && message.method === "thread/resume")
+          return { error: { code: -32000, message: "session unavailable" } };
+        if (
+          recovery === "compact" &&
+          message.method === "turn/start" &&
+          turns++ === 0
+        )
+          return {
+            result: { turn: { id: "full" } },
+            notification: failedTurn(message.params.threadId, "full", {
+              codexErrorInfo: "contextWindowExceeded",
+            }),
+          };
+      },
+    });
+    await fixture.adapter.run(
+      request({ effort: "high", session: { id: "source", mode: "continue" } }),
+    );
+    for (const process of fixture.processes) {
+      assert.ok(
+        process.argumentsList.includes('model_reasoning_effort="high"'),
+      );
+      for (const message of process.messages.filter(
+        ({ method }) => method === "turn/start",
+      ))
+        assert.equal(message.params.effort, "high");
+    }
+    assert.equal(recovery === "fresh" ? fixture.processes.length : turns, 2);
+  }
+});
+
+test("defers effort support for an unlisted inherited Codex model", async () => {
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method === "thread/start")
+        return {
+          result: {
+            model: "private-native-default",
+            thread: { id: "native-thread" },
+          },
+        };
+    },
+  });
+  await fixture.adapter.run(request({ effort: "high" }));
+  assert.equal(
+    fixture.processes[0].messages.find(({ method }) => method === "turn/start")
+      .params.effort,
+    "high",
+  );
+});
+
+test("keeps Codex effort setup rejection out of MCP availability retry", async () => {
+  const fixture = createFixture({
+    executeHandle({ argumentsList }) {
+      if (argumentsList.includes("mcp"))
+        throw Object.assign(new Error("private"), {
+          stderr: "Invalid model_reasoning_effort: xhigh",
+        });
+    },
+  });
+  await assert.rejects(
+    fixture.adapter.run(request({ effort: "high" })),
+    hasCode("ERR_UNSUPPORTED_EFFORT"),
+  );
+  assert.equal(
+    fixture.executeCalls.filter(({ argumentsList }) =>
+      argumentsList.includes("mcp"),
+    ).length,
+    1,
+  );
+  assert.equal(fixture.processes.length, 0);
+});
+
+test("normalizes Codex effort rejections without retry or raw diagnostics", async () => {
+  for (const [method, code] of [
+    ["thread/start", -32602],
+    ["thread/resume", -32602],
+    ["thread/resume", -32603],
+    ["thread/fork", -32602],
+    ["turn/start", -32602],
+    ["turn/completed", null],
+  ]) {
+    const fixture = createFixture({
+      handle({ message }) {
+        const text =
+          "Unsupported reasoning effort xhigh for this model PRIVATE_NATIVE_DETAIL";
+        if (message.method === method)
+          return { error: { code, message: text } };
+        if (method === "turn/completed" && message.method === "turn/start")
+          return {
+            result: { turn: { id: "rejected" } },
+            notification: failedTurn(message.params.threadId, "rejected", {
+              codexErrorInfo: "other",
+              message: `unexpected status 400 Bad Request: ${JSON.stringify({ error: { message: text, type: "invalid_request_error", param: "reasoning.effort", code: "unsupported_parameter" } })}`,
+            }),
+          };
+      },
+    });
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          effort: "xhigh",
+          ...(method === "thread/resume" || method === "thread/fork"
+            ? {
+                session: {
+                  id: "source",
+                  mode: method === "thread/fork" ? "fork" : "continue",
+                },
+              }
+            : {}),
+        }),
+      ),
+      (error) => {
+        assert.ok(
+          hasDiagnostic("ERR_UNSUPPORTED_EFFORT", "effort_unsupported")(error),
+        );
+        assert.equal(error.recoverable, false);
+        assert.equal(error.cause, undefined);
+        const normalized = normalizeAdapterFailure("codex", error);
+        assert.equal(normalized.code, "ERR_UNSUPPORTED_EFFORT");
+        assert.equal(normalized.diagnosticClass, "effort_unsupported");
+        assert.doesNotMatch(
+          JSON.stringify(normalized),
+          /PRIVATE_NATIVE_DETAIL/u,
+        );
+        return true;
+      },
+    );
+    assert.equal(fixture.processes.length, 1);
+  }
+});
+
 test("marks only Codex native-sandbox executions as provider-owned", async () => {
   const fixture = createFixture();
   await fixture.adapter.run(request({ onProcess: async () => {} }));
@@ -997,7 +1265,12 @@ test("omits current Codex execution overrides", async () => {
   const fixture = createFixture();
 
   await fixture.adapter.run(
-    request({ profile: "current", model: "current", contextSize: "current" }),
+    request({
+      profile: "current",
+      model: "current",
+      contextSize: "current",
+      effort: "current",
+    }),
   );
 
   assert.equal(
@@ -1020,6 +1293,21 @@ test("omits current Codex execution overrides", async () => {
     ({ method }) => method === "thread/start",
   );
   assert.equal(thread.params.model, undefined);
+  assert.equal(
+    fixture.processes[0].argumentsList.some((argument) =>
+      argument.startsWith("model_reasoning_effort="),
+    ),
+    false,
+  );
+  assert.equal(
+    Object.hasOwn(
+      fixture.processes[0].messages.find(
+        ({ method }) => method === "turn/start",
+      ).params,
+      "effort",
+    ),
+    false,
+  );
 });
 
 test("rejects invalid Codex profiles and context sizes", async () => {
