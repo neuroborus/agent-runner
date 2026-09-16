@@ -144,7 +144,14 @@ overrides win over project pipeline settings, which win over runner settings
 and descriptor defaults. `resume` uses the persisted roles, settings, and
 artifact root and never reloads the mode.
 
-Every role accepts string `profile`, `model`, and `contextSize` selections.
+Every role accepts string `profile`, `model`, `contextSize`, and `effort`
+selections.
+Root and safe ignored project configuration accept `defaultEffort`, with role
+`effort` values taking precedence within each layer. Portable effort values are
+`current`, `low`, `medium`, `high`, and `xhigh`; `current` retains the provider
+default. Effort uses the same precedence through internal runner overrides;
+CLI/MCP effort controls are not yet exposed. Only active roles persist the
+resolved selection, and resume reuses it without reloading configuration.
 A selected profile supplies its backend; `defaultBackend` provides the fallback.
 Explicit decimal context sizes are validated by the chosen adapter and map to
 Codex's context window or Claude's auto-compaction token window.
@@ -520,8 +527,10 @@ Runner state uses `$XDG_STATE_HOME/agent-runner/` with
 ID, pipeline state-schema version, and an explicit runtime compatibility tuple
 independent from the package version. Compatible legacy state is migrated by
 the owning pipeline under the per-run lease; incompatible readers return a
-specific version-skew error while preserving the run. The mode-aware pipeline
-versions are plan-authoring version 5, plan-execution version 17, and polishing
+specific version-skew error while preserving the run. Common envelope version 8
+persists active-role effort; legacy missing values migrate to `current` without
+provider activity or changes to saved progress and session evidence. The
+mode-aware pipeline versions are plan-authoring version 5, plan-execution version 17, and polishing
 version 13. Their ordered migrations resolve missing legacy modes to
 `independent` and preserve explicitly saved modes without moving terminal workflows or replaying role turns,
 commits, or handoffs. Complete write-ahead events precede atomic state

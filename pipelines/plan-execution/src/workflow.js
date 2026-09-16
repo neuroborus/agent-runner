@@ -1420,7 +1420,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     const roleConfiguration = currentRun.roles[role];
     const recoveryPrompt = completeRolePrompt(buildPrompt(context));
     const executionPreferences = Object.fromEntries(
-      ["profile", "model", "contextSize"].flatMap((field) =>
+      ["profile", "model", "contextSize", "effort"].flatMap((field) =>
         typeof roleConfiguration[field] === "string" &&
         roleConfiguration[field] !== "current"
           ? [[field, roleConfiguration[field]]]
@@ -5884,7 +5884,7 @@ ${JSON.stringify(
       }
       const roleConfiguration = currentRun.roles.worker;
       const executionPreferences = Object.fromEntries(
-        ["profile", "model", "contextSize"].flatMap((field) =>
+        ["profile", "model", "contextSize", "effort"].flatMap((field) =>
           typeof roleConfiguration[field] === "string" &&
           roleConfiguration[field] !== "current"
             ? [[field, roleConfiguration[field]]]

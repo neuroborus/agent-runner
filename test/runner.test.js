@@ -1515,6 +1515,7 @@ async function rewriteRunAsLegacy(directoryPath) {
   state.schemaVersion = 1;
   delete state.runtimeCompatibility;
   delete state.activeTurn;
+  for (const role of Object.values(state.roles)) delete role.effort;
   const events = (await readFile(eventsPath, "utf8"))
     .trimEnd()
     .split("\n")
@@ -1539,6 +1540,7 @@ async function rewriteRunAsLegacy(directoryPath) {
     event.state.schemaVersion = 1;
     delete event.state.runtimeCompatibility;
     delete event.state.activeTurn;
+    for (const role of Object.values(event.state.roles)) delete role.effort;
   }
   await Promise.all([
     writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`),
@@ -1736,6 +1738,7 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
       activities,
       configuration: {
         ...RUNNER_CONFIGURATION,
+        defaultEffort: "xhigh",
         pipelines: { "plan-authoring": { preferredCommitLineLimit: 650 } },
       },
     },
@@ -1763,6 +1766,7 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
     profile: "current",
     model: "planner-model",
     contextSize: "current",
+    effort: "xhigh",
   });
   assert.deepEqual(paused.run.pipelineState.settings, {
     maxRevisionRounds: 20,
@@ -1788,6 +1792,7 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
       configuration: {
         schemaVersion: 1,
         defaultBackend: "claude",
+        defaultEffort: "low",
         pipelines: { "plan-authoring": { preferredCommitLineLimit: 1200 } },
       },
     },
@@ -1805,6 +1810,8 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
   assert.equal(completed.run.pipelineState.workflowState, "DONE");
   assert.equal(await readFile(join(fixture.taskPath, "plan.md"), "utf8"), PLAN);
   assert.deepEqual(completed.run.roles, paused.run.roles);
+  assert.ok(adapter.calls.every(({ effort }) => effort === "xhigh"));
+  assert.ok(adapter.probes.every(({ effort }) => effort === "xhigh"));
   assert.deepEqual(completed.run.pipelineState.settings, {
     maxRevisionRounds: 20,
     mode: "independent",
@@ -1936,7 +1943,16 @@ test("migrates a legacy runtime envelope under the run lease before resume", asy
   });
   await rewriteRunAsLegacy(prepared.directoryPath);
 
+  const probeCount = adapter.probes.length;
+  const callCount = adapter.calls.length;
   const legacyStatus = await runner.status(prepared.run.runId);
+  assert.equal(adapter.probes.length, probeCount);
+  assert.equal(adapter.calls.length, callCount);
+  assert.ok(
+    Object.values(legacyStatus.run.roles).every(
+      ({ effort }) => effort === "current",
+    ),
+  );
   assert.equal(legacyStatus.run.schemaVersion, 1);
   assert.equal(legacyStatus.run.runtimeCompatibility, null);
   assert.equal(legacyStatus.run.revision, 1);
@@ -2405,12 +2421,14 @@ test("persists a trusted source profile and applies resolved turn preferences", 
     profile: profileDirectory,
     model: "sonnet",
     contextSize: "200000",
+    effort: "current",
   });
   assert.deepEqual(adapter.probes, [
     {
       profile: profileDirectory,
       model: "sonnet",
       contextSize: "200000",
+      effort: "current",
     },
   ]);
   assert.ok(
@@ -2459,6 +2477,7 @@ test("does not require an unused Arbiter backend", async (t) => {
     profile: "current",
     model: "current",
     contextSize: "current",
+    effort: "current",
   });
 });
 
@@ -2489,11 +2508,13 @@ test("persists descriptor-selected roles and probes only required roles", async 
       profile: "current",
       model: "planner-model",
       contextSize: "current",
+      effort: "current",
     },
     {
       profile: "current",
       model: "reviewer-model",
       contextSize: "current",
+      effort: "current",
     },
   ]);
   assert.equal(prepared.run.roles.arbiter.backend, "claude");
@@ -2508,12 +2529,21 @@ test("runs lazy plan authoring with only one Planner fork", async (t) => {
     {
       configuration: {
         ...RUNNER_CONFIGURATION,
+        defaultEffort: "xhigh",
         pipelines: {
           "plan-authoring": {
             mode: "independent",
             roles: {
-              reviewer: { backend: "claude", model: "reviewer-model" },
-              arbiter: { backend: "claude", model: "arbiter-model" },
+              reviewer: {
+                backend: "claude",
+                model: "reviewer-model",
+                effort: "low",
+              },
+              arbiter: {
+                backend: "claude",
+                model: "arbiter-model",
+                effort: "medium",
+              },
             },
           },
         },
@@ -2534,6 +2564,9 @@ test("runs lazy plan authoring with only one Planner fork", async (t) => {
   assert.deepEqual(Object.keys(result.run.roles), ["planner"]);
   assert.equal(result.run.pipelineState.settings.mode, "lazy");
   assert.equal(adapter.probes.length, 1);
+  assert.equal(result.run.roles.planner.effort, "xhigh");
+  assert.equal(adapter.probes[0].effort, "xhigh");
+  assert.ok(adapter.calls.every(({ effort }) => effort === "xhigh"));
   assert.equal(
     adapter.calls.filter(({ session }) => session?.mode === "fork").length,
     1,
@@ -2606,6 +2639,7 @@ test("persists project overrides and blocks later configuration changes", async 
       artifactRoot: "project-artifacts",
       defaultProfile: "codex-work",
       defaultModel: "project-model",
+      defaultEffort: "high",
       pipelines: {
         "plan-authoring": {
           mode: "lazy",
@@ -2659,12 +2693,14 @@ test("persists project overrides and blocks later configuration changes", async 
     profile: "native-work",
     model: "cli-planner",
     contextSize: "current",
+    effort: "high",
   });
   assert.deepEqual(paused.run.roles.reviewer, {
     backend: "codex",
     profile: "native-work",
     model: "project-model",
     contextSize: "200000",
+    effort: "high",
   });
   assert.equal(
     paused.run.projectConfigurationProtection.path,
@@ -2688,7 +2724,10 @@ test("persists project overrides and blocks later configuration changes", async 
   );
 
   await Promise.all([
-    writeFile(projectConfigurationPath, '{"schemaVersion":2}\n'),
+    writeFile(
+      projectConfigurationPath,
+      '{"schemaVersion":1,"defaultEffort":"low"}\n',
+    ),
     writeFile(
       join(fixture.taskPath, "clarifications.md"),
       `${await readFile(join(fixture.taskPath, "clarifications.md"), "utf8")}\nUse behavior A.\n`,
@@ -2904,16 +2943,19 @@ test("never reads an Agent Runner configuration file in the target repository", 
       ...roleOverrides.planner,
       profile: "current",
       contextSize: "current",
+      effort: "current",
     },
     reviewer: {
       ...roleOverrides.reviewer,
       profile: "current",
       contextSize: "current",
+      effort: "current",
     },
     arbiter: {
       ...roleOverrides.arbiter,
       profile: "current",
       contextSize: "current",
+      effort: "current",
     },
   });
 });
@@ -3041,6 +3083,7 @@ test("dispatches plan execution through the root Git and state services", async 
       profile: "work",
       model: "execution-model",
       contextSize: "200000",
+      effort: "current",
     })),
   );
   assert.ok(
@@ -3167,6 +3210,7 @@ for (const pauseReason of ["local_artifacts_not_ignored", "unsafe_git_state"]) {
         profile: "work",
         model: "polishing-model",
         contextSize: "200000",
+        effort: "current",
       })),
     );
   });

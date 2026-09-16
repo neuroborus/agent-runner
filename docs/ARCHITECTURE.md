@@ -239,6 +239,7 @@ The V1 shape is:
   "defaultBackend": "codex",
   "defaultProfile": "current",
   "defaultModel": "current",
+  "defaultEffort": "current",
   "defaultContextSize": "current",
   "profiles": {
     "codex-work": {
@@ -282,12 +283,15 @@ change requires a restart. A disabled server omits the reporting tool, schema,
 and related instructions from discovery. Other runner settings are reloaded
 for each fresh report and persisted through its resolved reservation.
 
-`defaultBackend` is optional. A role's `profile`, `model`, and `contextSize`
-resolve from its role-specific CLI/MCP override, the run-wide override, its
+`defaultBackend` is optional. A role's `profile`, `model`, `contextSize`, and
+`effort` resolve from its role-specific override, the run-wide override, its
 project-role value, the corresponding project-wide default, its pipeline-role
 runner value, the corresponding runner-wide default, then the built-in string
-`current`; a role-specific CLI override has highest precedence. Explicit
-CLI/MCP pipeline-setting overrides take precedence over project pipeline
+`current`; a role-specific override has highest precedence. CLI/MCP currently
+expose profile, model, and context size; effort overrides use the internal
+runner input contract. A role-specific CLI override wins over a run-wide
+selection for the exposed fields. Explicit CLI/MCP pipeline-setting overrides
+take precedence over project pipeline
 settings, which take precedence over runner settings and descriptor defaults.
 A profile alias is trusted runner configuration, pins one backend, and maps
 only to a native Codex profile name or an isolated Claude configuration
@@ -303,6 +307,13 @@ explicit context size is a decimal token string validated by the selected
 adapter and mapped to Codex's context-window setting or Claude's
 auto-compaction token window. These controls are not treated as otherwise
 equivalent.
+
+Both configuration layers accept `defaultEffort` and role `effort` using only
+`current|low|medium|high|xhigh`. Vocabulary validation includes inactive roles;
+provider capability validation applies only to resolved active roles. Effort
+remains separate from model IDs, and native translation belongs to adapters.
+An explicit `current` at any precedence level retains the effective provider
+default instead of inheriting a lower-precedence effort selection.
 
 Pipeline descriptors validate their own settings and supply built-in defaults.
 The root loader owns only the versioned envelope, strict field validation, and
@@ -333,8 +344,8 @@ nor a pipeline may select it automatically.
 
 Runner and project configuration are deterministically validated for every
 declared role. After settings resolve, the descriptor selects active roles.
-Only those roles are resolved to a backend, profile, model, and context size;
-only they are probed, persisted in the run, checked against a source session,
+Only those roles are resolved to a backend, profile, model, context size, and
+effort; only they are probed, persisted in the run, checked against a source session,
 and invoked. Public projections may identify an active role for bounded
 activity, but expose neither provider-private values nor inactive role
 configuration. Inactive Reviewer and Arbiter values remain untouched in the
@@ -377,8 +388,9 @@ project configuration, applies run-wide, role-specific, and accepted
 pipeline-setting overrides, asks the descriptor for the active roles, and
 persists those resolved roles, the resolved settings, artifact root, and
 optional source-session reference and profile before pipeline work begins.
-Common run-envelope version 7 retains the optional project-configuration
-protection record. Older runs normalize the absent field to `null`; migration
+Common run-envelope version 8 persists effort for every active role and retains
+the optional project-configuration protection record. Older runs normalize the
+absent protection record to `null`; migration
 never fabricates evidence by inspecting a current file.
 `run` then holds the new run's per-run lease while invoking its statically
 registered workflow. Plan execution and polishing additionally hold one external lease
@@ -1052,8 +1064,14 @@ Session lineage records an optional source-session reference, its resolved
 trusted profile when known, and every direct child role/session ID with its
 accepted-input and pipeline-checkpoint context key. Legacy role records missing
 `profile` or `contextSize`, and missing or nullable `model`, normalize to
-`current` in memory without rewriting state or event history. Native session
-resume remains an optimization rather than a correctness dependency.
+`current` in memory without rewriting state or event history. Envelope versions
+1–7 also normalize absent active-role `effort` to `current`; version 8 requires
+a portable effort value on every saved role. The leased runtime migration
+persists those defaults without provider activity or configuration reload,
+preserving prior journal records, progress, leases, and session evidence.
+Changing runner configuration never re-resolves saved effort; changing protected
+project configuration retains the safety pause without changing saved roles.
+Native session resume remains an optimization rather than a correctness dependency.
 
 Lock-free readers reject unsupported envelope, runtime, or pipeline versions
 with an actionable version-skew error and never rewrite durable state. A

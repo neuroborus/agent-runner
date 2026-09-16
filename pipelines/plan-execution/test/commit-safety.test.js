@@ -3,7 +3,10 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
-import { migratePlanExecutionStateV5 } from "../src/index.js";
+import {
+  migratePlanExecutionStateV5,
+  planExecutionPipeline,
+} from "../src/index.js";
 import {
   SOURCE_SESSION,
   bootstrapReady,
@@ -18,6 +21,29 @@ import {
   terminalConfirmation,
   versionOneState,
 } from "./support/index.js";
+
+test("carries saved effort through role turns and omits current", async (t) => {
+  for (const effort of ["current", "xhigh"]) {
+    const fixture = await createFixture(t);
+    fixture.currentRun.roles.worker.effort = effort;
+    fixture.currentRun.roles.reviewer.effort = "medium";
+    const result = await fixture.run();
+    assert.equal(result.pipelineState.workflowState, "DONE");
+    assert.ok(fixture.calls.worker.length > 0);
+    assert.ok(fixture.calls.reviewer.length > 0);
+    for (const request of fixture.calls.worker) {
+      assert.equal(request.effort, effort === "current" ? undefined : effort);
+    }
+    assert.ok(
+      fixture.calls.reviewer.every(({ effort }) => effort === "medium"),
+    );
+    assert.doesNotMatch(
+      JSON.stringify(planExecutionPipeline.projections.status(result)),
+      /effort|xhigh|medium/u,
+    );
+    assert.equal(fixture.calls.worker.at(-1).access, "local-commit");
+  }
+});
 
 test("implements, reviews, finalizes, confirms, and commits one step", async (t) => {
   let initialHead;

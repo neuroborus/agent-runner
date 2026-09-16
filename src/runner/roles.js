@@ -54,6 +54,7 @@ function executionOptions(configuration, providers) {
     profile: configuration.profile,
     model: configuration.model,
     contextSize: configuration.contextSize,
+    effort: configuration.effort,
   });
   providers.validateExecutionOptions(configuration.backend, options);
   return options;

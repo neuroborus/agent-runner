@@ -66,8 +66,8 @@ Values may be overridden under `pipelines.plan-authoring` in the runner's
 versioned `.agent-runner.json` contract or its safe project overlay. Role
 objects live under
 `pipelines.plan-authoring.roles` and may contain optional string `backend`,
-trusted `profile`, backend-specific `model`, and decimal `contextSize`
-selections. The root runtime applies the shared precedence rules
+trusted `profile`, backend-specific `model`, decimal `contextSize`, and portable
+`effort` selections. The root runtime applies the shared precedence rules
 documented in [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md); this
 pipeline owns only its roles, setting validation, and defaults. The root loads
 an optional ignored `LOCAL_ARTIFACTS/agent-runner.json`, or an explicitly
@@ -79,6 +79,18 @@ objects are validated, but lazy mode resolves, probes, persists, and invokes
 only the Planner. Reviewer and Arbiter configuration remains untouched for a
 later independent run and is not exposed through lazy-run state. Resolved roles
 and settings are persisted and not reloaded on resume.
+Effort accepts only `current|low|medium|high|xhigh`, independently of model IDs.
+The shared root resolver applies role override → run override → project role →
+project `defaultEffort` → runner role → runner `defaultEffort` → `current`.
+Effort overrides currently use the internal runner contract. Validate all
+configured vocabulary, but resolve and persist only active roles; native
+translation stays in provider adapters. Every role turn carries saved explicit
+effort, including recovery; `current` omits the request override.
+Common envelope version 8 requires saved active-role effort. Legacy missing
+values migrate to `current` under the run lease without provider activity,
+configuration reload, or changes to progress and session evidence. Public
+status and activity omit these provider-private values.
+
 When a project configuration supplied those values, the root runner persists
 its protection record and checks it before recovery and around every provider
 turn. Drift produces the non-resumable `project_configuration_changed` safety

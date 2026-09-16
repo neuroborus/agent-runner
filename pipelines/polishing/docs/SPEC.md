@@ -139,10 +139,22 @@ on-demand `arbiter` roles and owns active-role selection. Independent and
 combined modes activate all three, with Arbiter still resolved on demand; lazy mode activates
 only Worker. CLI and runner configuration use the common backend
 and execution-preference precedence rules. Each role accepts string trusted
-`profile`, backend-native `model`, and decimal `contextSize` selections;
+`profile`, backend-native `model`, decimal `contextSize`, and portable `effort` selections;
 role-specific CLI/MCP values win over run-wide and runner values, with
 `current` omitting the native override. Worker and Reviewer may use any
 Codex/Claude combination; Arbiter supports either backend.
+
+Effort accepts only `current|low|medium|high|xhigh`, independently of model IDs.
+The shared root resolver applies role override → run override → project role →
+project `defaultEffort` → runner role → runner `defaultEffort` → `current`.
+Effort overrides currently use the internal runner contract. Validate all
+configured vocabulary, but resolve and persist only active roles; native
+translation stays in provider adapters. Every role turn carries saved explicit
+effort, including recovery; `current` omits the request override.
+Common envelope version 8 requires saved active-role effort. Legacy missing
+values migrate to `current` under the run lease without provider activity,
+configuration reload, or changes to progress and session evidence. Public
+status and activity omit these provider-private values.
 
 Worker capability preflight requires structured output, read-only inspection,
 autonomous safe content writes, remote-write blocking, and the explicit

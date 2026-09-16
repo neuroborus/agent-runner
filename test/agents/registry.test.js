@@ -52,6 +52,7 @@ function fakeProvider() {
       validateExecutionOptions(value) {
         assert.deepEqual(Object.keys(value).sort(), [
           "contextSize",
+          "effort",
           "model",
           "profile",
         ]);

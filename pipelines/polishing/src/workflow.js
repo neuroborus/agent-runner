@@ -1207,7 +1207,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     const configuration = currentRun.roles[role];
     const recoveryPrompt = completeRolePrompt(buildPrompt(context));
     const executionPreferences = Object.fromEntries(
-      ["profile", "model", "contextSize"].flatMap((field) =>
+      ["profile", "model", "contextSize", "effort"].flatMap((field) =>
         typeof configuration[field] === "string" &&
         configuration[field] !== "current"
           ? [[field, configuration[field]]]

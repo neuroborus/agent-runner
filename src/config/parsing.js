@@ -20,6 +20,7 @@ const TOP_LEVEL_FIELDS = new Set([
   "schemaVersion",
   "defaultBackend",
   "defaultContextSize",
+  "defaultEffort",
   "defaultModel",
   "defaultProfile",
   "issueReporting",
@@ -32,7 +33,14 @@ const PROJECT_TOP_LEVEL_FIELDS = new Set(
     (field) => !["issueReporting", "profiles"].includes(field),
   ),
 );
-const ROLE_FIELDS = new Set(["backend", "contextSize", "model", "profile"]);
+const ROLE_FIELDS = new Set([
+  "backend",
+  "contextSize",
+  "effort",
+  "model",
+  "profile",
+]);
+const EFFORT_VALUES = new Set(["current", "low", "medium", "high", "xhigh"]);
 
 export class ConfigurationError extends Error {
   constructor(message, { cause, code = "ERR_INVALID_CONFIGURATION" } = {}) {
@@ -76,6 +84,14 @@ export function assertSelection(value, path) {
   }
 }
 
+function assertEffort(value, path) {
+  if (!EFFORT_VALUES.has(value)) {
+    throw new ConfigurationError(
+      `${path} must be current, low, medium, high, or xhigh.`,
+    );
+  }
+}
+
 function assertArtifactRoot(value, path) {
   assertSelection(value, path);
   if (
@@ -110,6 +126,11 @@ export function normalizeRole(role, path, providers = PROVIDER_REGISTRY) {
       assertSelection(role[field], `${path}.${field}`);
       normalized[field] = role[field];
     }
+  }
+
+  if (role.effort !== undefined) {
+    assertEffort(role.effort, `${path}.effort`);
+    normalized.effort = role.effort;
   }
 
   return Object.freeze(normalized);
@@ -275,6 +296,10 @@ export function normalizeConfiguration(input, providers = PROVIDER_REGISTRY) {
     }
   }
 
+  if (input.defaultEffort !== undefined) {
+    assertEffort(input.defaultEffort, "configuration.defaultEffort");
+  }
+
   const inputProfiles = input.profiles === undefined ? {} : input.profiles;
   assertRecord(inputProfiles, "configuration.profiles");
   const profiles = Object.freeze(
@@ -309,6 +334,7 @@ export function normalizeConfiguration(input, providers = PROVIDER_REGISTRY) {
     defaultProfile: input.defaultProfile ?? CURRENT,
     defaultModel: input.defaultModel ?? CURRENT,
     defaultContextSize: input.defaultContextSize ?? CURRENT,
+    defaultEffort: input.defaultEffort ?? CURRENT,
     profiles,
     trustedCommands,
     pipelines: Object.freeze(
@@ -402,6 +428,10 @@ export function normalizeProjectConfiguration(
     }
   }
 
+  if (input.defaultEffort !== undefined) {
+    assertEffort(input.defaultEffort, `${rootPath}.defaultEffort`);
+  }
+
   const inputPipelines = input.pipelines === undefined ? {} : input.pipelines;
   assertRecord(inputPipelines, `${rootPath}.pipelines`);
   const pipelines = listPipelines();
@@ -452,6 +482,7 @@ export function normalizeProjectConfiguration(
     "defaultProfile",
     "defaultModel",
     "defaultContextSize",
+    "defaultEffort",
   ]) {
     if (input[field] !== undefined) {
       normalized[field] = input[field];
