@@ -120,12 +120,18 @@ function createRunStartSchema(providers) {
     providers.sourceSessionIds.length === 0
       ? z.never()
       : z.enum(providers.sourceSessionIds);
+  const effort = z
+    .enum(["current", "low", "medium", "high", "xhigh"])
+    .describe(
+      "Portable effort, separate from model. current retains the effective provider default. Role overrides win over run-wide, project, and runner selections; resume preserves saved effort.",
+    );
   const roleOverride = z
     .object({
       backend: backend.optional(),
       profile: z.string().min(1).max(4_096).optional(),
       model: z.string().min(1).max(256).optional(),
       contextSize: z.string().min(1).max(64).optional(),
+      effort: effort.optional(),
     })
     .strict()
     .refine((value) =>
@@ -164,6 +170,7 @@ function createRunStartSchema(providers) {
       profile: z.string().min(1).max(4_096).optional(),
       model: z.string().min(1).max(256).optional(),
       contextSize: z.string().min(1).max(64).optional(),
+      effort: effort.optional(),
       roleOverrides: z.record(identifier, roleOverride).default({}),
       sourceSession: sourceSession.nullable().default(null),
     })
@@ -253,6 +260,7 @@ function runnerStartInput(input) {
     profile,
     model,
     contextSize,
+    effort,
     mode,
     ...runInput
   } = input;
@@ -262,6 +270,7 @@ function runnerStartInput(input) {
       ...(profile === undefined ? {} : { profile }),
       ...(model === undefined ? {} : { model }),
       ...(contextSize === undefined ? {} : { contextSize }),
+      ...(effort === undefined ? {} : { effort }),
     },
     settingOverrides: mode === undefined ? {} : { mode },
   };
@@ -1106,7 +1115,7 @@ export function createMcpServer(options = {}) {
     "run_start",
     {
       description:
-        "Start a durable pipeline. independent is default and recommended for genuinely independent semantic review but uses more provider context and tokens; lazy is opt-in for lower consumption and has no independent review, so never select it automatically. combined adds primary convergence before independent review and is available for all three pipelines. Leave sourceSession unset unless the user deliberately selects a compatible current session after being offered a fresh start. independent and combined fork its complete context into primary and review roles; lazy forks it once into the primary role. Recommend fresh for a long, multi-topic, or uncertain session. Include its known trusted profile, use only current inheritance when unknown, keep native IDs opaque, and never inspect private storage or infer an ID or alias.",
+        "Start a durable pipeline. Set effort separately from model using current|low|medium|high|xhigh; roleOverrides effort wins over run-wide effort, and current retains the provider default. independent is default and recommended for genuinely independent semantic review but uses more provider context and tokens; lazy is opt-in for lower consumption and has no independent review, so never select it automatically. combined adds primary convergence before independent review and is available for all three pipelines. Leave sourceSession unset unless the user deliberately selects a compatible current session after being offered a fresh start. independent and combined fork its complete context into primary and review roles; lazy forks it once into the primary role. Recommend fresh for a long, multi-topic, or uncertain session. Include its known trusted profile, use only current inheritance when unknown, keep native IDs opaque, and never inspect private storage or infer an ID or alias.",
       inputSchema: runStartSchema,
       annotations: mutating,
     },

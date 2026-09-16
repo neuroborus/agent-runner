@@ -5,6 +5,7 @@
   "defaultBackend": "codex",
   "defaultProfile": "current",
   "defaultModel": "current",
+  "defaultEffort": "current",
   "defaultContextSize": "current",
   "trustedCommands": {
     "repository-check": {
@@ -57,7 +58,8 @@
           "backend": "claude",
           "profile": "claude-primary",
           "model": "current",
-          "contextSize": "current"
+          "contextSize": "current",
+          "effort": "current"
         },
         "arbiter": {}
       }
@@ -76,7 +78,8 @@
           "backend": "claude",
           "profile": "claude-primary",
           "model": "current",
-          "contextSize": "current"
+          "contextSize": "current",
+          "effort": "current"
         },
         "arbiter": {}
       }

@@ -1222,7 +1222,8 @@ test("reconciles an incomplete start intent after run creation", async (t) => {
     projectPath: paths.projectPath,
     taskPath: paths.taskPath,
     proactiveClarification: false,
-    roleOverrides: {},
+    effort: "high",
+    roleOverrides: { planner: { effort: "current" } },
     sourceSession: null,
   };
   const intent = await store.beginAction({
@@ -1233,7 +1234,8 @@ test("reconciles an incomplete start intent after run creation", async (t) => {
       projectPath: input.projectPath,
       taskPath: input.taskPath,
       proactiveClarification: false,
-      roleOverrides: {},
+      effort: input.effort,
+      roleOverrides: input.roleOverrides,
       sourceSession: null,
     },
     context: { runId: RUN_ID },
@@ -1682,6 +1684,102 @@ test("retries when a detached loser exits after transient ownership", async (t) 
   assert.deepEqual(launches, [RUN_ID, RUN_ID]);
 });
 
+test("MCP effort survives detached resume and stays out of public projections", async (t) => {
+  const paths = await workspace(t, "agent-runner-mcp-effort-");
+  await executeFile("git", ["init", "-q", paths.projectPath]);
+  await writeFile(
+    join(paths.taskPath, "task.md"),
+    "Implement the requested behavior.\n",
+  );
+  const store = createRunStore({ stateRoot: paths.stateRoot });
+  const adapter = questioningAdapter();
+  const calls = [];
+  const adapters = {
+    codex: {
+      ...adapter,
+      async run(input) {
+        calls.push(input);
+        return adapter.run(input);
+      },
+    },
+  };
+  const runner = createRunner({
+    adapters,
+    clarifications: createClarificationService({ interactive: false }),
+    loadConfiguration: async () =>
+      parseRunnerConfiguration(
+        JSON.stringify({
+          schemaVersion: 1,
+          defaultBackend: "codex",
+          defaultEffort: "low",
+        }),
+      ),
+    runStore: store,
+  });
+  let launches = 0;
+  const control = createMcpControlPlane({
+    runner,
+    runStore: store,
+    runIdFactory: () => RUN_ID,
+    async launchRun(runId, action, { expectedRuntimeCompatibility }) {
+      launches += 1;
+      const child = createRunner({
+        adapters,
+        clarifications: createClarificationService({ interactive: false }),
+        loadConfiguration: async () => {
+          assert.fail("Detached resume reloaded configuration.");
+        },
+        runStore: createRunStore({ stateRoot: paths.stateRoot }),
+      });
+      await child.resume({ runId, action, expectedRuntimeCompatibility });
+    },
+  });
+  const input = {
+    idempotencyKey: "saved-effort",
+    pipelineId: "plan-authoring",
+    projectPath: paths.projectPath,
+    taskPath: paths.taskPath,
+    proactiveClarification: false,
+    effort: "high",
+    roleOverrides: {
+      planner: { effort: "current" },
+      reviewer: { effort: "xhigh" },
+    },
+    sourceSession: null,
+  };
+  assert.deepEqual(await control.runStart(input), { runId: RUN_ID });
+  assert.deepEqual(await control.runStart(input), { runId: RUN_ID });
+  assert.equal(launches, 1);
+  const saved = await store.loadRun(RUN_ID);
+  assert.deepEqual(
+    Object.fromEntries(
+      Object.entries(saved.roles).map(([role, config]) => [
+        role,
+        config.effort,
+      ]),
+    ),
+    { planner: "current", reviewer: "xhigh", arbiter: "high" },
+  );
+  assert.ok(calls.length > 0);
+  assert.ok(calls.every(({ effort }) => effort === undefined));
+  const status = await control.runStatus({ runId: RUN_ID });
+  const waited = await control.runWait({
+    runId: RUN_ID,
+    cursor: 0,
+    timeoutMs: 0,
+    progress: false,
+  });
+  const activity = await control.runActivity({
+    runId: RUN_ID,
+    cursor: 0,
+    limit: 50,
+  });
+  assert.doesNotMatch(
+    JSON.stringify({ status, waited, activity }),
+    /"effort":|"xhigh"|"roleOverrides":/u,
+  );
+});
+
 test("forwards additive run-wide, role, and source profile selections", async (t) => {
   const paths = await workspace(t, "agent-runner-mcp-preferences-");
   const store = createRunStore({ stateRoot: paths.stateRoot });
@@ -1712,11 +1810,13 @@ test("forwards additive run-wide, role, and source profile selections", async (t
     profile: "claude-primary",
     model: "sonnet",
     contextSize: "200000",
+    effort: "xhigh",
     roleOverrides: {
       planner: {
         profile: "claude-primary",
         model: "opus",
         contextSize: "300000",
+        effort: "current",
       },
     },
     sourceSession: {
@@ -1739,9 +1839,35 @@ test("forwards additive run-wide, role, and source profile selections", async (t
       profile: "claude-primary",
       model: "sonnet",
       contextSize: "200000",
+      effort: "xhigh",
     },
     settingOverrides: { mode: "lazy" },
   });
+  assert.deepEqual(await control.runStart(input), { runId: RUN_ID });
+  const { idempotencyKey, ...argumentsWithoutKey } = input;
+  assert.equal(
+    (
+      await store.readAction({
+        key: idempotencyKey,
+        tool: "run_start",
+        arguments: argumentsWithoutKey,
+      })
+    ).status,
+    "completed",
+  );
+  for (const changed of [
+    { ...input, effort: "high" },
+    {
+      ...input,
+      roleOverrides: {
+        planner: { ...input.roleOverrides.planner, effort: "low" },
+      },
+    },
+  ]) {
+    await assert.rejects(control.runStart(changed), {
+      code: "ERR_MCP_IDEMPOTENCY_CONFLICT",
+    });
+  }
   const status = await control.runStatus({ runId: RUN_ID });
   assert.equal(status.mode, "lazy");
   assert.doesNotMatch(
@@ -1754,6 +1880,16 @@ test("forwards additive run-wide, role, and source profile selections", async (t
     limit: 50,
   });
   assert.equal(activity.mode, "lazy");
+  const waited = await control.runWait({
+    runId: RUN_ID,
+    cursor: 0,
+    timeoutMs: 0,
+    progress: false,
+  });
+  assert.doesNotMatch(
+    JSON.stringify({ status, activity, waited }),
+    /"effort":|"xhigh"|"roleOverrides":|claude-primary|sonnet|opus/u,
+  );
 });
 
 test("records complete pending answers before detached continuation", async (t) => {

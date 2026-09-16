@@ -26,7 +26,11 @@ have the documented highest precedence.
 Both configuration layers accept portable `defaultEffort` and role `effort`
 values: `current`, `low`, `medium`, `high`, and `xhigh`. Effort stays separate
 from model selection and follows shared execution-preference precedence through
-internal runner overrides. Inactive role vocabulary is validated without
+CLI/MCP overrides. CLI `--effort` and MCP `run_start.effort` select run-wide
+effort; `--<role>-effort` and `roleOverrides.<role>.effort` win for one role.
+Start retries must retain both values under the same idempotency key; detached
+execution reuses the saved selection. Inactive role vocabulary is validated
+without
 resolving or exposing those roles. Legacy runs receive `current` without
 provider activity; public status and activity never expose saved role effort.
 

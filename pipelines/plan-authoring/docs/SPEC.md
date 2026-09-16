@@ -82,9 +82,12 @@ and settings are persisted and not reloaded on resume.
 Effort accepts only `current|low|medium|high|xhigh`, independently of model IDs.
 The shared root resolver applies role override → run override → project role →
 project `defaultEffort` → runner role → runner `defaultEffort` → `current`.
-Effort overrides currently use the internal runner contract. Validate all
-configured vocabulary, but resolve and persist only active roles; native
-translation stays in provider adapters. Every role turn carries saved explicit
+CLI `--effort` and descriptor-derived `--<role>-effort` map to MCP
+`run_start.effort` and `roleOverrides.<role>.effort` through the same runner
+contract. Both reject values outside the portable enum before dispatch; MCP
+intents bind the selections and detached continuations reuse saved effort.
+Validate all configured vocabulary, but resolve and persist only active roles;
+native translation stays in provider adapters. Every role turn carries saved explicit
 effort, including recovery; `current` omits the request override.
 Common envelope version 8 requires saved active-role effort. Legacy missing
 values migrate to `current` under the run lease without provider activity,
@@ -113,8 +116,9 @@ A configured runner artifact root does not affect this pipeline. Its task-owned
 `clarifications.md` and `plan.md` remain beside `task.md`.
 
 CLI overrides use `--planner`, `--reviewer`, and `--arbiter`, with corresponding
-derived profile, model, and context-size flags. Run-wide `--profile`, `--model`,
-and `--context-size` defaults apply below role-specific CLI values. `--mode`
+derived profile, model, context-size, and effort flags. Run-wide `--profile`,
+`--model`, `--context-size`, and `--effort` defaults apply below role-specific
+CLI values. `--mode`
 selects the descriptor setting. A new run may also use
 `--fork-from <backend>:<session-id>` and optional separate
 `--fork-profile <trusted-alias>` when the Planner and, in independent or

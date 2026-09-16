@@ -6,6 +6,8 @@ import {
   DETACHED_RUNTIME_COMPATIBILITY_ENV,
   DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
   main,
+  listPipelines,
+  resolvePipelineConfiguration,
   parseSourceSession,
   RUNTIME_VERSION_SKEW_EXIT_CODE,
   RunnerError,
@@ -197,6 +199,9 @@ test("help describes the required commands", async () => {
   });
 
   assert.equal(exitCode, 0);
+  assert.match(stdout.read(), /--effort/u);
+  assert.match(stdout.read(), /--<role>-effort/u);
+  assert.match(stdout.read(), /current\|low\|medium\|high\|xhigh/u);
   assert.match(stdout.read(), /agent-run run <pipeline> --project/);
   assert.match(stdout.read(), /agent-run resume --run/);
   assert.match(stdout.read(), /agent-run pause --run/);
@@ -722,6 +727,8 @@ test("run derives execution, role, and opaque source-session inputs", async () =
       "sonnet",
       "--worker-profile",
       "claude-primary",
+      "--worker-effort",
+      "current",
       "--worker-context-size",
       "300000",
       "--reviewer",
@@ -734,6 +741,8 @@ test("run derives execution, role, and opaque source-session inputs", async () =
       "claude-primary",
       "--model",
       "run-model",
+      "--effort",
+      "xhigh",
       "--context-size",
       "200000",
       "--mode",
@@ -764,6 +773,7 @@ test("run derives execution, role, and opaque source-session inputs", async () =
       profile: "claude-primary",
       model: "sonnet",
       contextSize: "300000",
+      effort: "current",
     },
     reviewer: { backend: "claude", profile: "claude-primary" },
     arbiter: { backend: "codex" },
@@ -772,6 +782,7 @@ test("run derives execution, role, and opaque source-session inputs", async () =
     profile: "claude-primary",
     model: "run-model",
     contextSize: "200000",
+    effort: "xhigh",
   });
   assert.deepEqual(request.settingOverrides, { mode: "lazy" });
   assert.equal(
@@ -1215,4 +1226,99 @@ test("pipelines lists the statically registered pipelines", async () => {
     /Settings \(defaults\):.*preferredCommitLineLimit=900/u,
   );
   assert.equal(stderr.read(), "");
+});
+
+test("CLI effort flags follow pipeline roles and shared precedence", async () => {
+  for (const pipeline of listPipelines()) {
+    for (const effort of ["current", "low", "medium", "high", "xhigh"]) {
+      const stdout = createSink();
+      let request;
+      const code = await main(
+        [
+          "run",
+          pipeline.id,
+          "--project",
+          "/project",
+          "--task",
+          "/task",
+          "--effort",
+          "high",
+          ...pipeline.roles.flatMap((role) => [`--${role}-effort`, effort]),
+        ],
+        {
+          stdout: stdout.stream,
+          stderr: createSink().stream,
+          runner: fakeRunner({
+            async run(input) {
+              request = input;
+              const result = commandResult({ pipelineId: pipeline.id });
+              result.run.roles = resolvePipelineConfiguration(
+                pipeline.id,
+                {
+                  schemaVersion: 1,
+                  defaultBackend: "codex",
+                  defaultEffort: "low",
+                },
+                input.roleOverrides,
+                input.executionOverrides,
+                null,
+                { schemaVersion: 1, defaultEffort: "medium" },
+              ).roles;
+              assert.ok(
+                Object.values(result.run.roles).every(
+                  (role) => role.effort === effort,
+                ),
+              );
+              return result;
+            },
+          }),
+        },
+      );
+      assert.equal(code, 0);
+      assert.equal(request.executionOverrides.effort, "high");
+      assert.deepEqual(Object.keys(request.roleOverrides), pipeline.roles);
+      assert.doesNotMatch(stdout.read(), /effort|xhigh/u);
+    }
+  }
+});
+
+test("CLI rejects invalid effort before dispatch, including inactive roles", async () => {
+  for (const option of [
+    "--effort",
+    "--worker-effort",
+    "--reviewer-effort",
+    "--arbiter-effort",
+  ]) {
+    for (const effort of ["", "max", "HIGH", " high", "gpt-5.6-sol xhigh"]) {
+      const stderr = createSink();
+      const code = await main(
+        [
+          "run",
+          "plan-execution",
+          "--project",
+          "/project",
+          "--task",
+          "/task",
+          "--mode",
+          "lazy",
+          option,
+          effort,
+        ],
+        {
+          stdout: createSink().stream,
+          stderr: stderr.stream,
+          runner: fakeRunner({
+            async run() {
+              assert.fail("Invalid effort reached the runner.");
+            },
+          }),
+        },
+      );
+      assert.equal(code, 1);
+      assert.match(
+        stderr.read(),
+        /must be current, low, medium, high, or xhigh/u,
+      );
+    }
+  }
 });
