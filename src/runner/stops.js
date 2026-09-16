@@ -268,6 +268,7 @@ export async function reconcileOperatorStop({
   publish,
   preEffectRejection = null,
   configurationFailure = null,
+  cleanupResources = async (run) => run,
 }) {
   let current = await runStore.loadRun(run.runId);
   if (!stopPending(current)) return current;
@@ -278,6 +279,7 @@ export async function reconcileOperatorStop({
     );
     current = await runStore.recordExecutionProcess(lease, null);
   }
+  current = await cleanupResources(current);
   const activity = {
     actor: "runner",
     phase: "stop",

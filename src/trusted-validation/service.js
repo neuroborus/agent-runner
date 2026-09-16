@@ -2,11 +2,13 @@ import { createHash } from "node:crypto";
 
 import { createGitService } from "../git/index.js";
 import {
+  gitMetadataExposures,
   resolveTrustedBubblewrap,
   runExactCommand,
   sandboxTrustedCommand,
   verifyTrustedBubblewrap,
 } from "./execution.js";
+import { createResourceStorage } from "./resources.js";
 
 const ALIAS_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
@@ -501,6 +503,7 @@ export function createTrustedValidationService(options = {}) {
       },
     );
   }
+  const storage = createResourceStorage({ storageRoot: options.storageRoot });
   const defaultSandbox = options.sandboxCommand === undefined;
   let launcherPath = null;
   function trustedLauncher(projectPath) {
@@ -514,7 +517,7 @@ export function createTrustedValidationService(options = {}) {
     const selected = validateTrustedValidationSnapshot(snapshot);
     if (
       selected.commands.some(
-        ({ capabilities }) => Object.keys(capabilities ?? {}).length > 0,
+        ({ capabilities }) => capabilities?.artifacts !== undefined,
       )
     ) {
       throw new TrustedValidationError(
@@ -524,8 +527,23 @@ export function createTrustedValidationService(options = {}) {
     }
   }
 
-  async function preflight({ projectPath, snapshot }) {
+  async function preflight({
+    projectPath,
+    snapshot,
+    storageForbiddenPaths = [],
+  }) {
     assertSupported(snapshot);
+    for (const { capabilities } of snapshot?.commands ?? []) {
+      if (!capabilities?.scratch && !capabilities?.cache) continue;
+      await storage.preflight(
+        [
+          projectPath,
+          ...gitMetadataExposures(projectPath),
+          ...storageForbiddenPaths,
+        ],
+        capabilities,
+      );
+    }
     if (!defaultSandbox) {
       return;
     }
@@ -539,6 +557,8 @@ export function createTrustedValidationService(options = {}) {
     snapshot,
     signal,
     onProcess,
+    onResource,
+    storageForbiddenPaths = [],
   }) {
     signal?.throwIfAborted();
     if (
@@ -573,6 +593,15 @@ export function createTrustedValidationService(options = {}) {
         { code: "ERR_TRUSTED_COMMAND_NOT_ALLOWLISTED" },
       );
     }
+    if (
+      (command.capabilities?.scratch || command.capabilities?.cache) &&
+      (typeof onProcess !== "function" || typeof onResource !== "function")
+    ) {
+      throw new TrustedValidationError(
+        "Trusted storage requires durable resource and process ownership.",
+        { code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE" },
+      );
+    }
     const before = await git.snapshot({ allowedPaths: [], projectPath });
     if (before.contentFingerprint !== normalizedBindings.contentFingerprint) {
       throw new TrustedValidationError(
@@ -581,14 +610,42 @@ export function createTrustedValidationService(options = {}) {
       );
     }
     let result;
+    let resource = null;
+    let persistenceFailed = false;
+    let processActive = false;
+    const forbiddenPaths = [
+      before.projectPath,
+      ...gitMetadataExposures(before.projectPath),
+      ...storageForbiddenPaths,
+    ];
+    const persistResource = async (value) => {
+      try {
+        await onResource(value);
+        resource = value;
+      } catch (cause) {
+        persistenceFailed = true;
+        throw cause;
+      }
+    };
+    let failure;
     try {
       const bubblewrapPath = defaultSandbox
         ? trustedLauncher(before.projectPath)
         : null;
+      const allocated =
+        command.capabilities?.scratch || command.capabilities?.cache
+          ? await storage.allocate({
+              command,
+              forbiddenPaths,
+              signal,
+              onResource: persistResource,
+            })
+          : null;
       const execution = await sandboxCommand(command, {
         bubblewrapPath,
         cwd: before.projectPath,
         environment,
+        resources: allocated?.mounts ?? {},
       });
       result = await runCommand(execution.command, {
         cwd: before.projectPath,
@@ -598,10 +655,25 @@ export function createTrustedValidationService(options = {}) {
         terminationGraceMs,
         timeoutMs,
         signal,
-        onProcess,
+        onProcess:
+          allocated === null
+            ? onProcess
+            : async (pid, proof) => {
+                if (pid !== null) processActive = true;
+                await onProcess(pid, proof);
+                if (pid === null) processActive = false;
+              },
       });
+      if (processActive)
+        throw new TrustedValidationError(
+          "Trusted execution process retirement is unverified.",
+          { code: "ERR_EXECUTION_PROCESS_ACTIVE" },
+        );
     } catch (cause) {
+      failure = cause;
       if (
+        persistenceFailed ||
+        cause?.code === "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE" ||
         signal?.aborted ||
         [
           "ERR_EXECUTION_PROCESS_ACTIVE",
@@ -622,17 +694,38 @@ export function createTrustedValidationService(options = {}) {
             ? "isolation"
             : "spawn",
       };
-    }
-    try {
-      await git.assertUnchanged(before);
-    } catch (cause) {
-      throw new TrustedValidationError(
-        "Runner-trusted validation mutated repository state.",
-        {
-          changes: Array.isArray(cause?.changes) ? cause.changes : [],
-          code: "ERR_TRUSTED_VALIDATION_MUTATED_REPOSITORY",
-        },
-      );
+    } finally {
+      // The process boundary clears registration only after retiring descendants.
+      // Uncertain process or journal ownership leaves the durable record intact.
+      const retired =
+        !processActive &&
+        ![
+          "ERR_EXECUTION_PROCESS_ACTIVE",
+          "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+          "ERR_TRUSTED_VALIDATION_PROCESS_TREE_ACTIVE",
+        ].includes(failure?.code);
+      try {
+        if (resource !== null && retired && !persistenceFailed) {
+          await storage.cleanup(resource, {
+            forbiddenPaths,
+            onResource: persistResource,
+          });
+        }
+      } finally {
+        if (retired) {
+          try {
+            await git.assertUnchanged(before);
+          } catch (cause) {
+            throw new TrustedValidationError(
+              "Runner-trusted validation mutated repository state.",
+              {
+                changes: Array.isArray(cause?.changes) ? cause.changes : [],
+                code: "ERR_TRUSTED_VALIDATION_MUTATED_REPOSITORY",
+              },
+            );
+          }
+        }
+      }
     }
     if (
       !isRecord(result) ||
@@ -675,5 +768,24 @@ export function createTrustedValidationService(options = {}) {
     });
   }
 
-  return Object.freeze({ execute, preflight });
+  async function recoverResources({
+    resource,
+    projectPath,
+    storageForbiddenPaths = [],
+    onResource,
+  }) {
+    await createResourceStorage({ storageRoot: resource?.root?.path }).cleanup(
+      resource,
+      {
+        forbiddenPaths: [
+          projectPath,
+          ...gitMetadataExposures(projectPath),
+          ...storageForbiddenPaths,
+        ],
+        onResource,
+      },
+    );
+  }
+
+  return Object.freeze({ execute, preflight, recoverResources });
 }

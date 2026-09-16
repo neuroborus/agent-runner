@@ -159,9 +159,9 @@ A valid but unavailable frozen request pauses durably as `environment_blocked`
 before provider work, including at creation before any preflight evidence exists.
 Resume retries the saved request after environment repair. Changing declarations
 requires a new run; repository changes must not bypass or weaken required checks.
-Declared scratch, cache, and artifact capabilities currently fail closed while
-their implementations are unavailable. Capability inspection is not check
-execution or validation evidence. Verification-only recovery of a consumed
+Scratch and cache capabilities provide per-execution transient storage; pinned
+artifact acquisition remains unavailable and fails closed. Capability inspection
+is not check execution or validation evidence. Verification-only recovery of a consumed
 commit or completed handoff remains available without those capabilities.
 
 Before finalization, writable roles receive the exact

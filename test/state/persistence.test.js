@@ -852,3 +852,75 @@ test("loads revision-bound private history without repairing files and rejects s
     3,
   );
 });
+
+test("storage ownership rejects non-string identifiers without a transition", async (t) => {
+  const { created, store, workspace } = await createFixture(t);
+  const resource = {
+    id: "55555555-5555-4555-8555-555555555555",
+    hostname: "fixture-host",
+    commandIdentity: "a".repeat(64),
+    phase: "allocating",
+    root: { path: join(workspace, "storage"), device: "1", inode: "2" },
+    directory: null,
+  };
+  const before = await store.loadRun(created.state.runId);
+  for (const field of ["id", "commandIdentity"]) {
+    await assert.rejects(
+      store.recordExecutionResource(created.lease, {
+        ...resource,
+        [field]: [resource[field]],
+      }),
+      { code: "ERR_INVALID_RUN_STATE" },
+    );
+    assert.deepEqual(await store.loadRun(created.state.runId), before);
+  }
+});
+
+test("legacy storage ownership migrates to null without allocating resources", async (t) => {
+  const { created, stateRoot, store, workspace } = await createFixture(t);
+  await created.lease.release();
+  const statePath = join(created.directoryPath, "state.json");
+  const eventsPath = join(created.directoryPath, "events.jsonl");
+  const legacy = JSON.parse(await readFile(statePath, "utf8"));
+  legacy.schemaVersion = 8;
+  legacy.runtimeCompatibility.runStateVersion = 8;
+  delete legacy.executionResource;
+  const event = JSON.parse((await readFile(eventsPath, "utf8")).trim());
+  event.schemaVersion = 8;
+  event.state = legacy;
+  await writeFile(statePath, JSON.stringify(legacy));
+  await writeFile(eventsPath, `${JSON.stringify(event)}\n`);
+  const before = await readdir(workspace);
+  const loaded = await store.loadRun(legacy.runId);
+  assert.equal(loaded.executionResource, null);
+  assert.equal(
+    JSON.parse(await readFile(statePath, "utf8")).executionResource,
+    undefined,
+  );
+  const resumed = createRunStore({ stateRoot });
+  const lease = await resumed.acquireRunLease(legacy.runId);
+  try {
+    const migrated = await resumed.migrateRun(
+      lease,
+      {
+        pipelineState: loaded.pipelineState,
+        pipelineStateVersion: loaded.pipelineStateVersion,
+      },
+      {
+        activity: {
+          actor: "runner",
+          phase: "runtime",
+          kind: "migrated",
+          message: "Migrated storage ownership.",
+        },
+      },
+    );
+    assert.equal(migrated.executionResource, null);
+    assert.equal(migrated.schemaVersion, RUN_STATE_SCHEMA_VERSION);
+    assert.deepEqual(migrated.sessionLineage, loaded.sessionLineage);
+    assert.deepEqual(migrated.counters, loaded.counters);
+    assert.deepEqual(await readdir(workspace), before);
+  } finally {
+    await lease.release();
+  }
+});

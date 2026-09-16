@@ -219,7 +219,10 @@ export function createStopService({
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
       const current = snapshot.state;
-      if (current.executionProcess !== null) {
+      if (
+        current.executionProcess !== null ||
+        current.executionResource !== null
+      ) {
         reject(
           "Owned execution must stop before reconciliation completes.",
           "ERR_EXECUTION_PROCESS_ACTIVE",
@@ -268,7 +271,10 @@ export function createStopService({
     }
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
-      if (snapshot.state.executionProcess !== null) {
+      if (
+        snapshot.state.executionProcess !== null ||
+        snapshot.state.executionResource !== null
+      ) {
         reject(
           "Owned execution must stop before checkpoint settlement.",
           "ERR_EXECUTION_PROCESS_ACTIVE",

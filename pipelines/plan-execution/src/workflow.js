@@ -3785,6 +3785,19 @@ ${
           snapshot: state().trustedValidation,
         });
       } catch (cause) {
+        if (cause?.code === "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE") {
+          await pause("environment_blocked", {
+            code: cause.code,
+            explanation:
+              "Trusted execution storage cleanup requires verified ownership before retry.",
+            evidence: [
+              "Storage ownership remains recorded for recovery; no new work is authorized.",
+            ],
+            resumeState: "FINALIZE",
+          });
+          return false;
+        }
+
         if (
           ![
             "ERR_TRUSTED_VALIDATION_BINDING_CHANGED",

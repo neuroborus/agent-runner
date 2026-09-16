@@ -3,12 +3,13 @@ import { execFile } from "node:child_process";
 import {
   mkdir,
   mkdtemp,
+  lstat,
   readdir,
   readFile,
   rm,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
@@ -19,6 +20,7 @@ import {
   createMcpControlPlane,
   createRunner,
   createRunStore,
+  createTrustedValidationService,
   DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
   getPipeline,
   main,
@@ -1484,6 +1486,146 @@ test("operator stop after host loss reclaims ownership and reconciles before fur
   }
 });
 
+for (const recovery of ["resume", "cancel", "configuration pause"]) {
+  test(`retired execution storage is cleaned before ${recovery} after owner loss`, async (t) => {
+    const fixture = await operatorFixture(t, "plan-execution");
+    if (recovery === "configuration pause") {
+      await mkdir(join(fixture.projectPath, "LOCAL_ARTIFACTS"), {
+        recursive: true,
+      });
+      await writeFile(
+        join(fixture.projectPath, "LOCAL_ARTIFACTS", "agent-runner.json"),
+        JSON.stringify({ schemaVersion: 1, defaultEffort: "current" }),
+      );
+    }
+    const bootA = "11111111-1111-4111-8111-111111111111";
+    const bootB = "22222222-2222-4222-8222-222222222222";
+    const options = {
+      stateRoot: fixture.stateRoot,
+      resolveStopBoundary,
+      hostName: "recovery-host",
+      processId: 100,
+      processIsAlive: () => true,
+      processIdentity: (pid) => ({ bootId: bootA, startTicks: String(pid) }),
+      leaseStaleMs: 0,
+    };
+    const store = createRunStore(options);
+    const delegate = createExecutionAdapter();
+    const runner = runnerFor(fixture, { codex: delegate }, { runStore: store });
+    const { run } = await runner.create({
+      pipelineId: "plan-execution",
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+      proactiveClarification: false,
+      roleOverrides: {},
+      sourceSession: null,
+    });
+    const lease = await store.acquireRunLease(run.runId);
+    const root = join(fixture.stateRoot, "..", "execution-storage");
+    await mkdir(root, { mode: 0o700 });
+    const rootInfo = await lstat(root, { bigint: true });
+    const intent = {
+      id: "55555555-5555-4555-8555-555555555555",
+      hostname: hostname(),
+      commandIdentity: "a".repeat(64),
+      phase: "allocating",
+      root: {
+        path: root,
+        device: String(rootInfo.dev),
+        inode: String(rootInfo.ino),
+      },
+      directory: null,
+    };
+    await store.recordExecutionResource(lease, intent);
+    const path = join(root, intent.id);
+    await mkdir(path, { mode: 0o700 });
+    const directory = await lstat(path, { bigint: true });
+    await store.recordExecutionResource(lease, {
+      ...intent,
+      phase: "allocated",
+      directory: {
+        device: String(directory.dev),
+        inode: String(directory.ino),
+      },
+    });
+    await writeFile(join(path, "interrupted-cache"), "must not be reused");
+    // Simulate a supervised child recorded before its owner was lost.
+    await store.recordExecutionProcess(lease, 4242, {
+      processIdentity: { bootId: bootA, startTicks: "4242" },
+      namespaceId: "pid:[4026533000]",
+    });
+    await assert.rejects(lease.release(), {
+      code: "ERR_EXECUTION_PROCESS_ACTIVE",
+    });
+    const recoveredStore = createRunStore({
+      ...options,
+      processId: 200,
+      processIdentity: (pid) => ({ bootId: bootB, startTicks: String(pid) }),
+    });
+    const interruption = new Error("Reached provider after recovery");
+    let providerCalls = 0;
+    const recoveredRunner = runnerFor(
+      fixture,
+      {
+        codex: {
+          ...delegate,
+          async run() {
+            providerCalls++;
+            const saved = await recoveredStore.loadRun(run.runId);
+            assert.equal(saved.executionProcess, null);
+            assert.equal(saved.executionResource, null);
+            assert.deepEqual(await readdir(root), []);
+            throw interruption;
+          },
+        },
+      },
+      {
+        runStore: recoveredStore,
+        trustedValidation: createTrustedValidationService(),
+      },
+    );
+    if (recovery === "cancel") {
+      const current = await recoveredStore.loadRun(run.runId);
+      await recoveredRunner.requestOperatorStop({
+        runId: run.runId,
+        kind: "cancel_requested",
+        expectedRevision: current.revision,
+        idempotencyKey: "storage-recovery-stop",
+        timing: "immediate",
+      });
+      const canceled = (
+        await recoveredRunner.resume({ runId: run.runId, action: null })
+      ).run;
+      assert.equal(canceled.pipelineState.workflowState, "CANCELED");
+      assert.equal(providerCalls, 0);
+    } else if (recovery === "configuration pause") {
+      await mkdir(join(fixture.projectPath, "LOCAL_ARTIFACTS"), {
+        recursive: true,
+      });
+      await writeFile(
+        join(fixture.projectPath, "LOCAL_ARTIFACTS", "agent-runner.json"),
+        JSON.stringify({ schemaVersion: 1, defaultEffort: "high" }),
+      );
+      const paused = (
+        await recoveredRunner.resume({ runId: run.runId, action: null })
+      ).run;
+      assert.equal(paused.pause.reason, "project_configuration_changed");
+      assert.equal(providerCalls, 0);
+    } else {
+      await assert.rejects(
+        recoveredRunner.resume({ runId: run.runId, action: null }),
+        { name: "AgentBoundaryError" },
+      );
+      assert.equal(providerCalls, 1);
+    }
+    const saved = await recoveredStore.loadRun(run.runId);
+    assert.equal(saved.executionProcess, null);
+    assert.equal(saved.executionResource, null);
+    assert.deepEqual(await readdir(root), []);
+    assert.equal(await recoveredStore.runIsLeased(run.runId), false);
+  });
+}
+
 function runnerFor(
   fixture,
   adapters,
@@ -2268,8 +2410,24 @@ test("resumes plan execution from its durable trusted-command snapshot", async (
   );
   assert.equal(configurationLoads, 1);
   assert.deepEqual(trustedPreflights, [
-    { projectPath: fixture.projectPath, snapshot: durableSnapshot },
-    { projectPath: fixture.projectPath, snapshot: durableSnapshot },
+    {
+      projectPath: fixture.projectPath,
+      snapshot: durableSnapshot,
+      storageForbiddenPaths: [
+        fixture.projectPath,
+        fixture.taskPath,
+        runStore.rootPath,
+      ],
+    },
+    {
+      projectPath: fixture.projectPath,
+      snapshot: durableSnapshot,
+      storageForbiddenPaths: [
+        fixture.projectPath,
+        fixture.taskPath,
+        runStore.rootPath,
+      ],
+    },
   ]);
 });
 

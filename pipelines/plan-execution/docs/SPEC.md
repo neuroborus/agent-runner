@@ -398,8 +398,8 @@ before provider work. An early creation pause has `preflightComplete: false`,
 null baseline, backend versions, clarification path, and canonical plan, empty
 hashes, and no `resumeState`; null-action resume retries the saved request before
 ordinary `CLARIFY` preflight. Later pauses preserve their current checkpoint.
-This inspection neither executes nor attests checks. Scratch, cache, and artifact
-requests currently fail closed pending implementation. A consumed COMMIT is
+This inspection neither executes nor attests checks. Scratch/cache requests use
+isolated transient storage; artifact requests still fail closed. A consumed COMMIT is
 verified first, preserving its authorized progress before capabilities are
 checked for subsequent work. If an authorization is prepared but unconsumed,
 an unavailable trusted capability or isolation boundary preserves it in an
@@ -2116,6 +2116,21 @@ repository-relative path must exactly equal the proposed value. Missing files,
 directories, symlinks, symlink traversal, and narrative per-turn values enter
 the same bounded redacted finalization-correction path; they never become a
 candidate fingerprint or Reviewer finding.
+
+### Transient validation storage ownership
+
+Common envelope version 9 records trusted storage allocation intent and verified
+identity separately from process ownership. The root retires owned processes and
+cleans recorded resources before resuming pipeline work or settling an operator
+stop. Legacy envelopes migrate to null storage ownership without allocation or
+provider activity. Only declared scratch/cache directories are writable, through
+the fixed mounts and environment bindings owned by the trusted-validation
+architecture. Required build output must stay outside the repository.
+
+Cleanup uncertainty preserves the resource record and pauses finalization as
+`environment_blocked` at `FINALIZE`; neither the check nor subsequent work is
+accepted until ownership is verified and cleanup finishes. Interrupted mutable
+cache contents are never reused. Status remains observational.
 
 ### 13.3 Mode-specific candidate review and terminal confirmation
 

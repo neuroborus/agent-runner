@@ -197,11 +197,7 @@ test("declared capabilities fail closed before sandbox or command activity", asy
       activity += 1;
     },
   });
-  for (const capabilities of [
-    { scratch: true },
-    { cache: true },
-    { artifacts: [artifact] },
-  ]) {
+  for (const capabilities of [{ artifacts: [artifact] }]) {
     const selected = snapshot(capabilities);
     await assert.rejects(
       service.preflight({ projectPath: "/project", snapshot: selected }),
@@ -230,7 +226,7 @@ test("constructing trusted validation for status does no capability work", async
   await assert.rejects(
     service.preflight({
       projectPath: "/project",
-      snapshot: snapshot({ scratch: true }),
+      snapshot: snapshot({ artifacts: [artifact] }),
     }),
     { code: "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE" },
   );

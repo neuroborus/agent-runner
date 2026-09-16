@@ -1783,8 +1783,8 @@ The artifact list contains 1–32 unique canonical HTTPS URLs and lowercase
 SHA-256 digests. URLs cannot carry credentials, fragments, nondefault ports,
 IP literals, or local/reserved hostnames. Public DNS, connection pinning,
 integrity, and resource limits must be enforced by the acquisition implementation.
-All three capabilities are currently declared but unavailable: preflight and
-direct execution fail closed until their isolated implementations exist.
+Scratch and cache are supported as isolated transient storage. Artifact
+acquisition remains unavailable and fails closed before provider work.
 
 Root and safe project catalogs share strict normalization, including capability
 parameters. Capability changes participate in catalog conflict detection and
@@ -1805,13 +1805,59 @@ or attest checks. Consumed commits and completed handoffs are verified before
 capability checks needed for new work; status and immutable terminal reads do no
 capability work. Launcher discovery is lazy for the same reason.
 
+Scratch and cache mount only at `/run/agent-runner/scratch` and
+`/run/agent-runner/cache`. They provide `AGENT_RUNNER_SCRATCH`/`TMPDIR` and
+`AGENT_RUNNER_CACHE`/`XDG_CACHE_HOME`/`npm_config_cache` respectively (npm uses
+`/run/agent-runner/cache/npm`). These bindings are runner-defined; project
+configuration chooses only the capability booleans. Build output must explicitly
+target scratch. Repository and system mounts remain read-only and networking
+remains private. Neither capability changes the agent sandbox.
+Preflight checks storage-root writability and rejects fixed mount targets that
+overlap protected paths before provider work; allocation rechecks that policy.
+Protected Git paths include canonical directory-symlink targets and shared
+metadata reached through Git directory pointers or `commondir` files.
+
+Common run-envelope version 9 adds private `executionResource` ownership next to
+`executionProcess`. Legacy envelopes normalize it to null and migrate through the
+existing leased journal transition without filesystem allocation, provider work,
+or changes to session/progress evidence. Status reads never allocate or clean
+resources. The resource record carries a random execution ID, host, command
+identity, private root device/inode, and allocation phase; the allocated phase
+also records the execution directory device/inode. It is never publicly projected.
+
+The trusted executor creates a runner-owned mode-0700 parent under the runner's
+temporary directory, disjoint from project, task, Git metadata, and runner state.
+A journaled allocation intent precedes exclusive per-execution directory creation;
+verified identity is journaled before exposing scratch/cache or launching a process.
+Directory creation is synchronized before publishing allocation identity, and
+scratch/cache entries are synchronized before launch. Cleanup synchronizes
+removal before clearing journaled ownership, including retries after removal.
+Descriptor-anchored directory operations and identity checks reject symlink
+substitution. Only declared subdirectories are mounted writable. No mutable cache
+is reused across executions, including after interruption.
+
+Command completion, failure, timeout, and cancellation retire descendants before
+confined cleanup and repository mutation checks. Resume and operator-stop recovery
+retire any recorded process before cleaning saved resources, even when interruption
+preceded process registration. Cleanup uses the recorded root, not a newly selected
+temporary directory. A missing child can be cleared idempotently. An existing child
+without a journaled verified identity, a replaced directory/root, or uncertain
+process ownership retains evidence and ownership for explicit recovery; the runner
+never guesses which directory to remove. Checkpoint settlement and releasing
+ownership remain closed until cleanup succeeds. After an operator restores the
+recorded directory or removes an independently verified orphan, resume retries
+cleanup before any new work. Resource cleanup uncertainty at finalization preserves
+an `environment_blocked` FINALIZE checkpoint and never attests the check.
+
 The finalization agent returns `NOT_RUN` only for those selected entries; after
 the agent turn reconciles, the root executor replaces each placeholder by
 running the exact persisted executable/argument vector directly without a
 shell. On Linux it requires bubblewrap and runs with a private network
 namespace. The trusted sandbox selects `native-sandbox-provider` ownership;
 the service and exact-command executor forward that mode to the owned-process
-launcher so it probes the complete nested isolation shape. Executions whose
+launcher so it probes the complete nested isolation shape. The trusted sandbox
+explicitly creates its own user namespace, matching the nested probe rather than
+relying on Bubblewrap's host-dependent implicit user-namespace selection. Executions whose
 sandbox does not select a mode retain ordinary ownership. The trusted command's
 isolation profile and process-containment requirements remain unchanged.
 Before agent work, the root resolves bubblewrap only from fixed

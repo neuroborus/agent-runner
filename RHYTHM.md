@@ -7,6 +7,11 @@ remain in the owning documentation.
 
 ## 2026-09-16
 
+- **Trusted build storage is transient and durably owned.** Scratch/cache mounts
+  stay outside repository and control paths. Intent and filesystem identity are
+  journaled before launch; cleanup follows verified process retirement. Uncertain
+  ownership blocks deletion and interrupted caches are never reused.
+
 - **Trusted execution requests freeze authority before provider work.** Closed
   scratch/cache and pinned-artifact declarations participate in command and
   snapshot fingerprints. Legacy snapshots retain their restricted authority and

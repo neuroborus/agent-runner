@@ -235,8 +235,8 @@ Null-action resume retries the saved request before ordinary `CLARIFY` preflight
 later pauses retain their applicable checkpoint, including an untouched HANDOFF.
 Completed handoffs are verified before checking capabilities needed for new
 work. Status and immutable terminal reads perform no capability work. Inspection
-does not execute or attest required checks. Scratch, cache, and artifact requests
-currently fail closed pending implementation. Environment repair permits retry;
+does not execute or attest required checks. Scratch/cache requests use isolated
+transient storage; artifact requests still fail closed. Environment repair permits retry;
 changing declarations requires a new run and never permits weakened validation.
 
 Settings are stored in pipeline state at run creation and are not reloaded on
@@ -625,6 +625,21 @@ result for the same content fails closed without retaining either rejected
 result. Content changes clear the consumed scope and permit one correction for
 the new fingerprint. This attempt is independent of the bootstrap and
 validation-migration correction ledger.
+
+### Transient validation storage ownership
+
+Common envelope version 9 records trusted storage allocation intent and verified
+identity separately from process ownership. The root retires owned processes and
+cleans recorded resources before resuming pipeline work or settling an operator
+stop. Legacy envelopes migrate to null storage ownership without allocation or
+provider activity. Only declared scratch/cache directories are writable, through
+the fixed mounts and environment bindings owned by the trusted-validation
+architecture. Required build output must stay outside the repository.
+
+Cleanup uncertainty preserves the resource record and pauses finalization as
+`environment_blocked` at `FINALIZE`; neither the check nor subsequent work is
+accepted until ownership is verified and cleanup finishes. Interrupted mutable
+cache contents are never reused. Status remains observational.
 
 ### Review And Findings
 

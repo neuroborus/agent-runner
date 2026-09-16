@@ -84,8 +84,12 @@ pin canonical HTTPS URLs and SHA-256 digests; they do not authorize raw network,
 credentials, proxies, redirects, arbitrary mounts, or project-controlled trust.
 Unavailable capabilities block before provider work rather than broadening an
 agent or validation sandbox. Legacy snapshots retain their original restricted
-authority and evidence bindings. Status does not probe capabilities, and consumed
-commit/handoff verification precedes capability checks needed for new work.
+authority and evidence bindings. Scratch/cache allocations have journaled intent
+and verified filesystem identity before launch, remain outside protected project
+and control paths, and are cleaned only after owned descendants retire. Uncertain
+ownership retains cleanup evidence and never authorizes deletion or cache reuse.
+Status does not probe capabilities. Consumed commit/handoff verification precedes
+capability checks needed for new work.
 Private PID namespaces contain detached and reparented descendants. Provider
 processes that require another native sandbox use that mode only when the full
 nested shape is available. Otherwise, an explicitly declared provider alone may
