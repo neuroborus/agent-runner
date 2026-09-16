@@ -7,6 +7,14 @@ remain in the owning documentation.
 
 ## 2026-09-16
 
+- **Capability needs are inspected without running required checks.** The root
+  trusted-validation capability matches additive exact-command reports against
+  frozen authority and distinguishes malformed contracts from environment blockers.
+  Availability preparation reuses durable ownership and runs only a fixed empty
+  program in the check sandbox; it never produces check evidence. Dependencies
+  are reacquired during finalization. Pipeline discovery and gating remain owned
+  by each pipeline, with the runner supplying configuration guards and leases.
+
 - **Verified dependencies share durable execution ownership.** Frozen public HTTPS
   downloads now use journaled allocations before acquisition and a fixed read-only
   digest mount after verification. Checks remain network-isolated; extraction

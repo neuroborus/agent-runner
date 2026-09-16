@@ -34,6 +34,7 @@ import {
   RunnerError,
 } from "./input.js";
 import { pipelineForRun } from "./migration.js";
+import { inspectTrustedRequirements } from "./trusted-requirements.js";
 import {
   createStopMonitor,
   reconcileOperatorStop,
@@ -321,6 +322,20 @@ export function createRunner(options = {}) {
                 });
                 await validatePersistedBoundary(run);
               },
+              inspectRequirements: (request) =>
+                inspectTrustedRequirements(
+                  {
+                    trustedValidation,
+                    runStore,
+                    lease,
+                    run,
+                    monitor,
+                    checkConfiguration,
+                    validatePersistedBoundary,
+                    storageForbiddenPaths,
+                  },
+                  request,
+                ),
               execute: async (request) => {
                 await checkConfiguration();
                 return monitor.invoke(

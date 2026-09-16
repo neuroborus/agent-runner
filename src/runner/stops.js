@@ -238,6 +238,7 @@ function reconciliationRuntime(runtime, initialRun) {
         ...runtime.trustedValidation,
         execute: rejectEffect,
         preflight: rejectEffect,
+        inspectRequirements: rejectEffect,
       }),
       transition: async (patch) => update(patch),
       settleVerifiedCommit: async (patch, { verifiedCommit }) => {

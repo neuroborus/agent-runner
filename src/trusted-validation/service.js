@@ -16,6 +16,13 @@ import {
 } from "./resources.js";
 import { normalizeArtifacts } from "./artifact-contract.js";
 import { createArtifactAcquirer } from "./acquisition.js";
+import { TrustedValidationError } from "./errors.js";
+import {
+  normalizeRequirementRequest,
+  requirementBlockers,
+} from "./requirements.js";
+
+export { TrustedValidationError } from "./errors.js";
 
 const ALIAS_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
@@ -38,18 +45,6 @@ const COMMAND_FIELDS = Object.freeze([
   "arguments",
   "identity",
 ]);
-
-export class TrustedValidationError extends Error {
-  constructor(
-    message,
-    { cause, changes = [], code = "ERR_TRUSTED_VALIDATION" } = {},
-  ) {
-    super(message, cause === undefined ? undefined : { cause });
-    this.name = "TrustedValidationError";
-    this.code = code;
-    this.changes = Object.freeze([...changes]);
-  }
-}
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -509,16 +504,19 @@ export function createTrustedValidationService(options = {}) {
     trustedLauncher(projectPath);
   }
 
-  async function execute({
-    bindings,
-    commandIdentity: identity,
-    projectPath,
-    snapshot,
-    signal,
-    onProcess,
-    onResource,
-    storageForbiddenPaths = [],
-  }) {
+  async function runSelected(
+    {
+      bindings,
+      commandIdentity: identity,
+      projectPath,
+      snapshot,
+      signal,
+      onProcess,
+      onResource,
+      storageForbiddenPaths = [],
+    },
+    preparationOnly = false,
+  ) {
     signal?.throwIfAborted();
     if (
       typeof git.snapshot !== "function" ||
@@ -530,12 +528,15 @@ export function createTrustedValidationService(options = {}) {
       );
     }
     const trustedSnapshot = validateTrustedValidationSnapshot(snapshot);
-    const normalizedBindings = normalizeBindings(bindings);
+    const normalizedBindings = preparationOnly
+      ? null
+      : normalizeBindings(bindings);
     if (
-      trustedSnapshot.commandFingerprint !==
+      !preparationOnly &&
+      (trustedSnapshot.commandFingerprint !==
         normalizedBindings.commandFingerprint ||
-      trustedSnapshot.configurationFingerprint !==
-        normalizedBindings.configurationFingerprint
+        trustedSnapshot.configurationFingerprint !==
+          normalizedBindings.configurationFingerprint)
     ) {
       throw new TrustedValidationError(
         "Trusted validation bindings do not match the durable snapshot.",
@@ -552,7 +553,7 @@ export function createTrustedValidationService(options = {}) {
       );
     }
     if (
-      needsStorage(command.capabilities) &&
+      (preparationOnly || needsStorage(command.capabilities)) &&
       (typeof onProcess !== "function" || typeof onResource !== "function")
     ) {
       throw new TrustedValidationError(
@@ -561,7 +562,10 @@ export function createTrustedValidationService(options = {}) {
       );
     }
     const before = await git.snapshot({ allowedPaths: [], projectPath });
-    if (before.contentFingerprint !== normalizedBindings.contentFingerprint) {
+    if (
+      !preparationOnly &&
+      before.contentFingerprint !== normalizedBindings.contentFingerprint
+    ) {
       throw new TrustedValidationError(
         "Trusted validation content binding changed before execution.",
         { code: "ERR_TRUSTED_VALIDATION_BINDING_CHANGED" },
@@ -664,6 +668,7 @@ export function createTrustedValidationService(options = {}) {
         environment,
         resources: allocated?.mounts ?? {},
         privateStorageRoot: allocated?.record.root.path,
+        preparationOnly,
       });
       result = await runCommand(execution.command, {
         cwd: before.projectPath,
@@ -671,10 +676,10 @@ export function createTrustedValidationService(options = {}) {
         ownershipMode: execution.ownershipMode,
         readinessRequired: execution.readinessRequired ?? false,
         terminationGraceMs,
-        timeoutMs,
+        timeoutMs: preparationOnly ? Math.min(timeoutMs, 10_000) : timeoutMs,
         signal,
         onProcess:
-          allocated === null
+          allocated === null && !preparationOnly
             ? onProcess
             : async (pid, proof) => {
                 if (pid !== null) processActive = true;
@@ -701,6 +706,12 @@ export function createTrustedValidationService(options = {}) {
         throw cause;
       if (cause?.code === "ERR_TRUSTED_VALIDATION_PROCESS_TREE_ACTIVE") {
         throw cause;
+      }
+      if (processActive) {
+        throw new TrustedValidationError(
+          "Trusted execution process retirement is unverified.",
+          { cause, code: "ERR_EXECUTION_PROCESS_ACTIVE" },
+        );
       }
       result = {
         status: "BLOCKED",
@@ -785,6 +796,8 @@ export function createTrustedValidationService(options = {}) {
         { code: "ERR_INVALID_TRUSTED_VALIDATION_RESULT" },
       );
     }
+    if (preparationOnly)
+      return Object.freeze({ available: result.status === "PASS" });
     return Object.freeze({
       status: result.status,
       commandIdentity: command.identity,
@@ -837,5 +850,63 @@ export function createTrustedValidationService(options = {}) {
     retiredAcquisitions.delete(resource.id);
   }
 
-  return Object.freeze({ execute, preflight, recoverResources });
+  async function inspectRequirements({
+    inventory,
+    requirements = [],
+    snapshot,
+    ...context
+  }) {
+    context.signal?.throwIfAborted();
+    const request = normalizeRequirementRequest({ inventory, requirements });
+    const selected =
+      snapshot === undefined
+        ? createTrustedValidationSnapshot({}, [])
+        : validateTrustedValidationSnapshot(snapshot);
+    if (
+      selected.commands.some(
+        (command) => !request.inventory.includes(command.command),
+      )
+    ) {
+      throw new TrustedValidationError(
+        "The inventory omits a frozen trusted command.",
+        {
+          code: "ERR_INVALID_TRUSTED_REQUIREMENTS",
+        },
+      );
+    }
+    const blockers = requirementBlockers(request, selected);
+    // Validate the complete request and authority before any preparation effects.
+    if (blockers.length === 0) {
+      for (const command of selected.commands) {
+        context.signal?.throwIfAborted();
+        const result = await runSelected(
+          { ...context, snapshot: selected, commandIdentity: command.identity },
+          true,
+        );
+        if (!result.available)
+          blockers.push(
+            Object.freeze({
+              command: command.command,
+              commandIdentity: command.identity,
+              reason: "unavailable",
+              evidence: Object.freeze([
+                "The runner could not prepare the frozen command capabilities.",
+              ]),
+            }),
+          );
+      }
+    }
+    context.signal?.throwIfAborted();
+    return Object.freeze({
+      status: blockers.length === 0 ? "READY" : "BLOCKED",
+      blockers: Object.freeze(blockers),
+    });
+  }
+
+  return Object.freeze({
+    execute: (request) => runSelected(request),
+    preflight,
+    inspectRequirements,
+    recoverResources,
+  });
 }
