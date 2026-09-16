@@ -624,8 +624,21 @@ export function runtimeStorageExposures(command, { cwd, environment }) {
 
 function sandboxArguments(
   command,
-  { cwd, environment, homePath, resources, privateStorageRoot },
+  {
+    cwd,
+    environment,
+    homePath,
+    resources,
+    privateStorageRoot,
+    preparationOnly,
+  },
 ) {
+  if (preparationOnly) {
+    const executable = executableCandidate(command.executable, environment);
+    if (executable === null || !lstatSync(realpathSync(executable)).isFile())
+      throw new Error("The declared executable is unavailable.");
+    accessSync(executable, constants.X_OK);
+  }
   const argumentsList = [
     "--die-with-parent",
     "--unshare-user",
@@ -696,8 +709,9 @@ function sandboxArguments(
     "--eval",
     READINESS_SCRIPT,
     "--",
-    command.executable,
-    ...command.arguments,
+    ...(preparationOnly
+      ? [process.execPath, "--eval", ""]
+      : [command.executable, ...command.arguments]),
   );
   return Object.freeze(argumentsList);
 }
@@ -710,6 +724,7 @@ export function sandboxTrustedCommand(
     environment,
     resources = {},
     privateStorageRoot,
+    preparationOnly = false,
     platform = process.platform,
   },
 ) {
@@ -738,6 +753,7 @@ export function sandboxTrustedCommand(
           homePath,
           resources,
           privateStorageRoot,
+          preparationOnly,
         }),
       }),
       environment: safeEnvironment(environment, resources),

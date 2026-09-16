@@ -1773,6 +1773,57 @@ A selected runner-trusted command is the only exception to agent-side check
 execution during finalization. The runner-derived bootstrap inventory must
 contain its exact configured command.
 
+The public trusted-validation service also provides `inspectRequirements` for
+pipeline-owned requirement discovery and writable-entry decisions. This is an
+explicit preparation effect, never a required-check execution or attestation.
+Construction, status reads, and ordinary preflight do not call it. Pipelines
+retain their own reporting schemas, saved requests, migration, and pause policy;
+the capability owns normalization, frozen authority matching, and availability.
+Pipeline adoption is separate from this root preparation boundary.
+
+Inspection accepts `inventory` (up to 256 unique, trimmed, single-line exact
+command strings, each at most 4,000 characters) and `requirements` (up to 256
+reports). Every selected frozen command must appear in the inventory. Each
+report names an inventory `command` and may supply `commandIdentity` (null or a
+lowercase SHA-256 identity), `capabilities` (the existing scratch, cache, and
+exact artifact declaration shape), and `unsupported` (up to 16 unique lowercase
+capability labels of at most 64 characters). Unknown fields, malformed parameters,
+or commands outside the inventory raise `ERR_INVALID_TRUSTED_REQUIREMENTS`
+before effects. Unsupported labels describe needs, never executable requests,
+paths, environment values, or authority. The capability copies and freezes the
+accepted request before asynchronous work.
+
+All reports for a command are additive; one role's smaller report cannot remove
+another's requirement. A valid report without trusted selection, with unsupported
+needs, or exceeding the saved command identity or capabilities returns `BLOCKED`
+with bounded `not-selected`, `unsupported`, or `insufficient-authority` reasons.
+Artifact authority matches both canonical URL and digest. Selected declarations
+are always runner-known requirements even without reports. Authority for the
+entire request is checked before any preparation; the snapshot is never changed.
+
+For authorized requests, inspection prepares each selected command sequentially
+under the existing durable storage, transport, and process lifecycle. It acquires
+and verifies dependencies, constructs the same network-isolated mounts, checks
+the declared executable's availability, and runs only a runner-defined empty Node
+program in that sandbox, with a maximum ten-second process deadline. The check's
+argument vector is never invoked. Preparation failures return bounded
+`unavailable` blockers without native diagnostics, URLs, or process output.
+Uncertain resource ownership, cancellation, and repository mutation preserve
+their existing safety error contracts and recovery evidence. Successful
+retirement journaling is required before inspecting another command; an
+uncertain process registration stops preparation with its ownership intact.
+Successful inspection returns only `READY` and an empty blocker list; it grants no check
+pass or finalization evidence. Owned resources are retired and cleaned, and
+finalization later acquires dependencies afresh and reverifies them.
+
+The runner's private inspection adapter pins repository scope and snapshot to
+the saved run, guards project configuration before and after the effect, and
+uses the stop monitor's signal and leased process/resource callbacks. Outstanding
+ownership must be recovered first. Stop reconciliation rejects inspection just
+as it rejects new command execution. This adds no eager capability work ahead
+of consumed-commit or completed-handoff verification; pipelines must keep that
+verification-only recovery ahead of any new preparation.
+
 Trusted declarations optionally carry `capabilities`, a closed object with
 `scratch: true`, `cache: true`, and `artifacts: [{ url, sha256 }]`. Omit a
 capability to leave it disabled. Scratch and cache request isolated per-execution

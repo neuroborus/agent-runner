@@ -216,6 +216,73 @@ async function fixture(
   };
 }
 
+test("requirement inspection acquires frozen dependencies without executing the check and finalization reverifies", async (t) => {
+  const f = await fixture(t);
+  const vectors = [];
+  const service = f.service({
+    async runCommand(command) {
+      vectors.push(command.arguments.slice(-3));
+      return passed;
+    },
+  });
+  const input = {
+    ...f.request,
+    inventory: [f.request.snapshot.commands[0].command],
+  };
+  assert.deepEqual(await service.inspectRequirements(input), {
+    status: "READY",
+    blockers: [],
+  });
+  assert.deepEqual(vectors, [[process.execPath, "--eval", ""]]);
+  assert.equal(f.downloads(), 1);
+  assert.equal(await f.saved(), null);
+  assert.deepEqual(await readdir(f.storageRoot), []);
+  assert.equal((await service.execute(f.request)).status, "PASS");
+  assert.equal(f.downloads(), 2);
+  assert.equal(await f.saved(), null);
+  const allocations = f.records.filter(
+    (record) => record?.phase === "allocating",
+  );
+  assert.notEqual(allocations[0].id, allocations[1].id);
+});
+
+test("unavailable dependencies block inspection with redacted evidence and retry the saved request", async (t) => {
+  const f = await fixture(t, { dnsError: true });
+  const service = f.service();
+  const input = {
+    ...f.request,
+    inventory: [f.request.snapshot.commands[0].command],
+  };
+  const before = JSON.stringify(input.snapshot);
+  const result = await service.inspectRequirements(input);
+  assert.equal(result.status, "BLOCKED");
+  assert.equal(result.blockers[0].reason, "unavailable");
+  assert.ok(!JSON.stringify(result).includes("private URL"));
+  assert.equal(f.launches(), 0);
+  assert.equal(await f.saved(), null);
+  f.repair();
+  assert.equal((await service.inspectRequirements(input)).status, "READY");
+  assert.equal(JSON.stringify(input.snapshot), before);
+  assert.equal(f.downloads(), 2);
+  assert.equal(await f.saved(), null);
+});
+
+test("inspection cancellation retires acquisition and clears durable ownership", async (t) => {
+  const f = await fixture(t, { pending: true });
+  const controller = new AbortController();
+  const inspecting = f.service().inspectRequirements({
+    ...f.request,
+    inventory: [f.request.snapshot.commands[0].command],
+    signal: controller.signal,
+  });
+  await f.started.promise;
+  controller.abort();
+  await assert.rejects(inspecting, { name: "AbortError" });
+  assert.equal(f.launches(), 0);
+  assert.equal(await f.saved(), null);
+  assert.ok(f.sockets.every((socket) => socket.closed));
+});
+
 for (const scratch of [false, true]) {
   test(`verified dependency mount is read-only and artifact-only allocation works (scratch=${scratch})`, async (t) => {
     const f = await fixture(t, {
