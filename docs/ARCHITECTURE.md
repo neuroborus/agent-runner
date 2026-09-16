@@ -1783,21 +1783,23 @@ The artifact list contains 1–32 unique canonical HTTPS URLs and lowercase
 SHA-256 digests. URLs cannot carry credentials, fragments, nondefault ports,
 IP literals, or local/reserved hostnames. Public DNS, connection pinning,
 integrity, and resource limits must be enforced by the acquisition implementation.
-Scratch and cache are supported as isolated transient storage. Artifact
-acquisition remains unavailable and fails closed before provider work.
+Scratch and cache provide isolated transient storage. Artifact acquisition uses
+the same durable allocation lifecycle and exposes verified files read-only.
 
 The private `acquisition.js` primitive shares artifact declaration normalization
-with the snapshot contract. It is not exported by the capability index or wired
-to production execution. The caller supplies an exclusively owned mode-0700
-directory handle, never a destination filename. Descriptor-relative exclusive
-partials are hashed while streaming, synchronized, and published without replacing
+with the snapshot contract. The trusted executor invokes it privately after
+journaling verified allocation ownership. The caller supplies an exclusively
+owned mode-0700 directory handle, never a destination filename. Descriptor-relative
+exclusive partials are hashed while streaming, synchronized, and published without replacing
 existing entries under their lowercase SHA-256 names with mode 0444. Identical
 digests share one published file, but every declared URL is acquired and verified.
 Cleanup rechecks entries against the open file's identity and preserves substitutes.
 Earlier verified files can remain after a later failure; callers must not expose
 an incomplete acquisition and remain responsible for the owned directory.
-Durable allocation, read-only mounting, and recovery integration must precede
-enabling production artifact requests.
+The service exposes the dependency directory only after the complete request
+succeeds, all transports retire, and allocation and subdirectory identities are
+rechecked. Every execution acquires fresh files from its frozen declarations;
+resume cleans previous allocations before downloading again.
 
 Acquisition resolves all addresses once (at most 64 answers), rejects the entire
 answer set if any address is not public unicast, and pins one numeric destination.
@@ -1815,7 +1817,13 @@ body/header inactivity 15 seconds, and the whole acquisition 5 minutes. Cancella
 and deadlines prevent subsequent publication. Requests, responses, and sockets
 must close before publication or partial cleanup; retirement has a separate
 1-second bound. Unverified retirement retains the partial for owned recovery.
-Late callbacks cannot publish files. Errors expose finite acquisition categories,
+The live service retains the resource while transport closure is uncertain and
+rejects concurrent recovery; closure permits cleanup retry. Recovery also checks
+the journaled acquisition owner, even after lease release and service
+reconstruction.
+A live or unverifiable owner blocks cleanup unless that same service observed
+transport retirement. A dead or replaced owner permits confined cleanup. Late
+callbacks cannot publish files. Errors expose finite acquisition categories,
 not URLs, response bodies, or native transport diagnostics. Tests inject DNS,
 HTTPS and deadline scheduling without network access.
 
@@ -1843,12 +1851,20 @@ Scratch and cache mount only at `/run/agent-runner/scratch` and
 `AGENT_RUNNER_CACHE`/`XDG_CACHE_HOME`/`npm_config_cache` respectively (npm uses
 `/run/agent-runner/cache/npm`). These bindings are runner-defined; project
 configuration chooses only the capability booleans. Build output must explicitly
-target scratch. Repository and system mounts remain read-only and networking
-remains private. Neither capability changes the agent sandbox.
+target scratch. Dependencies mount only at the read-only
+`/run/agent-runner/dependencies`, with `AGENT_RUNNER_DEPENDENCIES` bound to that
+path. Files use their declared lowercase SHA-256 digest as their name. No partial
+file is exposed. Artifact-only requests allocate storage even without scratch or
+cache. Extraction or setup must be part of the exact declared command and target
+declared scratch; the runner does not extract archives or install host tools.
+Repository and system mounts remain read-only and networking remains private.
+These capabilities do not change the agent sandbox.
 Preflight checks storage-root writability and rejects fixed mount targets that
 overlap protected paths before provider work; allocation rechecks that policy.
-Protected Git paths include canonical directory-symlink targets and shared
-metadata reached through Git directory pointers or `commondir` files.
+Private storage also cannot overlap system, executable, or PATH exposures;
+the sandbox rechecks this before mounting. Protected Git paths include canonical
+directory-symlink targets and shared metadata reached through Git directory
+pointers or `commondir` files.
 
 Common run-envelope version 9 adds private `executionResource` ownership next to
 `executionProcess`. Legacy envelopes normalize it to null and migrate through the
@@ -1856,18 +1872,30 @@ existing leased journal transition without filesystem allocation, provider work,
 or changes to session/progress evidence. Status reads never allocate or clean
 resources. The resource record carries a random execution ID, host, command
 identity, private root device/inode, and allocation phase; the allocated phase
-also records the execution directory device/inode. It is never publicly projected.
+also records the execution directory device/inode. Common run-envelope version
+10 adds the `acquiring` phase, which journals the runner PID and boot/start
+identity before transport activity. Version-9 state and journal records retain
+their original closed allocation contract and load without writes; leased
+migration preserves ownership, command identities, and progress without new
+resource effects. The runtime compatibility token changes with this version.
+Verified retirement restores `allocated` before launch or cleanup; only those
+exact identity-preserving transitions are accepted. Acquisition journal failures
+retain ownership and report the bounded resumable ownership blocker. Resource ownership is never publicly projected.
 
 The trusted executor creates a runner-owned mode-0700 parent under the runner's
 temporary directory, disjoint from project, task, Git metadata, and runner state.
 A journaled allocation intent precedes exclusive per-execution directory creation;
-verified identity is journaled before exposing scratch/cache or launching a process.
+verified identity is journaled before downloading, exposing mounts, or launching
+a process. The execution directory owns its dependency subdirectory as well as
+scratch/cache; the acquisition phase records transport ownership separately from
+command process registration.
 Directory creation is synchronized before publishing allocation identity, and
-scratch/cache entries are synchronized before launch. Cleanup synchronizes
-removal before clearing journaled ownership, including retries after removal.
+declared storage entries are synchronized before acquisition or launch. Cleanup
+synchronizes removal before clearing journaled ownership, including retries
+after removal.
 Descriptor-anchored directory operations and identity checks reject symlink
-substitution. Only declared subdirectories are mounted writable. No mutable cache
-is reused across executions, including after interruption.
+substitution. Only declared scratch/cache subdirectories are mounted writable.
+No mutable cache is reused across executions, including after interruption.
 
 Command completion, failure, timeout, and cancellation retire descendants before
 confined cleanup and repository mutation checks. Resume and operator-stop recovery
@@ -1879,8 +1907,11 @@ process ownership retains evidence and ownership for explicit recovery; the runn
 never guesses which directory to remove. Checkpoint settlement and releasing
 ownership remain closed until cleanup succeeds. After an operator restores the
 recorded directory or removes an independently verified orphan, resume retries
-cleanup before any new work. Resource cleanup uncertainty at finalization preserves
-an `environment_blocked` FINALIZE checkpoint and never attests the check.
+cleanup before any new work. Acquisition failures return bounded, redacted
+`BLOCKED` check evidence without launching the command. They and resource cleanup
+uncertainty preserve an `environment_blocked` FINALIZE checkpoint and never attest the check. Cancellation
+preserves the abort outcome after safe cleanup; uncertain retirement retains
+ownership and blocks settlement.
 
 The finalization agent returns `NOT_RUN` only for those selected entries; after
 the agent turn reconciles, the root executor replaces each placeholder by

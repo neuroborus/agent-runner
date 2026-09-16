@@ -160,8 +160,13 @@ before provider work, including at creation before any preflight evidence exists
 Resume retries the saved request after environment repair. Changing declarations
 requires a new run; repository changes must not bypass or weaken required checks.
 Scratch and cache capabilities provide per-execution transient storage; pinned
-artifact acquisition remains unavailable and fails closed. Capability inspection
-is not check execution or validation evidence. Verification-only recovery of a consumed
+artifacts are acquired by the runner into durably owned private storage before
+finalization command execution. Only complete SHA-256-verified files appear in
+the fixed read-only dependency mount. Checks remain network-isolated. Acquisition
+failures are resumable environment blockers, never check passes or permission to
+change the declaration; retries acquire fresh files after cleanup. Preflight
+checks storage and isolation without downloading. Capability inspection is not
+check execution or validation evidence. Verification-only recovery of a consumed
 commit or completed handoff remains available without those capabilities.
 
 Before finalization, writable roles receive the exact

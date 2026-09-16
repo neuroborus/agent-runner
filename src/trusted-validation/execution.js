@@ -20,7 +20,7 @@ import {
 } from "node:path";
 
 import { spawnOwnedProcess } from "../agents/index.js";
-import { STORAGE_PATHS } from "./resources.js";
+import { requestsMount, STORAGE_PATHS } from "./resources.js";
 
 const BUBBLEWRAP_CANDIDATES = Object.freeze([
   "/usr/bin/bwrap",
@@ -435,6 +435,9 @@ function safeEnvironment(environment, resources = {}) {
     isolated.XDG_CACHE_HOME = STORAGE_PATHS.cache;
     isolated.npm_config_cache = `${STORAGE_PATHS.cache}/npm`;
   }
+  if (resources.dependencies) {
+    isolated.AGENT_RUNNER_DEPENDENCIES = STORAGE_PATHS.dependencies;
+  }
   return Object.freeze(isolated);
 }
 
@@ -597,7 +600,32 @@ function dynamicExposures(command, { cwd, environment, homePath }) {
   return confined;
 }
 
-function sandboxArguments(command, { cwd, environment, homePath, resources }) {
+export function runtimeStorageExposures(command, { cwd, environment }) {
+  try {
+    return [
+      ...SYSTEM_MOUNTS.filter((path) => existsSync(path)).map((path) =>
+        realpathSync(path),
+      ),
+      ...dynamicExposures(command, {
+        cwd,
+        environment,
+        homePath: environment.HOME,
+      }).flatMap(({ source, target }) => [source, target]),
+    ];
+  } catch {
+    throw new TrustedExecutionError(
+      "Trusted execution runtime paths are unavailable.",
+      {
+        code: "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE",
+      },
+    );
+  }
+}
+
+function sandboxArguments(
+  command,
+  { cwd, environment, homePath, resources, privateStorageRoot },
+) {
   const argumentsList = [
     "--die-with-parent",
     "--unshare-user",
@@ -614,13 +642,22 @@ function sandboxArguments(command, { cwd, environment, homePath, resources }) {
     "--tmpfs",
     "/tmp",
   ];
+  const exposures = dynamicExposures(command, { cwd, environment, homePath });
+  // Private storage must not leak through a runtime, PATH or system exposure.
+  // Only the explicit per-command mounts below may expose owned subdirectories.
+  if (
+    privateStorageRoot !== undefined &&
+    runtimeStorageExposures(command, { cwd, environment }).some(
+      (path) =>
+        coversPath(path, privateStorageRoot) ||
+        coversPath(privateStorageRoot, path),
+    )
+  ) {
+    throw new Error("Trusted storage overlaps a runtime exposure.");
+  }
   appendSystemMounts(argumentsList);
   const createdParents = new Set();
-  for (const { source, target } of dynamicExposures(command, {
-    cwd,
-    environment,
-    homePath,
-  })) {
+  for (const { source, target } of exposures) {
     for (const parent of mountParents(target)) {
       if (!createdParents.has(parent)) {
         argumentsList.push("--dir", parent);
@@ -633,7 +670,7 @@ function sandboxArguments(command, { cwd, environment, homePath, resources }) {
     const target = STORAGE_PATHS[name];
     if (
       target === undefined ||
-      command.capabilities?.[name] !== true ||
+      !requestsMount(command.capabilities, name) ||
       !isAbsolute(source) ||
       realpathSync(source) !== source ||
       !lstatSync(source).isDirectory() ||
@@ -643,7 +680,13 @@ function sandboxArguments(command, { cwd, environment, homePath, resources }) {
     ) {
       throw new Error("Trusted storage mount is invalid.");
     }
-    argumentsList.push("--dir", dirname(target), "--bind", source, target);
+    argumentsList.push(
+      "--dir",
+      dirname(target),
+      name === "dependencies" ? "--ro-bind" : "--bind",
+      source,
+      target,
+    );
   }
   argumentsList.push(
     "--chdir",
@@ -666,6 +709,7 @@ export function sandboxTrustedCommand(
     cwd,
     environment,
     resources = {},
+    privateStorageRoot,
     platform = process.platform,
   },
 ) {
@@ -693,6 +737,7 @@ export function sandboxTrustedCommand(
           environment,
           homePath,
           resources,
+          privateStorageRoot,
         }),
       }),
       environment: safeEnvironment(environment, resources),

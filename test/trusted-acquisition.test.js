@@ -25,10 +25,6 @@ import {
   ACQUISITION_LIMITS,
 } from "../src/trusted-validation/acquisition.js";
 import { publicAddress } from "../src/trusted-validation/public-address.js";
-import {
-  createTrustedValidationService,
-  createTrustedValidationSnapshot,
-} from "../src/trusted-validation/index.js";
 
 const digest = (body) => createHash("sha256").update(body).digest("hex");
 const artifact = (body = "verified", path = "file") => ({
@@ -411,6 +407,34 @@ test("unverified transport retirement is bounded and retains the private partial
   assert.equal(f.timers.size, 0);
 });
 
+test("file close errors cannot hide unretired acquisition transports", async (t) => {
+  const f = await fixture(t, { stuck: true });
+  const originalOpen = filesystem.open;
+  t.mock.method(filesystem, "open", async (...args) => {
+    const file = await originalOpen(...args);
+    const close = file.close.bind(file);
+    t.mock.method(file, "close", async () => {
+      await close();
+      throw Object.assign(new Error("close failed"), { code: "EIO" });
+    });
+    return file;
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  });
+  const pending = assert.rejects(f.acquire(), (cause) => {
+    assert.equal(cause.code, "ERR_TRUSTED_ACQUISITION_RETIREMENT");
+    assert.ok(cause.retirement instanceof Promise);
+    return true;
+  });
+  await f.retiring.promise;
+  f.fire(ACQUISITION_LIMITS.retirementMs);
+  await pending;
+  assert.match((await readdir(f.root))[0], /^\.partial-/u);
+});
+
 test("destinations are digest-only, exclusive and never follow existing symlinks", async (t) => {
   const f = await fixture(t);
   await symlink("outside", join(f.root, artifact().sha256));
@@ -482,7 +506,7 @@ test("file ownership comparisons distinguish inode values above the safe integer
   assert.ok(!(await readdir(f.root)).includes(artifact().sha256));
 });
 
-test("acquisition reuses the declaration contract and production artifact requests remain unavailable", async (t) => {
+test("acquisition reuses the strict declaration contract", async (t) => {
   for (const input of [null, [], "path"])
     await assert.rejects(createArtifactAcquirer()(input), code("CONTRACT"));
   assert.throws(
@@ -505,22 +529,4 @@ test("acquisition reuses the declaration contract and production artifact reques
   ])
     await assert.rejects(f.acquire({ artifacts: [invalid] }), code("CONTRACT"));
   assert.equal(f.requests.length, 0);
-  const snapshot = createTrustedValidationSnapshot(
-    {
-      build: {
-        command: "node build.js",
-        executable: "node",
-        arguments: ["build.js"],
-        capabilities: { artifacts: [artifact()] },
-      },
-    },
-    ["build"],
-  );
-  await assert.rejects(
-    createTrustedValidationService().preflight({
-      projectPath: f.root,
-      snapshot,
-    }),
-    { code: "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE" },
-  );
 });

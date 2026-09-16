@@ -924,3 +924,97 @@ test("legacy storage ownership migrates to null without allocating resources", a
     await lease.release();
   }
 });
+
+for (const phase of ["allocating", "allocated"]) {
+  test(`version-9 ${phase} ownership migrates unchanged without resource effects`, async (t) => {
+    const { created, store, workspace } = await createFixture(t);
+    await created.lease.release();
+    const statePath = join(created.directoryPath, "state.json");
+    const eventsPath = join(created.directoryPath, "events.jsonl");
+    const legacy = JSON.parse(await readFile(statePath, "utf8"));
+    legacy.schemaVersion = 9;
+    legacy.runtimeCompatibility.runStateVersion = 9;
+    legacy.executionResource = {
+      id: "55555555-5555-4555-8555-555555555555",
+      hostname: "fixture-host",
+      commandIdentity: "a".repeat(64),
+      phase,
+      root: { path: join(workspace, "storage"), device: "1", inode: "2" },
+      directory: phase === "allocated" ? { device: "1", inode: "3" } : null,
+    };
+    const event = JSON.parse((await readFile(eventsPath, "utf8")).trim());
+    event.schemaVersion = 9;
+    event.state = legacy;
+    await writeFile(statePath, JSON.stringify(legacy));
+    await writeFile(eventsPath, `${JSON.stringify(event)}\n`);
+    const original = await readFile(statePath, "utf8");
+    const loaded = await store.loadRun(legacy.runId);
+    assert.equal(loaded.schemaVersion, 9);
+    assert.deepEqual(loaded.executionResource, legacy.executionResource);
+    assert.equal(await readFile(statePath, "utf8"), original);
+    const lease = await store.acquireRunLease(legacy.runId);
+    try {
+      const migrated = await store.migrateRun(
+        lease,
+        {
+          pipelineState: loaded.pipelineState,
+          pipelineStateVersion: loaded.pipelineStateVersion,
+        },
+        {
+          activity: {
+            actor: "runner",
+            phase: "runtime",
+            kind: "migrated",
+            message: "Migrated acquisition ownership contract.",
+          },
+        },
+      );
+      assert.equal(migrated.schemaVersion, RUN_STATE_SCHEMA_VERSION);
+      assert.deepEqual(migrated.executionResource, legacy.executionResource);
+      assert.deepEqual(migrated.counters, loaded.counters);
+      assert.deepEqual(migrated.sessionLineage, loaded.sessionLineage);
+      await assert.rejects(access(legacy.executionResource.root.path), {
+        code: "ENOENT",
+      });
+      await assert.rejects(lease.release(), {
+        code: "ERR_EXECUTION_PROCESS_ACTIVE",
+      });
+    } finally {
+      // The fixture owns no filesystem allocation; retire its synthetic record.
+      await store.recordExecutionResource(lease, null);
+      await lease.release();
+    }
+  });
+}
+
+test("version-9 state cannot carry the version-10 acquiring phase", async (t) => {
+  const { created, store, workspace } = await createFixture(t);
+  const statePath = join(created.directoryPath, "state.json");
+  const eventsPath = join(created.directoryPath, "events.jsonl");
+  const legacy = JSON.parse(await readFile(statePath, "utf8"));
+  legacy.schemaVersion = 9;
+  legacy.runtimeCompatibility.runStateVersion = 9;
+  legacy.executionResource = {
+    id: "55555555-5555-4555-8555-555555555555",
+    hostname: "fixture-host",
+    commandIdentity: "a".repeat(64),
+    phase: "acquiring",
+    root: { path: join(workspace, "storage"), device: "1", inode: "2" },
+    directory: { device: "1", inode: "3" },
+    owner: {
+      pid: process.pid,
+      processIdentity: {
+        bootId: "55555555-5555-4555-8555-555555555555",
+        startTicks: "1",
+      },
+    },
+  };
+  const event = JSON.parse((await readFile(eventsPath, "utf8")).trim());
+  event.schemaVersion = 9;
+  event.state = legacy;
+  await writeFile(statePath, JSON.stringify(legacy));
+  await writeFile(eventsPath, `${JSON.stringify(event)}\n`);
+  await assert.rejects(store.loadRun(legacy.runId), {
+    code: "ERR_INVALID_RUN_STATE",
+  });
+});

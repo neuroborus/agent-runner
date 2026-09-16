@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-09-16
 
+- **Verified dependencies share durable execution ownership.** Frozen public HTTPS
+  downloads now use journaled allocations before acquisition and a fixed read-only
+  digest mount after verification. Checks remain network-isolated; extraction
+  belongs to their exact vector and declared scratch. Failures retain bounded
+  resumable blockers, and a journaled acquisition owner prevents early cleanup
+  after service reconstruction. Common envelope version 10 distinguishes the new
+  phase while preserving legacy allocation evidence during migration. Recovery
+  cleans old allocations before any fresh download. No partial download is reused.
+
 - **Pinned acquisition separates transport verification from runtime authority.**
   The private primitive shares frozen artifact declaration rules, pins public
   destinations with hostname TLS verification, and bounds transfer and retirement.

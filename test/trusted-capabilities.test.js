@@ -187,9 +187,10 @@ test("legacy restricted snapshots retain exact identities and evidence bindings"
   );
 });
 
-test("declared capabilities fail closed before sandbox or command activity", async () => {
+test("unavailable storage fails closed before sandbox or command activity", async () => {
   let activity = 0;
   const service = createTrustedValidationService({
+    storageRoot: "/project/private-storage",
     sandboxCommand() {
       activity += 1;
     },
@@ -203,9 +204,6 @@ test("declared capabilities fail closed before sandbox or command activity", asy
       service.preflight({ projectPath: "/project", snapshot: selected }),
       { code: "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE" },
     );
-    await assert.rejects(service.execute({ snapshot: selected }), {
-      code: "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE",
-    });
   }
   await service.preflight({ projectPath: "/project", snapshot: snapshot({}) });
   assert.equal(activity, 0);
@@ -214,6 +212,7 @@ test("declared capabilities fail closed before sandbox or command activity", asy
 test("constructing trusted validation for status does no capability work", async () => {
   let resolutions = 0;
   const service = createTrustedValidationService({
+    storageRoot: "/project/private-storage",
     resolveLauncher() {
       resolutions += 1;
       return "/runner/bwrap";

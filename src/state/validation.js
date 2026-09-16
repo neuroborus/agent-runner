@@ -3,7 +3,7 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { isAdapterDiagnosticClass } from "../agents/index.js";
 import { validStopTiming, validStopSettlement } from "./stop-contract.js";
 
-export const RUN_STATE_SCHEMA_VERSION = 9;
+export const RUN_STATE_SCHEMA_VERSION = 10;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
   runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
@@ -25,6 +25,7 @@ const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   6,
   7,
   8,
+  9,
   RUN_STATE_SCHEMA_VERSION,
 ]);
 
@@ -807,6 +808,7 @@ export function normalizeExecutionResource(
     "phase",
     "root",
     "directory",
+    ...(value.phase === "acquiring" ? ["owner"] : []),
   ];
   if (
     Object.keys(value).length !== fields.length ||
@@ -821,9 +823,21 @@ export function normalizeExecutionResource(
     UNSAFE_TEXT_PATTERN.test(value.hostname) ||
     typeof value.commandIdentity !== "string" ||
     !/^[a-f0-9]{64}$/u.test(value.commandIdentity) ||
-    !["allocating", "allocated"].includes(value.phase)
+    !["allocating", "allocated", "acquiring"].includes(value.phase)
   )
     fail("Run execution resource is invalid.");
+  if (value.phase === "acquiring") {
+    if (schemaVersion < 10)
+      fail("Legacy runs cannot grant acquisition ownership.");
+    assertRecord(value.owner, "resource.owner");
+    if (
+      Object.keys(value.owner).length !== 2 ||
+      !Number.isSafeInteger(value.owner.pid) ||
+      value.owner.pid < 1 ||
+      validateProcessIdentity(value.owner.processIdentity) === null
+    )
+      fail("Resource acquisition owner is invalid.");
+  }
   assertRecord(value.root, "resource.root");
   if (
     Object.keys(value.root).length !== 3 ||
@@ -834,7 +848,7 @@ export function normalizeExecutionResource(
     fail("Resource root is invalid.");
   for (const identity of [
     value.root,
-    ...(value.phase === "allocated" ? [value.directory] : []),
+    ...(value.phase !== "allocating" ? [value.directory] : []),
   ]) {
     assertRecord(identity, "resource.identity");
     if (

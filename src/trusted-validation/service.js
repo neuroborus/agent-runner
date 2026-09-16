@@ -5,11 +5,17 @@ import {
   gitMetadataExposures,
   resolveTrustedBubblewrap,
   runExactCommand,
+  runtimeStorageExposures,
   sandboxTrustedCommand,
   verifyTrustedBubblewrap,
 } from "./execution.js";
-import { createResourceStorage } from "./resources.js";
+import {
+  acquisitionOwner,
+  createResourceStorage,
+  needsStorage,
+} from "./resources.js";
 import { normalizeArtifacts } from "./artifact-contract.js";
+import { createArtifactAcquirer } from "./acquisition.js";
 
 const ALIAS_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
@@ -406,6 +412,7 @@ function boundedEvidence(command, result) {
       "process-tree-supervision": `Runner-trusted command ${command.alias} could not run with complete process-tree supervision.`,
       spawn: `Runner-trusted command ${command.alias} could not be started safely.`,
       timeout: `Runner-trusted command ${command.alias} timed out without retaining process output.`,
+      acquisition: `Runner-trusted command ${command.alias} could not acquire its verified dependencies.`,
     };
     return Object.freeze([
       explanations[result.reason] ??
@@ -459,6 +466,10 @@ export function createTrustedValidationService(options = {}) {
     );
   }
   const storage = createResourceStorage({ storageRoot: options.storageRoot });
+  const acquire = createArtifactAcquirer(options.acquisition);
+  // Same-service retirement proof complements the journaled process identity.
+  const acquiring = new Set();
+  const retiredAcquisitions = new Set();
   const defaultSandbox = options.sandboxCommand === undefined;
   let launcherPath = null;
   function trustedLauncher(projectPath) {
@@ -467,33 +478,26 @@ export function createTrustedValidationService(options = {}) {
     return launcherPath;
   }
 
-  function assertSupported(snapshot) {
-    if (snapshot === undefined) return;
-    const selected = validateTrustedValidationSnapshot(snapshot);
-    if (
-      selected.commands.some(
-        ({ capabilities }) => capabilities?.artifacts !== undefined,
-      )
-    ) {
-      throw new TrustedValidationError(
-        "The frozen trusted execution capabilities are not available in this runner.",
-        { code: "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE" },
-      );
-    }
-  }
-
   async function preflight({
     projectPath,
     snapshot,
     storageForbiddenPaths = [],
   }) {
-    assertSupported(snapshot);
-    for (const { capabilities } of snapshot?.commands ?? []) {
-      if (!capabilities?.scratch && !capabilities?.cache) continue;
+    const selected =
+      snapshot === undefined
+        ? undefined
+        : validateTrustedValidationSnapshot(snapshot);
+    for (const command of selected?.commands ?? []) {
+      const { capabilities } = command;
+      if (!needsStorage(capabilities)) continue;
       await storage.preflight(
         [
           projectPath,
           ...gitMetadataExposures(projectPath),
+          ...runtimeStorageExposures(command, {
+            cwd: projectPath,
+            environment,
+          }),
           ...storageForbiddenPaths,
         ],
         capabilities,
@@ -526,7 +530,6 @@ export function createTrustedValidationService(options = {}) {
       );
     }
     const trustedSnapshot = validateTrustedValidationSnapshot(snapshot);
-    assertSupported(trustedSnapshot);
     const normalizedBindings = normalizeBindings(bindings);
     if (
       trustedSnapshot.commandFingerprint !==
@@ -549,7 +552,7 @@ export function createTrustedValidationService(options = {}) {
       );
     }
     if (
-      (command.capabilities?.scratch || command.capabilities?.cache) &&
+      needsStorage(command.capabilities) &&
       (typeof onProcess !== "function" || typeof onResource !== "function")
     ) {
       throw new TrustedValidationError(
@@ -579,28 +582,88 @@ export function createTrustedValidationService(options = {}) {
         resource = value;
       } catch (cause) {
         persistenceFailed = true;
+        if (command.capabilities?.artifacts && !signal?.aborted) {
+          throw new TrustedValidationError(
+            "Trusted acquisition ownership could not be persisted.",
+            { cause, code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE" },
+          );
+        }
         throw cause;
       }
     };
     let failure;
     try {
+      if (needsStorage(command.capabilities))
+        forbiddenPaths.push(
+          ...runtimeStorageExposures(command, {
+            cwd: before.projectPath,
+            environment,
+          }),
+        );
       const bubblewrapPath = defaultSandbox
         ? trustedLauncher(before.projectPath)
         : null;
-      const allocated =
-        command.capabilities?.scratch || command.capabilities?.cache
-          ? await storage.allocate({
-              command,
-              forbiddenPaths,
+      const allocated = needsStorage(command.capabilities)
+        ? await storage.allocate({
+            command,
+            forbiddenPaths,
+            signal,
+            onResource: persistResource,
+          })
+        : null;
+      if (command.capabilities?.artifacts) {
+        // Until the journal accepts this transition, no transport can start.
+        retiredAcquisitions.add(resource.id);
+        await persistResource({
+          ...resource,
+          phase: "acquiring",
+          owner: await acquisitionOwner(),
+        });
+        acquiring.add(resource.id);
+        retiredAcquisitions.delete(resource.id);
+        let retirement;
+        try {
+          const directory = await storage.openDependencies(allocated);
+          try {
+            await acquire({
+              artifacts: command.capabilities.artifacts,
+              directory,
               signal,
-              onResource: persistResource,
-            })
-          : null;
+            });
+          } catch (cause) {
+            if (cause?.code === "ERR_TRUSTED_ACQUISITION_RETIREMENT") {
+              retirement = cause.retirement;
+              const id = resource.id;
+              retirement.then(() => {
+                acquiring.delete(id);
+                retiredAcquisitions.add(id);
+              });
+              throw new TrustedValidationError(
+                "Trusted acquisition transport retirement is unverified.",
+                { code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE" },
+              );
+            }
+            throw cause;
+          } finally {
+            await directory.close();
+          }
+        } finally {
+          if (!retirement) {
+            acquiring.delete(resource.id);
+            retiredAcquisitions.add(resource.id);
+            await persistResource(allocated.record);
+            retiredAcquisitions.delete(resource.id);
+          }
+        }
+      }
+      if (allocated !== null) await storage.verify(allocated);
+      signal?.throwIfAborted();
       const execution = await sandboxCommand(command, {
         bubblewrapPath,
         cwd: before.projectPath,
         environment,
         resources: allocated?.mounts ?? {},
+        privateStorageRoot: allocated?.record.root.path,
       });
       result = await runCommand(execution.command, {
         cwd: before.projectPath,
@@ -644,8 +707,9 @@ export function createTrustedValidationService(options = {}) {
         exitCode: null,
         signal: null,
         timedOut: false,
-        reason:
-          cause?.code === "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE"
+        reason: cause?.code?.startsWith("ERR_TRUSTED_ACQUISITION_")
+          ? "acquisition"
+          : cause?.code === "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE"
             ? "isolation"
             : "spawn",
       };
@@ -660,11 +724,19 @@ export function createTrustedValidationService(options = {}) {
           "ERR_TRUSTED_VALIDATION_PROCESS_TREE_ACTIVE",
         ].includes(failure?.code);
       try {
-        if (resource !== null && retired && !persistenceFailed) {
+        if (
+          resource !== null &&
+          retired &&
+          !persistenceFailed &&
+          failure?.code !== "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE" &&
+          !acquiring.has(resource.id)
+        ) {
+          const id = resource.id;
           await storage.cleanup(resource, {
             forbiddenPaths,
             onResource: persistResource,
           });
+          retiredAcquisitions.delete(id);
         }
       } finally {
         if (retired) {
@@ -696,6 +768,7 @@ export function createTrustedValidationService(options = {}) {
         "process-tree-supervision",
         "spawn",
         "timeout",
+        "acquisition",
       ].includes(result.reason) ||
       (result.status === "PASS" &&
         (result.exitCode !== 0 || result.signal !== null || result.timedOut)) ||
@@ -729,6 +802,27 @@ export function createTrustedValidationService(options = {}) {
     storageForbiddenPaths = [],
     onResource,
   }) {
+    if (acquiring.has(resource?.id)) {
+      throw new TrustedValidationError(
+        "Trusted acquisition transport retirement is unverified.",
+        { code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE" },
+      );
+    }
+    if (
+      resource?.phase === "acquiring" &&
+      retiredAcquisitions.has(resource.id)
+    ) {
+      const { owner, ...allocation } = resource;
+      resource = { ...allocation, phase: "allocated" };
+      try {
+        await onResource(resource);
+      } catch (cause) {
+        throw new TrustedValidationError(
+          "Trusted acquisition retirement could not be persisted.",
+          { cause, code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE" },
+        );
+      }
+    }
     await createResourceStorage({ storageRoot: resource?.root?.path }).cleanup(
       resource,
       {
@@ -740,6 +834,7 @@ export function createTrustedValidationService(options = {}) {
         onResource,
       },
     );
+    retiredAcquisitions.delete(resource.id);
   }
 
   return Object.freeze({ execute, preflight, recoverResources });
