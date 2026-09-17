@@ -97,7 +97,7 @@ Transports retire before publication or cleanup; uncertain retirement retains
 ownership. Journaled acquisition process identity also blocks cleanup after
 service reconstruction while the owner is live or unverifiable. Same-service
 transport retirement or verified owner death permits cleanup.
-Plan-execution capability reports are exact-command, additive requirements stored
+Plan-execution and polishing capability reports are exact-command, additive requirements stored
 before availability inspection. They cannot replace frozen declarations or grant
 permissions. Read-only bootstrap and legacy discovery precede writable entry;
 missing authority or availability blocks without invoking a writable role. Each

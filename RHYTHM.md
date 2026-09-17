@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-09-17
+
+- **Polishing blocks unsatisfied check capabilities before writable work.** Its
+  own bounded reports preserve every active role's exact-command needs without
+  granting authority. Availability is rechecked at each writable checkpoint and
+  before new handoff staging; environment repair retries the frozen request.
+  State version 14 requires read-only legacy discovery while keeping completed
+  handoffs verification-only and preserving safety pauses and correction charges.
+  Preparation never executes required checks. Discovery, migration, interruption
+  recovery, and staging guards form one boundary and must ship together; separate
+  pipeline-owned schemas preserve ownership without importing execution internals.
+
 ## 2026-09-16
 
 - **Execution checks capability requirements before writable work.** Bootstrap

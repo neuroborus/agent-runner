@@ -1369,8 +1369,9 @@ function createBackend(
             "plan, risks, and finalization procedure.",
           requiredChecks: [{ id: "C1", command: "git diff --check HEAD" }],
           validationInfrastructure: [],
-          ...(request.schema?.properties?.result?.anyOf?.[0]?.properties
-            ?.capabilityRequirements
+          ...((request.schema?.properties?.result?.anyOf?.[0]?.properties
+            ?.capabilityRequirements ??
+          request.schema?.properties?.capabilityRequirements)
             ? { capabilityRequirements: [], environmentBlockers: [] }
             : {}),
           capacityField: "",
@@ -2478,7 +2479,6 @@ async function projectCommandScenario(t, pipelineId, hooks = {}) {
       assert.equal(options.readinessRequired, true);
       const preparing = command.arguments.at(-1) === "";
       if (preparing) {
-        assert.equal(pipelineId, "plan-execution");
         assert.deepEqual(command.arguments.slice(-3), [
           process.execPath,
           "--eval",
@@ -2682,10 +2682,7 @@ for (const pipelineId of ["plan-execution", "polishing"]) {
     assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
     assert.equal(paused.pause.resumeState, "FINALIZE");
     assert.equal(scenario.executions.length, 0);
-    assert.equal(
-      scenario.preparations.length > 0,
-      pipelineId === "plan-execution",
-    );
+    assert.equal(scenario.preparations.length > 0, true);
     assert.deepEqual(paused.pipelineState.trustedValidation, scenario.expected);
     scenario.reopen();
     const completed = (await scenario.resume()).run;
@@ -3011,7 +3008,7 @@ test("polishing migrates legacy 64/128 evidence under lease without replaying a 
   const before = await Promise.all([readFile(statePath), readFile(eventsPath)]);
   const lease = await store.acquireRunLease(runId);
   try {
-    assert.equal((await runner.status(runId)).run.pipelineStateVersion, 13);
+    assert.equal((await runner.status(runId)).run.pipelineStateVersion, 14);
     await assert.rejects(runner.resume({ runId }), { code: "ERR_RUN_LEASED" });
     assert.deepEqual(
       await Promise.all([readFile(statePath), readFile(eventsPath)]),
@@ -3021,7 +3018,7 @@ test("polishing migrates legacy 64/128 evidence under lease without replaying a 
     await lease.release();
   }
   const completed = (await runner.resume({ runId })).run;
-  assert.equal(completed.pipelineStateVersion, 13);
+  assert.equal(completed.pipelineStateVersion, 14);
   assert.equal(completed.pipelineState.workflowState, "DONE");
   assert.deepEqual(
     completed.pipelineState.finalizationResult,
@@ -3036,12 +3033,12 @@ test("polishing migrates legacy 64/128 evidence under lease without replaying a 
   );
   assert.equal(migrations.length, 1);
   assert.deepEqual(migrations[0].state.pipelineState, paused.pipelineState);
-  assert.equal(migrations[0].state.pipelineStateVersion, 13);
+  assert.equal(migrations[0].state.pipelineStateVersion, 14);
   const terminalState = completed.pipelineState;
   await downgrade();
   const terminal = (await runner.resume({ runId })).run;
   assert.deepEqual(terminal.pipelineState, terminalState);
-  assert.equal(terminal.pipelineStateVersion, 13);
+  assert.equal(terminal.pipelineStateVersion, 14);
   assert.equal(calls, turns);
   assert.equal(handoffs, 1);
 });

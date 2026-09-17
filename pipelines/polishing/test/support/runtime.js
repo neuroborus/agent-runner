@@ -326,6 +326,8 @@ function bootstrapReady(role) {
   return {
     status: "READY",
     summary: `${role} independently understands the dirty change set and finalization procedure.`,
+    capabilityRequirements: [],
+    environmentBlockers: [],
     requiredChecks: REQUIRED_CHECKS,
     validationInfrastructure: VALIDATION_INFRASTRUCTURE,
     capacityField: "",
@@ -339,6 +341,8 @@ function bootstrapCapacityExhausted(capacityField) {
   return {
     status: "CAPACITY_EXHAUSTED",
     summary: "",
+    capabilityRequirements: [],
+    environmentBlockers: [],
     requiredChecks: [],
     validationInfrastructure: [],
     capacityField,
@@ -822,6 +826,7 @@ async function createFixture(
     onEdit,
     onRoleRun,
     onTrustedValidation,
+    onRequirementInspection,
     prepareProject,
     proactiveClarification = false,
     repository = "memory",
@@ -1085,7 +1090,7 @@ async function createFixture(
     store = createRunStore({ stateRoot });
     const created = await store.createRun({
       pipelineId: "polishing",
-      pipelineStateVersion: 13,
+      pipelineStateVersion: 14,
       projectPath,
       taskPath,
       roles,
@@ -1108,7 +1113,7 @@ async function createFixture(
       revision: 1,
       runId: "run-1",
       pipelineId: "polishing",
-      pipelineStateVersion: 13,
+      pipelineStateVersion: 14,
       projectPath,
       taskPath,
       roles,
@@ -1383,6 +1388,14 @@ async function createFixture(
     git,
     trustedValidation: {
       async preflight() {},
+      async inspectRequirements(options) {
+        return (
+          onRequirementInspection?.(options) ?? {
+            status: "READY",
+            blockers: [],
+          }
+        );
+      },
       async execute(options) {
         assert.notEqual(onTrustedValidation, undefined);
         return onTrustedValidation(options);

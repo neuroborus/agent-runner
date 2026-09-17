@@ -63,24 +63,30 @@ function assertStrictSchema(schema) {
   assert.ok(Object.isFrozen(schema));
 }
 
-function assertSchemaBounds(schema, propertyName = null) {
+function assertSchemaBounds(schema, propertyName = null, parentName = null) {
   if (schema.type === "object") {
     assertStrictSchema(schema);
     for (const [name, property] of Object.entries(schema.properties)) {
-      assertSchemaBounds(property, name);
+      assertSchemaBounds(property, name, propertyName);
     }
     return;
   }
   if (schema.type === "array") {
+    const reportBound =
+      parentName === "environmentBlockers" && propertyName === "evidence"
+        ? 8
+        : { artifacts: 32, unsupported: 16 }[propertyName];
     assert.ok(
       propertyName === "options"
         ? schema.maxItems === MAX_OPTIONS
-        : [MAX_ITEMS, MAX_BOOTSTRAP_ITEMS, MAX_VALIDATION_ITEMS].includes(
-            schema.maxItems,
-          ),
+        : reportBound !== undefined
+          ? schema.maxItems === reportBound
+          : [MAX_ITEMS, MAX_BOOTSTRAP_ITEMS, MAX_VALIDATION_ITEMS].includes(
+              schema.maxItems,
+            ),
       `${propertyName} must have a deterministic collection bound`,
     );
-    assertSchemaBounds(schema.items, propertyName);
+    assertSchemaBounds(schema.items, propertyName, parentName);
     return;
   }
   if (

@@ -23,7 +23,7 @@ contract changes.
 | [`packages/commit-plan/README.md`](../packages/commit-plan/README.md)               | Shared commit-plan syntax, parsing, validation, and Conventional Commit subject contract                                           |
 | [`pipelines/plan-authoring/docs/SPEC.md`](../pipelines/plan-authoring/docs/SPEC.md) | Plan-authoring roles, prompts, states, corrections, artifacts, and completion rules                                                |
 | [`pipelines/plan-execution/docs/SPEC.md`](../pipelines/plan-execution/docs/SPEC.md) | Plan-execution roles, prompts, validation, review, commit, recovery, and completion rules                                          |
-| [`pipelines/polishing/docs/SPEC.md`](../pipelines/polishing/docs/SPEC.md)           | Polishing roles, prompts, validation, review, handoff, recovery, and completion rules                                              |
+| [`pipelines/polishing/docs/SPEC.md`](../pipelines/polishing/docs/SPEC.md)           | Polishing roles, capability discovery, validation, review, handoff, recovery, and completion rules                                 |
 | [`project-structure` skill](../.agents/skills/project-structure/SKILL.md)           | Operational ownership guidance for placing, moving, or splitting repository code                                                   |
 | [`finalization` skill](../.agents/skills/finalization/SKILL.md)                     | Post-change operator-surface review and validation; phase-owned staging and commit-message handoff gate                            |
 

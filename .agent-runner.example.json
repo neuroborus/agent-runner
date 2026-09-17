@@ -11,7 +11,8 @@
     "repository-check": {
       "command": "npm run check",
       "executable": "npm",
-      "arguments": ["run", "check"]
+      "arguments": ["run", "check"],
+      "capabilities": { "scratch": true, "cache": true }
     }
   },
   "profiles": {
