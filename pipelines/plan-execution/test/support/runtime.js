@@ -1590,6 +1590,29 @@ async function createFixture(
       },
     },
     git: {
+      async inspectHead() {
+        if (repository === "git") {
+          const head = (
+            await executeFile("git", ["-C", projectPath, "rev-parse", "HEAD"])
+          ).stdout.trim();
+          const subject = (
+            await executeFile("git", [
+              "-C",
+              projectPath,
+              "show",
+              "--no-patch",
+              "--format=%s",
+              head,
+              "--",
+            ])
+          ).stdout.trimEnd();
+          return { head, subject };
+        }
+        return {
+          head: (await gitSnapshot()).head,
+          subject: "chore(test): initial repository",
+        };
+      },
       async inspectPath({ path }) {
         const absolutePath = isAbsolute(path) ? path : join(projectPath, path);
         let canonicalPath;

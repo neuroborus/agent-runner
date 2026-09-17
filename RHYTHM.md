@@ -7,6 +7,14 @@ remain in the owning documentation.
 
 ## 2026-09-17
 
+- **Execution rejects stale plans before writable work.** The root Git capability
+  supplies HEAD's subject; the validated plan and verified completed commits
+  alone select the leading step. Existing subjects and external HEAD movement
+  require a new plan/run without adopting commits. Paused step one can remain
+  visible before bootstrap completes. Consumed effects settle first, stop
+  recovery starts no new effects, and verified settlement retires interrupted
+  commit context before selecting the next step.
+
 - **Polishing blocks unsatisfied check capabilities before writable work.** Its
   own bounded reports preserve every active role's exact-command needs without
   granting authority. Availability is rechecked at each writable checkpoint and

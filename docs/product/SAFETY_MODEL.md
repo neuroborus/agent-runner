@@ -33,6 +33,13 @@ Polishing never commits and keeps `HEAD` unchanged. Its handoff stages the
 complete finalized and reviewed change set, verifies that nothing accepted was
 left unstaged, and leaves the result for the operator.
 
+Execution never adopts an external commit as completed plan progress. A current
+planned subject already at HEAD, or external HEAD movement from the saved
+baseline, pauses for plan revision before new writable work, including on
+resume. Step one remains visible even if bootstrap has not completed. Only
+verified settlement of the runner's consumed COMMIT authorization advances
+the plan; completed effects are verified before any stale-plan guard.
+
 No pipeline may push, mutate a remote ref, call a hosting service to write,
 change a remote, alter Git identity, amend, reset, rebase, stash, switch
 branches, or create tags. A failed hook or unexpected repository state pauses

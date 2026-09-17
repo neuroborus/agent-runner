@@ -52,6 +52,12 @@ delegated check is resolved only when runner inspection succeeds. Required check
 remain exclusive to finalization, and consumed commit and completed handoff verification precede new
 preparation effects.
 
+Execution pauses as `plan_revision_required` when runner-observed HEAD already
+contains the current planned subject or moved outside verified commit settlement.
+The operator must revise the plan and start a new run; external commits are never
+adopted into progress. A reported first-step position can precede completed
+bootstrap. Completed runner-owned effects retain verification-only recovery.
+
 Plan authoring's `preferredCommitLineLimit` is a positive-integer planning
 target, default 900, configured through runner settings or the safe project
 overlay. It is persisted for the run; legacy runs receive 900 without adopting

@@ -101,6 +101,85 @@ async function createFixture(t, { identity = true } = {}) {
   };
 }
 
+test("inspects immutable HEAD subjects without changing repository state", async (t) => {
+  const { env, repositoryPath, service, workspace } = await createFixture(t);
+  const before = await service.snapshot({ projectPath: repositoryPath });
+  assert.deepEqual(await service.inspectHead({ projectPath: repositoryPath }), {
+    head: before.head,
+    subject: "initial",
+  });
+  await service.assertUnchanged(before);
+  const tree = (
+    await runGit(repositoryPath, env, "rev-parse", "HEAD^{tree}")
+  ).stdout.trim();
+  const replacement = (
+    await runGit(
+      repositoryPath,
+      env,
+      "commit-tree",
+      tree,
+      "-m",
+      "Replacement subject",
+    )
+  ).stdout.trim();
+  await runGit(repositoryPath, env, "replace", before.head, replacement);
+  assert.equal(
+    (await service.inspectHead({ projectPath: repositoryPath })).subject,
+    "initial",
+  );
+  await runGit(repositoryPath, env, "replace", "-d", before.head);
+  await runGit(
+    repositoryPath,
+    env,
+    "commit",
+    "--allow-empty",
+    "-qm",
+    "feat(test): exact subject\n\nBody is not the subject.",
+  );
+  assert.equal(
+    (await service.inspectHead({ projectPath: repositoryPath })).subject,
+    "feat(test): exact subject",
+  );
+  await runGit(
+    repositoryPath,
+    env,
+    "config",
+    "i18n.logOutputEncoding",
+    "ISO-8859-1",
+  );
+  await runGit(
+    repositoryPath,
+    env,
+    "commit",
+    "--allow-empty",
+    "-qm",
+    "feat(test): handle café",
+  );
+  assert.equal(
+    (await service.inspectHead({ projectPath: repositoryPath })).subject,
+    "feat(test): handle café",
+  );
+  await runGit(
+    repositoryPath,
+    env,
+    "commit",
+    "--allow-empty",
+    "--allow-empty-message",
+    "-qm",
+    "",
+  );
+  assert.equal(
+    (await service.inspectHead({ projectPath: repositoryPath })).subject,
+    "",
+  );
+  const unborn = join(workspace, "unborn");
+  await runGit(workspace, env, "init", "-q", unborn);
+  assert.deepEqual(await service.inspectHead({ projectPath: unborn }), {
+    head: null,
+    subject: null,
+  });
+});
+
 test("preflights clean repositories and records branch or detached state", async (t) => {
   const { env, repositoryPath, service, workspace } = await createFixture(t);
   const result = await service.preflight({

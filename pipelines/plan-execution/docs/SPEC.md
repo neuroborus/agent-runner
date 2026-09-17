@@ -1305,6 +1305,33 @@ skipped required check.
 
 ## 9. Repository Safety Guards
 
+### Stale plans and externally committed steps
+
+Before invoking a new role, and before ordinary or interrupted repository
+reconciliation can classify HEAD drift, the runner inspects HEAD through the
+root Git capability. The leading step is the validated plan entry at
+`completedCommits.length + 1`, independent of agent summaries. If HEAD already
+has that exact subject, or HEAD moved from the saved baseline outside verified
+runner commit settlement, pause as `plan_revision_required` with bounded
+runner-derived evidence. Do not adopt the external commit, advance the step,
+change `completedCommits`, or invoke writable work.
+
+This guard applies before bootstrap completes. A paused run may expose
+`currentStep: 1` while `resolvedSummary` and the established inventories remain
+null. This is a deterministic plan position, not evidence of completed
+bootstrap, and does not authorize a deferred commit stop. The persisted shape
+is unchanged; state validation accepts this suspended first-step position and
+still rejects unresolved bootstrap at later steps or writable checkpoints.
+
+Consumed COMMIT authorization remains verification-only and is settled before
+stale-plan inspection. Verified settlement alone records the commit and chooses
+the next step; recovery retires the previous in-memory turn as well as its
+durable marker. An ordinary runner-owned commit therefore does not appear as
+external HEAD movement. Stop/cancel reconciliation starts no providers,
+capability preparation, or stale-plan inspection. Independent branch, ref,
+remote, identity, index, and workspace violations retain their Git-safety
+checks and diagnostics. Plan revision requires a revised plan and a new run.
+
 A fresh `run` requires a clean Git working tree, including untracked non-ignored files.
 
 Before any implementation work:

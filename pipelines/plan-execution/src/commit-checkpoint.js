@@ -8,6 +8,7 @@ export function resolveStopBoundary(run) {
   if (
     !Number.isSafeInteger(current.currentStep) ||
     current.currentStep < 1 ||
+    current.resolvedSummary === null ||
     ["CLARIFY", "BOOTSTRAP"].includes(current.workflowState) ||
     current.repositoryBaseline === null ||
     current.currentStep > parseCommitPlan(current.canonicalPlan).steps.length

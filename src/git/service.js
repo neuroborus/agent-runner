@@ -157,6 +157,33 @@ export function createGitService(options = {}) {
 
   const contentContext = Object.freeze({ currentHead, runGit });
 
+  async function inspectHead(options) {
+    assertOptions(options, "HEAD-inspection options");
+    const repositoryPath = await resolveRepository(runGit, options.projectPath);
+    const head = await currentHead(repositoryPath);
+    if (head === null) return Object.freeze({ head, subject: null });
+    // Read the immutable object selected above, never a second resolution of HEAD.
+    const result = await runGit(repositoryPath, [
+      "--no-replace-objects",
+      "show",
+      "--no-patch",
+      "--no-show-signature",
+      "--no-notes",
+      "--no-decorate",
+      "--encoding=UTF-8",
+      "--format=%s",
+      head,
+      "--",
+    ]);
+    return Object.freeze({
+      head,
+      subject: decodeUtf8(result.stdout, "Git HEAD subject").replace(
+        /\n$/u,
+        "",
+      ),
+    });
+  }
+
   async function resolveProject(projectPath) {
     return resolveRepository(runGit, projectPath);
   }
@@ -550,6 +577,7 @@ export function createGitService(options = {}) {
     inspectPath,
     preflight,
     reconcileInterrupted,
+    inspectHead,
     resolveProject,
     snapshot,
     validationInfrastructureFingerprint,

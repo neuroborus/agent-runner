@@ -328,6 +328,14 @@ another execution owner or extra work.
 
 ## 5. Recover a pause without taking over the work
 
+Execution reports `plan_revision_required` when the current planned subject is
+already at HEAD or an external commit moved HEAD from the saved baseline. The
+runner retains the selected step and completed-commit history; it does not count
+external work as a completed step. Step one can be visible before bootstrap is
+complete. Revise the plan and start a new run; do not move HEAD or edit frozen
+inputs to force the old run forward. Runner-owned consumed commits retain
+verification-only recovery before this guard.
+
 **A pause is not completion.** Read its reason, bounded evidence, pending input,
 and current `nextActions`. When the run is resumable, resolve only the permitted
 cause and resume that same run. Do not manually finish, validate, rewrite,
