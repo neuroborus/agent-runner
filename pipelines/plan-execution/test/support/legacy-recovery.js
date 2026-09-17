@@ -256,6 +256,9 @@ export async function createLegacyRecoveryFixture(
       ...(trusted
         ? {
             trustedValidation: {
+              async inspectRequirements() {
+                return { status: "READY", blockers: [] };
+              },
               async preflight() {},
               async execute({ commandIdentity }) {
                 trustedExecutions += 1;

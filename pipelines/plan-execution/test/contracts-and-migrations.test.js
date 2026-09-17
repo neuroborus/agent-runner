@@ -705,7 +705,7 @@ test("migrates version-3 execution state with no consumed bootstrap corrections"
   assert.deepEqual(migrated.bootstrapCorrections, []);
   assert.equal(migrated.pendingBootstrapCorrection, null);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(planExecutionPipeline.stateVersion, 17);
+  assert.equal(planExecutionPipeline.stateVersion, 18);
 });
 
 test("selects Worker-only lazy mode and migrates version 11 to independent", () => {
@@ -1287,10 +1287,14 @@ test("migrates version-5 states according to their safe checkpoint", async (t) =
       resolvedSummary: "Historical summary requires a staged handoff.",
       workerValidation: {
         requiredChecks: [{ id: "C1", command: "git diff --cached --check" }],
+        capabilityRequirements: [],
+        environmentBlockers: [],
         validationInfrastructure: VALIDATION_INFRASTRUCTURE,
       },
       reviewerValidation: {
         requiredChecks: [{ id: "C1", command: "git diff --cached --check" }],
+        capabilityRequirements: [],
+        environmentBlockers: [],
         validationInfrastructure: VALIDATION_INFRASTRUCTURE,
       },
       requiredChecks: [{ id: "C1", command: "git diff --cached --check" }],
@@ -1620,6 +1624,8 @@ test("resumes a pre-fix paused implementation through phase-safe validation", as
   assert.equal(paused.pause.resumeState, "IMPLEMENT");
 
   const unsafeValidation = {
+    capabilityRequirements: [],
+    environmentBlockers: [],
     requiredChecks: [{ id: "C1", command: unsafeCommand }],
     validationInfrastructure: VALIDATION_INFRASTRUCTURE,
   };
@@ -2352,7 +2358,7 @@ test("legacy confirmation migrations preserve journal proof but cannot synthesiz
   unproven.updatedAt = unproven.createdAt;
   const projected = {
     ...unproven,
-    pipelineStateVersion: 17,
+    pipelineStateVersion: 18,
     pipelineState: {
       ...migratePlanExecutionStateV13(unproven),
       finalizationRecovery: {

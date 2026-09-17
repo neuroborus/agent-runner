@@ -134,7 +134,7 @@ test("malformed reports receive contract diagnostics before any availability eff
     null,
     [command, command],
     [command + " "],
-    Array(257).fill(command),
+    Array.from({ length: 513 }, (_, index) => `node check-${index}`),
     [],
   ]) {
     await assert.rejects(
@@ -145,7 +145,7 @@ test("malformed reports receive contract diagnostics before any availability eff
   await assert.rejects(
     f.service.inspectRequirements({
       ...f.input,
-      requirements: Array(257).fill({ command }),
+      requirements: Array(1025).fill({ command }),
     }),
     { code: "ERR_INVALID_TRUSTED_REQUIREMENTS" },
   );
@@ -520,4 +520,22 @@ test("stop reconciliation rejects inspection before any new preparation", async 
     }),
     { code: "ERR_STOP_RECONCILIATION_EFFECT" },
   );
+});
+
+test("inspection accepts the complete two-role requirement and blocker union", async () => {
+  const inventory = Array.from(
+    { length: 512 },
+    (_, index) => `node check-${index}`,
+  );
+  const requirements = inventory.flatMap((command) => [
+    { command },
+    { command },
+  ]);
+  const result = await createTrustedValidationService().inspectRequirements({
+    inventory,
+    requirements,
+  });
+  assert.equal(result.status, "BLOCKED");
+  assert.equal(result.blockers.length, 512);
+  assert.ok(result.blockers.every(({ reason }) => reason === "not-selected"));
 });

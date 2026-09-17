@@ -289,6 +289,10 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
             "plan, risks, and finalization procedure.",
           requiredChecks: [{ id: "C1", command: "git diff --check HEAD" }],
           validationInfrastructure: [],
+          ...(request.schema?.properties?.result?.anyOf?.[0]?.properties
+            ?.capabilityRequirements
+            ? { capabilityRequirements: [], environmentBlockers: [] }
+            : {}),
           capacityField: "",
           capacityLimit: 0,
           reason: "",

@@ -7,6 +7,17 @@ remain in the owning documentation.
 
 ## 2026-09-16
 
+- **Execution checks capability requirements before writable work.** Bootstrap
+  and legacy validation migration persist exact-command needs from every active
+  role. The root evaluates additive reports against frozen authority and current
+  availability at every writable checkpoint, independently of cached preflight.
+  Unsatisfied needs pause for environment repair; agents cannot grant authority
+  or discard another role's requirements. State version 18 preserves consumed
+  commit verification ahead of discovery. Discovery, migration, and writable
+  guards form one boundary: shipping a subset could admit work under provisional
+  requirements. Availability preparation produces no check evidence; required
+  checks still run only during finalization.
+
 - **Capability needs are inspected without running required checks.** The root
   trusted-validation capability matches additive exact-command reports against
   frozen authority and distinguishes malformed contracts from environment blockers.

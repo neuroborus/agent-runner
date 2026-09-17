@@ -97,6 +97,12 @@ Transports retire before publication or cleanup; uncertain retirement retains
 ownership. Journaled acquisition process identity also blocks cleanup after
 service reconstruction while the owner is live or unverifiable. Same-service
 transport retirement or verified owner death permits cleanup.
+Plan-execution capability reports are exact-command, additive requirements stored
+before availability inspection. They cannot replace frozen declarations or grant
+permissions. Read-only bootstrap and legacy discovery precede writable entry;
+missing authority or availability blocks without invoking a writable role. Each
+new writable checkpoint rechecks the saved request under configuration guards,
+cancellation, the execution lease, and durable resource ownership.
 Status does not probe capabilities. Consumed commit/handoff verification precedes
 capability checks needed for new work.
 Private PID namespaces contain detached and reparented descendants. Provider

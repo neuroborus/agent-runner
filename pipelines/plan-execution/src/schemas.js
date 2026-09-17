@@ -1,4 +1,8 @@
 import {
+  CAPABILITY_REQUIREMENTS,
+  ENVIRONMENT_BLOCKERS,
+} from "./capability-requirements.js";
+import {
   MAX_BOOTSTRAP_ITEMS,
   MAX_ITEMS,
   MAX_OPTIONS,
@@ -143,6 +147,8 @@ const BOOTSTRAP_PROPERTIES = {
     ],
   },
   summary: SUMMARY,
+  capabilityRequirements: CAPABILITY_REQUIREMENTS,
+  environmentBlockers: ENVIRONMENT_BLOCKERS,
   requiredChecks: BOOTSTRAP_REQUIRED_CHECKS,
   validationInfrastructure: BOOTSTRAP_VALIDATION_INFRASTRUCTURE,
   capacityField: {
@@ -299,6 +305,8 @@ export const BOOTSTRAP_SCHEMA = deepFreeze(
     variant("status", ["CAPACITY_EXHAUSTED"], BOOTSTRAP_PROPERTIES, {
       summary: EMPTY_TEXT,
       requiredChecks: EMPTY_REQUIRED_CHECKS,
+      capabilityRequirements: { ...CAPABILITY_REQUIREMENTS, maxItems: 0 },
+      environmentBlockers: { ...ENVIRONMENT_BLOCKERS, maxItems: 0 },
       validationInfrastructure: EMPTY_VALIDATION_INFRASTRUCTURE,
       capacityField: {
         type: "string",
@@ -311,6 +319,8 @@ export const BOOTSTRAP_SCHEMA = deepFreeze(
     variant("status", ["PLAN_REVISION_REQUIRED"], BOOTSTRAP_PROPERTIES, {
       summary: EMPTY_TEXT,
       requiredChecks: EMPTY_REQUIRED_CHECKS,
+      capabilityRequirements: { ...CAPABILITY_REQUIREMENTS, maxItems: 0 },
+      environmentBlockers: { ...ENVIRONMENT_BLOCKERS, maxItems: 0 },
       validationInfrastructure: EMPTY_VALIDATION_INFRASTRUCTURE,
       capacityField: { type: "string", enum: [""] },
       capacityLimit: { type: "integer", enum: [0] },
@@ -323,6 +333,8 @@ export const BOOTSTRAP_SCHEMA = deepFreeze(
     variant("status", ["PRODUCT_DECISION_REQUIRED"], BOOTSTRAP_PROPERTIES, {
       summary: EMPTY_TEXT,
       requiredChecks: EMPTY_REQUIRED_CHECKS,
+      capabilityRequirements: { ...CAPABILITY_REQUIREMENTS, maxItems: 0 },
+      environmentBlockers: { ...ENVIRONMENT_BLOCKERS, maxItems: 0 },
       validationInfrastructure: EMPTY_VALIDATION_INFRASTRUCTURE,
       capacityField: { type: "string", enum: [""] },
       capacityLimit: { type: "integer", enum: [0] },

@@ -8,6 +8,10 @@ import {
 } from "@agent-runner/commit-plan";
 
 import {
+  validCapabilityReports,
+  freezeReport,
+} from "./capability-requirements.js";
+import {
   candidateGatePassed,
   commitGatePassed,
   finalizationGatePassed,
@@ -208,6 +212,8 @@ const CANDIDATE_REVIEW_RESULT_FIELDS = Object.freeze([
   "evidence",
 ]);
 const BOOTSTRAP_RESULT_FIELDS = Object.freeze([
+  "capabilityRequirements",
+  "environmentBlockers",
   "status",
   "summary",
   "requiredChecks",
@@ -1045,6 +1051,16 @@ export function normalizeBootstrapResultCandidate(payload, role) {
     outputConstraint("result", "maximum-256-kibibytes"),
   );
   assertExactOutputFields(payload, BOOTSTRAP_RESULT_FIELDS);
+  if (
+    payload.status !== "READY" &&
+    (!emptyArray(payload.capabilityRequirements) ||
+      !emptyArray(payload.environmentBlockers))
+  ) {
+    throw outputError(
+      "Inactive capability reports must be empty.",
+      outputConstraint("capabilityRequirements", "status-field-consistency"),
+    );
+  }
   if (payload.status === "CAPACITY_EXHAUSTED") {
     if (
       payload.summary !== "" ||
@@ -1124,6 +1140,15 @@ export function normalizeBootstrapResultCandidate(payload, role) {
     INVALID_OUTPUT_CODE,
     { maxItems: MAX_BOOTSTRAP_ITEMS },
   );
+  if (!validCapabilityReports(payload, requiredChecks)) {
+    throw outputError(
+      "Capability reports must be bounded and name exact inventory commands.",
+      outputConstraint(
+        "capabilityRequirements",
+        "exact-command-capability-reports",
+      ),
+    );
+  }
   const diagnostics = stagingDependentCheckDiagnostics(requiredChecks);
   return Object.freeze({
     result: Object.freeze({
@@ -1135,6 +1160,12 @@ export function normalizeBootstrapResultCandidate(payload, role) {
         outputConstraint("summary", "concise-markdown-up-to-20000-characters"),
       ),
       requiredChecks,
+      capabilityRequirements: freezeReport(
+        structuredClone(payload.capabilityRequirements),
+      ),
+      environmentBlockers: freezeReport(
+        structuredClone(payload.environmentBlockers),
+      ),
       validationInfrastructure: normalizeValidationInfrastructure(
         payload.validationInfrastructure,
         INVALID_OUTPUT_CODE,
@@ -3301,7 +3332,12 @@ function normalizePersistedValidation(value, name) {
   }
   assertExactFields(
     value,
-    ["requiredChecks", "validationInfrastructure"],
+    [
+      "requiredChecks",
+      "validationInfrastructure",
+      "capabilityRequirements",
+      "environmentBlockers",
+    ],
     name,
   );
   normalizeRequiredChecks(
@@ -3314,6 +3350,14 @@ function normalizePersistedValidation(value, name) {
     "ERR_INVALID_PLAN_EXECUTION_STATE",
     { maxItems: MAX_BOOTSTRAP_ITEMS },
   );
+  if (
+    !(
+      value.capabilityRequirements === null &&
+      value.environmentBlockers === null
+    ) &&
+    !validCapabilityReports(value, value.requiredChecks)
+  )
+    throw workflowError("Persisted capability reports are invalid.");
   return value;
 }
 
@@ -4913,7 +4957,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 17 ||
+    run.pipelineStateVersion !== 18 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||

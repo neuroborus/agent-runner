@@ -344,6 +344,8 @@ function bootstrapReady(role) {
   return {
     status: "READY",
     summary: `${role} understands the task, architecture, plan, risks, and finalization procedure.`,
+    capabilityRequirements: [],
+    environmentBlockers: [],
     requiredChecks: REQUIRED_CHECKS,
     validationInfrastructure: VALIDATION_INFRASTRUCTURE,
     capacityField: "",
@@ -357,6 +359,8 @@ function bootstrapProductDecision() {
   return {
     status: "PRODUCT_DECISION_REQUIRED",
     summary: "",
+    capabilityRequirements: [],
+    environmentBlockers: [],
     requiredChecks: [],
     validationInfrastructure: [],
     capacityField: "",
@@ -373,6 +377,8 @@ function bootstrapCapacityExhausted(capacityField) {
   return {
     status: "CAPACITY_EXHAUSTED",
     summary: "",
+    capabilityRequirements: [],
+    environmentBlockers: [],
     requiredChecks: [],
     validationInfrastructure: [],
     capacityField,
@@ -1138,6 +1144,7 @@ async function createFixture(
     onCommitVerify,
     onRoleRun,
     onTrustedValidation,
+    onRequirementInspection,
     onTransition,
     plan = PLAN,
     prepareProject,
@@ -1533,7 +1540,7 @@ async function createFixture(
     revision: 1,
     runId,
     pipelineId: "plan-execution",
-    pipelineStateVersion: 17,
+    pipelineStateVersion: 18,
     projectPath,
     taskPath,
     roles: Object.fromEntries(
@@ -1569,6 +1576,14 @@ async function createFixture(
     clarifications,
     trustedValidation: {
       async preflight() {},
+      async inspectRequirements(options) {
+        return (
+          onRequirementInspection?.(options) ?? {
+            status: "READY",
+            blockers: [],
+          }
+        );
+      },
       async execute(options) {
         assert.notEqual(onTrustedValidation, undefined);
         return onTrustedValidation(options);
@@ -1913,7 +1928,7 @@ async function createFixture(
   ) {
     currentRun = {
       ...currentRun,
-      pipelineStateVersion: 17,
+      pipelineStateVersion: 18,
       pipelineState,
       pause,
       revision: currentRun.revision + 1,

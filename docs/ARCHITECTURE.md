@@ -1779,11 +1779,15 @@ explicit preparation effect, never a required-check execution or attestation.
 Construction, status reads, and ordinary preflight do not call it. Pipelines
 retain their own reporting schemas, saved requests, migration, and pause policy;
 the capability owns normalization, frozen authority matching, and availability.
-Pipeline adoption is separate from this root preparation boundary.
+Plan execution persists reports in each active role's bootstrap or validation-
+migration inventory and inspects their union at every writable entry, including
+unconsumed COMMIT. Its cached declaration preflight cannot bypass this gate.
+Polishing adoption remains separate from this root preparation boundary.
 
-Inspection accepts `inventory` (up to 256 unique, trimmed, single-line exact
-command strings, each at most 4,000 characters) and `requirements` (up to 256
-reports). Every selected frozen command must appear in the inventory. Each
+Inspection accepts `inventory` (up to 512 unique, trimmed, single-line exact
+command strings, each at most 4,000 characters) and `requirements` (up to 1,024
+reports, accommodating two role inventories with 256 needs and 256 blockers each).
+Every selected frozen command must appear in the inventory. Each
 report names an inventory `command` and may supply `commandIdentity` (null or a
 lowercase SHA-256 identity), `capabilities` (the existing scratch, cache, and
 exact artifact declaration shape), and `unsupported` (up to 16 unique lowercase
