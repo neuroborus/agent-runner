@@ -110,6 +110,22 @@ export async function createLegacyRecoveryFixture(
       };
     },
     async run(request) {
+      const position = JSON.parse(
+        /Runner-selected plan position[^\n]*\n([^\n]+)/u.exec(
+          request.prompt,
+        )?.[1] ?? "null",
+      );
+      const assessment = position && {
+        step: position.step,
+        subject: position.subject,
+        disposition: "CURRENT",
+        evidence: [],
+      };
+      if (request.schema === schemas.PLAN_CONTEXT_SCHEMA)
+        return {
+          structured: { stepAssessment: assessment },
+          sessionId: request.session?.id ?? randomUUID(),
+        };
       calls.push(request);
       const schema = request.schema;
       const step = Number(
@@ -215,6 +231,11 @@ export async function createLegacyRecoveryFixture(
               ? reviewApproved()
               : cleanConfirmation();
       } else throw new Error("Unexpected fixture phase.");
+      if (
+        (schema.properties?.result?.anyOf?.[0]?.properties ?? schema.properties)
+          ?.stepAssessment
+      )
+        (structured.result ?? structured).stepAssessment = assessment;
       return {
         structured,
         output: "fixture result",

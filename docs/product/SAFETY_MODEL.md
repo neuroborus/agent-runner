@@ -40,6 +40,12 @@ resume. Step one remains visible even if bootstrap has not completed. Only
 verified settlement of the runner's consumed COMMIT authorization advances
 the plan; completed effects are verified before any stale-plan guard.
 
+Agent context cannot change the runner-selected step. A claim that it already
+landed, or a direction to skip, reorder, or implement a later step, requires plan
+revision even when structured step fields match. Read-only context validation
+distinguishes such directions from quoted examples and whole-plan discussion.
+Legacy accepted context is rediscovered before further writable work.
+
 No pipeline may push, mutate a remote ref, call a hosting service to write,
 change a remote, alter Git identity, amend, reset, rebase, stash, switch
 branches, or create tags. A failed hook or unexpected repository state pauses

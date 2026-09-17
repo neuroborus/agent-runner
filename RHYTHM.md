@@ -7,6 +7,12 @@ remain in the owning documentation.
 
 ## 2026-09-17
 
+- **Execution context cannot advance the plan.** Bounded step assessments and a
+  separate read-only narrative review reject already-landed claims and directions
+  to skip or reorder the selected step. Matching numeric fields are insufficient;
+  quoted examples and whole-plan discussion remain valid. Legacy summaries must
+  be rediscovered before new writable work, after consumed-effect settlement.
+
 - **Execution rejects stale plans before writable work.** The root Git capability
   supplies HEAD's subject; the validated plan and verified completed commits
   alone select the leading step. Existing subjects and external HEAD movement

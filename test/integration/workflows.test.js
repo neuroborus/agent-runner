@@ -298,6 +298,8 @@ async function combinedScenario(t, pipelineId, hooks = {}) {
         codex: {
           ...backend,
           async run(request) {
+            if (request.prompt.startsWith("Validate the proposed context"))
+              return backend.run(request);
             const durable = await runStore.loadRun(runId);
             const turn = { ...durable.activeTurn, request };
             calls.push(turn);
@@ -334,6 +336,27 @@ async function combinedScenario(t, pipelineId, hooks = {}) {
                         ? supplied
                         : { result: supplied },
                   };
+            if (
+              supplied !== undefined &&
+              (
+                request.schema?.properties?.result?.anyOf?.[0]?.properties ??
+                request.schema?.properties
+              )?.stepAssessment
+            ) {
+              const { step, subject } = JSON.parse(
+                /Runner-selected plan position[^\n]*\n([^\n]+)/u.exec(
+                  request.prompt,
+                )[1],
+              );
+              (
+                response.structured.result ?? response.structured
+              ).stepAssessment = {
+                step,
+                subject,
+                disposition: "CURRENT",
+                evidence: [],
+              };
+            }
             sessions.add(response.sessionId);
             await hooks.afterTurn?.(
               turn,
@@ -1232,6 +1255,20 @@ function createBackend(
       return capabilities();
     },
     async run(request) {
+      const position = /Runner-selected plan position[^\n]*\n([^\n]+)/u.exec(
+        request.prompt,
+      );
+      const assessment = position && {
+        ...JSON.parse(position[1]),
+        disposition: "CURRENT",
+        evidence: [],
+      };
+      if (assessment) delete assessment.completed;
+      if (request.prompt.startsWith("Validate the proposed context"))
+        return {
+          structured: { stepAssessment: assessment },
+          sessionId: sessionId(request, "worker"),
+        };
       calls.push(request);
       if (request.session?.mode === "fork" && rejectSource) {
         const error = new Error("Source session is unavailable.");
@@ -1501,6 +1538,13 @@ function createBackend(
         throw new Error("Unexpected fake backend turn.");
       }
 
+      if (
+        (
+          request.schema?.properties?.result?.anyOf?.[0]?.properties ??
+          request.schema?.properties
+        )?.stepAssessment
+      )
+        structured.stepAssessment = assessment;
       return {
         output: "structured",
         structured:
@@ -2407,6 +2451,8 @@ async function projectCommandScenario(t, pipelineId, hooks = {}) {
     codex: {
       ...backend,
       async run(request) {
+        if (request.prompt.startsWith("Validate the proposed context"))
+          return backend.run(request);
         const durable = await runStore.loadRun(runId);
         assert.deepEqual(durable.pipelineState.trustedValidation, expected);
         assert.equal(

@@ -195,7 +195,7 @@ test("version-15 capacity migration preserves legacy 64/128 inventories and comp
   assert.equal(migrated.workerValidation.requiredChecks.length, 64);
 });
 
-test("runner migrates version-15 execution under a lease without replaying finalization", async (t) => {
+test("runner migrates version-15 execution under a lease and rediscovers context before finalization", async (t) => {
   const fixture = await createLegacyRecoveryFixture(t, { steps: 1 });
   await fixture.rewrite(({ events }) => {
     for (const event of events) event.state.pipelineStateVersion = 15;
@@ -207,18 +207,17 @@ test("runner migrates version-15 execution under a lease without replaying final
   const { run } = await fixture.openRunner().resume({ runId: fixture.runId });
   assert.equal(run.pipelineStateVersion, planExecutionPipeline.stateVersion);
   assert.equal(run.pipelineState.workflowState, "DONE");
+  const resumedCalls = fixture.calls.slice(calls);
+  assert.equal(resumedCalls[0].access, "read-only");
+  assert.equal(resumedCalls[0].schema, BOOTSTRAP_SCHEMA);
+  assert.match(resumedCalls[0].prompt, /versioned-state migration/u);
   assert.equal(
-    fixture.calls.slice(calls).filter(({ access }) => access === "local-commit")
-      .length,
+    resumedCalls.filter(({ access }) => access === "local-commit").length,
     1,
   );
   assert.equal(
-    fixture.calls
-      .slice(calls)
-      .filter(({ prompt }) =>
-        prompt?.includes("Run the complete project finalization"),
-      ).length,
-    0,
+    resumedCalls.filter(({ schema }) => schema === FINALIZATION_SCHEMA).length,
+    1,
   );
   const history = await fixture.history();
   assert.equal(

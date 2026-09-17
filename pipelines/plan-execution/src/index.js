@@ -1188,10 +1188,14 @@ export function migratePlanExecutionStateV17(run) {
   });
 }
 
+export function migratePlanExecutionStateV18(run) {
+  return Object.freeze({ ...run.pipelineState, planContextVersion: 0 });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
   resolveStopBoundary,
-  stateVersion: 18,
+  stateVersion: 19,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1210,6 +1214,7 @@ export const planExecutionPipeline = Object.freeze({
     15: migratePlanExecutionStateV15,
     16: migratePlanExecutionStateV16,
     17: migratePlanExecutionStateV17,
+    18: migratePlanExecutionStateV18,
   }),
   roles: ROLES,
   resolveActiveRoles,

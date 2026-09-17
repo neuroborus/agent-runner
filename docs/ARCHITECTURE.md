@@ -64,6 +64,16 @@ external HEAD movement from the saved baseline, requires plan revision without
 adopting the commit. Consumed runner-authorized commits settle verification-only
 first; only that verified settlement changes plan progress.
 
+Plan execution owns bounded step assessments and semantic context validation in
+its private `plan-position.js` contract. Every context-producing phase receives
+the runner-selected subject and verified completion evidence. A separate
+read-only review checks narrative directions before acceptance; matching fields
+cannot override contradictory prose. Its `plan-context` interruption marker
+requires read-only reconciliation before replaying the producing checkpoint.
+Version-19 migration invalidates legacy context before writable work while
+preserving verification-only settlement of consumed commits. Root Git remains
+the observation authority; agents and summaries never select the next step.
+
 The trusted-validation capability lives under `src/trusted-validation/` behind
 its public `index.js`. The index exposes only the contracts consumed by the
 root runtime and capability tests; private service and execution modules keep

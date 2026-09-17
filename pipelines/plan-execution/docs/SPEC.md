@@ -1305,6 +1305,48 @@ skipped required check.
 
 ## 9. Repository Safety Guards
 
+### Context cannot change plan position
+
+Clarification, plan compatibility, each independent bootstrap, reconciliation,
+bootstrap/finding/stagnation arbitration, and validation migration require
+`stepAssessment` in every result. It contains `step` (positive integer),
+`subject` (at most 256 characters),
+`disposition` (`CURRENT`, `ALREADY_LANDED`, `SKIP_OR_REORDER`, or `LATER_STEP`),
+and at most eight evidence strings of 512 characters each. The runner supplies
+its selected step, exact validated subject, and verified completed subjects and
+commit IDs in both continuation and reconstructed prompts. Reports cannot
+change that position or grant commit authority.
+
+A well-formed mismatching step/subject or non-`CURRENT` assessment pauses for
+plan revision. Each otherwise acceptable context result also receives a separate
+read-only semantic review before acceptance. That review examines the entire
+proposed narrative, not just its numeric fields: assertions that the current
+step landed, directions to skip/reorder it, or instructions to implement a later
+step are incompatible. Quoted rejected examples, hypothetical discussion, and
+ordinary whole-plan descriptions remain valid when they do not redirect work.
+The semantic review uses the producing logical role and continues its checkpoint
+session, including an Arbiter's existing session rather than starting another
+arbitration. It cannot modify the repository or execute required checks.
+Reconstructed review prompts retain the original inputs, clarification evidence,
+and applicable resolved context as well as the proposed result.
+
+Malformed assessments or semantic-review responses use the existing one-correction
+ledger, extended to clarification, compatibility, and finding/stagnation arbitration.
+Diagnostics stay bounded and exclude rejected narrative. The original producing checkpoint is replayed
+after interruption of the `plan-context` read-only turn; its output is not yet
+accepted. Recovery first verifies that no read-only mutation occurred.
+
+State version 19 marks prior context provisional with `planContextVersion: 0`.
+Before further writable work it invalidates dependent gates and active legacy
+rework directions and performs read-only validation rediscovery, preserving the
+existing correction ledger. Already pending migration also discards old accepted
+role inventories before rediscovery.
+A run that has not resolved bootstrap discards provisional role summaries and
+restarts discovery. Only current context has version 1. Consumed COMMIT effects
+settle verification-only before this migration; completed runs need no new work.
+Neither legacy summaries, reconciliation, nor arbitration advances completed
+commits. Stale context requires a revised plan and a new run.
+
 ### Stale plans and externally committed steps
 
 Before invoking a new role, and before ordinary or interrupted repository

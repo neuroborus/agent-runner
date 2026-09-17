@@ -288,9 +288,17 @@ function proveHistory(run, history, migrate) {
       ) {
         if (
           current.activeTurn.phase !==
-          event.state.pipelineState.workflowState
-            .toLowerCase()
-            .replaceAll("_", "-")
+            event.state.pipelineState.workflowState
+              .toLowerCase()
+              .replaceAll("_", "-") &&
+          !(
+            current.activeTurn.phase === "plan-context" &&
+            (["CLARIFY", "BOOTSTRAP", "RESOLVE_FINDINGS"].includes(
+              state.workflowState,
+            ) ||
+              state.validationMigrationPending ||
+              state.compatibilityCheckRequired)
+          )
         )
           return false;
         activeRequest = current.activeTurn;

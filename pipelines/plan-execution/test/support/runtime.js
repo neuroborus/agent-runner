@@ -38,6 +38,11 @@ import {
   runPlanExecution,
 } from "../../src/index.js";
 import {
+  FINDING_ARBITRATION_SCHEMA,
+  STAGNATION_SCHEMA,
+  PLAN_CONTEXT_SCHEMA,
+  CLARIFICATION_SCHEMA,
+  PLAN_COMPATIBILITY_SCHEMA,
   BOOTSTRAP_ARBITRATION_SCHEMA,
   BOOTSTRAP_RECONCILIATION_SCHEMA,
   BOOTSTRAP_SCHEMA,
@@ -305,8 +310,18 @@ function emptyDecision() {
   return { question: "", options: [], whyBlocked: "", evidence: [] };
 }
 
+function currentStepAssessment() {
+  return {
+    step: 1,
+    subject: "feat(test): add behavior",
+    disposition: "CURRENT",
+    evidence: [],
+  };
+}
+
 function clarificationReady() {
   return {
+    stepAssessment: currentStepAssessment(),
     status: "READY",
     questions: [],
     reason: "",
@@ -316,6 +331,7 @@ function clarificationReady() {
 
 function clarificationQuestions() {
   return {
+    stepAssessment: currentStepAssessment(),
     status: "QUESTIONS",
     questions: [
       {
@@ -330,6 +346,7 @@ function clarificationQuestions() {
 
 function clarificationPlanRevision() {
   return {
+    stepAssessment: currentStepAssessment(),
     status: "PLAN_REVISION_REQUIRED",
     questions: [],
     reason: "The requested behavior conflicts with the validated plan.",
@@ -342,6 +359,7 @@ function clarificationPlanRevision() {
 
 function bootstrapReady(role) {
   return {
+    stepAssessment: currentStepAssessment(),
     status: "READY",
     summary: `${role} understands the task, architecture, plan, risks, and finalization procedure.`,
     capabilityRequirements: [],
@@ -357,6 +375,7 @@ function bootstrapReady(role) {
 
 function bootstrapProductDecision() {
   return {
+    stepAssessment: currentStepAssessment(),
     status: "PRODUCT_DECISION_REQUIRED",
     summary: "",
     capabilityRequirements: [],
@@ -375,6 +394,7 @@ function bootstrapProductDecision() {
 
 function bootstrapCapacityExhausted(capacityField) {
   return {
+    stepAssessment: currentStepAssessment(),
     status: "CAPACITY_EXHAUSTED",
     summary: "",
     capabilityRequirements: [],
@@ -389,11 +409,17 @@ function bootstrapCapacityExhausted(capacityField) {
 }
 
 function compatibilityReady() {
-  return { status: "READY", reason: "", evidence: [] };
+  return {
+    stepAssessment: currentStepAssessment(),
+    status: "READY",
+    reason: "",
+    evidence: [],
+  };
 }
 
 function compatibilityPlanRevision() {
   return {
+    stepAssessment: currentStepAssessment(),
     status: "PLAN_REVISION_REQUIRED",
     reason: "The product decision changes a planned commit boundary.",
     evidence: ["The selected behavior requires another commit."],
@@ -402,6 +428,7 @@ function compatibilityPlanRevision() {
 
 function reconciliationResolved() {
   return {
+    stepAssessment: currentStepAssessment(),
     status: "RESOLVED",
     summary:
       "The roles agree on the minimal implementation and finalization procedure.",
@@ -413,6 +440,7 @@ function reconciliationResolved() {
 
 function reconciliationDisagreement() {
   return {
+    stepAssessment: currentStepAssessment(),
     status: "DISAGREEMENT",
     summary: "",
     disagreement: "The roles disagree about the required repository boundary.",
@@ -426,6 +454,7 @@ function reconciliationDisagreement() {
 
 function reconciliationProductDecision() {
   return {
+    stepAssessment: currentStepAssessment(),
     status: "PRODUCT_DECISION_REQUIRED",
     summary: "",
     disagreement: "",
@@ -439,6 +468,7 @@ function reconciliationProductDecision() {
 
 function arbitrationResolved() {
   return {
+    stepAssessment: currentStepAssessment(),
     direction: "SYNTHESIZE",
     summary: "Use the existing repository boundary and keep the change local.",
     rationale: "Repository ownership evidence supports the existing boundary.",
@@ -449,6 +479,7 @@ function arbitrationResolved() {
 
 function arbitrationProductDecision() {
   return {
+    stepAssessment: currentStepAssessment(),
     direction: "PRODUCT_DECISION_REQUIRED",
     summary: "",
     rationale: "The repository evidence cannot select a product behavior.",
@@ -819,6 +850,7 @@ function reconsiderationProductDecision() {
 
 function findingArbitration(direction) {
   return {
+    stepAssessment: currentStepAssessment(),
     direction,
     rationale: `Repository evidence supports ${direction}.`,
     ...emptyDecision(),
@@ -827,6 +859,7 @@ function findingArbitration(direction) {
 
 function stagnation(direction, findingIds = []) {
   return {
+    stepAssessment: currentStepAssessment(),
     direction,
     rationale: `The minimal next direction is ${direction}.`,
     findingIds,
@@ -1143,6 +1176,7 @@ async function createFixture(
     onCommitRun,
     onCommitVerify,
     onRoleRun,
+    onContextReview,
     onTrustedValidation,
     onRequirementInspection,
     onTransition,
@@ -1279,6 +1313,7 @@ async function createFixture(
     arbiter: [...arbiter],
   };
   const calls = { worker: [], reviewer: [], arbiter: [] };
+  const contextCalls = [];
   const probeCalls = { worker: 0, reviewer: 0, arbiter: 0 };
   const freshSessionIndexes = { worker: 0, reviewer: 0, arbiter: 0 };
 
@@ -1359,6 +1394,31 @@ async function createFixture(
           return { ...defaultCapabilities, ...capabilities[role] };
         },
         async run(request) {
+          if (request.schema === PLAN_CONTEXT_SCHEMA) {
+            contextCalls.push({ role, ...request });
+            const position = JSON.parse(
+              /Runner-selected plan position[^\n]*\n([^\n]+)/u.exec(
+                request.prompt,
+              )[1],
+            );
+            const structured = (await onContextReview?.(
+              role,
+              request,
+              contextCalls.length,
+              repositoryControl,
+            )) ?? {
+              stepAssessment: {
+                step: position.step,
+                subject: position.subject,
+                disposition: "CURRENT",
+                evidence: [],
+              },
+            };
+            return {
+              structured,
+              sessionId: request.session?.id ?? nextFreshSessionId(role),
+            };
+          }
           calls[role].push(request);
           assert.match(request.prompt, /Do not delegate/u);
           assert.match(
@@ -1412,6 +1472,29 @@ async function createFixture(
               join(projectPath, `implementation-${step}.txt`),
               `implemented step ${step}\n`,
             );
+          }
+          if (
+            [
+              FINDING_ARBITRATION_SCHEMA,
+              STAGNATION_SCHEMA,
+              CLARIFICATION_SCHEMA,
+              PLAN_COMPATIBILITY_SCHEMA,
+              ...WRAPPED_BOOTSTRAP_SCHEMAS,
+            ].includes(request.schema) &&
+            structured.stepAssessment?.step === 1 &&
+            structured.stepAssessment.subject === "feat(test): add behavior" &&
+            structured.stepAssessment.disposition === "CURRENT"
+          ) {
+            const position = JSON.parse(
+              /Runner-selected plan position[^\n]*\n([^\n]+)/u.exec(
+                request.prompt,
+              )[1],
+            );
+            structured.stepAssessment = {
+              ...structured.stepAssessment,
+              step: position.step,
+              subject: position.subject,
+            };
           }
           const candidateStructured = [
             CANDIDATE_REVIEW_SCHEMA,
@@ -1540,7 +1623,7 @@ async function createFixture(
     revision: 1,
     runId,
     pipelineId: "plan-execution",
-    pipelineStateVersion: 18,
+    pipelineStateVersion: 19,
     projectPath,
     taskPath,
     roles: Object.fromEntries(
@@ -1951,7 +2034,7 @@ async function createFixture(
   ) {
     currentRun = {
       ...currentRun,
-      pipelineStateVersion: 18,
+      pipelineStateVersion: 19,
       pipelineState,
       pause,
       revision: currentRun.revision + 1,
@@ -1963,6 +2046,7 @@ async function createFixture(
   return {
     artifacts,
     calls,
+    contextCalls,
     clarificationPath,
     hasClarification() {
       try {

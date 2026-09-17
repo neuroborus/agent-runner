@@ -7,6 +7,7 @@ import {
   serializeCommitPlan,
 } from "@agent-runner/commit-plan";
 
+import { validStepAssessment } from "./plan-position.js";
 import {
   validCapabilityReports,
   freezeReport,
@@ -44,6 +45,7 @@ export const WORKFLOW_STATES = Object.freeze([
 
 const PIPELINE_STATE_FIELDS = new Set([
   "workflowState",
+  "planContextVersion",
   "artifactRoot",
   "preflightComplete",
   "settings",
@@ -212,6 +214,7 @@ const CANDIDATE_REVIEW_RESULT_FIELDS = Object.freeze([
   "evidence",
 ]);
 const BOOTSTRAP_RESULT_FIELDS = Object.freeze([
+  "stepAssessment",
   "capabilityRequirements",
   "environmentBlockers",
   "status",
@@ -227,6 +230,7 @@ const BOOTSTRAP_RESULT_FIELDS = Object.freeze([
   "evidence",
 ]);
 const RECONCILIATION_RESULT_FIELDS = Object.freeze([
+  "stepAssessment",
   "status",
   "summary",
   "disagreement",
@@ -237,6 +241,7 @@ const RECONCILIATION_RESULT_FIELDS = Object.freeze([
   "evidence",
 ]);
 const ARBITRATION_RESULT_FIELDS = Object.freeze([
+  "stepAssessment",
   "direction",
   "summary",
   "rationale",
@@ -940,7 +945,16 @@ function normalizePlanRevision(payload, discriminator = "status") {
   });
 }
 
+export function assertStepAssessment(value) {
+  if (!validStepAssessment(value))
+    throw outputError(
+      "Invalid runner-step assessment.",
+      outputConstraint("stepAssessment", "bounded-step-assessment"),
+    );
+}
+
 export function normalizeClarificationResult(payload) {
+  assertStepAssessment(payload?.stepAssessment);
   const statuses = [
     "READY",
     "QUESTIONS",
@@ -1006,6 +1020,7 @@ export function normalizeClarificationResult(payload) {
 }
 
 export function normalizeCompatibilityResult(payload) {
+  assertStepAssessment(payload?.stepAssessment);
   if (
     !isRecord(payload) ||
     !["READY", "PLAN_REVISION_REQUIRED"].includes(payload.status)
@@ -1034,6 +1049,7 @@ export function normalizeCompatibilityResult(payload) {
 }
 
 export function normalizeBootstrapResultCandidate(payload, role) {
+  assertStepAssessment(payload?.stepAssessment);
   const statuses = [
     "READY",
     "CAPACITY_EXHAUSTED",
@@ -1192,6 +1208,7 @@ export function normalizeBootstrapResult(payload, role) {
 }
 
 export function normalizeReconciliationResult(payload) {
+  assertStepAssessment(payload?.stepAssessment);
   const statuses = [
     "RESOLVED",
     "DISAGREEMENT",
@@ -1290,6 +1307,7 @@ export function normalizeReconciliationResult(payload) {
 }
 
 export function normalizeBootstrapArbitration(payload) {
+  assertStepAssessment(payload?.stepAssessment);
   const directions = [
     "USE_WORKER",
     "USE_REVIEWER",
@@ -2662,6 +2680,7 @@ export function normalizeReconsiderationResult(payload, disputes) {
 }
 
 export function normalizeFindingArbitration(payload) {
+  assertStepAssessment(payload?.stepAssessment);
   const directions = [
     "WORKER_CORRECT",
     "REVIEWER_CORRECT",
@@ -2691,6 +2710,7 @@ export function normalizeFindingArbitration(payload) {
 }
 
 export function normalizeStagnationResult(payload, pipelineState) {
+  assertStepAssessment(payload?.stepAssessment);
   const directions = [
     "CONTINUE_FIXES",
     "REWORK_IMPLEMENTATION",
@@ -2868,6 +2888,10 @@ function normalizeBootstrapCorrection(correction) {
       throw workflowError("Plan-execution bootstrap correction is invalid.");
     }
     const validContext =
+      (["finding-arbitration", "stagnation"].includes(diagnostic.contract) &&
+        diagnostic.role === "arbiter") ||
+      (["clarification", "compatibility"].includes(diagnostic.contract) &&
+        diagnostic.role === "worker") ||
       (diagnostic.contract === "bootstrap" &&
         ["worker", "reviewer"].includes(diagnostic.role)) ||
       (diagnostic.contract === "bootstrap-reconciliation" &&
@@ -2876,8 +2900,17 @@ function normalizeBootstrapCorrection(correction) {
         diagnostic.role === "arbiter");
     const currentContext = `${diagnostic.role}\0${diagnostic.phase}\0${diagnostic.contract}`;
     const identity = `${diagnostic.field}\0${diagnostic.constraint}`;
+    const validPhase = ["bootstrap", "validation-migration"].includes(
+      diagnostic.phase,
+    )
+      ? [
+          "bootstrap",
+          "bootstrap-reconciliation",
+          "bootstrap-arbitration",
+        ].includes(diagnostic.contract)
+      : diagnostic.phase === diagnostic.contract;
     if (
-      !["bootstrap", "validation-migration"].includes(diagnostic.phase) ||
+      !validPhase ||
       !validContext ||
       (context !== undefined && context !== currentContext) ||
       identities.has(identity)
@@ -3690,6 +3723,8 @@ export function normalizePipelineState(value) {
   ) {
     throw workflowError("Plan-execution artifact root is invalid.");
   }
+  if (![0, 1].includes(value.planContextVersion))
+    throw workflowError("Invalid plan context version.");
   for (const field of [
     "preflightComplete",
     "proactiveClarification",
@@ -4821,6 +4856,7 @@ export function createPlanExecutionState({
       workflowState: "CLARIFY",
       artifactRoot,
       preflightComplete: false,
+      planContextVersion: 1,
       settings:
         settings === null
           ? null
@@ -4977,7 +5013,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 18 ||
+    run.pipelineStateVersion !== 19 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
