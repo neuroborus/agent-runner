@@ -4044,7 +4044,12 @@ export function normalizePipelineState(value) {
         ? workerSummary !== null ||
           reviewerSummary !== null ||
           resolvedSummary !== null
-        : resolvedSummary === null))
+        : resolvedSummary === null &&
+          !(
+            ["WAITING_FOR_USER", "FAILED", "CANCELED"].includes(
+              value.workflowState,
+            ) && value.currentStep === 1
+          )))
   ) {
     throw workflowError("Plan-execution compatibility state is invalid.");
   }
@@ -4053,6 +4058,21 @@ export function normalizePipelineState(value) {
     (!Number.isSafeInteger(value.currentStep) || value.currentStep < 1)
   ) {
     throw workflowError("Plan-execution current step is invalid.");
+  }
+  if (
+    value.currentStep !== null &&
+    resolvedSummary === null &&
+    !(
+      value.preflightComplete &&
+      ["WAITING_FOR_USER", "FAILED", "CANCELED"].includes(
+        value.workflowState,
+      ) &&
+      value.currentStep === 1
+    )
+  ) {
+    throw workflowError(
+      "An unresolved bootstrap may retain only paused step one.",
+    );
   }
   const finalizationCorrectionScope = finalizationCorrections[0] ?? null;
   if (
@@ -5455,6 +5475,7 @@ export function assertRuntime(runtime, activeRoles = resolveActiveRoles()) {
     "assertUnchanged",
     "consumeCommit",
     "contentFingerprint",
+    "inspectHead",
     "inspectPath",
     "preflight",
     "prepareCommit",

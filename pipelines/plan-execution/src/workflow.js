@@ -1092,16 +1092,98 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
   }
 
   async function verifyPersistedRepository() {
+    if (!(await ensurePlanPosition())) return false;
     try {
       await runtime.git.assertUnchanged(state().repositoryBaseline);
     } catch (cause) {
       if (cause?.code !== "ERR_READ_ONLY_REPOSITORY_CHANGED") {
         throw cause;
       }
+      if (cause.changes?.includes("head") && !(await ensurePlanPosition()))
+        return false;
       await pause("unsafe_git_state", { code: cause.code });
       return false;
     }
     return true;
+  }
+
+  async function ensurePlanPosition() {
+    const current = state();
+    if (
+      operatorStop ||
+      !current.preflightComplete ||
+      current.pendingCommit?.status === "consumed" ||
+      ["DONE", "CANCELED"].includes(current.workflowState) ||
+      (current.workflowState === "FAILED" &&
+        !canRecoverLegacyConfirmation(currentRun))
+    )
+      return true;
+    if (currentRun.pause?.reason === "plan_revision_required") return false;
+    if (
+      current.workflowState === "WAITING_FOR_USER" &&
+      currentRun.pause?.resumeState === undefined
+    )
+      return true;
+    const stepNumber = current.completedCommits.length + 1;
+    const step = parseCommitPlan(current.canonicalPlan).steps[stepNumber - 1];
+    if (step === undefined) return true;
+    const observed = await runtime.git.inspectHead({
+      projectPath: currentRun.projectPath,
+    });
+    if (
+      observed.head === current.repositoryBaseline.head &&
+      observed.subject !== step.subject
+    )
+      return true;
+    // Preserve the existing diagnostics for independent control violations.
+    const snapshot = await runtime.git.snapshot({
+      projectPath: currentRun.projectPath,
+      allowedPaths: current.repositoryBaseline.allowedPaths,
+    });
+    if (
+      [
+        "branch",
+        "detached",
+        "remoteConfigurationFingerprint",
+        "identityFingerprint",
+      ].some((field) => snapshot[field] !== current.repositoryBaseline[field])
+    )
+      return true;
+    if (
+      observed.head === current.repositoryBaseline.head &&
+      ["refsFingerprint", "indexFingerprint", "contentFingerprint"].some(
+        (field) => snapshot[field] !== current.repositoryBaseline[field],
+      )
+    )
+      return true;
+    await transition(
+      {
+        ...current,
+        currentStep: stepNumber,
+        workflowState: "WAITING_FOR_USER",
+      },
+      {
+        pause: {
+          reason: "plan_revision_required",
+          code: "ERR_STALE_EXECUTION_PLAN",
+          explanation:
+            "The runner-selected plan step conflicts with the observed HEAD. Revise the plan and start a new run.",
+          evidence: [
+            `Current step ${stepNumber}: ${step.subject}`,
+            observed.subject === step.subject
+              ? "HEAD already has the exact current planned subject."
+              : "HEAD moved outside runner-authorized commit settlement.",
+          ],
+        },
+        publicActivity: activity(
+          "runner",
+          "plan",
+          "revision-required",
+          "Plan revision required before writable work.",
+        ),
+      },
+    );
+    return false;
   }
 
   async function recordSession(
@@ -1333,6 +1415,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     if ((await readCurrentInputs()) === null) {
       return false;
     }
+    if (!(await ensurePlanPosition())) return false;
     const correctionWasReconciled =
       interruptedCorrectionWasReconciled(interruptedTurn);
     const supersededByValidationMigration = state().validationMigrationPending;
@@ -1346,6 +1429,15 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         },
       );
     } catch (cause) {
+      if (
+        [
+          "ERR_READ_ONLY_REPOSITORY_CHANGED",
+          "ERR_INTERRUPTED_REPOSITORY_CONTROL_CHANGED",
+        ].includes(cause?.code) &&
+        cause.changes?.includes("head") &&
+        !(await ensurePlanPosition())
+      )
+        return false;
       if (cause?.code !== "ERR_INTERRUPTED_REPOSITORY_CONTROL_CHANGED") {
         throw cause;
       }
@@ -1452,6 +1544,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       recoveryContext = "",
     } = {},
   ) {
+    if (!(await ensurePlanPosition())) return null;
     if (!(await ensureTrustedCapabilities())) return null;
     if (access === "workspace-write" && !(await ensureCheckRequirements()))
       return null;
@@ -6179,8 +6272,14 @@ ${step.subject}`),
     });
     commitCheckpointSettlement = false;
     assertRun(currentRun);
+    interruptedTurn = null;
+    interruptedRepositoryReconciled = false;
     return !["WAITING_FOR_USER", "CANCELED"].includes(state().workflowState);
   }
+
+  // Read-only plan classification precedes preparation, but never consumed
+  // commit verification or operator-stop reconciliation.
+  if (!(await ensurePlanPosition())) return currentRun;
 
   // Reconfirmation requires new provider work. Check its saved capabilities
   // before changing journal-proven legacy recovery or active-turn evidence.

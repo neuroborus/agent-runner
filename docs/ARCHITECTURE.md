@@ -56,6 +56,14 @@ private service composes command execution, content and snapshot inspection,
 commit verification, and polishing handoff modules without exposing their
 implementation contracts to root consumers.
 
+`inspectHead` reads the current commit object ID and that immutable object's
+subject, including unborn HEAD as `{head: null, subject: null}`. Plan execution
+uses this observation before writable entry and ahead of generic resume or
+interruption drift handling. An exact leading-plan subject already at HEAD, or
+external HEAD movement from the saved baseline, requires plan revision without
+adopting the commit. Consumed runner-authorized commits settle verification-only
+first; only that verified settlement changes plan progress.
+
 The trusted-validation capability lives under `src/trusted-validation/` behind
 its public `index.js`. The index exposes only the contracts consumed by the
 root runtime and capability tests; private service and execution modules keep

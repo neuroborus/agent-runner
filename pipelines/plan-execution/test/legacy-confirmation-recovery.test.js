@@ -346,13 +346,25 @@ test("legacy confirmation revalidates inputs, content, infrastructure, and Git c
         .openRunner()
         .resume({ runId: fixture.runId });
       assert.equal(run.pipelineState.workflowState, "WAITING_FOR_USER");
-      assert.ok(
-        [
-          "unsafe_git_state",
-          "task_input_changed",
-          "clarifications_changed",
-        ].includes(run.pause.reason),
-      );
+      if (name === "HEAD") {
+        assert.equal(run.pause.reason, "plan_revision_required");
+        assert.deepEqual(
+          run.pipelineState.repositoryBaseline,
+          fixture.failed.pipelineState.repositoryBaseline,
+        );
+        assert.deepEqual(
+          run.pipelineState.completedCommits,
+          fixture.failed.pipelineState.completedCommits,
+        );
+      } else {
+        assert.ok(
+          [
+            "unsafe_git_state",
+            "task_input_changed",
+            "clarifications_changed",
+          ].includes(run.pause.reason),
+        );
+      }
       assert.equal(fixture.calls.length, calls);
       assert.equal(
         (await fixture.history()).events.some(
