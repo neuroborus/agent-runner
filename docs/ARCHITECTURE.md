@@ -74,6 +74,15 @@ Version-19 migration invalidates legacy context before writable work while
 preserving verification-only settlement of consumed commits. Root Git remains
 the observation authority; agents and summaries never select the next step.
 
+Plan execution also owns durable initial-implementation evidence. Its
+`implementation-evidence.js` contract separates the original step/HEAD/content
+baseline from mutable repository snapshots and reconstructs legacy evidence only
+from the state-owned validated journal. State version 20 persists that evidence
+before writable implementation and rejects unchanged initial results before
+candidate convergence. Corrections retain their existing unchanged-result semantics;
+verified commit settlement alone resets the record for the next step. Consumed
+effects and stop recovery remain ahead of preparation for new writable work.
+
 The trusted-validation capability lives under `src/trusted-validation/` behind
 its public `index.js`. The index exposes only the contracts consumed by the
 root runtime and capability tests; private service and execution modules keep

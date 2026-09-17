@@ -7,6 +7,13 @@ remain in the owning documentation.
 
 ## 2026-09-17
 
+- **Initial implementation needs an observed content change.** Execution persists
+  step-start HEAD/content evidence before writable work and retains it through
+  interruption and mutable baseline updates. No-op initial completion requires a
+  revised plan before convergence; unchanged corrections remain valid. Version-20
+  recovery requires journal proof for legacy evidence and never guesses from the
+  current workspace. Verified consumed commits settle before new-work guards.
+
 - **Execution context cannot advance the plan.** Bounded step assessments and a
   separate read-only narrative review reject already-landed claims and directions
   to skip or reorder the selected step. Matching numeric fields are insufficient;

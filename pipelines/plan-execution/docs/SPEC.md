@@ -1305,6 +1305,37 @@ skipped required check.
 
 ## 9. Repository Safety Guards
 
+### Initial implementation must change step content
+
+Before registering the first writable implementation turn, the runner persists
+`stepImplementation`: the deterministic step number, runner-observed starting
+HEAD, staging-independent content fingerprint, and `accepted: false`. This
+record is distinct from the mutable repository baseline. Interrupted turns,
+partial implementation, stop recovery, environment retries, and baseline updates
+retain the original record. It is cleared only by verified COMMIT settlement.
+
+A `COMPLETED` initial implementation is accepted only when the observed content
+differs from that original fingerprint. Otherwise execution pauses with
+`plan_revision_required` before candidate convergence or finalization, retaining
+the current step and unchanged `completedCommits`. An implementation summary
+cannot authorize an empty step, including when its content already exists under
+a different commit subject. Repair requires a revised plan and new run.
+
+Once initial implementation is accepted, unchanged correction, finding-resolution,
+check/fix, review, and confirmation turns remain valid under their existing gates.
+The comparison does not depend on staging placement, and it does not authorize
+index changes. Only consumed runner-authorized commit verification advances steps.
+
+State version 20 marks legacy evidence as unresolved, except when preflight has
+never begun and no implementation could have run. Before new writable work
+or an unconsumed commit effect, recovery uses the complete validated journal to
+find the original implementation entry and its saved HEAD/content baseline.
+A prior acceptance must show a content change; a never-started step may use its
+journal-proven clean baseline. Missing, truncated, inconsistent, or already-no-op
+history cannot be replaced with the current workspace fingerprint or agent claims:
+it pauses for plan revision. Status performs no effects. Consumed commit settlement
+and operator stop/cancel reconciliation precede evidence acquisition for new work.
+
 ### Context cannot change plan position
 
 Clarification, plan compatibility, each independent bootstrap, reconciliation,

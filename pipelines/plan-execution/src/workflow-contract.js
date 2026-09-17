@@ -7,6 +7,7 @@ import {
   serializeCommitPlan,
 } from "@agent-runner/commit-plan";
 
+import { validImplementationEvidence } from "./implementation-evidence.js";
 import { validStepAssessment } from "./plan-position.js";
 import {
   validCapabilityReports,
@@ -46,6 +47,8 @@ export const WORKFLOW_STATES = Object.freeze([
 const PIPELINE_STATE_FIELDS = new Set([
   "workflowState",
   "planContextVersion",
+  "stepImplementation",
+  "implementationEvidenceLegacy",
   "artifactRoot",
   "preflightComplete",
   "settings",
@@ -3723,6 +3726,13 @@ export function normalizePipelineState(value) {
   ) {
     throw workflowError("Plan-execution artifact root is invalid.");
   }
+  if (
+    typeof value.implementationEvidenceLegacy !== "boolean" ||
+    (value.stepImplementation !== null &&
+      (!validImplementationEvidence(value.stepImplementation, value) ||
+        value.implementationEvidenceLegacy))
+  )
+    throw workflowError("Invalid step implementation evidence.");
   if (![0, 1].includes(value.planContextVersion))
     throw workflowError("Invalid plan context version.");
   for (const field of [
@@ -4857,6 +4867,8 @@ export function createPlanExecutionState({
       artifactRoot,
       preflightComplete: false,
       planContextVersion: 1,
+      stepImplementation: null,
+      implementationEvidenceLegacy: false,
       settings:
         settings === null
           ? null
@@ -5013,7 +5025,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 19 ||
+    run.pipelineStateVersion !== 20 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||

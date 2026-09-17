@@ -80,6 +80,8 @@ export function verifiedCommitCheckpoint({
     pendingLazyCorrection: null,
     pendingCommit: null,
     completedCommits,
+    stepImplementation: null,
+    implementationEvidenceLegacy: false,
   };
   return {
     patch: {

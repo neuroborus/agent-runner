@@ -26,6 +26,12 @@ measured provider guarantees.
 
 ## Core Guarantees
 
+Plan execution pauses for plan revision when initial implementation leaves the
+selected step's content unchanged. Runner-observed step-start evidence survives
+partial work and resume; missing legacy evidence must be reconstructed from the
+validated journal before new writable work. Unchanged corrective turns remain
+valid after initial acceptance. See the [execution specification](pipelines/plan-execution/docs/SPEC.md).
+
 - Pipelines own their roles, inputs, prompts, state machines, and output policy.
 - The root runner owns lifecycle, persistence, backend execution, and Git safety.
 - Every pipeline starts with a bounded, read-only `CLARIFY` phase.

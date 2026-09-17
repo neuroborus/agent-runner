@@ -8,6 +8,10 @@ import {
 } from "@agent-runner/commit-plan";
 
 import {
+  implementationEvidence,
+  recoveredImplementationEvidence,
+} from "./implementation-evidence.js";
+import {
   selectedPlanPosition,
   matchesPlanPosition,
   STEP_ASSESSMENT_INSTRUCTIONS,
@@ -716,6 +720,7 @@ export async function runPlanExecution({
     assertSettings(settings);
   }
 
+  const recoveredStepImplementation = recoveredImplementationEvidence(run);
   let currentRun = run;
   let interruptedTurn = run.activeTurn;
   let interruptedRepositoryReconciled = false;
@@ -1613,6 +1618,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     ) {
       return null;
     }
+    if (access === "workspace-write" && !(await ensureImplementationEvidence()))
+      return null;
     const turnSnapshot = await runtime.git.snapshot({
       allowedPaths: [],
       projectPath: baseline.projectPath,
@@ -3766,6 +3773,48 @@ The runner will derive validation inventories from the independently accepted ro
     return true;
   }
 
+  async function pauseForImplementationEvidence(explanation) {
+    await transition(
+      { ...state(), workflowState: "WAITING_FOR_USER" },
+      {
+        pause: {
+          reason: "plan_revision_required",
+          code: "ERR_STEP_IMPLEMENTATION_EVIDENCE",
+          explanation,
+          evidence: [
+            `Current step ${state().currentStep} requires a revised plan and new run.`,
+          ],
+        },
+      },
+    );
+    return false;
+  }
+
+  async function ensureImplementationEvidence() {
+    const current = state();
+    const initial =
+      current.workflowState === "IMPLEMENT" &&
+      current.implementationDirection === null;
+    const evidence =
+      current.stepImplementation ??
+      (current.implementationEvidenceLegacy
+        ? recoveredStepImplementation
+        : initial && currentRun.activeTurn === null
+          ? implementationEvidence(current)
+          : null);
+    if (evidence === null || (!initial && !evidence.accepted))
+      return pauseForImplementationEvidence(
+        "The original step-start content evidence cannot be reconstructed safely. Revise the plan and start a new run.",
+      );
+    if (current.stepImplementation === null)
+      await transition({
+        ...current,
+        stepImplementation: evidence,
+        implementationEvidenceLegacy: false,
+      });
+    return true;
+  }
+
   async function runImplementationTurn() {
     const current = state();
     const correction = current.implementationDirection !== null;
@@ -3824,6 +3873,16 @@ ${step.body}${
       });
       return false;
     }
+    const evidence = state().stepImplementation;
+    if (
+      !correction &&
+      !evidence.accepted &&
+      (await contentFingerprint()) === evidence.contentFingerprint
+    ) {
+      return pauseForImplementationEvidence(
+        "Initial implementation left the step content unchanged. Revise the plan and start a new run.",
+      );
+    }
     const nextCounters = correction
       ? { ...counters(), fixRounds: counters().fixRounds + 1 }
       : counters();
@@ -3831,6 +3890,7 @@ ${step.body}${
       {
         ...state(),
         workflowState: candidateCheckpoint(state().settings),
+        stepImplementation: { ...evidence, accepted: true },
         implementationDirection: null,
         ...clearedCandidateAndTerminalGate(),
         lazyCorrections: [],
@@ -6205,7 +6265,8 @@ ${JSON.stringify(
     let pendingCommit = current.pendingCommit;
     if (
       pendingCommit?.status !== "consumed" &&
-      !(await ensureCheckRequirements())
+      (!(await ensureCheckRequirements()) ||
+        !(await ensureImplementationEvidence()))
     )
       return false;
 

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import {
   createClarificationService,
@@ -364,4 +365,23 @@ export async function createLegacyRecoveryFixture(
       return planExecutionPipeline.projections.pause(run).nextActions;
     },
   };
+}
+
+// Downgrades remove transitions that only published fields absent in the old schema.
+export function removeUnchangedEvents(events) {
+  for (let index = events.length - 1; index > 0; index -= 1) {
+    const comparable = ({ revision, updatedAt, ...state }) => state;
+    if (
+      events[index].activity === null &&
+      isDeepStrictEqual(
+        comparable(events[index - 1].state),
+        comparable(events[index].state),
+      )
+    )
+      events.splice(index, 1);
+  }
+  events.forEach((event, index) => {
+    event.revision = index + 1;
+    event.state.revision = index + 1;
+  });
 }
