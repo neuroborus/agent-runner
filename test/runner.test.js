@@ -85,6 +85,15 @@ test("legacy recovery status is lock-free and resume retains run-then-worktree o
   );
 });
 
+function requestedStepAssessment(request) {
+  const matched = /Runner-selected plan position[^\n]*\n([^\n]+)/u.exec(
+    request.prompt,
+  );
+  if (!matched) return undefined;
+  const { step, subject } = JSON.parse(matched[1]);
+  return { step, subject, disposition: "CURRENT", evidence: [] };
+}
+
 function questions() {
   return {
     status: "QUESTIONS",
@@ -219,6 +228,7 @@ function createAdapter({ fork = true, questionFirst = false } = {}) {
 
 function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
   const calls = [];
+  const contextCalls = [];
   const probes = [];
   let freshSessionCount = 0;
   function freshSession() {
@@ -228,6 +238,7 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
   }
   return {
     calls,
+    contextCalls,
     probes,
     async probe(options) {
       probes.push(options);
@@ -245,6 +256,13 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
       };
     },
     async run(request) {
+      if (request.prompt.startsWith("Validate the proposed context")) {
+        contextCalls.push(request);
+        return {
+          structured: { stepAssessment: requestedStepAssessment(request) },
+          sessionId: request.session?.id ?? freshSession(),
+        };
+      }
       calls.push(request);
       if (request.access === "local-commit") {
         await executeFile("git", ["-C", request.cwd, "add", "-A"]);
@@ -401,6 +419,13 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
         throw new Error("Unexpected fake execution turn.");
       }
       sessionId ??= freshSession();
+      if (
+        (
+          request.schema?.properties?.result?.anyOf?.[0]?.properties ??
+          request.schema?.properties
+        )?.stepAssessment
+      )
+        structured.stepAssessment = requestedStepAssessment(request);
       return {
         output: "structured",
         structured:
@@ -431,6 +456,11 @@ function createArbiterAdapter() {
       };
     },
     async run(request) {
+      if (request.prompt.startsWith("Validate the proposed context"))
+        return {
+          structured: { stepAssessment: requestedStepAssessment(request) },
+          sessionId: request.session.id,
+        };
       assert.equal(probeCalls, 1);
       calls.push(request);
       assert.match(request.prompt, /^Resolve the bootstrap disagreement/u);
@@ -438,6 +468,7 @@ function createArbiterAdapter() {
         output: "structured",
         structured: {
           result: {
+            stepAssessment: requestedStepAssessment(request),
             direction: "SYNTHESIZE",
             summary: "Use the existing minimal module boundary.",
             rationale: "Repository ownership supports that boundary.",
@@ -1871,7 +1902,7 @@ test("publishes blocking provider activity before every pipeline turn", async (t
       assert.equal(completed.run.activeTurn, null);
       assert.equal(
         activities.filter(({ kind }) => kind === "turn-started").length,
-        delegate.calls.length,
+        delegate.calls.length + (delegate.contextCalls?.length ?? 0),
       );
     });
   }
@@ -2359,11 +2390,12 @@ test("resumes plan execution from its durable trusted-command snapshot", async (
         nativeSessionFork: true,
       };
     },
-    async run() {
+    async run(request) {
       return {
         output: "structured",
         structured: {
           status: "PLAN_REVISION_REQUIRED",
+          stepAssessment: requestedStepAssessment(request),
           questions: [],
           reason: "The durable test intentionally stops before bootstrap.",
           question: "",
@@ -2512,13 +2544,21 @@ test("unavailable trusted capabilities persist early pauses and retry frozen req
             nativeSessionFork: true,
           };
         },
-        async run() {
+        async run(request) {
           providerCalls += 1;
+          if (request.prompt.startsWith("Validate the proposed context"))
+            return {
+              structured: { stepAssessment: requestedStepAssessment(request) },
+              sessionId: PLANNER_SESSION,
+            };
           return {
             output: "structured",
             sessionId: PLANNER_SESSION,
             structured: {
               status: "PRODUCT_DECISION_REQUIRED",
+              ...(request.schema.properties.stepAssessment
+                ? { stepAssessment: requestedStepAssessment(request) }
+                : {}),
               questions: [],
               reason: "",
               question: "Which behavior should the fixture implement?",

@@ -330,6 +330,10 @@ another execution owner or extra work.
 
 Execution reports `plan_revision_required` when the current planned subject is
 already at HEAD or an external commit moved HEAD from the saved baseline. The
+same pause applies when context claims the current step landed or directs work
+to skip, reorder, or move to a later step. Matching structured step fields do not
+override contradictory instructions; quoted examples and future-plan discussion
+remain valid when they do not redirect current work. The
 runner retains the selected step and completed-commit history; it does not count
 external work as a completed step. Step one can be visible before bootstrap is
 complete. Revise the plan and start a new run; do not move HEAD or edit frozen
