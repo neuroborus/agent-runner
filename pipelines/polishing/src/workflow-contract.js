@@ -3,6 +3,10 @@ import { isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import {
+  validCapabilityReports,
+  freezeReport,
+} from "./capability-requirements.js";
+import {
   candidateGatePassed,
   finalizationGatePassed,
   handoffGatePassed,
@@ -876,6 +880,8 @@ export function normalizeBootstrapResult(payload, role) {
   const fields = [
     "status",
     "summary",
+    "capabilityRequirements",
+    "environmentBlockers",
     "requiredChecks",
     "validationInfrastructure",
     "capacityField",
@@ -902,6 +908,16 @@ export function normalizeBootstrapResult(payload, role) {
     outputConstraint("result", "maximum-256-kibibytes"),
   );
   assertExactOutputFields(payload, fields);
+  if (
+    payload.status !== "READY" &&
+    (!emptyArray(payload.capabilityRequirements) ||
+      !emptyArray(payload.environmentBlockers))
+  ) {
+    throw outputError(
+      "Inactive capability reports must be empty.",
+      outputConstraint("capabilityRequirements", "status-field-consistency"),
+    );
+  }
   if (payload.status === "CAPACITY_EXHAUSTED") {
     if (
       payload.summary !== "" ||
@@ -954,6 +970,20 @@ export function normalizeBootstrapResult(payload, role) {
       outputConstraint("status", "status-field-consistency"),
     );
   }
+  const requiredChecks = normalizePhaseSafeRequiredChecks(
+    payload.requiredChecks,
+    INVALID_OUTPUT_CODE,
+    { maxItems: MAX_BOOTSTRAP_ITEMS },
+  );
+  if (!validCapabilityReports(payload, requiredChecks)) {
+    throw outputError(
+      "Capability reports must be bounded and name exact inventory commands.",
+      outputConstraint(
+        "capabilityRequirements",
+        "exact-command-capability-reports",
+      ),
+    );
+  }
   return Object.freeze({
     status: payload.status,
     summary: normalizeSummary(
@@ -962,10 +992,12 @@ export function normalizeBootstrapResult(payload, role) {
       INVALID_OUTPUT_CODE,
       outputConstraint("summary", "concise-markdown-up-to-20000-characters"),
     ),
-    requiredChecks: normalizePhaseSafeRequiredChecks(
-      payload.requiredChecks,
-      INVALID_OUTPUT_CODE,
-      { maxItems: MAX_BOOTSTRAP_ITEMS },
+    requiredChecks,
+    capabilityRequirements: freezeReport(
+      structuredClone(payload.capabilityRequirements),
+    ),
+    environmentBlockers: freezeReport(
+      structuredClone(payload.environmentBlockers),
     ),
     validationInfrastructure: normalizeValidationInfrastructure(
       payload.validationInfrastructure,
@@ -3010,7 +3042,12 @@ function normalizePersistedValidation(value, name) {
   }
   assertExactFields(
     value,
-    ["requiredChecks", "validationInfrastructure"],
+    [
+      "requiredChecks",
+      "validationInfrastructure",
+      "capabilityRequirements",
+      "environmentBlockers",
+    ],
     name,
   );
   normalizeRequiredChecks(value.requiredChecks, "ERR_INVALID_POLISHING_STATE", {
@@ -3021,6 +3058,14 @@ function normalizePersistedValidation(value, name) {
     "ERR_INVALID_POLISHING_STATE",
     { maxItems: MAX_BOOTSTRAP_ITEMS },
   );
+  if (
+    !(
+      value.capabilityRequirements === null &&
+      value.environmentBlockers === null
+    ) &&
+    !validCapabilityReports(value, value.requiredChecks)
+  )
+    throw workflowError("Persisted capability reports are invalid.");
   return value;
 }
 
@@ -4468,7 +4513,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "polishing" ||
-    run.pipelineStateVersion !== 13 ||
+    run.pipelineStateVersion !== 14 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||

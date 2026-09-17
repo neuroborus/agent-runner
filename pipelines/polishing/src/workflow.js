@@ -2,6 +2,7 @@ import { realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
+import { inspectionRequirements } from "./capability-requirements.js";
 import {
   clearedCandidateAndConfirmationGate,
   clearedCandidateAndTerminalGate,
@@ -134,6 +135,17 @@ const SAFE_PREFLIGHT_PAUSE_CODES = new Set([
 const INVALID_BOOTSTRAP_PATH_CODES = new Set([
   "ERR_UNSAFE_REPOSITORY_PATH",
   "ERR_UNSUPPORTED_GIT_PATH",
+]);
+const RETRYABLE_CHECKPOINT_PAUSES = new Set([
+  "backend_unavailable",
+  "bootstrap_disagreement",
+  "environment_blocked",
+  "finalization_cannot_pass",
+  "finalization_skill_invalid",
+  "finalization_skill_missing",
+  "confirmation_output_invalid",
+  "lazy_output_invalid",
+  "review_output_invalid",
 ]);
 const STRUCTURED_OUTPUT_FAILURE_CLASS = "structured-output";
 const ADAPTER_DIAGNOSTIC_CLASS_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
@@ -1002,6 +1014,45 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     return true;
   }
 
+  async function ensureCheckRequirements() {
+    const current = state();
+    let result;
+    try {
+      result = await runtime.trustedValidation.inspectRequirements({
+        inventory: current.requiredChecks.map(({ command }) => command),
+        requirements: inspectionRequirements([
+          current.workerValidation,
+          current.reviewerValidation,
+        ]),
+        snapshot: current.trustedValidation,
+        projectPath: currentRun.projectPath,
+      });
+    } catch (cause) {
+      if (
+        ![
+          "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE",
+          "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE",
+        ].includes(cause?.code)
+      )
+        throw cause;
+      result = {
+        status: "BLOCKED",
+        blockers: [{ command: "Required checks", reason: "unavailable" }],
+      };
+    }
+    if (result.status === "READY") return true;
+    await pause("environment_blocked", {
+      code: "ERR_REQUIRED_CHECK_CAPABILITY_UNAVAILABLE",
+      explanation:
+        "Required check capabilities are unavailable. Repair the environment and resume the saved request; changed declarations require a new run.",
+      evidence: result.blockers
+        .slice(0, 16)
+        .map((item) => `${item.command.slice(0, 3_000)}: ${item.reason}`),
+      resumeState: current.workflowState,
+    });
+    return false;
+  }
+
   async function ensureRoleCapabilities(role) {
     if (state().backendVersions[role] !== null) {
       return;
@@ -1138,7 +1189,52 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       state().workflowState === "CHECK_AND_FIX" &&
       state().repositoryBaseline.contentFingerprint !==
         reconciledRepository.contentFingerprint;
-    if (interruptedLazyCheckChanged) {
+    if (state().validationMigrationPending) {
+      const current = state();
+      const changed =
+        current.repositoryBaseline.contentFingerprint !==
+        reconciledRepository.contentFingerprint;
+      const fixing =
+        changed &&
+        ["check-and-fix", "resolve-findings"].includes(interruptedTurn.phase);
+      const charged =
+        interruptedTurn.phase === "check-and-fix"
+          ? current.pendingLazyCorrection?.fixRoundCharged
+          : current.pendingCorrection;
+      await transition(
+        {
+          ...(current.pendingFinalizationCorrection === null
+            ? invalidatedLegacyValidation(current)
+            : current),
+          workflowState:
+            current.pendingFinalizationCorrection !== null ||
+            ["POLISH", "WAITING_FOR_USER"].includes(current.workflowState)
+              ? current.workflowState
+              : candidateCheckpoint(current.settings),
+          repositoryBaseline: reconciledRepository,
+          ...(changed
+            ? {
+                pendingCorrection: fixing || current.pendingCorrection,
+                ...(interruptedTurn.phase === "check-and-fix"
+                  ? markPendingLazyCorrectionCharged(current)
+                  : {}),
+              }
+            : {}),
+        },
+        fixing && !charged
+          ? {
+              nextCounters: {
+                ...counters(),
+                fixRounds: counters().fixRounds + 1,
+              },
+            }
+          : {},
+      );
+      currentRun = await runtime.finishAgentTurn(interruptedTurn);
+      assertRun(currentRun);
+      interruptedTurn = null;
+      interruptedRepositoryReconciled = false;
+    } else if (interruptedLazyCheckChanged) {
       const current = state();
       await transition(
         {
@@ -1192,6 +1288,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     } = {},
   ) {
     if (!(await ensureTrustedCapabilities())) return null;
+    if (access === "workspace-write" && !(await ensureCheckRequirements()))
+      return null;
     const turn = activeTurn(role, state().workflowState);
     const recovering = interruptedTurn !== null;
     if (recovering && !isDeepStrictEqual(interruptedTurn, turn)) {
@@ -1918,6 +2016,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       ...current,
       ...clearedCandidateAndConfirmationGate(current),
       ...clearedTerminalGate(),
+      finalizationCorrection: null,
+      pendingFinalizationCorrection: null,
       previousFindings:
         current.findings.length === 0
           ? current.previousFindings
@@ -1928,12 +2028,72 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     };
   }
 
+  async function prepareCapabilityDiscovery() {
+    const current = state();
+    if (
+      current.validationMigrationPending ||
+      current.pendingEdit !== null ||
+      ["WAITING_FOR_USER", "DONE", "FAILED", "CANCELED"].includes(
+        current.workflowState,
+      ) ||
+      ![current.workerValidation, current.reviewerValidation].some(
+        (value) => value !== null && value.capabilityRequirements === null,
+      )
+    )
+      return false;
+    if (current.resolvedSummary === null) {
+      if (interruptedTurn !== null) {
+        if (!interruptedRepositoryReconciled) return false;
+        // Settle the old read-only role before restarting independent discovery.
+        currentRun = await runtime.finishAgentTurn(interruptedTurn);
+        assertRun(currentRun);
+        interruptedTurn = null;
+        interruptedRepositoryReconciled = false;
+      }
+      await transition({
+        ...current,
+        workerSummary: null,
+        reviewerSummary: null,
+        workerValidation: null,
+        reviewerValidation: null,
+        bootstrapDisagreement: null,
+        bootstrapArbitrationUsed: false,
+      });
+    } else if (
+      current.workflowState === "HANDOFF" ||
+      interruptedTurn !== null
+    ) {
+      // Inspect consumed staging and reconcile interrupted permissions before
+      // invalidating their evidence or correction markers.
+      await transition({ ...current, validationMigrationPending: true });
+    } else {
+      await transition({
+        ...invalidatedLegacyValidation(current),
+        validationMigrationPending: true,
+        validationMigrationDisagreement: null,
+        workflowState:
+          current.workflowState === "POLISH"
+            ? "POLISH"
+            : candidateCheckpoint(current.settings),
+      });
+    }
+    return true;
+  }
+
   async function prepareValidationMigrationResume() {
     const current = state();
     if (
       !current.validationMigrationPending ||
       current.workflowState !== "WAITING_FOR_USER" ||
-      current.pendingEdit !== null
+      current.pendingEdit !== null ||
+      (!RETRYABLE_CHECKPOINT_PAUSES.has(currentRun.pause?.reason) &&
+        currentRun.pause?.reason !== "finalization_evidence_rejected" &&
+        !(
+          resumeAction !== null &&
+          ["fix_limit_reached", "no_progress"].includes(
+            currentRun.pause?.reason,
+          )
+        ))
     ) {
       return false;
     }
@@ -2030,6 +2190,8 @@ ${evidence}`,
         [`${role}Validation`]: {
           requiredChecks: result.requiredChecks,
           validationInfrastructure: result.validationInfrastructure,
+          capabilityRequirements: result.capabilityRequirements,
+          environmentBlockers: result.environmentBlockers,
         },
       },
       {
@@ -2161,10 +2323,25 @@ ${JSON.stringify(
   }
 
   async function runValidationMigration() {
-    if (state().workerValidation === null) {
+    if (state().pendingFinalizationCorrection !== null) {
+      // The interrupted read-only turn is retired before its permission marker.
+      await transition({
+        ...invalidatedLegacyValidation(state()),
+        workflowState: candidateCheckpoint(state().settings),
+      });
+    }
+    if (
+      state().workerValidation === null ||
+      state().workerValidation.capabilityRequirements === null
+    ) {
       return rediscoverValidationRole("worker");
     }
-    if (state().reviewerValidation === null) {
+    if (!polishingPolicy(state().settings).independentBootstrap)
+      return completeValidationMigration("worker");
+    if (
+      state().reviewerValidation === null ||
+      state().reviewerValidation.capabilityRequirements === null
+    ) {
       return rediscoverValidationRole("reviewer");
     }
     if (state().validationMigrationDisagreement !== null) {
@@ -2586,7 +2763,8 @@ ${JSON.stringify(
     if (inspected.status === "untouched" && verificationOnly) return false;
     if (
       inspected.status === "untouched" &&
-      !(await ensureTrustedCapabilities())
+      (!(await ensureTrustedCapabilities()) ||
+        !(await ensureCheckRequirements()))
     )
       return false;
     const repositoryBaseline =
@@ -3079,6 +3257,8 @@ ${evidence}`,
         [`${role}Validation`]: {
           requiredChecks: result.requiredChecks,
           validationInfrastructure: result.validationInfrastructure,
+          capabilityRequirements: result.capabilityRequirements,
+          environmentBlockers: result.environmentBlockers,
         },
       },
       {
@@ -5579,6 +5759,7 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
       }
       return currentRun;
     }
+    await prepareCapabilityDiscovery();
     if (!(await recoverInterruptedTurn())) {
       return currentRun;
     }
@@ -5608,17 +5789,7 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
             "local_artifacts_not_ignored",
             "unsafe_git_state",
           ].includes(currentRun.pause.reason)) ||
-        ([
-          "backend_unavailable",
-          "bootstrap_disagreement",
-          "environment_blocked",
-          "finalization_cannot_pass",
-          "finalization_skill_invalid",
-          "finalization_skill_missing",
-          "confirmation_output_invalid",
-          "lazy_output_invalid",
-          "review_output_invalid",
-        ].includes(currentRun.pause.reason) &&
+        (RETRYABLE_CHECKPOINT_PAUSES.has(currentRun.pause.reason) &&
           [
             "CLARIFY",
             "BOOTSTRAP",
@@ -5656,6 +5827,10 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
     }
 
     while (true) {
+      if (await prepareCapabilityDiscovery()) {
+        if (!(await recoverInterruptedTurn())) return currentRun;
+        continue;
+      }
       const current = state();
       if (
         !["DONE", "FAILED", "WAITING_FOR_USER", "CANCELED"].includes(

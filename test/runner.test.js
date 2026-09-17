@@ -289,8 +289,9 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
             "plan, risks, and finalization procedure.",
           requiredChecks: [{ id: "C1", command: "git diff --check HEAD" }],
           validationInfrastructure: [],
-          ...(request.schema?.properties?.result?.anyOf?.[0]?.properties
-            ?.capabilityRequirements
+          ...((request.schema?.properties?.result?.anyOf?.[0]?.properties
+            ?.capabilityRequirements ??
+          request.schema?.properties?.capabilityRequirements)
             ? { capabilityRequirements: [], environmentBlockers: [] }
             : {}),
           capacityField: "",
@@ -1327,6 +1328,9 @@ test("operator cancellation supersedes pause during trusted validation without a
       },
       trustedValidation: {
         async preflight() {},
+        async inspectRequirements() {
+          return { status: "READY", blockers: [] };
+        },
         async execute(request) {
           executions += 1;
           assert.equal(typeof request.onProcess, "function");

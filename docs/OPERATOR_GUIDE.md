@@ -250,7 +250,7 @@ the check. Repair the environment and resume; changing declarations requires a
 new run. Do not delete uncertain resources until their ownership and transport
 or process retirement have been independently verified.
 
-Plan execution also prepares required capabilities before each writable
+Plan execution and polishing also prepare required capabilities before each writable
 checkpoint, including on resume. Bootstrap and legacy read-only discovery save
 exact-command requirements from every active role; unavailable storage,
 isolation, or dependencies pause as `environment_blocked` before writable work.

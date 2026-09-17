@@ -41,7 +41,7 @@ default mode; choosing `lazy` or `combined` is always an explicit
 operator decision. Combined adds primary convergence before independent review.
 All three descriptors expose these modes through CLI/MCP discovery. Resume preserves the saved mode, approvals, and budgets.
 
-Plan execution saves exact-command capability needs and blocker evidence from
+Plan execution and polishing save exact-command capability needs and blocker evidence from
 bootstrap and legacy read-only discovery. If the runner cannot satisfy them, it
 pauses as `environment_blocked` before writable work. Repairing storage,
 isolation, or dependency availability permits retry of that saved request;
@@ -49,7 +49,7 @@ changing selection or declarations requires a new run. Availability is checked
 again at every writable entry, even within one invocation. Agents cannot grant
 capabilities by reporting a need. An agent's sandbox limitation for an exactly
 delegated check is resolved only when runner inspection succeeds. Required checks
-remain exclusive to finalization, and consumed commit verification precedes new
+remain exclusive to finalization, and consumed commit and completed handoff verification precede new
 preparation effects.
 
 Plan authoring's `preferredCommitLineLimit` is a positive-integer planning

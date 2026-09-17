@@ -1779,10 +1779,14 @@ explicit preparation effect, never a required-check execution or attestation.
 Construction, status reads, and ordinary preflight do not call it. Pipelines
 retain their own reporting schemas, saved requests, migration, and pause policy;
 the capability owns normalization, frozen authority matching, and availability.
-Plan execution persists reports in each active role's bootstrap or validation-
-migration inventory and inspects their union at every writable entry, including
-unconsumed COMMIT. Its cached declaration preflight cannot bypass this gate.
-Polishing adoption remains separate from this root preparation boundary.
+Plan execution and polishing independently own reports in each active role's
+bootstrap or validation-migration inventory and inspect their union at every
+writable entry. Cached declaration preflight cannot bypass this gate. Execution
+also checks unconsumed COMMIT; polishing inspects completed HANDOFF settlement
+before discovery or preparation and checks availability before new staging.
+Polishing state version 14 preserves historical handoff evidence while requiring
+read-only discovery before further content work. Neither pipeline imports the
+other's report schemas or workflow internals.
 
 Inspection accepts `inventory` (up to 512 unique, trimmed, single-line exact
 command strings, each at most 4,000 characters) and `requirements` (up to 1,024

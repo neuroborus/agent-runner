@@ -27,6 +27,7 @@ pipelines/polishing/
 ├── docs/
 │   └── SPEC.md
 ├── src/
+│   ├── capability-requirements.js
 │   ├── gate-evidence.js
 │   ├── index.js
 │   ├── mode-policy.js
@@ -76,6 +77,48 @@ separate primary/review checkpoint forks in independent and combined modes. Reco
 correction can reconstruct fresh sessions; Arbiter contexts are always fresh.
 The existing `lazyCorrections`, `pendingLazyCorrection`, and
 `lazySourceForkConsumed` fields and bounded accounting remain unchanged. Large turn implementations and Git reconciliation stay in the workflow.
+
+## Required Capability Discovery
+
+Bootstrap and read-only validation migration persist `capabilityRequirements`
+and `environmentBlockers` with each active role's exact inventory. The private
+`capability-requirements.js` owns their bounded syntax; only the root
+`inspectRequirements` capability evaluates authority, support, and availability.
+There are at most 256 reports of each kind per role. Each need names an exact
+inventory command, an optional frozen identity (`commandIdentity`, otherwise
+null), `capabilities` with boolean `scratch`/`cache` and up to 32 exact
+`{url, sha256}` artifacts, and up to 16 unique `unsupported` identifiers.
+Each blocker names an inventory command, `source` (`agent-sandbox` or `runner`),
+and 1–8 bounded single-line evidence strings. Non-READY outcomes use empty arrays.
+Malformed reports use the existing bounded read-only bootstrap correction path.
+
+Accepted reports from every active role remain additive regardless of the
+reconciled or arbitrated summary. Reports cannot grant permissions, omit another
+role's needs, or replace frozen declarations. Before every writable POLISH,
+CHECK_AND_FIX, RESOLVE_FINDINGS, or FINALIZE invocation, inspect the saved request
+again; cached declaration preflight cannot bypass this gate. Unsatisfied needs
+pause as `environment_blocked` before content or index mutation, preserving the
+checkpoint and bounded runner-derived evidence. Repairing the environment permits
+retry; changing trusted selection or declarations requires a new run.
+
+An agent-sandbox limitation is satisfied only for the exact delegated command
+when runner inspection succeeds. A limitation on another command remains a
+blocker. Preparation may acquire verified dependencies and probe isolation, but
+never executes or attests required checks. Those checks execute only in FINALIZE,
+which reacquires and reverifies dependencies. Configuration guards, cancellation,
+leases, and resource ownership remain enforced by the root capability.
+
+State version 14 marks legacy missing discovery with paired null report fields.
+Passive migration preserves historical gate proof. Active legacy runs rediscover
+requirements read-only before new writable work, using only Worker in lazy mode.
+Pending migration cannot bypass safety or capacity-exhaustion pauses; only
+retryable pauses and applicable explicit resume actions permit discovery.
+Interrupted content corrections are reconciled and charged once before continuing. Completed and
+failed historical states remain inert. HANDOFF first inspects whether staging
+already completed: complete staging settles verification-only without providers
+or capability preparation; untouched legacy staging returns to discovery and
+candidate convergence. Current untouched handoffs recheck availability before
+runner-owned staging. Stop reconciliation starts no new effects.
 
 ## Combined Review
 
@@ -236,10 +279,12 @@ later pauses retain their applicable checkpoint, including an untouched HANDOFF.
 Completed handoffs are verified before checking capabilities needed for new
 work. Status and immutable terminal reads perform no capability work. Inspection
 does not execute or attest required checks. Scratch/cache requests use isolated
-transient storage; artifact requests use bounded runner-owned acquisition and read-only mounts.
-Acquisition availability is checked when preparing finalization execution; this
-preflight inspects storage and isolation without downloading dependencies. Environment repair permits retry;
-changing declarations requires a new run and never permits weakened validation.
+transient storage; artifact requests use bounded runner-owned acquisition and
+read-only mounts. Declaration preflight inspects storage and isolation without
+downloading dependencies. Requirement inspection before writable work prepares
+dependencies; finalization execution reacquires and reverifies them. Environment
+repair permits retry; changing declarations requires a new run and never permits
+weakened validation.
 
 Settings are stored in pipeline state at run creation and are not reloaded on
 resume. The root may load safe project overrides from an ignored

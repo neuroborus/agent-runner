@@ -1,4 +1,8 @@
 import {
+  CAPABILITY_REQUIREMENTS,
+  ENVIRONMENT_BLOCKERS,
+} from "./capability-requirements.js";
+import {
   MAX_BOOTSTRAP_ITEMS,
   MAX_ITEMS,
   MAX_OPTIONS,
@@ -130,6 +134,8 @@ export const BOOTSTRAP_SCHEMA = deepFreeze({
       enum: ["READY", "CAPACITY_EXHAUSTED", "PRODUCT_DECISION_REQUIRED"],
     },
     summary: SUMMARY,
+    capabilityRequirements: CAPABILITY_REQUIREMENTS,
+    environmentBlockers: ENVIRONMENT_BLOCKERS,
     requiredChecks: BOOTSTRAP_REQUIRED_CHECKS,
     validationInfrastructure: BOOTSTRAP_VALIDATION_INFRASTRUCTURE,
     capacityField: {
@@ -146,6 +152,8 @@ export const BOOTSTRAP_SCHEMA = deepFreeze({
   required: [
     "status",
     "summary",
+    "capabilityRequirements",
+    "environmentBlockers",
     "requiredChecks",
     "validationInfrastructure",
     "capacityField",

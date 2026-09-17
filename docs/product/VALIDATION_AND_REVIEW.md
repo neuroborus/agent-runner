@@ -169,7 +169,7 @@ checks storage and isolation without downloading. Capability inspection is not
 check execution or validation evidence. Verification-only recovery of a consumed
 commit or completed handoff remains available without those capabilities.
 
-Plan execution also discovers exact-command capability needs and environment
+Plan execution and polishing also discover exact-command capability needs and environment
 blockers read-only during bootstrap or legacy validation migration. Accepted
 active-role reports are preserved together; reconciliation cannot discard a
 role's needs. Invalid reports receive bounded contract correction. Valid needs

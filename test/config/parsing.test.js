@@ -35,6 +35,7 @@ test("tracked example is valid and local configuration is ignored", async () => 
       command: "npm run check",
       executable: "npm",
       arguments: ["run", "check"],
+      capabilities: { scratch: true, cache: true },
     },
   });
   assert.equal(configuration.pipelines["plan-authoring"].mode, "independent");
