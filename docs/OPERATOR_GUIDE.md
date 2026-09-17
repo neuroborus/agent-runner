@@ -328,6 +328,13 @@ another execution owner or extra work.
 
 ## 5. Recover a pause without taking over the work
 
+Execution also requires plan revision when initial implementation leaves a step's
+content unchanged, or legacy state lacks trustworthy original step-start evidence.
+Already-present content under a different subject does not satisfy the step.
+Partial work survives interruption: a continuation need not make additional edits
+if the step has changed since its original start. Unchanged corrective turns are
+allowed after initial implementation is accepted.
+
 Execution reports `plan_revision_required` when the current planned subject is
 already at HEAD or an external commit moved HEAD from the saved baseline. The
 same pause applies when context claims the current step landed or directs work

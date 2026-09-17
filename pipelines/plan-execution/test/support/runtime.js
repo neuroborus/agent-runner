@@ -1161,6 +1161,7 @@ async function optionalInput(path) {
 async function createFixture(
   t,
   {
+    implementationWrites = true,
     artifactRoot = "LOCAL_ARTIFACTS",
     arbiter = [],
     capabilities = {},
@@ -1459,6 +1460,7 @@ async function createFixture(
             return null;
           }
           if (
+            implementationWrites &&
             role === "worker" &&
             structured.status === "COMPLETED" &&
             request.prompt.includes("Implement the changes")
@@ -1623,7 +1625,7 @@ async function createFixture(
     revision: 1,
     runId,
     pipelineId: "plan-execution",
-    pipelineStateVersion: 19,
+    pipelineStateVersion: 20,
     projectPath,
     taskPath,
     roles: Object.fromEntries(
@@ -2034,7 +2036,7 @@ async function createFixture(
   ) {
     currentRun = {
       ...currentRun,
-      pipelineStateVersion: 19,
+      pipelineStateVersion: 20,
       pipelineState,
       pause,
       revision: currentRun.revision + 1,

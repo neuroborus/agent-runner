@@ -53,6 +53,7 @@ import {
   cleanConfirmation,
   createFixture,
   createLegacyRecoveryFixture,
+  removeUnchangedEvents,
   finalizationBlocked,
   finalizationFailed,
   finalizationPassed,
@@ -705,7 +706,7 @@ test("migrates version-3 execution state with no consumed bootstrap corrections"
   assert.deepEqual(migrated.bootstrapCorrections, []);
   assert.equal(migrated.pendingBootstrapCorrection, null);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(planExecutionPipeline.stateVersion, 19);
+  assert.equal(planExecutionPipeline.stateVersion, 20);
 });
 
 test("selects Worker-only lazy mode and migrates version 11 to independent", () => {
@@ -2358,7 +2359,7 @@ test("legacy confirmation migrations preserve journal proof but cannot synthesiz
   unproven.updatedAt = unproven.createdAt;
   const projected = {
     ...unproven,
-    pipelineStateVersion: 19,
+    pipelineStateVersion: 20,
     pipelineState: {
       ...migratePlanExecutionStateV13(unproven),
       finalizationRecovery: {
@@ -2401,8 +2402,11 @@ test("legacy confirmation proof crosses an authentic intervening migration and r
         activity?.phase === "clean-confirm" && activity.kind === "clean",
     );
     // A migration marks old context provisional; it cannot synthesize a review.
-    for (const event of events)
+    for (const event of events) {
       event.state.pipelineState.planContextVersion = 0;
+      event.state.pipelineState.stepImplementation = null;
+      event.state.pipelineState.implementationEvidenceLegacy = true;
+    }
     const migration = structuredClone(events[accepted]);
     migration.activity = {
       actor: "runner",
@@ -2419,6 +2423,7 @@ test("legacy confirmation proof crosses an authentic intervening migration and r
       event.revision = index + 1;
       event.state.revision = index + 1;
     });
+    removeUnchangedEvents(events);
   });
   assert.deepEqual(await fixture.recoveryAction(), [
     { type: "resume", action: null },
