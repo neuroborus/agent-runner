@@ -389,6 +389,13 @@ the check. Repair the environment and resume; changing declarations requires a
 new run. Do not delete uncertain resources until their ownership and transport
 or process retirement have been independently verified.
 
+Plan execution discovers required capabilities read-only and rechecks runner
+availability before every writable checkpoint. Unsatisfied requirements pause as
+`environment_blocked`; repair the environment and resume the saved request.
+Changing trusted selection or declarations requires a new run. Inspection may
+prepare verified dependencies but does not execute required checks; those remain
+exclusive to finalization.
+
 Backend sessions are disposable. When a native context is full, the adapter
 compacts it and retries once; persistent pressure moves ordinary turns to a
 fresh session reconstructed from durable run state, artifacts, and the current

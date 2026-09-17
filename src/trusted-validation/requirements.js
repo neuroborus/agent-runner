@@ -1,7 +1,9 @@
 import { normalizeArtifacts } from "./artifact-contract.js";
 import { TrustedValidationError } from "./errors.js";
 
-const LIMIT = 256;
+// Two active role inventories, including their separate blocker reports.
+const INVENTORY_LIMIT = 512;
+const REQUIREMENT_LIMIT = 1024;
 const FIELDS = new Set([
   "command",
   "commandIdentity",
@@ -37,11 +39,11 @@ function commandText(value) {
 export function normalizeRequirementRequest({ inventory, requirements }) {
   if (
     !Array.isArray(inventory) ||
-    inventory.length > LIMIT ||
+    inventory.length > INVENTORY_LIMIT ||
     inventory.some((value) => !commandText(value)) ||
     new Set(inventory).size !== inventory.length ||
     !Array.isArray(requirements) ||
-    requirements.length > LIMIT
+    requirements.length > REQUIREMENT_LIMIT
   )
     invalid();
   const normalized = requirements.map((value) => {

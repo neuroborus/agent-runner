@@ -1170,10 +1170,28 @@ export function migratePlanExecutionStateV16(run) {
   });
 }
 
+export function migratePlanExecutionStateV17(run) {
+  // Preserve historical gate/journal proof, especially consumed effects.
+  // Live entry detects null reports and starts read-only rediscovery before work.
+  const provisional = (value) =>
+    value === null
+      ? null
+      : Object.freeze({
+          ...value,
+          capabilityRequirements: value.capabilityRequirements ?? null,
+          environmentBlockers: value.environmentBlockers ?? null,
+        });
+  return Object.freeze({
+    ...run.pipelineState,
+    workerValidation: provisional(run.pipelineState.workerValidation),
+    reviewerValidation: provisional(run.pipelineState.reviewerValidation),
+  });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
   resolveStopBoundary,
-  stateVersion: 17,
+  stateVersion: 18,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1191,6 +1209,7 @@ export const planExecutionPipeline = Object.freeze({
     14: migratePlanExecutionStateV14,
     15: migratePlanExecutionStateV15,
     16: migratePlanExecutionStateV16,
+    17: migratePlanExecutionStateV17,
   }),
   roles: ROLES,
   resolveActiveRoles,

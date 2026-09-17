@@ -1369,6 +1369,10 @@ function createBackend(
             "plan, risks, and finalization procedure.",
           requiredChecks: [{ id: "C1", command: "git diff --check HEAD" }],
           validationInfrastructure: [],
+          ...(request.schema?.properties?.result?.anyOf?.[0]?.properties
+            ?.capabilityRequirements
+            ? { capabilityRequirements: [], environmentBlockers: [] }
+            : {}),
           capacityField: "",
           capacityLimit: 0,
           reason: "",
@@ -2392,6 +2396,7 @@ async function projectCommandScenario(t, pipelineId, hooks = {}) {
   const git = createGitService();
   const calls = [];
   const executions = [];
+  const preparations = [];
   let handoffs = 0;
   let loads = 0;
   let runId;
@@ -2455,17 +2460,7 @@ async function projectCommandScenario(t, pipelineId, hooks = {}) {
     resolveLauncher: () => "/usr/bin/bwrap",
     verifyLauncher: (path) => path,
     async runCommand(command, options) {
-      executions.push(command);
-      assert.ok(
-        calls
-          .at(-1)
-          .prompt.includes("Run the complete project finalization procedure"),
-      );
       assert.equal(command.executable, "/usr/bin/bwrap");
-      assert.deepEqual(command.arguments.slice(-4), [
-        definition.executable,
-        ...definition.arguments,
-      ]);
       for (const flag of [
         "--unshare-net",
         "--unshare-pid",
@@ -2481,7 +2476,29 @@ async function projectCommandScenario(t, pipelineId, hooks = {}) {
       assert.equal(options.environment.GIT_SSH_COMMAND, "/bin/false");
       assert.equal(options.environment.GIT_CONFIG_GLOBAL, "/dev/null");
       assert.equal(options.readinessRequired, true);
-      await hooks.execute?.(paths);
+      const preparing = command.arguments.at(-1) === "";
+      if (preparing) {
+        assert.equal(pipelineId, "plan-execution");
+        assert.deepEqual(command.arguments.slice(-3), [
+          process.execPath,
+          "--eval",
+          "",
+        ]);
+        assert.equal(options.timeoutMs, 10_000);
+        preparations.push(command);
+      } else {
+        executions.push(command);
+        assert.ok(
+          calls
+            .at(-1)
+            .prompt.includes("Run the complete project finalization procedure"),
+        );
+        assert.deepEqual(command.arguments.slice(-4), [
+          definition.executable,
+          ...definition.arguments,
+        ]);
+        await hooks.execute?.(paths);
+      }
       return {
         status: "PASS",
         exitCode: 0,
@@ -2528,6 +2545,7 @@ async function projectCommandScenario(t, pipelineId, hooks = {}) {
   assert.deepEqual(prepared.run.pipelineState.trustedValidation, expected);
   assert.equal(calls.length, 0);
   assert.equal(executions.length, 0);
+  assert.equal(preparations.length, 0);
   return {
     ...paths,
     configurationPath,
@@ -2536,6 +2554,7 @@ async function projectCommandScenario(t, pipelineId, hooks = {}) {
     expected,
     calls,
     executions,
+    preparations,
     resume: () => runner.resume({ runId, action: null }),
     reopen() {
       rootConfiguration = {
@@ -2663,6 +2682,10 @@ for (const pipelineId of ["plan-execution", "polishing"]) {
     assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
     assert.equal(paused.pause.resumeState, "FINALIZE");
     assert.equal(scenario.executions.length, 0);
+    assert.equal(
+      scenario.preparations.length > 0,
+      pipelineId === "plan-execution",
+    );
     assert.deepEqual(paused.pipelineState.trustedValidation, scenario.expected);
     scenario.reopen();
     const completed = (await scenario.resume()).run;

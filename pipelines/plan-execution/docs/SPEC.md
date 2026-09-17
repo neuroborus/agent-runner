@@ -249,6 +249,20 @@ constructs a combined approval from a historical single gate. Journal-proven
 confirmation recovery requires both primary and independent candidate edges for
 combined mode, followed by finalization and terminal confirmation provenance.
 
+State version 18 adds `capabilityRequirements` and `environmentBlockers` to
+accepted role validation inventories. Legacy active runs lacking discovery must
+repeat read-only validation migration before writable work; lazy migration uses
+only Worker. Null report fields mark provisional legacy evidence, never an empty
+successful discovery. Passive migration preserves historical journal proof; live
+resume invalidates provisional gates before discovery. Completed/failed historical
+states remain inert except for already supported journal-proven recovery. A consumed
+commit keeps its exact gate and authorization for verification first; discovery
+continues only if settlement leaves more work. Migration preserves frozen
+configuration, completed commits, and correction budgets.
+Discovery does not authorize leaving a safety pause. Interrupted correction
+edits are reconciled and charged before new writable work, without recounting
+them on a later resume.
+
 An independent or combined run may seed Worker and Reviewer from one existing session only
 when both use its backend. A lazy run applies that requirement only to its
 active Worker:
@@ -393,6 +407,37 @@ version 2 and include normalized capabilities in identities and fingerprints;
 version-1 snapshots retain their exact restricted policy and evidence bindings.
 Migration never upgrades authority or reloads declarations.
 
+Bootstrap and validation migration report bounded exact-command needs alongside
+each active role's inventory. `capabilityRequirements` permits 256 reports per
+role: `command`, nullable frozen `commandIdentity`, `capabilities` with boolean
+`scratch`/`cache` and up to 32 exact `{url, sha256}` artifacts, and `unsupported`
+with up to 16 unique lowercase capability identifiers. `environmentBlockers`
+permits 256 reports per role: `command`, `source` (`agent-sandbox` or `runner`),
+and 1–8 bounded single-line evidence strings. Every command must occur in that
+role's exact inventory; existing structured-result byte bounds also apply.
+Non-READY outcomes carry empty report arrays. Malformed fields, parameters, or
+references use the existing bounded read-only bootstrap correction path.
+
+Accepted reports are persisted before inspection. Requirements from Worker and
+Reviewer remain additive regardless of which reconciliation or arbitration
+summary is selected. Reports describe needs; only the frozen runner declarations
+grant authority. Before IMPLEMENT, CHECK_AND_FIX, writable RESOLVE_FINDINGS,
+FINALIZE, and unconsumed COMMIT, the root capability matches those reports and
+selected declarations against the saved inventory and inspects actual runner
+availability. This gate runs on every writable entry and retry independently of
+once-per-invocation preflight. It prepares only runner-owned availability probes,
+not required checks or check attestations. Dependencies are verified during
+preparation and acquired and verified again for finalization.
+
+Missing selection, insufficient authority, unsupported needs, and unavailable
+resources pause as `environment_blocked` with bounded runner-derived evidence
+and the same resume checkpoint, before a writable provider invocation. The saved
+reports and snapshot survive resume; environment repair may retry, while changed
+declarations require a new run. An agent-sandbox report for an exactly delegated
+command is satisfied when root inspection succeeds; a report for another command
+still blocks. Agent evidence never overrides the root's availability decision.
+Required checks execute exclusively during FINALIZE.
+
 Unavailable frozen capabilities produce a durable `environment_blocked` pause
 before provider work. An early creation pause has `preflightComplete: false`,
 null baseline, backend versions, clarification path, and canonical plan, empty
@@ -400,8 +445,9 @@ hashes, and no `resumeState`; null-action resume retries the saved request befor
 ordinary `CLARIFY` preflight. Later pauses preserve their current checkpoint.
 This inspection neither executes nor attests checks. Scratch/cache requests use
 isolated transient storage; artifact requests use bounded runner-owned acquisition and read-only mounts.
-Acquisition availability is checked when preparing finalization execution; this
-preflight inspects storage and isolation without downloading dependencies. A consumed COMMIT is
+Acquisition availability is checked at writable entry and again when preparing
+finalization execution; the earlier declaration preflight inspects storage and
+isolation without downloading dependencies. A consumed COMMIT is
 verified first, preserving its authorized progress before capabilities are
 checked for subsequent work. If an authorization is prepared but unconsumed,
 an unavailable trusted capability or isolation boundary preserves it in an

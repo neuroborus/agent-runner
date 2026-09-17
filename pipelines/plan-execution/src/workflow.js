@@ -7,6 +7,7 @@ import {
   serializeCommitPlan,
 } from "@agent-runner/commit-plan";
 
+import { inspectionRequirements } from "./capability-requirements.js";
 import {
   candidateCheckpoint,
   combinedReview,
@@ -1184,6 +1185,45 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     return true;
   }
 
+  async function ensureCheckRequirements() {
+    const current = state();
+    let result;
+    try {
+      result = await runtime.trustedValidation.inspectRequirements({
+        inventory: current.requiredChecks.map(({ command }) => command),
+        requirements: inspectionRequirements([
+          current.workerValidation,
+          current.reviewerValidation,
+        ]),
+        snapshot: current.trustedValidation,
+        projectPath: currentRun.projectPath,
+      });
+    } catch (cause) {
+      if (
+        ![
+          "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE",
+          "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE",
+        ].includes(cause?.code)
+      )
+        throw cause;
+      result = {
+        status: "BLOCKED",
+        blockers: [{ command: "Required checks", reason: "unavailable" }],
+      };
+    }
+    if (result.status === "READY") return true;
+    await pause("environment_blocked", {
+      code: "ERR_REQUIRED_CHECK_CAPABILITY_UNAVAILABLE",
+      explanation:
+        "Required check capabilities are unavailable. Repair the environment and resume the saved request; changed declarations require a new run.",
+      evidence: result.blockers
+        .slice(0, 16)
+        .map((item) => `${item.command.slice(0, 3_000)}: ${item.reason}`),
+      resumeState: current.workflowState,
+    });
+    return false;
+  }
+
   async function ensureRoleCapabilities(role) {
     if (state().backendVersions[role] !== null) {
       return;
@@ -1323,8 +1363,11 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       const contentChanged =
         current.repositoryBaseline.contentFingerprint !==
         reconciledRepository.contentFingerprint;
+      const changedLazyCheck =
+        interruptedTurn.phase === "check-and-fix" && contentChanged;
       const changedCorrection =
-        interruptedTurn.phase === "resolve-findings" && contentChanged;
+        changedLazyCheck ||
+        (interruptedTurn.phase === "resolve-findings" && contentChanged);
       if (
         !isDeepStrictEqual(reconciledRepository, current.repositoryBaseline)
       ) {
@@ -1350,7 +1393,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
                 nextCounters: {
                   ...counters(),
                   fixRounds:
-                    counters().fixRounds + (current.pendingCorrection ? 0 : 1),
+                    counters().fixRounds +
+                    (changedLazyCheck || !current.pendingCorrection ? 1 : 0),
                 },
               }
             : {},
@@ -1409,6 +1453,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     } = {},
   ) {
     if (!(await ensureTrustedCapabilities())) return null;
+    if (access === "workspace-write" && !(await ensureCheckRequirements()))
+      return null;
     const turn = activeTurn(role, state().workflowState);
     const recovering = interruptedTurn !== null;
     if (recovering && !isDeepStrictEqual(interruptedTurn, turn)) {
@@ -2281,6 +2327,56 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     };
   }
 
+  function validationMigrationMayResume() {
+    return (
+      state().workflowState !== "WAITING_FOR_USER" ||
+      resumeAction !== null ||
+      (currentRun.pause?.resumeState !== undefined &&
+        RETRYABLE_PAUSE_REASONS.has(currentRun.pause.reason)) ||
+      (state().pendingCommit?.status === "consumed" &&
+        ["commit_failed", "commit_contract_violated"].includes(
+          currentRun.pause?.reason,
+        ))
+    );
+  }
+
+  async function prepareCapabilityDiscovery() {
+    const current = state();
+    if (
+      current.validationMigrationPending ||
+      current.pendingEdit !== null ||
+      !validationMigrationMayResume() ||
+      current.pendingCommit?.status === "consumed" ||
+      ["DONE", "FAILED", "CANCELED"].includes(current.workflowState) ||
+      ![current.workerValidation, current.reviewerValidation].some(
+        (value) => value !== null && value.capabilityRequirements === null,
+      )
+    )
+      return false;
+    if (current.resolvedSummary === null) {
+      await transition({
+        ...current,
+        workerSummary: null,
+        reviewerSummary: null,
+        workerValidation: null,
+        reviewerValidation: null,
+        bootstrapDisagreement: null,
+        bootstrapArbitrationUsed: false,
+      });
+    } else {
+      const paused = current.workflowState === "WAITING_FOR_USER";
+      await transition({
+        ...(paused ? current : invalidatedLegacyValidation(current)),
+        validationMigrationPending: true,
+        workflowState:
+          paused || current.workflowState === "IMPLEMENT"
+            ? current.workflowState
+            : candidateCheckpoint(current.settings),
+      });
+    }
+    return true;
+  }
+
   async function prepareValidationMigrationResume() {
     const current = state();
     if (
@@ -2395,6 +2491,8 @@ ${evidence}`,
         [`${role}Validation`]: {
           requiredChecks: result.requiredChecks,
           validationInfrastructure: result.validationInfrastructure,
+          capabilityRequirements: result.capabilityRequirements,
+          environmentBlockers: result.environmentBlockers,
         },
       },
       {
@@ -2511,10 +2609,23 @@ ${JSON.stringify(
   }
 
   async function runValidationMigration() {
-    if (state().workerValidation === null) {
+    if (
+      state().workerValidation === null ||
+      state().workerValidation.capabilityRequirements === null
+    ) {
       return rediscoverValidationRole("worker");
     }
-    if (state().reviewerValidation === null) {
+    if (!executionPolicy(state().settings).independentBootstrap) {
+      return completeValidationMigration(
+        "worker",
+        state().workerSummary,
+        false,
+      );
+    }
+    if (
+      state().reviewerValidation === null ||
+      state().reviewerValidation.capabilityRequirements === null
+    ) {
       return rediscoverValidationRole("reviewer");
     }
     return reconcileValidationMigration();
@@ -2991,6 +3102,8 @@ ${evidence}`,
         [`${role}Validation`]: {
           requiredChecks: result.requiredChecks,
           validationInfrastructure: result.validationInfrastructure,
+          capabilityRequirements: result.capabilityRequirements,
+          environmentBlockers: result.environmentBlockers,
         },
       },
       {
@@ -5798,6 +5911,11 @@ ${JSON.stringify(
     const current = state();
     const step = planStep();
     let pendingCommit = current.pendingCommit;
+    if (
+      pendingCommit?.status !== "consumed" &&
+      !(await ensureCheckRequirements())
+    )
+      return false;
 
     if (pendingCommit === null) {
       if ((await readCurrentInputs()) === null) {
@@ -6222,6 +6340,7 @@ ${step.subject}`),
       }
       return currentRun;
     }
+    await prepareCapabilityDiscovery();
     if (!(await recoverInterruptedTurn())) {
       return currentRun;
     }
@@ -6310,6 +6429,10 @@ ${step.subject}`),
     }
 
     while (true) {
+      if (await prepareCapabilityDiscovery()) {
+        if (!(await recoverInterruptedTurn())) return currentRun;
+        continue;
+      }
       const current = state();
       if (
         !["DONE", "FAILED", "WAITING_FOR_USER", "CANCELED"].includes(
