@@ -396,6 +396,7 @@ test("isolates host-control and remote-write probes", async (t) => {
   assert.notEqual(execution.command.executable, fakeLauncher);
   assert.notEqual(execution.command.executable, "bwrap");
   assert.ok(execution.command.arguments.includes("--unshare-net"));
+  assert.ok(execution.command.arguments.includes("--unshare-user"));
   assert.ok(execution.command.arguments.includes("--unshare-pid"));
   assert.ok(execution.command.arguments.includes("--cap-drop"));
   const runMount = execution.command.arguments.lastIndexOf("/run");

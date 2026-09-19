@@ -7,6 +7,7 @@ import { executeOwnedProcess } from "../owned-process.js";
 import {
   createAdapterContract,
   deepFreeze,
+  EFFORT_DIAGNOSTIC_CLASS,
   isEnvironment,
   isRecord,
   isolateGitEnvironment,
@@ -28,6 +29,7 @@ const MAX_ARGUMENT_BYTES = 128 * 1024 - 1;
 const MAX_PROCESS_OUTPUT_BYTES = 64 * 1024 * 1024;
 const MAX_DIAGNOSTIC_INPUT_LENGTH = 4_096;
 const CLAUDE_DIAGNOSTIC_CLASSES = new Set([
+  EFFORT_DIAGNOSTIC_CLASS,
   "authentication_unavailable",
   "backend_unavailable",
   "capability_unavailable",
@@ -146,6 +148,8 @@ const CAPABILITY_ERROR_PATTERN =
   /(?:(?:permission|safe|plan|auto) mode|sandbox|capabilit(?:y|ies))[^\n]{0,80}(?:unavailable|disabled|unsupported|invalid|failed)/iu;
 const CONFIGURATION_ERROR_PATTERN =
   /(?:configuration|config(?:uration)? directory|profile|model)[^\n]{0,80}(?:not found|does not exist|cannot (?:be )?load|missing|unavailable|invalid|inaccessible|permission denied|unsupported)/iu;
+const EFFORT_ERROR_PATTERN =
+  /\beffort\b[^\n]{0,160}(?:not supported|unsupported|invalid|not available|only supported|must be|not allowed)|(?:unsupported|invalid|unknown|does not support)[^\n]{0,160}\beffort\b/iu;
 const SAFE_BASH_INSPECTION_PATTERNS = Object.freeze([
   /^git status(?:\s+(?:-s|-b|-sb|-bs|--short|--branch|--porcelain(?:=v[12])?|--untracked-files=(?:no|normal|all)|--ignored(?:=(?:traditional|matching|no))?|--no-ahead-behind))*$/u,
   /^git rev-parse\s+(?:--git-dir|--show-toplevel|--is-inside-work-tree|--verify\s+HEAD|HEAD)$/u,
@@ -229,6 +233,7 @@ export class ClaudeAdapterError extends Error {
 
 const {
   assertFields,
+  effortError,
   normalizeExecutionOptions: normalizeContractExecutionOptions,
   normalizeRequest: normalizeContractRequest,
 } = createAdapterContract({
@@ -279,9 +284,14 @@ function normalizeRequest(value) {
 function executionOptionsFor(request) {
   return Object.freeze({
     contextSize: request.contextSize,
+    effort: request.effort,
     model: request.model,
     profile: request.profile,
   });
+}
+
+function nativeEffort(effort) {
+  return effort === "xhigh" ? "max" : effort;
 }
 
 function isCredentialEnvironmentName(name) {
@@ -544,6 +554,9 @@ function commandArguments(
   if (request.model !== undefined) {
     argumentsList.push("--model", request.model);
   }
+  if (request.effort !== undefined) {
+    argumentsList.push("--effort", nativeEffort(request.effort));
+  }
   if (request.contextSize !== undefined) {
     argumentsList.push("--autocompact", request.contextSize);
   }
@@ -750,11 +763,28 @@ function structuredProviderError(payload, sessionId) {
 
 function outputError(payload, request, session) {
   const sessionId = payloadSessionId(payload);
+  const diagnosticMessage = diagnosticText(payload);
   const structuredError = structuredProviderError(payload, sessionId);
+  if (
+    structuredError !== undefined &&
+    !["ERR_CLAUDE_REQUEST_REJECTED", "ERR_CLAUDE_BACKEND_UNAVAILABLE"].includes(
+      structuredError.code,
+    )
+  ) {
+    return structuredError;
+  }
+  // A specific selection rejection also explains a generic turn-setup failure;
+  // authentication, quota, and transient statuses retain their classifications.
+  if (
+    request.effort !== undefined &&
+    [undefined, 400, 422].includes(payload?.api_error_status) &&
+    EFFORT_ERROR_PATTERN.test(diagnosticMessage)
+  ) {
+    return effortError();
+  }
   if (structuredError !== undefined) {
     return structuredError;
   }
-  const diagnosticMessage = diagnosticText(payload);
   if (USAGE_LIMIT_ERROR_PATTERN.test(diagnosticMessage)) {
     return usageLimitError(sessionId);
   }
@@ -996,6 +1026,7 @@ export function createClaudeAdapter(options = {}) {
       .sort(),
   );
   let probePromise;
+  let supportedEfforts = new Set();
 
   async function inspectCapabilities() {
     let versionResult;
@@ -1041,6 +1072,13 @@ export function createClaudeAdapter(options = {}) {
     const cliSupported =
       versionAtLeast(version, MINIMUM_CLAUDE_VERSION) &&
       REQUIRED_HELP_FLAGS.every((flag) => help.includes(flag));
+    const effortHelp =
+      /(?:^|\n)[ \t]*--effort\b([\s\S]*?)(?=\n[ \t]*-\S|$)/u.exec(help)?.[1];
+    if (cliSupported && effortHelp !== undefined) {
+      supportedEfforts = new Set(
+        effortHelp.match(/\b(?:low|medium|high|max)\b/gu) ?? [],
+      );
+    }
     let nativeSandboxAvailable = false;
     let localCommitExecutorAvailable = false;
     if (cliSupported && platform === "linux" && socatAvailable) {
@@ -1074,8 +1112,15 @@ export function createClaudeAdapter(options = {}) {
   }
 
   function probe(value) {
-    normalizeExecutionOptions(value);
+    const options = normalizeExecutionOptions(value);
     probePromise ??= inspectCapabilities();
+    if (options.effort !== undefined) {
+      return probePromise.then((capabilities) => {
+        if (!supportedEfforts.has(nativeEffort(options.effort)))
+          throw effortError();
+        return capabilities;
+      });
+    }
     return probePromise;
   }
 

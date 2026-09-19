@@ -23,8 +23,10 @@ import {
   assertRunId,
   deepFreeze,
   normalizeChildSession,
+  normalizeExecutionResource,
   normalizePublicActivity,
   normalizeRunState,
+  normalizeRoles,
   normalizeTransitionPatch,
   RUNTIME_COMPATIBILITY,
   RUNTIME_COMPATIBILITY_TOKEN,
@@ -537,7 +539,7 @@ export function createRunStore({
             input.projectConfigurationProtection === undefined
               ? null
               : input.projectConfigurationProtection,
-          roles: input.roles,
+          roles: normalizeRoles(input.roles),
           counters: input.counters === undefined ? {} : input.counters,
           hashes: input.hashes === undefined ? {} : input.hashes,
           pause: input.pause === undefined ? null : input.pause,
@@ -551,6 +553,7 @@ export function createRunStore({
           },
           activeTurn: null,
           executionProcess: null,
+          executionResource: null,
           stopRequest: null,
           pipelineState:
             input.pipelineState === undefined ? {} : input.pipelineState,
@@ -1153,6 +1156,61 @@ export function createRunStore({
       return deepFreeze(next);
     });
   }
+  async function recordExecutionResource(lease, resource) {
+    const normalized = normalizeExecutionResource(resource);
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
+      const snapshot = await loadSnapshot(runDirectory, record.runId);
+      const previous = snapshot.state.executionResource;
+      const { owner: previousOwner, ...withoutOwner } = previous ?? {};
+      const settlesAcquisition =
+        previous?.phase === "acquiring" &&
+        isDeepStrictEqual(normalized, { ...withoutOwner, phase: "allocated" });
+      if (["allocating", "acquiring"].includes(normalized?.phase))
+        assertRunCanAdvance(snapshot.state, resolveStopBoundary);
+      if (
+        (normalized?.phase === "allocating" && previous !== null) ||
+        (normalized?.phase === "acquiring" &&
+          (previous?.phase !== "allocated" ||
+            snapshot.state.executionProcess !== null ||
+            !isDeepStrictEqual(
+              { ...previous, phase: "acquiring", owner: normalized.owner },
+              normalized,
+            ))) ||
+        (normalized?.phase === "allocated" &&
+          !settlesAcquisition &&
+          (previous?.phase !== "allocating" ||
+            !isDeepStrictEqual(
+              { ...normalized, phase: "allocating", directory: null },
+              previous,
+            ))) ||
+        (normalized === null && snapshot.state.executionProcess !== null)
+      ) {
+        throw new RunStoreError("Execution resource transition is unsafe.", {
+          code: "ERR_EXECUTION_RESOURCE_ACTIVE",
+        });
+      }
+      if (normalized === null && previous === null) return snapshot.state;
+      const next = normalizeRunState(
+        {
+          ...snapshot.state,
+          executionResource: normalized,
+          revision: snapshot.state.revision + 1,
+          updatedAt: timestamp(snapshot.state.updatedAt),
+        },
+        record.runId,
+      );
+      await journal.appendTransition(runDirectory, next, snapshot, {
+        actor: "runner",
+        phase: "execution",
+        kind: normalized === null ? "resource-cleaned" : "resource-recorded",
+        message:
+          normalized === null
+            ? "Owned execution storage cleaned."
+            : "Execution storage ownership recorded before launch.",
+      });
+      return deepFreeze(next);
+    });
+  }
   async function inspectExecutionProcess(runId) {
     const record = (await loadRun(runId)).executionProcess;
     const localIdentity =
@@ -1173,6 +1231,7 @@ export function createRunStore({
         });
   }
   return Object.freeze({
+    recordExecutionResource,
     recordExecutionProcess,
     inspectExecutionProcess,
     requestOperatorStop: stops.request,

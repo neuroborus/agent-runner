@@ -4,6 +4,14 @@ Validation and semantic review are separate sources of evidence. Deterministic
 checks prove executable repository properties; agents assess correctness,
 scope, architecture, and edge cases. Neither substitutes for the other.
 
+Plan execution requires an observed content change for initial implementation of
+each step. Worker completion claims do not suffice. The runner preserves the
+original step-start evidence across partial work and resume; an unchanged step
+requires plan revision before convergence or finalization. Unchanged corrections
+and confirmations remain valid. Legacy runs without reconstructable original
+evidence pause before further writable work; already-consumed commits still
+settle through verification.
+
 ## Authoring review
 
 Combined authoring requires two distinct approvals over the same durable draft:
@@ -149,6 +157,37 @@ selection to 32 aliases. Project selections may use project-only aliases.
 Vectors, identities, and fingerprints are frozen before agent work and reused
 unchanged on resume; later project configuration edits retain the protected-input
 guard. Profile implementations and sandbox policy remain runner-owned.
+Declarations may request the closed scratch/cache and pinned-HTTPS-artifact
+capability vocabulary owned by the trusted-validation architecture. Parameters
+are frozen into command identities and version-2 snapshot fingerprints. Legacy
+version-1 snapshots preserve their original restricted policy and evidence
+bindings; resume never grants newly configured capabilities.
+
+A valid but unavailable frozen request pauses durably as `environment_blocked`
+before provider work, including at creation before any preflight evidence exists.
+Resume retries the saved request after environment repair. Changing declarations
+requires a new run; repository changes must not bypass or weaken required checks.
+Scratch and cache capabilities provide per-execution transient storage; pinned
+artifacts are acquired by the runner into durably owned private storage before
+finalization command execution. Only complete SHA-256-verified files appear in
+the fixed read-only dependency mount. Checks remain network-isolated. Acquisition
+failures are resumable environment blockers, never check passes or permission to
+change the declaration; retries acquire fresh files after cleanup. Preflight
+checks storage and isolation without downloading. Capability inspection is not
+check execution or validation evidence. Verification-only recovery of a consumed
+commit or completed handoff remains available without those capabilities.
+
+Plan execution and polishing also discover exact-command capability needs and environment
+blockers read-only during bootstrap or legacy validation migration. Accepted
+active-role reports are preserved together; reconciliation cannot discard a
+role's needs. Invalid reports receive bounded contract correction. Valid needs
+without trusted selection, sufficient frozen authority, runner support, or actual
+availability pause before any writable checkpoint, with no content or index
+mutation. Every writable entry and resume rechecks the saved request. A sandbox
+limitation on an exactly delegated command is satisfied only by successful runner
+inspection; another command's limitation remains a blocker. Inspection never
+executes or attests the required check, changes authority, or reloads configuration.
+
 Before finalization, writable roles receive the exact
 selected command text from the persisted run, including on continuation,
 reconstruction, and correction. They defer established required-check execution

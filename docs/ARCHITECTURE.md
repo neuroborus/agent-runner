@@ -56,6 +56,33 @@ private service composes command execution, content and snapshot inspection,
 commit verification, and polishing handoff modules without exposing their
 implementation contracts to root consumers.
 
+`inspectHead` reads the current commit object ID and that immutable object's
+subject, including unborn HEAD as `{head: null, subject: null}`. Plan execution
+uses this observation before writable entry and ahead of generic resume or
+interruption drift handling. An exact leading-plan subject already at HEAD, or
+external HEAD movement from the saved baseline, requires plan revision without
+adopting the commit. Consumed runner-authorized commits settle verification-only
+first; only that verified settlement changes plan progress.
+
+Plan execution owns bounded step assessments and semantic context validation in
+its private `plan-position.js` contract. Every context-producing phase receives
+the runner-selected subject and verified completion evidence. A separate
+read-only review checks narrative directions before acceptance; matching fields
+cannot override contradictory prose. Its `plan-context` interruption marker
+requires read-only reconciliation before replaying the producing checkpoint.
+Version-19 migration invalidates legacy context before writable work while
+preserving verification-only settlement of consumed commits. Root Git remains
+the observation authority; agents and summaries never select the next step.
+
+Plan execution also owns durable initial-implementation evidence. Its
+`implementation-evidence.js` contract separates the original step/HEAD/content
+baseline from mutable repository snapshots and reconstructs legacy evidence only
+from the state-owned validated journal. State version 20 persists that evidence
+before writable implementation and rejects unchanged initial results before
+candidate convergence. Corrections retain their existing unchanged-result semantics;
+verified commit settlement alone resets the record for the next step. Consumed
+effects and stop recovery remain ahead of preparation for new writable work.
+
 The trusted-validation capability lives under `src/trusted-validation/` behind
 its public `index.js`. The index exposes only the contracts consumed by the
 root runtime and capability tests; private service and execution modules keep
@@ -239,6 +266,7 @@ The V1 shape is:
   "defaultBackend": "codex",
   "defaultProfile": "current",
   "defaultModel": "current",
+  "defaultEffort": "current",
   "defaultContextSize": "current",
   "profiles": {
     "codex-work": {
@@ -282,11 +310,16 @@ change requires a restart. A disabled server omits the reporting tool, schema,
 and related instructions from discovery. Other runner settings are reloaded
 for each fresh report and persisted through its resolved reservation.
 
-`defaultBackend` is optional. A role's `profile`, `model`, and `contextSize`
-resolve from its role-specific CLI/MCP override, the run-wide override, its
+`defaultBackend` is optional. A role's `profile`, `model`, `contextSize`, and
+`effort` resolve from its role-specific override, the run-wide override, its
 project-role value, the corresponding project-wide default, its pipeline-role
 runner value, the corresponding runner-wide default, then the built-in string
-`current`; a role-specific CLI override has highest precedence. Explicit
+`current`; a role-specific CLI override has highest precedence. CLI/MCP expose
+profile, model, context size, and effort through the same runner input contract.
+CLI uses `--effort` and descriptor-derived `--<role>-effort`; MCP uses `effort`
+and `roleOverrides.<role>.effort`. Both validate the portable enum before
+dispatch. MCP action identities include both selections before mutation;
+detached continuations resume the saved run without re-resolving them. Explicit
 CLI/MCP pipeline-setting overrides take precedence over project pipeline
 settings, which take precedence over runner settings and descriptor defaults.
 A profile alias is trusted runner configuration, pins one backend, and maps
@@ -303,6 +336,13 @@ explicit context size is a decimal token string validated by the selected
 adapter and mapped to Codex's context-window setting or Claude's
 auto-compaction token window. These controls are not treated as otherwise
 equivalent.
+
+Both configuration layers accept `defaultEffort` and role `effort` using only
+`current|low|medium|high|xhigh`. Vocabulary validation includes inactive roles;
+provider capability validation applies only to resolved active roles. Effort
+remains separate from model IDs, and native translation belongs to adapters.
+An explicit `current` at any precedence level retains the effective provider
+default instead of inheriting a lower-precedence effort selection.
 
 Pipeline descriptors validate their own settings and supply built-in defaults.
 The root loader owns only the versioned envelope, strict field validation, and
@@ -333,8 +373,8 @@ nor a pipeline may select it automatically.
 
 Runner and project configuration are deterministically validated for every
 declared role. After settings resolve, the descriptor selects active roles.
-Only those roles are resolved to a backend, profile, model, and context size;
-only they are probed, persisted in the run, checked against a source session,
+Only those roles are resolved to a backend, profile, model, context size, and
+effort; only they are probed, persisted in the run, checked against a source session,
 and invoked. Public projections may identify an active role for bounded
 activity, but expose neither provider-private values nor inactive role
 configuration. Inactive Reviewer and Arbiter values remain untouched in the
@@ -377,8 +417,9 @@ project configuration, applies run-wide, role-specific, and accepted
 pipeline-setting overrides, asks the descriptor for the active roles, and
 persists those resolved roles, the resolved settings, artifact root, and
 optional source-session reference and profile before pipeline work begins.
-Common run-envelope version 7 retains the optional project-configuration
-protection record. Older runs normalize the absent field to `null`; migration
+Common run-envelope version 8 persists effort for every active role and retains
+the optional project-configuration protection record. Older runs normalize the
+absent protection record to `null`; migration
 never fabricates evidence by inspecting a current file.
 `run` then holds the new run's per-run lease while invoking its statically
 registered workflow. Plan execution and polishing additionally hold one external lease
@@ -1052,8 +1093,14 @@ Session lineage records an optional source-session reference, its resolved
 trusted profile when known, and every direct child role/session ID with its
 accepted-input and pipeline-checkpoint context key. Legacy role records missing
 `profile` or `contextSize`, and missing or nullable `model`, normalize to
-`current` in memory without rewriting state or event history. Native session
-resume remains an optimization rather than a correctness dependency.
+`current` in memory without rewriting state or event history. Envelope versions
+1–7 also normalize absent active-role `effort` to `current`; version 8 requires
+a portable effort value on every saved role. The leased runtime migration
+persists those defaults without provider activity or configuration reload,
+preserving prior journal records, progress, leases, and session evidence.
+Changing runner configuration never re-resolves saved effort; changing protected
+project configuration retains the safety pause without changing saved roles.
+Native session resume remains an optimization rather than a correctness dependency.
 
 Lock-free readers reject unsupported envelope, runtime, or pipeline versions
 with an actionable version-skew error and never rewrite durable state. A
@@ -1399,6 +1446,34 @@ Adapter capability probes inspect the installed CLI and enforceable local
 isolation only. They do not apply a selected native profile and do not claim
 that its authentication or provider is usable; that is established by the
 first real turn under the effective profile.
+
+The shared adapter contract accepts optional `effort` in execution options and
+turn requests, validated by each registered provider through that contract.
+Its closed vocabulary is `current|low|medium|high|xhigh`; omission and `current`
+normalize to no override. Model identifiers cannot contain whitespace, so a
+combined model-and-effort string is rejected before provider activity.
+Native translation stays within the providers: Codex supplies
+`model_reasoning_effort` at process launch and `effort` on every `turn/start`;
+Claude supplies `--effort`, translating portable `xhigh` to native `max`.
+The supported Codex App Server baseline includes effort control. Claude's
+model-free help probe must advertise the requested native tier. These checks
+apply only to explicit selections and do not add requirements to `current`.
+Codex uses `model/list` reasoning-tier metadata when present. An explicit model
+is checked before thread selection; an inherited model uses the selected
+thread's effective model, falling back to effective configuration or the
+catalog default when unavailable. Missing tier metadata or an unlisted
+inherited model defers support to the provider instead of guessing a model
+capability. Every continued, forked, compacted, reconstructed, and
+commit-readiness turn retains the same effort.
+Both adapters normalize an unsupported explicit selection or bounded native
+effort/model rejection to non-recoverable `ERR_UNSUPPORTED_EFFORT` and
+`effort_unsupported`. Codex classifies relevant RPC errors before discarding
+their payloads and preserves that classification through thread recovery.
+Structured authentication, usage, and transient failures retain their existing
+semantics. A specific Claude effort rejection takes precedence over a generic
+turn-setup failure. Native rejection text is not retained, and commit-readiness
+failure cannot start or replay the constrained executor.
+
 On Linux, Claude proves native-turn sandbox support with a fixed, model-free
 bubblewrap invocation that runs `/usr/bin/true` through the resolved Claude
 executable's embedded `apply-seccomp` helper. The probe uses the same outer
@@ -1724,13 +1799,215 @@ repairs and semantic review. Bootstrap inventory-reporting and finalization
 A selected runner-trusted command is the only exception to agent-side check
 execution during finalization. The runner-derived bootstrap inventory must
 contain its exact configured command.
+
+The public trusted-validation service also provides `inspectRequirements` for
+pipeline-owned requirement discovery and writable-entry decisions. This is an
+explicit preparation effect, never a required-check execution or attestation.
+Construction, status reads, and ordinary preflight do not call it. Pipelines
+retain their own reporting schemas, saved requests, migration, and pause policy;
+the capability owns normalization, frozen authority matching, and availability.
+Plan execution and polishing independently own reports in each active role's
+bootstrap or validation-migration inventory and inspect their union at every
+writable entry. Cached declaration preflight cannot bypass this gate. Execution
+also checks unconsumed COMMIT; polishing inspects completed HANDOFF settlement
+before discovery or preparation and checks availability before new staging.
+Polishing state version 14 preserves historical handoff evidence while requiring
+read-only discovery before further content work. Neither pipeline imports the
+other's report schemas or workflow internals.
+
+Inspection accepts `inventory` (up to 512 unique, trimmed, single-line exact
+command strings, each at most 4,000 characters) and `requirements` (up to 1,024
+reports, accommodating two role inventories with 256 needs and 256 blockers each).
+Every selected frozen command must appear in the inventory. Each
+report names an inventory `command` and may supply `commandIdentity` (null or a
+lowercase SHA-256 identity), `capabilities` (the existing scratch, cache, and
+exact artifact declaration shape), and `unsupported` (up to 16 unique lowercase
+capability labels of at most 64 characters). Unknown fields, malformed parameters,
+or commands outside the inventory raise `ERR_INVALID_TRUSTED_REQUIREMENTS`
+before effects. Unsupported labels describe needs, never executable requests,
+paths, environment values, or authority. The capability copies and freezes the
+accepted request before asynchronous work.
+
+All reports for a command are additive; one role's smaller report cannot remove
+another's requirement. A valid report without trusted selection, with unsupported
+needs, or exceeding the saved command identity or capabilities returns `BLOCKED`
+with bounded `not-selected`, `unsupported`, or `insufficient-authority` reasons.
+Artifact authority matches both canonical URL and digest. Selected declarations
+are always runner-known requirements even without reports. Authority for the
+entire request is checked before any preparation; the snapshot is never changed.
+
+For authorized requests, inspection prepares each selected command sequentially
+under the existing durable storage, transport, and process lifecycle. It acquires
+and verifies dependencies, constructs the same network-isolated mounts, checks
+the declared executable's availability, and runs only a runner-defined empty Node
+program in that sandbox, with a maximum ten-second process deadline. The check's
+argument vector is never invoked. Preparation failures return bounded
+`unavailable` blockers without native diagnostics, URLs, or process output.
+Uncertain resource ownership, cancellation, and repository mutation preserve
+their existing safety error contracts and recovery evidence. Successful
+retirement journaling is required before inspecting another command; an
+uncertain process registration stops preparation with its ownership intact.
+Successful inspection returns only `READY` and an empty blocker list; it grants no check
+pass or finalization evidence. Owned resources are retired and cleaned, and
+finalization later acquires dependencies afresh and reverifies them.
+
+The runner's private inspection adapter pins repository scope and snapshot to
+the saved run, guards project configuration before and after the effect, and
+uses the stop monitor's signal and leased process/resource callbacks. Outstanding
+ownership must be recovered first. Stop reconciliation rejects inspection just
+as it rejects new command execution. This adds no eager capability work ahead
+of consumed-commit or completed-handoff verification; pipelines must keep that
+verification-only recovery ahead of any new preparation.
+
+Trusted declarations optionally carry `capabilities`, a closed object with
+`scratch: true`, `cache: true`, and `artifacts: [{ url, sha256 }]`. Omit a
+capability to leave it disabled. Scratch and cache request isolated per-execution
+storage with runner-defined paths and environment bindings; declarations cannot
+choose host paths, mount points, or environment names. Artifacts request pinned
+acquisition outside the check sandbox, never network permission for the command.
+The artifact list contains 1–32 unique canonical HTTPS URLs and lowercase
+SHA-256 digests. URLs cannot carry credentials, fragments, nondefault ports,
+IP literals, or local/reserved hostnames. Public DNS, connection pinning,
+integrity, and resource limits must be enforced by the acquisition implementation.
+Scratch and cache provide isolated transient storage. Artifact acquisition uses
+the same durable allocation lifecycle and exposes verified files read-only.
+
+The private `acquisition.js` primitive shares artifact declaration normalization
+with the snapshot contract. The trusted executor invokes it privately after
+journaling verified allocation ownership. The caller supplies an exclusively
+owned mode-0700 directory handle, never a destination filename. Descriptor-relative
+exclusive partials are hashed while streaming, synchronized, and published without replacing
+existing entries under their lowercase SHA-256 names with mode 0444. Identical
+digests share one published file, but every declared URL is acquired and verified.
+Cleanup rechecks entries against the open file's identity and preserves substitutes.
+Earlier verified files can remain after a later failure; callers must not expose
+an incomplete acquisition and remain responsible for the owned directory.
+The service exposes the dependency directory only after the complete request
+succeeds, all transports retire, and allocation and subdirectory identities are
+rechecked. Every execution acquires fresh files from its frozen declarations;
+resume cleans previous allocations before downloading again.
+
+Acquisition resolves all addresses once (at most 64 answers), rejects the entire
+answer set if any address is not public unicast, and pins one numeric destination.
+The conservative address policy excludes IPv4 special-use ranges and IPv6 outside
+2000::/3, plus special-use, documentation and transition ranges within it. The
+declared hostname remains the HTTP Host and TLS verification name; the actual
+peer must match the pinned address. Each request uses a fresh connection, explicit
+Node built-in trust roots, TLS 1.2 or newer, no proxy environment, and a 16 KiB
+header limit. Only HTTP 200 and identity content encoding are accepted; redirects,
+ambiguous framing, incomplete bodies, and integrity mismatches fail closed.
+
+Limits are 64 MiB per file and 256 MiB across a sequential acquisition, including
+repeated digests. DNS has a 5-second deadline, connection establishment 10 seconds,
+body/header inactivity 15 seconds, and the whole acquisition 5 minutes. Cancellation
+and deadlines prevent subsequent publication. Requests, responses, and sockets
+must close before publication or partial cleanup; retirement has a separate
+1-second bound. Unverified retirement retains the partial for owned recovery.
+The live service retains the resource while transport closure is uncertain and
+rejects concurrent recovery; closure permits cleanup retry. Recovery also checks
+the journaled acquisition owner, even after lease release and service
+reconstruction.
+A live or unverifiable owner blocks cleanup unless that same service observed
+transport retirement. A dead or replaced owner permits confined cleanup. Late
+callbacks cannot publish files. Errors expose finite acquisition categories,
+not URLs, response bodies, or native transport diagnostics. Tests inject DNS,
+HTTPS and deadline scheduling without network access.
+
+Root and safe project catalogs share strict normalization, including capability
+parameters. Capability changes participate in catalog conflict detection and
+command identities. New snapshots use schema version 2 with an explicit
+`capabilities` object on every command; configuration fingerprints bind that
+version and the complete normalized request. Version-1 snapshots retain their
+restricted policy, original identities, and fingerprints on migration/resume,
+so already accepted finalization evidence remains bound to its original policy.
+
+Creation checks the frozen request before provider probes. A valid unavailable
+request creates a durable `environment_blocked` run with incomplete preflight,
+no repository baseline, backend versions, input hashes, or agent activity.
+Malformed declarations remain configuration errors. Resume retries the saved
+request under the execution/worktree leases before new provider work; successful
+retry resumes ordinary preflight without reloading configuration. Later failures
+retain the applicable pipeline checkpoint. Capability inspection does not execute
+or attest checks. Consumed commits and completed handoffs are verified before
+capability checks needed for new work; status and immutable terminal reads do no
+capability work. Launcher discovery is lazy for the same reason.
+
+Scratch and cache mount only at `/run/agent-runner/scratch` and
+`/run/agent-runner/cache`. They provide `AGENT_RUNNER_SCRATCH`/`TMPDIR` and
+`AGENT_RUNNER_CACHE`/`XDG_CACHE_HOME`/`npm_config_cache` respectively (npm uses
+`/run/agent-runner/cache/npm`). These bindings are runner-defined; project
+configuration chooses only the capability booleans. Build output must explicitly
+target scratch. Dependencies mount only at the read-only
+`/run/agent-runner/dependencies`, with `AGENT_RUNNER_DEPENDENCIES` bound to that
+path. Files use their declared lowercase SHA-256 digest as their name. No partial
+file is exposed. Artifact-only requests allocate storage even without scratch or
+cache. Extraction or setup must be part of the exact declared command and target
+declared scratch; the runner does not extract archives or install host tools.
+Repository and system mounts remain read-only and networking remains private.
+These capabilities do not change the agent sandbox.
+Preflight checks storage-root writability and rejects fixed mount targets that
+overlap protected paths before provider work; allocation rechecks that policy.
+Private storage also cannot overlap system, executable, or PATH exposures;
+the sandbox rechecks this before mounting. Protected Git paths include canonical
+directory-symlink targets and shared metadata reached through Git directory
+pointers or `commondir` files.
+
+Common run-envelope version 9 adds private `executionResource` ownership next to
+`executionProcess`. Legacy envelopes normalize it to null and migrate through the
+existing leased journal transition without filesystem allocation, provider work,
+or changes to session/progress evidence. Status reads never allocate or clean
+resources. The resource record carries a random execution ID, host, command
+identity, private root device/inode, and allocation phase; the allocated phase
+also records the execution directory device/inode. Common run-envelope version
+10 adds the `acquiring` phase, which journals the runner PID and boot/start
+identity before transport activity. Version-9 state and journal records retain
+their original closed allocation contract and load without writes; leased
+migration preserves ownership, command identities, and progress without new
+resource effects. The runtime compatibility token changes with this version.
+Verified retirement restores `allocated` before launch or cleanup; only those
+exact identity-preserving transitions are accepted. Acquisition journal failures
+retain ownership and report the bounded resumable ownership blocker. Resource ownership is never publicly projected.
+
+The trusted executor creates a runner-owned mode-0700 parent under the runner's
+temporary directory, disjoint from project, task, Git metadata, and runner state.
+A journaled allocation intent precedes exclusive per-execution directory creation;
+verified identity is journaled before downloading, exposing mounts, or launching
+a process. The execution directory owns its dependency subdirectory as well as
+scratch/cache; the acquisition phase records transport ownership separately from
+command process registration.
+Directory creation is synchronized before publishing allocation identity, and
+declared storage entries are synchronized before acquisition or launch. Cleanup
+synchronizes removal before clearing journaled ownership, including retries
+after removal.
+Descriptor-anchored directory operations and identity checks reject symlink
+substitution. Only declared scratch/cache subdirectories are mounted writable.
+No mutable cache is reused across executions, including after interruption.
+
+Command completion, failure, timeout, and cancellation retire descendants before
+confined cleanup and repository mutation checks. Resume and operator-stop recovery
+retire any recorded process before cleaning saved resources, even when interruption
+preceded process registration. Cleanup uses the recorded root, not a newly selected
+temporary directory. A missing child can be cleared idempotently. An existing child
+without a journaled verified identity, a replaced directory/root, or uncertain
+process ownership retains evidence and ownership for explicit recovery; the runner
+never guesses which directory to remove. Checkpoint settlement and releasing
+ownership remain closed until cleanup succeeds. After an operator restores the
+recorded directory or removes an independently verified orphan, resume retries
+cleanup before any new work. Acquisition failures return bounded, redacted
+`BLOCKED` check evidence without launching the command. They and resource cleanup
+uncertainty preserve an `environment_blocked` FINALIZE checkpoint and never attest the check. Cancellation
+preserves the abort outcome after safe cleanup; uncertain retirement retains
+ownership and blocks settlement.
+
 The finalization agent returns `NOT_RUN` only for those selected entries; after
 the agent turn reconciles, the root executor replaces each placeholder by
 running the exact persisted executable/argument vector directly without a
 shell. On Linux it requires bubblewrap and runs with a private network
 namespace. The trusted sandbox selects `native-sandbox-provider` ownership;
 the service and exact-command executor forward that mode to the owned-process
-launcher so it probes the complete nested isolation shape. Executions whose
+launcher so it probes the complete nested isolation shape. The trusted sandbox
+explicitly creates its own user namespace, matching the nested probe rather than
+relying on Bubblewrap's host-dependent implicit user-namespace selection. Executions whose
 sandbox does not select a mode retain ordinary ownership. The trusted command's
 isolation profile and process-containment requirements remain unchanged.
 Before agent work, the root resolves bubblewrap only from fixed

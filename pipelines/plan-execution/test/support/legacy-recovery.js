@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import {
   createClarificationService,
@@ -110,6 +111,22 @@ export async function createLegacyRecoveryFixture(
       };
     },
     async run(request) {
+      const position = JSON.parse(
+        /Runner-selected plan position[^\n]*\n([^\n]+)/u.exec(
+          request.prompt,
+        )?.[1] ?? "null",
+      );
+      const assessment = position && {
+        step: position.step,
+        subject: position.subject,
+        disposition: "CURRENT",
+        evidence: [],
+      };
+      if (request.schema === schemas.PLAN_CONTEXT_SCHEMA)
+        return {
+          structured: { stepAssessment: assessment },
+          sessionId: request.session?.id ?? randomUUID(),
+        };
       calls.push(request);
       const schema = request.schema;
       const step = Number(
@@ -215,6 +232,11 @@ export async function createLegacyRecoveryFixture(
               ? reviewApproved()
               : cleanConfirmation();
       } else throw new Error("Unexpected fixture phase.");
+      if (
+        (schema.properties?.result?.anyOf?.[0]?.properties ?? schema.properties)
+          ?.stepAssessment
+      )
+        (structured.result ?? structured).stepAssessment = assessment;
       return {
         structured,
         output: "fixture result",
@@ -256,6 +278,9 @@ export async function createLegacyRecoveryFixture(
       ...(trusted
         ? {
             trustedValidation: {
+              async inspectRequirements() {
+                return { status: "READY", blockers: [] };
+              },
               async preflight() {},
               async execute({ commandIdentity }) {
                 trustedExecutions += 1;
@@ -340,4 +365,23 @@ export async function createLegacyRecoveryFixture(
       return planExecutionPipeline.projections.pause(run).nextActions;
     },
   };
+}
+
+// Downgrades remove transitions that only published fields absent in the old schema.
+export function removeUnchangedEvents(events) {
+  for (let index = events.length - 1; index > 0; index -= 1) {
+    const comparable = ({ revision, updatedAt, ...state }) => state;
+    if (
+      events[index].activity === null &&
+      isDeepStrictEqual(
+        comparable(events[index - 1].state),
+        comparable(events[index].state),
+      )
+    )
+      events.splice(index, 1);
+  }
+  events.forEach((event, index) => {
+    event.revision = index + 1;
+    event.state.revision = index + 1;
+  });
 }

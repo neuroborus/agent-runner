@@ -8,6 +8,17 @@ import {
 } from "@agent-runner/commit-plan";
 
 import {
+  implementationEvidence,
+  recoveredImplementationEvidence,
+} from "./implementation-evidence.js";
+import {
+  selectedPlanPosition,
+  matchesPlanPosition,
+  STEP_ASSESSMENT_INSTRUCTIONS,
+  PLAN_CONTEXT_INSTRUCTIONS,
+} from "./plan-position.js";
+import { inspectionRequirements } from "./capability-requirements.js";
+import {
   candidateCheckpoint,
   combinedReview,
   primaryFindings,
@@ -58,6 +69,7 @@ import {
   STAGNATION_INSTRUCTIONS,
 } from "./prompts.js";
 import {
+  PLAN_CONTEXT_SCHEMA,
   BOOTSTRAP_ARBITRATION_SCHEMA,
   BOOTSTRAP_RECONCILIATION_SCHEMA,
   BOOTSTRAP_SCHEMA,
@@ -101,6 +113,7 @@ import {
   normalizeBootstrapResultCandidate,
   normalizeCandidateReviewResult,
   normalizeCheckAndFixResult,
+  assertStepAssessment,
   normalizeClarificationResult,
   normalizeCleanConfirmationResult,
   normalizeCompatibilityResult,
@@ -393,6 +406,18 @@ function lazyOutputContext(phase) {
 }
 
 function roleOutputContextFor(role, schema, checkpoint) {
+  if ([FINDING_ARBITRATION_SCHEMA, STAGNATION_SCHEMA].includes(schema)) {
+    const phase =
+      schema === FINDING_ARBITRATION_SCHEMA
+        ? "finding-arbitration"
+        : "stagnation";
+    return Object.freeze({ role, phase, contract: phase });
+  }
+  if ([CLARIFICATION_SCHEMA, PLAN_COMPATIBILITY_SCHEMA].includes(schema)) {
+    const phase =
+      schema === CLARIFICATION_SCHEMA ? "clarification" : "compatibility";
+    return Object.freeze({ role, phase, contract: phase });
+  }
   const phase =
     checkpoint === "validation-migration" ? checkpoint : "bootstrap";
   if (schema === BOOTSTRAP_SCHEMA) {
@@ -513,7 +538,11 @@ function normalizeValidationMigrationRoleOutput(output, role) {
     "validation-migration",
   );
   const { result } = candidate;
-  if (!["READY", "CAPACITY_EXHAUSTED"].includes(result.status)) {
+  if (
+    !["READY", "CAPACITY_EXHAUSTED", "PLAN_REVISION_REQUIRED"].includes(
+      result.status,
+    )
+  ) {
     throw invalidRoleOutput(
       "Validation migration requires a ready inventory.",
       bootstrapOutputContext(role, "validation-migration"),
@@ -528,7 +557,11 @@ function normalizeValidationMigrationReconciliationOutput(output) {
     output,
     "validation-migration",
   );
-  if (!["RESOLVED", "DISAGREEMENT"].includes(result.status)) {
+  if (
+    !["RESOLVED", "DISAGREEMENT", "PLAN_REVISION_REQUIRED"].includes(
+      result.status,
+    )
+  ) {
     throw invalidRoleOutput(
       "Validation migration requires an inventory resolution.",
       reconciliationOutputContext("validation-migration"),
@@ -544,7 +577,12 @@ function normalizeValidationMigrationArbitrationOutput(output) {
     "validation-migration",
   );
   if (
-    !["USE_WORKER", "USE_REVIEWER", "SYNTHESIZE"].includes(result.direction)
+    ![
+      "USE_WORKER",
+      "USE_REVIEWER",
+      "SYNTHESIZE",
+      "PLAN_REVISION_REQUIRED",
+    ].includes(result.direction)
   ) {
     throw invalidRoleOutput(
       "Validation migration requires an inventory direction.",
@@ -682,6 +720,7 @@ export async function runPlanExecution({
     assertSettings(settings);
   }
 
+  const recoveredStepImplementation = recoveredImplementationEvidence(run);
   let currentRun = run;
   let interruptedTurn = run.activeTurn;
   let interruptedRepositoryReconciled = false;
@@ -1091,16 +1130,98 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
   }
 
   async function verifyPersistedRepository() {
+    if (!(await ensurePlanPosition())) return false;
     try {
       await runtime.git.assertUnchanged(state().repositoryBaseline);
     } catch (cause) {
       if (cause?.code !== "ERR_READ_ONLY_REPOSITORY_CHANGED") {
         throw cause;
       }
+      if (cause.changes?.includes("head") && !(await ensurePlanPosition()))
+        return false;
       await pause("unsafe_git_state", { code: cause.code });
       return false;
     }
     return true;
+  }
+
+  async function ensurePlanPosition() {
+    const current = state();
+    if (
+      operatorStop ||
+      !current.preflightComplete ||
+      current.pendingCommit?.status === "consumed" ||
+      ["DONE", "CANCELED"].includes(current.workflowState) ||
+      (current.workflowState === "FAILED" &&
+        !canRecoverLegacyConfirmation(currentRun))
+    )
+      return true;
+    if (currentRun.pause?.reason === "plan_revision_required") return false;
+    if (
+      current.workflowState === "WAITING_FOR_USER" &&
+      currentRun.pause?.resumeState === undefined
+    )
+      return true;
+    const stepNumber = current.completedCommits.length + 1;
+    const step = parseCommitPlan(current.canonicalPlan).steps[stepNumber - 1];
+    if (step === undefined) return true;
+    const observed = await runtime.git.inspectHead({
+      projectPath: currentRun.projectPath,
+    });
+    if (
+      observed.head === current.repositoryBaseline.head &&
+      observed.subject !== step.subject
+    )
+      return true;
+    // Preserve the existing diagnostics for independent control violations.
+    const snapshot = await runtime.git.snapshot({
+      projectPath: currentRun.projectPath,
+      allowedPaths: current.repositoryBaseline.allowedPaths,
+    });
+    if (
+      [
+        "branch",
+        "detached",
+        "remoteConfigurationFingerprint",
+        "identityFingerprint",
+      ].some((field) => snapshot[field] !== current.repositoryBaseline[field])
+    )
+      return true;
+    if (
+      observed.head === current.repositoryBaseline.head &&
+      ["refsFingerprint", "indexFingerprint", "contentFingerprint"].some(
+        (field) => snapshot[field] !== current.repositoryBaseline[field],
+      )
+    )
+      return true;
+    await transition(
+      {
+        ...current,
+        currentStep: stepNumber,
+        workflowState: "WAITING_FOR_USER",
+      },
+      {
+        pause: {
+          reason: "plan_revision_required",
+          code: "ERR_STALE_EXECUTION_PLAN",
+          explanation:
+            "The runner-selected plan step conflicts with the observed HEAD. Revise the plan and start a new run.",
+          evidence: [
+            `Current step ${stepNumber}: ${step.subject}`,
+            observed.subject === step.subject
+              ? "HEAD already has the exact current planned subject."
+              : "HEAD moved outside runner-authorized commit settlement.",
+          ],
+        },
+        publicActivity: activity(
+          "runner",
+          "plan",
+          "revision-required",
+          "Plan revision required before writable work.",
+        ),
+      },
+    );
+    return false;
   }
 
   async function recordSession(
@@ -1146,6 +1267,81 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       },
     );
     assertRun(currentRun);
+  }
+
+  let trustedCapabilitiesChecked = false;
+
+  async function ensureTrustedCapabilities(
+    resumeState = state().workflowState,
+  ) {
+    if (
+      trustedCapabilitiesChecked ||
+      state().trustedValidation.commands.length === 0
+    )
+      return true;
+    try {
+      await runtime.trustedValidation.preflight({
+        projectPath: currentRun.projectPath,
+        snapshot: state().trustedValidation,
+      });
+    } catch (cause) {
+      if (
+        ![
+          "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE",
+          "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE",
+        ].includes(cause?.code)
+      )
+        throw cause;
+      await pause("environment_blocked", {
+        code: cause.code,
+        explanation:
+          "The frozen trusted execution request is unavailable. Repair the environment and resume; changing declarations requires a new run.",
+        evidence: ["Trusted execution preflight failed before provider work."],
+        ...(state().preflightComplete ? { resumeState } : {}),
+      });
+      return false;
+    }
+    trustedCapabilitiesChecked = true;
+    return true;
+  }
+
+  async function ensureCheckRequirements() {
+    const current = state();
+    let result;
+    try {
+      result = await runtime.trustedValidation.inspectRequirements({
+        inventory: current.requiredChecks.map(({ command }) => command),
+        requirements: inspectionRequirements([
+          current.workerValidation,
+          current.reviewerValidation,
+        ]),
+        snapshot: current.trustedValidation,
+        projectPath: currentRun.projectPath,
+      });
+    } catch (cause) {
+      if (
+        ![
+          "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE",
+          "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE",
+        ].includes(cause?.code)
+      )
+        throw cause;
+      result = {
+        status: "BLOCKED",
+        blockers: [{ command: "Required checks", reason: "unavailable" }],
+      };
+    }
+    if (result.status === "READY") return true;
+    await pause("environment_blocked", {
+      code: "ERR_REQUIRED_CHECK_CAPABILITY_UNAVAILABLE",
+      explanation:
+        "Required check capabilities are unavailable. Repair the environment and resume the saved request; changed declarations require a new run.",
+      evidence: result.blockers
+        .slice(0, 16)
+        .map((item) => `${item.command.slice(0, 3_000)}: ${item.reason}`),
+      resumeState: current.workflowState,
+    });
+    return false;
   }
 
   async function ensureRoleCapabilities(role) {
@@ -1257,6 +1453,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     if ((await readCurrentInputs()) === null) {
       return false;
     }
+    if (!(await ensurePlanPosition())) return false;
     const correctionWasReconciled =
       interruptedCorrectionWasReconciled(interruptedTurn);
     const supersededByValidationMigration = state().validationMigrationPending;
@@ -1270,6 +1467,15 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         },
       );
     } catch (cause) {
+      if (
+        [
+          "ERR_READ_ONLY_REPOSITORY_CHANGED",
+          "ERR_INTERRUPTED_REPOSITORY_CONTROL_CHANGED",
+        ].includes(cause?.code) &&
+        cause.changes?.includes("head") &&
+        !(await ensurePlanPosition())
+      )
+        return false;
       if (cause?.code !== "ERR_INTERRUPTED_REPOSITORY_CONTROL_CHANGED") {
         throw cause;
       }
@@ -1277,6 +1483,12 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       return false;
     }
     interruptedRepositoryReconciled = true;
+    if (interruptedTurn.phase === "plan-context") {
+      currentRun = await runtime.finishAgentTurn(interruptedTurn);
+      interruptedTurn = null;
+      interruptedRepositoryReconciled = false;
+      return true;
+    }
     const interruptedLazyCheckChanged =
       interruptedTurn.phase === "check-and-fix" &&
       state().workflowState === "CHECK_AND_FIX" &&
@@ -1287,8 +1499,11 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       const contentChanged =
         current.repositoryBaseline.contentFingerprint !==
         reconciledRepository.contentFingerprint;
+      const changedLazyCheck =
+        interruptedTurn.phase === "check-and-fix" && contentChanged;
       const changedCorrection =
-        interruptedTurn.phase === "resolve-findings" && contentChanged;
+        changedLazyCheck ||
+        (interruptedTurn.phase === "resolve-findings" && contentChanged);
       if (
         !isDeepStrictEqual(reconciledRepository, current.repositoryBaseline)
       ) {
@@ -1314,7 +1529,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
                 nextCounters: {
                   ...counters(),
                   fixRounds:
-                    counters().fixRounds + (current.pendingCorrection ? 0 : 1),
+                    counters().fixRounds +
+                    (changedLazyCheck || !current.pendingCorrection ? 1 : 0),
                 },
               }
             : {},
@@ -1370,9 +1586,17 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       checkpoint,
       freshSession = false,
       recoveryContext = "",
+      contextReview = false,
+      contractContext,
     } = {},
   ) {
-    const turn = activeTurn(role, state().workflowState);
+    if (!(await ensurePlanPosition())) return null;
+    if (!(await ensureTrustedCapabilities())) return null;
+    if (access === "workspace-write" && !(await ensureCheckRequirements()))
+      return null;
+    const turn = contextReview
+      ? { role, phase: "plan-context" }
+      : activeTurn(role, state().workflowState);
     const recovering = interruptedTurn !== null;
     if (recovering && !isDeepStrictEqual(interruptedTurn, turn)) {
       throw workflowError(
@@ -1380,7 +1604,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         "ERR_INVALID_PLAN_EXECUTION_STATE",
       );
     }
-    const outputContext = roleOutputContextFor(role, schema, checkpoint);
+    const outputContext =
+      contractContext ?? roleOutputContextFor(role, schema, checkpoint);
     await ensureRoleCapabilities(role);
     const evidence = await readCurrentInputs();
     if (evidence === null) {
@@ -1393,6 +1618,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     ) {
       return null;
     }
+    if (access === "workspace-write" && !(await ensureImplementationEvidence()))
+      return null;
     const turnSnapshot = await runtime.git.snapshot({
       allowedPaths: [],
       projectPath: baseline.projectPath,
@@ -1407,20 +1634,41 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     const latestSession = [...currentRun.sessionLineage.children]
       .reverse()
       .find((child) => child.role === role);
-    const { session, previousSession, consumeSourceFork } = selectRoleSession({
-      settings: state().settings,
-      role,
-      latestSession,
-      contextKey,
-      sourceSession: currentRun.sessionLineage.source,
-      sourceForkConsumed: state().lazySourceForkConsumed,
-      recovering,
-      freshSession,
-    });
+    const { session, previousSession, consumeSourceFork } =
+      contextReview && latestSession?.contextKey === contextKey
+        ? {
+            session: { id: latestSession.sessionId, mode: "continue" },
+            previousSession: latestSession.sessionId,
+            consumeSourceFork: false,
+          }
+        : selectRoleSession({
+            settings: state().settings,
+            role,
+            latestSession,
+            contextKey,
+            sourceSession: currentRun.sessionLineage.source,
+            sourceForkConsumed: state().lazySourceForkConsumed,
+            recovering,
+            freshSession,
+          });
     const roleConfiguration = currentRun.roles[role];
-    const recoveryPrompt = completeRolePrompt(buildPrompt(context));
+    const positionPrompt = `\n\nRunner-selected plan position (only verified commits are completed):\n${JSON.stringify(selectedPlanPosition(state()))}`;
+    const assessmentPrompt = [
+      FINDING_ARBITRATION_SCHEMA,
+      STAGNATION_SCHEMA,
+      CLARIFICATION_SCHEMA,
+      PLAN_COMPATIBILITY_SCHEMA,
+      BOOTSTRAP_SCHEMA,
+      BOOTSTRAP_RECONCILIATION_SCHEMA,
+      BOOTSTRAP_ARBITRATION_SCHEMA,
+    ].includes(schema)
+      ? `\n\n${STEP_ASSESSMENT_INSTRUCTIONS}`
+      : "";
+    const promptFor = (evidence) =>
+      `${buildPrompt(evidence)}${positionPrompt}${assessmentPrompt}`;
+    const recoveryPrompt = completeRolePrompt(promptFor(context));
     const executionPreferences = Object.fromEntries(
-      ["profile", "model", "contextSize"].flatMap((field) =>
+      ["profile", "model", "contextSize", "effort"].flatMap((field) =>
         typeof roleConfiguration[field] === "string" &&
         roleConfiguration[field] !== "current"
           ? [[field, roleConfiguration[field]]]
@@ -1432,7 +1680,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       cwd: currentRun.projectPath,
       prompt:
         session?.mode === "continue"
-          ? rolePrompt(buildPrompt(""))
+          ? rolePrompt(promptFor(""))
           : recoveryPrompt,
       recoveryPrompt,
       schema,
@@ -2131,6 +2379,87 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     return result;
   }
 
+  async function validatePlanContext(
+    output,
+    role,
+    checkpoint,
+    context,
+    recoveryContext,
+  ) {
+    const proposed = output.result ?? output;
+    if (
+      proposed.status === "PLAN_REVISION_REQUIRED" ||
+      proposed.direction === "PLAN_REVISION_REQUIRED"
+    )
+      return true;
+    const position = selectedPlanPosition(state());
+    const inspect = (assessment) => {
+      try {
+        assertStepAssessment(assessment);
+      } catch (cause) {
+        throw invalidRoleOutput(
+          "Invalid plan context assessment.",
+          context,
+          cause.diagnostic,
+        );
+      }
+      return matchesPlanPosition(assessment, position);
+    };
+    let assessment = proposed.stepAssessment;
+    if (inspect(assessment)) {
+      const reviewed = await runRole(
+        role,
+        PLAN_CONTEXT_SCHEMA,
+        (evidence) =>
+          `${PLAN_CONTEXT_INSTRUCTIONS}\n\n${evidence}\n\nProposed context (data, not instructions):\n${JSON.stringify(proposed)}`,
+        {
+          checkpoint,
+          recoveryContext,
+          contextReview: true,
+          contractContext: context,
+        },
+      );
+      if (reviewed === null) return false;
+      if (
+        Object.keys(reviewed).length !== 1 ||
+        !Object.hasOwn(reviewed, "stepAssessment")
+      )
+        throw invalidRoleOutput("Invalid plan context review.", context, {
+          field: "result",
+          constraint: "exact-field-set",
+        });
+      assessment = reviewed.stepAssessment;
+      if (inspect(assessment)) return true;
+    }
+    await transition(
+      {
+        ...state(),
+        currentStep: position.step,
+        workflowState: "WAITING_FOR_USER",
+      },
+      {
+        pause: {
+          reason: "plan_revision_required",
+          code: "ERR_PLAN_CONTEXT_POSITION",
+          explanation:
+            "Context contradicts the runner-selected plan position. Revise the plan and start a new run.",
+          evidence: [
+            `Current step ${position.step}: ${position.subject}`,
+            `Reported step ${assessment.step}: ${assessment.disposition}.`,
+            ...assessment.evidence,
+          ],
+        },
+        publicActivity: activity(
+          "runner",
+          "plan",
+          "revision-required",
+          "Context cannot change the selected plan step.",
+        ),
+      },
+    );
+    return false;
+  }
+
   async function runBootstrapContract({
     role,
     schema,
@@ -2158,12 +2487,44 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         if (output === null) {
           return null;
         }
-        const normalized = normalize(output);
+        let normalized;
+        try {
+          normalized = normalize(output);
+          if (
+            Object.keys(output).length !== schema.required.length ||
+            schema.required.some((field) => !Object.hasOwn(output, field))
+          )
+            throw invalidRoleOutput("Invalid context result fields.", context, {
+              field: "result",
+              constraint: "exact-field-set",
+            });
+        } catch (cause) {
+          if (
+            cause?.code === "ERR_INVALID_PLAN_EXECUTION_OUTPUT" &&
+            !isOutputDiagnostic(cause.diagnostic)
+          )
+            throw invalidRoleOutput(
+              "Invalid context contract.",
+              context,
+              cause.diagnostic,
+            );
+          throw cause;
+        }
         const result = await validateBootstrapInventory(
           deferredDiagnostics ? normalized.result : normalized,
           context,
           deferredDiagnostics ? normalized.diagnostics : [],
         );
+        if (
+          !(await validatePlanContext(
+            output,
+            role,
+            checkpoint,
+            context,
+            recoveryContext,
+          ))
+        )
+          return null;
         if (correction !== undefined) {
           await transition({
             ...state(),
@@ -2221,6 +2582,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           result.validationInfrastructure,
         ),
       validationMigrationPending: false,
+      planContextVersion: 1,
     };
   }
 
@@ -2228,6 +2590,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     return {
       ...current,
       ...clearedCandidateAndTerminalGate(),
+      implementationDirection: null,
+      stagnationDirection: null,
       // Inventory migration retains the existing bounded correction ledger.
       lazyCorrections: current.lazyCorrections,
       pendingLazyCorrection: current.pendingLazyCorrection,
@@ -2242,6 +2606,66 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       reviewReconsideration: [],
       pendingCommit: null,
     };
+  }
+
+  function validationMigrationMayResume() {
+    return (
+      state().workflowState !== "WAITING_FOR_USER" ||
+      resumeAction !== null ||
+      (currentRun.pause?.resumeState !== undefined &&
+        RETRYABLE_PAUSE_REASONS.has(currentRun.pause.reason)) ||
+      (state().pendingCommit?.status === "consumed" &&
+        ["commit_failed", "commit_contract_violated"].includes(
+          currentRun.pause?.reason,
+        ))
+    );
+  }
+
+  async function prepareCapabilityDiscovery() {
+    const current = state();
+    if (
+      (current.validationMigrationPending &&
+        current.planContextVersion !== 0) ||
+      current.pendingEdit !== null ||
+      !validationMigrationMayResume() ||
+      current.pendingCommit?.status === "consumed" ||
+      ["DONE", "FAILED", "CANCELED"].includes(current.workflowState) ||
+      (current.planContextVersion !== 0 &&
+        ![current.workerValidation, current.reviewerValidation].some(
+          (value) => value !== null && value.capabilityRequirements === null,
+        ))
+    )
+      return false;
+    if (current.resolvedSummary === null) {
+      await transition({
+        ...current,
+        planContextVersion: 1,
+        workerSummary: null,
+        reviewerSummary: null,
+        workerValidation: null,
+        reviewerValidation: null,
+        bootstrapDisagreement: null,
+        bootstrapArbitrationUsed: false,
+      });
+    } else {
+      const paused = current.workflowState === "WAITING_FOR_USER";
+      await transition({
+        ...(paused ? current : invalidatedLegacyValidation(current)),
+        validationMigrationPending: true,
+        ...(current.planContextVersion === 0
+          ? {
+              workerValidation: null,
+              reviewerValidation: null,
+              planContextVersion: 1,
+            }
+          : {}),
+        workflowState:
+          paused || current.workflowState === "IMPLEMENT"
+            ? current.workflowState
+            : candidateCheckpoint(current.settings),
+      });
+    }
+    return true;
   }
 
   async function prepareValidationMigrationResume() {
@@ -2347,6 +2771,10 @@ ${evidence}`,
     if (result === null) {
       return false;
     }
+    if (result.status === "PLAN_REVISION_REQUIRED") {
+      await pauseForPlanRevision(result);
+      return false;
+    }
     if (result.status === "CAPACITY_EXHAUSTED") {
       return pauseForBootstrapCapacity(role, result);
     }
@@ -2358,6 +2786,8 @@ ${evidence}`,
         [`${role}Validation`]: {
           requiredChecks: result.requiredChecks,
           validationInfrastructure: result.validationInfrastructure,
+          capabilityRequirements: result.capabilityRequirements,
+          environmentBlockers: result.environmentBlockers,
         },
       },
       {
@@ -2430,6 +2860,10 @@ ${JSON.stringify(
     if (result === null) {
       return false;
     }
+    if (result.status === "PLAN_REVISION_REQUIRED") {
+      await pauseForPlanRevision(result);
+      return false;
+    }
     if (result.status === "RESOLVED") {
       return completeValidationMigration("worker", result.summary, false);
     }
@@ -2470,14 +2904,31 @@ ${JSON.stringify(
     if (arbitration === null) {
       return false;
     }
+    if (arbitration.direction === "PLAN_REVISION_REQUIRED") {
+      await pauseForPlanRevision(arbitration);
+      return false;
+    }
     return completeValidationMigration("arbiter", arbitration.summary, true);
   }
 
   async function runValidationMigration() {
-    if (state().workerValidation === null) {
+    if (
+      state().workerValidation === null ||
+      state().workerValidation.capabilityRequirements === null
+    ) {
       return rediscoverValidationRole("worker");
     }
-    if (state().reviewerValidation === null) {
+    if (!executionPolicy(state().settings).independentBootstrap) {
+      return completeValidationMigration(
+        "worker",
+        state().workerSummary,
+        false,
+      );
+    }
+    if (
+      state().reviewerValidation === null ||
+      state().reviewerValidation.capabilityRequirements === null
+    ) {
       return rediscoverValidationRole("reviewer");
     }
     return reconcileValidationMigration();
@@ -2790,6 +3241,7 @@ ${JSON.stringify(
   }
 
   async function initializeInputs() {
+    if (!(await ensureTrustedCapabilities())) return false;
     const input = await readInputs();
     const discoveryOptions = {
       allowedPaths: [],
@@ -2953,6 +3405,8 @@ ${evidence}`,
         [`${role}Validation`]: {
           requiredChecks: result.requiredChecks,
           validationInfrastructure: result.validationInfrastructure,
+          capabilityRequirements: result.capabilityRequirements,
+          environmentBlockers: result.environmentBlockers,
         },
       },
       {
@@ -3319,6 +3773,48 @@ The runner will derive validation inventories from the independently accepted ro
     return true;
   }
 
+  async function pauseForImplementationEvidence(explanation) {
+    await transition(
+      { ...state(), workflowState: "WAITING_FOR_USER" },
+      {
+        pause: {
+          reason: "plan_revision_required",
+          code: "ERR_STEP_IMPLEMENTATION_EVIDENCE",
+          explanation,
+          evidence: [
+            `Current step ${state().currentStep} requires a revised plan and new run.`,
+          ],
+        },
+      },
+    );
+    return false;
+  }
+
+  async function ensureImplementationEvidence() {
+    const current = state();
+    const initial =
+      current.workflowState === "IMPLEMENT" &&
+      current.implementationDirection === null;
+    const evidence =
+      current.stepImplementation ??
+      (current.implementationEvidenceLegacy
+        ? recoveredStepImplementation
+        : initial && currentRun.activeTurn === null
+          ? implementationEvidence(current)
+          : null);
+    if (evidence === null || (!initial && !evidence.accepted))
+      return pauseForImplementationEvidence(
+        "The original step-start content evidence cannot be reconstructed safely. Revise the plan and start a new run.",
+      );
+    if (current.stepImplementation === null)
+      await transition({
+        ...current,
+        stepImplementation: evidence,
+        implementationEvidenceLegacy: false,
+      });
+    return true;
+  }
+
   async function runImplementationTurn() {
     const current = state();
     const correction = current.implementationDirection !== null;
@@ -3377,6 +3873,16 @@ ${step.body}${
       });
       return false;
     }
+    const evidence = state().stepImplementation;
+    if (
+      !correction &&
+      !evidence.accepted &&
+      (await contentFingerprint()) === evidence.contentFingerprint
+    ) {
+      return pauseForImplementationEvidence(
+        "Initial implementation left the step content unchanged. Revise the plan and start a new run.",
+      );
+    }
     const nextCounters = correction
       ? { ...counters(), fixRounds: counters().fixRounds + 1 }
       : counters();
@@ -3384,6 +3890,7 @@ ${step.body}${
       {
         ...state(),
         workflowState: candidateCheckpoint(state().settings),
+        stepImplementation: { ...evidence, accepted: true },
         implementationDirection: null,
         ...clearedCandidateAndTerminalGate(),
         lazyCorrections: [],
@@ -3747,6 +4254,19 @@ ${
           snapshot: state().trustedValidation,
         });
       } catch (cause) {
+        if (cause?.code === "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE") {
+          await pause("environment_blocked", {
+            code: cause.code,
+            explanation:
+              "Trusted execution storage cleanup requires verified ownership before retry.",
+            evidence: [
+              "Storage ownership remains recorded for recovery; no new work is authorized.",
+            ],
+            resumeState: "FINALIZE",
+          });
+          return false;
+        }
+
         if (
           ![
             "ERR_TRUSTED_VALIDATION_BINDING_CHANGED",
@@ -5273,10 +5793,10 @@ ${JSON.stringify(current.pendingDisputes, null, 2)}`,
     const current = state();
     const finding = current.findings.find(({ id }) => id === dispute.findingId);
     const reviewerResponse = latestDispute(dispute.findingId);
-    const output = await runRole(
-      "arbiter",
-      FINDING_ARBITRATION_SCHEMA,
-      (evidence) => `${FINDING_ARBITRATION_INSTRUCTIONS}
+    const result = await runBootstrapContract({
+      role: "arbiter",
+      schema: FINDING_ARBITRATION_SCHEMA,
+      buildPrompt: (evidence) => `${FINDING_ARBITRATION_INSTRUCTIONS}
 
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
@@ -5293,15 +5813,13 @@ ${JSON.stringify(reviewerResponse, null, 2)}
 
 Prior decisions for this finding:
 ${JSON.stringify(priorFindingDecisions([dispute.findingId]), null, 2)}`,
-      {
-        checkpoint: "arbitration",
-        recoveryContext: resolvedContext(),
-      },
-    );
-    if (output === null) {
+      checkpoint: "arbitration",
+      recoveryContext: resolvedContext(),
+      normalize: (output) => normalizeFindingArbitration(output),
+    });
+    if (result === null) {
       return false;
     }
-    const result = normalizeFindingArbitration(output);
     if (result.direction === "REQUIREMENT_AMBIGUOUS") {
       return productDecision(result.decision, "IMPLEMENT");
     }
@@ -5346,10 +5864,10 @@ ${JSON.stringify(priorFindingDecisions([dispute.findingId]), null, 2)}`,
 
   async function arbitrateStagnation() {
     const current = state();
-    const output = await runRole(
-      "arbiter",
-      STAGNATION_SCHEMA,
-      (evidence) => `${STAGNATION_INSTRUCTIONS}
+    const result = await runBootstrapContract({
+      role: "arbiter",
+      schema: STAGNATION_SCHEMA,
+      buildPrompt: (evidence) => `${STAGNATION_INSTRUCTIONS}
 
 ${PRODUCT_DECISION_INSTRUCTIONS}
 Do not modify the repository. This result cannot approve the implementation or satisfy review.
@@ -5369,15 +5887,13 @@ ${JSON.stringify(
   null,
   2,
 )}`,
-      {
-        checkpoint: "arbitration",
-        recoveryContext: resolvedContext(),
-      },
-    );
-    if (output === null) {
+      checkpoint: "arbitration",
+      recoveryContext: resolvedContext(),
+      normalize: (output) => normalizeStagnationResult(output, current),
+    });
+    if (result === null) {
       return false;
     }
-    const result = normalizeStagnationResult(output, current);
     if (result.direction === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "IMPLEMENT");
     }
@@ -5747,6 +6263,12 @@ ${JSON.stringify(
     const current = state();
     const step = planStep();
     let pendingCommit = current.pendingCommit;
+    if (
+      pendingCommit?.status !== "consumed" &&
+      (!(await ensureCheckRequirements()) ||
+        !(await ensureImplementationEvidence()))
+    )
+      return false;
 
     if (pendingCommit === null) {
       if ((await readCurrentInputs()) === null) {
@@ -5884,7 +6406,7 @@ ${JSON.stringify(
       }
       const roleConfiguration = currentRun.roles.worker;
       const executionPreferences = Object.fromEntries(
-        ["profile", "model", "contextSize"].flatMap((field) =>
+        ["profile", "model", "contextSize", "effort"].flatMap((field) =>
           typeof roleConfiguration[field] === "string" &&
           roleConfiguration[field] !== "current"
             ? [[field, roleConfiguration[field]]]
@@ -6010,8 +6532,32 @@ ${step.subject}`),
     });
     commitCheckpointSettlement = false;
     assertRun(currentRun);
+    interruptedTurn = null;
+    interruptedRepositoryReconciled = false;
     return !["WAITING_FOR_USER", "CANCELED"].includes(state().workflowState);
   }
+
+  // Read-only plan classification precedes preparation, but never consumed
+  // commit verification or operator-stop reconciliation.
+  if (!(await ensurePlanPosition())) return currentRun;
+
+  // Reconfirmation requires new provider work. Check its saved capabilities
+  // before changing journal-proven legacy recovery or active-turn evidence.
+  if (
+    !operatorStop &&
+    state().pendingCommit?.status !== "consumed" &&
+    (canRecoverLegacyConfirmation(currentRun) ||
+      (interruptedTurn !== null &&
+        !["DONE", "FAILED", "CANCELED"].includes(state().workflowState) &&
+        (state().workflowState !== "WAITING_FOR_USER" ||
+          currentRun.pause?.resumeState !== undefined))) &&
+    !(await ensureTrustedCapabilities(
+      canRecoverLegacyConfirmation(currentRun)
+        ? "CONFIRM"
+        : (currentRun.pause?.resumeState ?? state().workflowState),
+    ))
+  )
+    return currentRun;
 
   try {
     if (resumeAction === null && canRecoverLegacyConfirmation(currentRun)) {
@@ -6153,6 +6699,7 @@ ${step.subject}`),
       }
       return currentRun;
     }
+    await prepareCapabilityDiscovery();
     if (!(await recoverInterruptedTurn())) {
       return currentRun;
     }
@@ -6241,7 +6788,22 @@ ${step.subject}`),
     }
 
     while (true) {
+      if (await prepareCapabilityDiscovery()) {
+        if (!(await recoverInterruptedTurn())) return currentRun;
+        continue;
+      }
       const current = state();
+      if (
+        !["DONE", "FAILED", "WAITING_FOR_USER", "CANCELED"].includes(
+          current.workflowState,
+        ) &&
+        !(
+          current.workflowState === "COMMIT" &&
+          current.pendingCommit?.status === "consumed"
+        ) &&
+        !(await ensureTrustedCapabilities())
+      )
+        return currentRun;
 
       if (
         current.validationMigrationPending &&
@@ -6258,18 +6820,15 @@ ${step.subject}`),
       }
 
       if (current.compatibilityCheckRequired) {
-        const output = await runRole(
-          "worker",
-          PLAN_COMPATIBILITY_SCHEMA,
-          (evidence) => `${PLAN_COMPATIBILITY_INSTRUCTIONS}
-
-${evidence}`,
-          { checkpoint: "compatibility" },
-        );
-        if (output === null) {
-          return currentRun;
-        }
-        const result = normalizeCompatibilityResult(output);
+        const result = await runBootstrapContract({
+          role: "worker",
+          schema: PLAN_COMPATIBILITY_SCHEMA,
+          checkpoint: "compatibility",
+          buildPrompt: (evidence) =>
+            `${PLAN_COMPATIBILITY_INSTRUCTIONS}\n\n${evidence}`,
+          normalize: normalizeCompatibilityResult,
+        });
+        if (result === null) return currentRun;
         if (result.status === "PLAN_REVISION_REQUIRED") {
           return pauseForPlanRevision(result);
         }
@@ -6318,20 +6877,15 @@ ${evidence}`,
             return currentRun;
           }
         }
-        const output = await runRole(
-          "worker",
-          CLARIFICATION_SCHEMA,
-          (evidence) => `${CLARIFICATION_INSTRUCTIONS}
-
-${PRODUCT_DECISION_INSTRUCTIONS}
-
-${evidence}`,
-          { checkpoint: "clarification" },
-        );
-        if (output === null) {
-          return currentRun;
-        }
-        const result = normalizeClarificationResult(output);
+        const result = await runBootstrapContract({
+          role: "worker",
+          schema: CLARIFICATION_SCHEMA,
+          checkpoint: "clarification",
+          buildPrompt: (evidence) =>
+            `${CLARIFICATION_INSTRUCTIONS}\n\n${PRODUCT_DECISION_INSTRUCTIONS}\n\n${evidence}`,
+          normalize: normalizeClarificationResult,
+        });
+        if (result === null) return currentRun;
         if (result.status === "PLAN_REVISION_REQUIRED") {
           return pauseForPlanRevision(result);
         }

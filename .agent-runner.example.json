@@ -5,12 +5,14 @@
   "defaultBackend": "codex",
   "defaultProfile": "current",
   "defaultModel": "current",
+  "defaultEffort": "current",
   "defaultContextSize": "current",
   "trustedCommands": {
     "repository-check": {
       "command": "npm run check",
       "executable": "npm",
-      "arguments": ["run", "check"]
+      "arguments": ["run", "check"],
+      "capabilities": { "scratch": true, "cache": true }
     }
   },
   "profiles": {
@@ -57,7 +59,8 @@
           "backend": "claude",
           "profile": "claude-primary",
           "model": "current",
-          "contextSize": "current"
+          "contextSize": "current",
+          "effort": "current"
         },
         "arbiter": {}
       }
@@ -76,7 +79,8 @@
           "backend": "claude",
           "profile": "claude-primary",
           "model": "current",
-          "contextSize": "current"
+          "contextSize": "current",
+          "effort": "current"
         },
         "arbiter": {}
       }

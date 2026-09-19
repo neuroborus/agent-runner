@@ -1,3 +1,8 @@
+import { STEP_ASSESSMENT } from "./plan-position.js";
+import {
+  CAPABILITY_REQUIREMENTS,
+  ENVIRONMENT_BLOCKERS,
+} from "./capability-requirements.js";
 import {
   MAX_BOOTSTRAP_ITEMS,
   MAX_ITEMS,
@@ -133,6 +138,7 @@ const PRODUCT_DECISION_PROPERTIES = {
   evidence: NONEMPTY_TEXT_LIST,
 };
 const BOOTSTRAP_PROPERTIES = {
+  stepAssessment: STEP_ASSESSMENT,
   status: {
     type: "string",
     enum: [
@@ -143,6 +149,8 @@ const BOOTSTRAP_PROPERTIES = {
     ],
   },
   summary: SUMMARY,
+  capabilityRequirements: CAPABILITY_REQUIREMENTS,
+  environmentBlockers: ENVIRONMENT_BLOCKERS,
   requiredChecks: BOOTSTRAP_REQUIRED_CHECKS,
   validationInfrastructure: BOOTSTRAP_VALIDATION_INFRASTRUCTURE,
   capacityField: {
@@ -157,6 +165,7 @@ const BOOTSTRAP_PROPERTIES = {
   ...DECISION_PROPERTIES,
 };
 const RECONCILIATION_PROPERTIES = {
+  stepAssessment: STEP_ASSESSMENT,
   status: {
     type: "string",
     enum: [
@@ -172,6 +181,7 @@ const RECONCILIATION_PROPERTIES = {
   ...DECISION_PROPERTIES,
 };
 const ARBITRATION_PROPERTIES = {
+  stepAssessment: STEP_ASSESSMENT,
   direction: {
     type: "string",
     enum: [
@@ -250,6 +260,7 @@ const REVIEW_FINDING = {
 export const CLARIFICATION_SCHEMA = deepFreeze({
   type: "object",
   properties: {
+    stepAssessment: STEP_ASSESSMENT,
     status: {
       type: "string",
       enum: [
@@ -264,6 +275,7 @@ export const CLARIFICATION_SCHEMA = deepFreeze({
     ...DECISION_PROPERTIES,
   },
   required: [
+    "stepAssessment",
     "status",
     "questions",
     "reason",
@@ -278,11 +290,12 @@ export const CLARIFICATION_SCHEMA = deepFreeze({
 export const PLAN_COMPATIBILITY_SCHEMA = deepFreeze({
   type: "object",
   properties: {
+    stepAssessment: STEP_ASSESSMENT,
     status: { type: "string", enum: ["READY", "PLAN_REVISION_REQUIRED"] },
     reason: TEXT,
     evidence: TEXT_LIST,
   },
-  required: ["status", "reason", "evidence"],
+  required: ["stepAssessment", "status", "reason", "evidence"],
   additionalProperties: false,
 });
 
@@ -299,6 +312,8 @@ export const BOOTSTRAP_SCHEMA = deepFreeze(
     variant("status", ["CAPACITY_EXHAUSTED"], BOOTSTRAP_PROPERTIES, {
       summary: EMPTY_TEXT,
       requiredChecks: EMPTY_REQUIRED_CHECKS,
+      capabilityRequirements: { ...CAPABILITY_REQUIREMENTS, maxItems: 0 },
+      environmentBlockers: { ...ENVIRONMENT_BLOCKERS, maxItems: 0 },
       validationInfrastructure: EMPTY_VALIDATION_INFRASTRUCTURE,
       capacityField: {
         type: "string",
@@ -311,6 +326,8 @@ export const BOOTSTRAP_SCHEMA = deepFreeze(
     variant("status", ["PLAN_REVISION_REQUIRED"], BOOTSTRAP_PROPERTIES, {
       summary: EMPTY_TEXT,
       requiredChecks: EMPTY_REQUIRED_CHECKS,
+      capabilityRequirements: { ...CAPABILITY_REQUIREMENTS, maxItems: 0 },
+      environmentBlockers: { ...ENVIRONMENT_BLOCKERS, maxItems: 0 },
       validationInfrastructure: EMPTY_VALIDATION_INFRASTRUCTURE,
       capacityField: { type: "string", enum: [""] },
       capacityLimit: { type: "integer", enum: [0] },
@@ -323,6 +340,8 @@ export const BOOTSTRAP_SCHEMA = deepFreeze(
     variant("status", ["PRODUCT_DECISION_REQUIRED"], BOOTSTRAP_PROPERTIES, {
       summary: EMPTY_TEXT,
       requiredChecks: EMPTY_REQUIRED_CHECKS,
+      capabilityRequirements: { ...CAPABILITY_REQUIREMENTS, maxItems: 0 },
+      environmentBlockers: { ...ENVIRONMENT_BLOCKERS, maxItems: 0 },
       validationInfrastructure: EMPTY_VALIDATION_INFRASTRUCTURE,
       capacityField: { type: "string", enum: [""] },
       capacityLimit: { type: "integer", enum: [0] },
@@ -678,6 +697,7 @@ export const DISPUTE_RECONSIDERATION_SCHEMA = deepFreeze({
 export const FINDING_ARBITRATION_SCHEMA = deepFreeze({
   type: "object",
   properties: {
+    stepAssessment: STEP_ASSESSMENT,
     direction: {
       type: "string",
       enum: ["WORKER_CORRECT", "REVIEWER_CORRECT", "REQUIREMENT_AMBIGUOUS"],
@@ -686,6 +706,7 @@ export const FINDING_ARBITRATION_SCHEMA = deepFreeze({
     ...DECISION_PROPERTIES,
   },
   required: [
+    "stepAssessment",
     "direction",
     "rationale",
     "question",
@@ -699,6 +720,7 @@ export const FINDING_ARBITRATION_SCHEMA = deepFreeze({
 export const STAGNATION_SCHEMA = deepFreeze({
   type: "object",
   properties: {
+    stepAssessment: STEP_ASSESSMENT,
     direction: {
       type: "string",
       enum: [
@@ -715,6 +737,7 @@ export const STAGNATION_SCHEMA = deepFreeze({
     ...DECISION_PROPERTIES,
   },
   required: [
+    "stepAssessment",
     "direction",
     "rationale",
     "findingIds",
@@ -726,3 +749,7 @@ export const STAGNATION_SCHEMA = deepFreeze({
   ],
   additionalProperties: false,
 });
+
+export const PLAN_CONTEXT_SCHEMA = deepFreeze(
+  strictObject({ stepAssessment: STEP_ASSESSMENT }),
+);

@@ -156,6 +156,7 @@ const RESUMABLE_WORKFLOW_STATES = new Set([
   "REVIEW",
   "RESOLVE_FINDINGS",
   "CONFIRM",
+  "HANDOFF",
 ]);
 const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   bootstrap_disagreement:
@@ -978,9 +979,26 @@ export function migratePolishingStateV12(run) {
   });
 }
 
+export function migratePolishingStateV13(run) {
+  // Keep historical gate proof intact until live discovery or handoff recovery.
+  const provisional = (value) =>
+    value === null
+      ? null
+      : Object.freeze({
+          ...value,
+          capabilityRequirements: value.capabilityRequirements ?? null,
+          environmentBlockers: value.environmentBlockers ?? null,
+        });
+  return Object.freeze({
+    ...run.pipelineState,
+    workerValidation: provisional(run.pipelineState.workerValidation),
+    reviewerValidation: provisional(run.pipelineState.reviewerValidation),
+  });
+}
+
 export const polishingPipeline = Object.freeze({
   id: POLISHING_PIPELINE_ID,
-  stateVersion: 13,
+  stateVersion: 14,
   migrations: Object.freeze({
     1: migratePolishingStateV1,
     2: migratePolishingStateV2,
@@ -994,6 +1012,7 @@ export const polishingPipeline = Object.freeze({
     10: migratePolishingStateV10,
     11: migratePolishingStateV11,
     12: migratePolishingStateV12,
+    13: migratePolishingStateV13,
   }),
   roles: ROLES,
   resolveActiveRoles,

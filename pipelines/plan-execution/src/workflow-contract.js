@@ -7,6 +7,12 @@ import {
   serializeCommitPlan,
 } from "@agent-runner/commit-plan";
 
+import { validImplementationEvidence } from "./implementation-evidence.js";
+import { validStepAssessment } from "./plan-position.js";
+import {
+  validCapabilityReports,
+  freezeReport,
+} from "./capability-requirements.js";
 import {
   candidateGatePassed,
   commitGatePassed,
@@ -40,6 +46,9 @@ export const WORKFLOW_STATES = Object.freeze([
 
 const PIPELINE_STATE_FIELDS = new Set([
   "workflowState",
+  "planContextVersion",
+  "stepImplementation",
+  "implementationEvidenceLegacy",
   "artifactRoot",
   "preflightComplete",
   "settings",
@@ -208,6 +217,9 @@ const CANDIDATE_REVIEW_RESULT_FIELDS = Object.freeze([
   "evidence",
 ]);
 const BOOTSTRAP_RESULT_FIELDS = Object.freeze([
+  "stepAssessment",
+  "capabilityRequirements",
+  "environmentBlockers",
   "status",
   "summary",
   "requiredChecks",
@@ -221,6 +233,7 @@ const BOOTSTRAP_RESULT_FIELDS = Object.freeze([
   "evidence",
 ]);
 const RECONCILIATION_RESULT_FIELDS = Object.freeze([
+  "stepAssessment",
   "status",
   "summary",
   "disagreement",
@@ -231,6 +244,7 @@ const RECONCILIATION_RESULT_FIELDS = Object.freeze([
   "evidence",
 ]);
 const ARBITRATION_RESULT_FIELDS = Object.freeze([
+  "stepAssessment",
   "direction",
   "summary",
   "rationale",
@@ -338,11 +352,16 @@ const PAUSE_RESUME_STATES = Object.freeze({
   ]),
   commit_failed: Object.freeze(["COMMIT"]),
   environment_blocked: Object.freeze([
+    "CLARIFY",
+    "BOOTSTRAP",
     "IMPLEMENT",
     "FINALIZE",
     "CHECK_AND_FIX",
+    "CLEAN_CONFIRM",
     "REVIEW",
     "RESOLVE_FINDINGS",
+    "CONFIRM",
+    "COMMIT",
   ]),
   confirmation_output_invalid: Object.freeze(["CONFIRM"]),
   finalization_cannot_pass: Object.freeze(["FINALIZE"]),
@@ -424,6 +443,79 @@ export function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function capabilityError() {
+  return workflowError("Trusted execution capabilities are invalid.");
+}
+
+function normalizeCapabilities(value) {
+  if (
+    !isRecord(value) ||
+    Object.keys(value).some(
+      (key) => !["scratch", "cache", "artifacts"].includes(key),
+    )
+  ) {
+    throw capabilityError();
+  }
+  const normalized = {};
+  for (const key of ["scratch", "cache"]) {
+    if (Object.hasOwn(value, key)) {
+      if (value[key] !== true) throw capabilityError();
+      normalized[key] = true;
+    }
+  }
+  if (Object.hasOwn(value, "artifacts")) {
+    if (
+      !Array.isArray(value.artifacts) ||
+      value.artifacts.length === 0 ||
+      value.artifacts.length > 32
+    )
+      throw capabilityError();
+    normalized.artifacts = Object.freeze(
+      value.artifacts.map((artifact) => {
+        if (
+          !isRecord(artifact) ||
+          Object.keys(artifact).length !== 2 ||
+          !Object.hasOwn(artifact, "url") ||
+          !Object.hasOwn(artifact, "sha256") ||
+          typeof artifact.url !== "string" ||
+          artifact.url.length > 4000 ||
+          typeof artifact.sha256 !== "string" ||
+          !/^[a-f0-9]{64}$/u.test(artifact.sha256)
+        )
+          throw capabilityError();
+        let url;
+        try {
+          url = new URL(artifact.url);
+        } catch {
+          throw capabilityError();
+        }
+        // DNS and connection enforcement belong to acquisition, never the check.
+        if (
+          url.protocol !== "https:" ||
+          url.username ||
+          url.password ||
+          artifact.url.includes("#") ||
+          url.port ||
+          url.href !== artifact.url ||
+          !/^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/u.test(url.hostname) ||
+          /(?:^|\.)(?:localhost|local|internal|test|invalid)$/u.test(
+            url.hostname,
+          ) ||
+          /^[0-9.]+$/u.test(url.hostname)
+        )
+          throw capabilityError();
+        return Object.freeze({ url: url.href, sha256: artifact.sha256 });
+      }),
+    );
+    if (
+      new Set(normalized.artifacts.map(({ url }) => url)).size !==
+      normalized.artifacts.length
+    )
+      throw capabilityError();
+  }
+  return Object.freeze(normalized);
+}
+
 function trustedCommandIdentity(command) {
   return sha256(
     JSON.stringify({
@@ -431,24 +523,34 @@ function trustedCommandIdentity(command) {
       command: command.command,
       executable: command.executable,
       arguments: command.arguments,
+      ...(command.capabilities === undefined
+        ? {}
+        : { capabilities: command.capabilities }),
     }),
   );
 }
 
-function trustedValidationFingerprints(commands) {
+function trustedValidationFingerprints(commands, schemaVersion = 1) {
   return Object.freeze({
     commandFingerprint: sha256(
       JSON.stringify(commands.map(({ identity }) => identity)),
     ),
     configurationFingerprint: sha256(
       JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion,
         commands: commands.map(
-          ({ alias, command, executable, arguments: argumentsList }) => ({
+          ({
             alias,
             command,
             executable,
             arguments: argumentsList,
+            capabilities,
+          }) => ({
+            alias,
+            command,
+            executable,
+            arguments: argumentsList,
+            ...(capabilities === undefined ? {} : { capabilities }),
           }),
         ),
       }),
@@ -459,13 +561,17 @@ function trustedValidationFingerprints(commands) {
 function normalizeExactVectorText(
   value,
   name,
-  { allowEmpty = false, requireTrimmed = false } = {},
+  { allowEmpty = false, allowLineFeeds = false, requireTrimmed = false } = {},
 ) {
+  const inspected =
+    allowLineFeeds && typeof value === "string"
+      ? value.replaceAll("\n", "")
+      : value;
   if (
     typeof value !== "string" ||
     (!allowEmpty && value.length === 0) ||
     characterLength(value) > MAX_TEXT_LENGTH ||
-    /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(value) ||
+    /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(inspected) ||
     (requireTrimmed && value.trim() !== value)
   ) {
     throw workflowError(`${name} is invalid.`);
@@ -477,7 +583,7 @@ function normalizeTrustedValidation(value) {
   if (
     !isRecord(value) ||
     !hasExactFields(value, TRUSTED_VALIDATION_FIELDS) ||
-    value.schemaVersion !== 1 ||
+    ![1, 2].includes(value.schemaVersion) ||
     !Array.isArray(value.commands) ||
     value.commands.length > MAX_ITEMS ||
     !HASH_PATTERN.test(value.commandFingerprint) ||
@@ -485,11 +591,15 @@ function normalizeTrustedValidation(value) {
   ) {
     throw workflowError("Plan-execution trusted validation is invalid.");
   }
+  const commandFields = [
+    ...TRUSTED_COMMAND_FIELDS,
+    ...(value.schemaVersion === 2 ? ["capabilities"] : []),
+  ];
   const commands = Object.freeze(
     value.commands.map((command, index) => {
       if (
         !isRecord(command) ||
-        !hasExactFields(command, TRUSTED_COMMAND_FIELDS) ||
+        !hasExactFields(command, commandFields) ||
         !TRUSTED_ALIAS_PATTERN.test(command.alias) ||
         !Array.isArray(command.arguments) ||
         command.arguments.length > 64 ||
@@ -516,10 +626,13 @@ function normalizeTrustedValidation(value) {
             normalizeExactVectorText(
               argument,
               `trusted command ${command.alias} argument`,
-              { allowEmpty: true },
+              { allowEmpty: true, allowLineFeeds: true },
             ),
           ),
         ),
+        ...(value.schemaVersion === 2
+          ? { capabilities: normalizeCapabilities(command.capabilities) }
+          : {}),
         identity: command.identity,
       });
       if (trustedCommandIdentity(normalized) !== command.identity) {
@@ -537,7 +650,10 @@ function normalizeTrustedValidation(value) {
   ) {
     throw workflowError("Plan-execution trusted commands must be unique.");
   }
-  const fingerprints = trustedValidationFingerprints(commands);
+  const fingerprints = trustedValidationFingerprints(
+    commands,
+    value.schemaVersion,
+  );
   if (
     value.commandFingerprint !== fingerprints.commandFingerprint ||
     value.configurationFingerprint !== fingerprints.configurationFingerprint
@@ -546,7 +662,11 @@ function normalizeTrustedValidation(value) {
       "Plan-execution trusted validation fingerprint is invalid.",
     );
   }
-  return Object.freeze({ schemaVersion: 1, commands, ...fingerprints });
+  return Object.freeze({
+    schemaVersion: value.schemaVersion,
+    commands,
+    ...fingerprints,
+  });
 }
 
 export const EMPTY_TRUSTED_VALIDATION = Object.freeze(
@@ -828,7 +948,16 @@ function normalizePlanRevision(payload, discriminator = "status") {
   });
 }
 
+export function assertStepAssessment(value) {
+  if (!validStepAssessment(value))
+    throw outputError(
+      "Invalid runner-step assessment.",
+      outputConstraint("stepAssessment", "bounded-step-assessment"),
+    );
+}
+
 export function normalizeClarificationResult(payload) {
+  assertStepAssessment(payload?.stepAssessment);
   const statuses = [
     "READY",
     "QUESTIONS",
@@ -894,6 +1023,7 @@ export function normalizeClarificationResult(payload) {
 }
 
 export function normalizeCompatibilityResult(payload) {
+  assertStepAssessment(payload?.stepAssessment);
   if (
     !isRecord(payload) ||
     !["READY", "PLAN_REVISION_REQUIRED"].includes(payload.status)
@@ -922,6 +1052,7 @@ export function normalizeCompatibilityResult(payload) {
 }
 
 export function normalizeBootstrapResultCandidate(payload, role) {
+  assertStepAssessment(payload?.stepAssessment);
   const statuses = [
     "READY",
     "CAPACITY_EXHAUSTED",
@@ -939,6 +1070,16 @@ export function normalizeBootstrapResultCandidate(payload, role) {
     outputConstraint("result", "maximum-256-kibibytes"),
   );
   assertExactOutputFields(payload, BOOTSTRAP_RESULT_FIELDS);
+  if (
+    payload.status !== "READY" &&
+    (!emptyArray(payload.capabilityRequirements) ||
+      !emptyArray(payload.environmentBlockers))
+  ) {
+    throw outputError(
+      "Inactive capability reports must be empty.",
+      outputConstraint("capabilityRequirements", "status-field-consistency"),
+    );
+  }
   if (payload.status === "CAPACITY_EXHAUSTED") {
     if (
       payload.summary !== "" ||
@@ -1018,6 +1159,15 @@ export function normalizeBootstrapResultCandidate(payload, role) {
     INVALID_OUTPUT_CODE,
     { maxItems: MAX_BOOTSTRAP_ITEMS },
   );
+  if (!validCapabilityReports(payload, requiredChecks)) {
+    throw outputError(
+      "Capability reports must be bounded and name exact inventory commands.",
+      outputConstraint(
+        "capabilityRequirements",
+        "exact-command-capability-reports",
+      ),
+    );
+  }
   const diagnostics = stagingDependentCheckDiagnostics(requiredChecks);
   return Object.freeze({
     result: Object.freeze({
@@ -1029,6 +1179,12 @@ export function normalizeBootstrapResultCandidate(payload, role) {
         outputConstraint("summary", "concise-markdown-up-to-20000-characters"),
       ),
       requiredChecks,
+      capabilityRequirements: freezeReport(
+        structuredClone(payload.capabilityRequirements),
+      ),
+      environmentBlockers: freezeReport(
+        structuredClone(payload.environmentBlockers),
+      ),
       validationInfrastructure: normalizeValidationInfrastructure(
         payload.validationInfrastructure,
         INVALID_OUTPUT_CODE,
@@ -1055,6 +1211,7 @@ export function normalizeBootstrapResult(payload, role) {
 }
 
 export function normalizeReconciliationResult(payload) {
+  assertStepAssessment(payload?.stepAssessment);
   const statuses = [
     "RESOLVED",
     "DISAGREEMENT",
@@ -1153,6 +1310,7 @@ export function normalizeReconciliationResult(payload) {
 }
 
 export function normalizeBootstrapArbitration(payload) {
+  assertStepAssessment(payload?.stepAssessment);
   const directions = [
     "USE_WORKER",
     "USE_REVIEWER",
@@ -2525,6 +2683,7 @@ export function normalizeReconsiderationResult(payload, disputes) {
 }
 
 export function normalizeFindingArbitration(payload) {
+  assertStepAssessment(payload?.stepAssessment);
   const directions = [
     "WORKER_CORRECT",
     "REVIEWER_CORRECT",
@@ -2554,6 +2713,7 @@ export function normalizeFindingArbitration(payload) {
 }
 
 export function normalizeStagnationResult(payload, pipelineState) {
+  assertStepAssessment(payload?.stepAssessment);
   const directions = [
     "CONTINUE_FIXES",
     "REWORK_IMPLEMENTATION",
@@ -2731,6 +2891,10 @@ function normalizeBootstrapCorrection(correction) {
       throw workflowError("Plan-execution bootstrap correction is invalid.");
     }
     const validContext =
+      (["finding-arbitration", "stagnation"].includes(diagnostic.contract) &&
+        diagnostic.role === "arbiter") ||
+      (["clarification", "compatibility"].includes(diagnostic.contract) &&
+        diagnostic.role === "worker") ||
       (diagnostic.contract === "bootstrap" &&
         ["worker", "reviewer"].includes(diagnostic.role)) ||
       (diagnostic.contract === "bootstrap-reconciliation" &&
@@ -2739,8 +2903,17 @@ function normalizeBootstrapCorrection(correction) {
         diagnostic.role === "arbiter");
     const currentContext = `${diagnostic.role}\0${diagnostic.phase}\0${diagnostic.contract}`;
     const identity = `${diagnostic.field}\0${diagnostic.constraint}`;
+    const validPhase = ["bootstrap", "validation-migration"].includes(
+      diagnostic.phase,
+    )
+      ? [
+          "bootstrap",
+          "bootstrap-reconciliation",
+          "bootstrap-arbitration",
+        ].includes(diagnostic.contract)
+      : diagnostic.phase === diagnostic.contract;
     if (
-      !["bootstrap", "validation-migration"].includes(diagnostic.phase) ||
+      !validPhase ||
       !validContext ||
       (context !== undefined && context !== currentContext) ||
       identities.has(identity)
@@ -3195,7 +3368,12 @@ function normalizePersistedValidation(value, name) {
   }
   assertExactFields(
     value,
-    ["requiredChecks", "validationInfrastructure"],
+    [
+      "requiredChecks",
+      "validationInfrastructure",
+      "capabilityRequirements",
+      "environmentBlockers",
+    ],
     name,
   );
   normalizeRequiredChecks(
@@ -3208,6 +3386,14 @@ function normalizePersistedValidation(value, name) {
     "ERR_INVALID_PLAN_EXECUTION_STATE",
     { maxItems: MAX_BOOTSTRAP_ITEMS },
   );
+  if (
+    !(
+      value.capabilityRequirements === null &&
+      value.environmentBlockers === null
+    ) &&
+    !validCapabilityReports(value, value.requiredChecks)
+  )
+    throw workflowError("Persisted capability reports are invalid.");
   return value;
 }
 
@@ -3540,6 +3726,15 @@ export function normalizePipelineState(value) {
   ) {
     throw workflowError("Plan-execution artifact root is invalid.");
   }
+  if (
+    typeof value.implementationEvidenceLegacy !== "boolean" ||
+    (value.stepImplementation !== null &&
+      (!validImplementationEvidence(value.stepImplementation, value) ||
+        value.implementationEvidenceLegacy))
+  )
+    throw workflowError("Invalid step implementation evidence.");
+  if (![0, 1].includes(value.planContextVersion))
+    throw workflowError("Invalid plan context version.");
   for (const field of [
     "preflightComplete",
     "proactiveClarification",
@@ -3894,7 +4089,12 @@ export function normalizePipelineState(value) {
         ? workerSummary !== null ||
           reviewerSummary !== null ||
           resolvedSummary !== null
-        : resolvedSummary === null))
+        : resolvedSummary === null &&
+          !(
+            ["WAITING_FOR_USER", "FAILED", "CANCELED"].includes(
+              value.workflowState,
+            ) && value.currentStep === 1
+          )))
   ) {
     throw workflowError("Plan-execution compatibility state is invalid.");
   }
@@ -3903,6 +4103,21 @@ export function normalizePipelineState(value) {
     (!Number.isSafeInteger(value.currentStep) || value.currentStep < 1)
   ) {
     throw workflowError("Plan-execution current step is invalid.");
+  }
+  if (
+    value.currentStep !== null &&
+    resolvedSummary === null &&
+    !(
+      value.preflightComplete &&
+      ["WAITING_FOR_USER", "FAILED", "CANCELED"].includes(
+        value.workflowState,
+      ) &&
+      value.currentStep === 1
+    )
+  ) {
+    throw workflowError(
+      "An unresolved bootstrap may retain only paused step one.",
+    );
   }
   const finalizationCorrectionScope = finalizationCorrections[0] ?? null;
   if (
@@ -4651,6 +4866,9 @@ export function createPlanExecutionState({
       workflowState: "CLARIFY",
       artifactRoot,
       preflightComplete: false,
+      planContextVersion: 1,
+      stepImplementation: null,
+      implementationEvidenceLegacy: false,
       settings:
         settings === null
           ? null
@@ -4807,7 +5025,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 17 ||
+    run.pipelineStateVersion !== 20 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -4834,7 +5052,9 @@ export function assertRun(run) {
       !isRecord(run.roles[role]) ||
       Object.keys(run.roles[role]).some(
         (field) =>
-          !["backend", "profile", "model", "contextSize"].includes(field),
+          !["backend", "profile", "model", "contextSize", "effort"].includes(
+            field,
+          ),
       ) ||
       typeof run.roles[role].backend !== "string" ||
       run.roles[role].backend.length === 0 ||
@@ -4842,6 +5062,10 @@ export function assertRun(run) {
         run.roles[role].model !== null &&
         (typeof run.roles[role].model !== "string" ||
           run.roles[role].model.length === 0)) ||
+      (run.roles[role].effort !== undefined &&
+        !["current", "low", "medium", "high", "xhigh"].includes(
+          run.roles[role].effort,
+        )) ||
       ["profile", "contextSize"].some(
         (field) =>
           run.roles[role][field] !== undefined &&
@@ -5076,13 +5300,22 @@ export function assertRun(run) {
       state.pendingCommit === null &&
       run.pause.reason === "commit_failed" &&
       run.pause.resumeState === "COMMIT";
+    const preparedCapabilityPause =
+      state.pendingCommit?.status === "prepared" &&
+      run.pause.reason === "environment_blocked" &&
+      run.pause.resumeState === "COMMIT" &&
+      [
+        "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE",
+        "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE",
+      ].includes(run.pause.code);
     if (
       (state.pendingCommit !== null ||
         ["commit_failed", "commit_contract_violated"].includes(
           run.pause.reason,
         )) &&
       !consumedCommitPause &&
-      !retiredCommitPause
+      !retiredCommitPause &&
+      !preparedCapabilityPause
     ) {
       throw workflowError("Plan-execution pending commit pause is invalid.");
     }
@@ -5260,7 +5493,8 @@ export function assertRuntime(runtime, activeRoles = resolveActiveRoles()) {
     !isRecord(runtime.clarifications) ||
     !isRecord(runtime.git) ||
     !isRecord(runtime.trustedValidation) ||
-    typeof runtime.trustedValidation.execute !== "function"
+    typeof runtime.trustedValidation.execute !== "function" ||
+    typeof runtime.trustedValidation.preflight !== "function"
   ) {
     throw workflowError("Plan-execution runtime is invalid.");
   }
@@ -5289,6 +5523,7 @@ export function assertRuntime(runtime, activeRoles = resolveActiveRoles()) {
     "assertUnchanged",
     "consumeCommit",
     "contentFingerprint",
+    "inspectHead",
     "inspectPath",
     "preflight",
     "prepareCommit",

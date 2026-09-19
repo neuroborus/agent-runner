@@ -1,4 +1,7 @@
-export { createLegacyRecoveryFixture } from "./legacy-recovery.js";
+export {
+  createLegacyRecoveryFixture,
+  removeUnchangedEvents,
+} from "./legacy-recovery.js";
 export {
   MISSING_BOOTSTRAP_RESPONSE,
   PLAN,

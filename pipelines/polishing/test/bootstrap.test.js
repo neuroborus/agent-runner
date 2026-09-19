@@ -33,6 +33,28 @@ import {
   reviewApproved,
 } from "./support/index.js";
 
+test("carries saved effort through role turns and omits current", async (t) => {
+  for (const effort of ["current", "xhigh"]) {
+    const fixture = await createFixture(t);
+    fixture.currentRun.roles.worker.effort = effort;
+    fixture.currentRun.roles.reviewer.effort = "medium";
+    const result = await fixture.run();
+    assert.equal(result.pipelineState.workflowState, "DONE");
+    assert.ok(fixture.calls.worker.length > 0);
+    assert.ok(fixture.calls.reviewer.length > 0);
+    for (const request of fixture.calls.worker) {
+      assert.equal(request.effort, effort === "current" ? undefined : effort);
+    }
+    assert.ok(
+      fixture.calls.reviewer.every(({ effort }) => effort === "medium"),
+    );
+    assert.doesNotMatch(
+      JSON.stringify(polishingPipeline.projections.status(result)),
+      /effort|xhigh|medium/u,
+    );
+  }
+});
+
 test("derives one stable complete inventory from independent role evidence", async (t) => {
   const workerPath = "validation/worker.js";
   const reviewerPath = "validation/reviewer.js";

@@ -23,6 +23,17 @@ pipeline settings, and an artifact root, but cannot add provider binaries,
 credentials, environment values, or new host authority. CLI and MCP overrides
 have the documented highest precedence.
 
+Both configuration layers accept portable `defaultEffort` and role `effort`
+values: `current`, `low`, `medium`, `high`, and `xhigh`. Effort stays separate
+from model selection and follows shared execution-preference precedence through
+CLI/MCP overrides. CLI `--effort` and MCP `run_start.effort` select run-wide
+effort; `--<role>-effort` and `roleOverrides.<role>.effort` win for one role.
+Start retries must retain both values under the same idempotency key; detached
+execution reuses the saved selection. Inactive role vocabulary is validated
+without
+resolving or exposing those roles. Legacy runs receive `current` without
+provider activity; public status and activity never expose saved role effort.
+
 Resolved active roles, settings, artifact root, trusted commands, and optional
 source-session lineage are frozen into a new run. Resume uses that snapshot and
 does not silently adopt later configuration changes. `independent` is the
@@ -30,11 +41,36 @@ default mode; choosing `lazy` or `combined` is always an explicit
 operator decision. Combined adds primary convergence before independent review.
 All three descriptors expose these modes through CLI/MCP discovery. Resume preserves the saved mode, approvals, and budgets.
 
+Plan execution and polishing save exact-command capability needs and blocker evidence from
+bootstrap and legacy read-only discovery. If the runner cannot satisfy them, it
+pauses as `environment_blocked` before writable work. Repairing storage,
+isolation, or dependency availability permits retry of that saved request;
+changing selection or declarations requires a new run. Availability is checked
+again at every writable entry, even within one invocation. Agents cannot grant
+capabilities by reporting a need. An agent's sandbox limitation for an exactly
+delegated check is resolved only when runner inspection succeeds. Required checks
+remain exclusive to finalization, and consumed commit and completed handoff verification precede new
+preparation effects.
+
+Execution pauses as `plan_revision_required` when runner-observed HEAD already
+contains the current planned subject or moved outside verified commit settlement.
+The operator must revise the plan and start a new run; external commits are never
+adopted into progress. A reported first-step position can precede completed
+bootstrap. Completed runner-owned effects retain verification-only recovery.
+
 Plan authoring's `preferredCommitLineLimit` is a positive-integer planning
 target, default 900, configured through runner settings or the safe project
 overlay. It is persisted for the run; legacy runs receive 900 without adopting
 current configuration. CLI pipeline listing and MCP pipeline metadata expose
 the descriptor-owned default. It does not restrict execution diff size.
+
+Pinned dependency declarations freeze canonical public HTTPS URLs and SHA-256
+digests alongside command vectors. During finalization, the runner downloads
+verified files into private storage and exposes a fixed read-only dependency
+mount to the network-isolated check. Acquisition failures pause for environment
+repair; resume cleans prior resources and retries the saved declarations. Changing
+a URL or digest requires a new run. Checks perform any extraction in declared
+scratch; the runner does not install host tools.
 
 ## CLI and MCP control
 

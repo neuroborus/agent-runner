@@ -249,6 +249,20 @@ constructs a combined approval from a historical single gate. Journal-proven
 confirmation recovery requires both primary and independent candidate edges for
 combined mode, followed by finalization and terminal confirmation provenance.
 
+State version 18 adds `capabilityRequirements` and `environmentBlockers` to
+accepted role validation inventories. Legacy active runs lacking discovery must
+repeat read-only validation migration before writable work; lazy migration uses
+only Worker. Null report fields mark provisional legacy evidence, never an empty
+successful discovery. Passive migration preserves historical journal proof; live
+resume invalidates provisional gates before discovery. Completed/failed historical
+states remain inert except for already supported journal-proven recovery. A consumed
+commit keeps its exact gate and authorization for verification first; discovery
+continues only if settlement leaves more work. Migration preserves frozen
+configuration, completed commits, and correction budgets.
+Discovery does not authorize leaving a safety pause. Interrupted correction
+edits are reconciled and charged before new writable work, without recounting
+them on a later resume.
+
 An independent or combined run may seed Worker and Reviewer from one existing session only
 when both use its backend. A lazy run applies that requirement only to its
 active Worker:
@@ -316,8 +330,8 @@ and owns active-role selection. Independent and combined modes activate all thre
 Arbiter still probed on demand; lazy mode activates only the Worker.
 Role objects under `pipelines.plan-execution.roles` in the runner's
 `.agent-runner.json` or its safe project overlay may provide optional string
-`backend`, trusted `profile`, backend-specific `model`, and decimal
-`contextSize` selections. Project profile selections reference aliases defined
+`backend`, trusted `profile`, backend-specific `model`, decimal
+`contextSize`, and portable `effort` selections. Project profile selections reference aliases defined
 by runner-root configuration; the project cannot define profile implementations,
 credentials, provider binaries, or environment values. Role-specific CLI/MCP
 values take precedence over run-wide values, project values, runner values, and
@@ -326,6 +340,21 @@ its backend; conflicting explicit backend selection is invalid. `current`
 omits the corresponding native override and uses the effective source-session,
 process, profile, or backend default. Do not hard-code model names into
 workflow logic.
+
+Effort accepts only `current|low|medium|high|xhigh`, independently of model IDs.
+The shared root resolver applies role override → run override → project role →
+project `defaultEffort` → runner role → runner `defaultEffort` → `current`.
+CLI `--effort` and descriptor-derived `--<role>-effort` map to MCP
+`run_start.effort` and `roleOverrides.<role>.effort` through the same runner
+contract. Both reject values outside the portable enum before dispatch; MCP
+intents bind the selections and detached continuations reuse saved effort.
+Validate all configured vocabulary, but resolve and persist only active roles;
+native translation stays in provider adapters. Every role turn carries saved explicit
+effort, including recovery and commit readiness; `current` omits the request override.
+Common envelope version 8 requires saved active-role effort. Legacy missing
+values migrate to `current` under the run lease without provider activity,
+configuration reload, or changes to progress and session evidence. Public
+status and activity omit these provider-private values.
 
 The descriptor also owns the positive-integer settings and built-in defaults
 listed under [Retry Limits and No-Progress Detection](#14-retry-limits-and-no-progress-detection),
@@ -370,6 +399,65 @@ the root persists every resolved vector and alias, deterministic command
 identities, an ordered command fingerprint, and a trusted-configuration
 fingerprint. Resume uses that durable snapshot without reloading configuration;
 later project configuration edits trigger the existing protected-input guard.
+
+Trusted declarations also accept the closed `capabilities` object described in
+the architecture: `scratch: true`, `cache: true`, and bounded pinned HTTPS
+`artifacts`. Root and project normalization are identical. New snapshots use
+version 2 and include normalized capabilities in identities and fingerprints;
+version-1 snapshots retain their exact restricted policy and evidence bindings.
+Migration never upgrades authority or reloads declarations.
+
+Bootstrap and validation migration report bounded exact-command needs alongside
+each active role's inventory. `capabilityRequirements` permits 256 reports per
+role: `command`, nullable frozen `commandIdentity`, `capabilities` with boolean
+`scratch`/`cache` and up to 32 exact `{url, sha256}` artifacts, and `unsupported`
+with up to 16 unique lowercase capability identifiers. `environmentBlockers`
+permits 256 reports per role: `command`, `source` (`agent-sandbox` or `runner`),
+and 1–8 bounded single-line evidence strings. Every command must occur in that
+role's exact inventory; existing structured-result byte bounds also apply.
+Non-READY outcomes carry empty report arrays. Malformed fields, parameters, or
+references use the existing bounded read-only bootstrap correction path.
+
+Accepted reports are persisted before inspection. Requirements from Worker and
+Reviewer remain additive regardless of which reconciliation or arbitration
+summary is selected. Reports describe needs; only the frozen runner declarations
+grant authority. Before IMPLEMENT, CHECK_AND_FIX, writable RESOLVE_FINDINGS,
+FINALIZE, and unconsumed COMMIT, the root capability matches those reports and
+selected declarations against the saved inventory and inspects actual runner
+availability. This gate runs on every writable entry and retry independently of
+once-per-invocation preflight. It prepares only runner-owned availability probes,
+not required checks or check attestations. Dependencies are verified during
+preparation and acquired and verified again for finalization.
+
+Missing selection, insufficient authority, unsupported needs, and unavailable
+resources pause as `environment_blocked` with bounded runner-derived evidence
+and the same resume checkpoint, before a writable provider invocation. The saved
+reports and snapshot survive resume; environment repair may retry, while changed
+declarations require a new run. An agent-sandbox report for an exactly delegated
+command is satisfied when root inspection succeeds; a report for another command
+still blocks. Agent evidence never overrides the root's availability decision.
+Required checks execute exclusively during FINALIZE.
+
+Unavailable frozen capabilities produce a durable `environment_blocked` pause
+before provider work. An early creation pause has `preflightComplete: false`,
+null baseline, backend versions, clarification path, and canonical plan, empty
+hashes, and no `resumeState`; null-action resume retries the saved request before
+ordinary `CLARIFY` preflight. Later pauses preserve their current checkpoint.
+This inspection neither executes nor attests checks. Scratch/cache requests use
+isolated transient storage; artifact requests use bounded runner-owned acquisition and read-only mounts.
+Acquisition availability is checked at writable entry and again when preparing
+finalization execution; the earlier declaration preflight inspects storage and
+isolation without downloading dependencies. A consumed COMMIT is
+verified first, preserving its authorized progress before capabilities are
+checked for subsequent work. If an authorization is prepared but unconsumed,
+an unavailable trusted capability or isolation boundary preserves it in an
+`environment_blocked` pause targeting `COMMIT`. Retry rechecks capabilities
+before consuming that same authorization; it does not advance commit progress.
+An interrupted safety pause without a resume checkpoint retains its original
+reason; capability inspection cannot replace it with an environment retry.
+Status and immutable terminal reads do not probe
+capabilities. Environment repair permits retry; changed declarations require a
+new run and cannot justify weakening validation.
 
 Codex and Claude do **not** both need to be installed for every run. Independent
 mode preflight validates the selected Worker and Reviewer; the Arbiter backend
@@ -810,6 +898,7 @@ A request should contain only runner-level concepts such as:
   access: "read-only" | "workspace-write" | "local-commit",
   prompt,
   recoveryPrompt, // optional; defaults to prompt
+  effort: "current" | "low" | "medium" | "high" | "xhigh", // optional
   schema,
   session: { mode: "fork" | "continue", id }, // optional
   authorizationId, // local-commit only
@@ -818,6 +907,16 @@ A request should contain only runner-level concepts such as:
 ```
 
 Backend-specific CLI flags belong only inside the adapter.
+
+Adapter effort is independent of the model identifier. Missing effort or
+`current` omits the native override. Codex uses its reasoning-effort control;
+Claude maps `xhigh` to its advertised native `max` tier through `--effort`.
+Explicit selections require native support, preserve every session/recovery
+and commit-readiness path, and use discoverable model capabilities before a
+turn. Unsupported selections and provider-only effort/model rejections return
+non-recoverable `ERR_UNSUPPORTED_EFFORT` / `effort_unsupported` without native
+diagnostics, downgrade, or availability retry. A rejected readiness turn keeps
+the commit executor unstarted. See the provider model for the shared contract.
 
 `probe()` validates installed CLI features and enforceable local isolation. It
 does not apply a selected native profile or attest that the profile's
@@ -1205,6 +1304,106 @@ skipped required check.
 ---
 
 ## 9. Repository Safety Guards
+
+### Initial implementation must change step content
+
+Before registering the first writable implementation turn, the runner persists
+`stepImplementation`: the deterministic step number, runner-observed starting
+HEAD, staging-independent content fingerprint, and `accepted: false`. This
+record is distinct from the mutable repository baseline. Interrupted turns,
+partial implementation, stop recovery, environment retries, and baseline updates
+retain the original record. It is cleared only by verified COMMIT settlement.
+
+A `COMPLETED` initial implementation is accepted only when the observed content
+differs from that original fingerprint. Otherwise execution pauses with
+`plan_revision_required` before candidate convergence or finalization, retaining
+the current step and unchanged `completedCommits`. An implementation summary
+cannot authorize an empty step, including when its content already exists under
+a different commit subject. Repair requires a revised plan and new run.
+
+Once initial implementation is accepted, unchanged correction, finding-resolution,
+check/fix, review, and confirmation turns remain valid under their existing gates.
+The comparison does not depend on staging placement, and it does not authorize
+index changes. Only consumed runner-authorized commit verification advances steps.
+
+State version 20 marks legacy evidence as unresolved, except when preflight has
+never begun and no implementation could have run. Before new writable work
+or an unconsumed commit effect, recovery uses the complete validated journal to
+find the original implementation entry and its saved HEAD/content baseline.
+A prior acceptance must show a content change; a never-started step may use its
+journal-proven clean baseline. Missing, truncated, inconsistent, or already-no-op
+history cannot be replaced with the current workspace fingerprint or agent claims:
+it pauses for plan revision. Status performs no effects. Consumed commit settlement
+and operator stop/cancel reconciliation precede evidence acquisition for new work.
+
+### Context cannot change plan position
+
+Clarification, plan compatibility, each independent bootstrap, reconciliation,
+bootstrap/finding/stagnation arbitration, and validation migration require
+`stepAssessment` in every result. It contains `step` (positive integer),
+`subject` (at most 256 characters),
+`disposition` (`CURRENT`, `ALREADY_LANDED`, `SKIP_OR_REORDER`, or `LATER_STEP`),
+and at most eight evidence strings of 512 characters each. The runner supplies
+its selected step, exact validated subject, and verified completed subjects and
+commit IDs in both continuation and reconstructed prompts. Reports cannot
+change that position or grant commit authority.
+
+A well-formed mismatching step/subject or non-`CURRENT` assessment pauses for
+plan revision. Each otherwise acceptable context result also receives a separate
+read-only semantic review before acceptance. That review examines the entire
+proposed narrative, not just its numeric fields: assertions that the current
+step landed, directions to skip/reorder it, or instructions to implement a later
+step are incompatible. Quoted rejected examples, hypothetical discussion, and
+ordinary whole-plan descriptions remain valid when they do not redirect work.
+The semantic review uses the producing logical role and continues its checkpoint
+session, including an Arbiter's existing session rather than starting another
+arbitration. It cannot modify the repository or execute required checks.
+Reconstructed review prompts retain the original inputs, clarification evidence,
+and applicable resolved context as well as the proposed result.
+
+Malformed assessments or semantic-review responses use the existing one-correction
+ledger, extended to clarification, compatibility, and finding/stagnation arbitration.
+Diagnostics stay bounded and exclude rejected narrative. The original producing checkpoint is replayed
+after interruption of the `plan-context` read-only turn; its output is not yet
+accepted. Recovery first verifies that no read-only mutation occurred.
+
+State version 19 marks prior context provisional with `planContextVersion: 0`.
+Before further writable work it invalidates dependent gates and active legacy
+rework directions and performs read-only validation rediscovery, preserving the
+existing correction ledger. Already pending migration also discards old accepted
+role inventories before rediscovery.
+A run that has not resolved bootstrap discards provisional role summaries and
+restarts discovery. Only current context has version 1. Consumed COMMIT effects
+settle verification-only before this migration; completed runs need no new work.
+Neither legacy summaries, reconciliation, nor arbitration advances completed
+commits. Stale context requires a revised plan and a new run.
+
+### Stale plans and externally committed steps
+
+Before invoking a new role, and before ordinary or interrupted repository
+reconciliation can classify HEAD drift, the runner inspects HEAD through the
+root Git capability. The leading step is the validated plan entry at
+`completedCommits.length + 1`, independent of agent summaries. If HEAD already
+has that exact subject, or HEAD moved from the saved baseline outside verified
+runner commit settlement, pause as `plan_revision_required` with bounded
+runner-derived evidence. Do not adopt the external commit, advance the step,
+change `completedCommits`, or invoke writable work.
+
+This guard applies before bootstrap completes. A paused run may expose
+`currentStep: 1` while `resolvedSummary` and the established inventories remain
+null. This is a deterministic plan position, not evidence of completed
+bootstrap, and does not authorize a deferred commit stop. The persisted shape
+is unchanged; state validation accepts this suspended first-step position and
+still rejects unresolved bootstrap at later steps or writable checkpoints.
+
+Consumed COMMIT authorization remains verification-only and is settled before
+stale-plan inspection. Verified settlement alone records the commit and chooses
+the next step; recovery retires the previous in-memory turn as well as its
+durable marker. An ordinary runner-owned commit therefore does not appear as
+external HEAD movement. Stop/cancel reconciliation starts no providers,
+capability preparation, or stale-plan inspection. Independent branch, ref,
+remote, identity, index, and workspace violations retain their Git-safety
+checks and diagnostics. Plan revision requires a revised plan and a new run.
 
 A fresh `run` requires a clean Git working tree, including untracked non-ignored files.
 
@@ -2065,6 +2264,33 @@ repository-relative path must exactly equal the proposed value. Missing files,
 directories, symlinks, symlink traversal, and narrative per-turn values enter
 the same bounded redacted finalization-correction path; they never become a
 candidate fingerprint or Reviewer finding.
+
+### Transient validation storage ownership
+
+Common envelope version 9 records trusted storage allocation intent and verified
+identity separately from process ownership. Version 10 adds the acquiring runner
+identity and changes the runtime compatibility token. Leased migration preserves
+version-9 allocation records without new resource effects. The root retires owned processes and
+cleans recorded resources before resuming pipeline work or settling an operator
+stop. Legacy envelopes migrate to null storage ownership without allocation or
+provider activity. Only declared scratch/cache directories are writable, through
+the fixed mounts and environment bindings owned by the trusted-validation
+architecture. Required build output must stay outside the repository.
+
+Cleanup uncertainty preserves the resource record and pauses finalization as
+`environment_blocked` at `FINALIZE`; neither the check nor subsequent work is
+accepted until ownership is verified and cleanup finishes. Interrupted mutable
+cache contents and partial downloads are never reused. Pinned artifact requests
+share this durable allocation lifecycle, including artifact-only commands. The
+root journals verified directory ownership and the acquiring runner process
+identity before downloading. Journal failures preserve a resumable ownership
+blocker and the saved allocation. Recovery cannot delete its storage while that owner
+is live or unverifiable without service-observed transport retirement. It exposes only
+complete digest-verified files at `/run/agent-runner/dependencies`, read-only.
+The exact check remains network-isolated; extraction or setup belongs to its
+declared vector and must use declared scratch. Acquisition failures block
+`FINALIZE` before command launch with bounded redacted evidence; repaired
+environments retry the frozen request after cleanup. Status remains observational.
 
 ### 13.3 Mode-specific candidate review and terminal confirmation
 

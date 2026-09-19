@@ -33,6 +33,19 @@ Polishing never commits and keeps `HEAD` unchanged. Its handoff stages the
 complete finalized and reviewed change set, verifies that nothing accepted was
 left unstaged, and leaves the result for the operator.
 
+Execution never adopts an external commit as completed plan progress. A current
+planned subject already at HEAD, or external HEAD movement from the saved
+baseline, pauses for plan revision before new writable work, including on
+resume. Step one remains visible even if bootstrap has not completed. Only
+verified settlement of the runner's consumed COMMIT authorization advances
+the plan; completed effects are verified before any stale-plan guard.
+
+Agent context cannot change the runner-selected step. A claim that it already
+landed, or a direction to skip, reorder, or implement a later step, requires plan
+revision even when structured step fields match. Read-only context validation
+distinguishes such directions from quoted examples and whole-plan discussion.
+Legacy accepted context is rediscovered before further writable work.
+
 No pipeline may push, mutate a remote ref, call a hosting service to write,
 change a remote, alter Git identity, amend, reset, rebase, stash, switch
 branches, or create tags. A failed hook or unexpected repository state pauses
@@ -78,6 +91,33 @@ process signalling or repository effect.
 The runner connects that protocol to an owned-process abort boundary. Provider
 and trusted-command processes wait for durable registration before executing;
 runner loss closes their private control pipe and starts bounded cleanup.
+Trusted command capability requests are closed and fingerprinted. Scratch/cache
+declarations cannot name host paths or environment bindings. Artifact declarations
+pin canonical HTTPS URLs and SHA-256 digests; they do not authorize raw network,
+credentials, proxies, redirects, arbitrary mounts, or project-controlled trust.
+Unavailable capabilities block before provider work rather than broadening an
+agent or validation sandbox. Legacy snapshots retain their original restricted
+authority and evidence bindings. Scratch/cache and dependency allocations have
+journaled intent and verified filesystem identity before downloading or launch,
+remain outside protected project and control paths, and are cleaned only after owned descendants retire. Uncertain
+ownership retains cleanup evidence and never authorizes deletion or cache reuse.
+Only digest-verified dependencies mount read-only at the runner-defined path.
+No partials, mutable shared downloads, automatic extraction, or host installation
+are exposed. Extraction must target declared scratch in the exact command.
+Acquisition validates and pins public HTTPS destinations, rejects redirects and
+inherited trust or credentials, and bounds bytes, time, and cancellation.
+Transports retire before publication or cleanup; uncertain retirement retains
+ownership. Journaled acquisition process identity also blocks cleanup after
+service reconstruction while the owner is live or unverifiable. Same-service
+transport retirement or verified owner death permits cleanup.
+Plan-execution and polishing capability reports are exact-command, additive requirements stored
+before availability inspection. They cannot replace frozen declarations or grant
+permissions. Read-only bootstrap and legacy discovery precede writable entry;
+missing authority or availability blocks without invoking a writable role. Each
+new writable checkpoint rechecks the saved request under configuration guards,
+cancellation, the execution lease, and durable resource ownership.
+Status does not probe capabilities. Consumed commit/handoff verification precedes
+capability checks needed for new work.
 Private PID namespaces contain detached and reparented descendants. Provider
 processes that require another native sandbox use that mode only when the full
 nested shape is available. Otherwise, an explicitly declared provider alone may

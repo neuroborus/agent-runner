@@ -26,6 +26,12 @@ measured provider guarantees.
 
 ## Core Guarantees
 
+Plan execution pauses for plan revision when initial implementation leaves the
+selected step's content unchanged. Runner-observed step-start evidence survives
+partial work and resume; missing legacy evidence must be reconstructed from the
+validated journal before new writable work. Unchanged corrective turns remain
+valid after initial acceptance. See the [execution specification](pipelines/plan-execution/docs/SPEC.md).
+
 - Pipelines own their roles, inputs, prompts, state machines, and output policy.
 - The root runner owns lifecycle, persistence, backend execution, and Git safety.
 - Every pipeline starts with a bounded, read-only `CLARIFY` phase.
@@ -144,7 +150,15 @@ overrides win over project pipeline settings, which win over runner settings
 and descriptor defaults. `resume` uses the persisted roles, settings, and
 artifact root and never reloads the mode.
 
-Every role accepts string `profile`, `model`, and `contextSize` selections.
+Every role accepts string `profile`, `model`, `contextSize`, and `effort`
+selections.
+Root and safe ignored project configuration accept `defaultEffort`, with role
+`effort` values taking precedence within each layer. Portable effort values are
+`current`, `low`, `medium`, `high`, and `xhigh`; `current` retains the provider
+default. Use `--effort` or MCP `run_start.effort` for a run-wide override, and
+`--<role>-effort` or `roleOverrides.<role>.effort` for a role override. Only
+active roles persist the resolved selection, and resume reuses it without
+reloading configuration.
 A selected profile supplies its backend; `defaultBackend` provides the fallback.
 Explicit decimal context sizes are validated by the chosen adapter and map to
 Codex's context window or Claude's auto-compaction token window.
@@ -321,6 +335,75 @@ process-tree retirement failures block or fail closed. Agent and runner results
 form one complete ordered gate for the same content,
 validation-infrastructure, command, and trusted-configuration fingerprints.
 
+For an offline build whose project-provided `build.js` supports `--out-dir`, a
+trusted declaration can request transient output and cache storage:
+
+```json
+{
+  "schemaVersion": 1,
+  "trustedCommands": {
+    "offline-build": {
+      "command": "node build.js --out-dir /run/agent-runner/scratch/build",
+      "executable": "node",
+      "arguments": ["build.js", "--out-dir", "/run/agent-runner/scratch/build"],
+      "capabilities": { "scratch": true, "cache": true }
+    }
+  },
+  "pipelines": { "polishing": { "trustedChecks": ["offline-build"] } }
+}
+```
+
+This fragment works in runner configuration or its safe project overlay. The
+project must already have the build tool and dependencies. Scratch provides
+`AGENT_RUNNER_SCRATCH` and `TMPDIR`; cache provides `AGENT_RUNNER_CACHE`,
+`XDG_CACHE_HOME`, and npm's cache binding. Paths are fixed by the runner; exact
+argument vectors do not expand environment variables. Both directories are
+private to one execution and removed after its process tree retires. Repository
+writes and network access remain prohibited. Interrupted cache contents are not
+reused. An uncertain cleanup keeps ownership evidence for operator recovery;
+resume retries cleanup before new work.
+
+When a build needs a pinned public download, extend that command's `capabilities`
+with `artifacts`. For example (replace the illustrative URL and digest with the
+canonical HTTPS URL and verified SHA-256 of your file):
+
+```json
+{
+  "scratch": true,
+  "cache": true,
+  "artifacts": [
+    {
+      "url": "https://downloads.example.com/tool.tar.gz",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ]
+}
+```
+
+The build driver reads the verified file at
+`/run/agent-runner/dependencies/<sha256>` or uses `AGENT_RUNNER_DEPENDENCIES`.
+The mount is read-only. The runner acquires files before launching the exact
+check, which remains network-isolated. Acquisition requires public DNS and HTTPS
+with built-in TLS trust; redirects, proxies, credentials, and custom trust are
+unsupported. Limits are 64 MiB per file, 256 MiB total, and five minutes overall,
+with shorter DNS, connection, and inactivity deadlines. No automatic extraction
+or host setup occurs: the declared command must extract or prepare inputs in
+its declared scratch directory. Artifact-only commands need no scratch or cache
+if they only read verified files. Downloads are never reused across executions.
+Acquisition failures pause finalization as an environment blocker without running
+the check. Repair the environment and resume; changing declarations requires a
+new run. Do not delete uncertain resources until their ownership and transport
+or process retirement have been independently verified.
+
+Plan execution and polishing discover required capabilities read-only and recheck runner
+availability before every writable checkpoint. Unsatisfied requirements pause as
+`environment_blocked`; repair the environment and resume the saved request.
+Changing trusted selection or declarations requires a new run. Inspection may
+prepare verified dependencies but does not execute required checks; those remain
+exclusive to finalization.
+The configuration example explicitly declares scratch and cache authority for
+`repository-check`; discovery can request only capabilities frozen at run creation.
+
 Backend sessions are disposable. When a native context is full, the adapter
 compacts it and retries once; persistent pressure moves ordinary turns to a
 fresh session reconstructed from durable run state, artifacts, and the current
@@ -435,11 +518,12 @@ An empty edited document removes all additions. Editor failure, unsafe content,
 or a concurrent change preserves the local document; reread and reconcile a
 stale edit. These commands do not create a pipeline run.
 
-Run-wide preferences use `--profile`, `--model`, and `--context-size`.
+Run-wide preferences use `--profile`, `--model`, `--context-size`, and `--effort`.
 Role-specific values use derived flags such as `--worker-profile`,
-`--reviewer-model`, or `--planner-context-size`; role-specific values win. Use
-the trusted alias, backend-native model ID, and decimal token string
-respectively:
+`--reviewer-model`, `--planner-context-size`, or `--worker-effort`; role-specific
+values win. Use a trusted alias, backend-native model ID, decimal token string,
+or portable effort value respectively. Effort accepts only
+`current|low|medium|high|xhigh`; select it separately from the model ID:
 
 ```bash
 agent-run run polishing \
@@ -448,6 +532,7 @@ agent-run run polishing \
   --mode independent \
   --profile claude-primary \
   --model sonnet \
+  --effort high \
   --worker-context-size 200000
 ```
 
@@ -520,8 +605,10 @@ Runner state uses `$XDG_STATE_HOME/agent-runner/` with
 ID, pipeline state-schema version, and an explicit runtime compatibility tuple
 independent from the package version. Compatible legacy state is migrated by
 the owning pipeline under the per-run lease; incompatible readers return a
-specific version-skew error while preserving the run. The mode-aware pipeline
-versions are plan-authoring version 5, plan-execution version 17, and polishing
+specific version-skew error while preserving the run. Common envelope version 8
+persists active-role effort; legacy missing values migrate to `current` without
+provider activity or changes to saved progress and session evidence. The
+mode-aware pipeline versions are plan-authoring version 5, plan-execution version 17, and polishing
 version 13. Their ordered migrations resolve missing legacy modes to
 `independent` and preserve explicitly saved modes without moving terminal workflows or replaying role turns,
 commits, or handoffs. Complete write-ahead events precede atomic state
@@ -733,8 +820,13 @@ Use `pipelines_list` to discover the registry, then start with `run_start` and a
 unique opaque idempotency key. It persists the run, returns a durable `runId`,
 and launches detached execution. Its additive `projectConfigurationPath`
 selects the same confined project file as `--project-config`; `profile`,
-`model`, and `contextSize` set run-wide selections; the same fields inside a
-`roleOverrides` entry take precedence. Optional `mode` overrides project and
+`model`, `contextSize`, and `effort` set run-wide selections; the same fields
+inside a
+`roleOverrides` entry take precedence. Effort uses the portable enum above;
+`current` overrides lower-precedence values with the native default. Retry a
+start with the same effort values and idempotency key. Detached execution and
+resume use persisted effort, while status, wait, and activity keep role
+configuration private. Optional `mode` overrides project and
 runner configuration and is validated by the selected descriptor. All pipelines
 accept `independent`, `lazy`, and `combined`.
 `independent` is the default and recommended option for genuinely independent

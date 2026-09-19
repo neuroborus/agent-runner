@@ -183,6 +183,7 @@ test("configuration examples keep trusted vectors and the preferred planning tar
     command: "npm run check",
     executable: "npm",
     arguments: ["run", "check"],
+    capabilities: { scratch: true, cache: true },
   });
   const authoring = listPipelines().find(({ id }) => id === "plan-authoring");
   assert.equal(

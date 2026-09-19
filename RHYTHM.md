@@ -5,6 +5,110 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-09-17
+
+- **Initial implementation needs an observed content change.** Execution persists
+  step-start HEAD/content evidence before writable work and retains it through
+  interruption and mutable baseline updates. No-op initial completion requires a
+  revised plan before convergence; unchanged corrections remain valid. Version-20
+  recovery requires journal proof for legacy evidence and never guesses from the
+  current workspace. Verified consumed commits settle before new-work guards.
+
+- **Execution context cannot advance the plan.** Bounded step assessments and a
+  separate read-only narrative review reject already-landed claims and directions
+  to skip or reorder the selected step. Matching numeric fields are insufficient;
+  quoted examples and whole-plan discussion remain valid. Legacy summaries must
+  be rediscovered before new writable work, after consumed-effect settlement.
+
+- **Execution rejects stale plans before writable work.** The root Git capability
+  supplies HEAD's subject; the validated plan and verified completed commits
+  alone select the leading step. Existing subjects and external HEAD movement
+  require a new plan/run without adopting commits. Paused step one can remain
+  visible before bootstrap completes. Consumed effects settle first, stop
+  recovery starts no new effects, and verified settlement retires interrupted
+  commit context before selecting the next step.
+
+- **Polishing blocks unsatisfied check capabilities before writable work.** Its
+  own bounded reports preserve every active role's exact-command needs without
+  granting authority. Availability is rechecked at each writable checkpoint and
+  before new handoff staging; environment repair retries the frozen request.
+  State version 14 requires read-only legacy discovery while keeping completed
+  handoffs verification-only and preserving safety pauses and correction charges.
+  Preparation never executes required checks. Discovery, migration, interruption
+  recovery, and staging guards form one boundary and must ship together; separate
+  pipeline-owned schemas preserve ownership without importing execution internals.
+
+## 2026-09-16
+
+- **Execution checks capability requirements before writable work.** Bootstrap
+  and legacy validation migration persist exact-command needs from every active
+  role. The root evaluates additive reports against frozen authority and current
+  availability at every writable checkpoint, independently of cached preflight.
+  Unsatisfied needs pause for environment repair; agents cannot grant authority
+  or discard another role's requirements. State version 18 preserves consumed
+  commit verification ahead of discovery. Discovery, migration, and writable
+  guards form one boundary: shipping a subset could admit work under provisional
+  requirements. Availability preparation produces no check evidence; required
+  checks still run only during finalization.
+
+- **Capability needs are inspected without running required checks.** The root
+  trusted-validation capability matches additive exact-command reports against
+  frozen authority and distinguishes malformed contracts from environment blockers.
+  Availability preparation reuses durable ownership and runs only a fixed empty
+  program in the check sandbox; it never produces check evidence. Dependencies
+  are reacquired during finalization. Pipeline discovery and gating remain owned
+  by each pipeline, with the runner supplying configuration guards and leases.
+
+- **Verified dependencies share durable execution ownership.** Frozen public HTTPS
+  downloads now use journaled allocations before acquisition and a fixed read-only
+  digest mount after verification. Checks remain network-isolated; extraction
+  belongs to their exact vector and declared scratch. Failures retain bounded
+  resumable blockers, and a journaled acquisition owner prevents early cleanup
+  after service reconstruction. Common envelope version 10 distinguishes the new
+  phase while preserving legacy allocation evidence during migration. Recovery
+  cleans old allocations before any fresh download. No partial download is reused.
+
+- **Pinned acquisition separates transport verification from runtime authority.**
+  The private primitive shares frozen artifact declaration rules, pins public
+  destinations with hostname TLS verification, and bounds transfer and retirement.
+  Digest-only publication follows integrity verification and transport closure;
+  uncertain ownership preserves files. Production requests remain unavailable
+  until durable resource ownership, mounting, and recovery are integrated.
+
+- **Trusted build storage is transient and durably owned.** Scratch/cache mounts
+  stay outside repository and control paths. Intent and filesystem identity are
+  journaled before launch; cleanup follows verified process retirement. Uncertain
+  ownership blocks deletion and interrupted caches are never reused.
+
+- **Trusted execution requests freeze authority before provider work.** Closed
+  scratch/cache and pinned-artifact declarations participate in command and
+  snapshot fingerprints. Legacy snapshots retain their restricted authority and
+  evidence. Unavailable requests pause durably and retry the saved request;
+  consumed effects remain verifiable without requiring capabilities for new work.
+
+- **CLI and MCP expose one provider-neutral effort preference.** Run-wide and
+  descriptor-derived role overrides share the portable enum and configuration
+  precedence. `current` explicitly preserves the provider default. MCP intents
+  bind effort before dispatch and detached work reuses the saved selection,
+  preventing retries from silently changing execution preferences. Public
+  supervision surfaces keep role configuration private.
+
+- **Effort is frozen with active role execution preferences.** Runner and safe
+  project configuration share one portable vocabulary and override precedence.
+  Inactive roles are validated but never resolved or persisted. Resume reuses
+  saved effort, while envelope version 8 migrates legacy missing values to
+  `current` under the existing lease without provider activity or rewriting
+  journal history. Configuration changes cannot silently alter resumed work.
+
+- **Effort incompatibility is a terminal adapter configuration failure.**
+  Provider adapters accept portable effort separately from model identifiers,
+  omit native overrides for `current`, and preserve explicit selections across
+  session recovery and commit readiness. Native translation and discoverable
+  capability checks stay inside the adapters. Unsupported selections return
+  one bounded, provider-neutral failure instead of silently downgrading or
+  retrying through a fresh session. This keeps recovery from changing the
+  requested execution semantics or starting a rejected commit effect.
+
 ## 2026-09-15
 
 - **Mode guidance and finalization coverage share canonical owners.** README and

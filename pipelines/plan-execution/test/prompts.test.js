@@ -134,7 +134,7 @@ test("clarification instructions keep questions before implementation", () => {
 
 Do not modify the repository.
 If existing clarifications conflict with the validated plan, use PLAN_REVISION_REQUIRED.
-For READY, return exactly {"status":"READY","questions":[],"reason":"","question":"","options":[],"whyBlocked":"","evidence":[]}.
+For READY, provide stepAssessment; set questions, options, and evidence to [], and reason, question, and whyBlocked to "".
 For QUESTIONS, provide one or more actionable questions with question and whyItMatters; set reason, question, and whyBlocked to "", and options and evidence to [].
 For PLAN_REVISION_REQUIRED, set questions and options to []; provide reason and evidence; set question and whyBlocked to "".
 For PRODUCT_DECISION_REQUIRED, set questions to [] and reason to ""; use the product-decision fields.`,

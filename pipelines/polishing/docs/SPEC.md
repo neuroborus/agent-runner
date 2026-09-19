@@ -27,6 +27,7 @@ pipelines/polishing/
 ├── docs/
 │   └── SPEC.md
 ├── src/
+│   ├── capability-requirements.js
 │   ├── gate-evidence.js
 │   ├── index.js
 │   ├── mode-policy.js
@@ -76,6 +77,48 @@ separate primary/review checkpoint forks in independent and combined modes. Reco
 correction can reconstruct fresh sessions; Arbiter contexts are always fresh.
 The existing `lazyCorrections`, `pendingLazyCorrection`, and
 `lazySourceForkConsumed` fields and bounded accounting remain unchanged. Large turn implementations and Git reconciliation stay in the workflow.
+
+## Required Capability Discovery
+
+Bootstrap and read-only validation migration persist `capabilityRequirements`
+and `environmentBlockers` with each active role's exact inventory. The private
+`capability-requirements.js` owns their bounded syntax; only the root
+`inspectRequirements` capability evaluates authority, support, and availability.
+There are at most 256 reports of each kind per role. Each need names an exact
+inventory command, an optional frozen identity (`commandIdentity`, otherwise
+null), `capabilities` with boolean `scratch`/`cache` and up to 32 exact
+`{url, sha256}` artifacts, and up to 16 unique `unsupported` identifiers.
+Each blocker names an inventory command, `source` (`agent-sandbox` or `runner`),
+and 1–8 bounded single-line evidence strings. Non-READY outcomes use empty arrays.
+Malformed reports use the existing bounded read-only bootstrap correction path.
+
+Accepted reports from every active role remain additive regardless of the
+reconciled or arbitrated summary. Reports cannot grant permissions, omit another
+role's needs, or replace frozen declarations. Before every writable POLISH,
+CHECK_AND_FIX, RESOLVE_FINDINGS, or FINALIZE invocation, inspect the saved request
+again; cached declaration preflight cannot bypass this gate. Unsatisfied needs
+pause as `environment_blocked` before content or index mutation, preserving the
+checkpoint and bounded runner-derived evidence. Repairing the environment permits
+retry; changing trusted selection or declarations requires a new run.
+
+An agent-sandbox limitation is satisfied only for the exact delegated command
+when runner inspection succeeds. A limitation on another command remains a
+blocker. Preparation may acquire verified dependencies and probe isolation, but
+never executes or attests required checks. Those checks execute only in FINALIZE,
+which reacquires and reverifies dependencies. Configuration guards, cancellation,
+leases, and resource ownership remain enforced by the root capability.
+
+State version 14 marks legacy missing discovery with paired null report fields.
+Passive migration preserves historical gate proof. Active legacy runs rediscover
+requirements read-only before new writable work, using only Worker in lazy mode.
+Pending migration cannot bypass safety or capacity-exhaustion pauses; only
+retryable pauses and applicable explicit resume actions permit discovery.
+Interrupted content corrections are reconciled and charged once before continuing. Completed and
+failed historical states remain inert. HANDOFF first inspects whether staging
+already completed: complete staging settles verification-only without providers
+or capability preparation; untouched legacy staging returns to discovery and
+candidate convergence. Current untouched handoffs recheck availability before
+runner-owned staging. Stop reconciliation starts no new effects.
 
 ## Combined Review
 
@@ -139,10 +182,25 @@ on-demand `arbiter` roles and owns active-role selection. Independent and
 combined modes activate all three, with Arbiter still resolved on demand; lazy mode activates
 only Worker. CLI and runner configuration use the common backend
 and execution-preference precedence rules. Each role accepts string trusted
-`profile`, backend-native `model`, and decimal `contextSize` selections;
+`profile`, backend-native `model`, decimal `contextSize`, and portable `effort` selections;
 role-specific CLI/MCP values win over run-wide and runner values, with
 `current` omitting the native override. Worker and Reviewer may use any
 Codex/Claude combination; Arbiter supports either backend.
+
+Effort accepts only `current|low|medium|high|xhigh`, independently of model IDs.
+The shared root resolver applies role override → run override → project role →
+project `defaultEffort` → runner role → runner `defaultEffort` → `current`.
+CLI `--effort` and descriptor-derived `--<role>-effort` map to MCP
+`run_start.effort` and `roleOverrides.<role>.effort` through the same runner
+contract. Both reject values outside the portable enum before dispatch; MCP
+intents bind the selections and detached continuations reuse saved effort.
+Validate all configured vocabulary, but resolve and persist only active roles;
+native translation stays in provider adapters. Every role turn carries saved explicit
+effort, including recovery; `current` omits the request override.
+Common envelope version 8 requires saved active-role effort. Legacy missing
+values migrate to `current` under the run lease without provider activity,
+configuration reload, or changes to progress and session evidence. Public
+status and activity omit these provider-private values.
 
 Worker capability preflight requires structured output, read-only inspection,
 autonomous safe content writes, remote-write blocking, and the explicit
@@ -205,6 +263,28 @@ substitutes and environment, credential, or host-authority fields. The root reso
 the complete selection and fingerprints it before agent work; resume uses the
 persisted snapshot without reloading configuration. Later project configuration
 edits trigger the existing protected-input guard.
+
+Trusted declarations also accept the architecture's closed `capabilities`
+object: `scratch: true`, `cache: true`, and bounded pinned HTTPS `artifacts`.
+Root and project normalization are identical. Version-2 snapshots include
+normalized capabilities in command identities and configuration fingerprints.
+Legacy version-1 snapshots retain their restricted policy, exact fingerprints,
+and evidence bindings without configuration reload or authority upgrades.
+
+Unavailable frozen requests create a durable `environment_blocked` pause before
+provider work. Early pauses retain `preflightComplete: false`, null baseline,
+backend versions and clarification path, empty hashes, and no `resumeState`.
+Null-action resume retries the saved request before ordinary `CLARIFY` preflight;
+later pauses retain their applicable checkpoint, including an untouched HANDOFF.
+Completed handoffs are verified before checking capabilities needed for new
+work. Status and immutable terminal reads perform no capability work. Inspection
+does not execute or attest required checks. Scratch/cache requests use isolated
+transient storage; artifact requests use bounded runner-owned acquisition and
+read-only mounts. Declaration preflight inspects storage and isolation without
+downloading dependencies. Requirement inspection before writable work prepares
+dependencies; finalization execution reacquires and reverifies them. Environment
+repair permits retry; changing declarations requires a new run and never permits
+weakened validation.
 
 Settings are stored in pipeline state at run creation and are not reloaded on
 resume. The root may load safe project overrides from an ignored
@@ -592,6 +672,33 @@ result for the same content fails closed without retaining either rejected
 result. Content changes clear the consumed scope and permit one correction for
 the new fingerprint. This attempt is independent of the bootstrap and
 validation-migration correction ledger.
+
+### Transient validation storage ownership
+
+Common envelope version 9 records trusted storage allocation intent and verified
+identity separately from process ownership. Version 10 adds the acquiring runner
+identity and changes the runtime compatibility token. Leased migration preserves
+version-9 allocation records without new resource effects. The root retires owned processes and
+cleans recorded resources before resuming pipeline work or settling an operator
+stop. Legacy envelopes migrate to null storage ownership without allocation or
+provider activity. Only declared scratch/cache directories are writable, through
+the fixed mounts and environment bindings owned by the trusted-validation
+architecture. Required build output must stay outside the repository.
+
+Cleanup uncertainty preserves the resource record and pauses finalization as
+`environment_blocked` at `FINALIZE`; neither the check nor subsequent work is
+accepted until ownership is verified and cleanup finishes. Interrupted mutable
+cache contents and partial downloads are never reused. Pinned artifact requests
+share this durable allocation lifecycle, including artifact-only commands. The
+root journals verified directory ownership and the acquiring runner process
+identity before downloading. Journal failures preserve a resumable ownership
+blocker and the saved allocation. Recovery cannot delete its storage while that owner
+is live or unverifiable without service-observed transport retirement. It exposes only
+complete digest-verified files at `/run/agent-runner/dependencies`, read-only.
+The exact check remains network-isolated; extraction or setup belongs to its
+declared vector and must use declared scratch. Acquisition failures block
+`FINALIZE` before command launch with bounded redacted evidence; repaired
+environments retry the frozen request after cleanup. Status remains observational.
 
 ### Review And Findings
 

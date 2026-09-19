@@ -20,6 +20,7 @@ import {
 } from "node:path";
 
 import { spawnOwnedProcess } from "../agents/index.js";
+import { requestsMount, STORAGE_PATHS } from "./resources.js";
 
 const BUBBLEWRAP_CANDIDATES = Object.freeze([
   "/usr/bin/bwrap",
@@ -296,6 +297,7 @@ export async function runExactCommand(
   signal?.removeEventListener("abort", abort);
   clearTimeout(timeout);
   if (outcome.type === "error" || !Number.isSafeInteger(child.pid)) {
+    await child.ownedCompletion;
     return {
       status: "BLOCKED",
       exitCode: null,
@@ -402,7 +404,7 @@ export async function runExactCommand(
   };
 }
 
-function safeEnvironment(environment) {
+function safeEnvironment(environment, resources = {}) {
   const isolated = {};
   for (const [name, value] of Object.entries(environment)) {
     const normalizedName = name.toUpperCase();
@@ -424,6 +426,18 @@ function safeEnvironment(environment) {
   isolated.XDG_CACHE_HOME = "/tmp/agent-runner-cache";
   isolated.XDG_CONFIG_HOME = "/nonexistent";
   isolated.XDG_DATA_HOME = "/nonexistent";
+  if (resources.scratch) {
+    isolated.AGENT_RUNNER_SCRATCH = STORAGE_PATHS.scratch;
+    isolated.TMPDIR = STORAGE_PATHS.scratch;
+  }
+  if (resources.cache) {
+    isolated.AGENT_RUNNER_CACHE = STORAGE_PATHS.cache;
+    isolated.XDG_CACHE_HOME = STORAGE_PATHS.cache;
+    isolated.npm_config_cache = `${STORAGE_PATHS.cache}/npm`;
+  }
+  if (resources.dependencies) {
+    isolated.AGENT_RUNNER_DEPENDENCIES = STORAGE_PATHS.dependencies;
+  }
   return Object.freeze(isolated);
 }
 
@@ -507,18 +521,25 @@ function executableExposure(executable, environment) {
   };
 }
 
-function gitMetadataExposures(cwd) {
+export function gitMetadataExposures(cwd) {
   const dotGit = join(cwd, ".git");
-  if (!existsSync(dotGit) || !lstatSync(dotGit).isFile()) {
-    return [];
-  }
-  const match = /^gitdir: ([^\r\n]+)\r?\n?$/u.exec(
-    readFileSync(dotGit, "utf8"),
-  );
-  if (match === null) {
+  if (!existsSync(dotGit)) return [];
+  const canonicalPath = realpathSync(dotGit);
+  const metadata = lstatSync(canonicalPath);
+  let gitDirectory;
+  if (metadata.isDirectory()) {
+    gitDirectory = canonicalPath;
+  } else if (metadata.isFile()) {
+    const match = /^gitdir: ([^\r\n]+)\r?\n?$/u.exec(
+      readFileSync(canonicalPath, "utf8"),
+    );
+    if (match === null) {
+      throw new Error("Git metadata pointer is invalid.");
+    }
+    gitDirectory = realpathSync(resolve(cwd, match[1]));
+  } else {
     throw new Error("Git metadata pointer is invalid.");
   }
-  const gitDirectory = realpathSync(resolve(cwd, match[1]));
   const commonPath = join(gitDirectory, "commondir");
   if (!existsSync(commonPath)) {
     return [gitDirectory];
@@ -579,9 +600,48 @@ function dynamicExposures(command, { cwd, environment, homePath }) {
   return confined;
 }
 
-function sandboxArguments(command, { cwd, environment, homePath }) {
+export function runtimeStorageExposures(command, { cwd, environment }) {
+  try {
+    return [
+      ...SYSTEM_MOUNTS.filter((path) => existsSync(path)).map((path) =>
+        realpathSync(path),
+      ),
+      ...dynamicExposures(command, {
+        cwd,
+        environment,
+        homePath: environment.HOME,
+      }).flatMap(({ source, target }) => [source, target]),
+    ];
+  } catch {
+    throw new TrustedExecutionError(
+      "Trusted execution runtime paths are unavailable.",
+      {
+        code: "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE",
+      },
+    );
+  }
+}
+
+function sandboxArguments(
+  command,
+  {
+    cwd,
+    environment,
+    homePath,
+    resources,
+    privateStorageRoot,
+    preparationOnly,
+  },
+) {
+  if (preparationOnly) {
+    const executable = executableCandidate(command.executable, environment);
+    if (executable === null || !lstatSync(realpathSync(executable)).isFile())
+      throw new Error("The declared executable is unavailable.");
+    accessSync(executable, constants.X_OK);
+  }
   const argumentsList = [
     "--die-with-parent",
+    "--unshare-user",
     "--unshare-net",
     "--unshare-pid",
     "--cap-drop",
@@ -595,13 +655,22 @@ function sandboxArguments(command, { cwd, environment, homePath }) {
     "--tmpfs",
     "/tmp",
   ];
+  const exposures = dynamicExposures(command, { cwd, environment, homePath });
+  // Private storage must not leak through a runtime, PATH or system exposure.
+  // Only the explicit per-command mounts below may expose owned subdirectories.
+  if (
+    privateStorageRoot !== undefined &&
+    runtimeStorageExposures(command, { cwd, environment }).some(
+      (path) =>
+        coversPath(path, privateStorageRoot) ||
+        coversPath(privateStorageRoot, path),
+    )
+  ) {
+    throw new Error("Trusted storage overlaps a runtime exposure.");
+  }
   appendSystemMounts(argumentsList);
   const createdParents = new Set();
-  for (const { source, target } of dynamicExposures(command, {
-    cwd,
-    environment,
-    homePath,
-  })) {
+  for (const { source, target } of exposures) {
     for (const parent of mountParents(target)) {
       if (!createdParents.has(parent)) {
         argumentsList.push("--dir", parent);
@@ -609,6 +678,28 @@ function sandboxArguments(command, { cwd, environment, homePath }) {
       }
     }
     argumentsList.push("--ro-bind", source, target);
+  }
+  for (const [name, source] of Object.entries(resources)) {
+    const target = STORAGE_PATHS[name];
+    if (
+      target === undefined ||
+      !requestsMount(command.capabilities, name) ||
+      !isAbsolute(source) ||
+      realpathSync(source) !== source ||
+      !lstatSync(source).isDirectory() ||
+      [cwd, ...gitMetadataExposures(cwd)].some(
+        (path) => coversPath(path, target) || coversPath(target, path),
+      )
+    ) {
+      throw new Error("Trusted storage mount is invalid.");
+    }
+    argumentsList.push(
+      "--dir",
+      dirname(target),
+      name === "dependencies" ? "--ro-bind" : "--bind",
+      source,
+      target,
+    );
   }
   argumentsList.push(
     "--chdir",
@@ -618,15 +709,24 @@ function sandboxArguments(command, { cwd, environment, homePath }) {
     "--eval",
     READINESS_SCRIPT,
     "--",
-    command.executable,
-    ...command.arguments,
+    ...(preparationOnly
+      ? [process.execPath, "--eval", ""]
+      : [command.executable, ...command.arguments]),
   );
   return Object.freeze(argumentsList);
 }
 
 export function sandboxTrustedCommand(
   command,
-  { bubblewrapPath, cwd, environment, platform = process.platform },
+  {
+    bubblewrapPath,
+    cwd,
+    environment,
+    resources = {},
+    privateStorageRoot,
+    preparationOnly = false,
+    platform = process.platform,
+  },
 ) {
   const homePath = environment.HOME;
   if (
@@ -651,9 +751,12 @@ export function sandboxTrustedCommand(
           cwd,
           environment,
           homePath,
+          resources,
+          privateStorageRoot,
+          preparationOnly,
         }),
       }),
-      environment: safeEnvironment(environment),
+      environment: safeEnvironment(environment, resources),
       // This command establishes its own mandatory isolation profile.
       ownershipMode: "native-sandbox-provider",
       readinessRequired: true,

@@ -34,6 +34,7 @@ import {
   RunnerError,
 } from "./input.js";
 import { pipelineForRun } from "./migration.js";
+import { inspectTrustedRequirements } from "./trusted-requirements.js";
 import {
   createStopMonitor,
   reconcileOperatorStop,
@@ -214,6 +215,32 @@ export function createRunner(options = {}) {
     return next;
   }
 
+  function storageForbiddenPaths(run) {
+    return [run.projectPath, run.taskPath, runStore.rootPath].filter(
+      (path) => typeof path === "string",
+    );
+  }
+
+  async function cleanupExecutionResource(run, lease) {
+    if (run.executionResource == null) return run;
+    if (
+      run.executionProcess !== null ||
+      typeof trustedValidation.recoverResources !== "function"
+    ) {
+      throw new RunnerError(
+        "Execution storage cleanup requires verified process retirement.",
+        { code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE" },
+      );
+    }
+    await trustedValidation.recoverResources({
+      resource: run.executionResource,
+      projectPath: run.projectPath,
+      storageForbiddenPaths: storageForbiddenPaths(run),
+      onResource: (value) => runStore.recordExecutionResource(lease, value),
+    });
+    return runStore.loadRun(run.runId);
+  }
+
   function runtimeFor(
     pipeline,
     lease,
@@ -289,12 +316,36 @@ export function createRunner(options = {}) {
           : {
               preflight: async (value) => {
                 await checkConfiguration();
-                return trustedValidation.preflight(value);
+                await trustedValidation.preflight({
+                  ...value,
+                  storageForbiddenPaths: storageForbiddenPaths(run),
+                });
+                await validatePersistedBoundary(run);
               },
+              inspectRequirements: (request) =>
+                inspectTrustedRequirements(
+                  {
+                    trustedValidation,
+                    runStore,
+                    lease,
+                    run,
+                    monitor,
+                    checkConfiguration,
+                    validatePersistedBoundary,
+                    storageForbiddenPaths,
+                  },
+                  request,
+                ),
               execute: async (request) => {
                 await checkConfiguration();
                 return monitor.invoke(
-                  (value) => trustedValidation.execute(value),
+                  (value) =>
+                    trustedValidation.execute({
+                      ...value,
+                      storageForbiddenPaths: storageForbiddenPaths(run),
+                      onResource: (resource) =>
+                        runStore.recordExecutionResource(lease, resource),
+                    }),
                   request,
                 );
               },
@@ -428,7 +479,8 @@ export function createRunner(options = {}) {
       configurationFailure !== null &&
       !stopPending(run) &&
       run.activeTurn === null &&
-      run.executionProcess === null
+      run.executionProcess === null &&
+      run.executionResource == null
     ) {
       return pauseForProjectConfiguration(run, lease);
     }
@@ -451,6 +503,7 @@ export function createRunner(options = {}) {
     const baseRuntime = runtimeFor(pipeline, lease, run, selected);
     if (stopPending(run))
       return reconcileOperatorStop({
+        cleanupResources: (current) => cleanupExecutionResource(current, lease),
         run,
         pipeline,
         lease,
@@ -472,13 +525,14 @@ export function createRunner(options = {}) {
         if (cause?.code !== "ERR_PROJECT_CONFIGURATION_CHANGED") throw cause;
         configurationFailure = cause;
       }
-      if (
-        configurationFailure !== null &&
-        !stopPending(run) &&
-        run.activeTurn === null
-      ) {
-        return pauseForProjectConfiguration(run, lease);
-      }
+    }
+    run = await cleanupExecutionResource(run, lease);
+    if (
+      configurationFailure !== null &&
+      !stopPending(run) &&
+      run.activeTurn === null
+    ) {
+      return pauseForProjectConfiguration(run, lease);
     }
     const monitor = createStopMonitor({
       runId: run.runId,
@@ -518,6 +572,7 @@ export function createRunner(options = {}) {
     const latest = await runStore.loadRun(run.runId);
     if (stopPending(latest)) {
       return reconcileOperatorStop({
+        cleanupResources: (current) => cleanupExecutionResource(current, lease),
         run: latest,
         pipeline,
         lease,
@@ -549,6 +604,7 @@ export function createRunner(options = {}) {
       configurationFailure = cause;
     }
     return reconcileOperatorStop({
+      cleanupResources: (current) => cleanupExecutionResource(current, lease),
       run: current,
       pipeline,
       lease,
@@ -678,7 +734,8 @@ export function createRunner(options = {}) {
         configurationChanged &&
         !stopPending(storedRun) &&
         storedRun.activeTurn === null &&
-        storedRun.executionProcess === null
+        storedRun.executionProcess === null &&
+        storedRun.executionResource == null
       ) {
         const pipeline = getPipeline(storedRun.pipelineId);
         if (pipeline === undefined) {
@@ -804,16 +861,37 @@ export function createRunner(options = {}) {
       normalized.sourceSession,
       providers,
     );
+    let capabilityFailure = null;
     if ((resolved.trustedValidation?.commands.length ?? 0) > 0) {
-      await trustedValidation.preflight({ projectPath });
+      try {
+        await trustedValidation.preflight({
+          projectPath,
+          snapshot: resolved.trustedValidation,
+          storageForbiddenPaths: storageForbiddenPaths({
+            projectPath,
+            taskPath,
+          }),
+        });
+      } catch (cause) {
+        if (
+          ![
+            "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE",
+            "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE",
+          ].includes(cause?.code)
+        )
+          throw cause;
+        capabilityFailure = cause;
+      }
     }
-    await probeRequiredRoles(
-      pipeline,
-      resolved.roles,
-      adapters,
-      normalized.sourceSession,
-      providers,
-    );
+    if (capabilityFailure === null) {
+      await probeRequiredRoles(
+        pipeline,
+        resolved.roles,
+        adapters,
+        normalized.sourceSession,
+        providers,
+      );
+    }
     const pipelineState = pipeline.workflow.createState({
       artifactRoot: resolved.artifactRoot,
       proactiveClarification: normalized.proactiveClarification,
@@ -822,7 +900,7 @@ export function createRunner(options = {}) {
         ? {}
         : { trustedValidation: resolved.trustedValidation }),
     });
-    const created = await runStore.createRun({
+    let created = await runStore.createRun({
       ...(createOptions.runId === undefined
         ? {}
         : { runId: createOptions.runId }),
@@ -843,6 +921,24 @@ export function createRunner(options = {}) {
       },
     });
     try {
+      if (capabilityFailure !== null) {
+        const state = await runStore.transitionRun(created.lease, {
+          pipelineState: {
+            ...created.state.pipelineState,
+            workflowState: "WAITING_FOR_USER",
+          },
+          pause: {
+            reason: "environment_blocked",
+            code: capabilityFailure.code,
+            explanation:
+              "The frozen trusted execution request is unavailable. Repair the environment and resume; changing declarations requires a new run.",
+            evidence: [
+              "Trusted execution preflight failed before provider work.",
+            ],
+          },
+        });
+        created = { ...created, state };
+      }
       await publish(
         {
           actor: "runner",
@@ -868,11 +964,13 @@ export function createRunner(options = {}) {
   async function run(input) {
     const { created, pipeline } = await prepare(input);
     try {
-      await withWorktreeLease(
-        created.state,
-        () => execute(pipeline, created.state, created.lease),
-        created.lease,
-      );
+      if (created.state.pause?.reason !== "environment_blocked") {
+        await withWorktreeLease(
+          created.state,
+          () => execute(pipeline, created.state, created.lease),
+          created.lease,
+        );
+      }
     } finally {
       await releaseRunLease(created.lease, created.state.runId);
     }
@@ -969,14 +1067,6 @@ export function createRunner(options = {}) {
               },
             },
           );
-        }
-        if (
-          (recovered.pipelineState.trustedValidation?.commands.length ?? 0) > 0
-        ) {
-          await guardProjectConfiguration(recovered);
-          await trustedValidation.preflight({
-            projectPath: recovered.projectPath,
-          });
         }
         await validatePersistedBoundary(recovered);
         return execute(pipeline, recovered, lease, normalized.action);

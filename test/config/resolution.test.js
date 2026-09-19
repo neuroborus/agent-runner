@@ -40,18 +40,21 @@ test("role resolution applies CLI, role, runner, and native defaults", () => {
       profile: "current",
       model: "cli-worker",
       contextSize: "current",
+      effort: "current",
     },
     reviewer: {
       backend: "claude",
       profile: "current",
       model: "runner-reviewer",
       contextSize: "current",
+      effort: "current",
     },
     arbiter: {
       backend: "codex",
       profile: "current",
       model: "current",
       contextSize: "current",
+      effort: "current",
     },
   });
   assert.deepEqual(resolved.settings, {
@@ -89,18 +92,21 @@ test("role resolution normalizes configuration objects", () => {
         profile: "current",
         model: "current",
         contextSize: "current",
+        effort: "current",
       },
       reviewer: {
         backend: "codex",
         profile: "current",
         model: "current",
         contextSize: "current",
+        effort: "current",
       },
       arbiter: {
         backend: "codex",
         profile: "current",
         model: "current",
         contextSize: "current",
+        effort: "current",
       },
     },
     settings: {
@@ -375,12 +381,14 @@ test("project configuration is a strict partial overlay", () => {
     profile: "/profiles/claude-primary",
     model: "cli-worker",
     contextSize: "300000",
+    effort: "current",
   });
   assert.deepEqual(resolved.roles.reviewer, {
     backend: "claude",
     profile: "/profiles/claude-primary",
     model: "project-model",
     contextSize: "300000",
+    effort: "current",
   });
 });
 
@@ -423,11 +431,13 @@ test("project selections preserve exact runner command vectors", () => {
   );
 
   assert.deepEqual(resolved.settings.trustedChecks, ["service-check"]);
+  assert.equal(resolved.trustedValidation.schemaVersion, 2);
   assert.deepEqual(resolved.trustedValidation.commands[0], {
     alias: "service-check",
     command: "npm run test:service",
     executable: "/opt/validation  tools/npm",
     arguments: ["run", "  test:service  "],
+    capabilities: {},
     identity: resolved.trustedValidation.commands[0].identity,
   });
   assert.match(
@@ -532,18 +542,21 @@ test("trusted profiles pin backends and resolve execution precedence", () => {
       profile: "native-work",
       model: "role-model",
       contextSize: "400000",
+      effort: "current",
     },
     reviewer: {
       backend: "claude",
       profile: "/profiles/claude-primary",
       model: "run-model",
       contextSize: "350000",
+      effort: "current",
     },
     arbiter: {
       backend: "codex",
       profile: "native-work",
       model: "run-model",
       contextSize: "350000",
+      effort: "current",
     },
   });
 });
@@ -612,6 +625,7 @@ test("source profiles inherit safely while unknown source profiles stay current"
     profile: "arbiter",
     model: "current",
     contextSize: "current",
+    effort: "current",
   });
 
   const unknownProfile = resolvePipelineConfiguration(

@@ -1,5 +1,6 @@
 import { join } from "node:path";
 
+import { prepareImplementationRecovery } from "./implementation-evidence.js";
 import {
   clearedCandidateAndTerminalGate,
   finalizationGatePassed,
@@ -1170,10 +1171,40 @@ export function migratePlanExecutionStateV16(run) {
   });
 }
 
+export function migratePlanExecutionStateV17(run) {
+  // Preserve historical gate/journal proof, especially consumed effects.
+  // Live entry detects null reports and starts read-only rediscovery before work.
+  const provisional = (value) =>
+    value === null
+      ? null
+      : Object.freeze({
+          ...value,
+          capabilityRequirements: value.capabilityRequirements ?? null,
+          environmentBlockers: value.environmentBlockers ?? null,
+        });
+  return Object.freeze({
+    ...run.pipelineState,
+    workerValidation: provisional(run.pipelineState.workerValidation),
+    reviewerValidation: provisional(run.pipelineState.reviewerValidation),
+  });
+}
+
+export function migratePlanExecutionStateV18(run) {
+  return Object.freeze({ ...run.pipelineState, planContextVersion: 0 });
+}
+
+export function migratePlanExecutionStateV19(run) {
+  return Object.freeze({
+    ...run.pipelineState,
+    stepImplementation: null,
+    implementationEvidenceLegacy: run.pipelineState.preflightComplete,
+  });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
   resolveStopBoundary,
-  stateVersion: 17,
+  stateVersion: 20,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1191,6 +1222,9 @@ export const planExecutionPipeline = Object.freeze({
     14: migratePlanExecutionStateV14,
     15: migratePlanExecutionStateV15,
     16: migratePlanExecutionStateV16,
+    17: migratePlanExecutionStateV17,
+    18: migratePlanExecutionStateV18,
+    19: migratePlanExecutionStateV19,
   }),
   roles: ROLES,
   resolveActiveRoles,
@@ -1207,7 +1241,7 @@ export const planExecutionPipeline = Object.freeze({
   }),
   validateResumeAction,
   prepareRecovery(run, history) {
-    prepareLegacyConfirmationRecovery(run, history, (historicalRun) => {
+    const migrate = (historicalRun) => {
       let current = historicalRun;
       while (
         current.pipelineStateVersion < planExecutionPipeline.stateVersion
@@ -1220,8 +1254,11 @@ export const planExecutionPipeline = Object.freeze({
           pipelineStateVersion: current.pipelineStateVersion + 1,
         };
       }
+      validateRun(current);
       return current;
-    });
+    };
+    prepareLegacyConfirmationRecovery(run, history, migrate);
+    prepareImplementationRecovery(run, history, migrate);
   },
   workflow: Object.freeze({
     createState: createPlanExecutionState,

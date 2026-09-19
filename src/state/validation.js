@@ -3,7 +3,7 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { isAdapterDiagnosticClass } from "../agents/index.js";
 import { validStopTiming, validStopSettlement } from "./stop-contract.js";
 
-export const RUN_STATE_SCHEMA_VERSION = 7;
+export const RUN_STATE_SCHEMA_VERSION = 10;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
   runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
@@ -23,6 +23,9 @@ const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   4,
   5,
   6,
+  7,
+  8,
+  9,
   RUN_STATE_SCHEMA_VERSION,
 ]);
 
@@ -48,6 +51,7 @@ const STATE_FIELDS = new Set([
   "sessionLineage",
   "activeTurn",
   "executionProcess",
+  "executionResource",
   "stopRequest",
   "pipelineState",
   "createdAt",
@@ -589,11 +593,21 @@ function normalizeSessionLineage(value) {
   return { source, sourceProfile, children };
 }
 
-function normalizeRoles(value) {
+export function normalizeRoles(value, { allowMissingEffort = true } = {}) {
   assertRecord(value, "run.roles");
   const roles = cloneRecord(value, "run.roles");
   for (const [role, configuration] of Object.entries(roles)) {
     assertRecord(configuration, `run.roles.${role}`);
+    if (allowMissingEffort && !Object.hasOwn(configuration, "effort")) {
+      configuration.effort = "current";
+    }
+    if (
+      !["current", "low", "medium", "high", "xhigh"].includes(
+        configuration.effort,
+      )
+    ) {
+      fail(`run.roles.${role}.effort is invalid.`);
+    }
     for (const field of ["profile", "model", "contextSize"]) {
       if (
         !Object.hasOwn(configuration, field) ||
@@ -780,6 +794,80 @@ function normalizeExecutionProcess(value, schemaVersion) {
   };
 }
 
+export function normalizeExecutionResource(
+  value,
+  schemaVersion = RUN_STATE_SCHEMA_VERSION,
+) {
+  if (value === null || (value === undefined && schemaVersion < 9)) return null;
+  if (schemaVersion < 9) fail("Legacy runs cannot grant storage ownership.");
+  assertRecord(value, "run.executionResource");
+  const fields = [
+    "id",
+    "hostname",
+    "commandIdentity",
+    "phase",
+    "root",
+    "directory",
+    ...(value.phase === "acquiring" ? ["owner"] : []),
+  ];
+  if (
+    Object.keys(value).length !== fields.length ||
+    fields.some((key) => !Object.hasOwn(value, key)) ||
+    typeof value.id !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
+      value.id,
+    ) ||
+    typeof value.hostname !== "string" ||
+    value.hostname.length < 1 ||
+    value.hostname.length > 255 ||
+    UNSAFE_TEXT_PATTERN.test(value.hostname) ||
+    typeof value.commandIdentity !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(value.commandIdentity) ||
+    !["allocating", "allocated", "acquiring"].includes(value.phase)
+  )
+    fail("Run execution resource is invalid.");
+  if (value.phase === "acquiring") {
+    if (schemaVersion < 10)
+      fail("Legacy runs cannot grant acquisition ownership.");
+    assertRecord(value.owner, "resource.owner");
+    if (
+      Object.keys(value.owner).length !== 2 ||
+      !Number.isSafeInteger(value.owner.pid) ||
+      value.owner.pid < 1 ||
+      validateProcessIdentity(value.owner.processIdentity) === null
+    )
+      fail("Resource acquisition owner is invalid.");
+  }
+  assertRecord(value.root, "resource.root");
+  if (
+    Object.keys(value.root).length !== 3 ||
+    typeof value.root.path !== "string" ||
+    !isAbsolute(value.root.path) ||
+    resolve(value.root.path) !== value.root.path
+  )
+    fail("Resource root is invalid.");
+  for (const identity of [
+    value.root,
+    ...(value.phase !== "allocating" ? [value.directory] : []),
+  ]) {
+    assertRecord(identity, "resource.identity");
+    if (
+      typeof identity.device !== "string" ||
+      typeof identity.inode !== "string" ||
+      !/^\d{1,32}$/u.test(identity.device) ||
+      !/^\d{1,32}$/u.test(identity.inode)
+    )
+      fail("Resource identity is invalid.");
+  }
+  if (
+    value.phase === "allocating"
+      ? value.directory !== null
+      : Object.keys(value.directory).length !== 2
+  )
+    fail("Resource allocation identity is invalid.");
+  return structuredClone(value);
+}
+
 export function normalizeRunState(value, expectedRunId) {
   assertRecord(value, "run");
   rejectUnknownFields(value, STATE_FIELDS, "run");
@@ -846,7 +934,9 @@ export function normalizeRunState(value, expectedRunId) {
       value.projectConfigurationProtection,
       value,
     ),
-    roles: normalizeRoles(value.roles),
+    roles: normalizeRoles(value.roles, {
+      allowMissingEffort: value.schemaVersion < 8,
+    }),
     counters: cloneRecord(value.counters, "run.counters"),
     hashes: cloneRecord(value.hashes, "run.hashes"),
     pause,
@@ -854,6 +944,10 @@ export function normalizeRunState(value, expectedRunId) {
     activeTurn: normalizeActiveTurn(value.activeTurn, value.schemaVersion),
     executionProcess: normalizeExecutionProcess(
       value.executionProcess,
+      value.schemaVersion,
+    ),
+    executionResource: normalizeExecutionResource(
+      value.executionResource,
       value.schemaVersion,
     ),
     stopRequest: normalizeStopRequest(value.stopRequest, value),

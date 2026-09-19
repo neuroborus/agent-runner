@@ -298,6 +298,8 @@ async function combinedScenario(t, pipelineId, hooks = {}) {
         codex: {
           ...backend,
           async run(request) {
+            if (request.prompt.startsWith("Validate the proposed context"))
+              return backend.run(request);
             const durable = await runStore.loadRun(runId);
             const turn = { ...durable.activeTurn, request };
             calls.push(turn);
@@ -334,6 +336,27 @@ async function combinedScenario(t, pipelineId, hooks = {}) {
                         ? supplied
                         : { result: supplied },
                   };
+            if (
+              supplied !== undefined &&
+              (
+                request.schema?.properties?.result?.anyOf?.[0]?.properties ??
+                request.schema?.properties
+              )?.stepAssessment
+            ) {
+              const { step, subject } = JSON.parse(
+                /Runner-selected plan position[^\n]*\n([^\n]+)/u.exec(
+                  request.prompt,
+                )[1],
+              );
+              (
+                response.structured.result ?? response.structured
+              ).stepAssessment = {
+                step,
+                subject,
+                disposition: "CURRENT",
+                evidence: [],
+              };
+            }
             sessions.add(response.sessionId);
             await hooks.afterTurn?.(
               turn,
@@ -1232,6 +1255,20 @@ function createBackend(
       return capabilities();
     },
     async run(request) {
+      const position = /Runner-selected plan position[^\n]*\n([^\n]+)/u.exec(
+        request.prompt,
+      );
+      const assessment = position && {
+        ...JSON.parse(position[1]),
+        disposition: "CURRENT",
+        evidence: [],
+      };
+      if (assessment) delete assessment.completed;
+      if (request.prompt.startsWith("Validate the proposed context"))
+        return {
+          structured: { stepAssessment: assessment },
+          sessionId: sessionId(request, "worker"),
+        };
       calls.push(request);
       if (request.session?.mode === "fork" && rejectSource) {
         const error = new Error("Source session is unavailable.");
@@ -1369,6 +1406,11 @@ function createBackend(
             "plan, risks, and finalization procedure.",
           requiredChecks: [{ id: "C1", command: "git diff --check HEAD" }],
           validationInfrastructure: [],
+          ...((request.schema?.properties?.result?.anyOf?.[0]?.properties
+            ?.capabilityRequirements ??
+          request.schema?.properties?.capabilityRequirements)
+            ? { capabilityRequirements: [], environmentBlockers: [] }
+            : {}),
           capacityField: "",
           capacityLimit: 0,
           reason: "",
@@ -1496,6 +1538,13 @@ function createBackend(
         throw new Error("Unexpected fake backend turn.");
       }
 
+      if (
+        (
+          request.schema?.properties?.result?.anyOf?.[0]?.properties ??
+          request.schema?.properties
+        )?.stepAssessment
+      )
+        structured.stepAssessment = assessment;
       return {
         output: "structured",
         structured:
@@ -2392,6 +2441,7 @@ async function projectCommandScenario(t, pipelineId, hooks = {}) {
   const git = createGitService();
   const calls = [];
   const executions = [];
+  const preparations = [];
   let handoffs = 0;
   let loads = 0;
   let runId;
@@ -2401,6 +2451,8 @@ async function projectCommandScenario(t, pipelineId, hooks = {}) {
     codex: {
       ...backend,
       async run(request) {
+        if (request.prompt.startsWith("Validate the proposed context"))
+          return backend.run(request);
         const durable = await runStore.loadRun(runId);
         assert.deepEqual(durable.pipelineState.trustedValidation, expected);
         assert.equal(
@@ -2455,17 +2507,7 @@ async function projectCommandScenario(t, pipelineId, hooks = {}) {
     resolveLauncher: () => "/usr/bin/bwrap",
     verifyLauncher: (path) => path,
     async runCommand(command, options) {
-      executions.push(command);
-      assert.ok(
-        calls
-          .at(-1)
-          .prompt.includes("Run the complete project finalization procedure"),
-      );
       assert.equal(command.executable, "/usr/bin/bwrap");
-      assert.deepEqual(command.arguments.slice(-4), [
-        definition.executable,
-        ...definition.arguments,
-      ]);
       for (const flag of [
         "--unshare-net",
         "--unshare-pid",
@@ -2481,7 +2523,28 @@ async function projectCommandScenario(t, pipelineId, hooks = {}) {
       assert.equal(options.environment.GIT_SSH_COMMAND, "/bin/false");
       assert.equal(options.environment.GIT_CONFIG_GLOBAL, "/dev/null");
       assert.equal(options.readinessRequired, true);
-      await hooks.execute?.(paths);
+      const preparing = command.arguments.at(-1) === "";
+      if (preparing) {
+        assert.deepEqual(command.arguments.slice(-3), [
+          process.execPath,
+          "--eval",
+          "",
+        ]);
+        assert.equal(options.timeoutMs, 10_000);
+        preparations.push(command);
+      } else {
+        executions.push(command);
+        assert.ok(
+          calls
+            .at(-1)
+            .prompt.includes("Run the complete project finalization procedure"),
+        );
+        assert.deepEqual(command.arguments.slice(-4), [
+          definition.executable,
+          ...definition.arguments,
+        ]);
+        await hooks.execute?.(paths);
+      }
       return {
         status: "PASS",
         exitCode: 0,
@@ -2528,6 +2591,7 @@ async function projectCommandScenario(t, pipelineId, hooks = {}) {
   assert.deepEqual(prepared.run.pipelineState.trustedValidation, expected);
   assert.equal(calls.length, 0);
   assert.equal(executions.length, 0);
+  assert.equal(preparations.length, 0);
   return {
     ...paths,
     configurationPath,
@@ -2536,6 +2600,7 @@ async function projectCommandScenario(t, pipelineId, hooks = {}) {
     expected,
     calls,
     executions,
+    preparations,
     resume: () => runner.resume({ runId, action: null }),
     reopen() {
       rootConfiguration = {
@@ -2663,6 +2728,7 @@ for (const pipelineId of ["plan-execution", "polishing"]) {
     assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
     assert.equal(paused.pause.resumeState, "FINALIZE");
     assert.equal(scenario.executions.length, 0);
+    assert.equal(scenario.preparations.length > 0, true);
     assert.deepEqual(paused.pipelineState.trustedValidation, scenario.expected);
     scenario.reopen();
     const completed = (await scenario.resume()).run;
@@ -2988,7 +3054,7 @@ test("polishing migrates legacy 64/128 evidence under lease without replaying a 
   const before = await Promise.all([readFile(statePath), readFile(eventsPath)]);
   const lease = await store.acquireRunLease(runId);
   try {
-    assert.equal((await runner.status(runId)).run.pipelineStateVersion, 13);
+    assert.equal((await runner.status(runId)).run.pipelineStateVersion, 14);
     await assert.rejects(runner.resume({ runId }), { code: "ERR_RUN_LEASED" });
     assert.deepEqual(
       await Promise.all([readFile(statePath), readFile(eventsPath)]),
@@ -2998,7 +3064,7 @@ test("polishing migrates legacy 64/128 evidence under lease without replaying a 
     await lease.release();
   }
   const completed = (await runner.resume({ runId })).run;
-  assert.equal(completed.pipelineStateVersion, 13);
+  assert.equal(completed.pipelineStateVersion, 14);
   assert.equal(completed.pipelineState.workflowState, "DONE");
   assert.deepEqual(
     completed.pipelineState.finalizationResult,
@@ -3013,12 +3079,12 @@ test("polishing migrates legacy 64/128 evidence under lease without replaying a 
   );
   assert.equal(migrations.length, 1);
   assert.deepEqual(migrations[0].state.pipelineState, paused.pipelineState);
-  assert.equal(migrations[0].state.pipelineStateVersion, 13);
+  assert.equal(migrations[0].state.pipelineStateVersion, 14);
   const terminalState = completed.pipelineState;
   await downgrade();
   const terminal = (await runner.resume({ runId })).run;
   assert.deepEqual(terminal.pipelineState, terminalState);
-  assert.equal(terminal.pipelineStateVersion, 13);
+  assert.equal(terminal.pipelineStateVersion, 14);
   assert.equal(calls, turns);
   assert.equal(handoffs, 1);
 });

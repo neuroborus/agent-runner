@@ -105,6 +105,17 @@ Repository-local artifacts must already be ignored. The runner never changes
 ignore rules automatically. Keep authoritative state in a separate tree from
 the project and task directories; neither may contain the other.
 
+Set portable effort with `defaultEffort` or role `effort` in runner/project
+configuration, CLI `--effort` and `--<role>-effort`, or MCP `run_start.effort`
+and `roleOverrides.<role>.effort`. Values are `current`, `low`, `medium`,
+`high`, and `xhigh`; keep effort separate from the model ID. A role override
+wins over a run-wide override, then project role/default, runner role/default,
+and finally `current`. Explicit `current` retains the effective provider
+default. Unsupported provider/model selections fail without downgrading.
+Resume and detached execution reuse saved effort; status, wait, and activity
+keep role configuration private. Retrying an MCP start requires the same effort
+values and idempotency key. To select different effort, start a new run.
+
 Select compatible role backends and profiles before starting. Leave the source
 session unset unless the user deliberately chooses to fork a compatible current
 session after being offered a fresh start. Use only a known trusted source
@@ -179,6 +190,75 @@ the task and current planned step and accepted by terminal confirmation.
 An environment blocker requires the permitted recovery action, not relaxed
 sandboxing, an invented command, a new baseline, or fabricated success.
 
+For an offline build whose project-provided `build.js` supports `--out-dir`, a
+trusted declaration can request transient output and cache storage:
+
+```json
+{
+  "schemaVersion": 1,
+  "trustedCommands": {
+    "offline-build": {
+      "command": "node build.js --out-dir /run/agent-runner/scratch/build",
+      "executable": "node",
+      "arguments": ["build.js", "--out-dir", "/run/agent-runner/scratch/build"],
+      "capabilities": { "scratch": true, "cache": true }
+    }
+  },
+  "pipelines": { "polishing": { "trustedChecks": ["offline-build"] } }
+}
+```
+
+This fragment works in runner configuration or its safe project overlay. The
+project must already have the build tool and dependencies. Scratch provides
+`AGENT_RUNNER_SCRATCH` and `TMPDIR`; cache provides `AGENT_RUNNER_CACHE`,
+`XDG_CACHE_HOME`, and npm's cache binding. Paths are fixed by the runner; exact
+argument vectors do not expand environment variables. Both directories are
+private to one execution and removed after its process tree retires. Repository
+writes and network access remain prohibited. Interrupted cache contents are not
+reused. An uncertain cleanup keeps ownership evidence for operator recovery;
+resume retries cleanup before new work.
+
+When a build needs a pinned public download, extend that command's `capabilities`
+with `artifacts`. For example (replace the illustrative URL and digest with the
+canonical HTTPS URL and verified SHA-256 of your file):
+
+```json
+{
+  "scratch": true,
+  "cache": true,
+  "artifacts": [
+    {
+      "url": "https://downloads.example.com/tool.tar.gz",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ]
+}
+```
+
+The build driver reads the verified file at
+`/run/agent-runner/dependencies/<sha256>` or uses `AGENT_RUNNER_DEPENDENCIES`.
+The mount is read-only. The runner acquires files before launching the exact
+check, which remains network-isolated. Acquisition requires public DNS and HTTPS
+with built-in TLS trust; redirects, proxies, credentials, and custom trust are
+unsupported. Limits are 64 MiB per file, 256 MiB total, and five minutes overall,
+with shorter DNS, connection, and inactivity deadlines. No automatic extraction
+or host setup occurs: the declared command must extract or prepare inputs in
+its declared scratch directory. Artifact-only commands need no scratch or cache
+if they only read verified files. Downloads are never reused across executions.
+Acquisition failures pause finalization as an environment blocker without running
+the check. Repair the environment and resume; changing declarations requires a
+new run. Do not delete uncertain resources until their ownership and transport
+or process retirement have been independently verified.
+
+Plan execution and polishing also prepare required capabilities before each writable
+checkpoint, including on resume. Bootstrap and legacy read-only discovery save
+exact-command requirements from every active role; unavailable storage,
+isolation, or dependencies pause as `environment_blocked` before writable work.
+Repair the environment to retry the saved request. A reported agent-sandbox
+limitation is satisfied only for that exact delegated command when runner
+inspection succeeds. Preparation does not execute required checks or provide
+check evidence; dependencies are verified again during finalization.
+
 ## 4. Start, clarify, and observe
 
 Start the selected pipeline with its project and task directory, for example:
@@ -247,6 +327,25 @@ settled stops may have no settlement details. None of these fields authorize
 another execution owner or extra work.
 
 ## 5. Recover a pause without taking over the work
+
+Execution also requires plan revision when initial implementation leaves a step's
+content unchanged, or legacy state lacks trustworthy original step-start evidence.
+Already-present content under a different subject does not satisfy the step.
+Partial work survives interruption: a continuation need not make additional edits
+if the step has changed since its original start. Unchanged corrective turns are
+allowed after initial implementation is accepted.
+
+Execution reports `plan_revision_required` when the current planned subject is
+already at HEAD or an external commit moved HEAD from the saved baseline. The
+same pause applies when context claims the current step landed or directs work
+to skip, reorder, or move to a later step. Matching structured step fields do not
+override contradictory instructions; quoted examples and future-plan discussion
+remain valid when they do not redirect current work. The
+runner retains the selected step and completed-commit history; it does not count
+external work as a completed step. Step one can be visible before bootstrap is
+complete. Revise the plan and start a new run; do not move HEAD or edit frozen
+inputs to force the old run forward. Runner-owned consumed commits retain
+verification-only recovery before this guard.
 
 **A pause is not completion.** Read its reason, bounded evidence, pending input,
 and current `nextActions`. When the run is resumable, resolve only the permitted

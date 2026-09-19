@@ -29,11 +29,13 @@ test("tracked example is valid and local configuration is ignored", async () => 
   assert.equal(configuration.defaultProfile, "current");
   assert.equal(configuration.defaultModel, "current");
   assert.equal(configuration.defaultContextSize, "current");
+  assert.equal(configuration.defaultEffort, "current");
   assert.deepEqual(configuration.trustedCommands, {
     "repository-check": {
       command: "npm run check",
       executable: "npm",
       arguments: ["run", "check"],
+      capabilities: { scratch: true, cache: true },
     },
   });
   assert.equal(configuration.pipelines["plan-authoring"].mode, "independent");
@@ -54,6 +56,7 @@ test("tracked example is valid and local configuration is ignored", async () => 
     profile: "claude-primary",
     model: "current",
     contextSize: "current",
+    effort: "current",
   });
   assert.equal(configuration.pipelines["plan-execution"].finalization, "auto");
   assert.equal(configuration.pipelines.polishing.finalization, "auto");

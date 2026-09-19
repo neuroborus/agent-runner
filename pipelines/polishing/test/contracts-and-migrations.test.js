@@ -319,7 +319,7 @@ test("migrates version-2 state with empty trust and invalidates its active gate"
   assert.deepEqual(migrated.settings.trustedChecks, []);
   assert.deepEqual(migrated.trustedValidation.commands, []);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(polishingPipeline.stateVersion, 13);
+  assert.equal(polishingPipeline.stateVersion, 14);
 });
 
 test("migrates version-3 state with no consumed bootstrap corrections", () => {
@@ -376,6 +376,8 @@ test("migrates active version-5 validation through an independent checkpoint", a
   const completed = await fixture.run();
   const unsafeCommand = "git diff --cached --check";
   const unsafeValidation = {
+    capabilityRequirements: null,
+    environmentBlockers: null,
     requiredChecks: [{ id: "C1", command: unsafeCommand }],
     validationInfrastructure: VALIDATION_INFRASTRUCTURE,
   };

@@ -7,25 +7,25 @@ contract changes.
 
 ## Document map
 
-| Document                                                                            | Owns                                                                                                                               |
-| ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| [`AGENTS.md`](../AGENTS.md)                                                         | Mandatory project goals, working agreements, safety invariants, repository ownership, and required checks                          |
-| [`RHYTHM.md`](../RHYTHM.md)                                                         | Newest-first record of meaningful implemented repository decisions; read when a change creates or revises a durable decision       |
-| [`docs/CONVENTIONS.md`](CONVENTIONS.md)                                             | Intended architecture and repository-wide code, module, test, documentation, and formatting conventions                            |
-| [`docs/ARCHITECTURE.md`](ARCHITECTURE.md)                                           | Detailed current runtime design, dependency direction, configuration, persistence, recovery, MCP, Git, and clarification contracts |
-| [`docs/OPERATOR_GUIDE.md`](OPERATOR_GUIDE.md)                                       | Shared CLI/MCP supervision procedure; read before preparing, running, recovering, or recording project operating lessons           |
-| [`docs/product/PIPELINE_MODEL.md`](product/PIPELINE_MODEL.md)                       | Pipeline purposes, relationships, modes, and clarification boundaries; read before changing workflow meaning                       |
-| [`docs/product/VALIDATION_AND_REVIEW.md`](product/VALIDATION_AND_REVIEW.md)         | Validation, review, fingerprint, and effect-gate guarantees; read before changing how work becomes acceptable                      |
-| [`docs/product/PROVIDER_MODEL.md`](product/PROVIDER_MODEL.md)                       | Provider capabilities, execution selection, sessions, and normalized failures; read before changing backend semantics              |
-| [`docs/product/OPERATOR_MODEL.md`](product/OPERATOR_MODEL.md)                       | Configuration, CLI/MCP control, durable state, pauses, and observability; read before changing operator behavior                   |
-| [`docs/product/SAFETY_MODEL.md`](product/SAFETY_MODEL.md)                           | Repository permissions, Git ownership, redaction, and effect reconciliation; read before changing a safety boundary                |
-| [`README.md`](../README.md)                                                         | User-facing installation, configuration, CLI, MCP, and pipeline usage                                                              |
-| [`packages/commit-plan/README.md`](../packages/commit-plan/README.md)               | Shared commit-plan syntax, parsing, validation, and Conventional Commit subject contract                                           |
-| [`pipelines/plan-authoring/docs/SPEC.md`](../pipelines/plan-authoring/docs/SPEC.md) | Plan-authoring roles, prompts, states, corrections, artifacts, and completion rules                                                |
-| [`pipelines/plan-execution/docs/SPEC.md`](../pipelines/plan-execution/docs/SPEC.md) | Plan-execution roles, prompts, validation, review, commit, recovery, and completion rules                                          |
-| [`pipelines/polishing/docs/SPEC.md`](../pipelines/polishing/docs/SPEC.md)           | Polishing roles, prompts, validation, review, handoff, recovery, and completion rules                                              |
-| [`project-structure` skill](../.agents/skills/project-structure/SKILL.md)           | Operational ownership guidance for placing, moving, or splitting repository code                                                   |
-| [`finalization` skill](../.agents/skills/finalization/SKILL.md)                     | Post-change operator-surface review and validation; phase-owned staging and commit-message handoff gate                            |
+| Document                                                                            | Owns                                                                                                                                                       |
+| ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`AGENTS.md`](../AGENTS.md)                                                         | Mandatory project goals, working agreements, safety invariants, repository ownership, and required checks                                                  |
+| [`RHYTHM.md`](../RHYTHM.md)                                                         | Newest-first record of meaningful implemented repository decisions; read when a change creates or revises a durable decision                               |
+| [`docs/CONVENTIONS.md`](CONVENTIONS.md)                                             | Intended architecture and repository-wide code, module, test, documentation, and formatting conventions                                                    |
+| [`docs/ARCHITECTURE.md`](ARCHITECTURE.md)                                           | Runtime design, dependency direction, configuration, persistence, recovery, pinned dependencies, MCP, Git, and clarification                               |
+| [`docs/OPERATOR_GUIDE.md`](OPERATOR_GUIDE.md)                                       | Shared CLI/MCP supervision procedure; read before preparing, running, recovering, or recording project operating lessons                                   |
+| [`docs/product/PIPELINE_MODEL.md`](product/PIPELINE_MODEL.md)                       | Pipeline purposes, relationships, modes, and clarification boundaries; read before changing workflow meaning                                               |
+| [`docs/product/VALIDATION_AND_REVIEW.md`](product/VALIDATION_AND_REVIEW.md)         | Initial implementation evidence, validation, pinned dependencies, review, fingerprints, and effect gates; read before changing how work becomes acceptable |
+| [`docs/product/PROVIDER_MODEL.md`](product/PROVIDER_MODEL.md)                       | Provider capabilities, execution selection, sessions, and normalized failures; read before changing backend semantics                                      |
+| [`docs/product/OPERATOR_MODEL.md`](product/OPERATOR_MODEL.md)                       | Configuration, CLI/MCP control, durable state, pauses, and observability; read before changing operator behavior                                           |
+| [`docs/product/SAFETY_MODEL.md`](product/SAFETY_MODEL.md)                           | Repository permissions, Git ownership, redaction, and effect reconciliation; read before changing a safety boundary                                        |
+| [`README.md`](../README.md)                                                         | User-facing installation, configuration, CLI, MCP, and pipeline usage                                                                                      |
+| [`packages/commit-plan/README.md`](../packages/commit-plan/README.md)               | Shared commit-plan syntax, parsing, validation, and Conventional Commit subject contract                                                                   |
+| [`pipelines/plan-authoring/docs/SPEC.md`](../pipelines/plan-authoring/docs/SPEC.md) | Plan-authoring roles, prompts, states, corrections, artifacts, and completion rules                                                                        |
+| [`pipelines/plan-execution/docs/SPEC.md`](../pipelines/plan-execution/docs/SPEC.md) | Plan-execution roles, prompts, validation, review, commit, recovery, and completion rules                                                                  |
+| [`pipelines/polishing/docs/SPEC.md`](../pipelines/polishing/docs/SPEC.md)           | Polishing roles, capability discovery, validation, review, handoff, recovery, and completion rules                                                         |
+| [`project-structure` skill](../.agents/skills/project-structure/SKILL.md)           | Operational ownership guidance for placing, moving, or splitting repository code                                                                           |
+| [`finalization` skill](../.agents/skills/finalization/SKILL.md)                     | Post-change operator-surface review and validation; phase-owned staging and commit-message handoff gate                                                    |
 
 ## Change gate
 

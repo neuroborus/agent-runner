@@ -206,6 +206,120 @@ test("normalizes legacy role records for every pipeline without rewriting histor
   }
 });
 
+test("migrates version-7 active role effort without rewriting journal history", async (t) => {
+  for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
+    for (const mode of ["independent", "lazy"]) {
+      const { created, store } = await createFixture(t);
+      await created.lease.release();
+      const statePath = join(created.directoryPath, "state.json");
+      const eventsPath = join(created.directoryPath, "events.jsonl");
+      const progressPath = join(created.directoryPath, "progress.md");
+      const legacy = JSON.parse(await readFile(statePath, "utf8"));
+      const event = JSON.parse((await readFile(eventsPath, "utf8")).trim());
+      const primary = pipelineId === "plan-authoring" ? "planner" : "worker";
+      const active =
+        mode === "lazy" ? [primary] : [primary, "reviewer", "arbiter"];
+      legacy.pipelineId = pipelineId;
+      legacy.schemaVersion = 7;
+      legacy.runtimeCompatibility.runStateVersion = 7;
+      legacy.roles = Object.fromEntries(
+        active.map((role) => [
+          role,
+          {
+            backend: "codex",
+            model: "current",
+            profile: "current",
+            contextSize: "current",
+          },
+        ]),
+      );
+      legacy.pipelineState.settings = { mode };
+      event.schemaVersion = 7;
+      event.state = legacy;
+      const stateSource = `${JSON.stringify(legacy)}\n`;
+      const eventSource = `${JSON.stringify(event)}\n`;
+      await writeFile(statePath, stateSource);
+      await writeFile(eventsPath, eventSource);
+      const progress = await readFile(progressPath, "utf8");
+
+      const loaded = await store.loadRun(legacy.runId);
+      assert.deepEqual(Object.keys(loaded.roles), active);
+      assert.ok(
+        Object.values(loaded.roles).every(({ effort }) => effort === "current"),
+      );
+      assert.equal(await readFile(statePath, "utf8"), stateSource);
+      assert.equal(await readFile(eventsPath, "utf8"), eventSource);
+      assert.equal(await readFile(progressPath, "utf8"), progress);
+      const lease = await store.acquireRunLease(legacy.runId);
+      const migrated = await store.migrateRun(
+        lease,
+        {
+          pipelineState: loaded.pipelineState,
+          pipelineStateVersion: loaded.pipelineStateVersion,
+        },
+        {
+          activity: {
+            actor: "runner",
+            phase: "runtime",
+            kind: "migrated",
+            message: "Migrate saved effort.",
+          },
+        },
+      );
+      await lease.release();
+      assert.equal(migrated.schemaVersion, RUN_STATE_SCHEMA_VERSION);
+      assert.equal(migrated.revision, loaded.revision + 1);
+      assert.deepEqual(migrated.roles, loaded.roles);
+      for (const field of [
+        "pipelineState",
+        "sessionLineage",
+        "activeTurn",
+        "executionProcess",
+        "counters",
+        "hashes",
+        "stopRequest",
+      ])
+        assert.deepEqual(migrated[field], loaded[field]);
+      assert.ok((await readFile(eventsPath, "utf8")).startsWith(eventSource));
+      assert.deepEqual((await store.loadRun(legacy.runId)).roles, loaded.roles);
+    }
+  }
+});
+
+test("current persisted role effort is required and cannot change across events", async (t) => {
+  const { created, store } = await createFixture(t);
+  await created.lease.release();
+  const statePath = join(created.directoryPath, "state.json");
+  const eventsPath = join(created.directoryPath, "events.jsonl");
+  const initial = JSON.parse(await readFile(statePath, "utf8"));
+  const event = JSON.parse((await readFile(eventsPath, "utf8")).trim());
+  for (const effort of [undefined, null, "max", "HIGH", 1]) {
+    const invalid = structuredClone(initial);
+    if (effort === undefined) delete invalid.roles.worker.effort;
+    else invalid.roles.worker.effort = effort;
+    await writeFile(statePath, JSON.stringify(invalid));
+    await writeFile(
+      eventsPath,
+      `${JSON.stringify({ ...event, state: invalid })}\n`,
+    );
+    await assert.rejects(store.loadRun(initial.runId), {
+      code: "ERR_INVALID_RUN_STATE",
+    });
+  }
+  const changed = structuredClone(initial);
+  changed.revision += 1;
+  changed.roles.worker.effort = "high";
+  const nextEvent = { ...event, revision: changed.revision, state: changed };
+  await writeFile(statePath, JSON.stringify(changed));
+  await writeFile(
+    eventsPath,
+    `${JSON.stringify(event)}\n${JSON.stringify(nextEvent)}\n`,
+  );
+  await assert.rejects(store.loadRun(initial.runId), {
+    code: "ERR_INVALID_EVENT_LOG",
+  });
+});
+
 test("projects version-2 activity state for every pipeline without rewriting", async (t) => {
   for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
     const workspace = await mkdtemp(
@@ -737,4 +851,170 @@ test("loads revision-bound private history without repairing files and rejects s
     (await store.loadRunHistory(created.state.runId)).run.revision,
     3,
   );
+});
+
+test("storage ownership rejects non-string identifiers without a transition", async (t) => {
+  const { created, store, workspace } = await createFixture(t);
+  const resource = {
+    id: "55555555-5555-4555-8555-555555555555",
+    hostname: "fixture-host",
+    commandIdentity: "a".repeat(64),
+    phase: "allocating",
+    root: { path: join(workspace, "storage"), device: "1", inode: "2" },
+    directory: null,
+  };
+  const before = await store.loadRun(created.state.runId);
+  for (const field of ["id", "commandIdentity"]) {
+    await assert.rejects(
+      store.recordExecutionResource(created.lease, {
+        ...resource,
+        [field]: [resource[field]],
+      }),
+      { code: "ERR_INVALID_RUN_STATE" },
+    );
+    assert.deepEqual(await store.loadRun(created.state.runId), before);
+  }
+});
+
+test("legacy storage ownership migrates to null without allocating resources", async (t) => {
+  const { created, stateRoot, store, workspace } = await createFixture(t);
+  await created.lease.release();
+  const statePath = join(created.directoryPath, "state.json");
+  const eventsPath = join(created.directoryPath, "events.jsonl");
+  const legacy = JSON.parse(await readFile(statePath, "utf8"));
+  legacy.schemaVersion = 8;
+  legacy.runtimeCompatibility.runStateVersion = 8;
+  delete legacy.executionResource;
+  const event = JSON.parse((await readFile(eventsPath, "utf8")).trim());
+  event.schemaVersion = 8;
+  event.state = legacy;
+  await writeFile(statePath, JSON.stringify(legacy));
+  await writeFile(eventsPath, `${JSON.stringify(event)}\n`);
+  const before = await readdir(workspace);
+  const loaded = await store.loadRun(legacy.runId);
+  assert.equal(loaded.executionResource, null);
+  assert.equal(
+    JSON.parse(await readFile(statePath, "utf8")).executionResource,
+    undefined,
+  );
+  const resumed = createRunStore({ stateRoot });
+  const lease = await resumed.acquireRunLease(legacy.runId);
+  try {
+    const migrated = await resumed.migrateRun(
+      lease,
+      {
+        pipelineState: loaded.pipelineState,
+        pipelineStateVersion: loaded.pipelineStateVersion,
+      },
+      {
+        activity: {
+          actor: "runner",
+          phase: "runtime",
+          kind: "migrated",
+          message: "Migrated storage ownership.",
+        },
+      },
+    );
+    assert.equal(migrated.executionResource, null);
+    assert.equal(migrated.schemaVersion, RUN_STATE_SCHEMA_VERSION);
+    assert.deepEqual(migrated.sessionLineage, loaded.sessionLineage);
+    assert.deepEqual(migrated.counters, loaded.counters);
+    assert.deepEqual(await readdir(workspace), before);
+  } finally {
+    await lease.release();
+  }
+});
+
+for (const phase of ["allocating", "allocated"]) {
+  test(`version-9 ${phase} ownership migrates unchanged without resource effects`, async (t) => {
+    const { created, store, workspace } = await createFixture(t);
+    await created.lease.release();
+    const statePath = join(created.directoryPath, "state.json");
+    const eventsPath = join(created.directoryPath, "events.jsonl");
+    const legacy = JSON.parse(await readFile(statePath, "utf8"));
+    legacy.schemaVersion = 9;
+    legacy.runtimeCompatibility.runStateVersion = 9;
+    legacy.executionResource = {
+      id: "55555555-5555-4555-8555-555555555555",
+      hostname: "fixture-host",
+      commandIdentity: "a".repeat(64),
+      phase,
+      root: { path: join(workspace, "storage"), device: "1", inode: "2" },
+      directory: phase === "allocated" ? { device: "1", inode: "3" } : null,
+    };
+    const event = JSON.parse((await readFile(eventsPath, "utf8")).trim());
+    event.schemaVersion = 9;
+    event.state = legacy;
+    await writeFile(statePath, JSON.stringify(legacy));
+    await writeFile(eventsPath, `${JSON.stringify(event)}\n`);
+    const original = await readFile(statePath, "utf8");
+    const loaded = await store.loadRun(legacy.runId);
+    assert.equal(loaded.schemaVersion, 9);
+    assert.deepEqual(loaded.executionResource, legacy.executionResource);
+    assert.equal(await readFile(statePath, "utf8"), original);
+    const lease = await store.acquireRunLease(legacy.runId);
+    try {
+      const migrated = await store.migrateRun(
+        lease,
+        {
+          pipelineState: loaded.pipelineState,
+          pipelineStateVersion: loaded.pipelineStateVersion,
+        },
+        {
+          activity: {
+            actor: "runner",
+            phase: "runtime",
+            kind: "migrated",
+            message: "Migrated acquisition ownership contract.",
+          },
+        },
+      );
+      assert.equal(migrated.schemaVersion, RUN_STATE_SCHEMA_VERSION);
+      assert.deepEqual(migrated.executionResource, legacy.executionResource);
+      assert.deepEqual(migrated.counters, loaded.counters);
+      assert.deepEqual(migrated.sessionLineage, loaded.sessionLineage);
+      await assert.rejects(access(legacy.executionResource.root.path), {
+        code: "ENOENT",
+      });
+      await assert.rejects(lease.release(), {
+        code: "ERR_EXECUTION_PROCESS_ACTIVE",
+      });
+    } finally {
+      // The fixture owns no filesystem allocation; retire its synthetic record.
+      await store.recordExecutionResource(lease, null);
+      await lease.release();
+    }
+  });
+}
+
+test("version-9 state cannot carry the version-10 acquiring phase", async (t) => {
+  const { created, store, workspace } = await createFixture(t);
+  const statePath = join(created.directoryPath, "state.json");
+  const eventsPath = join(created.directoryPath, "events.jsonl");
+  const legacy = JSON.parse(await readFile(statePath, "utf8"));
+  legacy.schemaVersion = 9;
+  legacy.runtimeCompatibility.runStateVersion = 9;
+  legacy.executionResource = {
+    id: "55555555-5555-4555-8555-555555555555",
+    hostname: "fixture-host",
+    commandIdentity: "a".repeat(64),
+    phase: "acquiring",
+    root: { path: join(workspace, "storage"), device: "1", inode: "2" },
+    directory: { device: "1", inode: "3" },
+    owner: {
+      pid: process.pid,
+      processIdentity: {
+        bootId: "55555555-5555-4555-8555-555555555555",
+        startTicks: "1",
+      },
+    },
+  };
+  const event = JSON.parse((await readFile(eventsPath, "utf8")).trim());
+  event.schemaVersion = 9;
+  event.state = legacy;
+  await writeFile(statePath, JSON.stringify(legacy));
+  await writeFile(eventsPath, `${JSON.stringify(event)}\n`);
+  await assert.rejects(store.loadRun(legacy.runId), {
+    code: "ERR_INVALID_RUN_STATE",
+  });
 });

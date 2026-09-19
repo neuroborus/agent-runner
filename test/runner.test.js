@@ -3,12 +3,13 @@ import { execFile } from "node:child_process";
 import {
   mkdir,
   mkdtemp,
+  lstat,
   readdir,
   readFile,
   rm,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
@@ -19,6 +20,7 @@ import {
   createMcpControlPlane,
   createRunner,
   createRunStore,
+  createTrustedValidationService,
   DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
   getPipeline,
   main,
@@ -82,6 +84,15 @@ test("legacy recovery status is lock-free and resume retains run-then-worktree o
     "DONE",
   );
 });
+
+function requestedStepAssessment(request) {
+  const matched = /Runner-selected plan position[^\n]*\n([^\n]+)/u.exec(
+    request.prompt,
+  );
+  if (!matched) return undefined;
+  const { step, subject } = JSON.parse(matched[1]);
+  return { step, subject, disposition: "CURRENT", evidence: [] };
+}
 
 function questions() {
   return {
@@ -217,6 +228,7 @@ function createAdapter({ fork = true, questionFirst = false } = {}) {
 
 function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
   const calls = [];
+  const contextCalls = [];
   const probes = [];
   let freshSessionCount = 0;
   function freshSession() {
@@ -226,6 +238,7 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
   }
   return {
     calls,
+    contextCalls,
     probes,
     async probe(options) {
       probes.push(options);
@@ -243,6 +256,13 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
       };
     },
     async run(request) {
+      if (request.prompt.startsWith("Validate the proposed context")) {
+        contextCalls.push(request);
+        return {
+          structured: { stepAssessment: requestedStepAssessment(request) },
+          sessionId: request.session?.id ?? freshSession(),
+        };
+      }
       calls.push(request);
       if (request.access === "local-commit") {
         await executeFile("git", ["-C", request.cwd, "add", "-A"]);
@@ -287,6 +307,11 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
             "plan, risks, and finalization procedure.",
           requiredChecks: [{ id: "C1", command: "git diff --check HEAD" }],
           validationInfrastructure: [],
+          ...((request.schema?.properties?.result?.anyOf?.[0]?.properties
+            ?.capabilityRequirements ??
+          request.schema?.properties?.capabilityRequirements)
+            ? { capabilityRequirements: [], environmentBlockers: [] }
+            : {}),
           capacityField: "",
           capacityLimit: 0,
           reason: "",
@@ -394,6 +419,13 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
         throw new Error("Unexpected fake execution turn.");
       }
       sessionId ??= freshSession();
+      if (
+        (
+          request.schema?.properties?.result?.anyOf?.[0]?.properties ??
+          request.schema?.properties
+        )?.stepAssessment
+      )
+        structured.stepAssessment = requestedStepAssessment(request);
       return {
         output: "structured",
         structured:
@@ -424,6 +456,11 @@ function createArbiterAdapter() {
       };
     },
     async run(request) {
+      if (request.prompt.startsWith("Validate the proposed context"))
+        return {
+          structured: { stepAssessment: requestedStepAssessment(request) },
+          sessionId: request.session.id,
+        };
       assert.equal(probeCalls, 1);
       calls.push(request);
       assert.match(request.prompt, /^Resolve the bootstrap disagreement/u);
@@ -431,6 +468,7 @@ function createArbiterAdapter() {
         output: "structured",
         structured: {
           result: {
+            stepAssessment: requestedStepAssessment(request),
             direction: "SYNTHESIZE",
             summary: "Use the existing minimal module boundary.",
             rationale: "Repository ownership supports that boundary.",
@@ -1321,6 +1359,9 @@ test("operator cancellation supersedes pause during trusted validation without a
       },
       trustedValidation: {
         async preflight() {},
+        async inspectRequirements() {
+          return { status: "READY", blockers: [] };
+        },
         async execute(request) {
           executions += 1;
           assert.equal(typeof request.onProcess, "function");
@@ -1484,6 +1525,146 @@ test("operator stop after host loss reclaims ownership and reconciles before fur
   }
 });
 
+for (const recovery of ["resume", "cancel", "configuration pause"]) {
+  test(`retired execution storage is cleaned before ${recovery} after owner loss`, async (t) => {
+    const fixture = await operatorFixture(t, "plan-execution");
+    if (recovery === "configuration pause") {
+      await mkdir(join(fixture.projectPath, "LOCAL_ARTIFACTS"), {
+        recursive: true,
+      });
+      await writeFile(
+        join(fixture.projectPath, "LOCAL_ARTIFACTS", "agent-runner.json"),
+        JSON.stringify({ schemaVersion: 1, defaultEffort: "current" }),
+      );
+    }
+    const bootA = "11111111-1111-4111-8111-111111111111";
+    const bootB = "22222222-2222-4222-8222-222222222222";
+    const options = {
+      stateRoot: fixture.stateRoot,
+      resolveStopBoundary,
+      hostName: "recovery-host",
+      processId: 100,
+      processIsAlive: () => true,
+      processIdentity: (pid) => ({ bootId: bootA, startTicks: String(pid) }),
+      leaseStaleMs: 0,
+    };
+    const store = createRunStore(options);
+    const delegate = createExecutionAdapter();
+    const runner = runnerFor(fixture, { codex: delegate }, { runStore: store });
+    const { run } = await runner.create({
+      pipelineId: "plan-execution",
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+      proactiveClarification: false,
+      roleOverrides: {},
+      sourceSession: null,
+    });
+    const lease = await store.acquireRunLease(run.runId);
+    const root = join(fixture.stateRoot, "..", "execution-storage");
+    await mkdir(root, { mode: 0o700 });
+    const rootInfo = await lstat(root, { bigint: true });
+    const intent = {
+      id: "55555555-5555-4555-8555-555555555555",
+      hostname: hostname(),
+      commandIdentity: "a".repeat(64),
+      phase: "allocating",
+      root: {
+        path: root,
+        device: String(rootInfo.dev),
+        inode: String(rootInfo.ino),
+      },
+      directory: null,
+    };
+    await store.recordExecutionResource(lease, intent);
+    const path = join(root, intent.id);
+    await mkdir(path, { mode: 0o700 });
+    const directory = await lstat(path, { bigint: true });
+    await store.recordExecutionResource(lease, {
+      ...intent,
+      phase: "allocated",
+      directory: {
+        device: String(directory.dev),
+        inode: String(directory.ino),
+      },
+    });
+    await writeFile(join(path, "interrupted-cache"), "must not be reused");
+    // Simulate a supervised child recorded before its owner was lost.
+    await store.recordExecutionProcess(lease, 4242, {
+      processIdentity: { bootId: bootA, startTicks: "4242" },
+      namespaceId: "pid:[4026533000]",
+    });
+    await assert.rejects(lease.release(), {
+      code: "ERR_EXECUTION_PROCESS_ACTIVE",
+    });
+    const recoveredStore = createRunStore({
+      ...options,
+      processId: 200,
+      processIdentity: (pid) => ({ bootId: bootB, startTicks: String(pid) }),
+    });
+    const interruption = new Error("Reached provider after recovery");
+    let providerCalls = 0;
+    const recoveredRunner = runnerFor(
+      fixture,
+      {
+        codex: {
+          ...delegate,
+          async run() {
+            providerCalls++;
+            const saved = await recoveredStore.loadRun(run.runId);
+            assert.equal(saved.executionProcess, null);
+            assert.equal(saved.executionResource, null);
+            assert.deepEqual(await readdir(root), []);
+            throw interruption;
+          },
+        },
+      },
+      {
+        runStore: recoveredStore,
+        trustedValidation: createTrustedValidationService(),
+      },
+    );
+    if (recovery === "cancel") {
+      const current = await recoveredStore.loadRun(run.runId);
+      await recoveredRunner.requestOperatorStop({
+        runId: run.runId,
+        kind: "cancel_requested",
+        expectedRevision: current.revision,
+        idempotencyKey: "storage-recovery-stop",
+        timing: "immediate",
+      });
+      const canceled = (
+        await recoveredRunner.resume({ runId: run.runId, action: null })
+      ).run;
+      assert.equal(canceled.pipelineState.workflowState, "CANCELED");
+      assert.equal(providerCalls, 0);
+    } else if (recovery === "configuration pause") {
+      await mkdir(join(fixture.projectPath, "LOCAL_ARTIFACTS"), {
+        recursive: true,
+      });
+      await writeFile(
+        join(fixture.projectPath, "LOCAL_ARTIFACTS", "agent-runner.json"),
+        JSON.stringify({ schemaVersion: 1, defaultEffort: "high" }),
+      );
+      const paused = (
+        await recoveredRunner.resume({ runId: run.runId, action: null })
+      ).run;
+      assert.equal(paused.pause.reason, "project_configuration_changed");
+      assert.equal(providerCalls, 0);
+    } else {
+      await assert.rejects(
+        recoveredRunner.resume({ runId: run.runId, action: null }),
+        { name: "AgentBoundaryError" },
+      );
+      assert.equal(providerCalls, 1);
+    }
+    const saved = await recoveredStore.loadRun(run.runId);
+    assert.equal(saved.executionProcess, null);
+    assert.equal(saved.executionResource, null);
+    assert.deepEqual(await readdir(root), []);
+    assert.equal(await recoveredStore.runIsLeased(run.runId), false);
+  });
+}
+
 function runnerFor(
   fixture,
   adapters,
@@ -1515,6 +1696,7 @@ async function rewriteRunAsLegacy(directoryPath) {
   state.schemaVersion = 1;
   delete state.runtimeCompatibility;
   delete state.activeTurn;
+  for (const role of Object.values(state.roles)) delete role.effort;
   const events = (await readFile(eventsPath, "utf8"))
     .trimEnd()
     .split("\n")
@@ -1539,6 +1721,7 @@ async function rewriteRunAsLegacy(directoryPath) {
     event.state.schemaVersion = 1;
     delete event.state.runtimeCompatibility;
     delete event.state.activeTurn;
+    for (const role of Object.values(event.state.roles)) delete role.effort;
   }
   await Promise.all([
     writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`),
@@ -1719,7 +1902,7 @@ test("publishes blocking provider activity before every pipeline turn", async (t
       assert.equal(completed.run.activeTurn, null);
       assert.equal(
         activities.filter(({ kind }) => kind === "turn-started").length,
-        delegate.calls.length,
+        delegate.calls.length + (delegate.contextCalls?.length ?? 0),
       );
     });
   }
@@ -1736,6 +1919,7 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
       activities,
       configuration: {
         ...RUNNER_CONFIGURATION,
+        defaultEffort: "xhigh",
         pipelines: { "plan-authoring": { preferredCommitLineLimit: 650 } },
       },
     },
@@ -1763,6 +1947,7 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
     profile: "current",
     model: "planner-model",
     contextSize: "current",
+    effort: "xhigh",
   });
   assert.deepEqual(paused.run.pipelineState.settings, {
     maxRevisionRounds: 20,
@@ -1788,6 +1973,7 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
       configuration: {
         schemaVersion: 1,
         defaultBackend: "claude",
+        defaultEffort: "low",
         pipelines: { "plan-authoring": { preferredCommitLineLimit: 1200 } },
       },
     },
@@ -1805,6 +1991,8 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
   assert.equal(completed.run.pipelineState.workflowState, "DONE");
   assert.equal(await readFile(join(fixture.taskPath, "plan.md"), "utf8"), PLAN);
   assert.deepEqual(completed.run.roles, paused.run.roles);
+  assert.ok(adapter.calls.every(({ effort }) => effort === "xhigh"));
+  assert.ok(adapter.probes.every(({ effort }) => effort === "xhigh"));
   assert.deepEqual(completed.run.pipelineState.settings, {
     maxRevisionRounds: 20,
     mode: "independent",
@@ -1936,7 +2124,16 @@ test("migrates a legacy runtime envelope under the run lease before resume", asy
   });
   await rewriteRunAsLegacy(prepared.directoryPath);
 
+  const probeCount = adapter.probes.length;
+  const callCount = adapter.calls.length;
   const legacyStatus = await runner.status(prepared.run.runId);
+  assert.equal(adapter.probes.length, probeCount);
+  assert.equal(adapter.calls.length, callCount);
+  assert.ok(
+    Object.values(legacyStatus.run.roles).every(
+      ({ effort }) => effort === "current",
+    ),
+  );
   assert.equal(legacyStatus.run.schemaVersion, 1);
   assert.equal(legacyStatus.run.runtimeCompatibility, null);
   assert.equal(legacyStatus.run.revision, 1);
@@ -2193,11 +2390,12 @@ test("resumes plan execution from its durable trusted-command snapshot", async (
         nativeSessionFork: true,
       };
     },
-    async run() {
+    async run(request) {
       return {
         output: "structured",
         structured: {
           status: "PLAN_REVISION_REQUIRED",
+          stepAssessment: requestedStepAssessment(request),
           questions: [],
           reason: "The durable test intentionally stops before bootstrap.",
           question: "",
@@ -2252,9 +2450,191 @@ test("resumes plan execution from its durable trusted-command snapshot", async (
   );
   assert.equal(configurationLoads, 1);
   assert.deepEqual(trustedPreflights, [
-    { projectPath: fixture.projectPath },
-    { projectPath: fixture.projectPath },
+    {
+      projectPath: fixture.projectPath,
+      snapshot: durableSnapshot,
+      storageForbiddenPaths: [
+        fixture.projectPath,
+        fixture.taskPath,
+        runStore.rootPath,
+      ],
+    },
+    {
+      projectPath: fixture.projectPath,
+      snapshot: durableSnapshot,
+      storageForbiddenPaths: [
+        fixture.projectPath,
+        fixture.taskPath,
+        runStore.rootPath,
+      ],
+    },
   ]);
+});
+
+test("unavailable trusted capabilities persist early pauses and retry frozen requests before providers", async (t) => {
+  for (const pipelineId of ["plan-execution", "polishing"]) {
+    await t.test(pipelineId, async (t) => {
+      const fixture = await createFixture(t);
+      await writeFile(
+        join(fixture.projectPath, ".gitignore"),
+        "/LOCAL_ARTIFACTS/\n",
+      );
+      await writeFile(
+        join(fixture.projectPath, "source.js"),
+        "export const value = 1;\n",
+      );
+      await writeFile(join(fixture.taskPath, "plan.md"), PLAN);
+      await executeFile("git", [
+        "-C",
+        fixture.projectPath,
+        "config",
+        "user.name",
+        "Test",
+      ]);
+      await executeFile("git", [
+        "-C",
+        fixture.projectPath,
+        "config",
+        "user.email",
+        "test@example.com",
+      ]);
+      await executeFile("git", ["-C", fixture.projectPath, "add", "."]);
+      await executeFile("git", [
+        "-C",
+        fixture.projectPath,
+        "commit",
+        "-qm",
+        "test: fixture",
+      ]);
+      if (pipelineId === "polishing")
+        await writeFile(
+          join(fixture.projectPath, "source.js"),
+          "export const value = 2;\n",
+        );
+      const configuration = {
+        schemaVersion: 1,
+        defaultBackend: "codex",
+        trustedCommands: {
+          build: {
+            command: "npm run build",
+            executable: "npm",
+            arguments: ["run", "build"],
+            capabilities: { scratch: true },
+          },
+        },
+        pipelines: { [pipelineId]: { trustedChecks: ["build"] } },
+      };
+      let unavailable = true;
+      let providerCalls = 0;
+      let loads = 0;
+      const requests = [];
+      const adapter = {
+        async probe() {
+          providerCalls += 1;
+          return {
+            version: "fake-1.0.0",
+            structuredOutput: true,
+            readOnly: true,
+            autonomousWrite: true,
+            gitMetadataWriteBlocked: true,
+            workspaceWrite: true,
+            localCommit: true,
+            remoteWriteBlocked: true,
+            nativeSessionContinuation: true,
+            nativeSessionFork: true,
+          };
+        },
+        async run(request) {
+          providerCalls += 1;
+          if (request.prompt.startsWith("Validate the proposed context"))
+            return {
+              structured: { stepAssessment: requestedStepAssessment(request) },
+              sessionId: PLANNER_SESSION,
+            };
+          return {
+            output: "structured",
+            sessionId: PLANNER_SESSION,
+            structured: {
+              status: "PRODUCT_DECISION_REQUIRED",
+              ...(request.schema.properties.stepAssessment
+                ? { stepAssessment: requestedStepAssessment(request) }
+                : {}),
+              questions: [],
+              reason: "",
+              question: "Which behavior should the fixture implement?",
+              options: [],
+              whyBlocked: "The fixture intentionally stops at clarification.",
+              evidence: ["The fixture task leaves behavior unspecified."],
+            },
+          };
+        },
+      };
+      const trustedValidation = {
+        async preflight({ snapshot }) {
+          requests.push(snapshot);
+          if (unavailable)
+            throw Object.assign(new Error("Unavailable fixture capability"), {
+              code: "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE",
+            });
+        },
+        async execute() {
+          assert.fail("Preflight must not execute checks.");
+        },
+      };
+      const runStore = createRunStore({ stateRoot: fixture.stateRoot });
+      const open = () =>
+        createRunner({
+          adapters: { codex: adapter },
+          clarifications: createClarificationService({ interactive: false }),
+          trustedValidation,
+          runStore,
+          async loadConfiguration() {
+            loads += 1;
+            assert.equal(loads, 1);
+            return parseRunnerConfiguration(JSON.stringify(configuration));
+          },
+        });
+      const runner = open();
+      const input = {
+        pipelineId,
+        projectPath: fixture.projectPath,
+        taskPath: fixture.taskPath,
+        proactiveClarification: false,
+        roleOverrides: {},
+        sourceSession: null,
+      };
+      const blocked =
+        pipelineId === "plan-execution"
+          ? await runner.run(input)
+          : await runner.create(input);
+      assert.equal(blocked.run.pause.reason, "environment_blocked");
+      assert.equal(blocked.run.pipelineState.preflightComplete, false);
+      assert.equal(blocked.run.pipelineState.repositoryBaseline, null);
+      assert.equal(blocked.run.pipelineState.backendVersions, null);
+      assert.deepEqual(blocked.run.hashes, {});
+      assert.equal(providerCalls, 0);
+      const runId = blocked.run.runId;
+      await runner.status(runId);
+      assert.equal(requests.length, 1);
+      const retried = await open().resume({ runId });
+      assert.equal(retried.run.pause.reason, "environment_blocked");
+      assert.equal(providerCalls, 0);
+      assert.equal(requests.length, 2);
+      configuration.trustedCommands.build.capabilities = { cache: true };
+      unavailable = false;
+      const resumed = await open().resume({ runId });
+      assert.equal(resumed.run.pause.reason, "product_decision_required");
+      assert.ok(providerCalls > 0);
+      assert.equal(loads, 1);
+      assert.equal(requests.length, 3);
+      for (const request of requests)
+        assert.deepEqual(request, blocked.run.pipelineState.trustedValidation);
+      assert.deepEqual(
+        resumed.run.pipelineState.trustedValidation,
+        blocked.run.pipelineState.trustedValidation,
+      );
+    });
+  }
 });
 
 test("submits input previewed from a compatible legacy run", async (t) => {
@@ -2405,12 +2785,14 @@ test("persists a trusted source profile and applies resolved turn preferences", 
     profile: profileDirectory,
     model: "sonnet",
     contextSize: "200000",
+    effort: "current",
   });
   assert.deepEqual(adapter.probes, [
     {
       profile: profileDirectory,
       model: "sonnet",
       contextSize: "200000",
+      effort: "current",
     },
   ]);
   assert.ok(
@@ -2459,6 +2841,7 @@ test("does not require an unused Arbiter backend", async (t) => {
     profile: "current",
     model: "current",
     contextSize: "current",
+    effort: "current",
   });
 });
 
@@ -2489,11 +2872,13 @@ test("persists descriptor-selected roles and probes only required roles", async 
       profile: "current",
       model: "planner-model",
       contextSize: "current",
+      effort: "current",
     },
     {
       profile: "current",
       model: "reviewer-model",
       contextSize: "current",
+      effort: "current",
     },
   ]);
   assert.equal(prepared.run.roles.arbiter.backend, "claude");
@@ -2508,12 +2893,21 @@ test("runs lazy plan authoring with only one Planner fork", async (t) => {
     {
       configuration: {
         ...RUNNER_CONFIGURATION,
+        defaultEffort: "xhigh",
         pipelines: {
           "plan-authoring": {
             mode: "independent",
             roles: {
-              reviewer: { backend: "claude", model: "reviewer-model" },
-              arbiter: { backend: "claude", model: "arbiter-model" },
+              reviewer: {
+                backend: "claude",
+                model: "reviewer-model",
+                effort: "low",
+              },
+              arbiter: {
+                backend: "claude",
+                model: "arbiter-model",
+                effort: "medium",
+              },
             },
           },
         },
@@ -2534,6 +2928,9 @@ test("runs lazy plan authoring with only one Planner fork", async (t) => {
   assert.deepEqual(Object.keys(result.run.roles), ["planner"]);
   assert.equal(result.run.pipelineState.settings.mode, "lazy");
   assert.equal(adapter.probes.length, 1);
+  assert.equal(result.run.roles.planner.effort, "xhigh");
+  assert.equal(adapter.probes[0].effort, "xhigh");
+  assert.ok(adapter.calls.every(({ effort }) => effort === "xhigh"));
   assert.equal(
     adapter.calls.filter(({ session }) => session?.mode === "fork").length,
     1,
@@ -2606,6 +3003,7 @@ test("persists project overrides and blocks later configuration changes", async 
       artifactRoot: "project-artifacts",
       defaultProfile: "codex-work",
       defaultModel: "project-model",
+      defaultEffort: "high",
       pipelines: {
         "plan-authoring": {
           mode: "lazy",
@@ -2659,12 +3057,14 @@ test("persists project overrides and blocks later configuration changes", async 
     profile: "native-work",
     model: "cli-planner",
     contextSize: "current",
+    effort: "high",
   });
   assert.deepEqual(paused.run.roles.reviewer, {
     backend: "codex",
     profile: "native-work",
     model: "project-model",
     contextSize: "200000",
+    effort: "high",
   });
   assert.equal(
     paused.run.projectConfigurationProtection.path,
@@ -2688,7 +3088,10 @@ test("persists project overrides and blocks later configuration changes", async 
   );
 
   await Promise.all([
-    writeFile(projectConfigurationPath, '{"schemaVersion":2}\n'),
+    writeFile(
+      projectConfigurationPath,
+      '{"schemaVersion":1,"defaultEffort":"low"}\n',
+    ),
     writeFile(
       join(fixture.taskPath, "clarifications.md"),
       `${await readFile(join(fixture.taskPath, "clarifications.md"), "utf8")}\nUse behavior A.\n`,
@@ -2886,6 +3289,7 @@ test("never reads an Agent Runner configuration file in the target repository", 
     adapters: { codex: createAdapter() },
     clarifications: createClarificationService({ interactive: false }),
     git: createGitService(),
+    loadConfiguration: configurationLoader(),
     runStore: createRunStore({ stateRoot: fixture.stateRoot }),
   });
 
@@ -2903,16 +3307,19 @@ test("never reads an Agent Runner configuration file in the target repository", 
       ...roleOverrides.planner,
       profile: "current",
       contextSize: "current",
+      effort: "current",
     },
     reviewer: {
       ...roleOverrides.reviewer,
       profile: "current",
       contextSize: "current",
+      effort: "current",
     },
     arbiter: {
       ...roleOverrides.arbiter,
       profile: "current",
       contextSize: "current",
+      effort: "current",
     },
   });
 });
@@ -3040,6 +3447,7 @@ test("dispatches plan execution through the root Git and state services", async 
       profile: "work",
       model: "execution-model",
       contextSize: "200000",
+      effort: "current",
     })),
   );
   assert.ok(
@@ -3166,6 +3574,7 @@ for (const pauseReason of ["local_artifacts_not_ignored", "unsafe_git_state"]) {
         profile: "work",
         model: "polishing-model",
         contextSize: "200000",
+        effort: "current",
       })),
     );
   });
