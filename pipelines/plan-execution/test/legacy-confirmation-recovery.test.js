@@ -96,6 +96,21 @@ test("legacy confirmation recovers directly with proven accounting and completed
     });
 });
 
+test("legacy confirmation does not reopen a historical server-overload failure", async (t) => {
+  const fixture = await createLegacyRecoveryFixture(t, { steps: 1 });
+  await fixture.rewrite(({ events }) => {
+    events.at(-1).state.pause.diagnosticClass = "turn_server_overloaded";
+  });
+  const calls = fixture.calls.length;
+
+  assert.deepEqual(await fixture.recoveryAction(), []);
+  const { run } = await fixture.openRunner().resume({ runId: fixture.runId });
+
+  assert.equal(run.pipelineState.workflowState, "FAILED");
+  assert.equal(run.pause.diagnosticClass, "turn_server_overloaded");
+  assert.equal(fixture.calls.length, calls);
+});
+
 test("legacy confirmation rejects a real pending terminal output correction", async (t) => {
   const fixture = await createLegacyRecoveryFixture(t, {
     steps: 1,

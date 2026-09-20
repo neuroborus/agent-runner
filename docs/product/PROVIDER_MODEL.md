@@ -149,16 +149,19 @@ no provider retry, availability pause, or output correction. Raw error text,
 payloads, and additional details are discarded after classification. Malformed,
 oversized, ambiguous, or transient-status evidence does not become a bad request.
 
-The remaining Codex `turn_other` is an opaque recoverable provider failure. An
-ordinary non-commit request uses the existing single fresh reconstruction from its
-complete persisted recovery context and the observed workspace, provided no
-explicit policy or protocol violation was reported. A second failure returns
-to the pipeline without another adapter retry; a repeated
-`turn_other` pauses as `backend_unavailable` at the safe checkpoint. A source
+The remaining Codex `turn_other` and the explicit native `serverOverloaded`
+variant, normalized as `turn_server_overloaded`, are recoverable provider
+failures. The adapter audits reported turn items first so policy, protocol, and
+isolation violations retain precedence. An ordinary non-commit request uses the
+existing single fresh reconstruction from its complete persisted recovery
+context and the observed workspace. A second failure returns to the pipeline
+without another adapter retry and pauses as `backend_unavailable` at the safe
+checkpoint when it remains recoverable. Writable workflows first reconcile safe
+workspace changes and invalidate stale fingerprint-bound evidence. A source
 fork is never replaced by fresh context. Local-commit turns bypass this retry:
-a rejected readiness turn reports that the executor never started, and any
-uncertain commit effect remains subject to verification without replay. Native
-error details are discarded.
+a rejected readiness turn, including overload, reports that the executor never
+started, and any uncertain commit effect remains subject to verification
+without replay. Native error details are discarded.
 
 Explicit rate, quota, credit, or spend-limit failures are not hidden behind
 context compaction or provider fallback. A resumable failure records only its

@@ -43,12 +43,12 @@ import {
   trustedValidationSnapshot,
 } from "./support/index.js";
 
-function exhaustedCodexTurnFailure() {
+function exhaustedCodexTurnFailure(diagnosticClass = "turn_other") {
   return normalizeAdapterFailure(
     "codex",
     Object.assign(new Error("DO_NOT_RETAIN_NATIVE_MESSAGE"), {
       code: "ERR_CODEX_TURN_FAILED",
-      diagnosticClass: "turn_other",
+      diagnosticClass,
       recoverable: true,
       additionalDetails: "DO_NOT_RETAIN_ADDITIONAL_DETAILS",
     }),
@@ -134,86 +134,88 @@ test("local Codex schema and structured bad-request failures stay terminal at CO
   }
 });
 
-test("repeated opaque Codex failures pause at terminal CONFIRM without replaying finalized work", async (t) => {
+test("repeated recoverable Codex failures pause at terminal CONFIRM without replaying finalized work", async (t) => {
   for (const mode of ["independent", "lazy"]) {
-    await t.test(mode, async (t) => {
-      let failures = 0;
-      const fixture = await createFixture(t, {
-        mode,
-        workWorker: [
-          implementationCompleted(),
-          checkAndFix(),
-          cleanConfirmation(),
-          finalizationPassed(),
-        ],
-        onRoleRun(_role, request) {
-          if (
-            [REVIEW_SCHEMA, CLEAN_CONFIRM_SCHEMA].includes(request.schema) &&
-            failures < 2
-          ) {
-            failures += 1;
-            throw exhaustedCodexTurnFailure();
-          }
-        },
-      });
-
-      const firstPause = await fixture.run();
-      const secondPause = await fixture.run();
-      for (const paused of [firstPause, secondPause]) {
-        assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
-        assert.deepEqual(paused.pause, {
-          code: "ERR_CODEX_TURN_FAILED",
-          resumeState: "CONFIRM",
-          reason: "backend_unavailable",
+    for (const diagnosticClass of ["turn_other", "turn_server_overloaded"]) {
+      await t.test(`${mode}/${diagnosticClass}`, async (t) => {
+        let failures = 0;
+        const fixture = await createFixture(t, {
+          mode,
+          workWorker: [
+            implementationCompleted(),
+            checkAndFix(),
+            cleanConfirmation(),
+            finalizationPassed(),
+          ],
+          onRoleRun(_role, request) {
+            if (
+              [REVIEW_SCHEMA, CLEAN_CONFIRM_SCHEMA].includes(request.schema) &&
+              failures < 2
+            ) {
+              failures += 1;
+              throw exhaustedCodexTurnFailure(diagnosticClass);
+            }
+          },
         });
-        assert.equal(paused.activeTurn, null);
-        assert.equal(paused.pipelineState.finalizationResult.status, "PASS");
+
+        const firstPause = await fixture.run();
+        const secondPause = await fixture.run();
+        for (const paused of [firstPause, secondPause]) {
+          assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+          assert.deepEqual(paused.pause, {
+            code: "ERR_CODEX_TURN_FAILED",
+            resumeState: "CONFIRM",
+            reason: "backend_unavailable",
+          });
+          assert.equal(paused.activeTurn, null);
+          assert.equal(paused.pipelineState.finalizationResult.status, "PASS");
+          assert.equal(
+            paused.pipelineState.finalizedFingerprint,
+            paused.pipelineState.repositoryBaseline.contentFingerprint,
+          );
+          assert.equal(paused.pipelineState.reviewedFingerprint, null);
+          assert.equal(paused.pipelineState.pendingCommit, null);
+          assert.deepEqual(paused.counters, firstPause.counters);
+          assert.deepEqual(
+            paused.pipelineState.finalizationResult,
+            firstPause.pipelineState.finalizationResult,
+          );
+        }
+        assert.equal(failures, 2);
         assert.equal(
-          paused.pipelineState.finalizedFingerprint,
-          paused.pipelineState.repositoryBaseline.contentFingerprint,
+          fixture.calls.worker.filter(({ access }) => access === "local-commit")
+            .length,
+          0,
         );
-        assert.equal(paused.pipelineState.reviewedFingerprint, null);
-        assert.equal(paused.pipelineState.pendingCommit, null);
-        assert.deepEqual(paused.counters, firstPause.counters);
-        assert.deepEqual(
-          paused.pipelineState.finalizationResult,
-          firstPause.pipelineState.finalizationResult,
+        const completed = await fixture.run();
+        assert.equal(completed.pipelineState.workflowState, "DONE");
+        assert.equal(
+          fixture.calls.worker.filter(({ prompt }) =>
+            prompt.includes("Implement the changes"),
+          ).length,
+          1,
         );
-      }
-      assert.equal(failures, 2);
-      assert.equal(
-        fixture.calls.worker.filter(({ access }) => access === "local-commit")
-          .length,
-        0,
-      );
-      const completed = await fixture.run();
-      assert.equal(completed.pipelineState.workflowState, "DONE");
-      assert.equal(
-        fixture.calls.worker.filter(({ prompt }) =>
-          prompt.includes("Implement the changes"),
-        ).length,
-        1,
-      );
-      assert.equal(
-        fixture.calls.worker.filter(
-          ({ schema }) => schema === FINALIZATION_SCHEMA,
-        ).length,
-        1,
-      );
-      assert.equal(
-        fixture.calls.worker.filter(({ access }) => access === "local-commit")
-          .length,
-        1,
-      );
-      assert.doesNotMatch(
-        JSON.stringify(fixture.transitions),
-        /DO_NOT_RETAIN/u,
-      );
-      if (mode === "lazy") {
-        assert.equal(fixture.calls.reviewer.length, 0);
-        assert.equal(fixture.calls.arbiter.length, 0);
-      }
-    });
+        assert.equal(
+          fixture.calls.worker.filter(
+            ({ schema }) => schema === FINALIZATION_SCHEMA,
+          ).length,
+          1,
+        );
+        assert.equal(
+          fixture.calls.worker.filter(({ access }) => access === "local-commit")
+            .length,
+          1,
+        );
+        assert.doesNotMatch(
+          JSON.stringify(fixture.transitions),
+          /DO_NOT_RETAIN/u,
+        );
+        if (mode === "lazy") {
+          assert.equal(fixture.calls.reviewer.length, 0);
+          assert.equal(fixture.calls.arbiter.length, 0);
+        }
+      });
+    }
   }
 });
 

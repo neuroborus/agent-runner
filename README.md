@@ -433,12 +433,16 @@ the native failure is marked `other`. HTTP 400 `invalid_request_error` /
 `turn_bad_request`; it does not trigger provider retries, output correction,
 or `backend_unavailable`. Native error details are discarded.
 
-Opaque Codex `turn_other` failures use at most one fresh reconstruction for
-ordinary non-commit turns, with the complete durable recovery request and observed
-workspace. A repeated failure pauses as `backend_unavailable` at the safe
-checkpoint; restore provider availability and resume the same run. Native
-error details are discarded, source forks are never replaced by fresh context,
-and local-commit turns never use this retry or replay a commit effect.
+Explicit Codex `turn_server_overloaded` and opaque `turn_other` failures use at
+most one fresh reconstruction for ordinary non-commit turns, with the complete
+durable recovery request and observed workspace. Turn items are audited before
+recovery so policy, protocol, and isolation failures retain precedence. A
+repeated recoverable failure pauses as `backend_unavailable` at the safe
+checkpoint; restore provider availability and resume the same run. Native error
+details are discarded, source forks are never replaced by fresh context, and
+local-commit turns never use this retry or replay a commit effect. An overload
+that rejects commit readiness before the isolated executor starts remains a
+proven pre-effect rejection for the runner's Git verification path.
 
 ## Task Inputs
 
@@ -646,6 +650,9 @@ confirmation; it preserves completed commits and counters and replays no
 implementation, finalization, or consumed commit effect. A proven
 `pendingCorrection: true` accounting marker is retained. Missing or inconsistent
 history, migration-only acceptance, and genuinely pending work fail closed.
+This compatibility exception remains limited to historical `turn_other`;
+historical `turn_server_overloaded` failures remain immutable `FAILED` runs and
+are not reopened by migration.
 See the [operator guide](docs/OPERATOR_GUIDE.md) for recovery boundaries.
 
 Plan execution and polishing accept one applicable resume action at a time:

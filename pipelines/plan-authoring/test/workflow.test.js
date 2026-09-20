@@ -2220,6 +2220,37 @@ test("reconstructs an allowlisted failed Claude read-only turn", async (t) => {
   assert.equal(resumedRequest.prompt, resumedRequest.recoveryPrompt);
 });
 
+test("pauses plan authoring before writing a plan after an explicit Codex overload", async (t) => {
+  let overloaded = true;
+  const fixture = await createFixture(t, {
+    onRoleRun(role) {
+      if (role === "planner" && overloaded) {
+        overloaded = false;
+        throw Object.assign(new Error("provider-native overload secret"), {
+          code: "ERR_CODEX_TURN_FAILED",
+          diagnosticClass: "turn_server_overloaded",
+          recoverable: true,
+        });
+      }
+    },
+  });
+
+  const paused = await fixture.run();
+
+  assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(paused.pause.reason, "backend_unavailable");
+  assert.equal(paused.pause.code, "ERR_CODEX_TURN_FAILED");
+  assert.equal(paused.pause.resumeState, "CLARIFY");
+  await assert.rejects(readFile(fixture.planPath, "utf8"), /ENOENT/u);
+  assert.doesNotMatch(JSON.stringify(fixture.transitions), /overload secret/u);
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(await readFile(fixture.planPath, "utf8"), PLAN);
+  assert.equal(fixture.calls.planner[1].session, undefined);
+});
+
 test("keeps Claude authentication terminal for a read-only turn", async (t) => {
   const fixture = await createFixture(t, {
     onRoleRun(role) {

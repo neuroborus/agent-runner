@@ -980,6 +980,15 @@ outcomes remain terminal. Resume reconstructs the complete request from durable
 state rather than requiring the failed native session. These rules add no new
 pipeline-state field, provider branch, or migration.
 
+Codex App Server `serverOverloaded` is a distinct recoverable provider
+diagnostic. After turn-item policy, protocol, and isolation auditing, eligible
+ordinary non-commit requests outside source forks use the existing single fresh
+reconstruction. Repeated overload propagates as a bounded recoverable failure
+and pauses at the exact durable checkpoint through the same backend-neutral
+path. Source forks and local-commit turns bypass that fallback. An overload that
+rejects local-commit readiness retains `effectStarted: false`; only Git proof of
+no effect may retire and reauthorize the one-shot request.
+
 When sandbox, IPC, loopback, process-isolation, missing-service, permission,
 or comparable external constraints prevent nondelegated work, a writable
 Worker turn returns structured `BLOCKED` with bounded reason and evidence.
@@ -1089,6 +1098,9 @@ compaction, fresh retry, `backend_unavailable`, and output-correction recovery.
 Malformed, oversized, ambiguous, and transient-status evidence remains opaque
 `turn_other`: eligible non-commit turns outside source forks reconstruct once
 from the complete durable request, then propagate the next failure unchanged.
+The explicit `turn_server_overloaded` class follows the same single-fresh-
+reconstruction eligibility and repeated-failure propagation after item
+auditing, without passing through native HTTP-message refinement.
 Local-commit readiness failures remain pre-effect rejections and never replay
 the executor. Recognition and redaction belong to the adapter as specified in
 [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md); no pipeline branch or
@@ -2465,6 +2477,9 @@ acceptance, or an unchanged lazy `CHECK_AND_FIX` followed by accepted candidate
 `CLEAN_CONFIRM`; combined requires both primary and independent edges. It must also prove passing finalization and the failed
 read-only terminal `CONFIRM` turn for the same step. Complete current state,
 check, trust, override, accounting, and effect contracts still apply.
+This compatibility gate is intentionally exact: historical
+`turn_server_overloaded` failures remain immutable `FAILED` runs, and no
+migration reopens them.
 
 Explicit supported migrations may preserve this proof, including across
 restart, but cannot create it. In particular, the version-13 migration's
@@ -3223,12 +3238,13 @@ At minimum cover:
     validation-infrastructure paths are batched before inventory acceptance
     with every producing field identified, while canonical existing files are
     accepted.
-52. Codex `usageLimitExceeded` and Claude structured status and permission
-    classification are finite and redacted; explicit usage exhaustion and
-    allowlisted Claude read-only failures reconstruct from durable state,
-    classified writable usage/provider failures preserve reconciled changes,
-    and forbidden, authentication, ambiguous writable, and one-shot outcomes
-    remain fail closed.
+52. Codex `usageLimitExceeded`, `serverOverloaded`, and Claude structured status
+    and permission classification are finite and redacted; explicit usage
+    exhaustion and allowlisted Claude read-only failures reconstruct from
+    durable state, eligible Codex overload receives only the established single
+    fresh reconstruction, classified writable usage/provider failures preserve
+    reconciled changes, and forbidden, authentication, ambiguous writable, and
+    one-shot outcomes remain fail closed.
 53. merged root/project trusted catalogs, deduplication, conflicts, 256-definition
     and 32-selection bounds, project-only alias selection, durable
     snapshot resume, exact-vector execution, bounded redaction, fingerprint

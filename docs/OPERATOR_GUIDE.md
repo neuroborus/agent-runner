@@ -398,9 +398,13 @@ rejection. A recognized structured HTTP 400 schema rejection has the latter
 classification even if Codex labels it `other`. These failures do not enter
 provider-availability or output-correction recovery; follow the stopped run's
 actions and correct the request defect before starting again. A genuinely
-opaque `turn_other` retains one fresh reconstruction for eligible non-commit
-turns and then the existing `backend_unavailable` pause. Native error payloads
-and transcripts are not diagnostic evidence to collect or attach.
+opaque `turn_other` or explicit `turn_server_overloaded` retains one fresh
+reconstruction for eligible ordinary non-commit turns outside source forks and
+then the existing `backend_unavailable` pause. Turn-item policy, protocol, and
+isolation violations retain precedence. Local-commit readiness bypasses this
+fallback and remains on the runner's pre-effect Git-verification path. Native
+error payloads and transcripts are not diagnostic evidence to collect or
+attach.
 
 If a genuinely non-resumable run leaves valid dirty work, first establish that
 execution ownership is gone and reconcile inputs and the stopped run's
