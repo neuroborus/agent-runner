@@ -1682,19 +1682,23 @@ ID suffixes are discarded. Unknown codes, malformed JSON, duplicate fields or
 metadata, inconsistent status text, oversized evidence, transient statuses,
 and prose lookalikes remain opaque; additional details and variant payloads
 are never alternative classification sources.
-Opaque failures retain `turn_other` and the existing recoverable flag. Neither
+Opaque failures retain `turn_other`; the native `serverOverloaded` variant maps
+to `turn_server_overloaded`. Both classes are recoverable after the turn-item
+audit, while the structured HTTP refinement remains limited to `other`. Neither
 path retains native messages, variant payloads, additional details, or causes.
 Completion notifications and hydrated turns accept only `completed`, `failed`,
 and `interrupted` statuses before failure classification. For these failures,
-the existing item audit and explicit-model reroute guard still
-reject policy and protocol violations before classification or recovery. For
-opaque non-commit failures outside a source fork, the existing recovery path
-attempts one fresh session with the complete `recoveryPrompt` and observed workspace.
-The failure itself does not request compaction, and the second attempt's
-failure propagates unchanged without another reconstruction. Source forks
-remain ineligible for fresh fallback. Local-commit readiness failures exit
-before retry with `effectStarted: false`; executor outcomes remain on their
-verification-only path and are never replayed.
+the existing item audit and explicit-model reroute guard still reject policy,
+protocol, and isolation violations before classification or recovery. For
+recoverable non-commit failures outside a source fork, the existing recovery
+path attempts one fresh session with the complete `recoveryPrompt` and observed
+workspace. The failure itself does not request compaction, and the second
+attempt's failure propagates unchanged without another reconstruction. Source
+forks remain ineligible for fresh fallback. Local-commit readiness failures
+exit before retry with `effectStarted: false`; an overload rejected before the
+isolated executor starts therefore remains a proven pre-effect rejection.
+Executor outcomes remain on their verification-only path and are never
+replayed.
 
 An otherwise unclassified valid read-only result or process failure is
 recoverable only because the enforced read-only envelope and the pipeline's

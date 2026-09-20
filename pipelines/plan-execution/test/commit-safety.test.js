@@ -3,6 +3,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
+import { normalizeAdapterFailure } from "../../../src/agents/index.js";
 import {
   migratePlanExecutionStateV5,
   planExecutionPipeline,
@@ -331,7 +332,7 @@ test("preserves pre-effect proof across interrupted Git verification", async (t)
   );
 });
 
-test("re-authorizes after a proven pre-effect provider rejection", async (t) => {
+test("re-authorizes after a proven pre-effect Codex overload rejection", async (t) => {
   let backendUnavailable = true;
   const fixture = await createFixture(t, {
     workReviewer: [
@@ -349,12 +350,16 @@ test("re-authorizes after a proven pre-effect provider rejection", async (t) => 
     async onRoleRun(_role, request) {
       if (request.access === "local-commit" && backendUnavailable) {
         backendUnavailable = false;
-        const error = new Error("Provider capacity is unavailable.");
-        error.code = "ERR_FAKE_PROVIDER_LIMIT";
-        error.recoverable = true;
-        error.ambiguous = false;
-        error.effectStarted = false;
-        throw error;
+        throw normalizeAdapterFailure(
+          "codex",
+          Object.assign(new Error("provider-native overload secret"), {
+            code: "ERR_CODEX_TURN_FAILED",
+            diagnosticClass: "turn_server_overloaded",
+            recoverable: true,
+            ambiguous: false,
+            effectStarted: false,
+          }),
+        );
       }
     },
   });
@@ -363,13 +368,14 @@ test("re-authorizes after a proven pre-effect provider rejection", async (t) => 
 
   assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
   assert.equal(paused.pause.reason, "backend_unavailable");
-  assert.equal(paused.pause.code, "ERR_FAKE_PROVIDER_LIMIT");
+  assert.equal(paused.pause.code, "ERR_CODEX_TURN_FAILED");
   assert.equal(paused.pause.resumeState, "COMMIT");
   assert.equal(paused.pipelineState.pendingCommit, null);
   const rejectedRequest = fixture.calls.worker.findLast(
     ({ access }) => access === "local-commit",
   );
   assert.equal(rejectedRequest.authorizationId, "commit-1");
+  assert.doesNotMatch(JSON.stringify(fixture.transitions), /overload secret/u);
 
   const migrated = migrateVersionOneState(
     versionOneState(paused.pipelineState),

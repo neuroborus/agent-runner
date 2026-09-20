@@ -65,6 +65,10 @@ const TERMINAL_TURN_DIAGNOSTICS = Object.freeze({
   unauthorized: "turn_unauthorized",
   usageLimitExceeded: "turn_usage_limit_exceeded",
 });
+const RECOVERABLE_TURN_DIAGNOSTICS = new Set([
+  TERMINAL_TURN_DIAGNOSTICS.other,
+  TERMINAL_TURN_DIAGNOSTICS.serverOverloaded,
+]);
 const MAX_HTTP_ERROR_BYTES = 16_384;
 const CLIENT_ERROR_STATUSES = new Map([
   [400, "Bad Request"],
@@ -1186,13 +1190,19 @@ async function runTurn(
       });
     }
     if (
+      diagnosticClass === TERMINAL_TURN_DIAGNOSTICS.badRequest ||
+      RECOVERABLE_TURN_DIAGNOSTICS.has(diagnosticClass)
+    ) {
+      // Classification and recovery cannot hide policy, protocol, or
+      // isolation violations.
+      auditItems(turn.items, request);
+    }
+    if (
       [
         TERMINAL_TURN_DIAGNOSTICS.other,
         TERMINAL_TURN_DIAGNOSTICS.badRequest,
       ].includes(diagnosticClass)
     ) {
-      // Classification and recovery cannot hide policy or protocol violations.
-      auditItems(turn.items, request);
       const rejection = structuredClientError(turn.error.message);
       if (
         request.effort !== undefined &&
@@ -1207,7 +1217,7 @@ async function runTurn(
     throw new CodexAdapterError("Codex turn failed.", {
       code: "ERR_CODEX_TURN_FAILED",
       diagnosticClass,
-      recoverable: diagnosticClass === TERMINAL_TURN_DIAGNOSTICS.other,
+      recoverable: RECOVERABLE_TURN_DIAGNOSTICS.has(diagnosticClass),
     });
   }
   return turn;

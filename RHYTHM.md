@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-09-20
+
+- **Explicit Codex overload is transient provider unavailability.** Native
+  `serverOverloaded` now joins opaque `turn_other` on the existing single fresh
+  reconstruction for eligible ordinary turns, after turn-item auditing preserves
+  policy, protocol, and isolation precedence. Repeated overload pauses every
+  workflow at its durable `backend_unavailable` checkpoint with native details
+  redacted. Source forks retain their supplied context, local-commit readiness
+  remains a proven pre-effect rejection without adapter replay, and writable
+  reconciliation preserves safe content while invalidating stale fingerprint
+  evidence. The exact historical `turn_other` confirmation exception remains
+  unchanged, so no migration reopens immutable overload failures.
+
 ## 2026-09-17
 
 - **Initial implementation needs an observed content change.** Execution persists
