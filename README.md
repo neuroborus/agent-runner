@@ -705,6 +705,21 @@ retains completed commits in terminal `CANCELED`. Status shows requested and
 effective timing, target step, and settlement. See
 [operator guidance](docs/OPERATOR_GUIDE.md) for recovery semantics.
 
+If CLI status shows `Stop state: applicable`,
+`agent-run resume --run <run-id>` is a safe action-free recovery attempt: lease
+enforcement rejects a live execution owner. MCP `run_status` identifies the
+ownerless case when `stop.state` is `applicable` and `execution.state` is not
+`running`; recover it through `run_resume` as described below. Neither path
+requires the original pause or cancel idempotency key. Initial plan-execution
+`CLARIFY` stops that have no preflight, repository/artifact checkpoint, active
+turn, process, or resource settle under the run lease without waiting for a
+canonical-worktree lease owned by another run. Every later or otherwise
+non-quiescent checkpoint still requires normal worktree exclusion and effect
+reconciliation. A lease-conflict diagnostic names the recorded owner run
+separately from the ownerless pending run. Never manually delete, rewrite, or
+bypass lease records; recover the recorded owner or retry the offered action
+after normal release or state-owned reclamation.
+
 For repeatable automation, supply both captured values explicitly. Retry an
 uncertain request with exactly the same revision, key, and timing; never refresh a stale
 request silently:
@@ -931,10 +946,12 @@ are appended verbatim to the durable clarification transcript before detached
 execution continues. Editing the artifact and using `run_resume` remains
 supported;
 `run_resume` requires `expectedRevision` from the latest status or wait result,
-a unique idempotency key, and only an action valid for the persisted pause. The
-only non-pause exception is a null action at the exact revision of a nonterminal
-persisted active turn with no live execution owner; stale revisions, non-null
-actions, and concurrent owners are rejected.
+a unique idempotency key, and only an action valid for the persisted pause. A
+null action at the exact revision also recovers either a nonterminal persisted
+active turn or an applicable stop when no execution owner is live. Stop recovery
+uses a new `run_resume` key and does not require the original pause/cancel key;
+stale revisions, non-null actions, live owners, and concurrent ownership races
+are rejected.
 
 Use `run_pause` or `run_cancel` with `expectedRevision` from the inspected
 status or wait result and a unique `idempotencyKey`. A pause preserves the
@@ -958,12 +975,15 @@ different arguments is rejected. Issue reporting uses that contract for its
 single local file creation. Accepted stop requests notify the live execution
 owner or start detached same-run reconciliation when ownership was lost. Runs
 continue in detached local children, so MCP disconnects and wait cancellation
-affect only the client call. A detached
-start or resume rejects active canonical-worktree ownership before launch and
-withholds its receipt after launch until the run advances or the child owns the
-worktree. Losing a concurrent ownership race keeps the durable idempotency
-intent available for an exact retry, including when the competing lease is
-released before the next MCP poll because child exit is acknowledged directly.
+affect only the client call. Ordinary detached start or resume rejects active
+canonical-worktree ownership before launch and withholds its receipt after
+launch until the run advances or the child owns the worktree. Detached stop
+reconciliation instead follows the exact launched child until the stop is
+durably settled or that child exits; acquiring the run lease is not completion.
+An exit before settlement leaves recovery retryable and preserves the applicable
+stop. Losing a concurrent ownership race keeps the durable idempotency intent
+available for an exact retry, including when the competing lease is released
+before the next MCP observation because child exit is acknowledged directly.
 The MCP process freezes a detached-compatibility token over the root
 run-envelope tuple and every sorted loaded pipeline ID/state version. The child
 independently recomputes it before acquiring the run lease, recovering state,

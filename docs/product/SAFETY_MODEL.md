@@ -96,6 +96,15 @@ receipt may be recovered or replayed after later transitions without executing
 work or changing a terminal outcome. The state protocol itself performs no
 process signalling or repository effect.
 
+Plan execution may omit canonical-worktree acquisition only when its descriptor
+proves that an applicable immediate stop belongs to the unchanged initial
+`CLARIFY` checkpoint: preflight and repository/artifact persistence are absent,
+and no pause, active turn, process, or resource exists. The runner still owns
+the execution lease and uses atomic state settlement. A canonical lease recorded
+for an unrelated run cannot block that state-only outcome. Every failed proof,
+persisted repository checkpoint, or possible in-flight effect retains ordinary
+worktree exclusion and reconciliation.
+
 The runner connects that protocol to an owned-process abort boundary. Provider
 and trusted-command processes wait for durable registration before executing;
 runner loss closes their private control pipe and starts bounded cleanup.
@@ -190,6 +199,16 @@ Omission is immediate. Neither transport refreshes stale inspected revisions;
 retries bind timing to the same durable identity. Public stop and activity
 summaries omit private checkpoints and request identities; receipts retain
 bounded acceptance evidence, and waits never confer execution ownership.
+
+Detached stop supervision correlates the launched child with the private stop
+checkpoint and waits for durable settlement or that child's exit. A transient
+execution lease does not prove reconciliation. Exit first preserves the
+applicable stop and retryable recovery intent. Exact-revision MCP recovery uses
+a new action-free idempotency intent, rejects live or duplicate owners, and does
+not depend on the original stop key; CLI resume uses the same runner settlement
+path. A conflicting canonical lease remains attributed to its recorded owner,
+not to the ownerless pending run. Operators never manually delete, rewrite, or
+bypass lease records; supported recovery uses the state-owned lease protocol.
 
 A deferred commit-boundary stop reserves execution/worktree ownership while
 its immutable target step advances. State rejects boundary crossing except via

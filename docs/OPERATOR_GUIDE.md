@@ -306,6 +306,9 @@ material requirement, not an implementation preference or review finding.
 Through MCP, retain the durable run ID and the original idempotency key for
 each mutation. Retry an uncertain mutation with the same arguments and key.
 A new key represents a new mutation and cannot recover the original receipt.
+Ownerless applicable-stop recovery is a separate mutation: `run_resume` records
+an action-free recovery intent under a new key and does not require or recreate
+the original pause/cancel receipt.
 Use `run_wait` for one event-driven wait over the desired interval. Use
 `run_activity` only for deliberate current or historical inspection, with its
 cursor. Do not poll status, activity, or waits at a fixed cadence.
@@ -316,7 +319,11 @@ A timeout, wait cancellation, or MCP disconnect ends only that wait. Detached
 work continues. Inspect the returned execution state to distinguish a live
 owner, an interrupted turn, and idle work. An ownerless interrupted turn may
 accept action-free resume at the exact revision; it is not permission to start
-a second owner. Follow the current public state and actions.
+a second owner. An ownerless `applicable` stop may likewise use
+`agent-run resume --run <run-id>`, or MCP `run_resume` with `action: null`, the
+exact current revision, and a new idempotency key. MCP rejects stale revisions,
+non-null actions, live owners, and ownership races. Follow the current public
+state and actions.
 
 To stop active work, use `agent-run pause --run <run-id>` or
 `agent-run cancel --run <run-id>`. The shorthand reads status once and binds
@@ -327,7 +334,11 @@ and never refresh a stale request silently. MCP supervisors use `run_pause` or
 resumable checkpoint. Cancellation is terminal and older intents cannot revive
 it. A pending request is durable across disconnect or owner loss; status and
 wait expose its bounded kind, revision, timing, and target step while the live owner or a detached
-same-run continuation reconciles it.
+same-run continuation reconciles it. When MCP launches that continuation, it
+waits for durable settlement or the correlated child's exit; transient
+run-lease acquisition is not completion. Exit before settlement leaves the stop
+applicable and recovery retryable, including the distinct runtime-version-skew
+restart path.
 
 Add `--timing after-current-commit` to CLI pause/cancel, or
 `timing: "after-current-commit"` to MCP `run_pause`/`run_cancel`, to stop after
@@ -352,6 +363,16 @@ owner can still need reconciliation while the durable summary is `pending`.
 Settlement is either `quiescent` or `commit` with its verified SHA. Legacy
 settled stops may have no settlement details. None of these fields authorize
 another execution owner or extra work.
+
+For an untouched initial plan-execution `CLARIFY` checkpoint, the descriptor can
+prove that preflight, repository/artifact checkpoints, active turns, processes,
+and resources never began. That stop settles under the run lease without
+waiting for an unrelated canonical-worktree lease. Every other checkpoint keeps
+normal worktree exclusion and effect reconciliation. A conflict message names
+the run recorded as lease owner; that run is distinct from the ownerless run
+whose stop is still applicable. Never manually delete, edit, or bypass lease
+files. Recover the recorded owner through supported actions, or wait for normal
+release or state-owned stale-owner reclamation.
 
 ## 5. Recover a pause without taking over the work
 

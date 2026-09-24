@@ -96,7 +96,10 @@ Mutating MCP calls require idempotency keys. Intent is persisted before
 mutation and a receipt before return. Work continues in a detached process, so
 a client disconnect or wait cancellation ends only that client's wait and does
 not create a second execution owner. A compatibility token prevents an old MCP
-process from dispatching a newer or otherwise incompatible workflow.
+process from dispatching a newer or otherwise incompatible workflow. An
+ownerless applicable stop may be recovered by exact-revision, action-free
+`run_resume` with a new key; that separate durable intent makes the original
+pause/cancel key unnecessary without replaying its acceptance receipt.
 
 ## Durable state and local artifacts
 
@@ -112,7 +115,12 @@ does not edit target ignore rules.
 
 One execution lease protects a mutating run. Plan execution and polishing also
 hold a canonical-worktree lease so independently identified runs cannot mutate
-the same checkout concurrently. Status and activity reads remain lock-free.
+the same checkout concurrently. Plan execution's descriptor-proven untouched
+initial `CLARIFY` stop is the narrow state-only exception: it retains the run
+lease and settles without acquiring a canonical lease recorded for an unrelated
+run. Every checkpoint that may require repository reconciliation or effect
+verification keeps normal worktree exclusion. Status and activity reads remain
+lock-free.
 An abandoned same-host execution or canonical-worktree lease becomes eligible
 for recovery after five minutes only when the recorded process is demonstrably
 dead; age alone never proves ownership ended. Short state mutations observe
@@ -162,6 +170,16 @@ for pending or legacy records, otherwise `quiescent` or `commit` with the verifi
 SHA. Activity projects the summary from each historical event, while receipts
 replay immutable acceptance evidence. Cancellation is a terminal wait result
 and older intents cannot revive it.
+
+MCP supervises a stop child through durable settlement or that correlated
+child's exit; transient run-lease ownership is never reported as reconciliation.
+Exit first leaves the stop applicable and the recovery intent retryable, with a
+distinct version-skew outcome when applicable. Fresh public recovery rejects a
+stale revision, non-null action, live owner, or duplicate-owner race. When a
+non-quiescent stop is blocked by a canonical lease, diagnostics distinguish the
+ownerless pending run from the different run recorded as lease owner. Operators
+must use supported recovery and reclamation rather than manually deleting or
+bypassing lease records.
 
 Legacy opaque plan-execution failures during terminal confirmation can expose
 an action-free retry in either mode when durable history proves acceptance and

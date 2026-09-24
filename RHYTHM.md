@@ -7,6 +7,17 @@ remain in the owning documentation.
 
 ## 2026-09-24
 
+- **Ownerless stops are supervised through durable settlement.** Detached stop
+  reconciliation is correlated with its checkpoint and child exit; transient
+  run-lease ownership no longer counts as success. Plan execution can settle
+  only a descriptor-proven untouched initial `CLARIFY` stop under the run lease
+  without acquiring an unrelated canonical-worktree lease, while every possible
+  repository or effect checkpoint retains worktree exclusion. Action-free CLI
+  resume and exact-revision MCP `run_resume` provide recovery when the original
+  stop key is unavailable; MCP records the recovery under a new key. Diagnostics
+  distinguish the ownerless pending run from a different recorded lease owner,
+  and operators never manually delete or bypass lease records.
+
 - **Trusted validation deadlines are explicit per-run configuration.** Root and
   safe project configuration accept bounded millisecond
   `trustedCommandTimeoutMs`, defaulting to one hour with project-over-runner

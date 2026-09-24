@@ -432,7 +432,12 @@ never fabricates evidence by inspecting a current file.
 registered workflow. Plan execution and polishing additionally hold one external lease
 keyed by the canonical Git worktree before any workflow-owned mutation. The
 runner always acquires the per-run lease first and releases the worktree lease
-first. `resume` recovers the durable event history and reconstructs the same
+first. The narrow exception is plan execution's descriptor-proven initial
+`CLARIFY` stop checkpoint: the runner retains the per-run lease but settles the
+stop through the state-owned atomic checkpoint without acquiring an unrelated
+canonical-worktree lease. Every checkpoint that may require repository
+reconciliation or effect verification still requires the worktree lease.
+`resume` recovers the durable event history and reconstructs the same
 runtime from persisted state without reloading either configuration source or
 requiring a live native session. `status` remains lock-free.
 
@@ -664,21 +669,33 @@ hash, and execution lease before work is launched again.
 `run_start` persists the run before spawning `agent-run resume` as a detached
 child with no inherited standard streams. `run_respond` atomically writes the
 identified answers, records their transcript hash in run state, then launches
-the same detached continuation. `run_resume` accepts only an action applicable
-to the persisted pause, except that an exact-revision, nonterminal, nonpaused
-run with a persisted active turn and no live execution owner accepts one null
-action to recover that interruption. A non-null action, stale revision, live
-owner, or persisted pause is rejected without weakening ordinary pause-action
-validation. The child owns
-the existing per-run execution lease
-and, for plan execution or polishing, the canonical-worktree lease. Before
+the same detached continuation. `run_resume` normally accepts only an action
+applicable to the persisted pause. Two exact-revision, action-free recovery
+paths are additional: a nonterminal active turn with no live owner, and an
+ownerless applicable stop. Stop recovery persists its own idempotency intent
+and private stop-checkpoint revision, so it uses a new key and does not require
+the original stop key. A non-null action, stale revision, live owner, or
+duplicate ownership race is rejected without weakening ordinary pause-action
+validation.
+
+An ordinary continuation child owns the existing per-run execution lease and,
+for plan execution or polishing, the canonical-worktree lease. Before ordinary
 detached dispatch, MCP rejects an already-owned worktree without completing the
 idempotency intent, leaving the reserved durable run available for an exact
-retry. After spawning a mutating continuation, MCP withholds the receipt until
-the run advances or that child owns the worktree lease. A child that loses a
-concurrent ownership race therefore leaves the intent incomplete and exactly
-retryable. The launcher reports a causally correlated child exit so this
-remains deterministic when the competing lease is released between MCP polls.
+retry. After spawning an ordinary mutating continuation, MCP withholds the
+receipt until the run advances or that child owns the worktree lease. A child
+that loses a concurrent ownership race therefore leaves the intent incomplete
+and exactly retryable. The launcher reports a causally correlated child exit so
+this remains deterministic when the competing lease is released between MCP
+polls.
+
+Detached stop reconciliation has the stronger completion condition. MCP binds
+the launched child to the exact stop checkpoint and follows it until that stop
+is durably settled or that child exits; transient acquisition of the run lease
+is not progress. Exit before settlement leaves the recovery intent retryable
+and reports detached-start failure or the distinct runtime-version-skew error.
+A delayed child carries the checkpoint revision and becomes a no-op after that
+stop settles, so it cannot resume a reconciled pause or revive cancellation.
 An MCP disconnect, tool timeout, worktree conflict, or duplicate recovery
 launch cannot create a second workflow owner.
 
@@ -688,9 +705,12 @@ Both require the caller's exact inspected revision and idempotency key. An
 exact retry replays the receipt; a stale or conflicting request never refreshes
 itself. A live execution owner observes the durable request through the runner
 monitor. If ownership was already lost, MCP launches a detached action-free
-resume to perform the same-run reconciliation; execution and worktree leases
-still exclude a second owner. Client cancellation stops only the tool's wait
-for ownership and does not retract the request or terminate the detached child.
+resume to perform the same-run reconciliation. If the child exits first, the
+diagnostic identifies a conflicting canonical lease by its recorded owner run
+ID, distinct from the ownerless run whose stop remains applicable. Execution
+and worktree leases still exclude a second owner. Client cancellation stops
+only the tool's wait and does not retract the request or terminate the detached
+child.
 
 MCP start fields remain additive. `run_start.mode` exposes the union of
 descriptor modes (`independent`, `lazy`, `combined`); the selected pipeline
@@ -904,6 +924,20 @@ requests remain `pending`, including interrupted owners awaiting recovery.
 `settled` denotes completed accounting, with `quiescent` or a verified commit
 SHA when available. These projections do not decide ownership or enforcement.
 
+Plan execution's descriptor classifies one stop checkpoint as `pre-work` only
+when the applicable request is immediate, its saved journal revision matches
+the unchanged current pipeline state, and both snapshots remain at initial
+`CLARIFY` with incomplete preflight, empty input hashes, no repository baseline,
+backend versions, clarification path, frozen artifact, pending edit, canonical
+plan, selected step, pending commit, or completed commit, and no pause, active
+turn, execution process, or execution resource. The runner holds the run lease and
+uses the existing atomic stop settlement without acquiring a canonical lease
+recorded for another run. Cancellation becomes terminal; pause preserves that
+same resumable `CLARIFY` checkpoint. Any failed predicate retains the ordinary
+worktree-lease requirement and full repository/effect reconciliation. Plan
+execution state version 21 is an identity migration that rotates detached
+runtime compatibility for this settlement-aware contract.
+
 The private `src/state/stop-policy.js` owns three distinct decisions: whether a
 request awaits reconciliation, whether that request blocks execution, and
 whether unresolved stop accounting or a recorded execution process retains
@@ -960,6 +994,10 @@ original run's mutation boundary before replacing ownership. A crash leaving
 only a reclaiming record retains that reservation until a replacement lease
 exists, restricted to the same run while a stop is pending; failed
 replacement publication restores the previous lease when possible.
+The recorded lease owner and the run currently requesting reconciliation are
+separate identities: diagnostics name both when they differ. Operators never
+manually delete, rewrite, or bypass a lease record to make progress; recovery
+uses the state-owned settlement and normal lease acquisition/reclamation rules.
 `inspectRunLeaseOwner` exposes private identity and finite
 live/dead/replaced/unverifiable classification for runner use; unverifiable
 owners are not eligible signalling targets.

@@ -1712,6 +1712,15 @@ run-lease acquisition, recovery, or migration. A mismatch takes the distinct
 version-skew exit path and leaves the durable run, journal, leases, and
 incomplete intent exactly unchanged for an exact-key retry after the MCP
 process is restarted.
+Detached stop reconciliation is checkpoint-correlated rather than
+lease-correlated. Once MCP launches that child, it follows the exact stop until
+durable settlement or correlated child exit and never treats transient run-lease
+ownership as completion. Exit before settlement leaves the request applicable
+and reports a retryable detached-start or runtime-version-skew result. A later
+action-free `run_resume` uses the exact inspected revision and a new durable
+idempotency intent; it does not require the original stop key. The delayed child
+also carries the private stop-checkpoint revision, so settlement makes it a
+no-op instead of allowing a pause to resume or cancellation to revive.
 The additive MCP start fields leave `sourceSession` unset by default and pass it
 only after the user deliberately selects a fork; native IDs remain opaque and
 an unknown source profile offers only `current` inheritance.
@@ -3008,6 +3017,20 @@ inputs and the original access contract, preserves existing artifacts and safe
 partial content, and retains unsafe input or repository changes as blockers.
 It never rolls back content or changes Git controls.
 
+The descriptor owns one fail-closed `pre-work` classification for an applicable
+immediate stop saved against the untouched initial `CLARIFY` checkpoint. The
+saved revision must match the stop checkpoint and the current pipeline state;
+preflight is incomplete, hashes are empty, and neither snapshot has a persisted
+repository baseline, backend versions, clarification artifact or frozen hash,
+pending edit, canonical plan, selected step, pending commit, completed commit,
+pause, active turn, execution process, or execution resource. Under the run
+lease, the runner may settle only this checkpoint through the state-owned atomic
+operation without acquiring an unrelated canonical-worktree lease. Cancellation
+becomes terminal `CANCELED`; pause preserves resumable initial `CLARIFY`. Every
+other checkpoint retains the worktree lease and full repository/effect
+reconciliation. State version 21 is an identity migration that rotates detached
+compatibility for this contract without synthesizing checkpoint evidence.
+
 A completed operator pause uses `WAITING_FOR_USER`, `operator_paused`, and a
 null resume action. Its private checkpoint preserves the reconciled workflow
 position, logical turn, and preceding pause. Resuming an already paused
@@ -3043,6 +3066,18 @@ Receipts remain immutable acceptance evidence, including across supersession
 and settlement. A disconnected caller can retry the same request without
 creating another owner, and wait cancellation affects only the wait.
 
+An ownerless applicable stop is also a public continuation target. CLI
+`agent-run resume --run <run-id>` performs action-free same-run reconciliation.
+MCP `run_resume` requires `action: null`, the exact latest revision, and a new
+idempotency key; its intent stores the private stop-checkpoint revision before
+dispatch, so the original stop key is unnecessary. Fresh stale-revision,
+non-null-action, live-owner, and duplicate-owner requests fail closed. MCP waits
+for settlement or the correlated child's exit before completing the recovery
+receipt. If another run owns the canonical worktree needed by a non-pre-work
+checkpoint, diagnostics identify that recorded owner separately from the
+ownerless pending run. Operators never manually delete or bypass a lease record;
+supported recovery uses the state-owned lease protocol.
+
 Deferred acceptance reserves ownership while the target step continues through
 its ordinary gates. Monitoring remains active for immediate cancellation
 supersession. Successful verification records the SHA, baseline, next checkpoint,
@@ -3069,11 +3104,14 @@ its earlier diagnostic remains in history while unrelated blockers stay intact.
 `agent-run resume --run <run-id>` must reconstruct the workflow from persisted
 state.
 
-An ownerless persisted active turn is a continuation target even though the
-run is not paused. CLI resume and exact-revision MCP `run_resume` reconstruct it
-with a null action; MCP rejects a non-null action, stale revision, or live
-execution owner. Paused runs continue to use their descriptor-owned action
-validator unchanged.
+An ownerless persisted active turn or applicable stop is a continuation target
+even though the run is not ordinarily resumable. CLI resume reconstructs it
+with a null action. Exact-revision MCP `run_resume` does the same with its own
+idempotency intent; for a stop, the original stop key is not required. MCP
+rejects a non-null action, stale revision, live execution owner, or duplicate
+ownership race. A stop recovery completes only after durable settlement, while
+paused runs otherwise continue to use their descriptor-owned action validator
+unchanged.
 
 Before continuing:
 
@@ -3353,6 +3391,11 @@ At minimum cover:
 77. terminal-fingerprint overrides, including formatter drift and partial
     overrides, never restore invalidated evidence; interruption and unavailable
     providers preserve pending attempts, while explicit retries grant only one.
+78. initial pre-work pause/cancellation settles under the run lease without an
+    unrelated worktree lease, while every non-quiescent checkpoint retains
+    worktree exclusion; detached stop supervision waits for settlement or the
+    correlated child exit, and exact-revision action-free recovery with a new
+    key preserves receipt replay, version skew, and single-owner safety.
 
 Real Codex/Claude smoke tests should be opt-in integration tests. The owned
 Codex smoke registers its supervised process and must read and validate the
@@ -3569,6 +3612,9 @@ V1 is complete when:
   remote repository;
 - detached MCP launches reject root or loaded-pipeline version skew before
   recovery and remain exactly retryable after a fresh control-plane start;
+- ownerless applicable stops have action-free CLI and exact-revision MCP
+  recovery without the original stop key, and detached stop reconciliation
+  cannot report success on transient run-lease ownership;
 - interruption and resume are safe;
 - tests cover workflow behavior using fake agents and temporary Git repositories;
 - the implementation remains a small local CLI rather than growing into a framework.
