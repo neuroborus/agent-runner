@@ -15,6 +15,7 @@ const RUN_FIELDS = new Set([
 const RESUME_FIELDS = new Set([
   "runId",
   "action",
+  "stopCheckpointRevision",
   "expectedRuntimeCompatibility",
 ]);
 const CREATE_OPTIONS_FIELDS = new Set(["runId"]);
@@ -145,6 +146,17 @@ export function normalizeRunInput(input, providers = PROVIDER_REGISTRY) {
 export function normalizeResumeInput(input) {
   rejectUnknownFields(input, RESUME_FIELDS, "resume");
   if (
+    input.stopCheckpointRevision !== undefined &&
+    (!Number.isSafeInteger(input.stopCheckpointRevision) ||
+      input.stopCheckpointRevision < 1 ||
+      input.action != null ||
+      input.expectedRuntimeCompatibility === undefined)
+  ) {
+    throw new RunnerError("Detached stop reconciliation input is invalid.", {
+      code: "ERR_INVALID_RUNNER_INPUT",
+    });
+  }
+  if (
     input.expectedRuntimeCompatibility !== undefined &&
     input.expectedRuntimeCompatibility !== DETACHED_RUNTIME_COMPATIBILITY_TOKEN
   ) {
@@ -158,6 +170,7 @@ export function normalizeResumeInput(input) {
   return Object.freeze({
     runId: assertNonEmptyString(input.runId, "resume.runId"),
     action: input.action ?? null,
+    stopCheckpointRevision: input.stopCheckpointRevision ?? null,
     ...(input.expectedRuntimeCompatibility === undefined
       ? {}
       : {

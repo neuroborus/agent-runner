@@ -241,7 +241,7 @@ export function createLeaseManager({
     }
     if (!(await leaseIsStale(marker)) || !(await canReclaim(marker, runId))) {
       throw new RunStoreError(
-        `${leaseSubject(runId)} lease recovery is active.`,
+        `${leaseSubject(runId, marker.runId)} lease recovery is active.`,
         { code: conflictCode },
       );
     }
@@ -253,7 +253,7 @@ export function createLeaseManager({
         !(await canReclaim(current, runId))
       ) {
         throw new RunStoreError(
-          `${leaseSubject(runId)} lease recovery is active.`,
+          `${leaseSubject(runId, current.runId)} lease recovery is active.`,
           { code: conflictCode },
         );
       }
@@ -267,7 +267,7 @@ export function createLeaseManager({
         !(await canReclaim(current, null))
       ) {
         throw new RunStoreError(
-          `${leaseSubject(runId)} is reserved for reconciliation.`,
+          `${leaseSubject(runId, current.runId)} is reserved for reconciliation.`,
           { code: conflictCode },
         );
       }
@@ -293,7 +293,7 @@ export function createLeaseManager({
         if (marker !== null && !(await canReclaim(marker, runId))) {
           await acquired.release();
           throw new RunStoreError(
-            `${leaseSubject(runId)} is reserved for reconciliation.`,
+            `${leaseSubject(runId, marker.runId)} is reserved for reconciliation.`,
             { code: conflictCode },
           );
         }
@@ -312,9 +312,10 @@ export function createLeaseManager({
         !(await leaseIsStale(existingLease)) ||
         !(await canReclaim(existingLease, runId))
       ) {
-        throw new RunStoreError(`${leaseSubject(runId)} is already leased.`, {
-          code: conflictCode,
-        });
+        throw new RunStoreError(
+          `${leaseSubject(runId, existingLease.runId)} is already leased.`,
+          { code: conflictCode },
+        );
       }
 
       const reclaimingLease = await createLeaseRecord(runId);
@@ -336,7 +337,7 @@ export function createLeaseManager({
             !(await canReclaim(currentLease, runId))
           ) {
             throw new RunStoreError(
-              `${leaseSubject(runId)} is already leased.`,
+              `${leaseSubject(runId, currentLease.runId)} is already leased.`,
               { code: conflictCode },
             );
           }
@@ -356,10 +357,11 @@ export function createLeaseManager({
         if (acquired !== null) return acquired;
       } catch (cause) {
         if (cause?.code === "EEXIST") {
-          throw new RunStoreError(`${leaseSubject(runId)} is already leased.`, {
-            cause,
-            code: conflictCode,
-          });
+          const conflictingLease = await readManagedLease(leasePath, runId);
+          throw new RunStoreError(
+            `${leaseSubject(runId, conflictingLease?.runId)} is already leased.`,
+            { cause, code: conflictCode },
+          );
         }
         throw cause;
       } finally {

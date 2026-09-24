@@ -3,7 +3,11 @@ import { parseArgs } from "node:util";
 
 import packageMetadata from "../package.json" with { type: "json" };
 import { createGuidanceService } from "./guidance/index.js";
-import { DETACHED_RUNTIME_COMPATIBILITY_ENV, serveMcp } from "./mcp/index.js";
+import {
+  DETACHED_RUNTIME_COMPATIBILITY_ENV,
+  DETACHED_STOP_CHECKPOINT_ENV,
+  serveMcp,
+} from "./mcp/index.js";
 import { getPipeline, listPipelines } from "./pipeline-registry.js";
 import { createRunner, parseSourceSession } from "./runner/index.js";
 import {
@@ -393,6 +397,19 @@ function resumeAction(values) {
     : Object.freeze({ type: "override-finding", findingId });
 }
 
+function detachedStopCheckpoint(environment) {
+  const value = environment[DETACHED_STOP_CHECKPOINT_ENV];
+  if (value === undefined) return undefined;
+  if (
+    environment[DETACHED_RUNTIME_COMPATIBILITY_ENV] === undefined ||
+    !/^[1-9][0-9]*$/u.test(value) ||
+    !Number.isSafeInteger(Number(value))
+  ) {
+    throw new Error("Detached stop checkpoint is invalid.");
+  }
+  return Number(value);
+}
+
 export async function main(
   args = process.argv.slice(2),
   {
@@ -623,6 +640,11 @@ export async function main(
       const result = await commandRunner.resume({
         runId: values.run,
         action: resumeAction(values),
+        ...(environment[DETACHED_STOP_CHECKPOINT_ENV] === undefined
+          ? {}
+          : {
+              stopCheckpointRevision: detachedStopCheckpoint(environment),
+            }),
         ...(environment[DETACHED_RUNTIME_COMPATIBILITY_ENV] === undefined
           ? {}
           : {

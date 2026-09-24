@@ -34,6 +34,7 @@ import {
   createDetachedLauncher,
   createMcpControlPlane,
   DETACHED_RUNTIME_COMPATIBILITY_ENV,
+  DETACHED_STOP_CHECKPOINT_ENV,
   MCP_INSTRUCTIONS,
 } from "../../src/mcp/index.js";
 
@@ -369,6 +370,35 @@ async function createStoredRun(
   return created.state;
 }
 
+async function settleStoredStop(store, runId, existingLease) {
+  const lease = existingLease ?? (await store.acquireRunLease(runId));
+  try {
+    return await store.settleCheckpoint(lease, (run) => {
+      const canceled = run.stopRequest.kind === "cancel_requested";
+      return {
+        patch: {
+          pipelineState: {
+            ...run.pipelineState,
+            workflowState: canceled ? "CANCELED" : "WAITING_FOR_USER",
+          },
+          pause: {
+            reason: canceled ? "operator_canceled" : "operator_paused",
+            resumeAction: null,
+            operatorResume: {
+              workflowState: run.pipelineState.workflowState,
+              pause: run.pause,
+              activeTurn: run.activeTurn,
+            },
+          },
+        },
+        activity: null,
+      };
+    });
+  } finally {
+    if (existingLease === undefined) await lease.release();
+  }
+}
+
 function storedRunner(store, paths) {
   return {
     requestOperatorStop(input) {
@@ -462,6 +492,9 @@ test("projects descriptor-owned pipeline mode guidance", async () => {
   assert.match(MCP_INSTRUCTIONS, /never select it automatically/u);
   assert.match(MCP_INSTRUCTIONS, /run_pause or run_cancel/u);
   assert.match(MCP_INSTRUCTIONS, /never refresh a stale revision silently/u);
+  assert.match(MCP_INSTRUCTIONS, /ownerless applicable stop/u);
+  assert.match(MCP_INSTRUCTIONS, /original stop key is unnecessary/u);
+  assert.match(MCP_INSTRUCTIONS, /durable stop settlement or child exit/u);
 
   const control = createMcpControlPlane({ runner: {}, runStore: {} });
   const { pipelines } = await control.pipelinesList();
@@ -647,6 +680,10 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
     tools.find((tool) => tool.name === "run_wait").description,
     /completion, cancellation, failure/u,
   );
+  const resumeTool = tools.find((tool) => tool.name === "run_resume");
+  assert.match(resumeTool.description, /ownerless applicable stop/u);
+  assert.match(resumeTool.description, /original stop key/u);
+  assert.match(resumeTool.description, /durable settlement or child exit/u);
   const startTool = tools.find((tool) => tool.name === "run_start");
   assert.match(startTool.description, /user deliberately selects/u);
   assert.match(
@@ -867,12 +904,437 @@ test("persists exact action receipts and rejects idempotency collisions", async 
   );
 });
 
-test("persists stop receipts, projects pending stops, and starts one ownerless reconciliation", async (t) => {
+test("detached stop supervision follows transient ownership until settlement or child exit", async (t) => {
+  for (const exitCode of [1, RUNTIME_VERSION_SKEW_EXIT_CODE]) {
+    await t.test(String(exitCode), async (t) => {
+      const paths = await workspace(t, "agent-runner-stop-exit-");
+      const store = createRunStore({ stateRoot: paths.stateRoot });
+      const initial = await createStoredRun(store, paths, {
+        pipelineId: "plan-execution",
+      });
+      const older = await createStoredRun(store, paths, {
+        id: SECOND_RUN_ID,
+        pipelineId: "plan-execution",
+      });
+      const olderLease = await store.acquireRunLease(older.runId);
+      const worktree = await store.acquireWorktreeLease(
+        paths.projectPath,
+        older.runId,
+      );
+      await store.requestOperatorStop({
+        runId: older.runId,
+        kind: "cancel_requested",
+        expectedRevision: older.revision,
+        idempotencyKey: "older-cancel",
+      });
+      const inspected = deferred();
+      let lease;
+      let onExit;
+      let finished = false;
+      const runner = storedRunner(store, paths);
+      const control = createMcpControlPlane({
+        runner: {
+          ...runner,
+          async status(runId) {
+            const current = await runner.status(runId);
+            if (lease) inspected.resolve();
+            return current;
+          },
+        },
+        runStore: store,
+        async launchRun(runId, action, options) {
+          assert.equal(action, null);
+          assert.equal(options.stopCheckpointRevision, initial.revision);
+          assert.equal(
+            options.expectedRuntimeCompatibility,
+            DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
+          );
+          lease = await store.acquireRunLease(runId);
+          onExit = options.onExit;
+        },
+      });
+      const pending = control.runCancel({
+        runId: initial.runId,
+        expectedRevision: initial.revision,
+        idempotencyKey: "transient-owner-stop",
+      });
+      pending.then(
+        () => {
+          finished = true;
+        },
+        () => {
+          finished = true;
+        },
+      );
+      await inspected.promise;
+      await new Promise(setImmediate);
+      assert.equal(finished, false, "A run lease is not stop settlement.");
+      assert.equal(
+        (await store.loadRun(initial.runId)).stopRequest.reconciledRevision,
+        null,
+      );
+      onExit(exitCode);
+      await assert.rejects(
+        pending,
+        (error) =>
+          error.code ===
+            (exitCode === RUNTIME_VERSION_SKEW_EXIT_CODE
+              ? "ERR_RUNTIME_VERSION_SKEW"
+              : "ERR_DETACHED_START_FAILED") &&
+          /before durable stop settlement/u.test(error.message) &&
+          (exitCode === RUNTIME_VERSION_SKEW_EXIT_CODE
+            ? /Restart the Agent Runner MCP server/u.test(error.message)
+            : error.message.includes(`lease belongs to run ${older.runId}`)) &&
+          error.message.includes(`reconciliation for run ${initial.runId}`),
+      );
+      await settleStoredStop(store, initial.runId, lease);
+      await lease.release();
+      assert.equal(
+        (await store.loadRun(older.runId)).stopRequest.reconciledRevision,
+        null,
+      );
+      await settleStoredStop(store, older.runId, olderLease);
+      await worktree.release();
+      await olderLease.release();
+    });
+  }
+});
+
+test("detached stop supervision rechecks settlement after a racing child exit", async (t) => {
+  const paths = await workspace(t, "agent-runner-stop-settlement-race-");
+  const store = createRunStore({ stateRoot: paths.stateRoot });
+  const initial = await createStoredRun(store, paths);
+  const runner = storedRunner(store, paths);
+  let onExit;
+  let exited = false;
+  const control = createMcpControlPlane({
+    runStore: store,
+    runner: {
+      ...runner,
+      async status(runId) {
+        const snapshot = await runner.status(runId);
+        if (onExit !== undefined && !exited) {
+          exited = true;
+          await settleStoredStop(store, runId);
+          onExit(0);
+        }
+        return snapshot;
+      },
+    },
+    launchRun(_runId, _action, options) {
+      onExit = options.onExit;
+    },
+  });
+  const receipt = await control.runPause({
+    runId: initial.runId,
+    expectedRevision: initial.revision,
+    idempotencyKey: "settlement-exit-race",
+  });
+  assert.equal(receipt.runId, initial.runId);
+  assert.equal(exited, true);
+  assert.notEqual(
+    (await store.loadRun(initial.runId)).stopRequest.reconciledRevision,
+    null,
+  );
+});
+
+test("action-free ownerless stop recovery uses a new exact-revision key and waits for settlement", async (t) => {
+  for (const kind of ["pause_requested", "cancel_requested"]) {
+    await t.test(kind, async (t) => {
+      const paths = await workspace(t, "agent-runner-stop-resume-");
+      const store = createRunStore({ stateRoot: paths.stateRoot });
+      const initial = await createStoredRun(store, paths, {
+        pipelineId: "plan-execution",
+      });
+      await store.requestOperatorStop({
+        runId: initial.runId,
+        kind,
+        expectedRevision: initial.revision,
+        idempotencyKey: "unavailable-original-key",
+      });
+      const pending = await store.loadRun(initial.runId);
+      const input = {
+        runId: pending.runId,
+        expectedRevision: pending.revision,
+        action: null,
+        idempotencyKey: "new-recovery-key",
+      };
+      const identity = {
+        key: input.idempotencyKey,
+        tool: "run_resume",
+        arguments: {
+          runId: input.runId,
+          expectedRevision: input.expectedRevision,
+          action: null,
+        },
+      };
+      const launched = deferred();
+      let lease;
+      let onExit;
+      let launches = 0;
+      let finished = false;
+      const control = createMcpControlPlane({
+        runner: storedRunner(store, paths),
+        runStore: store,
+        async launchRun(runId, action, options) {
+          launches += 1;
+          assert.equal(action, null);
+          assert.equal(options.stopCheckpointRevision, initial.revision);
+          const intent = await store.readAction(identity);
+          assert.equal(intent.status, "intent");
+          assert.equal(intent.context.stopCheckpointRevision, initial.revision);
+          lease = await store.acquireRunLease(runId);
+          await store.recordStopActivity(lease, {
+            actor: "runner",
+            phase: "stop",
+            kind: "reconciling",
+            message: "Reconciling stop.",
+          });
+          onExit = options.onExit;
+          launched.resolve();
+        },
+      });
+      await assert.rejects(
+        control.runResume({
+          ...input,
+          idempotencyKey: "stale",
+          expectedRevision: initial.revision,
+        }),
+        /stale/u,
+      );
+      await assert.rejects(
+        control.runResume({
+          ...input,
+          idempotencyKey: "non-null",
+          action: { type: "extra-fix-rounds", amount: 1 },
+        }),
+        /action-free/u,
+      );
+      const recovering = control.runResume(input);
+      recovering.then(
+        () => {
+          finished = true;
+        },
+        () => {
+          finished = true;
+        },
+      );
+      await launched.promise;
+      await new Promise(setImmediate);
+      assert.equal(finished, false);
+      const active = await store.loadRun(initial.runId);
+      await assert.rejects(
+        control.runResume({
+          ...input,
+          expectedRevision: active.revision,
+          idempotencyKey: "competing-recovery",
+        }),
+        { code: "ERR_RUN_LEASED" },
+      );
+      const settled = await settleStoredStop(store, initial.runId, lease);
+      await lease.release();
+      onExit(0);
+      assert.deepEqual(await recovering, { runId: initial.runId });
+      assert.deepEqual(await control.runResume(input), {
+        runId: initial.runId,
+      });
+      assert.equal(launches, 1);
+      assert.equal((await store.readAction(identity)).status, "completed");
+      assert.equal(
+        settled.pipelineState.workflowState,
+        kind === "cancel_requested" ? "CANCELED" : "WAITING_FOR_USER",
+      );
+      assert.equal(settled.pause.operatorResume.workflowState, "CLARIFY");
+    });
+  }
+});
+
+test("ownerless stop recovery preserves version-skew retries and durable receipt replay", async (t) => {
+  const paths = await workspace(t, "agent-runner-stop-retry-");
+  const store = createRunStore({ stateRoot: paths.stateRoot });
+  const initial = await createStoredRun(store, paths);
+  const stop = await store.requestOperatorStop({
+    runId: initial.runId,
+    kind: "cancel_requested",
+    expectedRevision: initial.revision,
+    idempotencyKey: "original-stop",
+  });
+  const input = {
+    runId: initial.runId,
+    expectedRevision: stop.revision,
+    action: null,
+    idempotencyKey: "stop-retry",
+  };
+  let launches = 0;
+  let loseReceipt = true;
+  const control = createMcpControlPlane({
+    runner: storedRunner(store, paths),
+    runStore: {
+      ...store,
+      async beginAction(...args) {
+        const action = await store.beginAction(...args);
+        return {
+          ...action,
+          get record() {
+            return action.record;
+          },
+          async complete(receipt) {
+            if (loseReceipt) {
+              loseReceipt = false;
+              throw new Error("Receipt publication interrupted.");
+            }
+            return action.complete(receipt);
+          },
+        };
+      },
+    },
+    async launchRun(runId, action, { onExit, stopCheckpointRevision }) {
+      assert.equal(action, null);
+      assert.equal(stopCheckpointRevision, initial.revision);
+      launches += 1;
+      if (launches === 1) {
+        onExit(RUNTIME_VERSION_SKEW_EXIT_CODE);
+        return;
+      }
+      const lease = await store.acquireRunLease(runId);
+      await settleStoredStop(store, runId, lease);
+      await lease.release();
+      onExit(0);
+    },
+  });
+  await assert.rejects(control.runResume(input), {
+    code: "ERR_RUNTIME_VERSION_SKEW",
+  });
+  await assert.rejects(
+    control.runResume(input),
+    /Receipt publication interrupted/u,
+  );
+  assert.deepEqual(await control.runResume(input), { runId: initial.runId });
+  assert.deepEqual(await control.runResume(input), { runId: initial.runId });
+  assert.equal(launches, 2);
+  assert.equal(
+    (await store.loadRun(initial.runId)).pipelineState.workflowState,
+    "CANCELED",
+  );
+});
+
+test("concurrent ownerless stop recoveries cannot gain a second execution owner", async (t) => {
+  const paths = await workspace(t, "agent-runner-stop-race-");
+  const store = createRunStore({ stateRoot: paths.stateRoot });
+  const initial = await createStoredRun(store, paths);
+  const stop = await store.requestOperatorStop({
+    runId: initial.runId,
+    kind: "cancel_requested",
+    expectedRevision: initial.revision,
+    idempotencyKey: "race-stop",
+  });
+  const bothLaunched = deferred();
+  const finishWinner = deferred();
+  const rejected = deferred();
+  const children = [];
+  let launches = 0;
+  let owners = 0;
+  let winnerLease;
+  const control = createMcpControlPlane({
+    runner: storedRunner(store, paths),
+    runStore: store,
+    launchRun(runId, _action, { onExit, stopCheckpointRevision }) {
+      assert.equal(stopCheckpointRevision, initial.revision);
+      launches += 1;
+      if (launches === 2) bothLaunched.resolve();
+      const child = (async () => {
+        await bothLaunched.promise;
+        let lease;
+        try {
+          lease = await store.acquireRunLease(runId);
+        } catch (error) {
+          assert.equal(error.code, "ERR_RUN_LEASED");
+          onExit(1);
+          return;
+        }
+        owners += 1;
+        winnerLease = lease;
+        await finishWinner.promise;
+        await lease.release();
+        onExit(0);
+      })();
+      children.push(child);
+    },
+  });
+  const requests = ["first-recovery", "second-recovery"].map(
+    (idempotencyKey) => {
+      const request = control.runResume({
+        runId: initial.runId,
+        expectedRevision: stop.revision,
+        action: null,
+        idempotencyKey,
+      });
+      request.catch((error) => rejected.resolve(error));
+      return request;
+    },
+  );
+  const error = await rejected.promise;
+  assert.equal(error.code, "ERR_DETACHED_START_FAILED");
+  assert.equal(owners, 1);
+  await settleStoredStop(store, initial.runId, winnerLease);
+  finishWinner.resolve();
+  await Promise.all(children);
+  const outcomes = await Promise.allSettled(requests);
+  assert.equal(
+    outcomes.filter(({ status }) => status === "fulfilled").length,
+    1,
+  );
+  assert.equal(
+    outcomes.filter(({ status }) => status === "rejected").length,
+    1,
+  );
+});
+
+test("replaying a settled stop receipt does not reconcile a later unrelated stop", async (t) => {
+  const paths = await workspace(t, "agent-runner-stop-replay-");
+  const store = createRunStore({ stateRoot: paths.stateRoot });
+  const initial = await createStoredRun(store, paths);
+  const input = {
+    runId: initial.runId,
+    expectedRevision: initial.revision,
+    idempotencyKey: "old-pause",
+  };
+  const receipt = await store.requestOperatorStop({
+    ...input,
+    kind: "pause_requested",
+  });
+  await settleStoredStop(store, initial.runId);
+  const lease = await store.acquireRunLease(initial.runId);
+  const resumed = await store.transitionRun(lease, {
+    pipelineState: initial.pipelineState,
+    pause: null,
+  });
+  await lease.release();
+  await store.requestOperatorStop({
+    runId: initial.runId,
+    kind: "cancel_requested",
+    expectedRevision: resumed.revision,
+    idempotencyKey: "later-cancel",
+  });
+  const control = createMcpControlPlane({
+    runner: storedRunner(store, paths),
+    runStore: store,
+    launchRun: () =>
+      assert.fail("An old receipt must not dispatch a later stop."),
+  });
+  assert.deepEqual(await control.runPause(input), receipt);
+  assert.equal(
+    (await store.loadRun(initial.runId)).stopRequest.reconciledRevision,
+    null,
+  );
+});
+
+test("persists stop receipts and projects pending stops without replacing a live owner", async (t) => {
   const paths = await workspace(t, "agent-runner-mcp-stop-");
   const store = createRunStore({ stateRoot: paths.stateRoot });
   const initial = await createStoredRun(store, paths);
   const runner = storedRunner(store, paths);
-  let ownerIsLive = false;
+  const ownerIsLive = true;
   const launches = [];
   const control = createMcpControlPlane({
     runner,
@@ -884,7 +1346,6 @@ test("persists stop receipts, projects pending stops, and starts one ownerless r
     },
     async launchRun(runId, action, options) {
       launches.push({ runId, action, options });
-      ownerIsLive = true;
     },
   });
   const pauseInput = {
@@ -913,14 +1374,7 @@ test("persists stop receipts, projects pending stops, and starts one ownerless r
     control.runPause({ ...pauseInput, timing: "after-current-commit" }),
     { code: "ERR_MCP_IDEMPOTENCY_CONFLICT" },
   );
-  assert.equal(launches.length, 1);
-  assert.equal(launches[0].runId, initial.runId);
-  assert.equal(launches[0].action, null);
-  assert.equal(
-    launches[0].options.expectedRuntimeCompatibility,
-    DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
-  );
-  assert.equal(typeof launches[0].options.onExit, "function");
+  assert.equal(launches.length, 0);
   const status = await control.runStatus({ runId: initial.runId });
   assert.deepEqual(status.pendingStop, {
     timing: "immediate",
@@ -1165,14 +1619,8 @@ test("recovers an ownerless stop after the requesting client disconnects", async
         },
       });
       const runner = storedRunner(store, paths);
-      let ownerIsLive = false;
       const abort = new AbortController();
-      const runStore = {
-        ...store,
-        async runLeaseOwnerIsLive() {
-          return ownerIsLive;
-        },
-      };
+      const runStore = { ...store };
       const input = {
         runId: initial.runId,
         expectedRevision: initial.revision,
@@ -1200,7 +1648,7 @@ test("recovers an ownerless stop after the requesting client disconnects", async
         runStore,
         async launchRun() {
           launches += 1;
-          ownerIsLive = true;
+          await settleStoredStop(store, initial.runId);
         },
       }).runCancel(input);
       assert.equal(receipt.kind, "cancel_requested");
@@ -2884,7 +3332,10 @@ test("launches continuation independently from the MCP process streams", async (
   const exitCallbacks = [];
   let unreferenced = false;
   const launch = createDetachedLauncher({
-    environment: { XDG_STATE_HOME: "/state" },
+    environment: {
+      XDG_STATE_HOME: "/state",
+      [DETACHED_STOP_CHECKPOINT_ENV]: "ambient-value-must-not-leak",
+    },
     executablePath: "/agent-run",
     spawnProcess(command, args, options) {
       calls.push({ command, args, options });
@@ -2917,6 +3368,7 @@ test("launches continuation independently from the MCP process streams", async (
   assert.equal(exited, true);
   await launch(RUN_ID, { type: "extra-fix-rounds", amount: 2 });
   await launch(RUN_ID, { type: "override-finding", findingId: "finding-1" });
+  await launch(RUN_ID, null, { stopCheckpointRevision: 7 });
   assert.equal(unreferenced, true);
   assert.deepEqual(calls[0].args, ["/agent-run", "resume", "--run", RUN_ID]);
   assert.deepEqual(calls[1].args, [
@@ -2935,12 +3387,26 @@ test("launches continuation independently from the MCP process streams", async (
     "--override-finding",
     "finding-1",
   ]);
+  assert.deepEqual(calls[3].args, ["/agent-run", "resume", "--run", RUN_ID]);
   assert.equal(calls[0].options.detached, true);
   assert.equal(calls[0].options.stdio, "ignore");
   assert.deepEqual(calls[0].options.env, {
     XDG_STATE_HOME: "/state",
     [DETACHED_RUNTIME_COMPATIBILITY_ENV]: DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
   });
+  assert.deepEqual(calls[3].options.env, {
+    XDG_STATE_HOME: "/state",
+    [DETACHED_RUNTIME_COMPATIBILITY_ENV]: DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
+    [DETACHED_STOP_CHECKPOINT_ENV]: "7",
+  });
+  await assert.rejects(
+    launch(
+      RUN_ID,
+      { type: "extra-fix-rounds", amount: 1 },
+      { stopCheckpointRevision: 7 },
+    ),
+    { code: "ERR_INVALID_RUNNER_INPUT" },
+  );
   await assert.rejects(
     launch(RUN_ID, null, { expectedRuntimeCompatibility: "other" }),
     (error) => error.code === "ERR_RUNTIME_VERSION_SKEW",

@@ -628,7 +628,7 @@ export function createRunner(options = {}) {
       } catch (cause) {
         if (cause?.code !== "ERR_STOP_RECONCILIATION_REQUIRED") throw cause;
         const current = await runStore.loadRun(runId);
-        await withWorktreeLease(
+        await withStopReconciliationLease(
           current,
           () => reconcilePendingStop(lease, runId),
           lease,
@@ -638,6 +638,21 @@ export function createRunner(options = {}) {
     throw new RunnerError("Operator stop reconciliation is still pending.", {
       code: "ERR_STOP_RECONCILIATION_REQUIRED",
     });
+  }
+
+  async function withStopReconciliationLease(run, operation, executionLease) {
+    const current = await runStore.loadRun(run.runId);
+    const { pipeline } = pipelineForRun(current);
+    if (
+      stopPending(current) &&
+      pipeline.classifyStopCheckpoint?.(
+        current,
+        await runStore.loadStopCheckpoint(current.runId),
+      ) === "pre-work"
+    ) {
+      return operation(current);
+    }
+    return withWorktreeLease(current, () => operation(current), executionLease);
   }
 
   async function withWorktreeLease(run, operation, executionLease) {
@@ -978,6 +993,16 @@ export function createRunner(options = {}) {
   }
 
   async function resumeLeased(normalized, lease) {
+    if (normalized.stopCheckpointRevision !== null) {
+      const current = await runStore.loadRun(normalized.runId);
+      if (
+        !stopPending(current) ||
+        current.stopRequest.checkpoint.revision !==
+          normalized.stopCheckpointRevision
+      ) {
+        return current;
+      }
+    }
     const {
       pipeline,
       run: loaded,
@@ -994,10 +1019,18 @@ export function createRunner(options = {}) {
         code: "ERR_RUN_CANCELED",
       });
     }
+    if (
+      normalized.stopCheckpointRevision !== null &&
+      (!stopPending(recovered) ||
+        recovered.stopRequest.checkpoint.revision !==
+          normalized.stopCheckpointRevision)
+    ) {
+      return recovered;
+    }
     if (stopPending(recovered)) {
-      return withWorktreeLease(
+      return withStopReconciliationLease(
         recovered,
-        () => execute(pipeline, recovered, lease),
+        (current) => execute(pipeline, current, lease),
         lease,
       );
     }

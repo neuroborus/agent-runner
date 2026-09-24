@@ -345,7 +345,10 @@ export function createRunStore({
     hostName,
     invalidLeaseCode: "ERR_INVALID_WORKTREE_LEASE",
     leaseDescription: "Worktree lease",
-    leaseSubject: (runId) => `Run ${runId}'s Git worktree`,
+    leaseSubject: (runId, ownerRunId = runId) =>
+      ownerRunId === runId
+        ? `Run ${runId}'s Git worktree`
+        : `Git worktree requested by run ${runId} (recorded lease owner: run ${ownerRunId})`,
     processId,
     processIsAlive,
     processIdentity,

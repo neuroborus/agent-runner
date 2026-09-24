@@ -1,6 +1,50 @@
+import { isDeepStrictEqual } from "node:util";
+
 import { parseCommitPlan } from "@agent-runner/commit-plan";
 import { clearedCandidateAndTerminalGate } from "./gate-evidence.js";
 import { createFinalizationRecovery } from "./workflow-contract.js";
+
+// The journal checkpoint, not only the current workflow label, proves that
+// this stop preceded repository, artifact, and execution ownership.
+export function classifyStopCheckpoint(run, checkpoint) {
+  const stop = run.stopRequest;
+  if (
+    stop == null ||
+    stop.reconciledRevision !== null ||
+    stop.effectiveTiming !== "immediate" ||
+    checkpoint == null ||
+    checkpoint.runId !== run.runId ||
+    checkpoint.revision !== stop.checkpoint.revision ||
+    checkpoint.stopRequest !== null ||
+    !isDeepStrictEqual(run.pipelineState, checkpoint.pipelineState)
+  )
+    return null;
+
+  for (const inspected of [checkpoint, run]) {
+    const state = inspected.pipelineState;
+    if (
+      inspected.pipelineId !== "plan-execution" ||
+      inspected.pause !== null ||
+      inspected.activeTurn !== null ||
+      inspected.executionProcess !== null ||
+      inspected.executionResource !== null ||
+      Object.keys(inspected.hashes).length !== 0 ||
+      state.workflowState !== "CLARIFY" ||
+      state.preflightComplete !== false ||
+      state.repositoryBaseline !== null ||
+      state.backendVersions !== null ||
+      state.clarificationPath !== null ||
+      state.clarificationFrozen !== false ||
+      state.pendingEdit !== null ||
+      state.canonicalPlan !== null ||
+      state.currentStep !== null ||
+      state.pendingCommit !== null ||
+      state.completedCommits.length !== 0
+    )
+      return null;
+  }
+  return "pre-work";
+}
 
 // Selected steps remain targets while suspended; terminal acceptance is state-owned.
 export function resolveStopBoundary(run) {

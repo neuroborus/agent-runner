@@ -79,6 +79,100 @@ import {
   versionThirteenState,
 } from "./support/index.js";
 
+test("classifies only journal-proven untouched immediate-stop checkpoints as pre-work", () => {
+  const checkpoint = {
+    runId: "initial-run",
+    revision: 1,
+    pipelineId: "plan-execution",
+    pipelineState: createPlanExecutionState(),
+    pause: null,
+    hashes: {},
+    activeTurn: null,
+    executionProcess: null,
+    executionResource: null,
+    stopRequest: null,
+  };
+  const run = {
+    ...checkpoint,
+    revision: 2,
+    stopRequest: {
+      kind: "cancel_requested",
+      effectiveTiming: "immediate",
+      reconciledRevision: null,
+      checkpoint: { revision: 1 },
+    },
+  };
+  const classify = planExecutionPipeline.classifyStopCheckpoint;
+
+  assert.equal(classify(run, checkpoint), "pre-work");
+  assert.equal(classify({ ...run, revision: 4 }, checkpoint), "pre-work");
+  assert.equal(
+    classify(
+      {
+        ...run,
+        stopRequest: { ...run.stopRequest, kind: "pause_requested" },
+      },
+      checkpoint,
+    ),
+    "pre-work",
+  );
+  assert.equal(classify(run, null), null);
+  assert.equal(classify(run, { ...checkpoint, runId: "another-run" }), null);
+  assert.equal(classify(run, { ...checkpoint, revision: 2 }), null);
+  assert.equal(classify({ ...run, stopRequest: null }, checkpoint), null);
+  assert.equal(
+    classify(run, {
+      ...checkpoint,
+      stopRequest: { reconciledRevision: 1 },
+    }),
+    null,
+  );
+  for (const patch of [
+    { effectiveTiming: "after-current-commit" },
+    { reconciledRevision: 3 },
+  ]) {
+    assert.equal(
+      classify(
+        { ...run, stopRequest: { ...run.stopRequest, ...patch } },
+        checkpoint,
+      ),
+      null,
+    );
+  }
+  for (const [field, value] of [
+    ["pipelineId", "polishing"],
+    ["pause", { reason: "environment_blocked" }],
+    ["activeTurn", { role: "worker", phase: "clarify" }],
+    ["executionProcess", { pid: 100 }],
+    ["executionResource", { kind: "validation" }],
+    ["hashes", { executionClarifications: "a".repeat(64) }],
+  ]) {
+    assert.equal(classify({ ...run, [field]: value }, checkpoint), null, field);
+    assert.equal(classify(run, { ...checkpoint, [field]: value }), null, field);
+  }
+  for (const [field, value] of [
+    ["workflowState", "BOOTSTRAP"],
+    ["preflightComplete", true],
+    ["repositoryBaseline", {}],
+    ["backendVersions", {}],
+    ["clarificationPath", "/artifact/clarifications.md"],
+    ["clarificationFrozen", true],
+    ["pendingEdit", {}],
+    ["canonicalPlan", "plan"],
+    ["currentStep", 1],
+    ["pendingCommit", { status: "consumed" }],
+    ["completedCommits", ["a".repeat(40)]],
+  ]) {
+    const pipelineState = { ...checkpoint.pipelineState, [field]: value };
+    assert.equal(
+      classify({ ...run, pipelineState }, { ...checkpoint, pipelineState }),
+      null,
+      field,
+    );
+    assert.equal(classify(run, { ...checkpoint, pipelineState }), null, field);
+  }
+});
+
 test("persists trusted-validation timeout snapshots and rejects invalid bounds", () => {
   const trustedValidation = trustedValidationSnapshot();
   const settings = { ...SETTINGS, trustedChecks: ["service-check"] };
@@ -746,7 +840,7 @@ test("migrates version-3 execution state with no consumed bootstrap corrections"
   assert.deepEqual(migrated.bootstrapCorrections, []);
   assert.equal(migrated.pendingBootstrapCorrection, null);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(planExecutionPipeline.stateVersion, 20);
+  assert.equal(planExecutionPipeline.stateVersion, 21);
 });
 
 test("selects Worker-only lazy mode and migrates version 11 to independent", () => {
@@ -2399,7 +2493,7 @@ test("legacy confirmation migrations preserve journal proof but cannot synthesiz
   unproven.updatedAt = unproven.createdAt;
   const projected = {
     ...unproven,
-    pipelineStateVersion: 20,
+    pipelineStateVersion: 21,
     pipelineState: {
       ...migratePlanExecutionStateV13(unproven),
       finalizationRecovery: {

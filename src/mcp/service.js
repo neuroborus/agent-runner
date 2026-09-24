@@ -41,8 +41,10 @@ const EXECUTABLE_PATH = fileURLToPath(
 );
 export const DETACHED_RUNTIME_COMPATIBILITY_ENV =
   "AGENT_RUNNER_PARENT_RUNTIME_COMPATIBILITY";
+export const DETACHED_STOP_CHECKPOINT_ENV =
+  "AGENT_RUNNER_PARENT_STOP_CHECKPOINT";
 
-const RUN_INSTRUCTIONS = `Use run_start to start a durable pipeline, then use one run_wait call for the desired waiting interval. Use run_activity only for explicit or historical reads; do not poll status, activity, or wait at a fixed cadence. Stop timing defaults to immediate; use after-current-commit only for a selected plan-execution step. A blocked or interrupted step stops at its reconciled checkpoint without extra work. Use run_pause or run_cancel with the exact inspected revision and a unique idempotency key; retry the same logical request with the same values and never refresh a stale revision silently. Cancellation is terminal. independent is the default and recommended mode because it provides genuinely independent semantic review, but it uses more provider context and tokens. lazy is opt-in, reduces consumption, and does not provide independent review; never select it automatically to save tokens. combined is available for all three pipelines and adds primary convergence and clean confirmation before independent review. Leave sourceSession unset unless the user deliberately chooses to fork a compatible current native session after being offered a fresh start. Offer its known trusted profile with the fork choice; when the profile is unknown, offer only current profile inheritance and never guess an alias. In independent and combined modes the primary and review roles fork the complete source context independently; in lazy mode the primary role forks it once. Recommend a fresh start for a long, multi-topic, or uncertain source session. Keep native session IDs opaque; never inspect provider-private storage or infer or fabricate an ID. Answer pending input from explicit user context when sufficient; otherwise ask the user. Never invent a material product decision.`;
+const RUN_INSTRUCTIONS = `Use run_start to start a durable pipeline, then use one run_wait call for the desired waiting interval. Use run_activity only for explicit or historical reads; do not poll status, activity, or wait at a fixed cadence. Stop timing defaults to immediate; use after-current-commit only for a selected plan-execution step. A blocked or interrupted step stops at its reconciled checkpoint without extra work. Use run_pause or run_cancel with the exact inspected revision and a unique idempotency key; retry the same logical request with the same values and never refresh a stale revision silently. Cancellation is terminal. For an ownerless applicable stop, use run_resume with action: null, its exact inspected revision, and a new idempotency key; the original stop key is unnecessary. Recovery follows its correlated child until durable stop settlement or child exit. independent is the default and recommended mode because it provides genuinely independent semantic review, but it uses more provider context and tokens. lazy is opt-in, reduces consumption, and does not provide independent review; never select it automatically to save tokens. combined is available for all three pipelines and adds primary convergence and clean confirmation before independent review. Leave sourceSession unset unless the user deliberately chooses to fork a compatible current native session after being offered a fresh start. Offer its known trusted profile with the fork choice; when the profile is unknown, offer only current profile inheritance and never guess an alias. In independent and combined modes the primary and review roles fork the complete source context independently; in lazy mode the primary role forks it once. Recommend a fresh start for a long, multi-topic, or uncertain source session. Keep native session IDs opaque; never inspect provider-private storage or infer or fabricate an ID. Answer pending input from explicit user context when sufficient; otherwise ask the user. Never invent a material product decision.`;
 const ISSUE_REPORTING_INSTRUCTIONS = `Use unexpected_issue_report only when you, as the supervising client agent, explicitly conclude that Agent Runner behaved genuinely unexpectedly or contrary to its documented contract. Expected completion, exhausted configured budgets, usage limits, expected user pauses, documented environment blockers, and invalid user or configuration input are not reportable issues. Supply concise English Markdown deliberately; the server never collects or attaches logs, transcripts, prompts, environment values, credentials, secrets, or other diagnostics automatically.`;
 const GUIDANCE_INSTRUCTIONS =
   "Call guidance_read once before first managing a run for each project and follow the combined operator guide.";
@@ -436,7 +438,11 @@ export function createDetachedLauncher({
   return (
     runIdValue,
     action = null,
-    { expectedRuntimeCompatibility = detachedCompatibilityToken, onExit } = {},
+    {
+      expectedRuntimeCompatibility = detachedCompatibilityToken,
+      stopCheckpointRevision = null,
+      onExit,
+    } = {},
   ) =>
     new Promise((resolvePromise, rejectPromise) => {
       if (expectedRuntimeCompatibility !== detachedCompatibilityToken) {
@@ -449,14 +455,38 @@ export function createDetachedLauncher({
         );
         return;
       }
+      if (
+        stopCheckpointRevision !== null &&
+        (!Number.isSafeInteger(stopCheckpointRevision) ||
+          stopCheckpointRevision < 1 ||
+          action !== null)
+      ) {
+        rejectPromise(
+          new RunStoreError("Detached stop checkpoint is invalid.", {
+            code: "ERR_INVALID_RUNNER_INPUT",
+          }),
+        );
+        return;
+      }
+      const {
+        [DETACHED_STOP_CHECKPOINT_ENV]: _ignoredStopCheckpoint,
+        ...childEnvironment
+      } = environment;
       const child = spawnProcess(
         process.execPath,
         detachedArguments(executablePath, runIdValue, action),
         {
           detached: true,
           env: {
-            ...environment,
+            ...childEnvironment,
             [DETACHED_RUNTIME_COMPATIBILITY_ENV]: expectedRuntimeCompatibility,
+            ...(stopCheckpointRevision === null
+              ? {}
+              : {
+                  [DETACHED_STOP_CHECKPOINT_ENV]: String(
+                    stopCheckpointRevision,
+                  ),
+                }),
           },
           stdio: "ignore",
         },
@@ -579,7 +609,7 @@ export function createMcpControlPlane(options = {}) {
         if (worktreeLeaseOwner !== null && worktreeLeaseOwner !== run.runId) {
           throw new RunStoreError(
             `Run ${run.runId} is durable, but its Git worktree is already ` +
-              "owned by another mutating run; retry this MCP request with " +
+              `owned by run ${worktreeLeaseOwner}; retry this MCP request with ` +
               "the same idempotency key after that run releases it.",
             { code: "ERR_WORKTREE_LEASED" },
           );
@@ -870,7 +900,37 @@ export function createMcpControlPlane(options = {}) {
         return action.record.result;
       }
       const run = (await runner.status(input.runId)).run;
-      if (run.revision === input.expectedRevision) {
+      let stopCheckpointRevision = action.record.context.stopCheckpointRevision;
+      if (
+        stopCheckpointRevision !== undefined &&
+        (!Number.isSafeInteger(stopCheckpointRevision) ||
+          stopCheckpointRevision < 1)
+      ) {
+        throw new RunStoreError("Stop recovery intent is invalid.", {
+          code: "ERR_INVALID_MCP_ACTION",
+        });
+      }
+      const applicableStop = projectOperatorStop(run)?.state === "applicable";
+      if (stopCheckpointRevision !== undefined) {
+        if (input.action !== null || run.revision < input.expectedRevision) {
+          throw new Error("Stop recovery request is invalid or stale.");
+        }
+      } else if (run.revision === input.expectedRevision && applicableStop) {
+        if (input.action !== null) {
+          throw new Error("A pending stop accepts only an action-free resume.");
+        }
+        if (await runStore.runLeaseOwnerIsLive(run.runId)) {
+          throw new RunStoreError(
+            `Run ${run.runId} already has a live execution owner.`,
+            { code: "ERR_RUN_LEASED" },
+          );
+        }
+        stopCheckpointRevision = run.stopRequest.checkpoint.revision;
+        await action.updateContext({
+          ...action.record.context,
+          stopCheckpointRevision,
+        });
+      } else if (run.revision === input.expectedRevision) {
         const interrupted =
           run.activeTurn !== null &&
           run.pause === null &&
@@ -892,15 +952,27 @@ export function createMcpControlPlane(options = {}) {
         } else {
           getPipeline(run.pipelineId).validateResumeAction(run, input.action);
         }
-      } else if (action.created || run.revision < input.expectedRevision) {
+      } else if (
+        applicableStop ||
+        action.created ||
+        run.revision < input.expectedRevision
+      ) {
         throw new Error("Resume request revision is stale.");
       }
-      await launchIfNeeded(input.runId, input.expectedRevision, {
-        action: input.action,
-        allowWaiting: true,
-        signal,
-        waitForLease: true,
-      });
+      if (stopCheckpointRevision !== undefined) {
+        await reconcileDetachedStop(
+          { runId: input.runId, checkpointRevision: stopCheckpointRevision },
+          signal,
+          { rejectLiveOwner: action.created, waitForSettlement: true },
+        );
+      } else {
+        await launchIfNeeded(input.runId, input.expectedRevision, {
+          action: input.action,
+          allowWaiting: true,
+          signal,
+          waitForLease: true,
+        });
+      }
       const receipt = { runId: input.runId };
       await action.complete(receipt);
       return receipt;
@@ -909,41 +981,80 @@ export function createMcpControlPlane(options = {}) {
     }
   }
 
-  async function reconcileDetachedStop(receipt, signal) {
+  async function reconcileDetachedStop(
+    receipt,
+    signal,
+    { rejectLiveOwner = false, waitForSettlement = false } = {},
+  ) {
     let launched = false;
     let childExited = false;
     let childExitCode = null;
+    let checkpointRevision = receipt.checkpointRevision ?? null;
     while (true) {
+      const exitedBeforeInspection = childExited;
       const current = await runner.status(receipt.runId);
-      if (
-        current.run.stopRequest === null ||
-        current.run.stopRequest.reconciledRevision !== null ||
-        (await runStore.runLeaseOwnerIsLive(receipt.runId))
-      ) {
+      const stop = current.run.stopRequest;
+      if (stop === null || stop.reconciledRevision !== null) {
         return;
       }
+      if (checkpointRevision === null) {
+        if (stop.requestId === receipt.requestId) {
+          checkpointRevision = stop.checkpoint.revision;
+        } else if (stop.checkpoint.revision === receipt.expectedRevision) {
+          checkpointRevision = receipt.expectedRevision;
+        } else {
+          return;
+        }
+      }
+      if (stop.checkpoint.revision !== checkpointRevision) return;
       if (childExited) {
+        if (!exitedBeforeInspection) continue;
+        const versionSkew = childExitCode === RUNTIME_VERSION_SKEW_EXIT_CODE;
+        const worktreeOwner =
+          !versionSkew && pipelineRequiresWorktreeLease(current.run.pipelineId)
+            ? await runStore.worktreeLeaseOwner(
+                current.run.projectPath,
+                receipt.runId,
+              )
+            : null;
         throw new RunStoreError(
           `Detached stop reconciliation for run ${receipt.runId} exited ` +
-            "before acquiring ownership; retry this request with the same " +
-            "idempotency key.",
+            "before durable stop settlement; retry this request with the same " +
+            "idempotency key or recover the ownerless applicable stop with " +
+            "an action-free run_resume at its exact inspected revision." +
+            (versionSkew
+              ? " Restart the Agent Runner MCP server before retrying the incompatible runtime."
+              : "") +
+            (worktreeOwner !== null && worktreeOwner !== receipt.runId
+              ? ` The conflicting canonical worktree lease belongs to run ${worktreeOwner}.`
+              : ""),
           {
-            code:
-              childExitCode === RUNTIME_VERSION_SKEW_EXIT_CODE
-                ? "ERR_RUNTIME_VERSION_SKEW"
-                : "ERR_DETACHED_START_FAILED",
+            code: versionSkew
+              ? "ERR_RUNTIME_VERSION_SKEW"
+              : "ERR_DETACHED_START_FAILED",
           },
         );
       }
       if (!launched) {
-        await launchRun(receipt.runId, null, {
-          expectedRuntimeCompatibility: detachedCompatibilityToken,
-          onExit(code) {
-            childExited = true;
-            childExitCode = code;
-          },
-        });
-        launched = true;
+        const ownerIsLive = await runStore.runLeaseOwnerIsLive(receipt.runId);
+        if (ownerIsLive && rejectLiveOwner) {
+          throw new RunStoreError(
+            `Run ${receipt.runId} already has a live execution owner.`,
+            { code: "ERR_RUN_LEASED" },
+          );
+        }
+        if (ownerIsLive && !waitForSettlement) return;
+        if (!ownerIsLive) {
+          await launchRun(receipt.runId, null, {
+            expectedRuntimeCompatibility: detachedCompatibilityToken,
+            stopCheckpointRevision: checkpointRevision,
+            onExit(code) {
+              childExited = true;
+              childExitCode = code;
+            },
+          });
+          launched = true;
+        }
       }
       await delay(RETRY_DELAY_MS, signal);
     }
@@ -1215,7 +1326,7 @@ export function createMcpServer(options = {}) {
     "run_resume",
     {
       description:
-        "Resume one persisted paused run with only an action valid for that pause.",
+        "Resume a persisted pause with its valid action, or recover an ownerless applicable stop or interrupted turn with action: null. Use the exact inspected revision and a unique idempotency key; stop recovery does not require the original stop key and waits for durable settlement or child exit. Reject stale revisions, non-null stop-recovery actions, and live execution owners.",
       inputSchema: runResumeSchema,
       annotations: mutating,
     },

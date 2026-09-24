@@ -10,7 +10,10 @@ import {
   executionPolicy,
   combinedReview,
 } from "./mode-policy.js";
-import { resolveStopBoundary } from "./commit-checkpoint.js";
+import {
+  classifyStopCheckpoint,
+  resolveStopBoundary,
+} from "./commit-checkpoint.js";
 import {
   canRecoverLegacyConfirmation,
   prepareLegacyConfirmationRecovery,
@@ -1201,10 +1204,17 @@ export function migratePlanExecutionStateV19(run) {
   });
 }
 
+export function migratePlanExecutionStateV20(run) {
+  // The identity migration changes detached-runtime compatibility for the
+  // settlement-aware stop-reconciliation contract.
+  return Object.freeze({ ...run.pipelineState });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
+  classifyStopCheckpoint,
   resolveStopBoundary,
-  stateVersion: 20,
+  stateVersion: 21,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1225,6 +1235,7 @@ export const planExecutionPipeline = Object.freeze({
     17: migratePlanExecutionStateV17,
     18: migratePlanExecutionStateV18,
     19: migratePlanExecutionStateV19,
+    20: migratePlanExecutionStateV20,
   }),
   roles: ROLES,
   resolveActiveRoles,
