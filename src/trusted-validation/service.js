@@ -30,7 +30,7 @@ const MAX_ARGUMENTS = 64;
 const MAX_COMMAND_DEFINITIONS = 256;
 const MAX_SELECTED_COMMANDS = 32;
 const MAX_TEXT_LENGTH = 4_000;
-const DEFAULT_TIMEOUT_MS = 15 * 60 * 1_000;
+const DEFAULT_TIMEOUT_MS = 60 * 60 * 1_000;
 const SNAPSHOT_SCHEMA_VERSION = 2;
 const SNAPSHOT_FIELDS = Object.freeze([
   "schemaVersion",

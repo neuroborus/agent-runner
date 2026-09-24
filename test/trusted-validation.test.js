@@ -81,6 +81,51 @@ function snapshot(alias, command, executable, argumentsList) {
   );
 }
 
+test("defaults trusted validation commands to a one-hour timeout", async () => {
+  const projectPath = process.cwd();
+  const before = { projectPath, contentFingerprint: hash("content") };
+  const trusted = snapshot("check", "node check.js", "node", ["check.js"]);
+  let execution;
+  const service = trustedService(
+    {
+      async snapshot() {
+        return before;
+      },
+      async assertUnchanged(value) {
+        assert.equal(value, before);
+      },
+    },
+    {
+      runCommand(command, options) {
+        execution = { command, options };
+        return {
+          status: "PASS",
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          reason: "exit",
+        };
+      },
+    },
+  );
+
+  const result = await service.execute({
+    bindings: {
+      contentFingerprint: before.contentFingerprint,
+      validationInfrastructureFingerprint: hash("infrastructure"),
+      commandFingerprint: trusted.commandFingerprint,
+      configurationFingerprint: trusted.configurationFingerprint,
+    },
+    commandIdentity: trusted.commands[0].identity,
+    projectPath,
+    snapshot: trusted,
+  });
+
+  assert.equal(result.status, "PASS");
+  assert.deepEqual(execution.command, trusted.commands[0]);
+  assert.equal(execution.options.timeoutMs, 3_600_000);
+});
+
 test("forwards sandbox ownership through trusted execution without changing containment", async () => {
   for (const ownershipMode of [
     "native-sandbox-provider",

@@ -1987,6 +1987,10 @@ Descriptor-anchored directory operations and identity checks reject symlink
 substitution. Only declared scratch/cache subdirectories are mounted writable.
 No mutable cache is reused across executions, including after interruption.
 
+Each runner-trusted validation command has an internal default timeout of
+60 minutes. Explicit service timeout overrides remain supported; capability
+preparation probes remain capped at 10 seconds.
+
 Command completion, failure, timeout, and cancellation retire descendants before
 confined cleanup and repository mutation checks. Resume and operator-stop recovery
 retire any recorded process before cleaning saved resources, even when interruption

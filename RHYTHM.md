@@ -5,6 +5,14 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-09-24
+
+- **Trusted validation defaults to one hour per command.** The internal timeout
+  increases from 15 to 60 minutes to accommodate long-running repository checks.
+  Explicit service overrides and the 10-second preparation cap remain unchanged,
+  as do execution, isolation, cleanup, evidence, and process-tree semantics.
+  This bounded change adds no configuration.
+
 ## 2026-09-20
 
 - **Explicit Codex overload is transient provider unavailability.** Native
