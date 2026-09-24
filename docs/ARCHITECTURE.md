@@ -721,6 +721,13 @@ timeout. Optional MCP progress notifications carry only bounded public activity
 with role labels; they do not wake a model or alter the run. Cancellation
 cancels only that wait.
 
+An omitted `run_wait.timeoutMs` means 30 seconds and the public maximum is 24
+hours; either deadline ends only the client wait. Internal detached-dispatch
+and idempotency reconciliation uses a fixed 25-millisecond observation delay,
+while the operator-stop monitor waits for a revision for at most one second at
+a time. These intervals affect protocol responsiveness, do not bound or retry
+user work, and remain fixed correctness mechanics rather than configuration.
+
 MCP status and wait also project one bounded `execution` object. Its finite
 `state` is `running` while the per-run execution lease has a live owner,
 `interrupted` when persisted provider activity has lost its owner, and `idle`
@@ -819,6 +826,18 @@ isolated regular file, and unrecognized or persistent hard links remain unsafe.
 Exclusive contention, stale-owner recovery, and release all use
 the published record and continue to verify its opaque owner token.
 
+These state retry counts are fixed correctness guards rather than workflow
+budgets. Managed-state reads make at most five attempts across an atomic
+replacement; lease acquisition, including stale-marker and owner
+reconciliation, makes at most five passes. Runner release of either an
+execution or canonical-worktree lease makes at most five stop-aware attempts;
+exhaustion leaves stop reconciliation pending. Generated run IDs try at most
+ten candidates. Unexpected-issue publication tries at most 1,010
+collision-safe names, ending with random-token candidates. None of these loops
+waits for user work or makes an external service more available, so exposing
+their counts as configuration would weaken the persistence proof without
+creating a useful operator control.
+
 ### State-owned operator stop protocol
 
 The common envelope version 7 extends the nullable bounded `stopRequest` with
@@ -836,7 +855,9 @@ execution-owned journal writes and lease release. Each contender durably
 publishes a choosing claim before selecting its ordered ticket; it waits for
 choosing peers and lower ticket/identity pairs. Dead claims have unique paths,
 so recovery cannot unlink a newer owner at a reused lock pathname. Claims and
-contention retries are bounded, and unverifiable owners continue to exclude
+contention are observed at most 500 times with 10 milliseconds between blocked
+observations, about five seconds plus filesystem work. Exhaustion returns the
+retryable mutation-busy outcome, and unverifiable owners continue to exclude
 mutation. Action-lease reclamation uses the same boundary, which does not grant
 another execution lease. Worktree owners without a pipeline run, such as
 guidance publishers, use claims in the worktree lease directory. Status and
@@ -1038,14 +1059,14 @@ namespace init remains responsible for otherwise detached descendants.
 Ordinary processes never receive the initial-host session fallback.
 
 Completion-time descendant inspection retries transiently incomplete evidence
-against one non-resetting descendant-grace deadline. Complete evidence resumes
-the ordinary success or bounded TERM/KILL path; uncertainty at the deadline
-retains the existing fail-closed error and durable ownership exclusion. After
-reporting that persistent containment failure, the parent unreferences the
-already-detached supervisor handle and IPC channel without disconnecting it,
-signalling an unverified process, or clearing registration. Provider protocol
-resources may then close and the run owner may exit while the supervisor keeps
-containment available for deterministic recovery.
+against one non-resetting one-second descendant-grace deadline. Complete
+evidence resumes the ordinary success or bounded TERM/KILL path; uncertainty at
+the deadline retains the existing fail-closed error and durable ownership
+exclusion. After reporting that persistent containment failure, the parent
+unreferences the already-detached supervisor handle and IPC channel without
+disconnecting it, signalling an unverified process, or clearing registration.
+Provider protocol resources may then close and the run owner may exit while the
+supervisor keeps containment available for deterministic recovery.
 
 The runner service accepts revision-bound `requestOperatorStop` requests and
 monitors durable revisions while executing. An accepted request aborts only
@@ -1454,6 +1475,22 @@ isolation only. They do not apply a selected native profile and do not claim
 that its authentication or provider is usable; that is established by the
 first real turn under the effective profile.
 
+Every model-free subprocess used for version/help, Claude `socat` and native
+sandbox checks, the local-commit executor proof, or owned-process namespace
+proof has a 10-second deadline. Within that outer bound, a local-commit probe
+has a one-second network-denial observation deadline; silence cannot prove
+isolation, so exhaustion fails the capability closed. Claude's per-turn Git
+metadata preparation and both providers' pre-effect local-commit Git metadata
+lookups use the 10-second bound. These preparation deadlines do not cap the
+authorized commit effect after it begins. Codex MCP configuration discovery is
+the deliberate exception: it makes at most two `mcp list` attempts with a
+30-second subprocess deadline apiece and no added retry delay, then reports
+recoverable provider unavailability. Codex model-catalog discovery issues at
+most 32 page requests with a requested limit of 100 entries per page, and
+rejects a repeated cursor. The 256-name MCP configuration capacity and
+catalog-page cap are schema and protocol defenses, not operator-configurable
+work budgets.
+
 The shared adapter contract accepts optional `effort` in execution options and
 turn requests, validated by each registered provider through that contract.
 Its closed vocabulary is `current|low|medium|high|xhigh`; omission and `current`
@@ -1526,7 +1563,9 @@ failure therefore starts bounded client and workspace cleanup promptly and
 retains precedence over client-cleanup failures, even when containment
 deliberately keeps protocol pipes open. Successful owned completion does not
 satisfy a protocol request; the adapter still requires the complete App Server
-result.
+result. App Server shutdown has up to three fixed one-second observation
+windows: natural protocol close, TERM, then KILL. These post-turn cleanup phases
+are containment invariants, not configurable provider-work deadlines.
 Read-only and local-commit storage remain independently isolated. Both adapters
 advertise `gitMetadataWriteBlocked`; the runner, not an agent turn, owns effects
 that require the index.
@@ -1898,8 +1937,9 @@ succeeds, all transports retire, and allocation and subdirectory identities are
 rechecked. Every execution acquires fresh files from its frozen declarations;
 resume cleans previous allocations before downloading again.
 
-Acquisition resolves all addresses once (at most 64 answers), rejects the entire
-answer set if any address is not public unicast, and pins one numeric destination.
+Acquisition performs one DNS phase with one A and one AAAA lookup, one resolver
+try each, and at most 64 combined answers. It rejects the entire answer set if
+any address is not public unicast and pins one numeric destination.
 The conservative address policy excludes IPv4 special-use ranges and IPv6 outside
 2000::/3, plus special-use, documentation and transition ranges within it. The
 declared hostname remains the HTTP Host and TLS verification name; the actual
@@ -2046,9 +2086,10 @@ the same mount, network, and PID namespaces, so it cannot gain host mounts or
 networking and is retired with the complete process tree. Remote network and
 filesystem writes, hosting credentials, Git credential helpers, and ambient
 authentication variables are unavailable. A private PID namespace and an outer
-process group give every completed, readiness-confirmed command one bounded
-grace period for remaining descendants to retire naturally regardless of exit
-code, then provide bounded TERM/KILL retirement when the group remains active.
+process group give every completed, readiness-confirmed command one fixed
+one-second grace period for remaining descendants to retire naturally
+regardless of exit code, then provide bounded TERM/KILL retirement when the
+group remains active.
 Timeout cleanup begins immediately. A one-byte readiness signal emitted inside
 the completed isolation profile
 distinguishes setup denial from an executed check failure without exposing
@@ -2181,7 +2222,8 @@ worktree throughout workflow execution and runner-authorized clarification
 writes, preventing independently identified runs from mutating the same
 worktree concurrently. Status and public activity reads acquire neither lease.
 A competing owner is rejected; either lease is recoverable only after its age
-threshold when its same-host process is demonstrably dead. Release verifies the
+threshold of five minutes when its same-host process is demonstrably dead. Age
+alone never proves that ownership ended. Release verifies the
 opaque owner token before removing a lease. Pipeline-declared run artifacts are
 atomically replaced beneath the run directory, with absolute paths, traversal,
 reserved state files, and symlink escapes rejected. Managed state and lease
@@ -2207,6 +2249,11 @@ structured questions whose answers could materially change the required
 behavior, scope, or planned work, or a pipeline-owned blocking outcome.
 `--clarify` opens the text editor before that turn so the user can add context
 proactively; otherwise the editor opens only when the agent asks a question.
+
+The fixed protocol limit is three agent question rounds for every pipeline.
+Empty artifacts and authorized editor closes without changes consume no round.
+Exhaustion pauses instead of extending the dialogue indefinitely; this is an
+ambiguity-resolution bound, not a configurable duration or workflow budget.
 
 The root runtime owns the common mechanics under `src/clarifications/` behind
 its public `index.js`: creating the `clarifications.md` artifact, invoking

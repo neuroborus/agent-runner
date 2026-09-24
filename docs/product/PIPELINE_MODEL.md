@@ -107,7 +107,11 @@ effect-safety guarantees.
 
 ## Clarification and product decisions
 
-Every pipeline begins with a bounded read-only clarification phase. Agents ask
+Every pipeline begins with a read-only clarification phase whose fixed protocol
+limit is three agent question rounds. Empty artifacts and authorized editor
+closes without changes consume no round. Exhaustion pauses instead of extending
+the dialogue indefinitely; this ambiguity bound is not a configurable workflow
+budget. Agents ask
 only questions whose answers can materially change behavior, scope, or the
 planned implementation, and they must use repository evidence for questions it
 can answer. An empty clarification file and an authorized editor close without

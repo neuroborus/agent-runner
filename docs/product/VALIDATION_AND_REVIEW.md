@@ -130,6 +130,17 @@ finalization. Recovery cannot omit, substitute, remove, or weaken established
 checks or infrastructure entries, and always requires fresh terminal confirmation.
 Ordinary non-rejection evidence reuse remains as specified above.
 
+Malformed structured output has separate fixed protocol bounds. Plan authoring
+allows one automatic correction at each draft-bound primary checkpoint. Plan
+execution and polishing allow one at each bootstrap, validation-migration,
+candidate-review, terminal-confirmation, or lazy checkpoint scope; polishing
+also allows one for malformed Worker finalization output. Plan execution alone
+allows up to two Worker finalization corrections, and the second is available
+only for a wholly new bounded diagnostic batch. Repetition or further invalid
+output pauses for explicit recovery. These limits prevent rejected provider
+output from becoming an unbounded hidden retry loop and do not consume the
+separate code-fix or semantic-evidence budgets.
+
 Two automatic semantic retries per execution step or polishing run are durable
 and separate from malformed-output and code-fix budgets. Pending retries survive
 interruption or provider unavailability without recounting. Scope drift clears feedback without

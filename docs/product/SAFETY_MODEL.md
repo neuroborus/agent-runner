@@ -114,6 +114,11 @@ No partials, mutable shared downloads, automatic extraction, or host installatio
 are exposed. Extraction must target declared scratch in the exact command.
 Acquisition validates and pins public HTTPS destinations, rejects redirects and
 inherited trust or credentials, and bounds bytes, time, and cancellation.
+The fixed safety envelope is 64 MiB per file, 256 MiB total, one A and one AAAA
+lookup with one resolver try each in a five-second DNS phase, 10 seconds to
+connect, 15 seconds of header/body inactivity, and five minutes overall, plus a
+separate one-second transport-retirement bound. These limits bound untrusted
+network resource ownership and are not configurable command-execution budgets.
 Transports retire before publication or cleanup; uncertain retirement retains
 ownership. Journaled acquisition process identity also blocks cleanup after
 service reconstruction while the owner is live or unverifiable. Same-service
@@ -154,7 +159,9 @@ For session ownership, the persisted PID/boot/start proof reconstructs the
 token used to detect survivors after supervisor loss without signalling them.
 Unverifiable ownership or surviving descendants retains exclusion.
 Transiently incomplete completion inspection is retried only within one
-non-resetting descendant-grace deadline. Persistent uncertainty keeps the same
+non-resetting one-second descendant-grace deadline. This cleanup grace verifies
+containment after work has ended; it is a fixed safety invariant, not a
+configurable user-work timeout. Persistent uncertainty keeps the same
 fail-closed error and durable exclusion, but the parent unreferences the
 detached supervisor and its IPC channel after the failure is reported. It does
 not disconnect containment, signal an unverified process, or clear ownership;

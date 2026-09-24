@@ -96,6 +96,20 @@ Plan execution's local commit is a separate constrained adapter capability. It
 is available only for the Worker's one-shot authorized `COMMIT` turn and does
 not widen ordinary workspace-write access. Polishing never requests it.
 
+Model-free capability subprocesses for CLI, sandbox, commit-executor, and
+process-containment proofs each have a fixed 10-second deadline. Within that
+bound, a local-commit probe has a one-second network-denial observation
+deadline and fails closed when a silent socket cannot prove isolation. Both
+providers' pre-effect local-commit Git metadata lookups also use the 10-second
+bound; this preparation deadline does not cap the authorized commit effect
+after it begins. Codex MCP configuration discovery needed to construct
+isolation gets at most two attempts with a 30-second subprocess deadline apiece
+and no added retry delay; exhaustion reports provider unavailability before a
+model turn. Codex model-catalog discovery makes at most 32 page requests, each
+asking for 100 entries, so a malformed or cyclic provider response cannot make
+discovery unbounded. These are protocol and safety bounds rather than user-work
+budgets, so they are intentionally not configuration settings.
+
 ## Normalized failures and recovery
 
 Provider requests may carry runner-owned abort and process-registration
@@ -113,14 +127,17 @@ that sandbox denies nested namespace creation; the enclosing namespace still
 contains otherwise detached descendants. Cancellation or runner loss
 retires the owned containment before reconciliation can release ownership.
 Completion retries incomplete descendant evidence only within one fixed
-descendant-grace deadline. Persistent uncertainty retains containment and its
-durable registration, while the parent unreferences the detached supervisor
-and IPC channel so closing provider protocol resources can let the run owner
-exit without signalling unverified work.
+one-second descendant-grace deadline. Persistent uncertainty retains
+containment and its durable registration, while the parent unreferences the
+detached supervisor and IPC channel so closing provider protocol resources can
+let the run owner exit without signalling unverified work.
 Codex races App Server work against owned-completion rejection so an ownership
 failure cannot remain hidden behind an open protocol request. It preserves the
 original ownership failure through bounded cleanup; successful ownership
-completion still requires the protocol operation to produce its result.
+completion still requires the protocol operation to produce its result. App
+Server shutdown allows up to one second each for natural close, TERM, and KILL.
+Those post-turn phases and the descendant grace are fixed containment
+invariants rather than configurable provider-work timeouts.
 Unavailable containment fails before provider execution. Every fresh
 or recovery attempt checks the abort signal. A constrained commit that may already have begun stays
 on the verification-only path; a proven pre-effect interruption retains that
@@ -132,6 +149,12 @@ isolation failure, invalid contracts, and ambiguous writable outcomes fail
 closed. Allowlisted backend, capability, configuration, usage, provider, and
 source-session availability failures may enter a durable pause only after the
 runner proves the repository is safe.
+
+An ordinary non-commit turn with native context exhaustion may receive at most
+one in-session compaction retry of the complete request when it has a usable
+native session. Persistent pressure outside a source fork can then enter the
+single fresh reconstruction path; neither recovery mechanism loops or falls
+back to a different provider.
 
 Codex validates response-schema compatibility locally before provider activity,
 including its own local-commit readiness schema. Unsupported declarations such

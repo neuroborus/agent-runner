@@ -349,7 +349,9 @@ An empty clarification artifact is valid. Closing an authorized editor without
 changes is also valid. Neither case requires user text.
 They do not consume an agent question
 round. Unanswered agent questions still require a response.
-Question rounds are bounded to three; exhaustion pauses rather than advancing.
+The fixed clarification protocol permits at most three agent question rounds;
+it is not a configurable workflow budget, and exhaustion pauses rather than
+advancing.
 
 The runner persists the suspended workflow state, one-shot pending editor
 authorization, and accepted transcript hash before opening an editor or waiting

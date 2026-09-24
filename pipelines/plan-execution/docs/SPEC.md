@@ -1679,8 +1679,9 @@ runs and may return `READY`; only unanswered questions appended by the Worker
 require user input.
 
 Append each question round to the execution clarification artifact, open the
-editor for answers, then let the Worker reread the complete transcript. Default
-to at most three agent question rounds. If the editor cannot be opened, the run
+editor for answers, then let the Worker reread the complete transcript. The
+fixed clarification protocol permits at most three agent question rounds; it
+is not a configurable workflow budget. If the editor cannot be opened, the run
 is non-interactive, answers remain missing, or the round limit is reached,
 persist `WAITING_FOR_USER` instead of advancing.
 

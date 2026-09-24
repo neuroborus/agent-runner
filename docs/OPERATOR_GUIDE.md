@@ -258,11 +258,14 @@ The build driver reads the verified file at
 The mount is read-only. The runner acquires files before launching the exact
 check, which remains network-isolated. Acquisition requires public DNS and HTTPS
 with built-in TLS trust; redirects, proxies, credentials, and custom trust are
-unsupported. Limits are 64 MiB per file, 256 MiB total, and five minutes overall,
-with shorter DNS, connection, and inactivity deadlines. No automatic extraction
-or host setup occurs: the declared command must extract or prepare inputs in
-its declared scratch directory. Artifact-only commands need no scratch or cache
-if they only read verified files. Downloads are never reused across executions.
+unsupported. Limits are 64 MiB per file, 256 MiB total, and five minutes
+overall, with one A and one AAAA lookup sharing a five-second DNS phase and one
+resolver try each, connection establishment bounded to 10 seconds, and
+header/body inactivity to 15 seconds. Transport retirement has a separate
+one-second safety bound. No automatic extraction or host setup occurs: the
+declared command must extract or prepare inputs in its declared scratch
+directory. Artifact-only commands need no scratch or cache if they only read
+verified files. Downloads are never reused across executions.
 Acquisition failures pause finalization as an environment blocker without running
 the check. Repair the environment and resume; changing declarations requires a
 new run. Do not delete uncertain resources until their ownership and transport
@@ -286,7 +289,11 @@ agent-run run plan-execution --project /path/to/project --task /path/to/task
 agent-run status --run <run-id>
 ```
 
-Every pipeline starts with read-only `CLARIFY`. Answer material questions from
+Every pipeline starts with read-only `CLARIFY`. The fixed protocol limit is
+three agent question rounds; empty clarification artifacts and authorized
+editor closes without changes consume no round. Exhaustion pauses rather than
+silently extending the dialogue, and the limit is not a configurable workflow
+budget. Answer material questions from
 explicit user context; otherwise obtain the user's decision. An empty
 clarification document and an authorized editor close without changes are
 valid. CLI uses a persisted editor authorization; MCP uses structured pending
@@ -302,6 +309,8 @@ A new key represents a new mutation and cannot recover the original receipt.
 Use `run_wait` for one event-driven wait over the desired interval. Use
 `run_activity` only for deliberate current or historical inspection, with its
 cursor. Do not poll status, activity, or waits at a fixed cadence.
+An omitted `run_wait.timeoutMs` waits 30 seconds; the maximum is 24 hours. This
+deadline ends only the client wait and never stops the detached run.
 
 A timeout, wait cancellation, or MCP disconnect ends only that wait. Detached
 work continues. Inspect the returned execution state to distinguish a live
@@ -345,6 +354,27 @@ settled stops may have no settlement details. None of these fields authorize
 another execution owner or extra work.
 
 ## 5. Recover a pause without taking over the work
+
+Some short runner bounds deliberately remain fixed. Each model-free subprocess
+used to prove CLI availability, sandbox support, commit-executor isolation, or
+process containment has a 10-second deadline. A local-commit probe has a
+one-second network-denial observation deadline inside that outer bound; a
+silent socket is not accepted as isolation proof. Both providers' pre-effect
+local-commit Git metadata lookups also use the 10-second bound; this preparation
+deadline does not cap the authorized commit effect after it begins. Codex MCP
+configuration discovery gets at most two attempts with a 30-second subprocess
+deadline apiece. An ordinary non-commit turn with native context exhaustion may
+receive at most one in-session compaction retry when it has a usable native
+session. Outside source forks, persistent pressure and other ordinary
+recoverable provider work get one fresh reconstruction before the run pauses.
+
+A same-host execution or canonical-worktree lease is eligible for stale
+recovery after five minutes only when its recorded process is demonstrably
+dead, while short state-mutation contention returns a retryable busy result
+after roughly five seconds. These protocol and ownership limits are not
+substitutes for configurable workflow budgets or the per-command
+trusted-validation timeout; repair the reported availability or ownership
+condition and use the run's offered action.
 
 Execution also requires plan revision when initial implementation leaves a step's
 content unchanged, or legacy state lacks trustworthy original step-start evidence.

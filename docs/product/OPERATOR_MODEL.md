@@ -113,6 +113,14 @@ does not edit target ignore rules.
 One execution lease protects a mutating run. Plan execution and polishing also
 hold a canonical-worktree lease so independently identified runs cannot mutate
 the same checkout concurrently. Status and activity reads remain lock-free.
+An abandoned same-host execution or canonical-worktree lease becomes eligible
+for recovery after five minutes only when the recorded process is demonstrably
+dead; age alone never proves ownership ended. Short state mutations observe
+competing claims at most 500 times with 10 milliseconds between observations
+(about five seconds plus file system work), then return a retryable busy result
+rather than risking two writers. The smaller fixed publication and collision
+retry counts are correctness mechanics, not operator-configurable workflow
+budgets.
 
 ## Pauses, resume, and observability
 

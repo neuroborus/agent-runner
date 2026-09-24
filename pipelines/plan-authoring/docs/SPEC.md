@@ -319,8 +319,9 @@ runs and may return `READY`; only unanswered questions appended by the Planner
 require user input.
 
 Append each question round to `clarifications.md`, open the editor for answers,
-then let the Planner reread the complete transcript. Default to at most three
-agent question rounds; reaching the limit pauses with
+then let the Planner reread the complete transcript. The fixed clarification
+protocol permits at most three agent question rounds; it is not a configurable
+workflow budget. Reaching the limit pauses with
 `clarification_limit_reached` rather than starting with unresolved questions.
 When the Planner returns `READY`, persist the artifact path and hash and close
 clarification. The hash becomes a run input checked on resume.

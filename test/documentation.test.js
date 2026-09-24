@@ -253,3 +253,155 @@ test("document-map links resolve and finalization covers the operator surfaces",
   assert.match(skill, /defer staging, unstaging,/u);
   assert.match(skill, /Do not copy it into phase prompts/u);
 });
+
+test("fixed operational bounds remain explicit and narrowly owned", async () => {
+  const [
+    architecture,
+    operatorGuide,
+    pipelineModel,
+    providerModel,
+    operatorModel,
+    safetyModel,
+    validationModel,
+    authoringSpec,
+    executionSpec,
+    polishingSpec,
+  ] = await Promise.all([
+    readDocument("docs/ARCHITECTURE.md"),
+    readDocument("docs/OPERATOR_GUIDE.md"),
+    readDocument("docs/product/PIPELINE_MODEL.md"),
+    readDocument("docs/product/PROVIDER_MODEL.md"),
+    readDocument("docs/product/OPERATOR_MODEL.md"),
+    readDocument("docs/product/SAFETY_MODEL.md"),
+    readDocument("docs/product/VALIDATION_AND_REVIEW.md"),
+    readDocument("pipelines/plan-authoring/docs/SPEC.md"),
+    readDocument("pipelines/plan-execution/docs/SPEC.md"),
+    readDocument("pipelines/polishing/docs/SPEC.md"),
+  ]);
+
+  for (const document of [
+    architecture,
+    operatorGuide,
+    pipelineModel,
+    authoringSpec,
+    executionSpec,
+    polishingSpec,
+  ]) {
+    assert.match(document, /three agent question rounds/u);
+    assert.match(
+      document,
+      /not a configurable\s+(?:duration or\s+)?workflow\s+budget/u,
+    );
+  }
+
+  for (const document of [architecture, providerModel, operatorGuide]) {
+    assert.match(document, /10-second\s+deadline/u);
+    assert.match(document, /one-second network-denial observation\s+deadline/u);
+    assert.match(
+      document,
+      /both\s+providers' pre-effect\s+local-commit Git metadata\s+lookups[^.]*10-second\s+bound/iu,
+    );
+    assert.match(
+      document,
+      /preparation\s+deadlines?[^.]*do(?:es)? not cap the\s+authorized commit effect/iu,
+    );
+    assert.match(document, /two[^.]*30-second\s+subprocess\s+deadline/u);
+  }
+  assert.match(providerModel, /single fresh reconstruction/u);
+  assert.match(operatorGuide, /one fresh\s+reconstruction/u);
+  assert.match(architecture, /compact[^.]*retry[^.]*once/u);
+  for (const document of [providerModel, operatorGuide]) {
+    assert.match(document, /at most\s+one[^.]*compaction retry/u);
+  }
+  assert.match(
+    providerModel,
+    /A second failure[^.]+without another adapter retry/u,
+  );
+  assert.match(
+    architecture,
+    /32 page requests[^.]*requested limit of 100\s+entries/u,
+  );
+  assert.match(providerModel, /32 page requests[^.]*asking for 100\s+entries/u);
+  assert.match(architecture, /256-name MCP configuration capacity/u);
+  assert.match(architecture, /three fixed one-second observation/u);
+  assert.match(
+    providerModel,
+    /one second each for natural close, TERM, and KILL/u,
+  );
+  assert.match(safetyModel, /one-second descendant-grace deadline/u);
+  assert.match(safetyModel, /fixed safety invariant/u);
+
+  assert.match(validationModel, /one automatic correction/u);
+  assert.match(validationModel, /up to two Worker finalization corrections/u);
+  assert.match(validationModel, /Two automatic semantic retries/u);
+  assert.match(validationModel, /not consume the\s+separate code-fix/u);
+  assert.match(authoringSpec, /permits one automatic fresh-session/u);
+  assert.match(executionSpec, /Allow at most two such attempts/u);
+  assert.match(executionSpec, /only one automatic read-only correction/u);
+  assert.match(polishingSpec, /separate one-attempt correction records/u);
+  for (const document of [executionSpec, polishingSpec]) {
+    assert.match(document, /Two automatic semantic retries/u);
+  }
+
+  assert.match(architecture, /DNS has a 5-second deadline/u);
+  assert.match(architecture, /one A and one AAAA lookup/u);
+  assert.match(architecture, /one resolver\s+try each/u);
+  assert.match(architecture, /connection establishment 10 seconds/u);
+  assert.match(architecture, /body\/header inactivity 15 seconds/u);
+  assert.match(architecture, /whole acquisition 5 minutes/u);
+  assert.match(architecture, /retirement has a separate\s+1-second bound/u);
+  for (const document of [operatorGuide, safetyModel]) {
+    assert.match(document, /64 MiB per file/u);
+    assert.match(document, /256 MiB total/u);
+    assert.match(document, /one A and one AAAA\s+lookup/u);
+    assert.match(document, /one\s+resolver\s+try each/u);
+    assert.match(
+      document,
+      /10 seconds\s+to\s+connect|connection establishment[^.]*10\s+seconds/u,
+    );
+    assert.match(
+      document,
+      /header\/body inactivity[^.]*15 seconds|15 seconds of header\/body\s+inactivity/u,
+    );
+    assert.match(document, /five minutes\s+overall/u);
+    assert.match(
+      document,
+      /separate\s+one-second (?:safety|transport-retirement) bound/u,
+    );
+  }
+
+  assert.match(architecture, /lease is recoverable[^.]*five minutes/u);
+  assert.match(
+    operatorModel,
+    /same-host execution or canonical-worktree lease becomes eligible[^.]*five minutes/u,
+  );
+  assert.match(
+    operatorGuide,
+    /same-host execution or canonical-worktree lease is eligible[^.]*five minutes/u,
+  );
+  for (const document of [architecture, operatorModel]) {
+    assert.match(document, /500/u);
+    assert.match(document, /10 milliseconds/u);
+  }
+  assert.match(operatorGuide, /roughly five seconds/u);
+  assert.match(architecture, /Managed-state reads[^.]+five attempts/u);
+  assert.match(
+    architecture,
+    /release of either an\s+execution or canonical-worktree lease[^.]*five stop-aware attempts/u,
+  );
+  assert.match(
+    architecture,
+    /Generated run IDs try at most\s+ten\s+candidates/u,
+  );
+  assert.match(architecture, /at most\s+1,010\s+collision-safe\s+names/u);
+  assert.match(
+    architecture,
+    /fixed correctness guards rather than workflow\s+budgets/u,
+  );
+  assert.match(architecture, /run_wait\.timeoutMs` means 30 seconds/u);
+  assert.match(architecture, /public maximum is 24\s+hours/u);
+  assert.match(architecture, /fixed 25-millisecond observation delay/u);
+  assert.match(architecture, /at most one second at\s+a time/u);
+  assert.match(architecture, /do not bound or retry\s+user work/u);
+  assert.match(operatorGuide, /run_wait\.timeoutMs` waits 30 seconds/u);
+});
