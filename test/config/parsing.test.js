@@ -30,6 +30,7 @@ test("tracked example is valid and local configuration is ignored", async () => 
   assert.equal(configuration.defaultModel, "current");
   assert.equal(configuration.defaultContextSize, "current");
   assert.equal(configuration.defaultEffort, "current");
+  assert.equal(configuration.trustedCommandTimeoutMs, 3_600_000);
   assert.deepEqual(configuration.trustedCommands, {
     "repository-check": {
       command: "npm run check",
@@ -82,6 +83,7 @@ test("minimal configuration uses pipeline-owned setting defaults", () => {
   assert.equal(configuration.defaultBackend, undefined);
   assert.equal(configuration.artifactRoot, DEFAULT_ARTIFACT_ROOT);
   assert.equal(configuration.issueReporting, true);
+  assert.equal(configuration.trustedCommandTimeoutMs, 3_600_000);
   assert.deepEqual(configuration.profiles, {});
   assert.deepEqual(configuration.trustedCommands, {});
   assert.deepEqual(configuration.pipelines["plan-authoring"], {
@@ -111,6 +113,53 @@ test("minimal configuration uses pipeline-owned setting defaults", () => {
     trustedChecks: [],
     roles: {},
   });
+});
+
+test("trusted command timeout configuration is a bounded positive integer", () => {
+  for (const timeoutMs of [1, 3_600_000, 2_147_483_647]) {
+    assert.equal(
+      parseRunnerConfiguration(
+        JSON.stringify({
+          schemaVersion: 1,
+          trustedCommandTimeoutMs: timeoutMs,
+        }),
+      ).trustedCommandTimeoutMs,
+      timeoutMs,
+    );
+    assert.equal(
+      parseProjectConfiguration(
+        JSON.stringify({
+          schemaVersion: 1,
+          trustedCommandTimeoutMs: timeoutMs,
+        }),
+        parseRunnerConfiguration(JSON.stringify({ schemaVersion: 1 })),
+      ).trustedCommandTimeoutMs,
+      timeoutMs,
+    );
+  }
+  for (const timeoutMs of [0, -1, 2_147_483_648, 1.5, "3600000", null, true]) {
+    assert.throws(
+      () =>
+        parseRunnerConfiguration(
+          JSON.stringify({
+            schemaVersion: 1,
+            trustedCommandTimeoutMs: timeoutMs,
+          }),
+        ),
+      /trustedCommandTimeoutMs must be an integer from 1 through 2147483647/u,
+    );
+    assert.throws(
+      () =>
+        parseProjectConfiguration(
+          JSON.stringify({
+            schemaVersion: 1,
+            trustedCommandTimeoutMs: timeoutMs,
+          }),
+          parseRunnerConfiguration(JSON.stringify({ schemaVersion: 1 })),
+        ),
+      /trustedCommandTimeoutMs must be an integer from 1 through 2147483647/u,
+    );
+  }
 });
 
 test("combined availability follows every pipeline descriptor", () => {

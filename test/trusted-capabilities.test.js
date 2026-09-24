@@ -63,7 +63,8 @@ test("capability parameters are strict, immutable, and fingerprinted in both con
       overlay,
     );
     const frozen = selected.trustedValidation;
-    assert.equal(frozen.schemaVersion, 2);
+    assert.equal(frozen.schemaVersion, 3);
+    assert.equal(frozen.timeoutMs, 3_600_000);
     assert.deepEqual(
       getPipeline(pipelineId).workflow.createState({
         settings: selected.settings,

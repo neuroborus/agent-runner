@@ -290,6 +290,7 @@ characters remain invalid. This example works in either configuration source:
 ```json
 {
   "schemaVersion": 1,
+  "trustedCommandTimeoutMs": 7200000,
   "trustedCommands": {
     "service-tests": {
       "command": "npm run test:service",
@@ -304,6 +305,16 @@ characters remain invalid. This example works in either configuration source:
   }
 }
 ```
+
+`trustedCommandTimeoutMs` is the per-command execution deadline in
+milliseconds. It is a strict integer from `1` through `2147483647` and defaults
+to `3600000` (60 minutes). Both configuration layers accept it; an ignored
+project value overrides the runner-root value for that project. There is no CLI
+or MCP override. The resolved value is fingerprinted into each new run's
+trusted-validation snapshot and remains unchanged on resume, so concurrent
+projects may safely use different deadlines. Legacy snapshot versions use the
+same deterministic 60-minute fallback. Capability preparation remains capped
+at the smaller of this value and 10 seconds.
 
 An ignored project configuration may select root or project aliases through
 the same pipeline setting, replacing that pipeline's root selection. The tracked
@@ -334,6 +345,13 @@ and validation-infrastructure snapshots must remain stable. Isolation or
 process-tree retirement failures block or fail closed. Agent and runner results
 form one complete ordered gate for the same content,
 validation-infrastructure, command, and trusted-configuration fingerprints.
+
+A longer deadline changes only when an exact command times out. It cannot make
+an incompatible sandbox work or improve native diagnostics. Trusted execution
+deliberately retains no stdout or stderr, so a full repository check that passes
+on the host can still fail closed in isolation with only a generic nonzero exit
+status. Reproduce that incompatibility in an equivalent safe environment rather
+than treating the timeout as a diagnostic or containment bypass.
 
 For an offline build whose project-provided `build.js` supports `--out-dir`, a
 trusted declaration can request transient output and cache storage:

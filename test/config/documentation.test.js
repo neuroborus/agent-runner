@@ -51,3 +51,51 @@ test("configuration ownership and defaults are documented", async () => {
   assert.match(polishingSpecification, /stagnationWindowRounds = 3/u);
   assert.match(agents, /`src\/config\/index\.js`/u);
 });
+
+test("trusted command timeout contract is documented by every owner", async () => {
+  const paths = [
+    ".agent-runner.example.json",
+    "README.md",
+    "docs/OPERATOR_GUIDE.md",
+    "docs/ARCHITECTURE.md",
+    "docs/product/OPERATOR_MODEL.md",
+    "docs/product/VALIDATION_AND_REVIEW.md",
+    "docs/product/SAFETY_MODEL.md",
+    "pipelines/plan-execution/docs/SPEC.md",
+    "pipelines/polishing/docs/SPEC.md",
+    "RHYTHM.md",
+  ];
+  const documents = await Promise.all(
+    paths.map((path) =>
+      readFile(new URL(`../../${path}`, import.meta.url), "utf8"),
+    ),
+  );
+
+  for (const [index, document] of documents.entries()) {
+    assert.match(document, /trustedCommandTimeoutMs/u, paths[index]);
+    assert.match(document, /3600000|one hour|60 minutes/u, paths[index]);
+  }
+  for (const path of [
+    "README.md",
+    "docs/OPERATOR_GUIDE.md",
+    "docs/ARCHITECTURE.md",
+    "docs/product/OPERATOR_MODEL.md",
+    "docs/product/VALIDATION_AND_REVIEW.md",
+    "docs/product/SAFETY_MODEL.md",
+    "pipelines/plan-execution/docs/SPEC.md",
+    "pipelines/polishing/docs/SPEC.md",
+  ]) {
+    const document = documents[paths.indexOf(path)];
+    assert.match(document, /2147483647/u, path);
+    assert.match(document, /milliseconds?/u, path);
+    assert.match(
+      document,
+      /project.{0,80}(?:overrides|wins|over).{0,80}(?:root|runner)/su,
+      path,
+    );
+    assert.match(document, /CLI.{0,40}MCP|MCP.{0,40}CLI/su, path);
+    assert.match(document, /resume/su, path);
+    assert.match(document, /stdout|stderr/u, path);
+    assert.match(document, /host/u, path);
+  }
+});

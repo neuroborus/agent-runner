@@ -263,13 +263,22 @@ substitutes and environment, credential, or host-authority fields. The root reso
 the complete selection and fingerprints it before agent work; resume uses the
 persisted snapshot without reloading configuration. Later project configuration
 edits trigger the existing protected-input guard.
+The top-level `trustedCommandTimeoutMs` supplies the per-command deadline in
+milliseconds. It accepts only integers from `1` through `2147483647`, defaults
+to `3600000` (60 minutes), and resolves project over runner configuration with
+no CLI or MCP override. Creation fingerprints and persists it once; resume and
+concurrent runs retain their own values. For example,
+`"trustedCommandTimeoutMs": 7200000` selects two hours.
 
 Trusted declarations also accept the architecture's closed `capabilities`
 object: `scratch: true`, `cache: true`, and bounded pinned HTTPS `artifacts`.
-Root and project normalization are identical. Version-2 snapshots include
-normalized capabilities in command identities and configuration fingerprints.
-Legacy version-1 snapshots retain their restricted policy, exact fingerprints,
-and evidence bindings without configuration reload or authority upgrades.
+Root and project normalization are identical. Version-3 snapshots include
+normalized capabilities in command identities and `timeoutMs` in the
+trusted-configuration fingerprint without changing command identities.
+Legacy version-1 and version-2 snapshots retain their policy, exact
+fingerprints, and evidence bindings with the deterministic one-hour fallback,
+without configuration reload or authority upgrades. Capability preparation
+uses the smaller of the snapshot deadline and 10 seconds.
 
 Unavailable frozen requests create a durable `environment_blocked` pause before
 provider work. Early pauses retain `preflightComplete: false`, null baseline,
@@ -649,6 +658,10 @@ closed. A bounded environment failure pauses at `FINALIZE`; resume reuses the
 durable command snapshot. The accepted ordered evidence tuple binds both agent
 and runner results to the same content, validation-infrastructure,
 ordered-command, and trusted-configuration fingerprints.
+Increasing the deadline cannot repair sandbox incompatibility or restore raw
+stdout/stderr. A full repository check may pass on the host while trusted
+isolation fails closed with only a generic exit code; the timeout is not a
+diagnostics or containment workaround.
 
 `BLOCKED` is reserved for required validation that cannot execute because of an
 external environment constraint. It carries bounded reason and evidence,

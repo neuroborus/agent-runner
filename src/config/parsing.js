@@ -5,6 +5,8 @@ import { PROVIDER_REGISTRY } from "../agents/index.js";
 import { listPipelines } from "../pipeline-registry.js";
 import {
   createTrustedValidationSnapshot,
+  DEFAULT_TRUSTED_COMMAND_TIMEOUT_MS,
+  MAX_TRUSTED_COMMAND_TIMEOUT_MS,
   normalizeTrustedValidationDefinitions,
 } from "../trusted-validation/index.js";
 
@@ -27,6 +29,7 @@ const TOP_LEVEL_FIELDS = new Set([
   "pipelines",
   "profiles",
   "trustedCommands",
+  "trustedCommandTimeoutMs",
 ]);
 const PROJECT_TOP_LEVEL_FIELDS = new Set(
   [...TOP_LEVEL_FIELDS].filter(
@@ -88,6 +91,18 @@ function assertEffort(value, path) {
   if (!EFFORT_VALUES.has(value)) {
     throw new ConfigurationError(
       `${path} must be current, low, medium, high, or xhigh.`,
+    );
+  }
+}
+
+function assertTrustedCommandTimeoutMs(value, path) {
+  if (
+    !Number.isInteger(value) ||
+    value < 1 ||
+    value > MAX_TRUSTED_COMMAND_TIMEOUT_MS
+  ) {
+    throw new ConfigurationError(
+      `${path} must be an integer from 1 through ${MAX_TRUSTED_COMMAND_TIMEOUT_MS}.`,
     );
   }
 }
@@ -299,6 +314,12 @@ export function normalizeConfiguration(input, providers = PROVIDER_REGISTRY) {
   if (input.defaultEffort !== undefined) {
     assertEffort(input.defaultEffort, "configuration.defaultEffort");
   }
+  if (input.trustedCommandTimeoutMs !== undefined) {
+    assertTrustedCommandTimeoutMs(
+      input.trustedCommandTimeoutMs,
+      "configuration.trustedCommandTimeoutMs",
+    );
+  }
 
   const inputProfiles = input.profiles === undefined ? {} : input.profiles;
   assertRecord(inputProfiles, "configuration.profiles");
@@ -335,6 +356,8 @@ export function normalizeConfiguration(input, providers = PROVIDER_REGISTRY) {
     defaultModel: input.defaultModel ?? CURRENT,
     defaultContextSize: input.defaultContextSize ?? CURRENT,
     defaultEffort: input.defaultEffort ?? CURRENT,
+    trustedCommandTimeoutMs:
+      input.trustedCommandTimeoutMs ?? DEFAULT_TRUSTED_COMMAND_TIMEOUT_MS,
     profiles,
     trustedCommands,
     pipelines: Object.freeze(
@@ -431,6 +454,12 @@ export function normalizeProjectConfiguration(
   if (input.defaultEffort !== undefined) {
     assertEffort(input.defaultEffort, `${rootPath}.defaultEffort`);
   }
+  if (input.trustedCommandTimeoutMs !== undefined) {
+    assertTrustedCommandTimeoutMs(
+      input.trustedCommandTimeoutMs,
+      `${rootPath}.trustedCommandTimeoutMs`,
+    );
+  }
 
   const inputPipelines = input.pipelines === undefined ? {} : input.pipelines;
   assertRecord(inputPipelines, `${rootPath}.pipelines`);
@@ -483,6 +512,7 @@ export function normalizeProjectConfiguration(
     "defaultModel",
     "defaultContextSize",
     "defaultEffort",
+    "trustedCommandTimeoutMs",
   ]) {
     if (input[field] !== undefined) {
       normalized[field] = input[field];

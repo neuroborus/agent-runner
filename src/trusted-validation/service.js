@@ -30,8 +30,9 @@ const MAX_ARGUMENTS = 64;
 const MAX_COMMAND_DEFINITIONS = 256;
 const MAX_SELECTED_COMMANDS = 32;
 const MAX_TEXT_LENGTH = 4_000;
-const DEFAULT_TIMEOUT_MS = 60 * 60 * 1_000;
-const SNAPSHOT_SCHEMA_VERSION = 2;
+export const DEFAULT_TRUSTED_COMMAND_TIMEOUT_MS = 60 * 60 * 1_000;
+export const MAX_TRUSTED_COMMAND_TIMEOUT_MS = 2_147_483_647;
+const SNAPSHOT_SCHEMA_VERSION = 3;
 const SNAPSHOT_FIELDS = Object.freeze([
   "schemaVersion",
   "commands",
@@ -234,6 +235,7 @@ export function normalizeTrustedValidationDefinitions(definitions = {}) {
 function snapshotFingerprints(
   commands,
   schemaVersion = SNAPSHOT_SCHEMA_VERSION,
+  timeoutMs = undefined,
 ) {
   return Object.freeze({
     commandFingerprint: sha256(
@@ -257,6 +259,7 @@ function snapshotFingerprints(
             ...(capabilities === undefined ? {} : { capabilities }),
           }),
         ),
+        ...(schemaVersion === 3 ? { timeoutMs } : {}),
       }),
     ),
   });
@@ -265,6 +268,7 @@ function snapshotFingerprints(
 export function createTrustedValidationSnapshot(
   definitions = {},
   selections = [],
+  timeoutMs = DEFAULT_TRUSTED_COMMAND_TIMEOUT_MS,
 ) {
   if (
     !Array.isArray(selections) ||
@@ -279,6 +283,16 @@ export function createTrustedValidationSnapshot(
       {
         code: "ERR_INVALID_TRUSTED_VALIDATION",
       },
+    );
+  }
+  if (
+    !Number.isInteger(timeoutMs) ||
+    timeoutMs < 1 ||
+    timeoutMs > MAX_TRUSTED_COMMAND_TIMEOUT_MS
+  ) {
+    throw new TrustedValidationError(
+      `Trusted command timeout must be an integer from 1 through ${MAX_TRUSTED_COMMAND_TIMEOUT_MS}.`,
+      { code: "ERR_INVALID_TRUSTED_VALIDATION" },
     );
   }
   const normalizedDefinitions = normalizeCommandDefinitions(definitions);
@@ -301,19 +315,29 @@ export function createTrustedValidationSnapshot(
   );
   return Object.freeze({
     schemaVersion: SNAPSHOT_SCHEMA_VERSION,
+    timeoutMs,
     commands,
-    ...snapshotFingerprints(commands),
+    ...snapshotFingerprints(commands, SNAPSHOT_SCHEMA_VERSION, timeoutMs),
   });
 }
 
 export function validateTrustedValidationSnapshot(value) {
+  const snapshotVersion = value?.schemaVersion;
+  const snapshotFields = [
+    ...SNAPSHOT_FIELDS,
+    ...(snapshotVersion === 3 ? ["timeoutMs"] : []),
+  ];
   if (
-    !hasExactFields(value, SNAPSHOT_FIELDS) ||
-    ![1, SNAPSHOT_SCHEMA_VERSION].includes(value.schemaVersion) ||
+    !hasExactFields(value, snapshotFields) ||
+    ![1, 2, SNAPSHOT_SCHEMA_VERSION].includes(snapshotVersion) ||
     !Array.isArray(value.commands) ||
     value.commands.length > MAX_SELECTED_COMMANDS ||
     !HASH_PATTERN.test(value.commandFingerprint) ||
-    !HASH_PATTERN.test(value.configurationFingerprint)
+    !HASH_PATTERN.test(value.configurationFingerprint) ||
+    (snapshotVersion === 3 &&
+      (!Number.isInteger(value.timeoutMs) ||
+        value.timeoutMs < 1 ||
+        value.timeoutMs > MAX_TRUSTED_COMMAND_TIMEOUT_MS))
   ) {
     throw new TrustedValidationError(
       "Trusted validation snapshot is invalid.",
@@ -322,13 +346,12 @@ export function validateTrustedValidationSnapshot(value) {
       },
     );
   }
-  const snapshotVersion = value.schemaVersion;
   const commands = Object.freeze(
     value.commands.map((value, index) => {
       if (
         !hasExactFields(value, [
           ...COMMAND_FIELDS,
-          ...(snapshotVersion === 2 ? ["capabilities"] : []),
+          ...(snapshotVersion >= 2 ? ["capabilities"] : []),
         ])
       ) {
         throw new TrustedValidationError(
@@ -340,7 +363,7 @@ export function validateTrustedValidationSnapshot(value) {
         command: value.command,
         executable: value.executable,
         arguments: value.arguments,
-        ...(snapshotVersion === 2 ? { capabilities: value.capabilities } : {}),
+        ...(snapshotVersion >= 2 ? { capabilities: value.capabilities } : {}),
       });
       if (normalized.identity !== value.identity) {
         throw new TrustedValidationError(
@@ -361,7 +384,11 @@ export function validateTrustedValidationSnapshot(value) {
       { code: "ERR_INVALID_TRUSTED_VALIDATION" },
     );
   }
-  const fingerprints = snapshotFingerprints(commands, snapshotVersion);
+  const fingerprints = snapshotFingerprints(
+    commands,
+    snapshotVersion,
+    value.timeoutMs,
+  );
   if (
     value.commandFingerprint !== fingerprints.commandFingerprint ||
     value.configurationFingerprint !== fingerprints.configurationFingerprint
@@ -373,6 +400,7 @@ export function validateTrustedValidationSnapshot(value) {
   }
   return Object.freeze({
     schemaVersion: snapshotVersion,
+    ...(snapshotVersion === 3 ? { timeoutMs: value.timeoutMs } : {}),
     commands,
     ...fingerprints,
   });
@@ -440,7 +468,6 @@ export function createTrustedValidationService(options = {}) {
   const resolveLauncher = options.resolveLauncher ?? resolveTrustedBubblewrap;
   const verifyLauncher = options.verifyLauncher ?? verifyTrustedBubblewrap;
   const terminationGraceMs = options.terminationGraceMs ?? 1_000;
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (
     !isRecord(environment) ||
     !isRecord(git) ||
@@ -450,8 +477,7 @@ export function createTrustedValidationService(options = {}) {
     typeof verifyLauncher !== "function" ||
     !Number.isSafeInteger(terminationGraceMs) ||
     terminationGraceMs < 1 ||
-    !Number.isSafeInteger(timeoutMs) ||
-    timeoutMs < 1
+    Object.hasOwn(options, "timeoutMs")
   ) {
     throw new TrustedValidationError(
       "Trusted validation options are invalid.",
@@ -528,6 +554,10 @@ export function createTrustedValidationService(options = {}) {
       );
     }
     const trustedSnapshot = validateTrustedValidationSnapshot(snapshot);
+    const timeoutMs =
+      trustedSnapshot.schemaVersion === 3
+        ? trustedSnapshot.timeoutMs
+        : DEFAULT_TRUSTED_COMMAND_TIMEOUT_MS;
     const normalizedBindings = preparationOnly
       ? null
       : normalizeBindings(bindings);

@@ -2353,6 +2353,7 @@ test("resumes plan execution from its durable trusted-command snapshot", async (
   const configuration = {
     schemaVersion: 1,
     defaultBackend: "codex",
+    trustedCommandTimeoutMs: 12_345,
     trustedCommands: {
       "service-check": {
         command: "npm run test:service",
@@ -2430,6 +2431,8 @@ test("resumes plan execution from its durable trusted-command snapshot", async (
     { runId: PREPARED_RUN },
   );
   const durableSnapshot = prepared.run.pipelineState.trustedValidation;
+  assert.equal(durableSnapshot.schemaVersion, 3);
+  assert.equal(durableSnapshot.timeoutMs, 12_345);
   assert.equal(configurationLoads, 1);
 
   const resumed = await createRunner({

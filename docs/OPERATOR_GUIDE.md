@@ -174,6 +174,17 @@ credentials, shell-string substitutes, or broader host authority.
 Trusted checks retain isolation and mutation guards; they do not grant broader
 agent permissions or accept user-attested results.
 
+Configure the per-command deadline with top-level
+`trustedCommandTimeoutMs`, expressed in milliseconds. The default is
+`3600000` (60 minutes), and accepted values are strict integers from `1`
+through `2147483647`. An ignored project value overrides the runner-root value;
+there is no CLI or MCP override. The resolved value is fingerprinted and saved
+with the run, reused without configuration reload on resume, and isolated from
+other concurrent runs. For example, set `"trustedCommandTimeoutMs": 7200000`
+for a two-hour deadline. Legacy snapshots retain a deterministic 60-minute
+deadline, and capability preparation still uses the smaller of the resolved
+deadline and 10 seconds.
+
 Writable implementation, polishing, lazy or combined check/fix, and finding-resolution turns
 receive only the persisted exact selected command text, including after resume
 or reconstruction. Established required-check execution and attestation belong
@@ -196,6 +207,7 @@ trusted declaration can request transient output and cache storage:
 ```json
 {
   "schemaVersion": 1,
+  "trustedCommandTimeoutMs": 7200000,
   "trustedCommands": {
     "offline-build": {
       "command": "node build.js --out-dir /run/agent-runner/scratch/build",
@@ -217,6 +229,12 @@ private to one execution and removed after its process tree retires. Repository
 writes and network access remain prohibited. Interrupted cache contents are not
 reused. An uncertain cleanup keeps ownership evidence for operator recovery;
 resume retries cleanup before new work.
+
+Increasing the deadline does not repair sandbox incompatibility or reveal
+discarded diagnostics. Trusted execution retains no command stdout or stderr;
+a check may pass on the host yet fail closed in isolation with only a generic
+exit code. Preserve that boundary and investigate the isolated environment
+rather than using the timeout as a containment or diagnostics workaround.
 
 When a build needs a pinned public download, extend that command's `capabilities`
 with `artifacts`. For example (replace the illustrative URL and digest with the

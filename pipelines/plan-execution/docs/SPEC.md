@@ -399,13 +399,22 @@ the root persists every resolved vector and alias, deterministic command
 identities, an ordered command fingerprint, and a trusted-configuration
 fingerprint. Resume uses that durable snapshot without reloading configuration;
 later project configuration edits trigger the existing protected-input guard.
+The top-level `trustedCommandTimeoutMs` supplies its per-command deadline in
+milliseconds. It is a strict integer from `1` through `2147483647`, defaults to
+`3600000` (60 minutes), and resolves project over runner configuration without
+a CLI or MCP override. Run creation fingerprints and persists the resolved
+value once; resume and concurrent runs use their own unchanged snapshots. For
+example, `"trustedCommandTimeoutMs": 7200000` selects a two-hour deadline.
 
 Trusted declarations also accept the closed `capabilities` object described in
 the architecture: `scratch: true`, `cache: true`, and bounded pinned HTTPS
 `artifacts`. Root and project normalization are identical. New snapshots use
-version 2 and include normalized capabilities in identities and fingerprints;
-version-1 snapshots retain their exact restricted policy and evidence bindings.
-Migration never upgrades authority or reloads declarations.
+version 3 and include normalized capabilities in identities plus `timeoutMs` in
+the trusted-configuration fingerprint; the timeout does not change command
+identities. Version-1 and version-2 snapshots retain their exact policy and
+evidence bindings and use the deterministic one-hour fallback. Migration never
+upgrades authority or reloads declarations. Capability preparation uses the
+smaller of the snapshot deadline and 10 seconds.
 
 Bootstrap and validation migration report bounded exact-command needs alongside
 each active role's inventory. `capabilityRequirements` permits 256 reports per
@@ -2092,6 +2101,10 @@ ordered evidence tuple bound to the same content, validation-infrastructure,
 ordered-command, and trusted-configuration fingerprints. The executor runs
 outside agent turns and does not grant an agent loopback, Docker, database,
 network, host temporary-directory, or another host-service capability.
+Increasing the deadline cannot repair sandbox incompatibility or recover the
+discarded output. A full repository check can pass on the host while trusted
+isolation fails closed with only a generic exit code; timeout configuration is
+not a diagnostics or containment remedy.
 
 Before either the passing or failing finalization transition is attempted, one
 pipeline-owned deterministic contract constructs and validates the exact

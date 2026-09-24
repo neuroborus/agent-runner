@@ -23,6 +23,17 @@ pipeline settings, and an artifact root, but cannot add provider binaries,
 credentials, environment values, or new host authority. CLI and MCP overrides
 have the documented highest precedence.
 
+The top-level `trustedCommandTimeoutMs` sets the per-command runner-trusted
+execution deadline in milliseconds. It is a strict integer from `1` through
+`2147483647`, defaults to `3600000` (60 minutes), and may be set in either
+configuration layer; the project value wins over the root value. Unlike role
+and pipeline selections, it has no CLI or MCP override. A new run saves the
+resolved value in its fingerprinted trusted-validation snapshot, and resume
+reuses it unchanged. This permits concurrent projects to use distinct deadlines
+without shared service state. For example, `"trustedCommandTimeoutMs": 7200000`
+selects two hours. Legacy snapshot versions use the one-hour fallback, while
+capability preparation remains capped at 10 seconds.
+
 Both configuration layers accept portable `defaultEffort` and role `effort`
 values: `current`, `low`, `medium`, `high`, and `xhigh`. Effort stays separate
 from model selection and follows shared execution-preference precedence through
@@ -166,6 +177,11 @@ If an unexpected runner-owned invariant rejects a plan-execution finalization
 transition, both CLI and MCP status expose the same bounded diagnostic and an
 explicit retry from the retained `FINALIZE` checkpoint. Rejected finalization
 evidence and native process output do not enter the pause record.
+
+Increasing the trusted-command deadline does not change isolation or expose
+discarded stdout/stderr. A command that passes on the host may still return only
+a generic isolated exit failure; timeout configuration is not a sandbox or
+diagnostics remedy.
 
 Plan execution and polishing pause as `finalization_evidence_rejected` at
 `FINALIZE` after two automatic semantic retries per execution step or polishing

@@ -7,11 +7,16 @@ remain in the owning documentation.
 
 ## 2026-09-24
 
-- **Trusted validation defaults to one hour per command.** The internal timeout
-  increases from 15 to 60 minutes to accommodate long-running repository checks.
-  Explicit service overrides and the 10-second preparation cap remain unchanged,
-  as do execution, isolation, cleanup, evidence, and process-tree semantics.
-  This bounded change adds no configuration.
+- **Trusted validation deadlines are explicit per-run configuration.** Root and
+  safe project configuration accept bounded millisecond
+  `trustedCommandTimeoutMs`, defaulting to one hour with project-over-runner
+  precedence. Version-3 snapshots fingerprint and persist the resolved deadline
+  without changing command identities; legacy versions deterministically retain
+  one hour, and concurrent runs carry independent values. The hidden service
+  override is removed while the 10-second preparation cap, no-output-retention
+  boundary, isolation, cancellation, cleanup, evidence, and process ownership
+  remain unchanged. Longer deadlines neither repair sandbox incompatibility nor
+  explain generic isolated exit failures after a host check passes.
 
 ## 2026-09-20
 

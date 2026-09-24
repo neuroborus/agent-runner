@@ -73,10 +73,50 @@ import {
   reviewFindings,
   schemaPatterns,
   stagnation,
+  trustedValidationSnapshot,
   versionFourState,
   versionOneState,
   versionThirteenState,
 } from "./support/index.js";
+
+test("persists trusted-validation timeout snapshots and rejects invalid bounds", () => {
+  const trustedValidation = trustedValidationSnapshot();
+  const settings = { ...SETTINGS, trustedChecks: ["service-check"] };
+  const state = createPlanExecutionState({
+    settings,
+    trustedValidation,
+  });
+  const legacyCommands = trustedValidation.commands.map(
+    ({ identity: _identity, ...command }) => command,
+  );
+  const { timeoutMs: _timeoutMs, ...legacySnapshot } = trustedValidation;
+  const versionTwo = {
+    ...legacySnapshot,
+    schemaVersion: 2,
+    configurationFingerprint: hash(
+      JSON.stringify({ schemaVersion: 2, commands: legacyCommands }),
+    ),
+  };
+
+  assert.deepEqual(state.trustedValidation, trustedValidation);
+  assert.deepEqual(
+    createPlanExecutionState({
+      settings,
+      trustedValidation: versionTwo,
+    }).trustedValidation,
+    versionTwo,
+  );
+  for (const timeoutMs of [0, 2_147_483_648, 1.5]) {
+    assert.throws(
+      () =>
+        normalizePipelineState({
+          ...state,
+          trustedValidation: { ...trustedValidation, timeoutMs },
+        }),
+      /trusted validation is invalid/u,
+    );
+  }
+});
 
 test("rejects incomplete or substituted finalization PASS evidence", () => {
   const valid = finalizationPassed();

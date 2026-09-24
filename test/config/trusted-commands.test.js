@@ -37,6 +37,34 @@ function resolve(root, overlay, pipelineId = "plan-execution") {
   return resolvePipelineConfiguration(pipelineId, root, {}, {}, null, overlay);
 }
 
+test("project trusted command timeout overrides the runner value", () => {
+  const definition = command("check");
+  const root = parseRunnerConfiguration(
+    JSON.stringify({
+      ...configuration(
+        { check: definition },
+        { "plan-execution": { trustedChecks: ["check"] } },
+      ),
+      trustedCommandTimeoutMs: 12_000,
+    }),
+  );
+  const inherited = parseProjectConfiguration(
+    JSON.stringify({ schemaVersion: 1 }),
+    root,
+  );
+  const overridden = parseProjectConfiguration(
+    JSON.stringify({ schemaVersion: 1, trustedCommandTimeoutMs: 4_000 }),
+    root,
+  );
+
+  assert.equal(resolve(root, inherited).trustedValidation.timeoutMs, 12_000);
+  assert.equal(resolve(root, overridden).trustedValidation.timeoutMs, 4_000);
+  assert.equal(
+    resolve(root, null).trustedValidation.timeoutMs,
+    root.trustedCommandTimeoutMs,
+  );
+});
+
 test("project-only selections produce immutable exact snapshots for both writable pipelines", () => {
   const rootCommand = command("root-check");
   const projectCommand = {

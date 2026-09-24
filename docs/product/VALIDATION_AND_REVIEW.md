@@ -159,9 +159,20 @@ unchanged on resume; later project configuration edits retain the protected-inpu
 guard. Profile implementations and sandbox policy remain runner-owned.
 Declarations may request the closed scratch/cache and pinned-HTTPS-artifact
 capability vocabulary owned by the trusted-validation architecture. Parameters
-are frozen into command identities and version-2 snapshot fingerprints. Legacy
-version-1 snapshots preserve their original restricted policy and evidence
-bindings; resume never grants newly configured capabilities.
+are frozen into command identities and snapshot fingerprints. Version-3
+snapshots additionally carry the resolved per-command `timeoutMs` in the
+trusted-configuration fingerprint without changing command identities. Legacy
+version-1 and version-2 snapshots preserve their original policy and evidence
+bindings and use the deterministic 60-minute fallback; resume never grants
+newly configured capabilities or adopts a new deadline.
+
+The public root/project setting is `trustedCommandTimeoutMs`, in milliseconds.
+It accepts strict integers from `1` through `2147483647`, defaults to `3600000`
+(60 minutes), and resolves project over root without CLI or MCP overrides. A
+new run persists the resolved value once, so resumes and concurrent runs use
+their own unchanged snapshots. For example, `"trustedCommandTimeoutMs":
+7200000` selects two hours. Capability preparation remains limited to the
+smaller of the resolved value and 10 seconds.
 
 A valid but unavailable frozen request pauses durably as `environment_blocked`
 before provider work, including at creation before any preflight evidence exists.
@@ -199,7 +210,10 @@ does not repeat the complete inventory or expose unrelated configuration.
 During `FINALIZE`, the runner executes only the exact persisted executable
 and argument vector in its isolated service, retains bounded status rather than
 native output, and rejects repository or control-state mutation. This mechanism
-does not broaden an agent turn's permissions.
+does not broaden an agent turn's permissions. Increasing the deadline cannot
+fix sandbox incompatibility or restore discarded stdout/stderr. A check may
+pass on the host yet fail closed in isolation with only a generic exit code;
+the timeout must not be presented as a diagnostics remedy.
 
 Execution and polishing validation infrastructure consists of files that own
 commands, discovery, runners, configuration, or mandatory finalization guidance. Ordinary

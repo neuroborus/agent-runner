@@ -68,7 +68,7 @@ async function repository(t) {
   return projectPath;
 }
 
-function snapshot(alias, command, executable, argumentsList) {
+function snapshot(alias, command, executable, argumentsList, timeoutMs) {
   return createTrustedValidationSnapshot(
     {
       [alias]: {
@@ -78,7 +78,27 @@ function snapshot(alias, command, executable, argumentsList) {
       },
     },
     [alias],
+    timeoutMs,
   );
+}
+
+function legacySnapshot(schemaVersion) {
+  const vector = {
+    alias: "check",
+    command: "node check.js",
+    executable: "node",
+    arguments: ["check.js"],
+    ...(schemaVersion === 2 ? { capabilities: {} } : {}),
+  };
+  const identity = hash(JSON.stringify(vector));
+  return {
+    schemaVersion,
+    commands: [{ ...vector, identity }],
+    commandFingerprint: hash(JSON.stringify([identity])),
+    configurationFingerprint: hash(
+      JSON.stringify({ schemaVersion, commands: [vector] }),
+    ),
+  };
 }
 
 test("defaults trusted validation commands to a one-hour timeout", async () => {
@@ -126,6 +146,209 @@ test("defaults trusted validation commands to a one-hour timeout", async () => {
   assert.equal(execution.options.timeoutMs, 3_600_000);
 });
 
+test("freezes bounded timeouts into configuration fingerprints without changing command identities", () => {
+  const first = snapshot("check", "node check.js", "node", ["check.js"], 1);
+  const second = snapshot(
+    "check",
+    "node check.js",
+    "node",
+    ["check.js"],
+    2_147_483_647,
+  );
+
+  assert.equal(first.schemaVersion, 3);
+  assert.equal(first.timeoutMs, 1);
+  assert.equal(second.timeoutMs, 2_147_483_647);
+  assert.equal(first.commands[0].identity, second.commands[0].identity);
+  assert.equal(
+    first.commands[0].identity,
+    legacySnapshot(2).commands[0].identity,
+  );
+  assert.equal(first.commandFingerprint, second.commandFingerprint);
+  assert.notEqual(
+    first.configurationFingerprint,
+    second.configurationFingerprint,
+  );
+  for (const timeoutMs of [0, -1, 2_147_483_648, 1.5, "1000", null]) {
+    assert.throws(
+      () => snapshot("check", "node check.js", "node", ["check.js"], timeoutMs),
+      { code: "ERR_INVALID_TRUSTED_VALIDATION" },
+    );
+  }
+});
+
+test("uses each concurrent run snapshot's timeout independently", async () => {
+  const executions = new Map();
+  const service = trustedService(
+    {
+      async snapshot({ projectPath }) {
+        return {
+          projectPath,
+          contentFingerprint: hash(`content:${projectPath}`),
+        };
+      },
+      async assertUnchanged(value) {
+        assert.equal(
+          value.contentFingerprint,
+          hash(`content:${value.projectPath}`),
+        );
+      },
+    },
+    {
+      async runCommand(command, options) {
+        await Promise.resolve();
+        executions.set(options.cwd, {
+          alias: command.alias,
+          timeoutMs: options.timeoutMs,
+        });
+        return {
+          status: "PASS",
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          reason: "exit",
+        };
+      },
+    },
+  );
+  const runs = [
+    {
+      projectPath: "/projects/first",
+      trusted: snapshot("first", "node first.js", "node", ["first.js"], 12_345),
+    },
+    {
+      projectPath: "/projects/second",
+      trusted: snapshot(
+        "second",
+        "node second.js",
+        "node",
+        ["second.js"],
+        67_890,
+      ),
+    },
+  ];
+
+  await Promise.all(
+    runs.map(({ projectPath, trusted }) =>
+      service.execute({
+        bindings: {
+          contentFingerprint: hash(`content:${projectPath}`),
+          validationInfrastructureFingerprint: hash("infrastructure"),
+          commandFingerprint: trusted.commandFingerprint,
+          configurationFingerprint: trusted.configurationFingerprint,
+        },
+        commandIdentity: trusted.commands[0].identity,
+        projectPath,
+        snapshot: trusted,
+      }),
+    ),
+  );
+
+  assert.deepEqual(Object.fromEntries(executions), {
+    "/projects/first": { alias: "first", timeoutMs: 12_345 },
+    "/projects/second": { alias: "second", timeoutMs: 67_890 },
+  });
+});
+
+test("keeps the one-hour fallback for legacy snapshot versions", async () => {
+  const projectPath = process.cwd();
+  const before = { projectPath, contentFingerprint: hash("content") };
+  const observed = [];
+  const service = trustedService(
+    {
+      async snapshot() {
+        return before;
+      },
+      async assertUnchanged(value) {
+        assert.equal(value, before);
+      },
+    },
+    {
+      runCommand(_command, options) {
+        observed.push(options.timeoutMs);
+        return {
+          status: "PASS",
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          reason: "exit",
+        };
+      },
+    },
+  );
+
+  for (const schemaVersion of [1, 2]) {
+    const trusted = legacySnapshot(schemaVersion);
+    await service.execute({
+      bindings: {
+        contentFingerprint: before.contentFingerprint,
+        validationInfrastructureFingerprint: hash("infrastructure"),
+        commandFingerprint: trusted.commandFingerprint,
+        configurationFingerprint: trusted.configurationFingerprint,
+      },
+      commandIdentity: trusted.commands[0].identity,
+      projectPath,
+      snapshot: trusted,
+    });
+  }
+
+  assert.deepEqual(observed, [3_600_000, 3_600_000]);
+});
+
+test("caps preparation at ten seconds while honoring shorter snapshot timeouts", async () => {
+  const projectPath = process.cwd();
+  const before = { projectPath, contentFingerprint: hash("content") };
+  const observed = [];
+  const service = trustedService(
+    {
+      async snapshot() {
+        return before;
+      },
+      async assertUnchanged(value) {
+        assert.equal(value, before);
+      },
+    },
+    {
+      runCommand(_command, options) {
+        observed.push(options.timeoutMs);
+        return {
+          status: "PASS",
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          reason: "exit",
+        };
+      },
+    },
+  );
+
+  for (const timeoutMs of [4_000, 40_000]) {
+    const trusted = snapshot(
+      `check-${timeoutMs}`,
+      `node check-${timeoutMs}.js`,
+      "node",
+      [`check-${timeoutMs}.js`],
+      timeoutMs,
+    );
+    await service.inspectRequirements({
+      inventory: [trusted.commands[0].command],
+      requirements: [],
+      projectPath,
+      snapshot: trusted,
+      async onProcess() {},
+      async onResource() {},
+    });
+  }
+
+  assert.deepEqual(observed, [4_000, 10_000]);
+});
+
+test("rejects the retired service-construction timeout override", () => {
+  assert.throws(() => createTrustedValidationService({ timeoutMs: 1_000 }), {
+    code: "ERR_INVALID_TRUSTED_VALIDATION_OPTIONS",
+  });
+});
+
 test("forwards sandbox ownership through trusted execution without changing containment", async () => {
   for (const ownershipMode of [
     "native-sandbox-provider",
@@ -135,7 +358,13 @@ test("forwards sandbox ownership through trusted execution without changing cont
     for (const descendantsStopped of [false, true]) {
       const projectPath = process.cwd();
       const before = { projectPath, contentFingerprint: hash("content") };
-      const trusted = snapshot("check", "node check.js", "node", ["check.js"]);
+      const trusted = snapshot(
+        "check",
+        "node check.js",
+        "node",
+        ["check.js"],
+        456,
+      );
       const environment = { PATH: "/usr/bin" };
       const signal = new AbortController().signal;
       const onProcess = async () => {};
@@ -183,7 +412,6 @@ test("forwards sandbox ownership through trusted execution without changing cont
           });
         },
         terminationGraceMs: 123,
-        timeoutMs: 456,
       });
 
       const result = await service.execute({
@@ -583,6 +811,7 @@ test("distinguishes isolation setup denial from command failure", async (t) => {
     "node isolation readiness probe",
     process.execPath,
     ["--eval", "process.exit(0)"],
+    1_000,
   );
   const service = createTrustedValidationService({
     git,
@@ -597,7 +826,6 @@ test("distinguishes isolation setup denial from command failure", async (t) => {
       };
     },
     terminationGraceMs: 100,
-    timeoutMs: 1_000,
   });
   const blocked = await service.execute({
     bindings: await bindings(git, projectPath, trusted),

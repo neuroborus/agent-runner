@@ -268,6 +268,7 @@ The V1 shape is:
   "defaultModel": "current",
   "defaultEffort": "current",
   "defaultContextSize": "current",
+  "trustedCommandTimeoutMs": 3600000,
   "profiles": {
     "codex-work": {
       "backend": "codex",
@@ -309,6 +310,12 @@ project configuration. The MCP process loads it once at startup; applying a
 change requires a restart. A disabled server omits the reporting tool, schema,
 and related instructions from discovery. Other runner settings are reloaded
 for each fresh report and persisted through its resolved reservation.
+
+`trustedCommandTimeoutMs` is accepted by root and safe project configuration as
+a strict integer from `1` through `2147483647` milliseconds and defaults to
+`3600000` (60 minutes). The project value overrides the root value. It has no
+CLI or MCP override because configuration resolution, not a transport-specific
+surface, owns the deadline.
 
 `defaultBackend` is optional. A role's `profile`, `model`, `contextSize`, and
 `effort` resolve from its role-specific override, the run-wide override, its
@@ -1919,11 +1926,16 @@ HTTPS and deadline scheduling without network access.
 
 Root and safe project catalogs share strict normalization, including capability
 parameters. Capability changes participate in catalog conflict detection and
-command identities. New snapshots use schema version 2 with an explicit
-`capabilities` object on every command; configuration fingerprints bind that
-version and the complete normalized request. Version-1 snapshots retain their
-restricted policy, original identities, and fingerprints on migration/resume,
-so already accepted finalization evidence remains bound to its original policy.
+command identities. New snapshots use schema version 3 with an explicit
+`capabilities` object on every command and the resolved `timeoutMs`.
+Configuration fingerprints bind the version, complete normalized request, and
+timeout, while command identities and ordered-command fingerprints remain
+independent of the deadline. Version-1 and version-2 snapshots retain their
+original identities and fingerprints on migration/resume and deterministically
+use the 60-minute fallback, so already accepted finalization evidence remains
+bound to its original policy. Each run carries its own immutable snapshot;
+resume does not reload configuration, and concurrent projects do not share
+deadline state.
 
 Creation checks the frozen request before provider probes. A valid unavailable
 request creates a durable `environment_blocked` run with incomplete preflight,
@@ -1987,9 +1999,11 @@ Descriptor-anchored directory operations and identity checks reject symlink
 substitution. Only declared scratch/cache subdirectories are mounted writable.
 No mutable cache is reused across executions, including after interruption.
 
-Each runner-trusted validation command has an internal default timeout of
-60 minutes. Explicit service timeout overrides remain supported; capability
-preparation probes remain capped at 10 seconds.
+Each runner-trusted validation command derives its deadline from the validated
+run snapshot. The public `trustedCommandTimeoutMs` default is 60 minutes, and
+capability preparation uses `Math.min(timeoutMs, 10_000)`. The service has no
+construction-time timeout override, so no second deadline of this operational
+class can bypass the per-run configuration contract.
 
 Command completion, failure, timeout, and cancellation retire descendants before
 confined cleanup and repository mutation checks. Resume and operator-stop recovery
@@ -2049,6 +2063,12 @@ closed. The final evidence tuple binds agent and runner results to the same
 content, validation-infrastructure, ordered-command, and trusted-configuration
 fingerprints. This service does not broaden any agent turn's sandbox and
 introduces no daemon or shell DSL.
+
+The deadline changes only timeout behavior. It cannot make an incompatible
+sandbox succeed or recover diagnostics discarded by the output-retention
+boundary. Consequently, a full repository check may pass on the host yet fail
+closed in trusted isolation with only a generic nonzero exit code; increasing
+`trustedCommandTimeoutMs` neither explains nor fixes that difference.
 
 Before plan execution or polishing accepts a producing role's bootstrap or
 legacy validation-migration inventory, and before either pipeline fingerprints

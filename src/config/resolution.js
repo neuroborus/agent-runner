@@ -294,6 +294,8 @@ export function resolvePipelineConfiguration(
           normalizedProjectConfiguration?.trustedCommands,
         ),
         settings.trustedChecks,
+        normalizedProjectConfiguration?.trustedCommandTimeoutMs ??
+          normalizedConfiguration.trustedCommandTimeoutMs,
       );
     } catch (cause) {
       throw new ConfigurationError(cause.message, {

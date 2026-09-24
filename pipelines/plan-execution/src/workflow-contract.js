@@ -310,6 +310,7 @@ const TRUSTED_VALIDATION_FIELDS = Object.freeze([
   "commandFingerprint",
   "configurationFingerprint",
 ]);
+const MAX_TRUSTED_COMMAND_TIMEOUT_MS = 2_147_483_647;
 const TRUSTED_ALIAS_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const SETTINGS_FIELDS = Object.freeze([
   "finalization",
@@ -530,7 +531,11 @@ function trustedCommandIdentity(command) {
   );
 }
 
-function trustedValidationFingerprints(commands, schemaVersion = 1) {
+function trustedValidationFingerprints(
+  commands,
+  schemaVersion = 1,
+  timeoutMs = undefined,
+) {
   return Object.freeze({
     commandFingerprint: sha256(
       JSON.stringify(commands.map(({ identity }) => identity)),
@@ -553,6 +558,7 @@ function trustedValidationFingerprints(commands, schemaVersion = 1) {
             ...(capabilities === undefined ? {} : { capabilities }),
           }),
         ),
+        ...(schemaVersion === 3 ? { timeoutMs } : {}),
       }),
     ),
   });
@@ -580,20 +586,29 @@ function normalizeExactVectorText(
 }
 
 function normalizeTrustedValidation(value) {
+  const snapshotVersion = value?.schemaVersion;
+  const snapshotFields = [
+    ...TRUSTED_VALIDATION_FIELDS,
+    ...(snapshotVersion === 3 ? ["timeoutMs"] : []),
+  ];
   if (
     !isRecord(value) ||
-    !hasExactFields(value, TRUSTED_VALIDATION_FIELDS) ||
-    ![1, 2].includes(value.schemaVersion) ||
+    !hasExactFields(value, snapshotFields) ||
+    ![1, 2, 3].includes(snapshotVersion) ||
     !Array.isArray(value.commands) ||
     value.commands.length > MAX_ITEMS ||
     !HASH_PATTERN.test(value.commandFingerprint) ||
-    !HASH_PATTERN.test(value.configurationFingerprint)
+    !HASH_PATTERN.test(value.configurationFingerprint) ||
+    (snapshotVersion === 3 &&
+      (!Number.isInteger(value.timeoutMs) ||
+        value.timeoutMs < 1 ||
+        value.timeoutMs > MAX_TRUSTED_COMMAND_TIMEOUT_MS))
   ) {
     throw workflowError("Plan-execution trusted validation is invalid.");
   }
   const commandFields = [
     ...TRUSTED_COMMAND_FIELDS,
-    ...(value.schemaVersion === 2 ? ["capabilities"] : []),
+    ...(snapshotVersion >= 2 ? ["capabilities"] : []),
   ];
   const commands = Object.freeze(
     value.commands.map((command, index) => {
@@ -630,7 +645,7 @@ function normalizeTrustedValidation(value) {
             ),
           ),
         ),
-        ...(value.schemaVersion === 2
+        ...(snapshotVersion >= 2
           ? { capabilities: normalizeCapabilities(command.capabilities) }
           : {}),
         identity: command.identity,
@@ -652,7 +667,8 @@ function normalizeTrustedValidation(value) {
   }
   const fingerprints = trustedValidationFingerprints(
     commands,
-    value.schemaVersion,
+    snapshotVersion,
+    value.timeoutMs,
   );
   if (
     value.commandFingerprint !== fingerprints.commandFingerprint ||
@@ -663,7 +679,8 @@ function normalizeTrustedValidation(value) {
     );
   }
   return Object.freeze({
-    schemaVersion: value.schemaVersion,
+    schemaVersion: snapshotVersion,
+    ...(snapshotVersion === 3 ? { timeoutMs: value.timeoutMs } : {}),
     commands,
     ...fingerprints,
   });

@@ -293,15 +293,21 @@ function trustedValidationSnapshot(
     command,
     executable: "npm",
     arguments: ["run", "test:service"],
+    capabilities: {},
   };
   const identity = hash(JSON.stringify(vector));
   const commands = [{ ...vector, identity }];
   return Object.freeze({
-    schemaVersion: 1,
+    schemaVersion: 3,
+    timeoutMs: 3_600_000,
     commands: Object.freeze(commands.map(Object.freeze)),
     commandFingerprint: hash(JSON.stringify([identity])),
     configurationFingerprint: hash(
-      JSON.stringify({ schemaVersion: 1, commands: [vector] }),
+      JSON.stringify({
+        schemaVersion: 3,
+        commands: [vector],
+        timeoutMs: 3_600_000,
+      }),
     ),
   });
 }

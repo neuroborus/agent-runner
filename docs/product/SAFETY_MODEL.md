@@ -68,6 +68,14 @@ redirection fails closed as one bounded provider-neutral safety pause. The
 runner never restores the file or derives missing evidence for a legacy run,
 and begun irreversible effects remain verification-only.
 
+The same protected resolution freezes `trustedCommandTimeoutMs` into each new
+run's version-3 trusted-validation snapshot. It is a strict `1` through
+`2147483647` millisecond integer, defaults to `3600000`, and resolves project
+over root without a CLI or MCP bypass. Its fingerprinted value is reused on
+resume and remains per-run under concurrency; legacy version-1 and version-2
+snapshots use the one-hour fallback. Preparation keeps its independent
+`Math.min(timeoutMs, 10_000)` safety cap.
+
 Authoritative run state is external to both repository and task. These trees
 must be disjoint: neither the project nor task may contain or be contained by
 the state root. Atomic files,
@@ -110,6 +118,10 @@ Transports retire before publication or cleanup; uncertain retirement retains
 ownership. Journaled acquisition process identity also blocks cleanup after
 service reconstruction while the owner is live or unverifiable. Same-service
 transport retirement or verified owner death permits cleanup.
+Timeout configuration changes only the execution deadline. It does not weaken
+isolation, make an incompatible sandbox usable, or cross the deliberate
+no-output-retention boundary. Trusted stdout/stderr remain discarded, so a host
+pass can still produce only a generic isolated nonzero exit result.
 Plan-execution and polishing capability reports are exact-command, additive requirements stored
 before availability inspection. They cannot replace frozen declarations or grant
 permissions. Read-only bootstrap and legacy discovery precede writable entry;

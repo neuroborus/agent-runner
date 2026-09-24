@@ -2419,6 +2419,7 @@ async function projectCommandScenario(t, pipelineId, hooks = {}) {
   };
   const projectConfiguration = {
     schemaVersion: 1,
+    trustedCommandTimeoutMs: hooks.timeoutMs ?? 12_345,
     trustedCommands: { "project-check": definition },
     pipelines: {
       [pipelineId]: {
@@ -2432,6 +2433,7 @@ async function projectCommandScenario(t, pipelineId, hooks = {}) {
   const expected = createTrustedValidationSnapshot(
     projectConfiguration.trustedCommands,
     ["project-check"],
+    projectConfiguration.trustedCommandTimeoutMs,
   );
   const requiredChecks = [
     { id: "C1", command: "git diff --check HEAD" },
@@ -2534,6 +2536,10 @@ async function projectCommandScenario(t, pipelineId, hooks = {}) {
         preparations.push(command);
       } else {
         executions.push(command);
+        assert.equal(
+          options.timeoutMs,
+          projectConfiguration.trustedCommandTimeoutMs,
+        );
         assert.ok(
           calls
             .at(-1)
