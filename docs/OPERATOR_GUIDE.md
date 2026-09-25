@@ -331,8 +331,10 @@ state and actions.
 Shared-host recovery uses a launch cutoff journaled with the supervisor before
 provider work. It can exclude inaccessible unrelated processes only when their
 same-boot start time strictly predates that cutoff. A new or reused PID, equal
-or newer start, surviving descendant, or incomplete evidence remains blocked;
-do not delete the process or lease records manually.
+or newer start, surviving descendant, or incomplete evidence remains blocked.
+Transient process exit or reparenting receives a fixed per-PID retry and is
+ignored only when a fresh read proves that snapshot entry absent; exhausted
+churn still blocks. Do not delete the process or lease records manually.
 
 To stop active work, use `agent-run pause --run <run-id>` or
 `agent-run cancel --run <run-id>`. The shorthand reads status once and binds

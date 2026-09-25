@@ -3056,7 +3056,13 @@ only for a same-boot process whose validated start strictly predates that
 cutoff. When the shared-host scan is required, equal or newer starts, PID reuse,
 a boot mismatch, missing evidence, and surviving or escaping descendants remain
 fail-closed ownership barriers. A recorded previous boot remains independent
-proof that the old process tree is absent.
+proof that the old process tree is absent. Each current-boot snapshot entry has
+three attempts bound to its first readable start tick. Transient disappearance
+or reparenting restarts that PID and its new ancestry from scratch; only a fresh
+absent read discards the exited entry. Reuse, malformed or inaccessible
+metadata, live ownership, surviving descendants, and exhausted churn retain the
+process record. Action-free CLI and MCP recovery use this same inspection before
+immediate pause or cancellation settlement.
 
 The descriptor owns one fail-closed `pre-work` classification for an applicable
 immediate stop saved against the untouched initial `CLARIFY` checkpoint. The

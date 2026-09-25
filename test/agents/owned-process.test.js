@@ -76,6 +76,33 @@ const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
 child.unref();`;
 }
 
+function spawnUnrelatedProcessChurn() {
+  return spawn(
+    process.execPath,
+    [
+      "-e",
+      `const { spawn } = require("node:child_process");
+let remaining = 100;
+function launch() {
+  if (remaining <= 0) return setTimeout(() => process.exit(0), 100);
+  remaining -= 1;
+  const child = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+  child.once("exit", launch);
+}
+process.send("ready");
+launch();`,
+    ],
+    { stdio: ["ignore", "ignore", "ignore", "ipc"] },
+  );
+}
+
+async function waitForChurn(churn) {
+  await new Promise((resolve, reject) => {
+    churn.once("error", reject);
+    churn.once("message", resolve);
+  });
+}
+
 function processStat(pid, parentPid, sessionId, startTicks = "1234") {
   const fields = Array(20).fill("0");
   fields[0] = "S";
@@ -83,6 +110,44 @@ function processStat(pid, parentPid, sessionId, startTicks = "1234") {
   fields[3] = String(sessionId);
   fields[19] = startTicks;
   return `${pid} (process) ${fields.join(" ")}`;
+}
+
+function processRaceError(code = "ENOENT") {
+  return Object.assign(new Error(`simulated ${code}`), { code });
+}
+
+function processRaceOptions(sequences = {}) {
+  const reads = new Map();
+  const ownerToken = "a".repeat(64);
+  const defaults = {
+    "/proc/101/stat": processStat(101, 202, 3),
+    "/proc/101/status": "Uid:\t1000\t1000\t1000\t1000\n",
+    "/proc/101/environ": "",
+    "/proc/202/stat": processStat(202, 1, 3, "5678"),
+    "/proc/202/environ": "",
+    "/proc/303/stat": processStat(303, 1, 3, "6789"),
+    "/proc/303/environ": "",
+  };
+  return {
+    options: {
+      getuid: () => 1000,
+      list: () => ["101"],
+      read(path) {
+        const count = reads.get(path) ?? 0;
+        reads.set(path, count + 1);
+        const sequence = sequences[path];
+        const value =
+          sequence === undefined
+            ? defaults[path]
+            : sequence[Math.min(count, sequence.length - 1)];
+        if (value instanceof Error) throw value;
+        if (value === undefined) throw processRaceError("EACCES");
+        return typeof value === "function" ? value() : value;
+      },
+    },
+    ownerToken,
+    reads,
+  };
 }
 
 async function waitForFile(path, timeoutMs = 1_000) {
@@ -327,6 +392,235 @@ test("uses ancestry and rejects incomplete owned-session evidence", () => {
   );
 });
 
+test("retries process churn from each current and ancestry read", async (t) => {
+  const stableCurrent = processStat(101, 202, 3);
+  const stableAncestor = processStat(202, 1, 3, "5678");
+  const cases = [
+    {
+      name: "current status",
+      sequences: {
+        "/proc/101/status": [
+          processRaceError(),
+          "Uid:\t1000\t1000\t1000\t1000\n",
+        ],
+      },
+    },
+    {
+      name: "current environment",
+      sequences: { "/proc/101/environ": [processRaceError(), ""] },
+    },
+    {
+      name: "ancestor stat",
+      sequences: {
+        "/proc/202/stat": [processRaceError(), stableAncestor, stableAncestor],
+      },
+    },
+    {
+      name: "ancestor environment",
+      sequences: { "/proc/202/environ": [processRaceError(), ""] },
+    },
+    {
+      name: "ancestor verification",
+      sequences: {
+        "/proc/202/stat": [
+          stableAncestor,
+          processRaceError(),
+          stableAncestor,
+          stableAncestor,
+        ],
+      },
+    },
+    {
+      name: "current verification",
+      sequences: {
+        "/proc/101/stat": [
+          stableCurrent,
+          processRaceError(),
+          stableCurrent,
+          stableCurrent,
+        ],
+      },
+    },
+  ];
+
+  for (const fixture of cases) {
+    await t.test(fixture.name, () => {
+      const { options, ownerToken } = processRaceOptions(fixture.sequences);
+      assert.deepEqual(
+        inspectOwnedSessionProcesses(44, ownerToken, options),
+        [],
+      );
+    });
+  }
+});
+
+test("restarts classification after current or ancestor reparenting", async (t) => {
+  const currentAt202 = processStat(101, 202, 3);
+  const currentAt303 = processStat(101, 303, 3);
+  const ancestorAtOne = processStat(202, 1, 3, "5678");
+  const ancestorAt303 = processStat(202, 303, 3, "5678");
+  for (const fixture of [
+    {
+      name: "current process",
+      sequences: {
+        "/proc/101/stat": [
+          currentAt202,
+          currentAt303,
+          currentAt303,
+          currentAt303,
+        ],
+      },
+    },
+    {
+      name: "ancestor process",
+      sequences: {
+        "/proc/202/stat": [
+          ancestorAtOne,
+          ancestorAt303,
+          ancestorAt303,
+          ancestorAt303,
+        ],
+      },
+    },
+  ]) {
+    await t.test(fixture.name, () => {
+      const { options, ownerToken } = processRaceOptions(fixture.sequences);
+      assert.deepEqual(
+        inspectOwnedSessionProcesses(44, ownerToken, options),
+        [],
+      );
+    });
+  }
+});
+
+test("ignores an exited entry but fails closed for reuse or exhausted churn", async (t) => {
+  const stableCurrent = processStat(101, 202, 3);
+  for (const fixture of [
+    {
+      name: "current PID exits before its first read",
+      sequences: { "/proc/101/stat": [processRaceError()] },
+      expected: [],
+    },
+    {
+      name: "current PID exits during classification",
+      sequences: {
+        "/proc/101/stat": [stableCurrent, processRaceError()],
+        "/proc/101/status": [processRaceError()],
+      },
+      expected: [],
+    },
+    {
+      name: "current PID is reused",
+      sequences: {
+        "/proc/101/stat": [stableCurrent, processStat(101, 202, 3, "9999")],
+        "/proc/101/status": [processRaceError()],
+      },
+      expected: null,
+    },
+    {
+      name: "ancestor PID is reused",
+      sequences: {
+        "/proc/202/stat": [
+          processStat(202, 1, 3, "5678"),
+          processStat(202, 1, 3, "9999"),
+        ],
+      },
+      expected: null,
+    },
+    {
+      name: "churn exhausts its attempt bound",
+      sequences: { "/proc/101/status": [processRaceError()] },
+      expected: null,
+      expectedStatusReads: 3,
+    },
+  ]) {
+    await t.test(fixture.name, () => {
+      const { options, ownerToken, reads } = processRaceOptions(
+        fixture.sequences,
+      );
+      assert.deepEqual(
+        inspectOwnedSessionProcesses(44, ownerToken, options),
+        fixture.expected,
+      );
+      if (fixture.expectedStatusReads !== undefined) {
+        assert.equal(
+          reads.get("/proc/101/status"),
+          fixture.expectedStatusReads,
+        );
+      }
+    });
+  }
+});
+
+test("retains an owned descendant that survives ancestry churn", () => {
+  const ownedAncestor = processStat(303, 1, 44, "6789");
+  const { options, ownerToken } = processRaceOptions({
+    "/proc/101/stat": [
+      processStat(101, 202, 3),
+      processStat(101, 303, 3),
+      processStat(101, 303, 3),
+    ],
+    "/proc/202/stat": [processRaceError()],
+    "/proc/303/stat": [ownedAncestor],
+  });
+  assert.deepEqual(
+    inspectOwnedSessionProcesses(44, ownerToken, options),
+    [101],
+  );
+});
+
+test(
+  "classifies a full procfs snapshot during unrelated process churn",
+  { timeout: 5_000 },
+  async (t) => {
+    const launchCutoff = await readProcessIdentity(process.pid);
+    assert.notEqual(launchCutoff, null);
+    const churn = spawnUnrelatedProcessChurn();
+    t.after(() => {
+      try {
+        churn.kill("SIGKILL");
+      } catch {}
+    });
+    await waitForChurn(churn);
+
+    for (let index = 0; index < 25; index += 1) {
+      assert.deepEqual(
+        inspectOwnedSessionProcesses(Number.MAX_SAFE_INTEGER, "f".repeat(64), {
+          launchCutoff,
+        }),
+        [],
+      );
+      await new Promise(setImmediate);
+    }
+  },
+);
+
+test(
+  "host-session supervision completes during unrelated process churn",
+  { timeout: 5_000 },
+  async (t) => {
+    const churn = spawnUnrelatedProcessChurn();
+    t.after(() => {
+      try {
+        churn.kill("SIGKILL");
+      } catch {}
+    });
+    await waitForChurn(churn);
+    const registrations = [];
+    const child = spawnOwnedProcess(process.execPath, ["-e", ""], {
+      onProcess: async (pid) => registrations.push(pid),
+      ownershipMode: "native-sandbox-provider",
+      resolveLauncher: hostSessionLauncher,
+      stdio: "ignore",
+    });
+
+    const result = await child.ownedCompletion;
+    assert.equal(result.inspectionComplete, true);
+    assert.equal(result.descendantsActive, false);
+    assert.deepEqual(registrations, [child.pid, null]);
+  },
+);
+
 function inaccessibleProcessOptions(startTicks = ["1234"]) {
   let identityReads = 0;
   return {
@@ -383,6 +677,73 @@ test("ignores a proven pre-existing inaccessible ancestor", () => {
     }),
     [],
   );
+});
+
+test("retries process churn while applying the launch cutoff", async (t) => {
+  const bootPath = "/proc/sys/kernel/random/boot_id";
+  for (const fixture of [
+    {
+      name: "current process",
+      sequences: {
+        [bootPath]: [`${BOOT_ID}\n`],
+        "/proc/101/stat": [
+          processStat(101, 1, 3),
+          processStat(101, 303, 3),
+          processStat(101, 303, 3),
+        ],
+        "/proc/101/environ": [processRaceError("EACCES")],
+      },
+    },
+    {
+      name: "ancestor process",
+      sequences: {
+        [bootPath]: [`${BOOT_ID}\n`],
+        "/proc/202/stat": [
+          processStat(202, 1, 3, "5678"),
+          processStat(202, 303, 3, "5678"),
+          processStat(202, 303, 3, "5678"),
+        ],
+        "/proc/202/environ": [processRaceError("EACCES")],
+      },
+    },
+    {
+      name: "ancestor exit",
+      sequences: {
+        [bootPath]: [`${BOOT_ID}\n`],
+        "/proc/101/stat": [processStat(101, 202, 3), processStat(101, 303, 3)],
+        "/proc/202/stat": [processStat(202, 1, 3, "5678"), processRaceError()],
+        "/proc/202/environ": [processRaceError("EACCES")],
+      },
+    },
+  ]) {
+    await t.test(fixture.name, () => {
+      const { options, ownerToken } = processRaceOptions(fixture.sequences);
+      assert.deepEqual(
+        inspectOwnedSessionProcesses(44, ownerToken, {
+          ...options,
+          launchCutoff: { bootId: BOOT_ID, startTicks: "9999" },
+        }),
+        [],
+      );
+    });
+  }
+});
+
+test("does not treat unavailable boot evidence as process churn", () => {
+  const current = processStat(101, 1, 3);
+  const { options, ownerToken, reads } = processRaceOptions({
+    "/proc/101/stat": [current, processRaceError()],
+    "/proc/101/environ": [processRaceError("EACCES")],
+    "/proc/sys/kernel/random/boot_id": [processRaceError()],
+  });
+  assert.equal(
+    inspectOwnedSessionProcesses(44, ownerToken, {
+      ...options,
+      launchCutoff: { bootId: BOOT_ID, startTicks: "1235" },
+    }),
+    null,
+  );
+  assert.equal(reads.get("/proc/101/stat"), 1);
 });
 
 test("ignores complete unrelated ancestry independently of the cutoff", () => {

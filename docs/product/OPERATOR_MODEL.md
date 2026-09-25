@@ -142,7 +142,11 @@ For shared-host sessions, the persisted supervisor boot/start cutoff lets
 recovery exclude only inaccessible processes proven to predate launch. Within
 a current-boot scan, equal or newer starts, PID reuse, or missing evidence
 remain conservative; a recorded previous boot remains independent absence
-proof. Public projections never expose the cutoff.
+proof. A process or ancestor that exits or reparents during inspection receives
+only the fixed per-entry retry bound; recovery ignores it only after a fresh
+read proves the snapshot PID absent. Reuse, surviving ownership, malformed
+evidence, and exhausted churn remain blocking. Public projections never expose
+the cutoff or retry evidence.
 
 ## Pauses, resume, and observability
 

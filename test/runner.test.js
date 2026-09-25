@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { readlinkSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
@@ -30,7 +31,7 @@ import {
   RUN_STATE_SCHEMA_VERSION,
   RunnerError,
 } from "../src/index.js";
-import { spawnOwnedProcess } from "../src/agents/index.js";
+import { readProcessIdentity, spawnOwnedProcess } from "../src/agents/index.js";
 import { resolveStopBoundary } from "../src/pipeline-registry.js";
 import { preparePipelineMigration } from "../src/runner/index.js";
 import { createLegacyRecoveryFixture } from "../pipelines/plan-execution/test/support/index.js";
@@ -1931,6 +1932,166 @@ test("operator stop after host loss reclaims ownership and reconciles before fur
           false,
         );
       });
+  }
+});
+
+test("action-free CLI/MCP recovery settles dead sessions", async (t) => {
+  for (const transport of ["runner", "cli", "mcp"]) {
+    for (const kind of ["pause_requested", "cancel_requested"]) {
+      await t.test(`${transport}/${kind}`, async (t) => {
+        const fixture = await operatorFixture(t, "plan-execution");
+        const launchIdentity = await readProcessIdentity(process.pid);
+        assert.notEqual(launchIdentity, null);
+        const namespaceId = readlinkSync("/proc/self/ns/pid");
+        const executionPid = 2_000_000_001;
+        let originalOwnerAlive = true;
+        let executionAlive = true;
+        const processIdentity = (pid) =>
+          pid === executionPid
+            ? launchIdentity
+            : { bootId: launchIdentity.bootId, startTicks: String(pid) };
+        const options = {
+          stateRoot: fixture.stateRoot,
+          resolveStopBoundary,
+          hostName: "current-boot-recovery-host",
+          processId: 100,
+          processIsAlive: (pid) =>
+            (pid === 100 && originalOwnerAlive) ||
+            (pid === executionPid && executionAlive),
+          processIdentity,
+          leaseStaleMs: 0,
+        };
+        const store = createRunStore(options);
+        const delegate = createExecutionAdapter();
+        const runner = runnerFor(
+          fixture,
+          {
+            codex: {
+              ...delegate,
+              async run(request) {
+                await request.onProcess(executionPid, {
+                  processIdentity: launchIdentity,
+                  namespaceId,
+                });
+                throw new Error("Simulated execution-owner loss");
+              },
+            },
+          },
+          { runStore: store },
+        );
+        const runId = (
+          await runner.create({
+            pipelineId: "plan-execution",
+            projectPath: fixture.projectPath,
+            taskPath: fixture.taskPath,
+            proactiveClarification: false,
+            roleOverrides: {},
+            sourceSession: null,
+          })
+        ).run.runId;
+        await assert.rejects(runner.resume({ runId, action: null }), {
+          code: "ERR_EXECUTION_PROCESS_ACTIVE",
+        });
+        const checkpoint = await store.loadRun(runId);
+        assert.equal(checkpoint.executionProcess.pid, executionPid);
+        assert.deepEqual(
+          checkpoint.executionProcess.launchCutoff,
+          launchIdentity,
+        );
+
+        originalOwnerAlive = false;
+        executionAlive = false;
+        const recoveredStore = createRunStore({
+          ...options,
+          processId: 200,
+          processIsAlive: (pid) => pid === 200,
+        });
+        const recoveredRunner = runnerFor(
+          fixture,
+          {
+            codex: {
+              ...delegate,
+              run: () => assert.fail("Recovery must not invoke a provider."),
+            },
+          },
+          { runStore: recoveredStore },
+        );
+        const stopRequest = {
+          runId,
+          kind,
+          expectedRevision: checkpoint.revision,
+          idempotencyKey: `${transport}-${kind}`,
+          timing: "immediate",
+        };
+        const accepted = await recoveredRunner.requestOperatorStop(stopRequest);
+        assert.deepEqual(
+          await recoveredRunner.requestOperatorStop(stopRequest),
+          accepted,
+        );
+        const pending = await recoveredStore.loadRun(runId);
+
+        if (transport === "runner") {
+          await recoveredRunner.resume({ runId, action: null });
+        } else if (transport === "cli") {
+          const exitCode = await main(["resume", "--run", runId], {
+            runner: recoveredRunner,
+            stdout: { write() {} },
+            stderr: {
+              write(message) {
+                assert.fail(message);
+              },
+            },
+          });
+          assert.equal(exitCode, kind === "pause_requested" ? 2 : 0);
+        } else {
+          let launches = 0;
+          let completion;
+          const control = createMcpControlPlane({
+            runner: recoveredRunner,
+            runStore: recoveredStore,
+            launchRun(id, action, launchOptions) {
+              launches += 1;
+              completion = recoveredRunner.resume({ runId: id, action }).then(
+                ({ run }) =>
+                  launchOptions.onExit(
+                    run.pipelineState.workflowState === "WAITING_FOR_USER"
+                      ? 2
+                      : 0,
+                  ),
+                () => launchOptions.onExit(1),
+              );
+            },
+          });
+          const input = {
+            runId,
+            expectedRevision: pending.revision,
+            action: null,
+            idempotencyKey: `resume-${kind}`,
+          };
+          assert.deepEqual(await control.runResume(input), { runId });
+          assert.deepEqual(await control.runResume(input), { runId });
+          assert.equal(launches, 1);
+          await completion;
+        }
+
+        const settled = await recoveredStore.loadRun(runId);
+        assert.equal(
+          settled.pipelineState.workflowState,
+          kind === "pause_requested" ? "WAITING_FOR_USER" : "CANCELED",
+        );
+        assert.equal(settled.executionProcess, null);
+        assert.deepEqual(settled.stopRequest.settlement, {
+          kind: "quiescent",
+          commit: null,
+        });
+        assert.equal(settled.stopRequest.reconciledRevision, settled.revision);
+        assert.equal(await recoveredStore.runIsLeased(runId), false);
+        assert.equal(
+          await recoveredStore.worktreeIsLeased(fixture.projectPath, runId),
+          false,
+        );
+      });
+    }
   }
 });
 

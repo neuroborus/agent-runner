@@ -25,6 +25,7 @@ const BUBBLEWRAP_CANDIDATES = Object.freeze([
   "/usr/local/sbin/bwrap",
 ]);
 const DEFAULT_DESCENDANT_GRACE_MS = 1_000;
+const OWNED_PROCESS_INSPECTION_ATTEMPTS = 3;
 const OWNERSHIP_MODES = new Set(["ordinary", "native-sandbox-provider"]);
 // Linux reserves this procfs inode for the initial PID namespace.
 const INITIAL_PID_NAMESPACE = "pid:[4026531836]";
@@ -39,19 +40,28 @@ const [mode, graceText, executable, encodedArguments, extraText, initialToken] =
 const grace = Number(graceText);
 const argumentsList = JSON.parse(encodedArguments);
 const extra = Number(extraText);
+const OWNED_PROCESS_INSPECTION_ATTEMPTS = ${OWNED_PROCESS_INSPECTION_ATTEMPTS};
 let target;
 let settled = false;
 let outcome;
 let ownerToken = initialToken;
 let launchCutoff;
 let retentionTimer;
-function processStartTicks(stat) {
+function processStatDetails(stat) {
   const separator = stat.lastIndexOf(")");
   if (separator < 0) return null;
   const fields = stat.slice(separator + 2).trim().split(/\s+/);
-  return fields.length >= 20 && /^(?:0|[1-9]\d{0,31})$/.test(fields[19])
-    ? fields[19]
-    : null;
+  if (
+    fields.length < 20 ||
+    !/^\d+$/.test(fields[1]) ||
+    !/^\d+$/.test(fields[3]) ||
+    !/^(?:0|[1-9]\d{0,31})$/.test(fields[19])
+  ) return null;
+  return {
+    parentPid: Number(fields[1]),
+    sessionId: fields[3],
+    startTicks: fields[19],
+  };
 }
 function normalizedLaunchCutoff(value) {
   if (
@@ -66,23 +76,37 @@ function normalizedLaunchCutoff(value) {
   ) return null;
   return value;
 }
-function predatesLaunchCutoff(pid) {
-  if (launchCutoff === null) return false;
+function inspectLaunchCutoff(pid, expected) {
+  if (launchCutoff === null) return null;
+  let bootId;
   try {
-    const bootId = require("node:fs")
+    bootId = require("node:fs")
       .readFileSync("/proc/sys/kernel/random/boot_id", "utf8")
       .trim();
-    const currentStartTicks = processStartTicks(
+  } catch {
+    return null;
+  }
+  let current;
+  try {
+    current = processStatDetails(
       require("node:fs").readFileSync("/proc/" + pid + "/stat", "utf8"),
     );
-    return (
-      currentStartTicks !== null &&
-      launchCutoff.bootId === bootId &&
-      BigInt(currentStartTicks) < BigInt(launchCutoff.startTicks)
-    );
-  } catch {
-    return false;
+  } catch (cause) {
+    return cause?.code === "ENOENT" || cause?.code === "ESRCH"
+      ? "retry"
+      : null;
   }
+  if (current === null || current.startTicks !== expected.startTicks) {
+    return null;
+  }
+  if (
+    current.parentPid !== expected.parentPid ||
+    current.sessionId !== expected.sessionId
+  ) return "retry";
+  return launchCutoff.bootId === bootId &&
+    BigInt(current.startTicks) < BigInt(launchCutoff.startTicks)
+    ? "unrelated"
+    : null;
 }
 function processUid(pid) {
   const status = require("node:fs").readFileSync(
@@ -93,45 +117,125 @@ function processUid(pid) {
   if (match === null) throw new Error("invalid process uid");
   return match.slice(1).map(Number);
 }
+function verifyProcessDetails(pid, expected) {
+  try {
+    const current = processStatDetails(
+      require("node:fs").readFileSync("/proc/" + pid + "/stat", "utf8"),
+    );
+    if (current === null || current.startTicks !== expected.startTicks) {
+      return null;
+    }
+    return current.parentPid === expected.parentPid &&
+      current.sessionId === expected.sessionId
+      ? "stable"
+      : "retry";
+  } catch (cause) {
+    return cause?.code === "ENOENT" || cause?.code === "ESRCH"
+      ? "retry"
+      : null;
+  }
+}
 function inspectOwnedAncestry(parentPid, session) {
   const seen = new Set();
-  let incomplete = false;
   while (parentPid > 1 && !seen.has(parentPid)) {
     if (String(parentPid) === session) return "current";
     seen.add(parentPid);
     const ancestorPid = parentPid;
+    let details;
     try {
-      const stat = require("node:fs").readFileSync(
-        "/proc/" + ancestorPid + "/stat",
-        "utf8",
+      details = processStatDetails(
+        require("node:fs").readFileSync(
+          "/proc/" + ancestorPid + "/stat",
+          "utf8",
+        ),
       );
-      const separator = stat.lastIndexOf(")");
-      if (separator < 0) return null;
-      const fields = stat.slice(separator + 2).trim().split(/\s+/);
-      if (
-        fields.length < 4 ||
-        !/^\d+$/.test(fields[1]) ||
-        !/^\d+$/.test(fields[3])
-      ) return null;
-      if (fields[3] === session) return "current";
-      parentPid = Number(fields[1]);
+      if (details === null) return null;
+      if (details.sessionId === session) {
+        const verification = verifyProcessDetails(ancestorPid, details);
+        return verification === "stable" ? "current" : verification;
+      }
       const environment = require("node:fs")
         .readFileSync("/proc/" + ancestorPid + "/environ", "utf8")
         .split("\0");
+      const verification = verifyProcessDetails(ancestorPid, details);
+      if (verification !== "stable") return verification;
       if (environment.includes("AGENT_RUNNER_OWNED_PROCESS=" + ownerToken)) {
         return "current";
       }
+      parentPid = details.parentPid;
     } catch (cause) {
+      if (cause?.code === "ENOENT" || cause?.code === "ESRCH") return "retry";
       if (cause?.code === "EACCES" || cause?.code === "EPERM") {
-        if (predatesLaunchCutoff(ancestorPid)) continue;
-        incomplete = true;
-        continue;
+        const cutoff =
+          details === undefined
+            ? null
+            : inspectLaunchCutoff(ancestorPid, details);
+        if (cutoff === "retry") return "retry";
+        if (cutoff === "unrelated") {
+          parentPid = details.parentPid;
+          continue;
+        }
       }
       return null;
     }
   }
-  if (parentPid > 1 || incomplete) return null;
-  return "unrelated";
+  return parentPid > 1 ? null : "unrelated";
+}
+function inspectSessionProcess(pid, session) {
+  let pinnedStartTicks;
+  for (
+    let attempt = 0;
+    attempt < OWNED_PROCESS_INSPECTION_ATTEMPTS;
+    attempt += 1
+  ) {
+    let details;
+    try {
+      details = processStatDetails(
+        require("node:fs").readFileSync("/proc/" + pid + "/stat", "utf8"),
+      );
+    } catch (cause) {
+      if (cause?.code === "ENOENT" || cause?.code === "ESRCH") return "absent";
+      return null;
+    }
+    if (details === null) return null;
+    if (pinnedStartTicks === undefined) pinnedStartTicks = details.startTicks;
+    else if (details.startTicks !== pinnedStartTicks) return null;
+
+    let ownership;
+    try {
+      if (details.sessionId === session) ownership = "current";
+      else if (processUid(pid).some((uid) => uid !== process.getuid())) {
+        ownership = "unrelated";
+      } else {
+        const environment = require("node:fs")
+          .readFileSync("/proc/" + pid + "/environ", "utf8")
+          .split("\0");
+        if (environment.includes("AGENT_RUNNER_OWNED_PROCESS=" + ownerToken)) {
+          ownership = "current";
+        } else {
+          ownership = inspectOwnedAncestry(details.parentPid, session);
+        }
+      }
+    } catch (cause) {
+      if (cause?.code === "ENOENT" || cause?.code === "ESRCH") {
+        ownership = "retry";
+      } else if (cause?.code === "EACCES" || cause?.code === "EPERM") {
+        const ancestry = inspectOwnedAncestry(details.parentPid, session);
+        if (ancestry === "current") ownership = "current";
+        else if (ancestry === "retry") ownership = "retry";
+        else if (details.parentPid !== 1 && ancestry === "unrelated") {
+          ownership = "unrelated";
+        } else ownership = inspectLaunchCutoff(pid, details);
+      } else return null;
+    }
+    if (ownership === "retry") continue;
+    if (ownership === null) return null;
+    const verification = verifyProcessDetails(pid, details);
+    if (verification === "retry") continue;
+    if (verification === null) return null;
+    return ownership;
+  }
+  return null;
 }
 function ownedMembers() {
   if (mode !== "session") return [];
@@ -142,57 +246,9 @@ function ownedMembers() {
     const members = [];
     for (const name of readdirSync("/proc")) {
       if (!/^\d+$/.test(name) || name === String(process.pid)) continue;
-      let parentPid;
-      try {
-        const stat = require("node:fs").readFileSync(
-          "/proc/" + name + "/stat",
-          "utf8",
-        );
-        const separator = stat.lastIndexOf(")");
-        if (separator < 0) throw new Error("invalid process stat");
-        const fields = stat.slice(separator + 2).trim().split(/\s+/);
-        if (
-          fields.length < 4 ||
-          !/^\d+$/.test(fields[1]) ||
-          !/^\d+$/.test(fields[3])
-        ) {
-          throw new Error("invalid process session");
-        }
-        if (processStartTicks(stat) === null) {
-          throw new Error("invalid process identity");
-        }
-        parentPid = Number(fields[1]);
-        if (fields[3] === session) {
-          members.push(Number(name));
-          continue;
-        }
-        if (processUid(name).some((uid) => uid !== process.getuid())) continue;
-        const environment = require("node:fs")
-          .readFileSync("/proc/" + name + "/environ", "utf8")
-          .split("\0");
-        if (environment.includes("AGENT_RUNNER_OWNED_PROCESS=" + ownerToken)) {
-          members.push(Number(name));
-          continue;
-        }
-        const ancestry = inspectOwnedAncestry(parentPid, session);
-        if (ancestry === "current") members.push(Number(name));
-        else if (ancestry === null) return null;
-      } catch (cause) {
-        if (cause?.code === "ENOENT" || cause?.code === "ESRCH") continue;
-        if (
-          (cause?.code === "EACCES" || cause?.code === "EPERM") &&
-          parentPid !== undefined
-        ) {
-          const ancestry = inspectOwnedAncestry(parentPid, session);
-          if (ancestry === "current") {
-            members.push(Number(name));
-            continue;
-          }
-          if (parentPid !== 1 && ancestry === "unrelated") continue;
-          if (predatesLaunchCutoff(name)) continue;
-        }
-        return null;
-      }
+      const ownership = inspectSessionProcess(Number(name), session);
+      if (ownership === null) return null;
+      if (ownership === "current") members.push(Number(name));
     }
     return members;
   } catch {
@@ -542,16 +598,25 @@ function processUid(pid, read = readFileSync) {
   return match.slice(1).map(Number);
 }
 
-function processStartTicks(stat) {
+function processStatDetails(stat) {
   const separator = stat.lastIndexOf(")");
   if (separator < 0) return null;
   const fields = stat
     .slice(separator + 2)
     .trim()
     .split(/\s+/u);
-  return fields.length >= 20 && /^(?:0|[1-9]\d{0,31})$/u.test(fields[19])
-    ? fields[19]
-    : null;
+  if (
+    fields.length < 20 ||
+    !/^\d+$/u.test(fields[1]) ||
+    !/^\d+$/u.test(fields[3]) ||
+    !/^(?:0|[1-9]\d{0,31})$/u.test(fields[19])
+  )
+    return null;
+  return {
+    parentPid: Number(fields[1]),
+    sessionId: fields[3],
+    startTicks: fields[19],
+  };
 }
 
 function validLaunchCutoff(value) {
@@ -567,20 +632,46 @@ function validLaunchCutoff(value) {
   );
 }
 
-function predatesLaunchCutoff(pid, launchCutoff, read) {
-  if (!validLaunchCutoff(launchCutoff)) return false;
+function inspectLaunchCutoff(pid, expected, launchCutoff, read) {
+  if (!validLaunchCutoff(launchCutoff)) return null;
+  let bootId;
   try {
-    const currentStartTicks = processStartTicks(
-      read(`/proc/${pid}/stat`, "utf8"),
-    );
-    return (
-      currentStartTicks !== null &&
-      launchCutoff.bootId ===
-        read("/proc/sys/kernel/random/boot_id", "utf8").trim() &&
-      BigInt(currentStartTicks) < BigInt(launchCutoff.startTicks)
-    );
+    bootId = read("/proc/sys/kernel/random/boot_id", "utf8").trim();
   } catch {
-    return false;
+    return null;
+  }
+  let current;
+  try {
+    current = processStatDetails(read(`/proc/${pid}/stat`, "utf8"));
+  } catch (cause) {
+    return ["ENOENT", "ESRCH"].includes(cause?.code) ? "retry" : null;
+  }
+  if (current === null || current.startTicks !== expected.startTicks) {
+    return null;
+  }
+  if (
+    current.parentPid !== expected.parentPid ||
+    current.sessionId !== expected.sessionId
+  )
+    return "retry";
+  return launchCutoff.bootId === bootId &&
+    BigInt(current.startTicks) < BigInt(launchCutoff.startTicks)
+    ? "unrelated"
+    : null;
+}
+
+function verifyProcessDetails(pid, expected, read) {
+  try {
+    const current = processStatDetails(read(`/proc/${pid}/stat`, "utf8"));
+    if (current === null || current.startTicks !== expected.startTicks) {
+      return null;
+    }
+    return current.parentPid === expected.parentPid &&
+      current.sessionId === expected.sessionId
+      ? "stable"
+      : "retry";
+  } catch (cause) {
+    return ["ENOENT", "ESRCH"].includes(cause?.code) ? "retry" : null;
   }
 }
 
@@ -593,44 +684,128 @@ function inspectOwnedAncestry(
   read,
 ) {
   const seen = new Set();
-  let incomplete = false;
   while (parentPid > 1 && !seen.has(parentPid)) {
     if (includeSession && parentPid === sessionId) return "current";
     seen.add(parentPid);
     const ancestorPid = parentPid;
+    let details;
     try {
-      const stat = read(`/proc/${ancestorPid}/stat`, "utf8");
-      const separator = stat.lastIndexOf(")");
-      if (separator < 0) return null;
-      const fields = stat
-        .slice(separator + 2)
-        .trim()
-        .split(/\s+/u);
-      if (
-        fields.length < 4 ||
-        !/^\d+$/u.test(fields[1]) ||
-        !/^\d+$/u.test(fields[3])
-      )
-        return null;
-      if (includeSession && fields[3] === String(sessionId)) return "current";
-      parentPid = Number(fields[1]);
+      details = processStatDetails(read(`/proc/${ancestorPid}/stat`, "utf8"));
+      if (details === null) return null;
+      if (includeSession && details.sessionId === String(sessionId)) {
+        const verification = verifyProcessDetails(ancestorPid, details, read);
+        return verification === "stable" ? "current" : verification;
+      }
       const environment = read(`/proc/${ancestorPid}/environ`, "utf8").split(
         "\0",
       );
+      const verification = verifyProcessDetails(ancestorPid, details, read);
+      if (verification !== "stable") return verification;
       if (environment.includes(`AGENT_RUNNER_OWNED_PROCESS=${ownerToken}`)) {
         return "current";
       }
+      parentPid = details.parentPid;
     } catch (cause) {
+      if (["ENOENT", "ESRCH"].includes(cause?.code)) return "retry";
       if (["EACCES", "EPERM"].includes(cause?.code)) {
-        if (predatesLaunchCutoff(ancestorPid, launchCutoff, read)) continue;
-        incomplete = true;
-        continue;
+        const cutoff =
+          details === undefined
+            ? null
+            : inspectLaunchCutoff(ancestorPid, details, launchCutoff, read);
+        if (cutoff === "retry") return "retry";
+        if (cutoff === "unrelated") {
+          parentPid = details.parentPid;
+          continue;
+        }
       }
       return null;
     }
   }
-  if (parentPid > 1 || incomplete) return null;
-  return "unrelated";
+  return parentPid > 1 ? null : "unrelated";
+}
+
+function inspectSessionProcess(
+  pid,
+  sessionId,
+  ownerToken,
+  includeSession,
+  launchCutoff,
+  getuid,
+  read,
+) {
+  let pinnedStartTicks;
+  for (
+    let attempt = 0;
+    attempt < OWNED_PROCESS_INSPECTION_ATTEMPTS;
+    attempt += 1
+  ) {
+    let details;
+    try {
+      details = processStatDetails(read(`/proc/${pid}/stat`, "utf8"));
+    } catch (cause) {
+      if (["ENOENT", "ESRCH"].includes(cause?.code)) return "absent";
+      return null;
+    }
+    if (details === null) return null;
+    if (pinnedStartTicks === undefined) pinnedStartTicks = details.startTicks;
+    else if (details.startTicks !== pinnedStartTicks) return null;
+
+    let ownership;
+    try {
+      if (includeSession && details.sessionId === String(sessionId)) {
+        ownership = "current";
+      } else {
+        const uids = processUid(pid, read);
+        if (uids === null) return null;
+        if (uids.some((uid) => uid !== getuid())) ownership = "unrelated";
+        else {
+          const environment = read(`/proc/${pid}/environ`, "utf8");
+          if (
+            environment
+              .split("\0")
+              .includes(`AGENT_RUNNER_OWNED_PROCESS=${ownerToken}`)
+          ) {
+            ownership = "current";
+          } else {
+            ownership = inspectOwnedAncestry(
+              details.parentPid,
+              sessionId,
+              ownerToken,
+              includeSession,
+              launchCutoff,
+              read,
+            );
+          }
+        }
+      }
+    } catch (cause) {
+      if (["ENOENT", "ESRCH"].includes(cause?.code)) ownership = "retry";
+      else if (["EACCES", "EPERM"].includes(cause?.code)) {
+        const ancestry = inspectOwnedAncestry(
+          details.parentPid,
+          sessionId,
+          ownerToken,
+          includeSession,
+          launchCutoff,
+          read,
+        );
+        if (ancestry === "current") ownership = "current";
+        else if (ancestry === "retry") ownership = "retry";
+        else if (details.parentPid !== 1 && ancestry === "unrelated") {
+          ownership = "unrelated";
+        } else {
+          ownership = inspectLaunchCutoff(pid, details, launchCutoff, read);
+        }
+      } else return null;
+    }
+    if (ownership === "retry") continue;
+    if (ownership === null) return null;
+    const verification = verifyProcessDetails(pid, details, read);
+    if (verification === "retry") continue;
+    if (verification === null) return null;
+    return ownership;
+  }
+  return null;
 }
 
 export function inspectOwnedSessionProcesses(
@@ -650,72 +825,17 @@ export function inspectOwnedSessionProcesses(
     for (const name of list("/proc")) {
       if (!/^\d+$/u.test(name)) continue;
       const pid = Number(name);
-      let parentPid;
-      try {
-        const stat = read(`/proc/${pid}/stat`, "utf8");
-        const separator = stat.lastIndexOf(")");
-        if (separator < 0) return null;
-        const fields = stat
-          .slice(separator + 2)
-          .trim()
-          .split(/\s+/u);
-        if (
-          fields.length < 4 ||
-          !/^\d+$/u.test(fields[1]) ||
-          !/^\d+$/u.test(fields[3])
-        )
-          return null;
-        if (processStartTicks(stat) === null) return null;
-        parentPid = Number(fields[1]);
-        if (includeSession && fields[3] === String(sessionId)) {
-          members.push(pid);
-          continue;
-        }
-        const uids = processUid(pid, read);
-        if (uids === null) return null;
-        if (uids.some((uid) => uid !== getuid())) continue;
-        const environment = read(`/proc/${pid}/environ`, "utf8");
-        if (
-          environment
-            .split("\0")
-            .includes(`AGENT_RUNNER_OWNED_PROCESS=${ownerToken}`)
-        ) {
-          members.push(pid);
-          continue;
-        }
-        const ancestry = inspectOwnedAncestry(
-          parentPid,
-          sessionId,
-          ownerToken,
-          includeSession,
-          launchCutoff,
-          read,
-        );
-        if (ancestry === "current") members.push(pid);
-        else if (ancestry === null) return null;
-      } catch (cause) {
-        if (["ENOENT", "ESRCH"].includes(cause?.code)) continue;
-        if (
-          ["EACCES", "EPERM"].includes(cause?.code) &&
-          parentPid !== undefined
-        ) {
-          const ancestry = inspectOwnedAncestry(
-            parentPid,
-            sessionId,
-            ownerToken,
-            includeSession,
-            launchCutoff,
-            read,
-          );
-          if (ancestry === "current") {
-            members.push(pid);
-            continue;
-          }
-          if (parentPid !== 1 && ancestry === "unrelated") continue;
-          if (predatesLaunchCutoff(pid, launchCutoff, read)) continue;
-        }
-        return null;
-      }
+      const ownership = inspectSessionProcess(
+        pid,
+        sessionId,
+        ownerToken,
+        includeSession,
+        launchCutoff,
+        getuid,
+        read,
+      );
+      if (ownership === null) return null;
+      if (ownership === "current") members.push(pid);
     }
     return members;
   } catch {

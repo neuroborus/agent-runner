@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-09-25
 
+- **Shared-host descendant inspection tolerates bounded process churn.** Both
+  the live supervisor and replacement-owner recovery pin each snapshot entry's
+  first readable start tick and retry transient exit or reparenting from that
+  PID under one three-attempt bound. A fresh absent read discards only the
+  exited entry; reuse, malformed or inaccessible evidence, live ownership,
+  surviving descendants, and exhausted churn still fail closed. This lets
+  action-free pause and cancellation recovery settle after a dead supervisor
+  without weakening the persisted launch cutoff.
+
 - **Shared-host process recovery carries its launch boundary durably.** The
   common envelope now journals the supervisor's boot ID and start tick as a
   bounded launch cutoff before provider work. Live teardown and owner-loss

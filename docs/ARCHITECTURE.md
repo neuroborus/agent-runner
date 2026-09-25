@@ -1137,6 +1137,17 @@ policy; its namespace init remains responsible for otherwise detached
 descendants.
 Ordinary processes never receive the initial-host session fallback.
 
+Both shared-host scanners classify each PID under a fixed three-attempt bound.
+The first readable stat pins that entry's start tick. An `ENOENT`/`ESRCH` from a
+later UID, environment, or ancestry read, or an observed parent/session change,
+restarts only that PID from a fresh stat and new ancestry. An entry absent on
+that fresh read is ignored as exited; a changed start tick is PID reuse and
+remains unverifiable. Malformed metadata, unapproved permission denial, live
+session/token evidence, a surviving descendant, and exhausted churn keep the
+existing fail-closed result. This per-entry retry applies identically inside the
+live supervisor and during replacement-owner recovery; it does not extend the
+completion grace below.
+
 Completion-time descendant inspection retries transiently incomplete evidence
 against one non-resetting one-second descendant-grace deadline. Complete
 evidence resumes the ordinary success or bounded TERM/KILL path; uncertainty at

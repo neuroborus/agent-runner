@@ -731,7 +731,10 @@ absent. An inaccessible shared-host process is excluded only when it is on the
 recorded boot and its validated start strictly predates the supervisor's
 journaled launch cutoff. Replaced, live, equal or newer, reused, unverifiable,
 or surviving process evidence remains blocked and must not be bypassed by
-killing a persisted PID.
+killing a persisted PID. If a snapshot PID exits or reparents during inspection,
+the runner retries that PID and its new ancestry under a fixed small bound and
+ignores it only after a fresh read proves it absent; exhausted churn remains
+unverifiable.
 
 For repeatable automation, supply both captured values explicitly. Retry an
 uncertain request with exactly the same revision, key, and timing; never refresh a stale

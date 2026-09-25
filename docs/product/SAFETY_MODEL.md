@@ -181,6 +181,13 @@ token used to detect survivors after supervisor loss without signalling them.
 PID replacement, unverifiable ownership, or surviving descendants retains
 exclusion. A PID disappearing between the live and identity observations is
 rechecked before it can be classified dead.
+Each shared-host snapshot entry pins its first readable start tick and receives
+at most three attempts to classify that same identity. Transient
+`ENOENT`/`ESRCH` or a changed parent/session restarts the current PID and its
+ancestry from scratch; a then-absent PID is an exited snapshot entry, while a
+different start tick is reuse. Malformed metadata, permission denial outside
+the launch-cutoff rule, live ownership evidence, surviving descendants, and
+attempt exhaustion remain fail-closed.
 Transiently incomplete completion inspection is retried only within one
 non-resetting one-second descendant-grace deadline. This cleanup grace verifies
 containment after work has ended; it is a fixed safety invariant, not a
