@@ -13,6 +13,7 @@ import test from "node:test";
 
 import { planExecutionPipeline } from "../src/index.js";
 import {
+  BOOTSTRAP_SCHEMA,
   CANDIDATE_CLEAN_CONFIRM_SCHEMA,
   CANDIDATE_REVIEW_SCHEMA,
   CHECK_AND_FIX_SCHEMA,
@@ -29,6 +30,7 @@ import {
   RESTARTED_ROLE_SESSIONS,
   ROLE_SESSIONS,
   SOURCE_SESSION,
+  VALIDATION_INFRASTRUCTURE,
   bootstrapCorrection,
   bootstrapReady,
   checkAndFix,
@@ -94,6 +96,16 @@ test("runs the dedicated finalization gate without skill guidance", async (t) =>
 
   assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(result.pipelineState.settings.finalization, "none");
+  assert.equal(
+    result.pipelineState.finalizationGuidance.configuredPolicy,
+    "none",
+  );
+  assert.equal(result.pipelineState.finalizationGuidance.selection, "fallback");
+  assert.equal(result.pipelineState.finalizationGuidance.skillPath, null);
+  assert.match(
+    result.pipelineState.finalizationGuidance.decisionFingerprint,
+    /^[a-f0-9]{64}$/u,
+  );
   assert.equal(result.pipelineState.finalizationResult.skillPath, null);
   assert.equal(
     result.pipelineState.finalizedFingerprint,
@@ -142,6 +154,49 @@ test("corrects noncanonical finalization infrastructure before review", async (t
     prompt.includes("Review the changes"),
   ).prompt;
   assert.doesNotMatch(reviewPrompt, /\.claude\/skills/u);
+});
+
+test("corrects finalization inventory that omits frozen guidance", async (t) => {
+  const fixture = await createFixture(t, {
+    workWorker: [
+      implementationCompleted(),
+      {
+        ...finalizationPassed(),
+        validationInfrastructure: ["package.json"],
+      },
+      finalizationPassed(),
+    ],
+  });
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  const correction = fixture.transitions.find(
+    ({ options }) => options.activity?.kind === "finalization-correction",
+  ).patch.pipelineState.finalizationCorrections[0];
+  assert.deepEqual(correction.diagnostics, [
+    {
+      role: "worker",
+      phase: "finalization",
+      contract: "finalization",
+      field: "validationInfrastructure",
+      constraint: "includes-frozen-finalization-guidance",
+    },
+  ]);
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
+      .length,
+    2,
+  );
+  assert.equal(
+    fixture.calls.reviewer.filter(({ schema }) => schema === REVIEW_SCHEMA)
+      .length,
+    1,
+  );
+  assert.deepEqual(
+    completed.pipelineState.validationInfrastructure,
+    VALIDATION_INFRASTRUCTURE,
+  );
 });
 
 test("corrects narrative infrastructure in blocked finalization output", async (t) => {
@@ -518,9 +573,8 @@ test("reconstructs finalization correction before and during interruption", asyn
     const fixture = await createFixture(t, {
       workWorker: [
         implementationCompleted(),
-        finalizationUnavailable("SKILL_INVALID"),
         invalidProductionFinalization(),
-        finalizationPassed(""),
+        finalizationPassed(),
       ],
     });
     const transition = fixture.runtime.transition;
@@ -551,7 +605,7 @@ test("reconstructs finalization correction before and during interruption", asyn
     );
     assert.equal(
       fixture.currentRun.pipelineState.pendingFinalizationCorrection.guidance,
-      "fallback",
+      "resolved",
     );
     assert.equal(
       fixture.currentRun.pipelineState.finalizationCorrections.length,
@@ -568,10 +622,7 @@ test("reconstructs finalization correction before and during interruption", asyn
       prompt.includes("bounded read-only correction"),
     );
     assert.equal(correctionCall.access, "read-only");
-    assert.match(
-      correctionCall.prompt,
-      /No finalization skill guidance is available/u,
-    );
+    assert.match(correctionCall.prompt, /frozen finalization skill/u);
     assert.match(correctionCall.recoveryPrompt, /Resolved bootstrap context/u);
     assert.equal(correctionCall.session, undefined);
   });
@@ -793,6 +844,37 @@ test("corrects invalid terminal confirmation without retaining rejected values",
   assert.doesNotMatch(
     JSON.stringify(fixture.transitions),
     new RegExp(sensitiveMarker, "u"),
+  );
+});
+
+test("rechecks frozen guidance before a bounded confirmation correction", async (t) => {
+  const skillPath = ".agents/skills/finalization/SKILL.md";
+  let drifted = false;
+  const fixture = await createFixture(t, {
+    async onTransition(run, _patch, options) {
+      if (!drifted && options.activity?.kind === "confirmation-correction") {
+        drifted = true;
+        await writeFile(
+          join(run.projectPath, skillPath),
+          "---\nname: finalization\ndescription: Changed validation.\n---\n\nRun another gate.\n",
+        );
+      }
+    },
+    workReviewer: [
+      terminalConfirmation(invalidReviewStatus()),
+      terminalConfirmation(reviewApproved()),
+    ],
+  });
+
+  const paused = await fixture.run();
+
+  assert.equal(paused.pause.reason, "finalization_skill_invalid");
+  assert.equal(paused.pause.code, "ERR_FINALIZATION_GUIDANCE_CHANGED");
+  assert.equal(paused.counters.fixRounds ?? 0, 0);
+  assert.equal(
+    fixture.calls.reviewer.filter(({ schema }) => schema === REVIEW_SCHEMA)
+      .length,
+    1,
   );
 });
 
@@ -1227,7 +1309,9 @@ test("rejects repository mutation and fingerprint drift during terminal confirma
     const validationInfrastructureFingerprint =
       fixture.runtime.git.validationInfrastructureFingerprint;
     fixture.runtime.git.validationInfrastructureFingerprint = (options) =>
-      drifted ? "c".repeat(64) : validationInfrastructureFingerprint(options);
+      drifted && options.paths.length > 1
+        ? "c".repeat(64)
+        : validationInfrastructureFingerprint(options);
 
     const completed = await fixture.run();
 
@@ -1528,7 +1612,10 @@ test("rejects unsafe trusted execution and pauses unverifiable storage cleanup",
 test("rejects ignored validation-infrastructure drift after trusted execution", async (t) => {
   const trustedValidation = trustedValidationSnapshot();
   const infrastructurePath = "LOCAL_ARTIFACTS/validation.json";
-  const validationInfrastructure = [infrastructurePath];
+  const validationInfrastructure = [
+    infrastructurePath,
+    ".agents/skills/finalization/SKILL.md",
+  ];
   const requiredChecks = [
     ...REQUIRED_CHECKS,
     { id: "C2", command: trustedValidation.commands[0].command },
@@ -1603,13 +1690,38 @@ test("rejects ignored validation-infrastructure drift after trusted execution", 
 test("falls back when automatic finalization discovery finds no skill", async (t) => {
   const fixture = await createFixture(t, {
     finalizationSkill: false,
-    workWorker: [implementationCompleted(), finalizationPassed("")],
+    worker: [
+      clarificationReady(),
+      {
+        ...bootstrapReady("Worker"),
+        validationInfrastructure: ["package.json"],
+      },
+      reconciliationResolved(),
+    ],
+    reviewer: [
+      {
+        ...bootstrapReady("Reviewer"),
+        validationInfrastructure: ["package.json"],
+      },
+    ],
+    workWorker: [
+      implementationCompleted(),
+      {
+        ...finalizationPassed(""),
+        validationInfrastructure: ["package.json"],
+      },
+    ],
   });
 
   const result = await fixture.run();
 
   assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(result.pipelineState.settings.finalization, "auto");
+  assert.equal(
+    result.pipelineState.finalizationGuidance.configuredPolicy,
+    "auto",
+  );
+  assert.equal(result.pipelineState.finalizationGuidance.selection, "fallback");
   assert.equal(result.pipelineState.finalizationResult.skillPath, null);
   assert.match(
     fixture.calls.worker.find(({ prompt }) =>
@@ -1627,11 +1739,132 @@ test("uses an explicitly configured finalization skill", async (t) => {
 
   assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(result.pipelineState.settings.finalization, skillPath);
+  assert.deepEqual(result.pipelineState.finalizationGuidance, {
+    configuredPolicy: skillPath,
+    selection: "skill",
+    skillPath,
+    selectedFileFingerprint:
+      result.pipelineState.finalizationGuidance.selectedFileFingerprint,
+    decisionFingerprint:
+      result.pipelineState.finalizationGuidance.decisionFingerprint,
+  });
+  assert.match(
+    result.pipelineState.finalizationGuidance.selectedFileFingerprint,
+    /^[a-f0-9]{64}$/u,
+  );
   assert.match(
     fixture.calls.worker.find(({ prompt }) =>
       prompt.includes("Run the complete project finalization procedure"),
     ).prompt,
-    /explicitly configured/u,
+    /frozen finalization skill/u,
+  );
+  assert.doesNotMatch(
+    fixture.calls.worker.find(({ prompt }) =>
+      prompt.includes("Study the repository"),
+    ).prompt,
+    /explicitly configured|discovered automatically/u,
+  );
+  assert.doesNotMatch(JSON.stringify(fixture.calls), /Test validation\./u);
+  assert.doesNotMatch(
+    JSON.stringify(fixture.transitions),
+    /Test validation\./u,
+  );
+});
+
+test("selects the first safely inspectable conventional skill", async (t) => {
+  const skillPath = ".claude/skills/finalization/SKILL.md";
+  const validationInfrastructure = ["package.json", skillPath];
+  const fixture = await createFixture(t, {
+    finalizationSkill: false,
+    async prepareProject(projectPath) {
+      await mkdir(dirname(join(projectPath, skillPath)), { recursive: true });
+      await writeFile(
+        join(projectPath, skillPath),
+        "---\nname: finalization\ndescription: Alternate validation.\n---\n\nRun tests.\n",
+      );
+    },
+    worker: [
+      clarificationReady(),
+      {
+        ...bootstrapReady("Worker"),
+        validationInfrastructure,
+      },
+      reconciliationResolved(),
+    ],
+    reviewer: [
+      {
+        ...bootstrapReady("Reviewer"),
+        validationInfrastructure,
+      },
+    ],
+    workWorker: [
+      implementationCompleted(),
+      {
+        ...finalizationPassed(skillPath),
+        validationInfrastructure,
+      },
+    ],
+  });
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(
+    completed.pipelineState.finalizationGuidance.skillPath,
+    skillPath,
+  );
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === BOOTSTRAP_SCHEMA)
+      .length,
+    1,
+  );
+  assert.equal(
+    fixture.calls.reviewer.filter(({ schema }) => schema === BOOTSTRAP_SCHEMA)
+      .length,
+    1,
+  );
+  assert.deepEqual(
+    completed.pipelineState.validationInfrastructure,
+    validationInfrastructure,
+  );
+});
+
+test("requires a new run when frozen guidance content drifts", async (t) => {
+  const skillPath = ".agents/skills/finalization/SKILL.md";
+  const fixture = await createFixture(t, {
+    workWorker: [implementationCompleted()],
+    async onRoleRun(role, request) {
+      if (
+        role === "worker" &&
+        request.prompt.includes("Implement the changes")
+      ) {
+        await writeFile(
+          join(request.cwd, skillPath),
+          "---\nname: finalization\ndescription: Changed validation.\n---\n\nRun another gate.\n",
+        );
+      }
+    },
+  });
+
+  const paused = await fixture.run();
+
+  assert.equal(paused.pause.reason, "finalization_skill_invalid");
+  assert.equal(paused.pause.code, "ERR_FINALIZATION_GUIDANCE_CHANGED");
+  assert.equal(paused.counters.fixRounds ?? 0, 0);
+  assert.equal(
+    fixture.calls.reviewer.some(
+      ({ schema }) => schema === CANDIDATE_REVIEW_SCHEMA,
+    ),
+    false,
+  );
+  assert.deepEqual(
+    planExecutionPipeline.projections.pause(paused).nextActions,
+    [
+      {
+        type: "start-new-run",
+        requirement: "resolved-finalization-guidance",
+      },
+    ],
   );
 });
 
@@ -1705,16 +1938,30 @@ Run tests and formatting, then stage changes, inspect the cached diff, and draft
 });
 
 test("pauses before invoking a missing explicit finalization skill", async (t) => {
-  const fixture = await createFixture(t);
+  const trustedValidation = trustedValidationSnapshot();
+  let trustedExecutions = 0;
+  const fixture = await createFixture(t, {
+    trustedValidation,
+    onTrustedValidation() {
+      trustedExecutions += 1;
+      assert.fail("Guidance preflight must not execute validation commands.");
+    },
+  });
 
   const result = await fixture.run({
     finalization: "checks/finalization/SKILL.md",
+    trustedChecks: ["service-check"],
   });
 
   assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
   assert.equal(result.pause.reason, "finalization_skill_missing");
-  assert.equal(result.pause.resumeState, "FINALIZE");
+  assert.equal(result.pause.resumeState, undefined);
   assert.equal(result.pause.skillPath, "checks/finalization/SKILL.md");
+  assert.equal(fixture.calls.worker.length, 0);
+  assert.equal(fixture.calls.reviewer.length, 0);
+  assert.equal(fixture.probeCalls.worker, 0);
+  assert.equal(fixture.probeCalls.reviewer, 0);
+  assert.equal(trustedExecutions, 0);
   assert.equal(
     fixture.calls.worker.some(({ prompt }) =>
       prompt.includes("Run the complete project finalization procedure"),
@@ -1723,7 +1970,7 @@ test("pauses before invoking a missing explicit finalization skill", async (t) =
   );
 });
 
-test("resumes finalization after an explicit skill is corrected", async (t) => {
+test("requires a new run after an explicit skill is corrected", async (t) => {
   for (const kind of ["missing", "symlink-invalid"]) {
     await t.test(kind, async (t) => {
       const skillPath = `LOCAL_ARTIFACTS/skills/${kind}/SKILL.md`;
@@ -1755,7 +2002,7 @@ test("resumes finalization after an explicit skill is corrected", async (t) => {
           ? "finalization_skill_missing"
           : "finalization_skill_invalid",
       );
-      assert.doesNotThrow(() =>
+      assert.throws(() =>
         planExecutionPipeline.validateResumeAction(paused, null),
       );
       await rm(skillDirectory, { recursive: true, force: true });
@@ -1767,11 +2014,16 @@ test("resumes finalization after an explicit skill is corrected", async (t) => {
 
       const resumed = await fixture.run();
 
-      assert.equal(resumed.pipelineState.workflowState, "DONE");
-      assert.equal(resumed.pause, null);
-      assert.equal(
-        resumed.pipelineState.finalizationResult.skillPath,
-        skillPath,
+      assert.equal(resumed.pipelineState.workflowState, "WAITING_FOR_USER");
+      assert.equal(resumed.pause.reason, paused.pause.reason);
+      assert.deepEqual(
+        planExecutionPipeline.projections.pause(resumed).nextActions,
+        [
+          {
+            type: "start-new-run",
+            requirement: "resolved-finalization-guidance",
+          },
+        ],
       );
     });
   }
@@ -2393,7 +2645,9 @@ test("reruns finalization when validation infrastructure drifts during lazy reco
   const validationInfrastructureFingerprint =
     fixture.runtime.git.validationInfrastructureFingerprint;
   fixture.runtime.git.validationInfrastructureFingerprint = (options) =>
-    drifted ? "d".repeat(64) : validationInfrastructureFingerprint(options);
+    drifted && options.paths.length > 1
+      ? "d".repeat(64)
+      : validationInfrastructureFingerprint(options);
 
   const completed = await fixture.run();
 
@@ -2470,7 +2724,9 @@ test("reruns finalization when retained candidate-review correction scope drifts
   const validationInfrastructureFingerprint =
     fixture.runtime.git.validationInfrastructureFingerprint;
   fixture.runtime.git.validationInfrastructureFingerprint = (options) =>
-    drifted ? "c".repeat(64) : validationInfrastructureFingerprint(options);
+    drifted && options.paths.length > 1
+      ? "c".repeat(64)
+      : validationInfrastructureFingerprint(options);
 
   const completed = await fixture.run();
 
@@ -3609,7 +3865,7 @@ test("overrides one current finding only for its reviewed fingerprint", async (t
 });
 
 test("requires replacement finalization before resolving a rejected validation change through its exact override", async (t) => {
-  const changedInfrastructure = ["package.json", "source.js"];
+  const changedInfrastructure = [...VALIDATION_INFRASTRUCTURE, "source.js"];
   const changedFinalization = {
     ...finalizationPassed(),
     validationInfrastructure: changedInfrastructure,
@@ -3654,9 +3910,10 @@ test("requires replacement finalization before resolving a rejected validation c
     "REJECTED",
   );
   assert.deepEqual(completed.pipelineState.findings, []);
-  assert.deepEqual(completed.pipelineState.validationInfrastructure, [
-    "package.json",
-  ]);
+  assert.deepEqual(
+    completed.pipelineState.validationInfrastructure,
+    VALIDATION_INFRASTRUCTURE,
+  );
   assert.deepEqual(completed.pipelineState.findingOverrides, [
     {
       findingId: "R1",
@@ -4090,6 +4347,9 @@ test("retries finalization after its environment blocker clears", async (t) => {
   assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
   assert.equal(paused.pause.reason, "environment_blocked");
   assert.equal(paused.pause.resumeState, "FINALIZE");
+  const frozenGuidance = structuredClone(
+    paused.pipelineState.finalizationGuidance,
+  );
 
   const resumed = await fixture.run({ finalization: "none" });
 
@@ -4098,9 +4358,10 @@ test("retries finalization after its environment blocker clears", async (t) => {
     resumed.pipelineState.settings.finalization,
     ".agents/skills/finalization/SKILL.md",
   );
+  assert.deepEqual(resumed.pipelineState.finalizationGuidance, frozenGuidance);
 });
 
-test("falls back after an automatically discovered skill is invalid", async (t) => {
+test("does not switch away from frozen automatic guidance", async (t) => {
   const fixture = await createFixture(t, {
     workWorker: [
       implementationCompleted(),
@@ -4111,13 +4372,14 @@ test("falls back after an automatically discovered skill is invalid", async (t) 
 
   const result = await fixture.run();
 
-  assert.equal(result.pipelineState.workflowState, "DONE");
-  assert.equal(result.pipelineState.finalizationResult.skillPath, null);
+  assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(result.pause.reason, "finalization_skill_invalid");
+  assert.equal(result.pipelineState.finalizationResult, null);
   assert.equal(
     fixture.calls.worker.filter(({ prompt }) =>
       prompt.includes("Run the complete project finalization procedure"),
     ).length,
-    2,
+    1,
   );
 });
 
@@ -4148,11 +4410,8 @@ test("rejects finalization changes made before skill validation", async (t) => {
   });
 
   assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
-  assert.equal(result.pause.reason, "finalization_cannot_pass");
-  assert.equal(
-    result.pause.code,
-    "ERR_FINALIZATION_MODIFIED_BEFORE_VALIDATION",
-  );
+  assert.equal(result.pause.reason, "finalization_skill_missing");
+  assert.equal(result.pause.code, "ERR_FINALIZATION_GUIDANCE_MISSING");
   assert.equal(result.pipelineState.finalizationResult, null);
   assert.equal(fixture.calls.reviewer.length, 2);
 });

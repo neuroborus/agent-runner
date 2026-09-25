@@ -397,6 +397,20 @@ the run. Runner configuration supplies the base value and a safe project
 overlay may replace it. The resolved selection is persisted with the other
 pipeline settings and is not reloaded on resume.
 
+Plan execution resolves its effective guidance through the root Git inspection
+and validation-infrastructure fingerprint capabilities after Git preflight and
+before bootstrap. Its pipeline state separately freezes the configured policy,
+selected canonical regular repository-relative skill or fallback decision,
+selected-file fingerprint when applicable, and complete decision fingerprint.
+Bootstrap and validation migration receive only that path or fallback, never
+copied skill content, and no additional provider checkpoint is introduced. The
+selected skill is part of established validation infrastructure. Execution
+rechecks its exact path and fingerprint before guidance-consuming, correction,
+and resumed work. Missing, invalid, or changed frozen guidance requires a fresh
+run; automatic selection never switches late. This decision does not replace
+the frozen trusted-validation snapshot, exact inventory matching, capability
+reports, environment blockers, or requirement inspection.
+
 `trustedCommands` is accepted in root and safe project configuration through
 the same exact-vector validator. Each lowercase alias binds one exact inventory
 command to one executable and argument vector. Definitions reject shell-string
@@ -936,7 +950,12 @@ recorded for another run. Cancellation becomes terminal; pause preserves that
 same resumable `CLARIFY` checkpoint. Any failed predicate retains the ordinary
 worktree-lease requirement and full repository/effect reconciliation. Plan
 execution state version 21 is an identity migration that rotates detached
-runtime compatibility for this settlement-aware contract.
+runtime compatibility for this settlement-aware contract. Plan execution state
+version 22 adds its frozen finalization-guidance decision. Terminal states and
+consumed commits retain verification-only recovery. Other unfinished legacy
+states establish the decision before more provider work and use the existing
+read-only validation migration before writable work when their prior inventory
+cannot prove the new contract.
 
 The private `src/state/stop-policy.js` owns three distinct decisions: whether a
 request awaits reconciliation, whether that request blocks execution, and
@@ -1839,7 +1858,11 @@ Plan execution gives each preparation phase one owner. Independent semantic
 review, or lazy check/fix and candidate clean confirmation, converges first.
 Implementation, finding-resolution, and lazy check/fix turns do not invoke project finalization
 or perform generic commit preparation. The dedicated finalization turn follows
-every substantive instruction in the selected guidance. It runs the writable
+every substantive instruction in the pre-bootstrap frozen guidance. A selected
+skill remains in the established validation-infrastructure inventory and must
+match its frozen path and fingerprint through finalization and terminal
+confirmation. Guidance repair or drift starts a new run rather than consuming
+correction or review budgets. The finalization turn runs the writable
 repository formatter first, treats its output as the content under finalization, then runs
 generation, the non-mutating repository gate, Git whitespace checks, and
 staging-independent content review. Bootstrap,

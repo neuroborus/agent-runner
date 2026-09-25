@@ -170,6 +170,9 @@ function pauseActionLine(runId, action) {
     if (action.requirement === "resolved-finalization-blockers") {
       return "  Resolve the reported finalization blockers, restore a clean baseline, prepare a plan for the remaining work, and start a fresh plan-execution run.";
     }
+    if (action.requirement === "resolved-finalization-guidance") {
+      return "  Repair the reported finalization guidance and start a fresh plan-execution run.";
+    }
     return "  Abandon this run and start a fresh run from an uncontaminated worktree.";
   }
   if (action.action === null) {

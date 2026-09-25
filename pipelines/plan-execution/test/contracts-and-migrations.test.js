@@ -16,6 +16,7 @@ import {
   migratePlanExecutionStateV11,
   migratePlanExecutionStateV12,
   migratePlanExecutionStateV13,
+  migratePlanExecutionStateV21,
   planExecutionPipeline,
 } from "../src/index.js";
 
@@ -840,7 +841,24 @@ test("migrates version-3 execution state with no consumed bootstrap corrections"
   assert.deepEqual(migrated.bootstrapCorrections, []);
   assert.equal(migrated.pendingBootstrapCorrection, null);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(planExecutionPipeline.stateVersion, 21);
+  assert.equal(planExecutionPipeline.stateVersion, 22);
+});
+
+test("version 21 migration preserves terminal proof", async (t) => {
+  const fixture = await createFixture(t);
+  const completed = await fixture.run();
+  const legacy = { ...completed.pipelineState };
+  delete legacy.finalizationGuidance;
+
+  const migrated = migratePlanExecutionStateV21({ pipelineState: legacy });
+
+  assert.equal(migrated.finalizationGuidance, null);
+  assert.deepEqual(migrated.finalizationResult, legacy.finalizationResult);
+  assert.deepEqual(migrated.completedCommits, legacy.completedCommits);
+  assert.deepEqual(migrated.workerValidation, legacy.workerValidation);
+  assert.deepEqual(migrated.reviewerValidation, legacy.reviewerValidation);
+  assert.equal(migrated.planContextVersion, 0);
+  assert.doesNotThrow(() => normalizePipelineState(migrated));
 });
 
 test("selects Worker-only lazy mode and migrates version 11 to independent", () => {
@@ -1516,14 +1534,26 @@ test("invalidates version-1 validation evidence before active execution resumes"
   const completed = await fixture.run();
   assert.equal(completed.pipelineState.workflowState, "DONE");
   assert.equal(completed.pipelineState.validationMigrationPending, false);
+  assert.equal(
+    completed.pipelineState.finalizationGuidance.skillPath,
+    ".agents/skills/finalization/SKILL.md",
+  );
   assert.ok(
-    fixture.calls.worker.some(({ prompt }) =>
-      prompt.includes("versioned-state migration checkpoint"),
+    fixture.calls.worker.some(
+      ({ prompt }) =>
+        prompt.includes("versioned-state migration checkpoint") &&
+        prompt.includes(
+          "The frozen finalization skill is .agents/skills/finalization/SKILL.md",
+        ),
     ),
   );
   assert.ok(
-    fixture.calls.reviewer.some(({ prompt }) =>
-      prompt.includes("versioned-state migration checkpoint"),
+    fixture.calls.reviewer.some(
+      ({ prompt }) =>
+        prompt.includes("versioned-state migration checkpoint") &&
+        prompt.includes(
+          "The frozen finalization skill is .agents/skills/finalization/SKILL.md",
+        ),
     ),
   );
 });
@@ -1986,9 +2016,18 @@ Implement the second behavior.`;
   const completedHead = paused.pipelineState.completedCommits[0];
   const narrativePath =
     "TMPDIR, bound HEAD, and worktree fingerprint from a prior turn";
-  const invalidInfrastructure = [narrativePath];
+  const invalidInfrastructure = [
+    ".agents/skills/finalization/SKILL.md",
+    narrativePath,
+  ];
   const invalidInfrastructureFingerprint = hash(
-    JSON.stringify([[narrativePath, null]]),
+    JSON.stringify([
+      [
+        ".agents/skills/finalization/SKILL.md",
+        "---\nname: finalization\ndescription: Test validation.\n---\n\nRun tests.\n",
+      ],
+      [narrativePath, null],
+    ]),
   );
   const legacy = {
     ...paused.pipelineState,
@@ -2103,6 +2142,17 @@ test("rejects inconsistent persisted workflow state", async (t) => {
   await rejectsState("arbitration without backend metadata", (run) => {
     run.pipelineState.bootstrapArbitrationUsed = true;
   });
+
+  await rejectsState("changed finalization guidance decision", (run) => {
+    run.pipelineState.finalizationGuidance.decisionFingerprint = "0".repeat(64);
+  });
+
+  await rejectsState(
+    "validation inventory without selected guidance",
+    (run) => {
+      run.pipelineState.validationInfrastructure = ["package.json"];
+    },
+  );
 
   await rejectsState("pending bootstrap correction without history", (run) => {
     run.pipelineState.pendingBootstrapCorrection = bootstrapCorrection({
@@ -2453,6 +2503,7 @@ test("legacy confirmation migrations preserve journal proof but cannot synthesiz
     for (const event of events) {
       event.state.pipelineStateVersion = 14;
       delete event.state.pipelineState.finalizationRecovery;
+      delete event.state.pipelineState.finalizationGuidance;
     }
   });
   const oldBytes = await fixture.bytes();
@@ -2542,6 +2593,8 @@ test("legacy confirmation proof crosses an authentic intervening migration and r
       event.state.pipelineState.implementationEvidenceLegacy = true;
     }
     const migration = structuredClone(events[accepted]);
+    delete migration.state.pipelineState.finalizationGuidance;
+    migration.state.pipelineStateVersion = 21;
     migration.activity = {
       actor: "runner",
       phase: "runtime",
@@ -2551,6 +2604,11 @@ test("legacy confirmation proof crosses an authentic intervening migration and r
     for (const event of events.slice(0, accepted + 1)) {
       event.state.pipelineStateVersion = 14;
       delete event.state.pipelineState.finalizationRecovery;
+      delete event.state.pipelineState.finalizationGuidance;
+    }
+    for (const event of events.slice(accepted + 1)) {
+      event.state.pipelineStateVersion = 21;
+      delete event.state.pipelineState.finalizationGuidance;
     }
     events.splice(accepted + 1, 0, migration);
     events.forEach((event, index) => {

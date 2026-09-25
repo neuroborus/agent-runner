@@ -360,10 +360,14 @@ The descriptor also owns the positive-integer settings and built-in defaults
 listed under [Retry Limits and No-Progress Detection](#14-retry-limits-and-no-progress-detection),
 plus `mode` with default and recommended value `independent`. It additionally
 owns the string `finalization` setting. Its default `auto`
-discovers a conventional confined repository `finalization` skill and otherwise
-falls back to repository instructions and project-defined checks. `none`
-selects that fallback directly; any other valid value is a normalized
-repository-relative path ending in `SKILL.md` and requires that exact skill.
+selects the first safely inspectable canonical regular conventional
+`finalization` skill and otherwise falls back to repository instructions and
+project-defined checks. `none` selects that fallback directly; any other valid
+value is a normalized repository-relative path ending in `SKILL.md` and
+requires that exact skill. The runner resolves this decision after Git
+preflight and before bootstrap, then persists the configured policy, selected
+path or fallback, selected-file fingerprint when applicable, and a fingerprint
+of the complete decision. Resume never rediscovers or switches guidance.
 Runner overrides live directly under `pipelines.plan-execution`. The root
 loader strictly validates both versioned envelopes and delegates these values
 to the descriptor rather than duplicating pipeline policy. It discovers only
@@ -1300,15 +1304,29 @@ Finalization is a dedicated pipeline gate, not a Codex-only or Claude-only
 feature. A repository-defined skill may guide it, but the gate does not depend
 on optional guidance being present.
 
-During bootstrap, the agent follows the persisted policy: use an explicitly
-selected confined skill, discover a conventional skill in `auto`, or derive the
-complete procedure from repository instructions and project-defined checks when
-no skill is selected or discovered.
+Before bootstrap, the runner resolves the persisted policy with the existing
+Git path inspection and validation-infrastructure fingerprint capabilities.
+For `auto`, it freezes the first safely inspectable canonical regular
+conventional skill or a fallback decision when none qualifies. `none` freezes
+the fallback directly. An explicit path must already identify a safely confined
+canonical regular file. Missing or deterministically invalid explicit guidance
+pauses before provider probing and requires a new run after repair.
+
+Bootstrap and validation migration receive only the frozen repository-relative
+path or fallback decision. They never receive copied skill content and do not
+add a guidance-specific provider turn. A selected skill is included in the
+established validation-infrastructure inventory. Its exact path and
+selected-file fingerprint are verified before bootstrap, validation migration,
+finalization, bounded correction, and resumed work. Drift or later
+unavailability requires a fresh run without consuming a fix or review round;
+`auto` does not rediscover or switch to fallback during the run.
 
 When the selected backend supports a resolved skill natively, it may invoke it
-natively. Otherwise it reads and follows the instructions directly. An
-explicitly selected missing, escaping, or invalid skill blocks; an unavailable
-automatically discovered skill falls back without skipping finalization.
+natively. Otherwise it reads and follows the instructions directly. Exact
+runner-trusted authority and availability remain owned by the frozen trusted
+snapshot, capability requirements, environment blockers, inventory matching,
+and requirement inspection; the guidance decision grants no additional
+authority.
 
 The same repository finalization procedure must therefore work with either
 Worker backend and without skill-specific guidance.
@@ -1797,8 +1815,8 @@ Every active bootstrap role studies:
 - optional `context.md`;
 - repository agent instructions;
 - relevant repository skills;
-- the persisted finalization policy, its resolved guidance when present, and
-  repository instructions and project checks for fallback validation;
+- the frozen finalization path or fallback decision, and repository
+  instructions and project checks for fallback validation;
 - relevant tests;
 - relevant Git history where useful;
 - project conventions related to the task.
@@ -1849,6 +1867,11 @@ Validation infrastructure consists of files owning commands, discovery, runners,
 configuration, or mandatory finalization guidance. Exclude ordinary source,
 individual tests, fixtures, and generated output merely consumed by checks.
 Classification is semantic, not a filename or extension heuristic.
+The runner deterministically includes a frozen selected finalization skill in
+the established infrastructure before fingerprinting it, even when a role
+omits that already resolved mandatory path. If that addition would exceed the
+aggregate bound, the producing role receives its bounded correction instead of
+creating an oversized persisted inventory.
 Each role may return at most 256 `requiredChecks` and 256
 `validationInfrastructure` entries. The independently derived, persisted,
 finalization, and fingerprint-input inventories each allow at most 512 entries,
@@ -2140,17 +2163,17 @@ blocker. A change required by the current planned commit remains possible, but
 the finalization result records the proposed inventory and current
 infrastructure fingerprint for terminal confirmation.
 
-Before invocation, the Worker reports a missing or invalid resolved skill and
-does not execute it. An explicitly configured unavailable skill pauses. An
-unavailable automatically discovered skill switches to the same dedicated gate
-using repository instructions and project-defined checks. A safe structured
-result is one of `PASS`, `FAIL`,
+Before invocation, the runner verifies the frozen selected skill and does not
+invoke the Worker when it is missing, invalid, or changed. The Worker reports
+the same conditions if they arise inside finalization. Either outcome pauses
+non-resumably and requires a new run after repair; automatic selection never
+switches guidance late. A safe structured result is one of `PASS`, `FAIL`,
 `SKILL_MISSING`, `SKILL_INVALID`, `BLOCKED`, or the narrowly permitted
 `PRODUCT_DECISION_REQUIRED`. `FAIL` supplies stable `F`-prefixed issue IDs for
-the current procedure output. Skill-guided results identify the resolved
+the current procedure output. Skill-guided results identify the frozen
 repository-relative skill path; skill-less `PASS`, `FAIL`, and `BLOCKED`
-results carry no path. A blocked procedure or unavailable explicit skill pauses
-without advancing.
+results carry no path. A blocked procedure retains resumable environment
+recovery; unavailable frozen guidance requires a new run.
 
 `BLOCKED` is reserved for a required check that cannot execute because of an
 external environment constraint and carries bounded reason and evidence. It
@@ -3030,6 +3053,11 @@ becomes terminal `CANCELED`; pause preserves resumable initial `CLARIFY`. Every
 other checkpoint retains the worktree lease and full repository/effect
 reconciliation. State version 21 is an identity migration that rotates detached
 compatibility for this contract without synthesizing checkpoint evidence.
+State version 22 adds the frozen finalization-guidance decision. Terminal runs
+and consumed commit effects remain verification-only. Unfinished legacy work
+resolves and freezes guidance before another provider turn; when its prior
+evidence cannot prove the new contract, the existing read-only validation
+migration re-establishes the inventory before writable work.
 
 A completed operator pause uses `WAITING_FOR_USER`, `operator_paused`, and a
 null resume action. Its private checkpoint preserves the reconciled workflow
@@ -3254,8 +3282,9 @@ At minimum cover:
 39. preflight rejects a clarification path that the target repository does not ignore.
 40. MCP input uses the same one-shot authorization and preserves exact answers;
 41. MCP continuation cannot bypass the per-run lease or any local-commit gate.
-42. automatic, explicit, and skill-less finalization modes preserve the
-    dedicated gate, resume policy, and matching finalization/review fingerprints.
+42. frozen automatic, explicit, and skill-less finalization decisions preserve
+    the dedicated gate and matching finalization/review fingerprints; selected
+    guidance drift requires a fresh run.
 43. MCP offers fresh start and compatible current-session fork choices while
     leaving the source unset unless the user deliberately selects the fork.
 44. independently identified plan-execution or polishing runs cannot own the
@@ -3376,9 +3405,10 @@ At minimum cover:
 73. lazy no-progress, stable-finding, fix, and additional-round behavior remains
     bounded without weakening exact commits, trusted checks, fingerprints, Git
     controls, product decisions, or no-coauthor/no-push rules.
-74. every supported legacy version migrates through state version 17 to
+74. every supported legacy version migrates through state version 22 to
     `independent` without reviving terminal runs or replaying completed or
-    pending commit effects.
+    pending commit effects; unfinished work freezes guidance and repeats
+    read-only validation discovery when prior evidence is provisional.
 75. lazy provider and deterministic contract failures receive one scoped
     fresh-session correction; writable mutation re-finalizes and is counted
     once, clean correction remains read-only and fingerprint-bound, pending
@@ -3469,7 +3499,8 @@ Do not build:
    confirmation, and arbitration turns are read-only.
 3. A dedicated finalization turn always defines the project validation gate.
 4. Finalization is backend-neutral and must work through either Worker adapter,
-   with an explicit skill, automatic discovery, or no skill guidance.
+   with a frozen explicit skill, frozen automatic selection, or no skill
+   guidance.
 5. Skill-less finalization derives checks from repository evidence; the runner
    never substitutes generic hard-coded test commands.
 6. The Worker is autonomous during normal implementation.

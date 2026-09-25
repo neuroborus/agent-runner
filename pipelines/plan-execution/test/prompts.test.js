@@ -288,25 +288,33 @@ test("finalization and dispute prompts preserve their narrow roles", () => {
     FINALIZATION_INSTRUCTIONS,
     /For PRODUCT_DECISION_REQUIRED, set skillPath, summary, and reason to ""/u,
   );
-  assert.match(finalizationBootstrapInstructions("auto"), /conventional/u);
-  assert.match(finalizationBootstrapInstructions("none"), /do not skip/u);
   assert.match(
-    finalizationBootstrapInstructions("checks/finalize/SKILL.md"),
-    /explicitly configured/u,
+    finalizationBootstrapInstructions({
+      selection: "fallback",
+      skillPath: null,
+    }),
+    /do not skip/u,
+  );
+  assert.match(
+    finalizationBootstrapInstructions({
+      selection: "skill",
+      skillPath: "checks/finalize/SKILL.md",
+    }),
+    /frozen finalization skill/u,
   );
   assert.match(
     finalizationGuidanceInstructions({
-      required: false,
+      selection: "fallback",
       skillPath: null,
     }),
     /repository instructions and project-defined checks/u,
   );
   assert.match(
     finalizationGuidanceInstructions({
-      required: true,
+      selection: "skill",
       skillPath: "checks/finalize/SKILL.md",
     }),
-    /missing, escaping, or invalid skill is blocking/u,
+    /repairing guidance requires a new run/u,
   );
   assert.equal(
     DISPUTE_RECONSIDERATION_INSTRUCTIONS,

@@ -39,8 +39,16 @@ import {
   terminalLazyConfirmation,
 } from "./support/index.js";
 
-const ESTABLISHED = ["package.json", "docs/OPERATOR_GUIDE.md"];
-const SUBSTITUTED = ["package.json", "docs/ARCHITECTURE.md"];
+const ESTABLISHED = [
+  "package.json",
+  ".agents/skills/finalization/SKILL.md",
+  "docs/OPERATOR_GUIDE.md",
+];
+const SUBSTITUTED = [
+  "package.json",
+  ".agents/skills/finalization/SKILL.md",
+  "docs/ARCHITECTURE.md",
+];
 const EXPANDED = [...ESTABLISHED, "docs/ARCHITECTURE.md"];
 
 function finalized(infrastructure = ESTABLISHED) {
@@ -742,6 +750,7 @@ test("infrastructure scope drift discards stale feedback without losing a pendin
     const value = await fingerprint(options);
     if (
       fixture.currentRun.pipelineState.finalizationRecovery.required &&
+      options.paths.length > 1 &&
       !drifted
     ) {
       drifted = true;

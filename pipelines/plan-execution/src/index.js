@@ -142,8 +142,6 @@ const RETRYABLE_PAUSE_REASONS = new Set([
   "confirmation_output_invalid",
   "environment_blocked",
   "finalization_cannot_pass",
-  "finalization_skill_invalid",
-  "finalization_skill_missing",
   "finalization_transition_invalid",
   "finalization_evidence_rejected",
   "local_artifacts_not_ignored",
@@ -191,9 +189,9 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   finalization_cannot_pass:
     "The current finalization procedure cannot establish a passing gate.",
   finalization_skill_invalid:
-    "The explicitly configured finalization skill is invalid.",
+    "The frozen finalization guidance is invalid or changed; repair it and start a new run.",
   finalization_skill_missing:
-    "The explicitly configured finalization skill is missing.",
+    "The frozen finalization guidance is missing; restore it and start a new run.",
   finalization_evidence_rejected:
     "Terminal confirmation exhausted semantic finalization retries; correct evidence and explicitly retry complete finalization.",
   finalization_transition_invalid:
@@ -415,6 +413,17 @@ function projectPause(run) {
           requirement: "uncontaminated-worktree",
         }),
       );
+    } else if (
+      ["finalization_skill_invalid", "finalization_skill_missing"].includes(
+        run.pause.reason,
+      )
+    ) {
+      nextActions.push(
+        Object.freeze({
+          type: "start-new-run",
+          requirement: "resolved-finalization-guidance",
+        }),
+      );
     } else {
       if (resumeActionApplies(run, null)) {
         nextActions.push(Object.freeze({ type: "resume", action: null }));
@@ -587,8 +596,6 @@ function validateResumeAction(run, action) {
             "confirmation_output_invalid",
             "environment_blocked",
             "finalization_cannot_pass",
-            "finalization_skill_invalid",
-            "finalization_skill_missing",
             "finalization_transition_invalid",
             "finalization_evidence_rejected",
             "lazy_output_invalid",
@@ -1210,11 +1217,62 @@ export function migratePlanExecutionStateV20(run) {
   return Object.freeze({ ...run.pipelineState });
 }
 
+export function migratePlanExecutionStateV21(run) {
+  const current = run.pipelineState;
+  const terminal = ["DONE", "FAILED", "CANCELED"].includes(
+    current.workflowState,
+  );
+  const consumedCommit = current.pendingCommit?.status === "consumed";
+  if (terminal || consumedCommit || !current.preflightComplete) {
+    return Object.freeze({
+      ...current,
+      finalizationGuidance: null,
+      planContextVersion: 0,
+    });
+  }
+  const resumeState = run.pause?.resumeState;
+  const checkpoint =
+    current.workflowState === "WAITING_FOR_USER" &&
+    WORKFLOW_STATES.includes(resumeState)
+      ? resumeState
+      : current.workflowState;
+  const unfinishedBootstrap =
+    current.resolvedSummary === null &&
+    (checkpoint === "BOOTSTRAP" ||
+      current.workerSummary !== null ||
+      current.reviewerSummary !== null);
+  if (unfinishedBootstrap) {
+    return Object.freeze({
+      ...current,
+      finalizationGuidance: null,
+      planContextVersion: 0,
+      workerSummary: null,
+      reviewerSummary: null,
+      workerValidation: null,
+      reviewerValidation: null,
+      bootstrapDisagreement: null,
+      bootstrapArbitrationUsed: false,
+    });
+  }
+  if (current.resolvedSummary === null) {
+    return Object.freeze({
+      ...current,
+      finalizationGuidance: null,
+      planContextVersion: 0,
+    });
+  }
+  return Object.freeze({
+    ...current,
+    finalizationGuidance: null,
+    planContextVersion: 0,
+  });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
   classifyStopCheckpoint,
   resolveStopBoundary,
-  stateVersion: 21,
+  stateVersion: 22,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1236,6 +1294,7 @@ export const planExecutionPipeline = Object.freeze({
     18: migratePlanExecutionStateV18,
     19: migratePlanExecutionStateV19,
     20: migratePlanExecutionStateV20,
+    21: migratePlanExecutionStateV21,
   }),
   roles: ROLES,
   resolveActiveRoles,

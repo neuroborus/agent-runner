@@ -144,6 +144,7 @@ test("expanded execution inventories retain structured-output and per-item byte 
 
 test("version-15 capacity migration preserves legacy 64/128 inventories and completed effects", async (t) => {
   const worker = inventory(64, "worker");
+  worker.validationInfrastructure[0] = ".agents/skills/finalization/SKILL.md";
   const reviewer = inventory(64, "reviewer");
   const merged = {
     requiredChecks: [...worker.requiredChecks, ...reviewer.requiredChecks].map(

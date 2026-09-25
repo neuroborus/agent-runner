@@ -34,6 +34,7 @@ import {
   migratePlanExecutionStateV13,
   migratePlanExecutionStateV14,
   migratePlanExecutionStateV15,
+  migratePlanExecutionStateV21,
   planExecutionPipeline,
   runPlanExecution,
 } from "../../src/index.js";
@@ -96,7 +97,10 @@ const SETTINGS = Object.freeze({
 const REQUIRED_CHECKS = Object.freeze([
   Object.freeze({ id: "C1", command: "npm test" }),
 ]);
-const VALIDATION_INFRASTRUCTURE = Object.freeze(["package.json"]);
+const VALIDATION_INFRASTRUCTURE = Object.freeze([
+  "package.json",
+  ".agents/skills/finalization/SKILL.md",
+]);
 const WRAPPED_BOOTSTRAP_SCHEMAS = new Set([
   BOOTSTRAP_SCHEMA,
   BOOTSTRAP_RECONCILIATION_SCHEMA,
@@ -124,6 +128,7 @@ function versionOneState(state) {
   for (const field of [
     "workerValidation",
     "reviewerValidation",
+    "finalizationGuidance",
     "requiredChecks",
     "validationInfrastructure",
     "validationInfrastructureFingerprint",
@@ -246,12 +251,17 @@ function migrateVersionOneState(state) {
   const versionThirteen = migratePlanExecutionStateV12({
     pipelineState: versionTwelve,
   });
-  return migratePlanExecutionStateV15({
-    pipelineState: migratePlanExecutionStateV14({
-      pipelineState: migratePlanExecutionStateV13({
-        pipelineState: versionThirteen,
-      }),
-    }),
+  const versionFourteen = migratePlanExecutionStateV13({
+    pipelineState: versionThirteen,
+  });
+  const versionFifteen = migratePlanExecutionStateV14({
+    pipelineState: versionFourteen,
+  });
+  const versionSixteen = migratePlanExecutionStateV15({
+    pipelineState: versionFifteen,
+  });
+  return migratePlanExecutionStateV21({
+    pipelineState: versionSixteen,
   });
 }
 
@@ -1631,7 +1641,7 @@ async function createFixture(
     revision: 1,
     runId,
     pipelineId: "plan-execution",
-    pipelineStateVersion: 21,
+    pipelineStateVersion: 22,
     projectPath,
     taskPath,
     roles: Object.fromEntries(
@@ -2042,7 +2052,7 @@ async function createFixture(
   ) {
     currentRun = {
       ...currentRun,
-      pipelineStateVersion: 21,
+      pipelineStateVersion: 22,
       pipelineState,
       pause,
       revision: currentRun.revision + 1,

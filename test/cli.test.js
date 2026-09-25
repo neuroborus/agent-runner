@@ -1012,6 +1012,19 @@ test("status renders input and fresh-run pause actions", async () => {
     },
     {
       pause: {
+        reason: "finalization_skill_invalid",
+        code: "ERR_FINALIZATION_GUIDANCE_CHANGED",
+        explanation:
+          "The frozen finalization guidance changed. Start a new run.",
+        evidence: ["The selected repository skill no longer matches."],
+      },
+      state: {},
+      expected:
+        /Repair the reported finalization guidance and start a fresh plan-execution run\./u,
+      alsoExpected: /The frozen finalization guidance changed/u,
+    },
+    {
+      pause: {
         reason: "no_progress",
         resumeState: "RESOLVE_FINDINGS",
         evidence: ["PRIVATE_PAUSE_EVIDENCE"],

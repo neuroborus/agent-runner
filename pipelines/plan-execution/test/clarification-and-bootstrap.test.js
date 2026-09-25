@@ -300,7 +300,8 @@ test("accepts the advertised maximum bootstrap inventory", async (t) => {
   assert.equal(implementationStarted, true);
 });
 
-test("persists and finalizes a disjoint maximum role-derived inventory", async (t) => {
+test("reserves guidance capacity in a disjoint maximum inventory", async (t) => {
+  const skillPath = ".agents/skills/finalization/SKILL.md";
   const roleInventory = (role) => ({
     requiredChecks: Array.from({ length: MAX_BOOTSTRAP_ITEMS }, (_, index) => ({
       id: `C${index + 1}`,
@@ -313,24 +314,40 @@ test("persists and finalizes a disjoint maximum role-derived inventory", async (
   });
   const workerInventory = roleInventory("worker");
   const reviewerInventory = roleInventory("reviewer");
+  const correctedReviewerInventory = {
+    ...reviewerInventory,
+    validationInfrastructure: [
+      skillPath,
+      ...reviewerInventory.validationInfrastructure.slice(1),
+    ],
+  };
   const derivedCommands = [
     ...workerInventory.requiredChecks,
     ...reviewerInventory.requiredChecks,
   ].map(({ command }, index) => ({ id: `C${index + 1}`, command }));
   const derivedPaths = [
     ...workerInventory.validationInfrastructure,
-    ...reviewerInventory.validationInfrastructure,
+    ...correctedReviewerInventory.validationInfrastructure,
   ];
   const fixture = await createFixture(t, {
     async prepareProject(projectPath) {
       await mkdir(join(projectPath, "validation"));
       await Promise.all(
-        derivedPaths.map((path) =>
-          writeFile(join(projectPath, path), `// ${path}\n`),
-        ),
+        [
+          ...new Set([
+            ...derivedPaths,
+            ...reviewerInventory.validationInfrastructure,
+          ]),
+        ].map((path) => writeFile(join(projectPath, path), `// ${path}\n`)),
       );
     },
-    reviewer: [{ ...bootstrapReady("Reviewer"), ...reviewerInventory }],
+    reviewer: [
+      { ...bootstrapReady("Reviewer"), ...reviewerInventory },
+      {
+        ...bootstrapReady("Corrected Reviewer"),
+        ...correctedReviewerInventory,
+      },
+    ],
     worker: [
       clarificationReady(),
       { ...bootstrapReady("Worker"), ...workerInventory },
@@ -370,6 +387,15 @@ test("persists and finalizes a disjoint maximum role-derived inventory", async (
     MAX_VALIDATION_ITEMS,
   );
   assert.equal(state.finalizationResult.checks.length, MAX_VALIDATION_ITEMS);
+  assert.deepEqual(state.bootstrapCorrections, [
+    bootstrapCorrection({
+      role: "reviewer",
+      phase: "bootstrap",
+      contract: "bootstrap",
+      field: "validationInfrastructure",
+      constraint: "includes-frozen-finalization-guidance",
+    }),
+  ]);
   for (const field of ["requiredChecks", "validationInfrastructure"]) {
     const extra =
       field === "requiredChecks"
@@ -472,6 +498,7 @@ test("derives one stable complete inventory from independent role evidence", asy
     "package.json",
     workerPath,
     reviewerPath,
+    ".agents/skills/finalization/SKILL.md",
   ]);
 });
 
@@ -757,10 +784,7 @@ test("gives the independent Reviewer one bounded bootstrap correction", async (t
 test("corrects a symlink alias and preserves the canonical role-only path", async (t) => {
   const aliasPath = ".claude/skills/finalization/SKILL.md";
   const canonicalPath = ".agents/skills/finalization/SKILL.md";
-  const validationInfrastructure = [
-    canonicalPath,
-    ...VALIDATION_INFRASTRUCTURE,
-  ];
+  const validationInfrastructure = [canonicalPath, "package.json"];
   const fixture = await createFixture(t, {
     async prepareProject(projectPath) {
       await symlink(".agents", join(projectPath, ".claude"));

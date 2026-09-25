@@ -6,6 +6,7 @@ import test from "node:test";
 import { normalizeAdapterFailure } from "../../../src/agents/index.js";
 import {
   migratePlanExecutionStateV5,
+  migratePlanExecutionStateV21,
   planExecutionPipeline,
 } from "../src/index.js";
 import {
@@ -487,12 +488,19 @@ test("verifies a consumed version-5 authorization before validation migration", 
   });
   const paused = await fixture.run({ trustedChecks: ["service-check"] });
   const roleCallCount = Object.values(fixture.calls).flat().length;
-  const migrated = migratePlanExecutionStateV5({
+  const migratedV5 = migratePlanExecutionStateV5({
     pipelineState: paused.pipelineState,
     pause: paused.pause,
   });
+  const legacyV21 = { ...migratedV5 };
+  delete legacyV21.finalizationGuidance;
+  const migrated = migratePlanExecutionStateV21({
+    pipelineState: legacyV21,
+  });
   assert.equal(migrated.pendingCommit.status, "consumed");
   assert.equal(migrated.validationMigrationPending, true);
+  assert.equal(migrated.finalizationGuidance, null);
+  assert.deepEqual(migrated.finalizationResult, migratedV5.finalizationResult);
   fixture.persistPipelineState(migrated, { pause: paused.pause });
 
   fixture.runtime.trustedValidation.preflight = async () => {
