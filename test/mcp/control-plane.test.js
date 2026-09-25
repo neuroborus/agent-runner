@@ -2638,7 +2638,13 @@ test("resumes only an action valid for the persisted pause", async (t) => {
     status: "WAITING_FOR_USER",
     pendingStop: null,
     stop: null,
-    execution: { state: "idle", role: null, phase: null },
+    execution: {
+      state: "idle",
+      leaseOwner: "none",
+      processRecord: "none",
+      role: null,
+      phase: null,
+    },
     currentStep: null,
     pause: {
       reason: "fix_limit_reached",
@@ -3259,6 +3265,10 @@ test("projects live and crashed provider activity through status and wait", asyn
     stateRoot: paths.stateRoot,
     processId: ownerProcessId,
     processIsAlive: (pid) => pid === ownerProcessId && ownerIsAlive,
+    processIdentity: (pid) => ({
+      bootId: "11111111-1111-4111-8111-111111111111",
+      startTicks: String(pid),
+    }),
   });
   await createStoredRun(store, paths);
   const lease = await store.acquireRunLease(RUN_ID);
@@ -3271,6 +3281,13 @@ test("projects live and crashed provider activity through status and wait", asyn
       message: "planner clarify turn started.",
     },
   });
+  await store.recordExecutionProcess(lease, 4242, {
+    processIdentity: {
+      bootId: "11111111-1111-4111-8111-111111111111",
+      startTicks: "4242",
+    },
+    namespaceId: "pid:[4026533000]",
+  });
   const control = createMcpControlPlane({
     runner: storedRunner(store, paths),
     runStore: store,
@@ -3278,6 +3295,8 @@ test("projects live and crashed provider activity through status and wait", asyn
 
   assert.deepEqual((await control.runStatus({ runId: RUN_ID })).execution, {
     state: "running",
+    leaseOwner: "live",
+    processRecord: "persisted",
     role: "planner",
     phase: "clarify",
   });
@@ -3290,6 +3309,8 @@ test("projects live and crashed provider activity through status and wait", asyn
   assert.equal(waiting.timedOut, true);
   assert.deepEqual(waiting.execution, {
     state: "running",
+    leaseOwner: "live",
+    processRecord: "persisted",
     role: "planner",
     phase: "clarify",
   });
@@ -3310,10 +3331,13 @@ test("projects live and crashed provider activity through status and wait", asyn
   assert.equal(interruptedWait.timedOut, true);
   assert.deepEqual(interruptedWait.execution, {
     state: "interrupted",
+    leaseOwner: "dead",
+    processRecord: "persisted",
     role: "planner",
     phase: "clarify",
   });
 
+  await store.recordExecutionProcess(lease, null);
   await lease.release();
   ownerIsAlive = true;
   const resumedLease = await store.acquireRunLease(RUN_ID);
@@ -3322,6 +3346,8 @@ test("projects live and crashed provider activity through status and wait", asyn
   await resumedLease.release();
   assert.deepEqual((await control.runStatus({ runId: RUN_ID })).execution, {
     state: "idle",
+    leaseOwner: "none",
+    processRecord: "none",
     role: null,
     phase: null,
   });

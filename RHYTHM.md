@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-09-25
+
+- **Execution-owner recovery separates lease, recovery, and process facts.** A
+  current owner now performs bounded supervisor teardown through its private
+  control boundary, while replacement-lease recovery proves the persisted
+  process and descendants absent before clearing the record. Same-run stop
+  reconciliation reuses a held worktree lease instead of reacquiring it, so a
+  containment failure remains primary and the reservation survives for retry.
+  PID replacement, namespace uncertainty, unverifiable owners, and surviving
+  descendants still fail closed. MCP status distinguishes lease-owner state
+  from a persisted process record without exposing either identity.
+
 ## 2026-09-24
 
 - **Ownerless stops are supervised through durable settlement.** Detached stop

@@ -317,7 +317,10 @@ deadline ends only the client wait and never stops the detached run.
 
 A timeout, wait cancellation, or MCP disconnect ends only that wait. Detached
 work continues. Inspect the returned execution state to distinguish a live
-owner, an interrupted turn, and idle work. An ownerless interrupted turn may
+owner, an interrupted turn, and idle work. `execution.leaseOwner` reports the
+finite live/dead/replaced/unverifiable classification and
+`execution.processRecord` says whether durable process ownership remains; they
+do not expose process identity. An ownerless interrupted turn may
 accept action-free resume at the exact revision; it is not permission to start
 a second owner. An ownerless `applicable` stop may likewise use
 `agent-run resume --run <run-id>`, or MCP `run_resume` with `action: null`, the
@@ -396,6 +399,11 @@ after roughly five seconds. These protocol and ownership limits are not
 substitutes for configurable workflow budgets or the per-command
 trusted-validation timeout; repair the reported availability or ownership
 condition and use the run's offered action.
+Same-run recovery reclaims leases through this protocol, proves the persisted
+process and descendants absent, and then resumes stop settlement. A replaced,
+live, unverifiable, or descendant-bearing process remains blocked. Do not kill
+the recorded PID or remove its lease files manually; PID identity may have been
+reused, and supported recovery deliberately preserves that distinction.
 
 Execution also requires plan revision when initial implementation leaves a step's
 content unchanged, or legacy state lacks trustworthy original step-start evidence.

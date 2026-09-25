@@ -459,7 +459,7 @@ test(
 );
 
 test(
-  "bounds persistent incomplete inspection and retains registration",
+  "bounds persistent incomplete inspection and retires an empty supervisor",
   { timeout: 5_000 },
   async (t) => {
     const registrations = [];
@@ -471,6 +471,9 @@ test(
         descendantGraceMs: 50,
         env: await inspectionSequenceEnvironment(t, ["incomplete"]),
         onProcess: async (pid, proof) => {
+          if (pid === null) {
+            await new Promise((resolve) => setTimeout(resolve, 125));
+          }
           registrations.push(pid);
           if (pid !== null) registeredIdentity = proof.processIdentity;
         },
@@ -499,9 +502,101 @@ test(
     const elapsed = Date.now() - startedAt;
     assert.ok(elapsed >= 40, `inspection failed after only ${elapsed}ms`);
     assert.ok(elapsed < 1_000, `inspection remained pending for ${elapsed}ms`);
+    assert.deepEqual(registrations, [child.ownedPid, null]);
+    assert.equal(child.ownedContainmentRetained, true);
+    assert.throws(() => process.kill(child.pid, 0), { code: "ESRCH" });
+  },
+);
+
+test(
+  "retires a retained supervisor when parent descendant inspection is unavailable",
+  { timeout: 5_000 },
+  async (t) => {
+    const registrations = [];
+    let registeredIdentity;
+    const child = spawnOwnedProcess(
+      process.execPath,
+      ["-e", "process.exit(0)"],
+      {
+        descendantGraceMs: 50,
+        env: await inspectionSequenceEnvironment(t, ["incomplete"]),
+        inspectSessionProcesses: () => null,
+        onProcess: async (pid, proof) => {
+          registrations.push(pid);
+          if (pid !== null) registeredIdentity = proof.processIdentity;
+        },
+        ownershipMode: "native-sandbox-provider",
+        resolveLauncher: hostSessionLauncher,
+        stdio: "ignore",
+      },
+    );
+    t.after(async () => {
+      const currentIdentity = await readProcessIdentity(child.pid);
+      if (
+        registeredIdentity !== undefined &&
+        currentIdentity?.bootId === registeredIdentity.bootId &&
+        currentIdentity.startTicks === registeredIdentity.startTicks
+      ) {
+        try {
+          process.kill(child.pid, "SIGKILL");
+        } catch {}
+      }
+    });
+
+    await assert.rejects(child.ownedCompletion, {
+      code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    });
     assert.deepEqual(registrations, [child.ownedPid]);
     assert.equal(child.ownedContainmentRetained, true);
-    assert.doesNotThrow(() => process.kill(child.pid, 0));
+    assert.throws(() => process.kill(child.pid, 0), { code: "ESRCH" });
+  },
+);
+
+test(
+  "rechecks descendant absence after a transient parent inspection failure",
+  { timeout: 5_000 },
+  async (t) => {
+    const registrations = [];
+    let inspections = 0;
+    let registeredIdentity;
+    const child = spawnOwnedProcess(
+      process.execPath,
+      ["-e", "process.exit(0)"],
+      {
+        descendantGraceMs: 50,
+        env: await inspectionSequenceEnvironment(t, ["incomplete"]),
+        inspectSessionProcesses() {
+          inspections += 1;
+          return inspections === 1 ? null : [];
+        },
+        onProcess: async (pid, proof) => {
+          registrations.push(pid);
+          if (pid !== null) registeredIdentity = proof.processIdentity;
+        },
+        ownershipMode: "native-sandbox-provider",
+        resolveLauncher: hostSessionLauncher,
+        stdio: "ignore",
+      },
+    );
+    t.after(async () => {
+      const currentIdentity = await readProcessIdentity(child.pid);
+      if (
+        registeredIdentity !== undefined &&
+        currentIdentity?.bootId === registeredIdentity.bootId &&
+        currentIdentity.startTicks === registeredIdentity.startTicks
+      ) {
+        try {
+          process.kill(child.pid, "SIGKILL");
+        } catch {}
+      }
+    });
+
+    await assert.rejects(child.ownedCompletion, {
+      code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    });
+    assert.equal(inspections, 2);
+    assert.deepEqual(registrations, [child.ownedPid, null]);
+    assert.throws(() => process.kill(child.pid, 0), { code: "ESRCH" });
   },
 );
 
@@ -590,7 +685,7 @@ try {
       await readFile(failurePath, "utf8"),
       "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
     );
-    assert.doesNotThrow(() => process.kill(registration.pid, 0));
+    assert.throws(() => process.kill(registration.pid, 0), { code: "ESRCH" });
   },
 );
 
@@ -736,13 +831,8 @@ test(
   },
 );
 
-test("recovery clears proven-dead owners without signaling reused PIDs", async () => {
-  for (const owner of [
-    null,
-    { status: "dead", previousBoot: false },
-    { status: "replaced", previousBoot: false },
-    { status: "unverifiable", previousBoot: true },
-  ]) {
+test("recovery clears absent and previous-boot owners", async () => {
+  for (const owner of [null, { status: "unverifiable", previousBoot: true }]) {
     let inspections = 0;
     await terminateOwnedProcess(987_654, async () => {
       inspections += 1;
@@ -750,6 +840,28 @@ test("recovery clears proven-dead owners without signaling reused PIDs", async (
     });
     assert.equal(inspections, 1);
   }
+});
+
+test("recovery clears a dead session only after proving descendants absent", async () => {
+  const ownerPid = 987_654;
+  const processIdentity = { bootId: "boot-a", startTicks: "1234" };
+  await terminateOwnedProcess(
+    ownerPid,
+    async () => ({
+      namespaceId: readlinkSync("/proc/self/ns/pid"),
+      pid: ownerPid,
+      previousBoot: false,
+      processIdentity,
+      status: "dead",
+    }),
+    {
+      inspectSessionProcesses(sessionId, _token, options) {
+        assert.equal(sessionId, ownerPid);
+        assert.deepEqual(options, { includeSession: true });
+        return [];
+      },
+    },
+  );
 });
 
 test("recovery retains a dead session owner while descendants remain", async () => {
@@ -795,6 +907,23 @@ test("recovery retains exclusion for live or unverifiable owners", async () => {
         previousBoot: false,
       })),
       { code },
+    );
+  }
+});
+
+test("recovery rejects replaced and incompletely recorded owners", async () => {
+  for (const owner of [
+    { status: "replaced", previousBoot: false },
+    {
+      namespaceId: null,
+      processIdentity: null,
+      status: "dead",
+      previousBoot: false,
+    },
+  ]) {
+    await assert.rejects(
+      terminateOwnedProcess(987_654, async () => owner),
+      { code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE" },
     );
   }
 });

@@ -328,20 +328,23 @@ function shortFingerprint(value) {
   return typeof value === "string" ? value.slice(0, 12) : null;
 }
 
-function executionProjection(run, leaseOwnerIsLive) {
-  const state = leaseOwnerIsLive
+function executionProjection(run, leaseOwner) {
+  const leaseOwnerStatus = leaseOwner?.status ?? "none";
+  const state = ["live", "unverifiable"].includes(leaseOwnerStatus)
     ? "running"
-    : run.activeTurn === null
+    : run.activeTurn === null && run.executionProcess === null
       ? "idle"
       : "interrupted";
   return {
     state,
+    leaseOwner: leaseOwnerStatus,
+    processRecord: run.executionProcess === null ? "none" : "persisted",
     role: run.activeTurn?.role ?? null,
     phase: run.activeTurn?.phase ?? null,
   };
 }
 
-function statusProjection({ directoryPath, run }, leaseOwnerIsLive) {
+function statusProjection({ directoryPath, run }, leaseOwner) {
   const pipeline = getPipeline(run.pipelineId);
   const status = pipeline.projections.status(run);
   const clarification = pipeline.projections.clarification(run);
@@ -364,7 +367,7 @@ function statusProjection({ directoryPath, run }, leaseOwnerIsLive) {
             targetStep: run.stopRequest.targetBoundary?.step ?? null,
           }
         : null,
-    execution: executionProjection(run, leaseOwnerIsLive),
+    execution: executionProjection(run, leaseOwner),
     currentStep: status.currentStep,
     pause,
     clarificationPath: clarification.path,
@@ -539,10 +542,8 @@ export function createMcpControlPlane(options = {}) {
     });
 
   async function projectStatus(current) {
-    const leaseOwnerIsLive = await runStore.runLeaseOwnerIsLive(
-      current.run.runId,
-    );
-    return statusProjection(current, leaseOwnerIsLive);
+    const leaseOwner = await runStore.inspectRunLeaseOwner(current.run.runId);
+    return statusProjection(current, leaseOwner);
   }
 
   async function beginAction(input, signal) {

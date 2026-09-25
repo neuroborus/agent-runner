@@ -95,6 +95,11 @@ unverifiable owners remain conservative exclusion barriers. An acceptance
 receipt may be recovered or replayed after later transitions without executing
 work or changing a terminal outcome. The state protocol itself performs no
 process signalling or repository effect.
+The live execution lease, durable same-run recovery responsibility, and
+persisted execution process are never treated as interchangeable proof. A held
+worktree lease is reused during stop settlement; it is not recursively
+reacquired, and a failed retirement keeps that same-run reservation without
+masking the containment result.
 
 Plan execution may omit canonical-worktree acquisition only when its descriptor
 proves that an applicable immediate stop belongs to the unchanged initial
@@ -166,16 +171,17 @@ Live shutdown signals only through the owned child handle/control channel;
 recovery verifies parent-death teardown without signalling host PIDs.
 For session ownership, the persisted PID/boot/start proof reconstructs the
 token used to detect survivors after supervisor loss without signalling them.
-Unverifiable ownership or surviving descendants retains exclusion.
+PID replacement, unverifiable ownership, or surviving descendants retains
+exclusion. A PID disappearing between the live and identity observations is
+rechecked before it can be classified dead.
 Transiently incomplete completion inspection is retried only within one
 non-resetting one-second descendant-grace deadline. This cleanup grace verifies
 containment after work has ended; it is a fixed safety invariant, not a
-configurable user-work timeout. Persistent uncertainty keeps the same
-fail-closed error and durable exclusion, but the parent unreferences the
-detached supervisor and its IPC channel after the failure is reported. It does
-not disconnect containment, signal an unverified process, or clear ownership;
-the run owner can close protocol resources and exit while later recovery keeps
-using the durable proof.
+configurable user-work timeout. Persistent uncertainty keeps the original
+fail-closed error while the current owner makes one bounded teardown through
+its private child handle and control channel. It clears registration only after
+an empty owned session is proved. Otherwise the parent leaves durable ownership
+for replacement-lease recovery and never signals from the persisted PID alone.
 Codex observes owned-process failure independently of App Server protocol
 completion. A retained containment boundary may keep protocol pipes open, but
 the ownership failure still triggers bounded adapter cleanup and propagates as

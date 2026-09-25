@@ -896,6 +896,143 @@ test("operator stops abort active read-only turns and preserve their checkpoints
   }
 });
 
+test("pre-work retry releases the worktree lease held at reconciliation", async (t) => {
+  const fixture = await operatorFixture(t, "plan-execution");
+  const store = createRunStore({
+    stateRoot: fixture.stateRoot,
+    resolveStopBoundary,
+  });
+  const reconciliationFailure = Object.assign(
+    new Error("Simulated interrupted pre-work reconciliation"),
+    { code: "ERR_TEST_RECONCILIATION_INTERRUPTED" },
+  );
+  let reconciliationFailures = 0;
+  let runId;
+  let worktreeAcquisitions = 0;
+  const runner = createRunner({
+    adapters: {
+      codex: {
+        ...createExecutionAdapter(),
+        run: () => assert.fail("Pre-work settlement must not invoke an agent."),
+      },
+    },
+    clarifications: createClarificationService({ interactive: false }),
+    git: createGitService(),
+    loadConfiguration: configurationLoader(),
+    runStore: {
+      ...store,
+      async acquireWorktreeLease(...argumentsList) {
+        worktreeAcquisitions += 1;
+        return store.acquireWorktreeLease(...argumentsList);
+      },
+      async recordStopActivity(lease, activity) {
+        if (activity.kind === "reconciling" && reconciliationFailures < 1) {
+          reconciliationFailures += 1;
+          throw reconciliationFailure;
+        }
+        return store.recordStopActivity(lease, activity);
+      },
+    },
+    async onActivity(activity) {
+      if (activity.kind !== "created") return;
+      runId = activity.runId;
+      await store.requestOperatorStop({
+        runId,
+        kind: "pause_requested",
+        expectedRevision: activity.revision,
+        idempotencyKey: "pre-work-retry-stop",
+      });
+    },
+  });
+
+  await assert.rejects(
+    runner.run({
+      pipelineId: "plan-execution",
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+      proactiveClarification: false,
+      roleOverrides: {},
+      sourceSession: null,
+    }),
+    (cause) => cause === reconciliationFailure,
+  );
+  const stopped = await store.loadRun(runId);
+  assert.deepEqual(
+    {
+      pause: stopped.pause?.reason ?? null,
+      reconciliationFailures,
+      reconciledRevision: stopped.stopRequest.reconciledRevision,
+      revision: stopped.revision,
+      runLeased: await store.runIsLeased(runId),
+      worktreeAcquisitions,
+      worktreeLeased: await store.worktreeIsLeased(fixture.projectPath, runId),
+    },
+    {
+      pause: "operator_paused",
+      reconciliationFailures: 1,
+      reconciledRevision: stopped.revision,
+      revision: stopped.revision,
+      runLeased: false,
+      worktreeAcquisitions: 1,
+      worktreeLeased: false,
+    },
+  );
+});
+
+test("release-time stop settlement releases its worktree lease after publication failure", async (t) => {
+  const fixture = await operatorFixture(t, "plan-execution");
+  const store = createRunStore({
+    stateRoot: fixture.stateRoot,
+    resolveStopBoundary,
+  });
+  const publicationFailure = new Error(
+    "Simulated reconciled activity publication failure",
+  );
+  let runId;
+  const runner = createRunner({
+    adapters: {
+      codex: {
+        ...createExecutionAdapter(),
+        run: () => assert.fail("Pre-work settlement must not invoke an agent."),
+      },
+    },
+    clarifications: createClarificationService({ interactive: false }),
+    git: createGitService(),
+    loadConfiguration: configurationLoader(),
+    runStore: store,
+    async onActivity(activity) {
+      if (activity.kind === "created") {
+        runId = activity.runId;
+        await store.requestOperatorStop({
+          runId,
+          kind: "pause_requested",
+          expectedRevision: activity.revision,
+          idempotencyKey: "publication-failure-stop",
+        });
+      } else if (activity.kind === "reconciled") {
+        throw publicationFailure;
+      }
+    },
+  });
+
+  await assert.rejects(
+    runner.run({
+      pipelineId: "plan-execution",
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+      proactiveClarification: false,
+      roleOverrides: {},
+      sourceSession: null,
+    }),
+    (cause) => cause === publicationFailure,
+  );
+  const settled = await store.loadRun(runId);
+  assert.equal(settled.pause.reason, "operator_paused");
+  assert.equal(settled.stopRequest.reconciledRevision, settled.revision);
+  assert.equal(await store.runIsLeased(runId), false);
+  assert.equal(await store.worktreeIsLeased(fixture.projectPath, runId), false);
+});
+
 test("operator pause resume restores active state only after worktree ownership", async (t) => {
   const fixture = await operatorFixture(t, "plan-execution");
   const store = createRunStore({ stateRoot: fixture.stateRoot });
@@ -1791,6 +1928,299 @@ test("operator stop after host loss reclaims ownership and reconciles before fur
         );
       });
   }
+});
+
+test("stop recovery preserves containment failure without reacquiring its held worktree lease", async (t) => {
+  const fixture = await operatorFixture(t, "plan-execution");
+  const bootA = "11111111-1111-4111-8111-111111111111";
+  const bootB = "22222222-2222-4222-8222-222222222222";
+  let originalOwnerAlive = true;
+  const options = {
+    stateRoot: fixture.stateRoot,
+    resolveStopBoundary,
+    hostName: "recovery-host",
+    processId: 100,
+    processIsAlive: (pid) => (pid === 100 ? originalOwnerAlive : pid === 4242),
+    processIdentity: (pid) => ({ bootId: bootA, startTicks: String(pid) }),
+    leaseStaleMs: 0,
+  };
+  const store = createRunStore(options);
+  const delegate = createExecutionAdapter();
+  let runId;
+  let worktreeAcquisitions = 0;
+  const runner = runnerFor(
+    fixture,
+    {
+      codex: {
+        ...delegate,
+        async run(request) {
+          if (!request.prompt.includes("Implement the changes described")) {
+            return delegate.run(request);
+          }
+          const registered = await request.onProcess(4242, {
+            processIdentity: { bootId: bootA, startTicks: "4242" },
+            namespaceId: "pid:[4026533000]",
+          });
+          await store.requestOperatorStop({
+            runId,
+            kind: "pause_requested",
+            expectedRevision: registered.revision,
+            idempotencyKey: "containment-stop",
+            timing: "immediate",
+          });
+          throw new Error("Simulated provider interruption");
+        },
+      },
+    },
+    {
+      runStore: {
+        ...store,
+        async acquireWorktreeLease(...argumentsList) {
+          worktreeAcquisitions += 1;
+          return store.acquireWorktreeLease(...argumentsList);
+        },
+      },
+    },
+  );
+  runId = (
+    await runner.create({
+      pipelineId: "plan-execution",
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+      proactiveClarification: false,
+      roleOverrides: {},
+      sourceSession: null,
+    })
+  ).run.runId;
+
+  await assert.rejects(runner.resume({ runId, action: null }), {
+    code: "ERR_EXECUTION_PROCESS_ACTIVE",
+  });
+  assert.equal(worktreeAcquisitions, 1);
+  assert.equal(
+    await store.worktreeLeaseOwner(fixture.projectPath, runId),
+    runId,
+  );
+  assert.equal((await store.loadRun(runId)).executionProcess.pid, 4242);
+
+  originalOwnerAlive = false;
+  const recoveredStore = createRunStore({
+    ...options,
+    processId: 200,
+    processIsAlive: (pid) => pid === 200,
+    processIdentity: (pid) => ({ bootId: bootB, startTicks: String(pid) }),
+  });
+  const recovered = runnerFor(
+    fixture,
+    {
+      codex: {
+        ...delegate,
+        run: () => assert.fail("Recovery must not invoke a provider."),
+      },
+    },
+    { runStore: recoveredStore },
+  );
+  const paused = (await recovered.resume({ runId, action: null })).run;
+  assert.equal(paused.pause.reason, "operator_paused");
+  assert.equal(paused.executionProcess, null);
+  assert.equal(paused.stopRequest.reconciledRevision, paused.revision);
+  assert.equal(await recoveredStore.runIsLeased(runId), false);
+  assert.equal(
+    await recoveredStore.worktreeIsLeased(fixture.projectPath, runId),
+    false,
+  );
+});
+
+test("stop recovery retries settlement after process retirement was journaled", async (t) => {
+  const fixture = await operatorFixture(t, "plan-execution");
+  const bootA = "11111111-1111-4111-8111-111111111111";
+  const bootB = "22222222-2222-4222-8222-222222222222";
+  let originalOwnerAlive = true;
+  const options = {
+    stateRoot: fixture.stateRoot,
+    resolveStopBoundary,
+    hostName: "recovery-host",
+    processId: 100,
+    processIsAlive: (pid) => pid === 100 && originalOwnerAlive,
+    processIdentity: (pid) => ({ bootId: bootA, startTicks: String(pid) }),
+    leaseStaleMs: 0,
+  };
+  const store = createRunStore(options);
+  const delegate = createExecutionAdapter();
+  const prepared = await runnerFor(
+    fixture,
+    { codex: delegate },
+    { runStore: store },
+  ).create({
+    pipelineId: "plan-execution",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    sourceSession: null,
+  });
+  const runId = prepared.run.runId;
+  const originalLease = await store.acquireRunLease(runId);
+  let current = await store.recordExecutionProcess(originalLease, 4242, {
+    processIdentity: { bootId: bootA, startTicks: "4242" },
+    namespaceId: "pid:[4026533000]",
+  });
+  await store.requestOperatorStop({
+    runId,
+    kind: "pause_requested",
+    expectedRevision: current.revision,
+    idempotencyKey: "retirement-settlement-stop",
+    timing: "immediate",
+  });
+  await assert.rejects(originalLease.release(), {
+    code: "ERR_STOP_RECONCILIATION_REQUIRED",
+  });
+
+  originalOwnerAlive = false;
+  const interruptedStore = createRunStore({
+    ...options,
+    processId: 200,
+    processIsAlive: (pid) => pid === 200,
+    processIdentity: (pid) => ({ bootId: bootB, startTicks: String(pid) }),
+  });
+  const settlementCrash = Object.assign(
+    new Error("Simulated crash before stop settlement"),
+    { code: "ERR_TEST_SETTLEMENT_CRASH" },
+  );
+  const interruptedRunner = runnerFor(
+    fixture,
+    {
+      codex: {
+        ...delegate,
+        run: () => assert.fail("Recovery must not invoke a provider."),
+      },
+    },
+    {
+      runStore: {
+        ...interruptedStore,
+        settleCheckpoint: () => {
+          throw settlementCrash;
+        },
+      },
+    },
+  );
+  await assert.rejects(
+    interruptedRunner.resume({ runId, action: null }),
+    settlementCrash,
+  );
+  current = await interruptedStore.loadRun(runId);
+  assert.equal(current.executionProcess, null);
+  assert.equal(current.stopRequest.reconciledRevision, null);
+
+  const recoveredStore = createRunStore({
+    ...options,
+    processId: 300,
+    processIsAlive: (pid) => pid === 300,
+    processIdentity: (pid) => ({ bootId: bootB, startTicks: String(pid) }),
+  });
+  const recovered = runnerFor(
+    fixture,
+    {
+      codex: {
+        ...delegate,
+        run: () => assert.fail("Recovery must not invoke a provider."),
+      },
+    },
+    { runStore: recoveredStore },
+  );
+  const paused = (await recovered.resume({ runId, action: null })).run;
+  assert.equal(paused.pause.reason, "operator_paused");
+  assert.equal(paused.executionProcess, null);
+  assert.equal(paused.stopRequest.reconciledRevision, paused.revision);
+  assert.equal(await recoveredStore.runIsLeased(runId), false);
+  assert.equal(
+    await recoveredStore.worktreeIsLeased(fixture.projectPath, runId),
+    false,
+  );
+});
+
+test("settled stop releases its recovered worktree lease after publication failure", async (t) => {
+  const fixture = await operatorFixture(t, "plan-execution");
+  const bootA = "11111111-1111-4111-8111-111111111111";
+  const bootB = "22222222-2222-4222-8222-222222222222";
+  const options = {
+    stateRoot: fixture.stateRoot,
+    resolveStopBoundary,
+    hostName: "recovery-host",
+    processId: 100,
+    processIsAlive: (pid) => pid === 100,
+    processIdentity: (pid) => ({ bootId: bootA, startTicks: String(pid) }),
+    leaseStaleMs: 0,
+  };
+  const store = createRunStore(options);
+  const delegate = createExecutionAdapter();
+  const prepared = await runnerFor(
+    fixture,
+    { codex: delegate },
+    { runStore: store },
+  ).create({
+    pipelineId: "plan-execution",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    sourceSession: null,
+  });
+  const runId = prepared.run.runId;
+  const originalLease = await store.acquireRunLease(runId);
+  const registered = await store.recordExecutionProcess(originalLease, 4242, {
+    processIdentity: { bootId: bootA, startTicks: "4242" },
+    namespaceId: "pid:[4026533000]",
+  });
+  await store.requestOperatorStop({
+    runId,
+    kind: "pause_requested",
+    expectedRevision: registered.revision,
+    idempotencyKey: "publication-failure-stop",
+    timing: "immediate",
+  });
+  await assert.rejects(originalLease.release(), {
+    code: "ERR_STOP_RECONCILIATION_REQUIRED",
+  });
+
+  const recoveredStore = createRunStore({
+    ...options,
+    processId: 200,
+    processIsAlive: (pid) => pid === 200,
+    processIdentity: (pid) => ({ bootId: bootB, startTicks: String(pid) }),
+  });
+  const publicationFailure = new Error(
+    "Simulated reconciled activity publication failure",
+  );
+  const recovered = createRunner({
+    adapters: {
+      codex: {
+        ...delegate,
+        run: () => assert.fail("Recovery must not invoke a provider."),
+      },
+    },
+    clarifications: createClarificationService({ interactive: false }),
+    git: createGitService(),
+    loadConfiguration: configurationLoader(),
+    onActivity(activity) {
+      if (activity.kind === "reconciled") throw publicationFailure;
+    },
+    runStore: recoveredStore,
+  });
+
+  await assert.rejects(
+    recovered.resume({ runId, action: null }),
+    (cause) => cause === publicationFailure,
+  );
+  const settled = await recoveredStore.loadRun(runId);
+  assert.equal(settled.pause.reason, "operator_paused");
+  assert.equal(settled.executionProcess, null);
+  assert.equal(settled.stopRequest.reconciledRevision, settled.revision);
+  assert.equal(await recoveredStore.runIsLeased(runId), false);
+  assert.equal(
+    await recoveredStore.worktreeIsLeased(fixture.projectPath, runId),
+    false,
+  );
 });
 
 for (const recovery of ["resume", "cancel", "configuration pause"]) {

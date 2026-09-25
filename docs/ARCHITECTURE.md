@@ -763,14 +763,16 @@ a time. These intervals affect protocol responsiveness, do not bound or retry
 user work, and remain fixed correctness mechanics rather than configuration.
 
 MCP status and wait also project one bounded `execution` object. Its finite
-`state` is `running` while the per-run execution lease has a live owner,
-`interrupted` when persisted provider activity has lost its owner, and `idle`
-otherwise; nullable `role` and `phase` come only from the common run envelope.
-A read checks same-host process liveness immediately without changing the
-stale threshold used for exclusive acquisition; an owner on another host
-remains live because its process liveness cannot be established locally.
-A timeout therefore distinguishes a live detached continuation from an
-interrupted process without polling or a heartbeat.
+`leaseOwner` is `none`, `live`, `dead`, `replaced`, or `unverifiable`, while
+`processRecord` is `none` or `persisted`; neither field exposes process
+identity. `state` remains the conservative action summary: `running` while the
+lease owner is live or unverifiable, `interrupted` when a persisted active turn
+or process record has no exclusionary owner, and `idle` otherwise. Nullable
+`role` and `phase` come only from the common run envelope. A read checks
+same-host process liveness immediately without changing the stale threshold
+used for exclusive acquisition. A timeout therefore distinguishes live lease
+ownership, unresolved lease identity, and durable process ownership without
+polling or a heartbeat.
 `pipelines_list` projects descriptor-owned setting values, defaults, and
 recommendations. Status, wait, and activity project the persisted resolved mode
 without inactive role configuration or provider-private data. `run_activity`
@@ -1021,6 +1023,16 @@ uses the state-owned settlement and normal lease acquisition/reclamation rules.
 live/dead/replaced/unverifiable classification for runner use; unverifiable
 owners are not eligible signalling targets.
 
+The runner separately tracks an in-process canonical-worktree lease handle,
+durable same-run recovery responsibility, and the persisted execution-process
+record. Stop reconciliation reuses a handle it already owns and releases it
+only after durable settlement. If process retirement cannot be proved, the
+same-run reservation remains for retry and the containment error escapes
+unchanged; release recovery never reacquires that handle and cannot replace the
+failure with a self-conflict. After owner loss, normal age, process-identity,
+and competing-owner checks govern same-run stale reclamation before the same
+retirement and settlement path runs.
+
 Only the execution lease holder can call `completeOperatorStop`, after the
 runner has reconciled the interrupted access contract and any begun effects.
 That operation atomically records `WAITING_FOR_USER`/`operator_paused` or
@@ -1118,12 +1130,13 @@ Ordinary processes never receive the initial-host session fallback.
 Completion-time descendant inspection retries transiently incomplete evidence
 against one non-resetting one-second descendant-grace deadline. Complete
 evidence resumes the ordinary success or bounded TERM/KILL path; uncertainty at
-the deadline retains the existing fail-closed error and durable ownership
-exclusion. After reporting that persistent containment failure, the parent
-unreferences the already-detached supervisor handle and IPC channel without
-disconnecting it, signalling an unverified process, or clearing registration.
-Provider protocol resources may then close and the run owner may exit while the
-supervisor keeps containment available for deterministic recovery.
+the deadline retains the existing fail-closed error. While the current owner
+still holds the private child handle and control channel, it makes one bounded
+teardown attempt through that boundary and rechecks the owned session. An empty
+retained supervisor is retired and its durable process record is cleared before
+the original containment error is returned. If owned descendants survive or
+inspection remains incomplete, the process record and exclusion remain; the
+parent never signals a host PID from persisted identity alone.
 
 The runner service accepts revision-bound `requestOperatorStop` requests and
 monitors durable revisions while executing. An accepted request aborts only
@@ -1134,6 +1147,17 @@ process shutdown, read-only reconciliation, and the final stop event. Persisted
 process ownership also prevents a different run from reclaiming the worktree
 after owner loss, and prevents checkpoint advancement before process cleanup.
 CLI/MCP command registration remains transport-owned.
+
+After owner loss, the replacement execution lease inspects the recorded
+PID/boot/start and namespace evidence. A PID that vanishes between liveness and
+identity reads is checked again and classified dead only when that second read
+proves absence. Same-boot PID replacement, a live or unverifiable owner, an
+initial-host namespace hidden from the recovery process, incomplete descendant
+inspection, or surviving descendants all retain the record. A previous boot,
+a dead isolated namespace, or a dead same-namespace session with a complete
+empty descendant scan permits journaled clearing under the replacement lease.
+Crashes before clearing repeat retirement proof; crashes after clearing repeat
+resource and checkpoint settlement without signalling the former PID.
 
 Each pipeline has a reconciliation-only entry path with provider invocation,
 trusted commands, and artifact writes disabled. It rechecks frozen inputs and

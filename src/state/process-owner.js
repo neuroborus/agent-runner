@@ -24,7 +24,17 @@ export async function inspectProcessOwner(
   if (record.processIdentity === undefined || record.processIdentity === null)
     return "unverifiable";
   const current = validateProcessIdentity(await processIdentity(record.pid));
-  if (current === null) return "unverifiable";
+  if (current === null) {
+    // The process can exit between the liveness and identity reads. Recheck
+    // before treating an unavailable identity as a persistent uncertainty.
+    const remainsAlive = await processIsAlive(record.pid);
+    if (typeof remainsAlive !== "boolean") {
+      throw new RunStoreError("Process liveness check is invalid.", {
+        code: "ERR_INVALID_RUN_STORE_OPTIONS",
+      });
+    }
+    return remainsAlive ? "unverifiable" : "dead";
+  }
   return isDeepStrictEqual(record.processIdentity, current)
     ? "live"
     : "replaced";

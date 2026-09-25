@@ -130,6 +130,15 @@ rather than risking two writers. The smaller fixed publication and collision
 retry counts are correctness mechanics, not operator-configurable workflow
 budgets.
 
+Lease ownership, same-run recovery responsibility, and a persisted execution
+process are independent facts. A current owner reuses its existing worktree
+lease while stopping; after owner loss, the replacement execution owner may
+reclaim only the stale same-run lease and must prove the recorded process and
+all owned descendants absent before clearing the process record. Live,
+replaced, unverifiable, or descendant-bearing process evidence remains a
+blocking ownership condition. Retirement and stop settlement are separate
+journaled transitions so an interruption safely retries either boundary.
+
 ## Pauses, resume, and observability
 
 The runner service distinguishes an operator pause from cancellation. A pause
@@ -221,8 +230,10 @@ resumes an already pending attempt without charging another retry.
 Public activity records the actor, phase, event kind, and concise message. The
 active role and phase combine with lease ownership to distinguish running,
 interrupted, and idle work without polling a provider or depending on a
-heartbeat. An interrupted owner reconstructs work from durable state after
-revalidating inputs and the repository.
+heartbeat. MCP status and wait additionally report the finite lease-owner
+classification and whether a process record is persisted, without exposing a
+PID or process identity. An interrupted owner reconstructs work from durable
+state after revalidating inputs and the repository.
 
 Unexpected-issue reporting is an optional MCP-only operator action for behavior
 that contradicts the documented runner contract. Expected pauses, invalid

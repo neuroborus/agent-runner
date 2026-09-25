@@ -758,8 +758,14 @@ export function inspectOwnedSessionProcesses(
   }
 }
 
-function signalSession(sessionId, ownerToken, signal, baseline) {
-  const members = inspectOwnedSessionProcesses(sessionId, ownerToken, {
+function signalSession(
+  sessionId,
+  ownerToken,
+  signal,
+  baseline,
+  inspectSessionProcesses,
+) {
+  const members = inspectSessionProcesses(sessionId, ownerToken, {
     baseline,
   });
   if (members === null) {
@@ -943,6 +949,7 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
   const {
     captureBaseline = captureProcessBaseline,
     descendantGraceMs = DEFAULT_DESCENDANT_GRACE_MS,
+    inspectSessionProcesses = inspectOwnedSessionProcesses,
     onProcess,
     ownershipMode = "ordinary",
     resolveLauncher = resolveOwnedProcessLauncher,
@@ -952,6 +959,7 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
   } = options;
   if (
     typeof captureBaseline !== "function" ||
+    typeof inspectSessionProcesses !== "function" ||
     typeof onProcess !== "function" ||
     !OWNERSHIP_MODES.has(ownershipMode) ||
     typeof resolveLauncher !== "function" ||
@@ -993,6 +1001,8 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
   let terminationTimer;
   let terminationFailureTimer;
   let rejectCompletion;
+  let retainedContainmentFailure = null;
+  let closed = false;
   const killChild = child.kill.bind(child);
   let containmentFailure = null;
   let processBaseline = null;
@@ -1014,7 +1024,13 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
   const kill = (signal) => {
     if (!launcher.isolatedNamespace) {
       try {
-        signalSession(child.pid, ownerToken, signal, processBaseline);
+        signalSession(
+          child.pid,
+          ownerToken,
+          signal,
+          processBaseline,
+          inspectSessionProcesses,
+        );
       } catch (cause) {
         containmentFailure ??= cause;
         return false;
@@ -1042,20 +1058,27 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
       terminationTimer = setTimeout(() => {
         if (startRequested) kill("SIGKILL");
         else killLauncher("SIGKILL");
+        if (containmentFailure !== null && !launcher.isolatedNamespace) {
+          // The live ChildProcess handle identifies only this supervisor. A
+          // failed session scan must not leave that empty control process
+          // behind; descendant uncertainty remains protected by registration.
+          killLauncher("SIGKILL");
+        }
       }, descendantGraceMs);
       terminationTimer.unref();
       terminationFailureTimer = setTimeout(
         () => {
+          if (closed) return;
           rejectCompletion?.(
-            ownedError(
-              "Owned process namespace did not terminate within its bound.",
-              "ERR_EXECUTION_PROCESS_ACTIVE",
-            ),
+            retainedContainmentFailure ??
+              ownedError(
+                "Owned process namespace did not terminate within its bound.",
+                "ERR_EXECUTION_PROCESS_ACTIVE",
+              ),
           );
         },
         descendantGraceMs * 2 + 1,
       );
-      terminationFailureTimer.unref();
     }
     return true;
   };
@@ -1066,7 +1089,6 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
     let registration = null;
     let failure = null;
     let supervision = null;
-    let closed = false;
     let settled = false;
     const finish = async () => {
       if (settled || !closed) return;
@@ -1086,10 +1108,9 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
         registered &&
         supervision === null &&
         startRequested &&
-        terminationRequested &&
-        containmentFailure === null
+        terminationRequested
       ) {
-        const members = inspectOwnedSessionProcesses(child.pid, ownerToken, {
+        const members = inspectSessionProcesses(child.pid, ownerToken, {
           baseline: processBaseline,
         });
         if (members === null) {
@@ -1156,19 +1177,19 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
     child.on("message", async (message) => {
       if (message?.type === "containment-failure") {
         const unverifiable = message.code === "unverifiable";
+        retainedContainmentFailure ??= ownedError(
+          unverifiable
+            ? "Owned process descendants are unverifiable."
+            : "Owned process descendants did not terminate within their bound.",
+          unverifiable
+            ? "ERR_EXECUTION_PROCESS_UNVERIFIABLE"
+            : "ERR_EXECUTION_PROCESS_ACTIVE",
+        );
+        failure ??= retainedContainmentFailure;
+        if (!child.ownedContainmentRetained) child.kill("SIGKILL");
         child.ownedContainmentRetained = true;
         child.unref();
         child.channel?.unref?.();
-        rejectCompletion?.(
-          ownedError(
-            unverifiable
-              ? "Owned process descendants are unverifiable."
-              : "Owned process descendants did not terminate within their bound.",
-            unverifiable
-              ? "ERR_EXECUTION_PROCESS_UNVERIFIABLE"
-              : "ERR_EXECUTION_PROCESS_ACTIVE",
-          ),
-        );
         return;
       }
       if (message?.type === "outcome") {
@@ -1268,10 +1289,19 @@ export async function terminateOwnedProcess(
   }
   const owner = await inspect();
   if (owner === null || owner.previousBoot === true) return;
-  if (["dead", "replaced"].includes(owner.status)) {
-    if (owner.namespaceId === null) return;
+  if (owner.status === "replaced") {
+    throw ownedError(
+      "Owned execution process identity was replaced.",
+      "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    );
+  }
+  if (owner.status === "dead") {
     const namespaceId = await readProcessNamespace(process.pid);
-    if (namespaceId === null || owner.processIdentity === null) {
+    if (
+      namespaceId === null ||
+      owner.namespaceId === null ||
+      owner.processIdentity === null
+    ) {
       throw ownedError(
         "Owned execution process cannot be safely reconciled.",
         "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
@@ -1289,7 +1319,7 @@ export async function terminateOwnedProcess(
     const members = inspectSessionProcesses(
       owner.pid,
       ownedProcessToken(owner.pid, owner.processIdentity),
-      { includeSession: owner.status === "dead" },
+      { includeSession: true },
     );
     if (members === null) {
       throw ownedError(

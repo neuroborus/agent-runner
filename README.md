@@ -709,7 +709,10 @@ If CLI status shows `Stop state: applicable`,
 `agent-run resume --run <run-id>` is a safe action-free recovery attempt: lease
 enforcement rejects a live execution owner. MCP `run_status` identifies the
 ownerless case when `stop.state` is `applicable` and `execution.state` is not
-`running`; recover it through `run_resume` as described below. Neither path
+`running`; `execution.leaseOwner` distinguishes live, dead, replaced, and
+unverifiable lease evidence, while `execution.processRecord` reports retained
+durable process ownership without exposing its identity. Recover it through
+`run_resume` as described below. Neither path
 requires the original pause or cancel idempotency key. Initial plan-execution
 `CLARIFY` stops that have no preflight, repository/artifact checkpoint, active
 turn, process, or resource settle under the run lease without waiting for a
@@ -719,6 +722,11 @@ reconciliation. A lease-conflict diagnostic names the recorded owner run
 separately from the ownerless pending run. Never manually delete, rewrite, or
 bypass lease records; recover the recorded owner or retry the offered action
 after normal release or state-owned reclamation.
+Recovery reuses a same-run worktree lease already held by the runner. After
+owner loss it may reclaim that lease only through stale-owner checks, then
+clears a process record only after proving the recorded process and descendants
+absent. Replaced, live, unverifiable, or surviving process evidence remains
+blocked and must not be bypassed by killing a persisted PID.
 
 For repeatable automation, supply both captured values explicitly. Retry an
 uncertain request with exactly the same revision, key, and timing; never refresh a stale

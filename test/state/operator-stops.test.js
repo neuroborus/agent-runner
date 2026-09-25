@@ -553,6 +553,27 @@ test("distinguishes reused PIDs and rebooted owners without trusting process liv
   }
 });
 
+test("rechecks liveness when a lease owner disappears during identity inspection", async (t) => {
+  const f = await fixture(t);
+  let livenessChecks = 0;
+  const recovery = createRunStore({
+    ...f.storeOptions,
+    processId: 200,
+    processIsAlive(pid) {
+      if (pid !== 100) return true;
+      livenessChecks += 1;
+      return livenessChecks === 1;
+    },
+    processIdentity: () => null,
+  });
+
+  assert.equal(
+    (await recovery.inspectRunLeaseOwner(f.input.runId)).status,
+    "dead",
+  );
+  assert.equal(livenessChecks, 2);
+});
+
 test("durable subprocess ownership retains worktree exclusion and distinguishes host loss", async (t) => {
   const f = await fixture(t);
   await f.store.acquireWorktreeLease(f.projectPath, f.input.runId);

@@ -123,6 +123,13 @@ export function pipelineRequiresWorktreeLease(pipelineId) {
   return WORKTREE_LEASE_PIPELINES.has(pipelineId);
 }
 
+function isProcessContainmentFailure(cause) {
+  return [
+    "ERR_EXECUTION_PROCESS_ACTIVE",
+    "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+  ].includes(cause?.code);
+}
+
 export function createRunner(options = {}) {
   rejectUnknownFields(options, RUNNER_OPTION_FIELDS, "runnerOptions");
   const providers = options.providers ?? PROVIDER_REGISTRY;
@@ -150,6 +157,10 @@ export function createRunner(options = {}) {
   const runStore = options.runStore ?? createRunStore({ resolveStopBoundary });
   const trustedValidation =
     options.trustedValidation ?? createTrustedValidationService({ git });
+  // Stop recovery must reuse the exact in-process reservation; failed
+  // reconciliation keeps its handle for same-owner retry and its durable
+  // lease for safe reclamation after owner loss.
+  const heldWorktreeLeases = new Map();
   if (
     !isRecord(adapters) ||
     !isRecord(clarifications) ||
@@ -643,42 +654,105 @@ export function createRunner(options = {}) {
   async function withStopReconciliationLease(run, operation, executionLease) {
     const current = await runStore.loadRun(run.runId);
     const { pipeline } = pipelineForRun(current);
+    let ownership = heldWorktreeLeases.get(current.runId);
     if (
       stopPending(current) &&
       pipeline.classifyStopCheckpoint?.(
         current,
         await runStore.loadStopCheckpoint(current.runId),
-      ) === "pre-work"
+      ) === "pre-work" &&
+      ownership === undefined
     ) {
       return operation(current);
     }
-    return withWorktreeLease(current, () => operation(current), executionLease);
+    if (!pipelineRequiresWorktreeLease(current.pipelineId)) {
+      return operation(current);
+    }
+    if (ownership === undefined) {
+      ownership = {
+        lease: await runStore.acquireWorktreeLease(
+          current.projectPath,
+          current.runId,
+        ),
+        projectPath: current.projectPath,
+        runId: current.runId,
+      };
+      heldWorktreeLeases.set(current.runId, ownership);
+    } else if (ownership.projectPath !== current.projectPath) {
+      throw new RunnerError("Held worktree lease boundary changed.", {
+        code: "ERR_RUN_PATH_CHANGED",
+      });
+    }
+    return withHeldWorktreeLease(
+      ownership,
+      () => operation(current),
+      executionLease,
+    );
+  }
+
+  async function releaseWorktreeLease(ownership, executionLease) {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await releaseHeldWorktreeLease(ownership);
+        return;
+      } catch (cause) {
+        if (
+          cause?.code !== "ERR_STOP_RECONCILIATION_REQUIRED" ||
+          executionLease === undefined ||
+          attempt >= 4
+        ) {
+          throw cause;
+        }
+        try {
+          await reconcilePendingStop(executionLease, ownership.runId);
+        } catch (reconciliationCause) {
+          // Settlement may have committed before its public activity failed.
+          // Release only if durable state now permits it, then retain the
+          // reconciliation failure as the operation's primary result.
+          try {
+            await releaseHeldWorktreeLease(ownership);
+          } catch {}
+          throw reconciliationCause;
+        }
+      }
+    }
+  }
+
+  async function releaseHeldWorktreeLease(ownership) {
+    await ownership.lease.release();
+    if (heldWorktreeLeases.get(ownership.runId) === ownership) {
+      heldWorktreeLeases.delete(ownership.runId);
+    }
   }
 
   async function withWorktreeLease(run, operation, executionLease) {
     if (!pipelineRequiresWorktreeLease(run.pipelineId)) {
       return operation();
     }
-    const worktreeLease = await runStore.acquireWorktreeLease(
-      run.projectPath,
-      run.runId,
-    );
+    const ownership = {
+      lease: await runStore.acquireWorktreeLease(run.projectPath, run.runId),
+      projectPath: run.projectPath,
+      runId: run.runId,
+    };
+    heldWorktreeLeases.set(run.runId, ownership);
+    return withHeldWorktreeLease(ownership, operation, executionLease);
+  }
+
+  async function withHeldWorktreeLease(ownership, operation, executionLease) {
+    let operationFailure = null;
     try {
       return await operation();
+    } catch (cause) {
+      operationFailure = cause;
+      throw cause;
     } finally {
-      for (let attempt = 0; ; attempt += 1) {
-        try {
-          await worktreeLease.release();
-          break;
-        } catch (cause) {
-          if (
-            cause?.code !== "ERR_STOP_RECONCILIATION_REQUIRED" ||
-            executionLease === undefined ||
-            attempt >= 4
-          )
-            throw cause;
-          await reconcilePendingStop(executionLease, run.runId);
+      try {
+        await releaseWorktreeLease(ownership, executionLease);
+      } catch (cause) {
+        if (isProcessContainmentFailure(operationFailure)) {
+          throw operationFailure;
         }
+        throw cause;
       }
     }
   }
@@ -978,6 +1052,7 @@ export function createRunner(options = {}) {
 
   async function run(input) {
     const { created, pipeline } = await prepare(input);
+    let executionFailure = null;
     try {
       if (created.state.pause?.reason !== "environment_blocked") {
         await withWorktreeLease(
@@ -986,8 +1061,18 @@ export function createRunner(options = {}) {
           created.lease,
         );
       }
+    } catch (cause) {
+      executionFailure = cause;
+      throw cause;
     } finally {
-      await releaseRunLease(created.lease, created.state.runId);
+      try {
+        await releaseRunLease(created.lease, created.state.runId);
+      } catch (cause) {
+        if (isProcessContainmentFailure(executionFailure)) {
+          throw executionFailure;
+        }
+        throw cause;
+      }
     }
     return result(await runStore.loadRun(created.state.runId));
   }
@@ -1111,10 +1196,21 @@ export function createRunner(options = {}) {
   async function resume(input) {
     const normalized = normalizeResumeInput(input);
     const lease = await runStore.acquireRunLease(normalized.runId);
+    let executionFailure = null;
     try {
       await resumeLeased(normalized, lease);
+    } catch (cause) {
+      executionFailure = cause;
+      throw cause;
     } finally {
-      await releaseRunLease(lease, normalized.runId);
+      try {
+        await releaseRunLease(lease, normalized.runId);
+      } catch (cause) {
+        if (isProcessContainmentFailure(executionFailure)) {
+          throw executionFailure;
+        }
+        throw cause;
+      }
     }
     return result(await runStore.loadRun(normalized.runId));
   }

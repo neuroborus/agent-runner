@@ -760,11 +760,15 @@ provider role and phase. Version-1 and version-2 envelopes project it as `null`
 without rewriting; the next mutating continuation persists the explicit runtime
 migration under the per-run lease.
 MCP status and timed-out wait combine that field with the live execution lease:
-`running` identifies a current execution owner, including a detached
-continuation; `interrupted` identifies retained provider activity with no owner,
-and `idle` identifies neither. This projection uses no polling, daemon, or
-heartbeat. Same-host reads check owner process liveness immediately while
-exclusive acquisition and stale recovery retain their existing age threshold.
+`running` identifies a live or conservatively unverifiable execution owner,
+including a detached continuation; `interrupted` identifies a persisted active
+turn or execution-process record with no exclusionary owner, and `idle`
+identifies neither. The bounded object separately reports `leaseOwner` as
+`none`, `live`, `dead`, `replaced`, or `unverifiable`, plus `processRecord` as
+`none` or `persisted`, without exposing identity. This projection uses no
+polling, daemon, or heartbeat. Same-host reads check owner process liveness
+immediately while exclusive acquisition and stale recovery retain their
+existing age threshold.
 
 ### `events.jsonl`
 
@@ -3039,6 +3043,12 @@ invoke providers, trusted checks, or artifact writes. It revalidates frozen
 inputs and the original access contract, preserves existing artifacts and safe
 partial content, and retains unsafe input or repository changes as blockers.
 It never rolls back content or changes Git controls.
+The current runner reuses its already-held worktree lease during this path.
+After owner loss, replacement ownership may safely reclaim only the stale
+same-run lease. It rejects a replaced, live, unverifiable, or
+descendant-bearing recorded process, clears a retired record under the
+replacement execution lease, and makes process retirement plus checkpoint
+settlement independently retryable across interruption.
 
 The descriptor owns one fail-closed `pre-work` classification for an applicable
 immediate stop saved against the untouched initial `CLARIFY` checkpoint. The

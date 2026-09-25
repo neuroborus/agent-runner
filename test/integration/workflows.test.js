@@ -1020,6 +1020,8 @@ for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
             assert.equal(projected.mode, "combined");
             assert.deepEqual(projected.execution, {
               state: "running",
+              leaseOwner: "live",
+              processRecord: "none",
               phase,
               role: ["review", "confirm"].includes(phase)
                 ? "reviewer"
