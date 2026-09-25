@@ -3281,25 +3281,34 @@ test("projects live and crashed provider activity through status and wait", asyn
       message: "planner clarify turn started.",
     },
   });
-  await store.recordExecutionProcess(lease, 4242, {
+  const registered = await store.recordExecutionProcess(lease, 4242, {
     processIdentity: {
       bootId: "11111111-1111-4111-8111-111111111111",
       startTicks: "4242",
     },
     namespaceId: "pid:[4026533000]",
   });
+  assert.deepEqual(
+    registered.executionProcess.launchCutoff,
+    registered.executionProcess.processIdentity,
+  );
   const control = createMcpControlPlane({
     runner: storedRunner(store, paths),
     runStore: store,
   });
 
-  assert.deepEqual((await control.runStatus({ runId: RUN_ID })).execution, {
+  const liveStatus = await control.runStatus({ runId: RUN_ID });
+  assert.deepEqual(liveStatus.execution, {
     state: "running",
     leaseOwner: "live",
     processRecord: "persisted",
     role: "planner",
     phase: "clarify",
   });
+  assert.doesNotMatch(
+    JSON.stringify(liveStatus),
+    /bootId|launchCutoff|startTicks/u,
+  );
   const waiting = await control.runWait({
     runId: RUN_ID,
     cursor: started.revision,

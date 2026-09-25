@@ -1065,14 +1065,18 @@ same settlement path and retain explicit commit or quiescent accounting.
 
 ### Common envelope and pipeline migrations
 
-Common envelope version 5 adds nullable `executionProcess` ownership. Legacy
-envelopes project null without read-side writes; the ordinary leased runtime
-migration persists the current shape. Before a provider or trusted command
+Common envelope version 5 adds nullable `executionProcess` ownership. Version
+11 adds the supervisor's bounded boot/start launch cutoff and changes the
+runtime compatibility token. Versions 5 through 10 derive that cutoff from a
+valid recorded supervisor identity during normalization without read-side
+writes; a missing legacy identity remains null and conservative. The ordinary
+leased runtime migration persists the current shape, while malformed or
+mismatched current evidence is rejected. Before a provider or trusted command
 can execute, a private supervisor waits on a separate inherited Node IPC channel
-while the runner journals its host PID, hostname, boot/start identity, and PID
-namespace identity. The shared agents boundary owns the closed `ordinary` and
-`native-sandbox-provider` supervision modes. Ordinary processes launch this
-supervisor as PID 1 in a private Linux namespace using
+while the runner journals its host PID, hostname, boot/start identity, identical
+launch cutoff, and PID namespace identity. The shared agents boundary owns the
+closed `ordinary` and `native-sandbox-provider` supervision modes. Ordinary
+processes launch this supervisor as PID 1 in a private Linux namespace using
 system-protected bubblewrap. Provider launches use that mode only when a cached,
 namespace-local probe proves the complete outer-plus-inner user, PID, mount,
 device, and network namespace shape. When nesting is unavailable on the initial
@@ -1114,17 +1118,23 @@ membership and verified live ancestry with a per-launch inherited ownership
 token, including same-user descendants that create another session or PID
 namespace. Complete ancestry that reaches an unrelated host process remains an
 independent reason to disregard an inaccessible candidate regardless of launch
-timing. After durable registration and before provider work, an initial-host
-session launch snapshots stable PID/boot/start identities. Exact matching
-against that baseline is used only when ancestry is inconclusive, especially
-for an unchanged pre-existing process reparented to PID 1. New, reused, changed,
-owned, malformed, and otherwise unproven candidates remain unverifiable;
-recovery has no launch baseline and retains only the ancestry proof. Other
-incomplete process evidence is unverifiable, and
-surviving descendants after bounded TERM/KILL retirement fail closed. Reusing
-the enclosing trusted
-namespace neither retries without containment nor widens its policy; its
-namespace init remains responsible for otherwise detached descendants.
+timing. The persisted launch cutoff is the supervisor's boot ID and process
+start tick, recorded atomically with process ownership before provider work.
+Parent loss before target launch retires the inert supervisor without scanning
+the shared namespace; no provider descendants can yet exist. Once launch is
+accepted, live and replacement-owner inspection use the persisted cutoff.
+When ancestry is inconclusive, session inspection may disregard inaccessible
+metadata only for a process on that recorded boot whose validated start tick is
+strictly older than the cutoff, especially a pre-existing process reparented to
+PID 1. Equal or newer starts on the recorded boot, PID reuse, owned, malformed,
+and otherwise unproven candidates remain unverifiable during both live
+execution and recovery. A cutoff that does not match the current boot cannot
+authorize this exclusion; the independently proven previous-boot owner case is
+handled below. Other incomplete process evidence is unverifiable, and surviving
+descendants after bounded TERM/KILL retirement fail closed. Reusing the
+enclosing trusted namespace neither retries without containment nor widens its
+policy; its namespace init remains responsible for otherwise detached
+descendants.
 Ordinary processes never receive the initial-host session fallback.
 
 Completion-time descendant inspection retries transiently incomplete evidence
@@ -1149,13 +1159,14 @@ after owner loss, and prevents checkpoint advancement before process cleanup.
 CLI/MCP command registration remains transport-owned.
 
 After owner loss, the replacement execution lease inspects the recorded
-PID/boot/start and namespace evidence. A PID that vanishes between liveness and
-identity reads is checked again and classified dead only when that second read
-proves absence. Same-boot PID replacement, a live or unverifiable owner, an
-initial-host namespace hidden from the recovery process, incomplete descendant
-inspection, or surviving descendants all retain the record. A previous boot,
-a dead isolated namespace, or a dead same-namespace session with a complete
-empty descendant scan permits journaled clearing under the replacement lease.
+PID/boot/start, launch cutoff, and namespace evidence. A PID that vanishes
+between liveness and identity reads is checked again and classified dead only
+when that second read proves absence. Same-boot PID replacement, a live or
+unverifiable owner, an initial-host namespace hidden from the recovery process,
+a missing cutoff with inconclusive ancestry, incomplete descendant inspection,
+or surviving descendants all retain the record. A previous boot, a dead
+isolated namespace, or a dead same-namespace session with a complete empty
+descendant scan permits journaled clearing under the replacement lease.
 Crashes before clearing repeat retirement proof; crashes after clearing repeat
 resource and checkpoint settlement without signalling the former PID.
 

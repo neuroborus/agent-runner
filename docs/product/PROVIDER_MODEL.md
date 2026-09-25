@@ -114,11 +114,13 @@ budgets, so they are intentionally not configuration settings.
 
 Provider requests may carry runner-owned abort and process-registration
 callbacks. The adapter keeps these out of prompts and provider configuration.
-Owned supervisors wait for durable registration before launching work. A
-provider adapter declares `native-sandbox-provider` only for an execution that
-requires a native sandbox. That mode uses a private PID namespace only after
-the complete nested namespace shape is proven; when nesting is unavailable on
-the initial host namespace, it may instead use the
+Owned supervisors wait for durable registration, including their bounded
+boot/start launch cutoff, before launching work. Owner-loss recovery uses that
+cutoff only to exclude inaccessible same-boot processes proven to predate the
+supervisor. A provider adapter declares `native-sandbox-provider` only for an
+execution that requires a native sandbox. That mode uses a private PID
+namespace only after the complete nested namespace shape is proven; when
+nesting is unavailable on the initial host namespace, it may instead use the
 narrow session/token ownership mode while its mandatory provider sandbox still
 enforces command isolation. Ordinary owned processes cannot use
 that host fallback. A runner exercised inside the already-private

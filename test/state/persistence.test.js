@@ -320,6 +320,109 @@ test("current persisted role effort is required and cannot change across events"
   });
 });
 
+test("migrates version-10 process launch evidence without rewriting legacy history", async (t) => {
+  for (const processIdentity of [
+    {
+      bootId: "55555555-5555-4555-8555-555555555555",
+      startTicks: "4242",
+    },
+    null,
+  ]) {
+    const { created, store } = await createFixture(t);
+    await created.lease.release();
+    const statePath = join(created.directoryPath, "state.json");
+    const eventsPath = join(created.directoryPath, "events.jsonl");
+    const legacy = JSON.parse(await readFile(statePath, "utf8"));
+    legacy.schemaVersion = 10;
+    legacy.runtimeCompatibility.runStateVersion = 10;
+    legacy.executionProcess = {
+      pid: 4242,
+      hostname: "legacy-host",
+      processIdentity,
+      namespaceId: "pid:[4026531836]",
+    };
+    const event = JSON.parse((await readFile(eventsPath, "utf8")).trim());
+    event.schemaVersion = 10;
+    event.state = legacy;
+    const stateSource = `${JSON.stringify(legacy)}\n`;
+    const eventSource = `${JSON.stringify(event)}\n`;
+    await writeFile(statePath, stateSource);
+    await writeFile(eventsPath, eventSource);
+
+    const loaded = await store.loadRun(legacy.runId);
+    assert.deepEqual(loaded.executionProcess.launchCutoff, processIdentity);
+    assert.equal(await readFile(statePath, "utf8"), stateSource);
+    assert.equal(await readFile(eventsPath, "utf8"), eventSource);
+
+    const lease = await store.acquireRunLease(legacy.runId);
+    try {
+      const migrated = await store.migrateRun(
+        lease,
+        {
+          pipelineState: loaded.pipelineState,
+          pipelineStateVersion: loaded.pipelineStateVersion,
+        },
+        {
+          activity: {
+            actor: "runner",
+            phase: "runtime",
+            kind: "migrated",
+            message: "Migrated process launch evidence.",
+          },
+        },
+      );
+      assert.equal(migrated.schemaVersion, RUN_STATE_SCHEMA_VERSION);
+      assert.deepEqual(migrated.executionProcess.launchCutoff, processIdentity);
+      assert.deepEqual(
+        JSON.parse(await readFile(statePath, "utf8")).executionProcess
+          .launchCutoff,
+        processIdentity,
+      );
+    } finally {
+      await store.recordExecutionProcess(lease, null);
+      await lease.release();
+    }
+  }
+});
+
+test("rejects missing, malformed, and widened current launch cutoffs", async (t) => {
+  const { created, store } = await createFixture(t);
+  await created.lease.release();
+  const statePath = join(created.directoryPath, "state.json");
+  const eventsPath = join(created.directoryPath, "events.jsonl");
+  const current = JSON.parse(await readFile(statePath, "utf8"));
+  const event = JSON.parse((await readFile(eventsPath, "utf8")).trim());
+  const processIdentity = {
+    bootId: "55555555-5555-4555-8555-555555555555",
+    startTicks: "4242",
+  };
+  const variants = [
+    undefined,
+    null,
+    { ...processIdentity, extra: true },
+    { ...processIdentity, startTicks: "4243" },
+    { ...processIdentity, bootId: "invalid" },
+  ];
+  for (const launchCutoff of variants) {
+    const invalid = structuredClone(current);
+    invalid.executionProcess = {
+      pid: 4242,
+      hostname: "current-host",
+      processIdentity,
+      namespaceId: "pid:[4026531836]",
+      ...(launchCutoff === undefined ? {} : { launchCutoff }),
+    };
+    await writeFile(statePath, JSON.stringify(invalid));
+    await writeFile(
+      eventsPath,
+      `${JSON.stringify({ ...event, state: invalid })}\n`,
+    );
+    await assert.rejects(store.loadRun(current.runId), {
+      code: "ERR_INVALID_RUN_STATE",
+    });
+  }
+});
+
 test("projects version-2 activity state for every pipeline without rewriting", async (t) => {
   for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
     const workspace = await mkdtemp(

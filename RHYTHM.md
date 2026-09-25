@@ -7,6 +7,17 @@ remain in the owning documentation.
 
 ## 2026-09-25
 
+- **Shared-host process recovery carries its launch boundary durably.** The
+  common envelope now journals the supervisor's boot ID and start tick as a
+  bounded launch cutoff before provider work. Live teardown and owner-loss
+  recovery may disregard inaccessible process metadata only when a same-boot
+  start strictly predates that cutoff; equal or newer processes, PID reuse,
+  missing or corrupt evidence, and surviving descendants still fail closed.
+  Legacy records derive the cutoff from valid supervisor identity, allowing
+  action-free recovery to retire the original checkpoint without reacquiring a
+  worktree lease it already owns. Owner loss before target launch retires the
+  inert supervisor directly, closing the crash window around registration.
+
 - **Execution-owner recovery separates lease, recovery, and process facts.** A
   current owner now performs bounded supervisor teardown through its private
   control boundary, while replacement-lease recovery proves the persisted

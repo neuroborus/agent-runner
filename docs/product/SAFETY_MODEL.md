@@ -156,17 +156,21 @@ use session/token ownership on the initial host namespace; verified live
 ancestry and same-user token discovery retain descendants that create another
 session or namespace. Complete unrelated ancestry independently excludes an
 inaccessible candidate regardless of launch timing. Before provider work, the
-initial-host session path records stable identities for visible pre-existing
-processes; an exact PID/boot/start match is the narrow fallback when ancestry is
-inconclusive, including an unchanged process reparented to PID 1. New, reused,
-changed, owned, malformed, or otherwise unproven candidates fail closed.
-Recovery has no launch baseline, so only complete unrelated ancestry can
-exclude an inaccessible candidate. Nested runner tests inside the
-trusted-validation namespace retain the owned-session path when that enclosing
-sandbox denies another PID namespace; the enclosing namespace remains the
-ultimate containment boundary. The runner records the owned supervisor
-identity and verifies its death before clearing ownership; the outer launcher's
-exit or an empty process group is insufficient.
+session path durably records the supervisor's boot ID and start tick as a
+bounded launch cutoff. Parent loss before target launch exits the inert
+supervisor directly because no provider descendant can yet exist. When ancestry
+is inconclusive after launch, inaccessible metadata is disregarded only for a
+same-boot process whose validated start tick strictly predates that cutoff,
+including a pre-existing process reparented to PID 1.
+Equal or newer starts on the recorded boot, PID reuse, owned, malformed, or
+otherwise unproven candidates fail closed whenever the session scan is needed.
+A recorded previous boot remains independent proof that the old process tree
+cannot survive. Nested runner tests inside the trusted-validation namespace
+retain the owned-session path when that enclosing sandbox denies another PID
+namespace; the enclosing namespace remains the ultimate containment boundary.
+The runner records the owned supervisor identity and verifies its death before
+clearing ownership; the outer launcher's exit or an empty process group is
+insufficient.
 Live shutdown signals only through the owned child handle/control channel;
 recovery verifies parent-death teardown without signalling host PIDs.
 For session ownership, the persisted PID/boot/start proof reconstructs the

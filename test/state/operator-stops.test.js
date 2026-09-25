@@ -584,6 +584,10 @@ test("durable subprocess ownership retains worktree exclusion and distinguishes 
   const registered = await f.store.recordExecutionProcess(f.lease, 101, proof);
   assert.equal(registered.executionProcess.pid, 101);
   assert.equal(registered.executionProcess.namespaceId, proof.namespaceId);
+  assert.deepEqual(
+    registered.executionProcess.launchCutoff,
+    proof.processIdentity,
+  );
   assert.equal(
     (await f.store.inspectExecutionProcess(f.input.runId)).namespaceId,
     proof.namespaceId,
@@ -629,6 +633,11 @@ test("namespace registration rejects identity replacement without recording a ne
     {
       processIdentity: { bootId: BOOT_B, startTicks: "101" },
       namespaceId: "pid:[1]",
+    },
+    {
+      processIdentity: { bootId: BOOT_A, startTicks: "101" },
+      namespaceId: "pid:[1]",
+      launchCutoff: { bootId: BOOT_A, startTicks: "100" },
     },
   ]) {
     await assert.rejects(f.store.recordExecutionProcess(f.lease, 101, proof), {

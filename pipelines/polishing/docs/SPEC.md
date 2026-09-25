@@ -989,6 +989,12 @@ inputs and the original access contract, preserves existing artifacts and safe
 partial content, and retains unsafe input or repository changes as blockers.
 It never rolls back content or changes Git controls.
 
+Common envelope version 11 persists the supervisor boot/start launch cutoff
+before work. Owner-loss recovery uses it only to exclude inaccessible same-boot
+processes whose validated start strictly predates launch; equal or newer starts,
+PID reuse, missing evidence, and surviving descendants fail closed before the
+process record can be retired.
+
 A completed operator pause uses `WAITING_FOR_USER`, `operator_paused`, and a
 null resume action. Its private checkpoint preserves the reconciled workflow
 position, logical turn, and preceding pause. Resuming an already paused

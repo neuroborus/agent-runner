@@ -138,6 +138,11 @@ all owned descendants absent before clearing the process record. Live,
 replaced, unverifiable, or descendant-bearing process evidence remains a
 blocking ownership condition. Retirement and stop settlement are separate
 journaled transitions so an interruption safely retries either boundary.
+For shared-host sessions, the persisted supervisor boot/start cutoff lets
+recovery exclude only inaccessible processes proven to predate launch. Within
+a current-boot scan, equal or newer starts, PID reuse, or missing evidence
+remain conservative; a recorded previous boot remains independent absence
+proof. Public projections never expose the cutoff.
 
 ## Pauses, resume, and observability
 

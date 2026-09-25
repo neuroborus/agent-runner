@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readlinkSync, realpathSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -83,6 +83,35 @@ function processStat(pid, parentPid, sessionId, startTicks = "1234") {
   fields[3] = String(sessionId);
   fields[19] = startTicks;
   return `${pid} (process) ${fields.join(" ")}`;
+}
+
+async function waitForFile(path, timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      return await readFile(path, "utf8");
+    } catch (cause) {
+      if (cause?.code !== "ENOENT") throw cause;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`File was not written within ${timeoutMs}ms: ${path}`);
+}
+
+async function waitForProcessRetirement(pid, identity, timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const current = await readProcessIdentity(pid);
+    if (
+      current === null ||
+      current.bootId !== identity.bootId ||
+      current.startTicks !== identity.startTicks
+    ) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Process ${pid} was not retired within ${timeoutMs}ms.`);
 }
 
 test("read-only launcher mounts still protect namespace-root paths", () => {
@@ -323,7 +352,7 @@ test("ignores a proven pre-existing inaccessible process", () => {
   assert.deepEqual(
     inspectOwnedSessionProcesses("44", "a".repeat(64), {
       ...inaccessibleProcessOptions(),
-      baseline: new Map([["101", { bootId: BOOT_ID, startTicks: "1234" }]]),
+      launchCutoff: { bootId: BOOT_ID, startTicks: "1235" },
     }),
     [],
   );
@@ -332,7 +361,7 @@ test("ignores a proven pre-existing inaccessible process", () => {
 test("ignores a proven pre-existing inaccessible ancestor", () => {
   assert.deepEqual(
     inspectOwnedSessionProcesses("44", "a".repeat(64), {
-      baseline: new Map([["202", { bootId: BOOT_ID, startTicks: "5678" }]]),
+      launchCutoff: { bootId: BOOT_ID, startTicks: "5679" },
       getuid: () => 1000,
       list: () => ["101"],
       read(path) {
@@ -356,11 +385,11 @@ test("ignores a proven pre-existing inaccessible ancestor", () => {
   );
 });
 
-test("ignores complete unrelated ancestry independently of the baseline", () => {
+test("ignores complete unrelated ancestry independently of the cutoff", () => {
   const ownerToken = "a".repeat(64);
   assert.deepEqual(
     inspectOwnedSessionProcesses("44", ownerToken, {
-      baseline: new Map([["101", { bootId: BOOT_ID, startTicks: "1000" }]]),
+      launchCutoff: { bootId: BOOT_ID, startTicks: "1000" },
       getuid: () => 1000,
       list: () => ["101"],
       read(path) {
@@ -379,26 +408,33 @@ test("ignores complete unrelated ancestry independently of the baseline", () => 
   );
 });
 
-test("rejects an inaccessible process with a changed or reused identity", () => {
+test("rejects inaccessible processes created at or after the cutoff", () => {
+  for (const startTicks of ["1234", "1235"]) {
+    assert.equal(
+      inspectOwnedSessionProcesses("44", "a".repeat(64), {
+        ...inaccessibleProcessOptions([startTicks]),
+        launchCutoff: { bootId: BOOT_ID, startTicks: "1234" },
+      }),
+      null,
+    );
+  }
+});
+
+test("rejects an inaccessible process with a reused identity or another boot", () => {
   assert.equal(
     inspectOwnedSessionProcesses("44", "a".repeat(64), {
       ...inaccessibleProcessOptions(["1234", "5678"]),
-      baseline: new Map([["101", { bootId: BOOT_ID, startTicks: "1234" }]]),
+      launchCutoff: { bootId: BOOT_ID, startTicks: "2000" },
     }),
     null,
   );
   assert.equal(
     inspectOwnedSessionProcesses("44", "a".repeat(64), {
       ...inaccessibleProcessOptions(),
-      baseline: new Map([
-        [
-          "101",
-          {
-            bootId: "ffffffff-1111-2222-3333-444444444444",
-            startTicks: "1234",
-          },
-        ],
-      ]),
+      launchCutoff: {
+        bootId: "ffffffff-1111-2222-3333-444444444444",
+        startTicks: "1235",
+      },
     }),
     null,
   );
@@ -409,7 +445,7 @@ test("rejects malformed current process identity", () => {
   assert.equal(
     inspectOwnedSessionProcesses("44", "a".repeat(64), {
       ...options,
-      baseline: new Map([["101", { bootId: BOOT_ID, startTicks: "1234" }]]),
+      launchCutoff: { bootId: BOOT_ID, startTicks: "1235" },
     }),
     null,
   );
@@ -424,7 +460,7 @@ test("rejects inaccessible new processes and retains inaccessible owned ones", (
   assert.deepEqual(
     inspectOwnedSessionProcesses("3", "a".repeat(64), {
       ...options,
-      baseline: new Map([["101", { bootId: BOOT_ID, startTicks: "1234" }]]),
+      launchCutoff: { bootId: BOOT_ID, startTicks: "1235" },
     }),
     [101],
   );
@@ -601,6 +637,105 @@ test(
 );
 
 test(
+  "retires an inert shared-host supervisor when its owner exits during registration",
+  { timeout: 5_000 },
+  async (t) => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "owned-process-registration-exit-"),
+    );
+    t.after(() => rm(directory, { force: true, recursive: true }));
+    const environment = await inspectionSequenceEnvironment(t, ["incomplete"]);
+    const owners = [];
+    const supervisors = [];
+    t.after(async () => {
+      for (const owner of owners) {
+        try {
+          owner.kill("SIGKILL");
+        } catch {}
+      }
+      for (const { pid, processIdentity } of supervisors) {
+        const current = await readProcessIdentity(pid);
+        if (
+          current?.bootId === processIdentity.bootId &&
+          current.startTicks === processIdentity.startTicks
+        ) {
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch {}
+        }
+      }
+    });
+
+    // The after-registration marker models a durable journal side effect that
+    // completed immediately before the owner died and its callback returned.
+    for (const phase of ["before", "after"]) {
+      const ownerPath = join(directory, `${phase}-owner.mjs`);
+      const supervisorPath = join(directory, `${phase}-supervisor.json`);
+      const registrationPath = join(directory, `${phase}-registration.json`);
+      const startedPath = join(directory, `${phase}-started.txt`);
+      await writeFile(
+        ownerPath,
+        `import { writeFile } from "node:fs/promises";
+const { resolveOwnedProcessLauncher, spawnOwnedProcess } = await import(process.argv[2]);
+const child = spawnOwnedProcess(
+  process.execPath,
+  ["-e", ${JSON.stringify(
+    `require("node:fs").writeFileSync(${JSON.stringify(startedPath)}, "started")`,
+  )}],
+  {
+    descendantGraceMs: 50,
+    env: process.env,
+    onProcess: async (pid, proof) => {
+      if (pid !== null && ${JSON.stringify(phase)} === "after") {
+        await writeFile(
+          ${JSON.stringify(registrationPath)},
+          JSON.stringify({ pid, processIdentity: proof.processIdentity }),
+        );
+      }
+      await new Promise(() => {});
+    },
+    ownershipMode: "native-sandbox-provider",
+    resolveLauncher(cwd, { ownershipMode }) {
+      return resolveOwnedProcessLauncher(cwd, {
+        bubblewrap: process.execPath,
+        cache: new Map(),
+        namespaceId: ${JSON.stringify(INITIAL_PID_NAMESPACE)},
+        ownershipMode,
+        probe: () => ({ status: 1 }),
+      });
+    },
+    stdio: "ignore",
+  },
+);
+await writeFile(${JSON.stringify(supervisorPath)}, JSON.stringify({ pid: child.pid }));
+await child.ownedCompletion;
+`,
+      );
+      const owner = spawn(
+        process.execPath,
+        [ownerPath, pathToFileURL(OWNED_PROCESS_MODULE).href],
+        { env: environment, stdio: "ignore" },
+      );
+      owners.push(owner);
+      const ownerExit = new Promise((resolve, reject) => {
+        owner.once("error", reject);
+        owner.once("exit", (code, signal) => resolve({ code, signal }));
+      });
+      const { pid } = JSON.parse(await waitForFile(supervisorPath));
+      if (phase === "after") await waitForFile(registrationPath);
+      const processIdentity = await readProcessIdentity(pid);
+      assert.notEqual(processIdentity, null);
+      supervisors.push({ pid, processIdentity });
+
+      owner.kill("SIGKILL");
+      assert.deepEqual(await ownerExit, { code: null, signal: "SIGKILL" });
+      await waitForProcessRetirement(pid, processIdentity);
+      await assert.rejects(access(startedPath), { code: "ENOENT" });
+    }
+  },
+);
+
+test(
   "retained containment does not keep the run owner alive",
   { timeout: 5_000 },
   async (t) => {
@@ -733,6 +868,64 @@ test(
 );
 
 test(
+  "settles cancellation while durable registration is pending",
+  {
+    timeout: 5_000,
+  },
+  async (t) => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "owned-process-registration-cancel-"),
+    );
+    t.after(() => rm(directory, { force: true, recursive: true }));
+    const startedPath = join(directory, "started.txt");
+    const controller = new AbortController();
+    const registrations = [];
+    let inspections = 0;
+    let releaseRegistration;
+    let registrationStarted;
+    const registrationPending = new Promise((resolve) => {
+      releaseRegistration = resolve;
+    });
+    const registrationObserved = new Promise((resolve) => {
+      registrationStarted = resolve;
+    });
+    const child = spawnOwnedProcess(
+      process.execPath,
+      [
+        "-e",
+        `require("node:fs").writeFileSync(${JSON.stringify(startedPath)}, "started")`,
+      ],
+      {
+        descendantGraceMs: 25,
+        inspectSessionProcesses() {
+          inspections += 1;
+          return null;
+        },
+        onProcess: async (pid) => {
+          registrations.push(pid);
+          if (pid === null) return;
+          registrationStarted();
+          await registrationPending;
+        },
+        ownershipMode: "native-sandbox-provider",
+        resolveLauncher: hostSessionLauncher,
+        signal: controller.signal,
+        stdio: "ignore",
+      },
+    );
+
+    await registrationObserved;
+    controller.abort();
+    releaseRegistration();
+
+    await child.ownedCompletion;
+    assert.deepEqual(registrations, [child.pid, null]);
+    assert.equal(inspections, 0);
+    await assert.rejects(access(startedPath), { code: "ENOENT" });
+  },
+);
+
+test(
   "retires an inert supervisor before reporting failed registration",
   {
     timeout: 5_000,
@@ -758,57 +951,45 @@ test(
 );
 
 test(
-  "retires a registered supervisor when host baseline capture fails",
+  "records the bounded launch cutoff before provider work starts",
   {
     timeout: 5_000,
   },
   async (t) => {
-    const failure = Object.assign(new Error("baseline unavailable"), {
-      code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
-    });
+    const directory = await mkdtemp(join(tmpdir(), "owned-process-cutoff-"));
+    t.after(() => rm(directory, { force: true, recursive: true }));
+    const startedPath = join(directory, "started.txt");
     const registrations = [];
-    let registeredIdentity;
-    let child;
-    t.after(async () => {
-      if (registeredIdentity === undefined) return;
-      const currentIdentity = await readProcessIdentity(child.pid);
-      if (
-        currentIdentity?.bootId === registeredIdentity.bootId &&
-        currentIdentity.startTicks === registeredIdentity.startTicks
-      ) {
-        try {
-          process.kill(child.pid, "SIGKILL");
-        } catch {}
-      }
-    });
-    child = spawnOwnedProcess(process.execPath, ["-e", "process.exit(0)"], {
-      captureBaseline() {
-        throw failure;
+    const child = spawnOwnedProcess(
+      process.execPath,
+      [
+        "-e",
+        `require("node:fs").writeFileSync(${JSON.stringify(startedPath)}, "started")`,
+      ],
+      {
+        descendantGraceMs: 100,
+        onProcess: async (pid, proof) => {
+          registrations.push(pid);
+          if (pid === null) return;
+          await assert.rejects(access(startedPath), { code: "ENOENT" });
+          assert.deepEqual(proof.launchCutoff, proof.processIdentity);
+        },
+        ownershipMode: "native-sandbox-provider",
+        resolveLauncher(cwd, { ownershipMode }) {
+          return resolveOwnedProcessLauncher(cwd, {
+            bubblewrap: process.execPath,
+            cache: new Map(),
+            namespaceId: INITIAL_PID_NAMESPACE,
+            ownershipMode,
+            probe: () => ({ status: 1 }),
+          });
+        },
       },
-      descendantGraceMs: 100,
-      onProcess: async (pid, proof) => {
-        registrations.push(pid);
-        if (pid !== null) registeredIdentity = proof.processIdentity;
-      },
-      ownershipMode: "native-sandbox-provider",
-      resolveLauncher(cwd, { ownershipMode }) {
-        return resolveOwnedProcessLauncher(cwd, {
-          bubblewrap: process.execPath,
-          cache: new Map(),
-          namespaceId: INITIAL_PID_NAMESPACE,
-          ownershipMode,
-          probe: () => ({ status: 1 }),
-        });
-      },
-    });
-
-    await assert.rejects(child.ownedCompletion, (cause) => cause === failure);
-    assert.deepEqual(registrations, [child.pid, null]);
-    assert.notDeepEqual(
-      await readProcessIdentity(child.pid),
-      registeredIdentity,
     );
-    registeredIdentity = undefined;
+
+    await child.ownedCompletion;
+    assert.deepEqual(registrations, [child.pid, null]);
+    assert.equal(await readFile(startedPath, "utf8"), "started");
   },
 );
 
@@ -852,12 +1033,16 @@ test("recovery clears a dead session only after proving descendants absent", asy
       pid: ownerPid,
       previousBoot: false,
       processIdentity,
+      launchCutoff: processIdentity,
       status: "dead",
     }),
     {
       inspectSessionProcesses(sessionId, _token, options) {
         assert.equal(sessionId, ownerPid);
-        assert.deepEqual(options, { includeSession: true });
+        assert.deepEqual(options, {
+          includeSession: true,
+          launchCutoff: processIdentity,
+        });
         return [];
       },
     },
@@ -881,13 +1066,17 @@ test("recovery retains a dead session owner while descendants remain", async () 
         pid: ownerPid,
         previousBoot: false,
         processIdentity,
+        launchCutoff: processIdentity,
         status: "dead",
       }),
       {
         inspectSessionProcesses(sessionId, token, options) {
           assert.equal(sessionId, ownerPid);
           assert.equal(token, ownerToken);
-          assert.deepEqual(options, { includeSession: true });
+          assert.deepEqual(options, {
+            includeSession: true,
+            launchCutoff: processIdentity,
+          });
           return [123_456];
         },
       },

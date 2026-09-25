@@ -1119,9 +1119,12 @@ export function createRunStore({
       } else if (snapshot.state.executionProcess === null)
         return snapshot.state;
       const identity = pid === null ? null : await processIdentity(pid);
+      const launchCutoff = identity === null ? null : { ...identity };
       if (
         proof !== null &&
-        !isDeepStrictEqual(identity, proof.processIdentity)
+        (!isDeepStrictEqual(identity, proof.processIdentity) ||
+          (Object.hasOwn(proof, "launchCutoff") &&
+            !isDeepStrictEqual(launchCutoff, proof.launchCutoff)))
       ) {
         throw new RunStoreError(
           "Execution identity changed before registration.",
@@ -1141,6 +1144,7 @@ export function createRunStore({
                   hostname: hostName,
                   processIdentity: identity,
                   namespaceId: proof?.namespaceId ?? null,
+                  launchCutoff,
                 },
           revision: snapshot.state.revision + 1,
           updatedAt: timestamp(snapshot.state.updatedAt),

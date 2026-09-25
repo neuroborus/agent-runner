@@ -629,10 +629,12 @@ independent from the package version. Compatible legacy state is migrated by
 the owning pipeline under the per-run lease; incompatible readers return a
 specific version-skew error while preserving the run. Common envelope version 8
 persists active-role effort; legacy missing values migrate to `current` without
-provider activity or changes to saved progress and session evidence. The
-mode-aware pipeline versions are plan-authoring version 5, plan-execution version 17, and polishing
-version 13. Their ordered migrations resolve missing legacy modes to
-`independent` and preserve explicitly saved modes without moving terminal workflows or replaying role turns,
+provider activity or changes to saved progress and session evidence. Version 11
+adds the supervisor's boot/start launch cutoff for durable shared-host recovery.
+The mode-aware pipeline versions are plan-authoring version 5, plan-execution
+version 17, and polishing version 13. Their ordered migrations resolve missing
+legacy modes to `independent` and preserve explicitly saved modes without
+moving terminal workflows or replaying role turns,
 commits, or handoffs. Complete write-ahead events precede atomic state
 replacement; recovery repairs a lagging state file and derived progress.
 Mutating runs require one per-run execution lease. Plan execution and polishing
@@ -725,8 +727,11 @@ after normal release or state-owned reclamation.
 Recovery reuses a same-run worktree lease already held by the runner. After
 owner loss it may reclaim that lease only through stale-owner checks, then
 clears a process record only after proving the recorded process and descendants
-absent. Replaced, live, unverifiable, or surviving process evidence remains
-blocked and must not be bypassed by killing a persisted PID.
+absent. An inaccessible shared-host process is excluded only when it is on the
+recorded boot and its validated start strictly predates the supervisor's
+journaled launch cutoff. Replaced, live, equal or newer, reused, unverifiable,
+or surviving process evidence remains blocked and must not be bypassed by
+killing a persisted PID.
 
 For repeatable automation, supply both captured values explicitly. Retry an
 uncertain request with exactly the same revision, key, and timing; never refresh a stale

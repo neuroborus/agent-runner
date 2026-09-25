@@ -1878,6 +1878,10 @@ test("operator stop after host loss reclaims ownership and reconciles before fur
           bootId: BOOT_A,
           startTicks: "4242",
         });
+        assert.deepEqual(
+          checkpoint.executionProcess.launchCutoff,
+          checkpoint.executionProcess.processIdentity,
+        );
         const rebooted = createRunStore({
           ...options,
           processId: 200,

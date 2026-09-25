@@ -3050,6 +3050,14 @@ descendant-bearing recorded process, clears a retired record under the
 replacement execution lease, and makes process retirement plus checkpoint
 settlement independently retryable across interruption.
 
+Common envelope version 11 persists the supervisor boot/start launch cutoff
+before work. Replacement ownership may exclude inaccessible process metadata
+only for a same-boot process whose validated start strictly predates that
+cutoff. When the shared-host scan is required, equal or newer starts, PID reuse,
+a boot mismatch, missing evidence, and surviving or escaping descendants remain
+fail-closed ownership barriers. A recorded previous boot remains independent
+proof that the old process tree is absent.
+
 The descriptor owns one fail-closed `pre-work` classification for an applicable
 immediate stop saved against the untouched initial `CLARIFY` checkpoint. The
 saved revision must match the stop checkpoint and the current pipeline state;

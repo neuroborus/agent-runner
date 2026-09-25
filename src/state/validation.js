@@ -3,7 +3,7 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { isAdapterDiagnosticClass } from "../agents/index.js";
 import { validStopTiming, validStopSettlement } from "./stop-contract.js";
 
-export const RUN_STATE_SCHEMA_VERSION = 10;
+export const RUN_STATE_SCHEMA_VERSION = 11;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
   runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
@@ -26,6 +26,7 @@ const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   7,
   8,
   9,
+  10,
   RUN_STATE_SCHEMA_VERSION,
 ]);
 
@@ -768,14 +769,14 @@ export function validateProcessIdentity(value) {
 function normalizeExecutionProcess(value, schemaVersion) {
   if ((value === undefined && schemaVersion < 5) || value === null) return null;
   assertRecord(value, "run.executionProcess");
-  rejectUnknownFields(
-    value,
-    new Set(["pid", "hostname", "processIdentity", "namespaceId"]),
-    "run.executionProcess",
-  );
+  const fields = ["pid", "hostname", "processIdentity", "namespaceId"];
+  if (schemaVersion >= 11) fields.push("launchCutoff");
+  rejectUnknownFields(value, new Set(fields), "run.executionProcess");
   if (
     schemaVersion < 5 ||
-    ![3, 4].includes(Object.keys(value).length) ||
+    (schemaVersion < 11
+      ? ![3, 4].includes(Object.keys(value).length)
+      : Object.keys(value).length !== fields.length) ||
     (value.namespaceId != null &&
       (typeof value.namespaceId !== "string" ||
         !/^pid:\[\d{1,20}\]$/u.test(value.namespaceId))) ||
@@ -787,10 +788,27 @@ function normalizeExecutionProcess(value, schemaVersion) {
     UNSAFE_TEXT_PATTERN.test(value.hostname)
   )
     fail("Run execution process is invalid.");
+  const processIdentity = validateProcessIdentity(value.processIdentity);
+  const launchCutoff =
+    schemaVersion < 11
+      ? processIdentity === null
+        ? null
+        : { ...processIdentity }
+      : validateProcessIdentity(value.launchCutoff);
+  if (
+    (processIdentity === null) !== (launchCutoff === null) ||
+    (processIdentity !== null &&
+      (processIdentity.bootId !== launchCutoff.bootId ||
+        processIdentity.startTicks !== launchCutoff.startTicks))
+  ) {
+    fail("Run execution process launch cutoff is invalid.");
+  }
   return {
-    ...value,
-    processIdentity: validateProcessIdentity(value.processIdentity),
+    pid: value.pid,
+    hostname: value.hostname,
+    processIdentity,
     namespaceId: value.namespaceId ?? null,
+    launchCutoff,
   };
 }
 
