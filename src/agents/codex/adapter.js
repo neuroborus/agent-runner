@@ -283,6 +283,7 @@ const LOCAL_COMMIT_READ_ONLY_GIT_COMMANDS = new Set([
   "show",
   "show-ref",
   "status",
+  "var",
 ]);
 const SAFE_TURN_ITEM_TYPES = new Set([
   "agentMessage",

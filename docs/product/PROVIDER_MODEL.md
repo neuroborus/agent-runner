@@ -94,7 +94,10 @@ connectivity.
 
 Plan execution's local commit is a separate constrained adapter capability. It
 is available only for the Worker's one-shot authorized `COMMIT` turn and does
-not widen ordinary workspace-write access. Polishing never requests it.
+not widen ordinary workspace-write access. Codex readiness may use the
+read-only `git var` subcommand to inspect the repository's existing author and
+committer identities; staging, commit, configuration, history, ref, and remote
+mutations remain outside that turn. Polishing never requests local commit.
 
 Model-free capability subprocesses for CLI, sandbox, commit-executor, and
 process-containment proofs each have a fixed 10-second deadline. Within that

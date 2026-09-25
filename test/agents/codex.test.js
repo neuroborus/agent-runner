@@ -2338,6 +2338,44 @@ test("creates an authorized commit through a networkless sandbox", async () => {
   );
 });
 
+test("allows read-only Git identity queries during local-commit readiness", async () => {
+  for (const command of [
+    "git var GIT_AUTHOR_IDENT",
+    "git var GIT_COMMITTER_IDENT",
+    "git var GIT_AUTHOR_IDENT && git var GIT_COMMITTER_IDENT",
+  ]) {
+    const fixture = createFixture({
+      handle({ message }) {
+        if (message.method === "turn/start") {
+          return {
+            result: { turn: { id: "identity-turn" } },
+            notification: completedTurn(
+              message.params.threadId,
+              "identity-turn",
+              '{"ready":true}',
+              [{ type: "commandExecution", command, status: "completed" }],
+            ),
+          };
+        }
+        return undefined;
+      },
+    });
+
+    const result = await fixture.adapter.run(
+      request({
+        access: "local-commit",
+        authorizationId: "authorization-1",
+        commit: {
+          expectedHead: EXPECTED_HEAD,
+          message: "feat(test): create commit",
+        },
+      }),
+    );
+
+    assert.deepEqual(result.structured, { ready: true });
+  }
+});
+
 test("rejects forbidden Git and remote-write commands reported by Codex", async () => {
   for (const [command, code] of [
     [
@@ -2346,6 +2384,16 @@ test("rejects forbidden Git and remote-write commands reported by Codex", async 
     ],
     ["git reset --hard HEAD^", "ERR_CODEX_LOCAL_COMMIT_POLICY"],
     ["git status && git stash", "ERR_CODEX_LOCAL_COMMIT_POLICY"],
+    [
+      "git var GIT_AUTHOR_IDENT && git commit -m bypass",
+      "ERR_CODEX_LOCAL_COMMIT_POLICY",
+    ],
+    [
+      "git config user.name provider-private-detail",
+      "ERR_CODEX_LOCAL_COMMIT_POLICY",
+    ],
+    ["git rebase HEAD^", "ERR_CODEX_LOCAL_COMMIT_POLICY"],
+    ["git update-ref refs/heads/main HEAD^", "ERR_CODEX_LOCAL_COMMIT_POLICY"],
     ["git -C . push origin main", "ERR_CODEX_REMOTE_WRITE_ATTEMPT"],
     [
       "git config remote.origin.url https://example.invalid/get",
@@ -2407,9 +2455,16 @@ test("rejects forbidden Git and remote-write commands reported by Codex", async 
         assert.equal(error.cause, undefined);
         assert.equal(error.command, undefined);
         assert.ok(!error.message.includes(command));
-        assert.ok(!JSON.stringify(error).includes(command));
+        const diagnostic = JSON.stringify(error);
+        assert.ok(Buffer.byteLength(diagnostic) < 1_024);
+        assert.ok(!diagnostic.includes(command));
+        assert.ok(!diagnostic.includes("provider-private-detail"));
         return true;
       },
+    );
+    assert.equal(
+      fixture.executeCalls.filter(({ file }) => file === "git").length,
+      0,
     );
   }
 });

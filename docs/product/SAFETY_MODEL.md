@@ -27,7 +27,10 @@ Plan execution permits exactly one ordinary local commit for each validated
 plan step. Only the Worker may trigger it, only after the fingerprint-bound
 gate, and only with a fresh one-shot authorization. The commit must use the
 exact subject from the plan, the existing Git identity, and no body, footer, or
-authorship trailer.
+authorship trailer. Codex may inspect that existing author and committer
+identity during readiness with read-only `git var`; the readiness turn still
+cannot stage, commit, change configuration, rewrite history, mutate refs, or
+write to a remote.
 
 Polishing never commits and keeps `HEAD` unchanged. Its handoff stages the
 complete finalized and reviewed change set, verifies that nothing accepted was
