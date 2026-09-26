@@ -118,9 +118,12 @@ budgets, so they are intentionally not configuration settings.
 Provider requests may carry runner-owned abort and process-registration
 callbacks. The adapter keeps these out of prompts and provider configuration.
 Owned supervisors wait for durable registration, including their bounded
-boot/start launch cutoff, before launching work. Owner-loss recovery uses that
-cutoff only to exclude inaccessible same-boot processes proven to predate the
-supervisor. A provider adapter declares `native-sandbox-provider` only for an
+launch-time boot/PID/start ancestry baseline, before launching work. Live
+supervision and owner-loss recovery receive the same frozen evidence and may
+exclude a new unrelated process only after its stabilized lineage reaches an
+unchanged baseline identity. A baseline anchor never bypasses observed session
+or ownership-token evidence; missing legacy evidence remains conservative. A
+provider adapter declares `native-sandbox-provider` only for an
 execution that requires a native sandbox. That mode uses a private PID
 namespace only after the complete nested namespace shape is proven; when
 nesting is unavailable on the initial host namespace, it may instead use the

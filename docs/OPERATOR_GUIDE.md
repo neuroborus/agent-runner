@@ -328,13 +328,19 @@ exact current revision, and a new idempotency key. MCP rejects stale revisions,
 non-null actions, live owners, and ownership races. Follow the current public
 state and actions.
 
-Shared-host recovery uses a launch cutoff journaled with the supervisor before
-provider work. It can exclude inaccessible unrelated processes only when their
-same-boot start time strictly predates that cutoff. A new or reused PID, equal
-or newer start, surviving descendant, or incomplete evidence remains blocked.
-Transient process exit or reparenting receives a fixed per-PID retry and is
-ignored only when a fresh read proves that snapshot entry absent; exhausted
-churn still blocks. Do not delete the process or lease records manually.
+Shared-host recovery uses the bounded boot/PID/start ancestry baseline captured
+before supervisor launch and journaled before provider work. A post-launch
+unrelated process is excluded only after its stabilized lineage reaches an
+unchanged baseline identity without crossing observed owned-session or token
+evidence. A stable inaccessible intermediate environment is acceptable only
+when that walk reaches the exact anchor. A new or reused PID, stale or missing
+anchor, inaccessible current-process metadata, boot or namespace mismatch,
+cycle, surviving descendant, or incomplete evidence remains blocked. Legacy
+runs that never stored the baseline report a compatibility diagnosis and cannot
+gain it during recovery. Transient process exit or reparenting receives a fixed
+per-PID retry and is ignored only when a fresh read proves that snapshot entry
+absent; exhausted churn still blocks. Do not delete the process or lease
+records manually.
 
 To stop active work, use `agent-run pause --run <run-id>` or
 `agent-run cancel --run <run-id>`. The shorthand reads status once and binds

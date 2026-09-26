@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readlinkSync, realpathSync } from "node:fs";
+import { readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -40,10 +40,18 @@ async function inspectionSequenceEnvironment(t, sequence) {
   await writeFile(
     preloadPath,
     `if (process.argv[1] === "session") {
+  const { createHash } = require("node:crypto");
   const fs = require("node:fs");
   const original = fs.readdirSync;
+  const originalRead = fs.readFileSync;
   const sequence = ${JSON.stringify(sequence)};
   let index = 0;
+  const bootId = originalRead("/proc/sys/kernel/random/boot_id", "utf8").trim();
+  const ownStat = originalRead("/proc/" + process.pid + "/stat", "utf8");
+  const ownFields = ownStat.slice(ownStat.lastIndexOf(")") + 2).trim().split(/\\s+/);
+  const ownerToken = createHash("sha256")
+    .update(process.pid + "\\0" + bootId + "\\0" + ownFields[19], "utf8")
+    .digest("hex");
   fs.readdirSync = function readdirSync(path, ...argumentsList) {
     if (path === "/proc") {
       const observation = sequence[Math.min(index, sequence.length - 1)];
@@ -53,8 +61,68 @@ async function inspectionSequenceEnvironment(t, sequence) {
           code: "EACCES",
         });
       }
+      return Reflect.apply(original, this, [path, ...argumentsList]).filter(
+        (name) => {
+          if (!/^\\d+$/.test(name) || name === String(process.pid)) return false;
+          try {
+            const stat = originalRead("/proc/" + name + "/stat", "utf8");
+            const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\\s+/);
+            if (fields[3] === String(process.pid)) return true;
+            return originalRead("/proc/" + name + "/environ", "utf8")
+              .split("\\0")
+              .includes("AGENT_RUNNER_OWNED_PROCESS=" + ownerToken);
+          } catch {
+            return false;
+          }
+        },
+      );
     }
     return Reflect.apply(original, this, [path, ...argumentsList]);
+  };
+}
+`,
+  );
+  return {
+    ...process.env,
+    NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${preloadPath}`]
+      .filter(Boolean)
+      .join(" "),
+  };
+}
+
+async function productionTopologyEnvironment(t, bootId) {
+  const directory = await mkdtemp(join(tmpdir(), "owned-process-topology-"));
+  t.after(() => rm(directory, { force: true, recursive: true }));
+  const preloadPath = join(directory, "production-topology.cjs");
+  const denied = `{ throw Object.assign(new Error("denied"), { code: "EACCES" }); }`;
+  await writeFile(
+    preloadPath,
+    `if (process.argv[1] === "session") {
+  const fs = require("node:fs");
+  const originalRead = fs.readFileSync;
+  const originalList = fs.readdirSync;
+  const values = new Map(${JSON.stringify([
+    ["/proc/101/stat", processStat(101, 202, 3)],
+    [
+      "/proc/101/status",
+      `Uid:\t${process.getuid()}\t${process.getuid()}\t${process.getuid()}\t${process.getuid()}\n`,
+    ],
+    ["/proc/101/environ", ""],
+    ["/proc/202/stat", processStat(202, 303, 3, "5678")],
+    ["/proc/303/stat", processStat(303, 1, 3, "6789")],
+    ["/proc/303/environ", ""],
+    ["/proc/sys/kernel/random/boot_id", `${bootId}\n`],
+  ])});
+  fs.readdirSync = function readdirSync(path, ...argumentsList) {
+    return path === "/proc"
+      ? ["101"]
+      : Reflect.apply(originalList, this, [path, ...argumentsList]);
+  };
+  fs.readFileSync = function readFileSync(path, ...argumentsList) {
+    if (path === "/proc/202/environ") ${denied}
+    return values.has(path)
+      ? values.get(path)
+      : Reflect.apply(originalRead, this, [path, ...argumentsList]);
   };
 }
 `,
@@ -116,6 +184,28 @@ function processRaceError(code = "ENOENT") {
   return Object.assign(new Error(`simulated ${code}`), { code });
 }
 
+function ancestryBaseline(...entries) {
+  return entries
+    .map(([pid, startTicks]) => ({ bootId: BOOT_ID, pid, startTicks }))
+    .sort((left, right) => left.pid - right.pid);
+}
+
+function churnProcessList(churn) {
+  let children = [];
+  try {
+    children = readFileSync(
+      `/proc/${churn.pid}/task/${churn.pid}/children`,
+      "utf8",
+    )
+      .trim()
+      .split(/\s+/u)
+      .filter(Boolean);
+  } catch (cause) {
+    if (!["ENOENT", "ESRCH"].includes(cause?.code)) throw cause;
+  }
+  return [String(churn.pid), ...children];
+}
+
 function processRaceOptions(sequences = {}) {
   const reads = new Map();
   const ownerToken = "a".repeat(64);
@@ -127,9 +217,13 @@ function processRaceOptions(sequences = {}) {
     "/proc/202/environ": "",
     "/proc/303/stat": processStat(303, 1, 3, "6789"),
     "/proc/303/environ": "",
+    "/proc/1/stat": processStat(1, 0, 1, "1"),
+    "/proc/1/environ": "",
+    "/proc/sys/kernel/random/boot_id": `${BOOT_ID}\n`,
   };
   return {
     options: {
+      ancestryBaseline: ancestryBaseline([1, "1"]),
       getuid: () => 1000,
       list: () => ["101"],
       read(path) {
@@ -310,9 +404,13 @@ test("rejects indeterminate namespace capability evidence", () => {
 test("uses ancestry and rejects incomplete owned-session evidence", () => {
   const ownerToken = "a".repeat(64);
   const options = {
+    ancestryBaseline: ancestryBaseline([1, "1"]),
     getuid: () => 1000,
     list: () => ["101"],
     read(path) {
+      if (path === "/proc/sys/kernel/random/boot_id") return `${BOOT_ID}\n`;
+      if (path === "/proc/1/stat") return processStat(1, 0, 1, "1");
+      if (path === "/proc/1/environ") return "";
       if (path.endsWith("/stat")) return processStat(101, 44, 3);
       if (path.endsWith("/status")) return "Uid:\t1000\t1000\t1000\t1000\n";
       throw Object.assign(new Error("denied"), { code: "EACCES" });
@@ -368,6 +466,7 @@ test("uses ancestry and rejects incomplete owned-session evidence", () => {
       ...options,
       read(path) {
         if (path === "/proc/101/stat") return processStat(101, 202, 3);
+        if (path === "/proc/101/environ") return "";
         if (path === "/proc/202/stat") return processStat(202, 1, 3);
         if (path === "/proc/202/environ") {
           return `AGENT_RUNNER_OWNED_PROCESS=${"b".repeat(64)}\0`;
@@ -383,6 +482,7 @@ test("uses ancestry and rejects incomplete owned-session evidence", () => {
       ...options,
       read(path) {
         if (path === "/proc/101/stat") return processStat(101, 202, 3);
+        if (path === "/proc/101/environ") return "";
         if (path === "/proc/202/stat") return processStat(202, 1, 3);
         if (path === "/proc/202/environ") return "";
         return options.read(path);
@@ -570,11 +670,20 @@ test("retains an owned descendant that survives ancestry churn", () => {
 });
 
 test(
-  "classifies a full procfs snapshot during unrelated process churn",
+  "classifies an unrelated process tree during process churn",
   { timeout: 5_000 },
   async (t) => {
-    const launchCutoff = await readProcessIdentity(process.pid);
-    assert.notEqual(launchCutoff, null);
+    let frozenBaseline;
+    const baselineOwner = spawnOwnedProcess(process.execPath, ["-e", ""], {
+      onProcess: async (pid, proof) => {
+        if (pid !== null) frozenBaseline = proof.ancestryBaseline;
+      },
+      ownershipMode: "native-sandbox-provider",
+      resolveLauncher: hostSessionLauncher,
+      stdio: "ignore",
+    });
+    await baselineOwner.ownedCompletion;
+    assert.ok(Array.isArray(frozenBaseline));
     const churn = spawnUnrelatedProcessChurn();
     t.after(() => {
       try {
@@ -586,7 +695,8 @@ test(
     for (let index = 0; index < 25; index += 1) {
       assert.deepEqual(
         inspectOwnedSessionProcesses(Number.MAX_SAFE_INTEGER, "f".repeat(64), {
-          launchCutoff,
+          ancestryBaseline: frozenBaseline,
+          list: () => churnProcessList(churn),
         }),
         [],
       );
@@ -646,16 +756,17 @@ test("ignores a proven pre-existing inaccessible process", () => {
   assert.deepEqual(
     inspectOwnedSessionProcesses("44", "a".repeat(64), {
       ...inaccessibleProcessOptions(),
-      launchCutoff: { bootId: BOOT_ID, startTicks: "1235" },
+      ancestryBaseline: ancestryBaseline([101, "1234"]),
     }),
     [],
   );
 });
 
-test("ignores a proven pre-existing inaccessible ancestor", () => {
+test("anchors the production SSH and tmux topology to frozen ancestry", () => {
+  const ownerToken = "a".repeat(64);
   assert.deepEqual(
-    inspectOwnedSessionProcesses("44", "a".repeat(64), {
-      launchCutoff: { bootId: BOOT_ID, startTicks: "5679" },
+    inspectOwnedSessionProcesses("44", ownerToken, {
+      ancestryBaseline: ancestryBaseline([303, "6789"]),
       getuid: () => 1000,
       list: () => ["101"],
       read(path) {
@@ -670,149 +781,200 @@ test("ignores a proven pre-existing inaccessible ancestor", () => {
         }
         if (path === "/proc/101/environ") return "";
         if (path === "/proc/202/stat") {
-          return processStat(202, 1, 3, "5678");
+          return processStat(202, 303, 3, "5678");
         }
-        throw Object.assign(new Error("denied"), { code: "EACCES" });
+        if (path === "/proc/202/environ") {
+          throw processRaceError("EACCES");
+        }
+        if (path === "/proc/303/stat") {
+          return processStat(303, 1, 3, "6789");
+        }
+        if (path === "/proc/303/environ") return "";
+        throw processRaceError("EACCES");
       },
     }),
     [],
   );
 });
 
-test("retries process churn while applying the launch cutoff", async (t) => {
-  const bootPath = "/proc/sys/kernel/random/boot_id";
+test(
+  "embedded supervision uses the same production-shaped ancestry anchor",
+  { timeout: 5_000 },
+  async (t) => {
+    const identity = await readProcessIdentity(process.pid);
+    assert.notEqual(identity, null);
+    const frozenBaseline = [
+      { bootId: identity.bootId, pid: 303, startTicks: "6789" },
+    ];
+    const child = spawnOwnedProcess(process.execPath, ["-e", ""], {
+      captureAncestryBaseline: () => frozenBaseline,
+      env: await productionTopologyEnvironment(t, identity.bootId),
+      onProcess: async (_pid, proof) => {
+        if (proof !== undefined) {
+          assert.deepEqual(proof.ancestryBaseline, frozenBaseline);
+        }
+      },
+      ownershipMode: "native-sandbox-provider",
+      resolveLauncher: hostSessionLauncher,
+      stdio: "ignore",
+    });
+
+    const result = await child.ownedCompletion;
+    assert.equal(result.inspectionComplete, true);
+    assert.equal(result.descendantsActive, false);
+  },
+);
+
+test("does not let a baseline anchor hide observed owned evidence", async (t) => {
   for (const fixture of [
     {
-      name: "current process",
-      sequences: {
-        [bootPath]: [`${BOOT_ID}\n`],
-        "/proc/101/stat": [
-          processStat(101, 1, 3),
-          processStat(101, 303, 3),
-          processStat(101, 303, 3),
-        ],
-        "/proc/101/environ": [processRaceError("EACCES")],
-      },
+      name: "owned token",
+      environment: `AGENT_RUNNER_OWNED_PROCESS=${"a".repeat(64)}\0`,
+      ancestorSession: 3,
     },
     {
-      name: "ancestor process",
-      sequences: {
-        [bootPath]: [`${BOOT_ID}\n`],
-        "/proc/202/stat": [
-          processStat(202, 1, 3, "5678"),
-          processStat(202, 303, 3, "5678"),
-          processStat(202, 303, 3, "5678"),
-        ],
-        "/proc/202/environ": [processRaceError("EACCES")],
-      },
-    },
-    {
-      name: "ancestor exit",
-      sequences: {
-        [bootPath]: [`${BOOT_ID}\n`],
-        "/proc/101/stat": [processStat(101, 202, 3), processStat(101, 303, 3)],
-        "/proc/202/stat": [processStat(202, 1, 3, "5678"), processRaceError()],
-        "/proc/202/environ": [processRaceError("EACCES")],
-      },
+      name: "owned session",
+      environment: "",
+      ancestorSession: 44,
     },
   ]) {
     await t.test(fixture.name, () => {
-      const { options, ownerToken } = processRaceOptions(fixture.sequences);
       assert.deepEqual(
-        inspectOwnedSessionProcesses(44, ownerToken, {
-          ...options,
-          launchCutoff: { bootId: BOOT_ID, startTicks: "9999" },
+        inspectOwnedSessionProcesses(44, "a".repeat(64), {
+          ancestryBaseline: ancestryBaseline([303, "6789"]),
+          getuid: () => 1000,
+          list: () => ["101"],
+          read(path) {
+            if (path === "/proc/sys/kernel/random/boot_id") {
+              return `${BOOT_ID}\n`;
+            }
+            if (path === "/proc/101/stat") {
+              return processStat(101, 202, 3);
+            }
+            if (path === "/proc/101/status") {
+              return "Uid:\t1000\t1000\t1000\t1000\n";
+            }
+            if (path === "/proc/101/environ") return fixture.environment;
+            if (path === "/proc/202/stat") {
+              return processStat(202, 303, fixture.ancestorSession, "5678");
+            }
+            if (path === "/proc/202/environ") return fixture.environment;
+            if (path === "/proc/303/stat") {
+              return processStat(303, 1, 3, "6789");
+            }
+            if (path === "/proc/303/environ") return "";
+            throw processRaceError("EACCES");
+          },
         }),
-        [],
+        [101],
       );
     });
   }
 });
 
-test("does not treat unavailable boot evidence as process churn", () => {
-  const current = processStat(101, 1, 3);
-  const { options, ownerToken, reads } = processRaceOptions({
-    "/proc/101/stat": [current, processRaceError()],
-    "/proc/101/environ": [processRaceError("EACCES")],
-    "/proc/sys/kernel/random/boot_id": [processRaceError()],
-  });
-  assert.equal(
-    inspectOwnedSessionProcesses(44, ownerToken, {
-      ...options,
-      launchCutoff: { bootId: BOOT_ID, startTicks: "1235" },
-    }),
-    null,
-  );
-  assert.equal(reads.get("/proc/101/stat"), 1);
-});
-
-test("ignores complete unrelated ancestry independently of the cutoff", () => {
+test("fails closed for stale, reused, malformed, or wrong-boot anchors", async (t) => {
   const ownerToken = "a".repeat(64);
-  assert.deepEqual(
-    inspectOwnedSessionProcesses("44", ownerToken, {
-      launchCutoff: { bootId: BOOT_ID, startTicks: "1000" },
-      getuid: () => 1000,
-      list: () => ["101"],
-      read(path) {
-        if (path === "/proc/101/stat") {
-          return processStat(101, 202, 3, "2000");
-        }
-        if (path === "/proc/101/status") {
-          return "Uid:\t1000\t1000\t1000\t1000\n";
-        }
-        if (path === "/proc/202/stat") return processStat(202, 1, 3);
-        if (path === "/proc/202/environ") return "";
-        throw Object.assign(new Error("denied"), { code: "EACCES" });
-      },
-    }),
-    [],
-  );
-});
-
-test("rejects inaccessible processes created at or after the cutoff", () => {
-  for (const startTicks of ["1234", "1235"]) {
-    assert.equal(
-      inspectOwnedSessionProcesses("44", "a".repeat(64), {
-        ...inaccessibleProcessOptions([startTicks]),
-        launchCutoff: { bootId: BOOT_ID, startTicks: "1234" },
-      }),
-      null,
-    );
+  for (const fixture of [
+    {
+      name: "reused anchor",
+      baseline: ancestryBaseline([303, "6789"]),
+      anchorTicks: "9999",
+      bootId: BOOT_ID,
+    },
+    {
+      name: "wrong boot",
+      baseline: [
+        {
+          bootId: "ffffffff-1111-2222-3333-444444444444",
+          pid: 303,
+          startTicks: "6789",
+        },
+      ],
+      anchorTicks: "6789",
+      bootId: BOOT_ID,
+    },
+    {
+      name: "unsorted baseline",
+      baseline: ancestryBaseline([303, "6789"], [1, "1"]).reverse(),
+      anchorTicks: "6789",
+      bootId: BOOT_ID,
+    },
+  ]) {
+    await t.test(fixture.name, () => {
+      assert.equal(
+        inspectOwnedSessionProcesses(44, ownerToken, {
+          ancestryBaseline: fixture.baseline,
+          getuid: () => 1000,
+          list: () => ["101"],
+          read(path) {
+            if (path === "/proc/sys/kernel/random/boot_id") {
+              return `${fixture.bootId}\n`;
+            }
+            if (path === "/proc/101/stat") {
+              return processStat(101, 303, 3);
+            }
+            if (path === "/proc/101/status") {
+              return "Uid:\t1000\t1000\t1000\t1000\n";
+            }
+            if (path === "/proc/101/environ") return "";
+            if (path === "/proc/303/stat") {
+              return processStat(303, 1, 3, fixture.anchorTicks);
+            }
+            if (path === "/proc/303/environ") return "";
+            throw processRaceError("EACCES");
+          },
+        }),
+        null,
+      );
+    });
   }
 });
 
-test("rejects an inaccessible process with a reused identity or another boot", () => {
+test("fails closed for an ancestry cycle before the frozen anchor", () => {
   assert.equal(
-    inspectOwnedSessionProcesses("44", "a".repeat(64), {
-      ...inaccessibleProcessOptions(["1234", "5678"]),
-      launchCutoff: { bootId: BOOT_ID, startTicks: "2000" },
-    }),
-    null,
-  );
-  assert.equal(
-    inspectOwnedSessionProcesses("44", "a".repeat(64), {
-      ...inaccessibleProcessOptions(),
-      launchCutoff: {
-        bootId: "ffffffff-1111-2222-3333-444444444444",
-        startTicks: "1235",
+    inspectOwnedSessionProcesses(44, "a".repeat(64), {
+      ancestryBaseline: ancestryBaseline([303, "6789"]),
+      getuid: () => 1000,
+      list: () => ["101"],
+      read(path) {
+        if (path === "/proc/sys/kernel/random/boot_id") {
+          return `${BOOT_ID}\n`;
+        }
+        if (path === "/proc/101/stat") return processStat(101, 202, 3);
+        if (path === "/proc/101/status") {
+          return "Uid:\t1000\t1000\t1000\t1000\n";
+        }
+        if (path === "/proc/101/environ") return "";
+        if (path === "/proc/202/stat") {
+          return processStat(202, 101, 3, "5678");
+        }
+        if (path === "/proc/202/environ") return "";
+        throw processRaceError("EACCES");
       },
     }),
     null,
   );
 });
 
-test("rejects malformed current process identity", () => {
-  const options = inaccessibleProcessOptions(["01234"]);
+test("fails closed before scanning when current boot evidence is unavailable", () => {
+  let listed = false;
   assert.equal(
-    inspectOwnedSessionProcesses("44", "a".repeat(64), {
-      ...options,
-      launchCutoff: { bootId: BOOT_ID, startTicks: "1235" },
+    inspectOwnedSessionProcesses(44, "a".repeat(64), {
+      ancestryBaseline: ancestryBaseline([1, "1"]),
+      list: () => {
+        listed = true;
+        return [];
+      },
+      read: () => {
+        throw processRaceError("EACCES");
+      },
     }),
     null,
   );
+  assert.equal(listed, false);
 });
 
-test("rejects inaccessible new processes and retains inaccessible owned ones", () => {
+test("rejects inaccessible new processes but retains an owned session", () => {
   const options = inaccessibleProcessOptions();
   assert.equal(
     inspectOwnedSessionProcesses("44", "a".repeat(64), options),
@@ -821,7 +983,7 @@ test("rejects inaccessible new processes and retains inaccessible owned ones", (
   assert.deepEqual(
     inspectOwnedSessionProcesses("3", "a".repeat(64), {
       ...options,
-      launchCutoff: { bootId: BOOT_ID, startTicks: "1235" },
+      ancestryBaseline: ancestryBaseline([1, "1"]),
     }),
     [101],
   );
@@ -1312,12 +1474,12 @@ test(
 );
 
 test(
-  "records the bounded launch cutoff before provider work starts",
+  "records bounded frozen ancestry before provider work starts",
   {
     timeout: 5_000,
   },
   async (t) => {
-    const directory = await mkdtemp(join(tmpdir(), "owned-process-cutoff-"));
+    const directory = await mkdtemp(join(tmpdir(), "owned-process-baseline-"));
     t.after(() => rm(directory, { force: true, recursive: true }));
     const startedPath = join(directory, "started.txt");
     const registrations = [];
@@ -1334,6 +1496,16 @@ test(
           if (pid === null) return;
           await assert.rejects(access(startedPath), { code: "ENOENT" });
           assert.deepEqual(proof.launchCutoff, proof.processIdentity);
+          assert.ok(proof.ancestryBaseline.length > 0);
+          assert.ok(proof.ancestryBaseline.length <= 4_096);
+          assert.equal(
+            proof.ancestryBaseline.every(
+              (entry, index, entries) =>
+                entry.bootId === proof.processIdentity.bootId &&
+                (index === 0 || entries[index - 1].pid < entry.pid),
+            ),
+            true,
+          );
         },
         ownershipMode: "native-sandbox-provider",
         resolveLauncher(cwd, { ownershipMode }) {
@@ -1353,6 +1525,35 @@ test(
     assert.equal(await readFile(startedPath, "utf8"), "started");
   },
 );
+
+test("rejects an oversized launch ancestry before spawning work", () => {
+  let launcherResolved = false;
+  assert.throws(
+    () =>
+      spawnOwnedProcess(process.execPath, ["-e", ""], {
+        captureAncestryBaseline: () =>
+          Array.from({ length: 4_097 }, (_, index) => ({
+            bootId: BOOT_ID,
+            pid: index + 1,
+            startTicks: String(index + 1),
+          })),
+        onProcess: async () => {},
+        resolveLauncher: () => {
+          launcherResolved = true;
+          return {
+            file: process.execPath,
+            arguments: [],
+            isolatedNamespace: true,
+          };
+        },
+      }),
+    {
+      code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+      message: "Owned-process launch ancestry is unavailable.",
+    },
+  );
+  assert.equal(launcherResolved, true);
+});
 
 test(
   "does not signal through a completed owned-process handle",
@@ -1386,7 +1587,8 @@ test("recovery clears absent and previous-boot owners", async () => {
 
 test("recovery clears a dead session only after proving descendants absent", async () => {
   const ownerPid = 987_654;
-  const processIdentity = { bootId: "boot-a", startTicks: "1234" };
+  const processIdentity = { bootId: BOOT_ID, startTicks: "1234" };
+  const frozenBaseline = ancestryBaseline([1, "1"]);
   await terminateOwnedProcess(
     ownerPid,
     async () => ({
@@ -1395,14 +1597,15 @@ test("recovery clears a dead session only after proving descendants absent", asy
       previousBoot: false,
       processIdentity,
       launchCutoff: processIdentity,
+      ancestryBaseline: frozenBaseline,
       status: "dead",
     }),
     {
       inspectSessionProcesses(sessionId, _token, options) {
         assert.equal(sessionId, ownerPid);
         assert.deepEqual(options, {
+          ancestryBaseline: frozenBaseline,
           includeSession: true,
-          launchCutoff: processIdentity,
         });
         return [];
       },
@@ -1412,7 +1615,8 @@ test("recovery clears a dead session only after proving descendants absent", asy
 
 test("recovery retains a dead session owner while descendants remain", async () => {
   const ownerPid = 987_654;
-  const processIdentity = { bootId: "boot-a", startTicks: "1234" };
+  const processIdentity = { bootId: BOOT_ID, startTicks: "1234" };
+  const frozenBaseline = ancestryBaseline([1, "1"]);
   const ownerToken = createHash("sha256")
     .update(
       `${ownerPid}\0${processIdentity.bootId}\0${processIdentity.startTicks}`,
@@ -1428,6 +1632,7 @@ test("recovery retains a dead session owner while descendants remain", async () 
         previousBoot: false,
         processIdentity,
         launchCutoff: processIdentity,
+        ancestryBaseline: frozenBaseline,
         status: "dead",
       }),
       {
@@ -1435,8 +1640,8 @@ test("recovery retains a dead session owner while descendants remain", async () 
           assert.equal(sessionId, ownerPid);
           assert.equal(token, ownerToken);
           assert.deepEqual(options, {
+            ancestryBaseline: frozenBaseline,
             includeSession: true,
-            launchCutoff: processIdentity,
           });
           return [123_456];
         },
@@ -1444,6 +1649,52 @@ test("recovery retains a dead session owner while descendants remain", async () 
     ),
     { code: "ERR_EXECUTION_PROCESS_ACTIVE" },
   );
+});
+
+test("recovery rejects legacy sessions without frozen ancestry evidence", async () => {
+  await assert.rejects(
+    terminateOwnedProcess(987_654, async () => ({
+      ancestryBaseline: null,
+      namespaceId: readlinkSync("/proc/self/ns/pid"),
+      pid: 987_654,
+      previousBoot: false,
+      processIdentity: { bootId: BOOT_ID, startTicks: "1234" },
+      status: "dead",
+    })),
+    {
+      code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+      message:
+        "Owned execution process predates frozen ancestry recovery evidence.",
+    },
+  );
+});
+
+test("recovery rejects a dead owner from another PID namespace", async () => {
+  let scanned = false;
+  await assert.rejects(
+    terminateOwnedProcess(
+      987_654,
+      async () => ({
+        ancestryBaseline: ancestryBaseline([1, "1"]),
+        namespaceId: "pid:[987654321]",
+        pid: 987_654,
+        previousBoot: false,
+        processIdentity: { bootId: BOOT_ID, startTicks: "1234" },
+        status: "dead",
+      }),
+      {
+        inspectSessionProcesses() {
+          scanned = true;
+          return [];
+        },
+      },
+    ),
+    {
+      code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+      message: "Owned execution process namespace does not match recovery.",
+    },
+  );
+  assert.equal(scanned, false);
 });
 
 test("recovery retains exclusion for live or unverifiable owners", async () => {

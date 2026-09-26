@@ -157,16 +157,20 @@ processes that require another native sandbox use that mode only when the full
 nested shape is available. Otherwise, an explicitly declared provider alone may
 use session/token ownership on the initial host namespace; verified live
 ancestry and same-user token discovery retain descendants that create another
-session or namespace. Complete unrelated ancestry independently excludes an
-inaccessible candidate regardless of launch timing. Before provider work, the
-session path durably records the supervisor's boot ID and start tick as a
-bounded launch cutoff. Parent loss before target launch exits the inert
-supervisor directly because no provider descendant can yet exist. When ancestry
-is inconclusive after launch, inaccessible metadata is disregarded only for a
-same-boot process whose validated start tick strictly predates that cutoff,
-including a pre-existing process reparented to PID 1.
-Equal or newer starts on the recorded boot, PID reuse, owned, malformed, or
-otherwise unproven candidates fail closed whenever the session scan is needed.
+session or namespace. Complete unrelated ancestry excludes a candidate only
+after every stabilized hop reaches an unchanged pre-launch identity. Before
+provider work, the session path durably records a bounded,
+ordered baseline of boot ID, PID, and start tick identities captured before
+supervisor launch. Parent loss before target launch exits the inert supervisor
+directly because no provider descendant can yet exist. Live supervision and
+recovery traverse the same frozen evidence, checking observed session and token
+ownership before accepting an anchor. An inaccessible intermediate environment
+may be crossed only when the walk still reaches that exact anchor.
+PID reuse, a stale or missing anchor, a boot mismatch, inaccessible current
+metadata, cycles, owned evidence, malformed identities, a recovery namespace
+mismatch, or otherwise unproven candidates fail closed whenever the session
+scan is needed. Legacy records do not gain baseline authority through migration
+or recovery.
 A recorded previous boot remains independent proof that the old process tree
 cannot survive. Nested runner tests inside the trusted-validation namespace
 retain the owned-session path when that enclosing sandbox denies another PID
@@ -186,8 +190,8 @@ at most three attempts to classify that same identity. Transient
 `ENOENT`/`ESRCH` or a changed parent/session restarts the current PID and its
 ancestry from scratch; a then-absent PID is an exited snapshot entry, while a
 different start tick is reuse. Malformed metadata, permission denial outside
-the launch-cutoff rule, live ownership evidence, surviving descendants, and
-attempt exhaustion remain fail-closed.
+the stable-intermediate anchored-lineage rule, live ownership evidence,
+surviving descendants, and attempt exhaustion remain fail-closed.
 Transiently incomplete completion inspection is retried only within one
 non-resetting one-second descendant-grace deadline. This cleanup grace verifies
 containment after work has ended; it is a fixed safety invariant, not a

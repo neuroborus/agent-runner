@@ -5,6 +5,22 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-09-26
+
+- **Shared-host recovery anchors new lineages to frozen launch ancestry.** Before
+  supervisor launch, the runner now captures a deterministic baseline of at
+  most 4,096 boot/PID/start identities and journals it with process ownership
+  before provider work. Live supervision and replacement-owner recovery use
+  the identical frozen evidence, walk every observed hop, and accept a new
+  unrelated lineage only when it reaches an unchanged anchor after checking
+  session and ownership-token evidence. This closes the stable SSH/tmux case
+  where a post-launch inaccessible intermediate is rooted at a pre-existing
+  SSH process without letting PID reuse, stale anchors, cycles, reparenting
+  exhaustion, namespace mismatch, or owned descendants pass. Common envelope
+  version 12 adds the nullable baseline; legacy records migrate without a host
+  rescan or invented authority and receive a precise compatibility failure when
+  same-boot session recovery needs evidence they never stored.
+
 ## 2026-09-25
 
 - **Shared-host descendant inspection tolerates bounded process churn.** Both

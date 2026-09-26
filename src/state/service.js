@@ -1120,6 +1120,12 @@ export function createRunStore({
         return snapshot.state;
       const identity = pid === null ? null : await processIdentity(pid);
       const launchCutoff = identity === null ? null : { ...identity };
+      const ancestryBaseline =
+        pid === null ||
+        proof === null ||
+        !Object.hasOwn(proof, "ancestryBaseline")
+          ? null
+          : proof.ancestryBaseline;
       if (
         proof !== null &&
         (!isDeepStrictEqual(identity, proof.processIdentity) ||
@@ -1145,6 +1151,7 @@ export function createRunStore({
                   processIdentity: identity,
                   namespaceId: proof?.namespaceId ?? null,
                   launchCutoff,
+                  ancestryBaseline,
                 },
           revision: snapshot.state.revision + 1,
           updatedAt: timestamp(snapshot.state.updatedAt),

@@ -989,11 +989,14 @@ inputs and the original access contract, preserves existing artifacts and safe
 partial content, and retains unsafe input or repository changes as blockers.
 It never rolls back content or changes Git controls.
 
-Common envelope version 11 persists the supervisor boot/start launch cutoff
-before work. Owner-loss recovery uses it only to exclude inaccessible same-boot
-processes whose validated start strictly predates launch; equal or newer starts,
-PID reuse, missing evidence, and surviving descendants fail closed before the
-process record can be retired.
+Common envelope version 12 persists the bounded frozen boot/PID/start ancestry
+baseline captured before supervisor launch. Owner-loss recovery excludes a new
+unrelated process only after every stabilized hop reaches an unchanged baseline
+identity without bypassing observed session or token ownership. PID reuse,
+stale or missing anchors, boot or namespace mismatch, cycles, inaccessible
+current metadata, and surviving descendants fail closed before the process
+record can be retired. Legacy envelopes migrate with a null baseline and gain
+no recovery authority.
 
 A completed operator pause uses `WAITING_FOR_USER`, `operator_paused`, and a
 null resume action. Its private checkpoint preserves the reconciled workflow

@@ -138,15 +138,18 @@ all owned descendants absent before clearing the process record. Live,
 replaced, unverifiable, or descendant-bearing process evidence remains a
 blocking ownership condition. Retirement and stop settlement are separate
 journaled transitions so an interruption safely retries either boundary.
-For shared-host sessions, the persisted supervisor boot/start cutoff lets
-recovery exclude only inaccessible processes proven to predate launch. Within
-a current-boot scan, equal or newer starts, PID reuse, or missing evidence
-remain conservative; a recorded previous boot remains independent absence
-proof. A process or ancestor that exits or reparents during inspection receives
-only the fixed per-entry retry bound; recovery ignores it only after a fresh
-read proves the snapshot PID absent. Reuse, surviving ownership, malformed
-evidence, and exhausted churn remain blocking. Public projections never expose
-the cutoff or retry evidence.
+For shared-host sessions, the persisted frozen boot/PID/start baseline lets
+recovery exclude a new unrelated process only when every stabilized ancestry
+hop reaches an unchanged pre-launch identity. Observed session and token
+ownership always wins over an anchor. PID reuse, a stale or missing anchor,
+boot or namespace mismatch, cycles, inaccessible current metadata, or
+incomplete evidence remain conservative; a recorded previous boot remains
+independent absence proof. A process or ancestor that exits or reparents during
+inspection receives only the fixed per-entry retry bound; recovery ignores it
+only after a fresh read proves the snapshot PID absent. Reuse, surviving
+ownership, malformed evidence, and exhausted churn remain blocking. Legacy
+records gain no baseline authority, and public projections never expose the
+baseline or retry evidence.
 
 ## Pauses, resume, and observability
 

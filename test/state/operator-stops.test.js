@@ -580,6 +580,10 @@ test("durable subprocess ownership retains worktree exclusion and distinguishes 
   const proof = {
     processIdentity: { bootId: BOOT_A, startTicks: "101" },
     namespaceId: "pid:[4026533000]",
+    ancestryBaseline: [
+      { bootId: BOOT_A, pid: 1, startTicks: "1" },
+      { bootId: BOOT_A, pid: 100, startTicks: "100" },
+    ],
   };
   const registered = await f.store.recordExecutionProcess(f.lease, 101, proof);
   assert.equal(registered.executionProcess.pid, 101);
@@ -587,6 +591,10 @@ test("durable subprocess ownership retains worktree exclusion and distinguishes 
   assert.deepEqual(
     registered.executionProcess.launchCutoff,
     proof.processIdentity,
+  );
+  assert.deepEqual(
+    registered.executionProcess.ancestryBaseline,
+    proof.ancestryBaseline,
   );
   assert.equal(
     (await f.store.inspectExecutionProcess(f.input.runId)).namespaceId,

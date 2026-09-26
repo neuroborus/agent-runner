@@ -320,67 +320,74 @@ test("current persisted role effort is required and cannot change across events"
   });
 });
 
-test("migrates version-10 process launch evidence without rewriting legacy history", async (t) => {
-  for (const processIdentity of [
-    {
-      bootId: "55555555-5555-4555-8555-555555555555",
-      startTicks: "4242",
-    },
-    null,
-  ]) {
-    const { created, store } = await createFixture(t);
-    await created.lease.release();
-    const statePath = join(created.directoryPath, "state.json");
-    const eventsPath = join(created.directoryPath, "events.jsonl");
-    const legacy = JSON.parse(await readFile(statePath, "utf8"));
-    legacy.schemaVersion = 10;
-    legacy.runtimeCompatibility.runStateVersion = 10;
-    legacy.executionProcess = {
-      pid: 4242,
-      hostname: "legacy-host",
-      processIdentity,
-      namespaceId: "pid:[4026531836]",
-    };
-    const event = JSON.parse((await readFile(eventsPath, "utf8")).trim());
-    event.schemaVersion = 10;
-    event.state = legacy;
-    const stateSource = `${JSON.stringify(legacy)}\n`;
-    const eventSource = `${JSON.stringify(event)}\n`;
-    await writeFile(statePath, stateSource);
-    await writeFile(eventsPath, eventSource);
-
-    const loaded = await store.loadRun(legacy.runId);
-    assert.deepEqual(loaded.executionProcess.launchCutoff, processIdentity);
-    assert.equal(await readFile(statePath, "utf8"), stateSource);
-    assert.equal(await readFile(eventsPath, "utf8"), eventSource);
-
-    const lease = await store.acquireRunLease(legacy.runId);
-    try {
-      const migrated = await store.migrateRun(
-        lease,
-        {
-          pipelineState: loaded.pipelineState,
-          pipelineStateVersion: loaded.pipelineStateVersion,
-        },
-        {
-          activity: {
-            actor: "runner",
-            phase: "runtime",
-            kind: "migrated",
-            message: "Migrated process launch evidence.",
-          },
-        },
-      );
-      assert.equal(migrated.schemaVersion, RUN_STATE_SCHEMA_VERSION);
-      assert.deepEqual(migrated.executionProcess.launchCutoff, processIdentity);
-      assert.deepEqual(
-        JSON.parse(await readFile(statePath, "utf8")).executionProcess
-          .launchCutoff,
+test("migrates legacy process evidence without inventing ancestry authority", async (t) => {
+  for (const schemaVersion of [10, 11]) {
+    for (const processIdentity of [
+      {
+        bootId: "55555555-5555-4555-8555-555555555555",
+        startTicks: "4242",
+      },
+      null,
+    ]) {
+      const { created, store } = await createFixture(t);
+      await created.lease.release();
+      const statePath = join(created.directoryPath, "state.json");
+      const eventsPath = join(created.directoryPath, "events.jsonl");
+      const legacy = JSON.parse(await readFile(statePath, "utf8"));
+      legacy.schemaVersion = schemaVersion;
+      legacy.runtimeCompatibility.runStateVersion = schemaVersion;
+      legacy.executionProcess = {
+        pid: 4242,
+        hostname: "legacy-host",
         processIdentity,
-      );
-    } finally {
-      await store.recordExecutionProcess(lease, null);
-      await lease.release();
+        namespaceId: "pid:[4026531836]",
+        ...(schemaVersion === 11 ? { launchCutoff: processIdentity } : {}),
+      };
+      const event = JSON.parse((await readFile(eventsPath, "utf8")).trim());
+      event.schemaVersion = schemaVersion;
+      event.state = legacy;
+      const stateSource = `${JSON.stringify(legacy)}\n`;
+      const eventSource = `${JSON.stringify(event)}\n`;
+      await writeFile(statePath, stateSource);
+      await writeFile(eventsPath, eventSource);
+
+      const loaded = await store.loadRun(legacy.runId);
+      assert.deepEqual(loaded.executionProcess.launchCutoff, processIdentity);
+      assert.equal(loaded.executionProcess.ancestryBaseline, null);
+      assert.equal(await readFile(statePath, "utf8"), stateSource);
+      assert.equal(await readFile(eventsPath, "utf8"), eventSource);
+
+      const lease = await store.acquireRunLease(legacy.runId);
+      try {
+        const migrated = await store.migrateRun(
+          lease,
+          {
+            pipelineState: loaded.pipelineState,
+            pipelineStateVersion: loaded.pipelineStateVersion,
+          },
+          {
+            activity: {
+              actor: "runner",
+              phase: "runtime",
+              kind: "migrated",
+              message: "Migrated process launch evidence.",
+            },
+          },
+        );
+        assert.equal(migrated.schemaVersion, RUN_STATE_SCHEMA_VERSION);
+        assert.deepEqual(
+          migrated.executionProcess.launchCutoff,
+          processIdentity,
+        );
+        assert.equal(migrated.executionProcess.ancestryBaseline, null);
+        assert.deepEqual(
+          JSON.parse(await readFile(statePath, "utf8")).executionProcess,
+          migrated.executionProcess,
+        );
+      } finally {
+        await store.recordExecutionProcess(lease, null);
+        await lease.release();
+      }
     }
   }
 });
@@ -411,6 +418,53 @@ test("rejects missing, malformed, and widened current launch cutoffs", async (t)
       processIdentity,
       namespaceId: "pid:[4026531836]",
       ...(launchCutoff === undefined ? {} : { launchCutoff }),
+      ancestryBaseline: null,
+    };
+    await writeFile(statePath, JSON.stringify(invalid));
+    await writeFile(
+      eventsPath,
+      `${JSON.stringify({ ...event, state: invalid })}\n`,
+    );
+    await assert.rejects(store.loadRun(current.runId), {
+      code: "ERR_INVALID_RUN_STATE",
+    });
+  }
+});
+
+test("validates current frozen ancestry baselines strictly and bounds their size", async (t) => {
+  const { created, store } = await createFixture(t);
+  await created.lease.release();
+  const statePath = join(created.directoryPath, "state.json");
+  const eventsPath = join(created.directoryPath, "events.jsonl");
+  const current = JSON.parse(await readFile(statePath, "utf8"));
+  const event = JSON.parse((await readFile(eventsPath, "utf8")).trim());
+  const processIdentity = {
+    bootId: "55555555-5555-4555-8555-555555555555",
+    startTicks: "4242",
+  };
+  const entry = (pid, startTicks = String(pid)) => ({
+    bootId: processIdentity.bootId,
+    pid,
+    startTicks,
+  });
+  const variants = [
+    undefined,
+    [],
+    [entry(2), entry(1)],
+    [entry(1), entry(1)],
+    [{ ...entry(1), bootId: "66666666-6666-4666-8666-666666666666" }],
+    [{ ...entry(1), extra: true }],
+    Array.from({ length: 4_097 }, (_, index) => entry(index + 1)),
+  ];
+  for (const ancestryBaseline of variants) {
+    const invalid = structuredClone(current);
+    invalid.executionProcess = {
+      pid: 4242,
+      hostname: "current-host",
+      processIdentity,
+      namespaceId: "pid:[4026531836]",
+      launchCutoff: processIdentity,
+      ...(ancestryBaseline === undefined ? {} : { ancestryBaseline }),
     };
     await writeFile(statePath, JSON.stringify(invalid));
     await writeFile(

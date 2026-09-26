@@ -3050,19 +3050,23 @@ descendant-bearing recorded process, clears a retired record under the
 replacement execution lease, and makes process retirement plus checkpoint
 settlement independently retryable across interruption.
 
-Common envelope version 11 persists the supervisor boot/start launch cutoff
-before work. Replacement ownership may exclude inaccessible process metadata
-only for a same-boot process whose validated start strictly predates that
-cutoff. When the shared-host scan is required, equal or newer starts, PID reuse,
-a boot mismatch, missing evidence, and surviving or escaping descendants remain
-fail-closed ownership barriers. A recorded previous boot remains independent
-proof that the old process tree is absent. Each current-boot snapshot entry has
-three attempts bound to its first readable start tick. Transient disappearance
-or reparenting restarts that PID and its new ancestry from scratch; only a fresh
-absent read discards the exited entry. Reuse, malformed or inaccessible
-metadata, live ownership, surviving descendants, and exhausted churn retain the
-process record. Action-free CLI and MCP recovery use this same inspection before
-immediate pause or cancellation settlement.
+Common envelope version 12 persists the bounded frozen boot/PID/start ancestry
+baseline captured before supervisor launch. Replacement ownership may exclude
+a new unrelated process only after every stabilized hop reaches an unchanged
+baseline identity without bypassing observed session or token ownership. A
+stable inaccessible intermediate environment can be crossed only when the same
+walk reaches that exact anchor. PID reuse, a stale or missing anchor, boot
+or namespace mismatch, cycles, inaccessible current metadata, malformed
+identities, and surviving or escaping descendants remain fail-closed ownership
+barriers. Version-11 and older envelopes migrate with a null baseline and gain
+no recovery authority. A recorded previous boot remains independent proof that
+the old process tree is absent. Each current-boot snapshot entry has three
+attempts bound to its first readable start tick. Transient disappearance or
+reparenting restarts that PID and its new ancestry from scratch; only a fresh
+absent read discards the exited entry. Reuse, malformed evidence, unresolved
+permission denial, live ownership, surviving descendants, and exhausted churn
+retain the process record. Action-free CLI and MCP recovery use this same
+inspection before immediate pause or cancellation settlement.
 
 The descriptor owns one fail-closed `pre-work` classification for an applicable
 immediate stop saved against the untouched initial `CLARIFY` checkpoint. The

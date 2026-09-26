@@ -3,7 +3,7 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { isAdapterDiagnosticClass } from "../agents/index.js";
 import { validStopTiming, validStopSettlement } from "./stop-contract.js";
 
-export const RUN_STATE_SCHEMA_VERSION = 11;
+export const RUN_STATE_SCHEMA_VERSION = 12;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
   runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
@@ -27,6 +27,7 @@ const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   8,
   9,
   10,
+  11,
   RUN_STATE_SCHEMA_VERSION,
 ]);
 
@@ -115,6 +116,7 @@ const MAX_ACTIVITY_MESSAGE_LENGTH = 500;
 const MAX_INPUT_ITEMS = 32;
 const MAX_INPUT_OPTIONS = 16;
 const MAX_INPUT_TEXT_LENGTH = 4_000;
+const MAX_PROCESS_ANCESTRY_BASELINE_ENTRIES = 4_096;
 
 export class RunStoreError extends Error {
   constructor(message, { cause, code = "ERR_RUN_STORE" } = {}) {
@@ -766,11 +768,46 @@ export function validateProcessIdentity(value) {
   return { bootId: value.bootId, startTicks: value.startTicks };
 }
 
+function normalizeProcessAncestryBaseline(value, processIdentity) {
+  if (value === null) return null;
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > MAX_PROCESS_ANCESTRY_BASELINE_ENTRIES ||
+    processIdentity === null
+  ) {
+    fail("Run execution process ancestry baseline is invalid.");
+  }
+  let previousPid = 0;
+  return value.map((entry, index) => {
+    const path = `run.executionProcess.ancestryBaseline[${index}]`;
+    assertRecord(entry, path);
+    rejectUnknownFields(entry, new Set(["bootId", "pid", "startTicks"]), path);
+    if (
+      Object.keys(entry).length !== 3 ||
+      entry.bootId !== processIdentity.bootId ||
+      !Number.isSafeInteger(entry.pid) ||
+      entry.pid <= previousPid ||
+      typeof entry.startTicks !== "string" ||
+      !/^(?:0|[1-9][0-9]{0,31})$/u.test(entry.startTicks)
+    ) {
+      fail(`${path} is invalid.`);
+    }
+    previousPid = entry.pid;
+    return {
+      bootId: entry.bootId,
+      pid: entry.pid,
+      startTicks: entry.startTicks,
+    };
+  });
+}
+
 function normalizeExecutionProcess(value, schemaVersion) {
   if ((value === undefined && schemaVersion < 5) || value === null) return null;
   assertRecord(value, "run.executionProcess");
   const fields = ["pid", "hostname", "processIdentity", "namespaceId"];
   if (schemaVersion >= 11) fields.push("launchCutoff");
+  if (schemaVersion >= 12) fields.push("ancestryBaseline");
   rejectUnknownFields(value, new Set(fields), "run.executionProcess");
   if (
     schemaVersion < 5 ||
@@ -803,12 +840,20 @@ function normalizeExecutionProcess(value, schemaVersion) {
   ) {
     fail("Run execution process launch cutoff is invalid.");
   }
+  const ancestryBaseline =
+    schemaVersion < 12
+      ? null
+      : normalizeProcessAncestryBaseline(
+          value.ancestryBaseline,
+          processIdentity,
+        );
   return {
     pid: value.pid,
     hostname: value.hostname,
     processIdentity,
     namespaceId: value.namespaceId ?? null,
     launchCutoff,
+    ancestryBaseline,
   };
 }
 

@@ -113,6 +113,20 @@ function ready() {
   return { status: "READY", questions: [] };
 }
 
+async function frozenHostAncestryBaseline() {
+  const entries = [];
+  for (const name of (await readdir("/proc"))
+    .filter((entry) => /^(?:[1-9]\d*)$/u.test(entry))
+    .sort((left, right) => Number(left) - Number(right))) {
+    const pid = Number(name);
+    const identity = await readProcessIdentity(pid);
+    if (identity !== null) entries.push({ ...identity, pid });
+  }
+  assert.ok(entries.length > 0);
+  assert.ok(entries.length <= 4_096);
+  return entries;
+}
+
 function draft() {
   return {
     status: "DRAFT",
@@ -1212,6 +1226,7 @@ test("operator stops reconcile native provider ownership before releasing leases
       ]);
       const before = await store.loadRun(runId);
       assert.equal(before.executionProcess.pid, child.ownedPid);
+      assert.ok(before.executionProcess.ancestryBaseline.length > 0);
       assert.equal(await store.runIsLeased(runId), true);
       const kind =
         access === "read-only" ? "pause_requested" : "cancel_requested";
@@ -1942,6 +1957,7 @@ test("action-free CLI/MCP recovery settles dead sessions", async (t) => {
         const fixture = await operatorFixture(t, "plan-execution");
         const launchIdentity = await readProcessIdentity(process.pid);
         assert.notEqual(launchIdentity, null);
+        const ancestryBaseline = await frozenHostAncestryBaseline();
         const namespaceId = readlinkSync("/proc/self/ns/pid");
         const executionPid = 2_000_000_001;
         let originalOwnerAlive = true;
@@ -1972,6 +1988,7 @@ test("action-free CLI/MCP recovery settles dead sessions", async (t) => {
                 await request.onProcess(executionPid, {
                   processIdentity: launchIdentity,
                   namespaceId,
+                  ancestryBaseline,
                 });
                 throw new Error("Simulated execution-owner loss");
               },
@@ -1997,6 +2014,15 @@ test("action-free CLI/MCP recovery settles dead sessions", async (t) => {
         assert.deepEqual(
           checkpoint.executionProcess.launchCutoff,
           launchIdentity,
+        );
+        assert.deepEqual(
+          checkpoint.executionProcess.ancestryBaseline,
+          ancestryBaseline,
+        );
+        const { stdout: repositoryBeforeRecovery } = await executeFile(
+          "git",
+          ["status", "--short"],
+          { cwd: fixture.projectPath },
         );
 
         originalOwnerAlive = false;
@@ -2090,9 +2116,117 @@ test("action-free CLI/MCP recovery settles dead sessions", async (t) => {
           await recoveredStore.worktreeIsLeased(fixture.projectPath, runId),
           false,
         );
+        const { stdout: repositoryAfterRecovery } = await executeFile(
+          "git",
+          ["status", "--short"],
+          { cwd: fixture.projectPath },
+        );
+        assert.equal(repositoryAfterRecovery, repositoryBeforeRecovery);
       });
     }
   }
+});
+
+test("legacy recovery evidence remains non-mutating and compatibility-blocked", async (t) => {
+  const fixture = await operatorFixture(t, "plan-execution");
+  const launchIdentity = await readProcessIdentity(process.pid);
+  assert.notEqual(launchIdentity, null);
+  const namespaceId = readlinkSync("/proc/self/ns/pid");
+  const executionPid = 2_000_000_002;
+  let originalOwnerAlive = true;
+  let executionAlive = true;
+  const options = {
+    stateRoot: fixture.stateRoot,
+    resolveStopBoundary,
+    hostName: "legacy-recovery-host",
+    processId: 100,
+    processIsAlive: (pid) =>
+      (pid === 100 && originalOwnerAlive) ||
+      (pid === executionPid && executionAlive),
+    processIdentity: (pid) =>
+      pid === executionPid
+        ? launchIdentity
+        : { bootId: launchIdentity.bootId, startTicks: String(pid) },
+    leaseStaleMs: 0,
+  };
+  const store = createRunStore(options);
+  const delegate = createExecutionAdapter();
+  const runner = runnerFor(
+    fixture,
+    {
+      codex: {
+        ...delegate,
+        async run(request) {
+          await request.onProcess(executionPid, {
+            processIdentity: launchIdentity,
+            namespaceId,
+          });
+          throw new Error("Simulated legacy execution-owner loss");
+        },
+      },
+    },
+    { runStore: store },
+  );
+  const runId = (
+    await runner.create({
+      pipelineId: "plan-execution",
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+      proactiveClarification: false,
+      roleOverrides: {},
+      sourceSession: null,
+    })
+  ).run.runId;
+  await assert.rejects(runner.resume({ runId, action: null }), {
+    code: "ERR_EXECUTION_PROCESS_ACTIVE",
+  });
+  const checkpoint = await store.loadRun(runId);
+  assert.equal(checkpoint.executionProcess.ancestryBaseline, null);
+
+  originalOwnerAlive = false;
+  executionAlive = false;
+  const recoveredStore = createRunStore({
+    ...options,
+    processId: 200,
+    processIsAlive: (pid) => pid === 200,
+  });
+  const recoveredRunner = runnerFor(
+    fixture,
+    {
+      codex: {
+        ...delegate,
+        run: () =>
+          assert.fail("Compatibility recovery must not invoke a provider."),
+      },
+    },
+    { runStore: recoveredStore },
+  );
+  await recoveredRunner.requestOperatorStop({
+    runId,
+    kind: "pause_requested",
+    expectedRevision: checkpoint.revision,
+    idempotencyKey: "legacy-evidence-stop",
+    timing: "immediate",
+  });
+  const durableBefore = await recoveredStore.loadRun(runId);
+  const { stdout: repositoryBefore } = await executeFile(
+    "git",
+    ["status", "--short"],
+    { cwd: fixture.projectPath },
+  );
+  await assert.rejects(recoveredRunner.resume({ runId, action: null }), {
+    code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    message:
+      "Owned execution process predates frozen ancestry recovery evidence.",
+  });
+  assert.deepEqual(await recoveredStore.loadRun(runId), durableBefore);
+  assert.equal(await recoveredStore.runIsLeased(runId), true);
+  const { stdout: repositoryAfter } = await executeFile(
+    "git",
+    ["status", "--short"],
+    { cwd: fixture.projectPath },
+  );
+  assert.equal(repositoryAfter, repositoryBefore);
 });
 
 test("stop recovery preserves containment failure without reacquiring its held worktree lease", async (t) => {

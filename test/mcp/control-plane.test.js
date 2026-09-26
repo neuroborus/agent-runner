@@ -3287,6 +3287,13 @@ test("projects live and crashed provider activity through status and wait", asyn
       startTicks: "4242",
     },
     namespaceId: "pid:[4026533000]",
+    ancestryBaseline: [
+      {
+        bootId: "11111111-1111-4111-8111-111111111111",
+        pid: 1,
+        startTicks: "1",
+      },
+    ],
   });
   assert.deepEqual(
     registered.executionProcess.launchCutoff,
@@ -3307,7 +3314,7 @@ test("projects live and crashed provider activity through status and wait", asyn
   });
   assert.doesNotMatch(
     JSON.stringify(liveStatus),
-    /bootId|launchCutoff|startTicks/u,
+    /ancestryBaseline|bootId|launchCutoff|startTicks/u,
   );
   const waiting = await control.runWait({
     runId: RUN_ID,
