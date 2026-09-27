@@ -323,14 +323,16 @@ Claude bubblewrap grammar, rejects malformed or weakened input before spawning,
 and strengthens the validated invocation into one user, PID, mount, and network
 boundary with private `/proc`, `/tmp`, and `/run`, a read-only host root,
 access-specific workspace writes, and read-only Git metadata. Its file and
-containing directory are non-writable during the turn, and it pins the
-canonical host `bwrap` executable rather than resolving it through a
-workspace-writable path. The proof denies IP and host Unix sockets, inherited
-credentials and host provider-proc access, remote writes, Git metadata, and
-outside writes. The fallback sets `allowAllUnixSockets: true`, so Claude does
-not prepend its native-only `apply-seccomp` dispatch; the launcher rejects an
-attempted dispatch before spawning, and the Runner boundary blocks host sockets
-without a nested helper. Native policy stays strict; the
+containing directory are non-writable during the turn, and it pins both the
+Claude helper and canonical host `bwrap` executable rather than resolving them
+through a workspace-writable path. The launcher consumes Claude's required
+user-unshare input, invokes the helper with `ARGV0=apply-seccomp`, and lets that
+helper execute bubblewrap exactly once without a second user namespace. It
+removes `ARGV0`, credentials, and its token before the payload. The proof denies
+IP and host abstract and pathname Unix sockets, inherited credentials and host
+provider-proc access, remote writes, Git metadata, and outside writes. The
+fallback sets `allowAllUnixSockets: true` so Claude does not prepend a second
+automatic helper dispatch. Native policy stays strict; the
 [architecture contract](../ARCHITECTURE.md) owns the exact launcher grammar and
 strengthening mechanics. Any failed or incomplete proof, argument rejection,
 launcher failure, or cleanup leaves that access mode unavailable. The bounded

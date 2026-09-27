@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import {
   CLAUDE_COMMAND_LAUNCHER_TOKEN,
@@ -97,8 +97,14 @@ import { readFileSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { createConnection } from "node:net";
 import { join } from "node:path";
 
-const [access, gitDirectory, outsideDirectory, socketPath, providerPid] =
-  process.argv.slice(1);
+const [
+  access,
+  gitDirectory,
+  outsideDirectory,
+  socketPath,
+  abstractSocketName,
+  providerPid,
+] = process.argv.slice(1);
 const writable = access === "workspace-write";
 const denied = new Set(["EACCES", "ENOENT", "EPERM", "EROFS"]);
 function write(path, expected) {
@@ -111,7 +117,8 @@ function write(path, expected) {
 }
 if (
   process.env.${PROBE_CREDENTIAL} !== undefined ||
-  process.env.${CLAUDE_COMMAND_LAUNCHER_TOKEN} !== undefined
+  process.env.${CLAUDE_COMMAND_LAUNCHER_TOKEN} !== undefined ||
+  process.env.ARGV0 !== undefined
 ) process.exit(12);
 if (!/^[1-9][0-9]*$/.test(providerPid)) process.exit(17);
 try {
@@ -125,12 +132,14 @@ if (writable && !statSync(".claude").isDirectory()) process.exit(23);
 write(".claude/mask-probe", false);
 write(join(gitDirectory, "git-probe"), false);
 write(join(outsideDirectory, "outside-probe"), false);
+write("/tmp/agent-runner-claude-probe", true);
+write("/run/agent-runner-claude-probe", true);
 
 const results = new Set();
 function finish(kind, code, expected) {
   if (!expected.has(code)) process.exit(13);
   results.add(kind);
-  if (results.size === 2) {
+  if (results.size === 3) {
     writeSync(1, ${JSON.stringify(PROBE_OUTPUT)});
     process.exit(0);
   }
@@ -144,7 +153,16 @@ if (!statSync(socketPath).isSocket()) process.exit(24);
 const unix = createConnection(socketPath);
 unix.once("connect", () => process.exit(15));
 unix.once("error", ({ code }) =>
-  finish("unix", code, new Set(["EACCES", "EPERM"])),
+  finish("pathname", code, new Set(["EACCES", "EPERM"])),
+);
+const abstract = createConnection(String.fromCharCode(0) + abstractSocketName);
+abstract.once("connect", () => process.exit(25));
+abstract.once("error", ({ code }) =>
+  finish(
+    "abstract",
+    code,
+    new Set(["EACCES", "ECONNREFUSED", "ENOENT", "EPERM"]),
+  ),
 );
 setTimeout(() => process.exit(16), 1_000);
 `.trim();
@@ -217,6 +235,7 @@ function nativeArguments({
 
 function fallbackProbeArguments({
   access,
+  abstractSocketName,
   credentialEnvironmentNames,
   emptyMaskDirectory,
   gitDirectory,
@@ -264,6 +283,7 @@ function fallbackProbeArguments({
       gitDirectory,
       outsideDirectory,
       socketPath,
+      abstractSocketName,
       String(process.pid),
     ]
       .map(shellArgument)
@@ -330,10 +350,12 @@ async function probePolicy({
   let basePath;
   let commandLauncher;
   let outcome;
-  let socketServer;
+  const socketServers = [];
   try {
-    basePath = await mkdtemp(join(tmpdir(), "agent-runner-claude-policy-"));
-    const workspaceDirectory = join(basePath, "workspace");
+    // Keep the workspace socket below Linux's bounded AF_UNIX pathname size,
+    // including when the test runner supplies a nested private temporary root.
+    basePath = await mkdtemp(join(tmpdir(), "ar-c-"));
+    const workspaceDirectory = join(basePath, "w");
     const gitDirectory = join(workspaceDirectory, ".git");
     const outsideDirectory = join(basePath, "outside");
     const emptyMaskDirectory = join(basePath, "claude-empty-probe");
@@ -346,12 +368,19 @@ async function probePolicy({
     let file;
     let argumentsList;
     if (weaker) {
-      const socketPath = join(workspaceDirectory, "host.sock");
-      socketServer = createSocketServer();
-      await listen(socketServer, socketPath);
+      const socketPath = join(workspaceDirectory, "s");
+      const abstractSocketName = `${basename(basePath)}-${process.pid}`;
+      const pathnameServer = createSocketServer();
+      const abstractServer = createSocketServer();
+      socketServers.push(pathnameServer, abstractServer);
+      await Promise.all([
+        listen(pathnameServer, socketPath),
+        listen(abstractServer, String.fromCharCode(0) + abstractSocketName),
+      ]);
       commandLauncher = await createClaudeCommandLauncher({
         access,
         bubblewrapBinary,
+        claudeBinary,
         cwd: workspaceDirectory,
         environment: env,
         gitDirectories: [gitDirectory],
@@ -363,6 +392,7 @@ async function probePolicy({
       file = commandLauncher.path;
       argumentsList = fallbackProbeArguments({
         access,
+        abstractSocketName,
         credentialEnvironmentNames,
         emptyMaskDirectory,
         gitDirectory,
@@ -423,7 +453,7 @@ async function probePolicy({
         cleanupFailed = true;
       }
     }
-    if (socketServer !== undefined) {
+    for (const socketServer of socketServers) {
       try {
         await close(socketServer);
       } catch {

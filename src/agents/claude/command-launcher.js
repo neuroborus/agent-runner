@@ -6,6 +6,7 @@ import {
   mkdtemp,
   realpath,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -26,7 +27,11 @@ function containsPath(parent, child) {
 async function resolveExecutable(binary, environment) {
   if (isAbsolute(binary)) {
     await access(binary, constants.X_OK);
-    return realpath(binary);
+    const path = await realpath(binary);
+    if (!(await stat(path)).isFile()) {
+      throw new Error("Claude command isolation executable is unavailable.");
+    }
+    return path;
   }
   for (const directory of (environment.PATH ?? "")
     .split(delimiter)
@@ -34,7 +39,8 @@ async function resolveExecutable(binary, environment) {
     const candidate = join(directory, binary);
     try {
       await access(candidate, constants.X_OK);
-      return await realpath(candidate);
+      const path = await realpath(candidate);
+      if ((await stat(path)).isFile()) return path;
     } catch {
       // Continue past unusable absolute PATH entries.
     }
@@ -103,6 +109,7 @@ function launcherSource({
   canonicalCwd,
   canonicalGitDirectories,
   canonicalTemporaryRoot,
+  claudeBinary,
   claudeWritablePaths,
   cwd,
   filesystemArguments,
@@ -137,6 +144,7 @@ const gitDirectories = new Set(
   ${JSON.stringify([...new Set(gitDirectories)])},
 );
 const protectedEnvironmentNames = new Set(${JSON.stringify([
+    "ARGV0",
     CLAUDE_COMMAND_LAUNCHER_TOKEN,
     ...unsetEnvironmentNames,
   ])});
@@ -232,10 +240,7 @@ while (["--unsetenv", "--setenv"].includes(sourceArguments[index])) {
     presentUnsetEnvironmentNames.push(name);
   } else {
     const value = takeValue();
-    if (
-      protectedEnvironmentNames.has(name) ||
-      (name === "ARGV0" && value === "apply-seccomp")
-    ) fail();
+    if (protectedEnvironmentNames.has(name)) fail();
     validatedArguments.push(value);
   }
 }
@@ -374,7 +379,8 @@ while (["--bind", "--ro-bind", "--tmpfs"].includes(sourceArguments[index])) {
 take("--dev");
 take("/dev");
 take("--unshare-pid");
-take("--unshare-user");
+if (sourceArguments[index] !== "--unshare-user") fail();
+index += 1;
 if (
   sourceArguments[index] !== "--bind" ||
   sourceArguments[index + 1] !== "/proc" ||
@@ -396,12 +402,14 @@ if (
 
 const environment = { ...process.env };
 for (const name of protectedEnvironmentNames) delete environment[name];
+environment.ARGV0 = "apply-seccomp";
 const missingUnsetArguments = [...protectedEnvironmentNames]
   .filter((name) => !presentUnsetEnvironmentNames.includes(name))
   .flatMap((name) => ["--unsetenv", name]);
 const result = spawnSync(
-  ${JSON.stringify(bubblewrapBinary)},
+  ${JSON.stringify(claudeBinary)},
   [
+    ${JSON.stringify(bubblewrapBinary)},
     ...validatedArguments,
     ...${JSON.stringify(finalArguments)},
     ...missingUnsetArguments,
@@ -422,6 +430,7 @@ process.exit(result.status ?? 125);
 export async function createClaudeCommandLauncher({
   access,
   bubblewrapBinary,
+  claudeBinary,
   cwd,
   environment,
   gitDirectories,
@@ -444,9 +453,14 @@ export async function createClaudeCommandLauncher({
       bubblewrapBinary,
       environment,
     );
+    const resolvedClaudeBinary = await resolveExecutable(
+      claudeBinary,
+      environment,
+    );
     if (
-      protectedRoots.some((path) =>
-        containsPath(path, resolvedBubblewrapBinary),
+      resolvedClaudeBinary === resolvedBubblewrapBinary ||
+      [resolvedBubblewrapBinary, resolvedClaudeBinary].some((executable) =>
+        protectedRoots.some((path) => containsPath(path, executable)),
       )
     ) {
       throw new Error("Claude command isolation executable is unsafe.");
@@ -472,6 +486,7 @@ export async function createClaudeCommandLauncher({
           canonicalCwd,
           canonicalGitDirectories,
           canonicalTemporaryRoot: temporaryRoot,
+          claudeBinary: resolvedClaudeBinary,
           claudeWritablePaths,
           cwd,
           filesystemArguments,

@@ -13,16 +13,15 @@ remain in the owning documentation.
   parent invocation only after the exact probe recognizes
   nested-user-namespace denial. The authenticated provider-private launcher
   validates a closed argument grammar, rejects malformed or weakened input,
-  adds the required isolation constraints, scrubs its token and credentials,
-  and executes the pinned real bubblewrap once with the unchanged payload. The
-  same path handles direct model-free probes and model commands. The Claude CLI
-  retains its host provider transport and credentials; only command children
-  cross the single Runner user, PID, mount, and network boundary with private
-  `/proc`, `/tmp`, and `/run`, read-only host and Git views, credential
-  scrubbing, and the requested workspace write authority. Claude's embedded
-  seccomp helper stays inside the validated payload to block pathname Unix
-  sockets without creating another namespace boundary; native policy stays
-  strict.
+  and applies the pinned Claude seccomp helper before one pinned real bubblewrap
+  boundary. The same path handles direct model-free probes and model commands.
+  The Claude CLI retains its host provider transport and credentials; only
+  command children cross the single Runner user, PID, mount, and network
+  boundary with private `/proc`, `/tmp`, and `/run`, read-only host and Git
+  views, credential scrubbing, and the requested workspace write authority.
+  The proved ordering blocks pathname Unix sockets, while consuming Claude's
+  already-satisfied user-namespace input avoids nesting another user namespace;
+  native policy stays strict.
   Common envelope version 13 holds one provider-neutral receipt slot per
   resolved role and persists only a policy fingerprint and supported-access
   list when that role is required; the fingerprint distinguishes this

@@ -172,6 +172,7 @@ const STRUCTURED_OUTPUT_TERMINAL_REASONS = new Set([
   "structured_output_retry_exhausted",
 ]);
 const IGNORED_CONTROL_ENVIRONMENT = new Set([
+  "ARGV0",
   CLAUDE_COMMAND_LAUNCHER_TOKEN,
   "CLAUDE_AUTO_BACKGROUND_TASKS",
   "CLAUDE_CODE_AUTO_CONNECT_IDE",
@@ -1140,7 +1141,7 @@ export function createClaudeAdapter(options = {}) {
             contract: Object.values(isolationPolicies).includes(
               "runner-boundary",
             )
-              ? "claude-command-boundary-v5"
+              ? "claude-command-boundary-v6"
               : "claude-isolation-v1",
             policies: isolationPolicies,
             version: version.text,
@@ -1307,6 +1308,7 @@ export function createClaudeAdapter(options = {}) {
         commandLauncher = await createClaudeCommandLauncher({
           access: request.access,
           bubblewrapBinary: BUBBLEWRAP_BINARY,
+          claudeBinary,
           cwd: request.cwd,
           environment: baseEnvironment,
           gitDirectories,

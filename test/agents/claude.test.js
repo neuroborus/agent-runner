@@ -1,16 +1,19 @@
 import assert from "node:assert/strict";
 import { execFile as executeFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
+import { constants } from "node:fs";
 import {
+  access,
   chmod,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   stat,
   writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { delimiter, join, parse } from "node:path";
+import { delimiter, dirname, isAbsolute, join, parse } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
@@ -237,22 +240,56 @@ async function createFakeBubblewrap(t) {
     join(tmpdir(), "agent-runner-fake-claude-bwrap-"),
   );
   const logPath = join(directory, "arguments.jsonl");
+  const helperLogPath = join(directory, "helper.jsonl");
   await Promise.all([
+    writeFile(
+      join(directory, "claude"),
+      `#!${process.execPath}\n` +
+        `const { spawnSync } = require("node:child_process");\n` +
+        `const { appendFileSync } = require("node:fs");\n` +
+        `if (process.env.ARGV0 !== "apply-seccomp" || ` +
+        `process.env.${COMMAND_LAUNCHER_TOKEN} !== undefined || ` +
+        `process.env.ANTHROPIC_API_KEY !== undefined || ` +
+        `process.env.HTTPS_PROXY !== undefined || ` +
+        `process.env.AGENT_RUNNER_CLAUDE_PROBE_CREDENTIAL !== undefined) ` +
+        `process.exit(12);\n` +
+        `const args = process.argv.slice(2);\n` +
+        `if (process.env.AGENT_RUNNER_FAKE_HELPER_LOG !== undefined) ` +
+        `appendFileSync(process.env.AGENT_RUNNER_FAKE_HELPER_LOG, ` +
+        `JSON.stringify({ argv0: process.env.ARGV0, file: args[0], argumentsList: args.slice(1) }) + "\\n");\n` +
+        `const result = spawnSync(args[0], args.slice(1), ` +
+        `{ env: process.env, stdio: "inherit" });\n` +
+        `if (result.error !== undefined || result.signal !== null) process.exit(125);\n` +
+        `process.exit(result.status ?? 125);\n`,
+      { mode: 0o700 },
+    ),
     writeFile(
       join(directory, "bwrap"),
       `#!${process.execPath}\n` +
         `const { spawnSync } = require("node:child_process");\n` +
         `const { appendFileSync, writeSync } = require("node:fs");\n` +
-        `if (process.env.${COMMAND_LAUNCHER_TOKEN} !== undefined || ` +
+        `if (process.env.ARGV0 !== "apply-seccomp" || ` +
+        `process.env.${COMMAND_LAUNCHER_TOKEN} !== undefined || ` +
         `process.env.ANTHROPIC_API_KEY !== undefined || ` +
+        `process.env.HTTPS_PROXY !== undefined || ` +
         `process.env.AGENT_RUNNER_CLAUDE_PROBE_CREDENTIAL !== undefined) ` +
         `process.exit(12);\n` +
         `const args = process.argv.slice(2);\n` +
         `appendFileSync(process.env.AGENT_RUNNER_FAKE_BWRAP_LOG, JSON.stringify(args) + "\\n");\n` +
         `if (process.env.AGENT_RUNNER_FAKE_BWRAP_EXECUTE_PAYLOAD === "1") {\n` +
         `  const separator = args.indexOf("--");\n` +
+        `  const environment = { ...process.env };\n` +
+        `  for (let index = 0; index < separator; index += 1) {\n` +
+        `    if (args[index] === "--unsetenv") {\n` +
+        `      delete environment[args[index + 1]];\n` +
+        `      index += 1;\n` +
+        `    } else if (args[index] === "--setenv") {\n` +
+        `      environment[args[index + 1]] = args[index + 2];\n` +
+        `      index += 2;\n` +
+        `    }\n` +
+        `  }\n` +
         `  const result = spawnSync(args[separator + 1], args.slice(separator + 2), ` +
-        `{ env: process.env, stdio: "inherit" });\n` +
+        `{ env: environment, stdio: "inherit" });\n` +
         `  process.exit(result.status ?? 125);\n` +
         `}\n` +
         `writeSync(1, "agent-runner-claude-isolation-ok");\n`,
@@ -261,7 +298,23 @@ async function createFakeBubblewrap(t) {
     writeFile(join(directory, "package.json"), '{"type":"commonjs"}\n'),
   ]);
   t.after(() => rm(directory, { force: true, recursive: true }));
-  return { directory, logPath };
+  return { directory, helperLogPath, logPath };
+}
+
+async function resolveTestExecutable(binary) {
+  for (const directory of (process.env.PATH ?? "")
+    .split(delimiter)
+    .filter(isAbsolute)) {
+    const candidate = join(directory, binary);
+    try {
+      await access(candidate, constants.X_OK);
+      const path = await realpath(candidate);
+      if ((await stat(path)).isFile()) return path;
+    } catch {
+      // The real-process regression is capability-gated.
+    }
+  }
+  return undefined;
 }
 
 async function commandLauncherEvidence(path) {
@@ -318,6 +371,7 @@ function socketServerFixture(socketServers) {
 }
 
 function createFixture({
+  claudeBinary,
   env,
   handle,
   help = HELP,
@@ -333,11 +387,12 @@ function createFixture({
   let turnIndex = 0;
   const execute = async (file, argumentsList, options) => {
     const call = { file, argumentsList, options };
+    const isClaudeCall = file === (claudeBinary ?? "claude");
     calls.push(call);
     if (isRunnerBoundaryProbe(call)) {
       Object.assign(call, await commandLauncherEvidence(file));
     } else if (
-      file === "claude" &&
+      isClaudeCall &&
       argumentsList.includes("-p") &&
       options.env[COMMAND_LAUNCHER_TOKEN] !== undefined
     ) {
@@ -351,15 +406,15 @@ function createFixture({
     }
     const handled = await handle?.({ call, calls, turnIndex });
     if (handled !== undefined) {
-      if (file === "claude" && argumentsList.includes("-p")) {
+      if (isClaudeCall && argumentsList.includes("-p")) {
         turnIndex += 1;
       }
       return handled;
     }
-    if (file === "claude" && argumentsList.at(-1) === "--version") {
+    if (isClaudeCall && argumentsList.at(-1) === "--version") {
       return { stdout: `${version} (Claude Code)\n`, stderr: "" };
     }
-    if (file === "claude" && argumentsList[0] === "--help") {
+    if (isClaudeCall && argumentsList[0] === "--help") {
       return { stdout: help, stderr: "" };
     }
     if (file === "socat") {
@@ -383,7 +438,10 @@ function createFixture({
         throw new Error("Fallback unavailable host-secret-value");
       }
       if (!isNativeSandboxProbe(call) && executeFallbackLauncher) {
-        return executeFile(file, argumentsList, options);
+        return executeFile(file, argumentsList, {
+          ...options,
+          env: { ...options.env, PATH: "" },
+        });
       }
       return {
         stdout: "agent-runner-claude-isolation-ok",
@@ -393,7 +451,7 @@ function createFixture({
     if (file === "git") {
       return { stdout: `${PROJECT_PATH}/.git\n.git\n`, stderr: "" };
     }
-    const effectiveArguments = claudeArguments(call);
+    const effectiveArguments = isClaudeCall ? argumentsList : null;
     if (effectiveArguments?.includes("-p")) {
       const resume = option(effectiveArguments, "--resume");
       const schema = option(effectiveArguments, "--json-schema");
@@ -425,6 +483,7 @@ function createFixture({
     throw new Error(`Unexpected command: ${file} ${argumentsList.join(" ")}`);
   };
   const adapter = createClaudeAdapter({
+    ...(claudeBinary === undefined ? {} : { claudeBinary }),
     createSocketServer: () => socketServerFixture(socketServers),
     env: env ?? process.env,
     execute,
@@ -952,8 +1011,11 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
     env: {
       ...process.env,
       AGENT_RUNNER_FAKE_BWRAP_LOG: fakeBubblewrap.logPath,
+      AGENT_RUNNER_FAKE_HELPER_LOG: fakeBubblewrap.helperLogPath,
       [COMMAND_LAUNCHER_TOKEN]: "inherited-launcher-token",
       ANTHROPIC_API_KEY: "provider-token",
+      ARGV0: "inherited-argv0",
+      HTTPS_PROXY: "http://credential.invalid",
       PATH: providerPath,
     },
     executeFallbackLauncher: true,
@@ -974,7 +1036,7 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
         }),
         {
           encoding: "utf8",
-          env: call.options.env,
+          env: { ...call.options.env, PATH: "" },
           timeout: 10_000,
         },
       );
@@ -1004,7 +1066,7 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
   assert.equal(
     capabilities.policyReceipt.fingerprint,
     policyFingerprint(
-      "claude-command-boundary-v5",
+      "claude-command-boundary-v6",
       {
         "read-only": "runner-boundary",
         "workspace-write": "runner-boundary",
@@ -1027,7 +1089,7 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
     (call) => isIsolationProbe(call) && !isNativeSandboxProbe(call),
   );
   assert.equal(fallbackProbes.length, 3);
-  assert.equal(fixture.socketServers.length, 3);
+  assert.equal(fixture.socketServers.length, 6);
   assert.ok(fixture.socketServers.every(({ closed }) => closed));
   assert.deepEqual(
     fallbackProbes.map(({ argumentsList }) => fallbackAccess(argumentsList)),
@@ -1045,7 +1107,7 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
     const commandIndex = boundaryArguments.indexOf("--");
     const workspaceDirectory = option(boundaryArguments, "--chdir");
     const gitDirectory = join(workspaceDirectory, ".git");
-    const socketPath = join(workspaceDirectory, "host.sock");
+    const socketPath = join(workspaceDirectory, "s");
     assert.equal(call.file, call.commandLauncherPath);
     assert.equal(
       call.options.env.PATH.split(delimiter)[0],
@@ -1066,11 +1128,7 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
       ]),
       false,
     );
-    assert.ok(boundaryArguments.indexOf("--unshare-user") !== -1);
-    assert.ok(
-      boundaryArguments.indexOf("--unshare-pid") <
-        boundaryArguments.indexOf("--unshare-user"),
-    );
+    assert.equal(boundaryArguments.includes("--unshare-user"), false);
     assert.ok(boundaryArguments.includes("--unshare-net"));
     assert.ok(boundaryArguments.includes("--as-pid-1"));
     assert.ok(includesSequence(boundaryArguments, ["--cap-drop", "ALL"]));
@@ -1089,11 +1147,15 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
       includesSequence(boundaryArguments, ["--unsetenv", "ANTHROPIC_API_KEY"]),
     );
     assert.ok(
+      includesSequence(boundaryArguments, ["--unsetenv", "HTTPS_PROXY"]),
+    );
+    assert.ok(
       includesSequence(boundaryArguments, [
         "--unsetenv",
         "AGENT_RUNNER_CLAUDE_COMMAND_LAUNCHER_TOKEN",
       ]),
     );
+    assert.ok(includesSequence(boundaryArguments, ["--unsetenv", "ARGV0"]));
     assert.equal(
       includesSequence(boundaryArguments, [
         "--bind",
@@ -1167,9 +1229,20 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
     assert.match(commandProbe, /statSync\(socketPath\)\.isSocket/u);
     assert.match(
       commandProbe,
-      /finish\("unix", code, new Set\(\["EACCES", "EPERM"\]\)\)/u,
+      /finish\("pathname", code, new Set\(\["EACCES", "EPERM"\]\)\)/u,
+    );
+    assert.match(commandProbe, /String\.fromCharCode\(0\)/u);
+    assert.match(commandProbe, /"EACCES", "ECONNREFUSED", "ENOENT", "EPERM"/u);
+    assert.match(
+      commandProbe,
+      /write\("\/tmp\/agent-runner-claude-probe", true\)/u,
+    );
+    assert.match(
+      commandProbe,
+      /write\("\/run\/agent-runner-claude-probe", true\)/u,
     );
     assert.match(commandProbe, /AGENT_RUNNER_CLAUDE_COMMAND_LAUNCHER_TOKEN/u);
+    assert.match(commandProbe, /process\.env\.ARGV0/u);
   }
 
   await fixture.adapter.run(request());
@@ -1204,6 +1277,8 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
     const commandIndex = boundaryArguments.indexOf("--");
     assert.equal(call.file, "claude");
     assert.equal(call.options.env.ANTHROPIC_API_KEY, "provider-token");
+    assert.equal(call.options.env.ARGV0, undefined);
+    assert.equal(call.options.env.HTTPS_PROXY, "http://credential.invalid");
     assert.equal(call.options.env.PATH, providerPath);
     assert.equal(
       typeof call.options.env.AGENT_RUNNER_CLAUDE_COMMAND_LAUNCHER_TOKEN,
@@ -1229,13 +1304,17 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
       ),
       { mode: "deny", name: "ANTHROPIC_API_KEY" },
     );
+    assert.deepEqual(
+      sandbox.credentials.envVars.find(({ name }) => name === "HTTPS_PROXY"),
+      { mode: "deny", name: "HTTPS_PROXY" },
+    );
     assert.equal(
       sandbox.credentials.envVars.some(
         ({ name }) => name === "AGENT_RUNNER_CLAUDE_COMMAND_LAUNCHER_TOKEN",
       ),
       false,
     );
-    assert.ok(boundaryArguments.includes("--unshare-user"));
+    assert.equal(boundaryArguments.includes("--unshare-user"), false);
     assert.ok(boundaryArguments.includes("--unshare-pid"));
     assert.ok(boundaryArguments.includes("--unshare-net"));
     assert.ok(includesSequence(boundaryArguments, ["--proc", "/proc"]));
@@ -1249,8 +1328,12 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
         "AGENT_RUNNER_CLAUDE_COMMAND_LAUNCHER_TOKEN",
       ]),
     );
+    assert.ok(includesSequence(boundaryArguments, ["--unsetenv", "ARGV0"]));
     assert.ok(
       includesSequence(boundaryArguments, ["--unsetenv", "ANTHROPIC_API_KEY"]),
+    );
+    assert.ok(
+      includesSequence(boundaryArguments, ["--unsetenv", "HTTPS_PROXY"]),
     );
     assert.ok(
       includesSequence(boundaryArguments, [
@@ -1328,6 +1411,18 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
   assert.deepEqual(settings.sandbox.network.deniedDomains, ["*"]);
   assert.equal(option(turns[1].argumentsList, "--permission-mode"), "auto");
   assert.equal(option(turns[2].argumentsList, "--permission-mode"), "plan");
+  const helperInvocations = (
+    await readFile(fakeBubblewrap.helperLogPath, "utf8")
+  )
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(helperInvocations.length, 6);
+  for (const [index, invocation] of helperInvocations.entries()) {
+    assert.equal(invocation.argv0, "apply-seccomp");
+    assert.equal(invocation.file, join(fakeBubblewrap.directory, "bwrap"));
+    assert.deepEqual(invocation.argumentsList, exercisedBoundaries[index]);
+  }
 });
 
 test("rejects unauthenticated and invalid fallback arguments before execution", async (t) => {
@@ -1375,6 +1470,26 @@ test("rejects unauthenticated and invalid fallback arguments before execution", 
       name: "unsupported-option",
       transform({ argumentsList }) {
         argumentsList[argumentsList.indexOf("--unshare-net")] = "--share-net";
+      },
+    },
+    {
+      name: "missing-user-namespace",
+      transform({ argumentsList }) {
+        argumentsList.splice(argumentsList.indexOf("--unshare-user"), 1);
+      },
+    },
+    {
+      name: "malformed-user-namespace",
+      transform({ argumentsList }) {
+        argumentsList[argumentsList.indexOf("--unshare-user")] =
+          "--unshare-uts";
+      },
+    },
+    {
+      name: "duplicate-user-namespace",
+      transform({ argumentsList }) {
+        const index = argumentsList.indexOf("--unshare-user");
+        argumentsList.splice(index, 0, "--unshare-user");
       },
     },
     {
@@ -1562,6 +1677,50 @@ test("rejects unauthenticated and invalid fallback arguments before execution", 
     .trim()
     .split("\n");
   assert.equal(bubblewrapInvocations.length, 3);
+});
+
+test("rejects unsafe or unsupported fallback helper topology", async (t) => {
+  const fakeBubblewrap = await createFakeBubblewrap(t);
+  const environment = {
+    ...process.env,
+    AGENT_RUNNER_FAKE_BWRAP_LOG: fakeBubblewrap.logPath,
+    PATH: `${fakeBubblewrap.directory}${delimiter}${process.env.PATH ?? ""}`,
+  };
+  const unsafe = createFixture({
+    claudeBinary: join(PROJECT_PATH, "bin/agent-run.js"),
+    env: environment,
+    nativeSandbox: "nested-denied",
+  });
+  assert.equal((await unsafe.adapter.probe()).readOnly, true);
+  await assert.rejects(
+    unsafe.adapter.run(request()),
+    hasCode("ERR_CLAUDE_ISOLATION"),
+  );
+  assert.equal(
+    unsafe.calls.filter(
+      ({ file, argumentsList }) =>
+        file === join(PROJECT_PATH, "bin/agent-run.js") &&
+        argumentsList.includes("-p"),
+    ).length,
+    0,
+  );
+
+  const unsupported = createFixture({
+    claudeBinary: join(fakeBubblewrap.directory, "bwrap"),
+    env: environment,
+    nativeSandbox: "nested-denied",
+  });
+  const capabilities = await unsupported.adapter.probe();
+  assert.deepEqual(capabilities.policyReceipt.supportedAccess, []);
+  assert.equal(capabilities.readOnly, false);
+  assert.equal(capabilities.workspaceWrite, false);
+  assert.equal(capabilities.localCommit, false);
+  assert.equal(
+    unsupported.calls.filter(
+      (call) => isIsolationProbe(call) && !isNativeSandboxProbe(call),
+    ).length,
+    0,
+  );
 });
 
 test("fails closed when the restricted-host fallback cannot be proved", async (t) => {
@@ -2944,6 +3103,105 @@ test("keeps commit-executor failures ambiguous", async () => {
   );
   assert.equal(bubblewrapCalls, 2);
 });
+
+test(
+  "denies a visible pathname socket through the installed Claude helper",
+  { skip: process.platform !== "linux" },
+  async (t) => {
+    const claudeBinary = await resolveTestExecutable("claude");
+    const bubblewrapBinary = await resolveTestExecutable("bwrap");
+    if (claudeBinary === undefined || bubblewrapBinary === undefined) {
+      t.skip("Claude and bubblewrap are required for the real-process probe.");
+      return;
+    }
+    const environment = {
+      PATH: process.env.PATH ?? "",
+      ARGV0: "apply-seccomp",
+    };
+    try {
+      await executeFile(
+        claudeBinary,
+        [
+          bubblewrapBinary,
+          "--new-session",
+          "--die-with-parent",
+          "--unshare-net",
+          "--ro-bind",
+          "/",
+          "/",
+          "--dev",
+          "/dev",
+          "--unshare-pid",
+          "--as-pid-1",
+          "--cap-drop",
+          "ALL",
+          "--proc",
+          "/proc",
+          "--",
+          "/bin/true",
+        ],
+        {
+          encoding: "utf8",
+          env: environment,
+          maxBuffer: 1024 * 1024,
+          timeout: 10_000,
+        },
+      );
+    } catch {
+      t.skip("The installed helper-first bubblewrap topology is unavailable.");
+      return;
+    }
+
+    let fallbackProbeCount = 0;
+    let realProbeCount = 0;
+    const execute = async (file, argumentsList, options) => {
+      const call = { file, argumentsList, options };
+      if (file === claudeBinary && argumentsList.at(-1) === "--version") {
+        return { stdout: "2.1.233 (Claude Code)\n", stderr: "" };
+      }
+      if (file === claudeBinary && argumentsList[0] === "--help") {
+        return { stdout: HELP, stderr: "" };
+      }
+      if (file === "socat") {
+        return { stdout: "socat version 1.8", stderr: "" };
+      }
+      if (isNativeSandboxProbe(call)) {
+        const error = new Error("Claude isolation probe failed.");
+        error.stderr =
+          "apply-seccomp: write /proc/self/setgroups (nested userns is " +
+          "capability-restricted; caller must provide CAP_SYS_ADMIN) " +
+          "Permission denied";
+        throw error;
+      }
+      if (isRunnerBoundaryProbe(call)) {
+        fallbackProbeCount += 1;
+        if (realProbeCount === 0) {
+          realProbeCount += 1;
+          return executeFile(file, argumentsList, options);
+        }
+        return { stdout: "agent-runner-claude-isolation-ok", stderr: "" };
+      }
+      if (file === "bwrap") {
+        return { stdout: "agent-runner-claude-commit-ok", stderr: "" };
+      }
+      throw new Error(`Unexpected command: ${file} ${argumentsList.join(" ")}`);
+    };
+    const adapter = createClaudeAdapter({
+      claudeBinary,
+      env: {
+        ...process.env,
+        PATH: `${dirname(bubblewrapBinary)}${delimiter}${process.env.PATH ?? ""}`,
+      },
+      execute,
+      platform: "linux",
+    });
+
+    const capabilities = await adapter.probe();
+    assert.equal(capabilities.readOnly, true);
+    assert.equal(fallbackProbeCount, 3);
+    assert.equal(realProbeCount, 1);
+  },
+);
 
 test(
   "runs an opt-in real Claude read-only inspection smoke turn",
