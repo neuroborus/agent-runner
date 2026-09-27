@@ -11,12 +11,18 @@ remain in the owning documentation.
   Claude adapter proves read-only, workspace-write, and local-commit isolation
   independently. It prefers the full native sandbox and enables weak native
   nesting only after the exact probe recognizes nested-user-namespace denial
-  and a Runner private PID/`/proc` boundary proves the complete policy. Common
+  and a direct model-free probe proves the same access-aware Runner boundary
+  used by fallback turns. That boundary creates user, PID, mount, and network
+  isolation, private `/proc`, `/tmp`, and `/run`, read-only host and Git views,
+  and only the requested workspace write authority. The fallback skips the
+  redundant native Unix-socket seccomp helper only after the outer boundary
+  proves IP and host-socket isolation; native policy stays strict. Common
   envelope version 13 holds one provider-neutral receipt slot per resolved role
   and persists only a policy fingerprint and supported-access list when that
-  role is required; resume rejects drift before provider work. This restores
-  safe execution without `CAP_SYS_ADMIN`, host-policy changes, provider
-  branches in pipelines, or broader authority.
+  role is required; the fingerprint distinguishes this corrected topology and
+  resume rejects drift before provider work. This restores safe execution
+  without host `CAP_SYS_ADMIN`, host-policy changes, provider branches in
+  pipelines, or broader authority.
 - **Polishing freezes finalization guidance before bootstrap.** State version
   15 persists the configured policy, selected canonical skill or fallback, and
   its fingerprints before provider work. The selected skill remains mandatory

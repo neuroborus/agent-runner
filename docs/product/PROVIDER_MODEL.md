@@ -86,14 +86,19 @@ Remote writes remain blocked in every access mode.
 
 Claude prefers its full native sandbox. If and only if the exact effective
 probe recognizes nested-user-namespace denial, it may use weaker native nesting
-inside a Runner-owned private PID namespace and private `/proc`. The proof is
-separate for read-only, workspace-write, and local-commit access and verifies
-command network and Unix-socket denial, credential removal and provider-proc
-secrecy, workspace authority, Git-metadata protection, and outside-write
-denial. It does not require `CAP_SYS_ADMIN`, change host policy, or expose host
-procfs. A generic sandbox failure or failed fallback leaves the affected access
-mode unavailable. There is no configuration switch that forces or weakens this
-selection.
+inside a Runner-owned boundary with private user, PID, mount, and network
+isolation plus private `/proc`, `/tmp`, and `/run`. The same access-aware
+boundary encloses the direct model-free fallback probe and every accepted turn;
+the probe never dispatches Claude's native `apply-seccomp` helper again. It
+keeps the host root read-only, makes only workspace content writable for
+workspace-write access, re-binds all Git metadata read-only, and proves IP and
+host Unix-socket isolation, credential removal and provider-proc secrecy,
+workspace authority, and outside-write denial. The proved fallback enables
+weaker native nesting and skips only the redundant Unix-socket seccomp layer;
+native policy remains stricter. It does not require host `CAP_SYS_ADMIN`, change
+host policy, or expose host procfs. A generic sandbox failure, incomplete proof,
+or cleanup failure leaves the affected access mode unavailable. There is no
+configuration switch that forces or weakens this selection.
 
 The runner holds one provider-neutral receipt slot per resolved role and
 persists only a fingerprint and supported-access list when that role is first

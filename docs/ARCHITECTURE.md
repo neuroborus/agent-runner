@@ -1321,9 +1321,11 @@ The Git validation-infrastructure fingerprint API accepts 512 paths; other Git
 path lists retain their 256-path bounds. Execution state version 16 and polishing
 state version 12 expand capacity with leased migrations preserving legacy 64/128
 evidence, budgets, completed commits and handoffs, and one-shot effects. Item,
-structured-output, and durable byte limits do not change. Expanded schemas retain
-strict Claude preflight and native sandbox restrictions without enabling
-`allowAllUnixSockets: true` or broader host access.
+structured-output, and durable byte limits do not change. Expanded schemas
+retain strict Claude preflight and native sandbox restrictions. Only Claude's
+independently proved Runner-boundary policy enables `allowAllUnixSockets: true`;
+its outer boundary replaces that redundant native seccomp layer without
+granting broader host access.
 In independent mode, the runner establishes that inventory from accepted Worker
 evidence followed by accepted Reviewer evidence; in lazy mode, accepted Worker
 evidence is complete. It deduplicates exact commands and paths in stable
@@ -1613,8 +1615,8 @@ isolation only. They do not apply a selected native profile and do not claim
 that its authentication or provider is usable; that is established by the
 first real turn under the effective profile.
 
-Every model-free subprocess used for version/help, Claude `socat` and native
-sandbox checks, the local-commit executor proof, or owned-process namespace
+Every model-free subprocess used for version/help, Claude `socat` and isolation
+policy checks, the local-commit executor proof, or owned-process namespace
 proof has a 10-second deadline. Within that outer bound, a local-commit probe
 has a one-second network-denial observation deadline; silence cannot prove
 isolation, so exhaustion fails the capability closed. Claude's per-turn Git
@@ -1657,24 +1659,29 @@ turn-setup failure. Native rejection text is not retained, and commit-readiness
 failure cannot start or replay the constrained executor.
 
 On Linux, Claude selects an isolation policy independently for read-only,
-workspace-write, and local-commit access. Each fixed, model-free proof
-reproduces the effective provider/child topology around Claude's embedded
-`apply-seccomp` helper and checks workspace and Git writes, an outside write,
-IP network, Unix sockets, and a probe credential. The selector prefers Claude's
-full native sandbox. Only a positively recognized nested-user-namespace denial
-may try the fallback: a Runner-owned private PID namespace and private `/proc`
-enclose Claude while `enableWeakerNestedSandbox` binds that private procfs,
-never the host procfs. That provider/child probe retains a synthetic credential
-in the provider while proving that the inner command cannot recover it through
-`/proc/<provider-pid>/environ`. Arbitrary native failures do not enable the
-fallback.
-Both policies keep network, Unix sockets, credentials, Git metadata, remotes,
-and outside writes denied; a failed proof advertises that access mode as
-unavailable. Probes use fixed no-shell arguments, the credential-filtered
-command environment, and bounded time and output, retain no host diagnostic,
-and never apply a profile, authenticate, or invoke a model. The local-commit
-executor proof remains independent and `localCommit` requires both the
-local-commit turn policy and executor proof.
+workspace-write, and local-commit access. The selector first uses the fixed,
+model-free provider/child probe around Claude's embedded `apply-seccomp` helper
+for the full native sandbox. Only a positively recognized
+nested-user-namespace denial may try the fallback. That second proof invokes no
+Claude helper: it runs the probe command directly inside the same access-aware
+Runner boundary later used for fallback turns.
+The Runner boundary creates its own user, PID, mount, and network isolation,
+uses private `/proc`, `/tmp`, and `/run`, keeps the host root read-only, exposes
+only the requested workspace content as writable, and re-binds every resolved
+Git metadata path read-only. Its direct probe checks access-specific workspace
+writes, Git and outside-write denial, IP isolation, inability to reach a live
+host abstract Unix socket isolated by the network namespace, credential
+removal, and host provider-proc secrecy. The selected fallback enables Claude's weaker nested
+sandbox but sets `allowAllUnixSockets: true` so the native `apply-seccomp`
+socket layer is not repeated inside the already isolated boundary. Native
+policy retains the stricter setting. Arbitrary native failures, incomplete
+proof, or cleanup failure do not enable the fallback.
+Both policies keep network, host Unix sockets, credentials, Git metadata,
+remotes, and outside writes denied. Probes use fixed no-shell arguments, the
+credential-filtered command environment, and bounded time and output, retain no
+host diagnostic, and never apply a profile, authenticate, or invoke a model.
+The local-commit executor proof remains independent and `localCommit` requires
+both the local-commit turn policy and executor proof.
 Claude derives its advertised read-only capability and turn arguments from one
 plan-mode access envelope. It exposes only repository-inspection tools, allows
 Bash without prompting only when the required native sandbox is active, denies

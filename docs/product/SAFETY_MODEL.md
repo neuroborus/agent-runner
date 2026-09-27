@@ -315,10 +315,15 @@ host-service access to overcome a validation blocker.
 Claude selects isolation separately for read-only, workspace-write, and local
 commit access. It prefers the full native sandbox and considers the restricted
 host fallback only after the exact effective probe identifies the known nested
-user-namespace denial. The fallback encloses Claude in a Runner-owned private
-PID and proc boundary, then proves the effective weaker native sandbox denies
-network and Unix sockets, inherited credentials and provider-proc credential
-access, remote writes, Git metadata, and writes outside the access-specific
-workspace. Any failed proof leaves that access mode unavailable. The bounded
-selected-policy receipt is immutable for the run; resume or reconstruction
+user-namespace denial. The fallback's direct model-free probe and turns use one
+Runner-owned boundary with user, PID, mount, and network isolation, private
+`/proc`, `/tmp`, and `/run`, a read-only host root, access-specific workspace
+writes, and read-only Git metadata. The outer proof denies IP and host Unix
+sockets, inherited probe credentials and host provider-proc access, remote
+writes, Git metadata, and outside writes without invoking Claude's native
+`apply-seccomp` path again. Only that proved boundary enables weaker native
+nesting and skips the redundant Unix-socket seccomp layer; native policy stays
+strict. Any failed or incomplete proof or cleanup leaves that access mode
+unavailable. The bounded selected-policy receipt distinguishes the corrected
+fallback topology and remains immutable for the run; resume or reconstruction
 fails closed if the provider's policy proof drifts.

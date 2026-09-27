@@ -525,7 +525,7 @@ function cliSettings(
       network: {
         allowedDomains: [],
         deniedDomains: ["*"],
-        allowAllUnixSockets: false,
+        allowAllUnixSockets: isolationPolicy === "runner-boundary",
         strictAllowlist: true,
       },
     },
@@ -1001,11 +1001,12 @@ function normalizeResult(payload, request, session) {
 export function createClaudeAdapter(options = {}) {
   assertFields(
     options,
-    ["claudeBinary", "env", "execute", "platform"],
+    ["claudeBinary", "createSocketServer", "env", "execute", "platform"],
     "Claude adapter options",
   );
   const {
     claudeBinary = "claude",
+    createSocketServer,
     env = process.env,
     execute = executeFile,
     platform = process.platform,
@@ -1014,6 +1015,8 @@ export function createClaudeAdapter(options = {}) {
     typeof claudeBinary !== "string" ||
     claudeBinary.trim().length === 0 ||
     /[\0\r\n]/u.test(claudeBinary) ||
+    (createSocketServer !== undefined &&
+      typeof createSocketServer !== "function") ||
     !isEnvironment(env) ||
     typeof execute !== "function" ||
     typeof platform !== "string" ||
@@ -1097,6 +1100,7 @@ export function createClaudeAdapter(options = {}) {
       selectedPolicies = await probeClaudeIsolationPolicies({
         bubblewrapBinary: BUBBLEWRAP_BINARY,
         claudeBinary,
+        ...(createSocketServer === undefined ? {} : { createSocketServer }),
         env: commandEnvironment,
         execute,
       });
@@ -1122,7 +1126,11 @@ export function createClaudeAdapter(options = {}) {
       fingerprint: createHash("sha256")
         .update(
           JSON.stringify({
-            contract: "claude-isolation-v1",
+            contract: Object.values(isolationPolicies).includes(
+              "runner-boundary",
+            )
+              ? "claude-runner-boundary-v2"
+              : "claude-isolation-v1",
             policies: isolationPolicies,
             version: version.text,
           }),
@@ -1289,10 +1297,12 @@ export function createClaudeAdapter(options = {}) {
       isolationPolicy,
     );
     const command = claudeIsolationCommand({
+      access: request.access,
       argumentsList,
       bubblewrapBinary: BUBBLEWRAP_BINARY,
       claudeBinary,
       cwd: request.cwd,
+      gitDirectories,
       policy: isolationPolicy,
     });
     let processResult;

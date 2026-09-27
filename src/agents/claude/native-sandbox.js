@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 const APPLY_SECCOMP_ARGV0 = "apply-seccomp";
 const PROBE_CREDENTIAL = "AGENT_RUNNER_CLAUDE_PROBE_CREDENTIAL";
@@ -35,7 +36,7 @@ if (result.stderr) writeSync(2, result.stderr);
 if (result.error !== undefined || result.signal !== null) process.exit(21);
 process.exit(result.status ?? 22);
 `.trim();
-const PROBE_SCRIPT = String.raw`
+const NATIVE_PROBE_SCRIPT = String.raw`
 import { readFileSync, writeFileSync, writeSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { join } from "node:path";
@@ -85,19 +86,68 @@ server.listen(socketPath, () => {
 });
 setTimeout(() => process.exit(16), 1_000);
 `.trim();
+const RUNNER_BOUNDARY_PROBE_SCRIPT = String.raw`
+import { readFileSync, writeFileSync, writeSync } from "node:fs";
+import { createConnection } from "node:net";
+import { join } from "node:path";
+
+const [access, gitDirectory, outsideDirectory, socketName, providerPid] =
+  process.argv.slice(1);
+const writable = access === "workspace-write";
+const denied = new Set(["EACCES", "ENOENT", "EPERM", "EROFS"]);
+function write(path, expected) {
+  try {
+    writeFileSync(path, "");
+    if (!expected) process.exit(10);
+  } catch ({ code }) {
+    if (expected || !denied.has(code)) process.exit(11);
+  }
+}
+if (process.env.${PROBE_CREDENTIAL} !== undefined) process.exit(12);
+if (!/^[1-9][0-9]*$/.test(providerPid)) process.exit(17);
+try {
+  readFileSync(join("/proc", providerPid, "environ"));
+  process.exit(18);
+} catch ({ code }) {
+  if (!denied.has(code)) process.exit(19);
+}
+write("workspace-probe", writable);
+write(join(gitDirectory, "git-probe"), false);
+write(join(outsideDirectory, "outside-probe"), false);
+
+const results = new Set();
+function finish(kind, code, expected) {
+  if (!expected.has(code)) process.exit(13);
+  results.add(kind);
+  if (results.size === 2) {
+    writeSync(1, ${JSON.stringify(PROBE_OUTPUT)});
+    process.exit(0);
+  }
+}
+const internet = createConnection({ host: "1.1.1.1", port: 53 });
+internet.once("connect", () => process.exit(14));
+internet.once("error", ({ code }) =>
+  finish("internet", code, new Set(["EACCES", "ENETUNREACH", "EPERM"])),
+);
+const unix = createConnection(String.fromCharCode(0) + socketName);
+unix.once("connect", () => process.exit(15));
+unix.once("error", ({ code }) =>
+  finish("unix", code, new Set(["EACCES", "ENOENT", "EPERM"])),
+);
+setTimeout(() => process.exit(16), 1_000);
+`.trim();
 
 function processOutput(value) {
   if (typeof value === "string") return value;
   return Buffer.isBuffer(value) ? value.toString("utf8") : "";
 }
 
-function innerArguments({
+function nativeArguments({
   access,
   basePath,
   claudeBinary,
   gitDirectory,
   outsideDirectory,
-  weaker,
   workspaceDirectory,
 }) {
   const argumentsList = [
@@ -111,9 +161,10 @@ function innerArguments({
     "/dev",
     "--unshare-pid",
     "--unshare-user",
-    ...(weaker
-      ? ["--bind", "/proc", "/proc"]
-      : ["--cap-drop", "ALL", "--proc", "/proc"]),
+    "--cap-drop",
+    "ALL",
+    "--proc",
+    "/proc",
     "--tmpfs",
     "/tmp",
     "--tmpfs",
@@ -139,7 +190,7 @@ function innerArguments({
     process.execPath,
     "--input-type=module",
     "-e",
-    PROBE_SCRIPT,
+    NATIVE_PROBE_SCRIPT,
     access,
     gitDirectory,
     outsideDirectory,
@@ -148,36 +199,78 @@ function innerArguments({
   return argumentsList;
 }
 
-function boundaryArguments(cwd, command) {
-  return [
+function runnerBoundaryArguments({ access, command, cwd, gitDirectories }) {
+  const argumentsList = [
     "--new-session",
     "--die-with-parent",
+    "--unshare-user",
     "--unshare-pid",
+    "--unshare-net",
     "--as-pid-1",
-    "--bind",
+    "--ro-bind",
     "/",
     "/",
     "--dev",
     "/dev",
     "--proc",
     "/proc",
+    "--tmpfs",
+    "/tmp",
+    "--tmpfs",
+    "/run",
+    access === "workspace-write" ? "--bind" : "--ro-bind",
+    cwd,
+    cwd,
+  ];
+  for (const gitDirectory of new Set(gitDirectories)) {
+    argumentsList.push("--ro-bind", gitDirectory, gitDirectory);
+  }
+  argumentsList.push(
+    "--unsetenv",
+    PROBE_CREDENTIAL,
     "--chdir",
     cwd,
     "--",
     ...command,
-  ];
+  );
+  return argumentsList;
+}
+
+async function listen(server, socketPath) {
+  await new Promise((resolve, reject) => {
+    const onError = (cause) => {
+      server.off("listening", onListening);
+      reject(cause);
+    };
+    const onListening = () => {
+      server.off("error", onError);
+      resolve();
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(socketPath);
+  });
+}
+
+async function close(server) {
+  if (!server.listening) return;
+  await new Promise((resolve, reject) => {
+    server.close((cause) => (cause === undefined ? resolve() : reject(cause)));
+  });
 }
 
 async function probePolicy({
   access,
   bubblewrapBinary,
   claudeBinary,
+  createSocketServer = createServer,
   env,
   execute,
   weaker,
 }) {
   let basePath;
   let outcome;
+  let socketServer;
   try {
     basePath = await mkdtemp(join(tmpdir(), "agent-runner-claude-policy-"));
     const workspaceDirectory = join(basePath, "workspace");
@@ -187,35 +280,55 @@ async function probePolicy({
     await Promise.all(
       [gitDirectory, outsideDirectory].map((path) => mkdir(path)),
     );
-    const inner = innerArguments({
-      access,
-      basePath,
-      claudeBinary,
-      gitDirectory,
-      outsideDirectory,
-      weaker,
-      workspaceDirectory,
+    let file;
+    let argumentsList;
+    if (weaker) {
+      const socketName = `${basename(basePath)}-${process.pid}`;
+      socketServer = createSocketServer();
+      await listen(socketServer, String.fromCharCode(0) + socketName);
+      file = bubblewrapBinary;
+      argumentsList = runnerBoundaryArguments({
+        access,
+        command: [
+          process.execPath,
+          "--input-type=module",
+          "-e",
+          RUNNER_BOUNDARY_PROBE_SCRIPT,
+          access,
+          gitDirectory,
+          outsideDirectory,
+          socketName,
+          String(process.pid),
+        ],
+        cwd: workspaceDirectory,
+        gitDirectories: [gitDirectory],
+      });
+    } else {
+      const inner = nativeArguments({
+        access,
+        basePath,
+        claudeBinary,
+        gitDirectory,
+        outsideDirectory,
+        workspaceDirectory,
+      });
+      const providerCommand = [
+        process.execPath,
+        "--input-type=module",
+        "-e",
+        PROVIDER_PROBE_SCRIPT,
+        bubblewrapBinary,
+        ...inner,
+      ];
+      file = providerCommand[0];
+      argumentsList = providerCommand.slice(1);
+    }
+    const result = await execute(file, argumentsList, {
+      encoding: "utf8",
+      env: { ...env, [PROBE_CREDENTIAL]: "unavailable-to-model-commands" },
+      maxBuffer: 1024 * 1024,
+      timeout: 10_000,
     });
-    const providerCommand = [
-      process.execPath,
-      "--input-type=module",
-      "-e",
-      PROVIDER_PROBE_SCRIPT,
-      bubblewrapBinary,
-      ...inner,
-    ];
-    const result = await execute(
-      weaker ? bubblewrapBinary : providerCommand[0],
-      weaker
-        ? boundaryArguments(workspaceDirectory, providerCommand)
-        : providerCommand.slice(1),
-      {
-        encoding: "utf8",
-        env: { ...env, [PROBE_CREDENTIAL]: "unavailable-to-model-commands" },
-        maxBuffer: 1024 * 1024,
-        timeout: 10_000,
-      },
-    );
     outcome = {
       available: processOutput(result.stdout) === PROBE_OUTPUT,
       nestedUserNamespaceDenied: false,
@@ -228,15 +341,26 @@ async function probePolicy({
         !weaker && NESTED_USER_NAMESPACE_DENIAL.test(diagnostic),
     };
   } finally {
+    let cleanupFailed = false;
+    if (socketServer !== undefined) {
+      try {
+        await close(socketServer);
+      } catch {
+        cleanupFailed = true;
+      }
+    }
     if (basePath !== undefined) {
       try {
         await rm(basePath, { force: true, recursive: true });
       } catch {
-        outcome = {
-          available: false,
-          nestedUserNamespaceDenied: false,
-        };
+        cleanupFailed = true;
       }
+    }
+    if (cleanupFailed) {
+      outcome = {
+        available: false,
+        nestedUserNamespaceDenied: false,
+      };
     }
   }
   return Object.freeze(outcome);
@@ -261,10 +385,12 @@ export async function probeClaudeIsolationPolicies(options) {
 }
 
 export function claudeIsolationCommand({
+  access,
   argumentsList,
   bubblewrapBinary,
   claudeBinary,
   cwd,
+  gitDirectories,
   policy,
 }) {
   if (policy === "native") {
@@ -273,7 +399,12 @@ export function claudeIsolationCommand({
   if (policy === "runner-boundary") {
     return Object.freeze({
       file: bubblewrapBinary,
-      argumentsList: boundaryArguments(cwd, [claudeBinary, ...argumentsList]),
+      argumentsList: runnerBoundaryArguments({
+        access,
+        command: [claudeBinary, ...argumentsList],
+        cwd,
+        gitDirectories,
+      }),
     });
   }
   throw new Error("Claude isolation policy is unavailable.");

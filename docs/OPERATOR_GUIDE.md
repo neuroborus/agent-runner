@@ -409,12 +409,15 @@ recoverable provider work get one fresh reconstruction before the run pauses.
 For Claude on a capability-restricted Linux host, do not grant `CAP_SYS_ADMIN`,
 change user-namespace policy, or disable sandboxing. The adapter first probes
 the full native policy for each required access mode. Only a recognized
-nested-user-namespace denial permits its private PID/`/proc` fallback. A
-successful fallback is selected and fingerprinted automatically; a generic
-failure or incomplete access proof remains `ERR_UNSUPPORTED_BACKEND` with a
-bounded access-mode diagnosis. Resume must reproduce the saved receipt. If it
-cannot, preserve the run and repair the installed Claude, bubblewrap, or host
-environment instead of editing durable state or forcing weaker settings.
+nested-user-namespace denial permits its Runner boundary with private user,
+PID, mount, network, `/proc`, `/tmp`, and `/run` isolation. That fallback is
+selected and fingerprinted only after its direct model-free probe proves the
+same access-aware boundary used by turns; it does not retry Claude's native
+`apply-seccomp` path. A generic failure or incomplete access or cleanup proof
+remains `ERR_UNSUPPORTED_BACKEND` with a bounded access-mode diagnosis. Resume
+must reproduce the saved receipt. If it cannot, preserve the run and repair the
+installed Claude, bubblewrap, or host environment instead of editing durable
+state or forcing weaker settings.
 
 A same-host execution or canonical-worktree lease is eligible for stale
 recovery after five minutes only when its recorded process is demonstrably
