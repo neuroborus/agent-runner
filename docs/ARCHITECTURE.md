@@ -1674,19 +1674,18 @@ Fallback turns launch the Claude CLI directly so authentication and provider
 transport retain the host environment and network path. The invocation-local
 spawning-parent policy selects the short-lived launcher only when Claude starts
 a sandboxed command without changing the provider's `PATH`. The launcher pins
-the canonical Claude and host `bwrap` executables before the turn instead of
-resolving either through a potentially workspace-writable path. The Runner
-keeps the launcher and its directory owner read/execute-only during the turn
-and restores directory write permission only for cleanup.
+the canonical host `bwrap` executable before the turn instead of resolving it
+through a potentially workspace-writable path. The Runner keeps the launcher
+and its directory non-writable during the turn and restores directory write
+permission only for cleanup.
 The authenticated launcher accepts one closed Claude bubblewrap grammar: the
 session and parent-lifetime flags; unique environment removals or non-protected
 assignments; network unsharing; a read-only root followed by supported bind,
 read-only-bind, or private-runtime tmpfs operations; the synthetic device
 mount; PID and required user unsharing; Claude's weaker host `/proc` bind; and
 exactly one absolute shell, `-c`, and opaque command payload after `--`. The
-launcher consumes the required user-unshare argument because the helper has
-already entered that context; bubblewrap never receives a second user
-namespace request. Claude's fixed
+launcher translates the required user-unshare argument into exactly one
+bubblewrap user namespace. Claude's fixed
 incidental write binds for its temporary, npm-log, and debug paths are
 recognized exactly but discarded rather than exposing their host paths. All
 other writable binds must resolve inside the canonical workspace, must not
@@ -1714,15 +1713,28 @@ After validation the launcher drops Claude's host `/proc` bind and strengthens
 the same invocation with PID-1 behavior, an empty capability set, private
 procfs, private `/tmp` and `/run`, a private `/tmp/claude`, a hidden launcher
 path, the exact workspace authority, read-only resolved Git metadata, missing
-protected-environment removals, and the requested working directory. It removes
-its authorization token and provider credential variables before invoking the
-pinned Claude executable with `ARGV0=apply-seccomp`; that helper starts the
-pinned real `bwrap` binary exactly once. Bubblewrap receives an explicit
-`ARGV0` removal before the unchanged shell payload. The fallback's
-`allowAllUnixSockets: true` setting suppresses Claude's automatic helper
-dispatch so the launcher owns this proved helper-before-bubblewrap ordering.
-The command crosses one effective user, PID, mount, and network namespace
-boundary rather than nesting a second user namespace around bubblewrap.
+protected-environment removals, and the requested working directory. A private
+Claude module serializes a classic seccomp BPF for little-endian x64 or arm64.
+The program validates `seccomp_data.arch`, kills an architecture mismatch,
+returns `EPERM` for `socket(AF_UNIX, ...)`, `io_uring_setup`,
+`io_uring_enter`, and `io_uring_register`, and allows other syscalls. X64
+covers both native and x32 syscall numbers. Unsupported architectures and
+malformed programs fail before launch.
+
+On every invocation the authenticated launcher decodes and hashes the exact
+filter bytes, writes and syncs an owner-only no-follow file, reopens it
+read-only, and unlinks it before verifying the link-free descriptor's owner,
+mode, size, identity, and complete contents with positioned reads that leave
+its offset at zero. It then removes its authorization token, `ARGV0`, and
+provider credentials and invokes the pinned real `bwrap` directly once,
+passing that sealed resource as inherited child descriptor `3` with
+`--seccomp 3`. Filter creation, tampering, descriptor inheritance, bubblewrap
+setup or execution, close, and resource cleanup errors all fail closed. The
+fallback's `allowAllUnixSockets: true` setting suppresses Claude's automatic
+helper dispatch so the Runner-owned filter is the only fallback socket policy.
+The command crosses one user, PID, mount, and network namespace boundary; the
+fallback never invokes Claude's seccomp helper or creates a nested user
+namespace.
 
 The direct fallback probe supplies representative effective Claude arguments
 to that same validator and execution path. Native and fallback child probes use
@@ -1745,9 +1757,11 @@ never apply a profile, authenticate, or invoke a model.
 The local-commit executor proof remains independent and `localCommit` requires
 both the local-commit turn policy and executor proof.
 The provider-private policy identity binds the installed CLI version, selected
-isolation policy, and complete effective permission, tool, deny, and sandbox
-policy for every access mode. A receipt created for the superseded fallback or
-permission policy cannot authorize later provider work.
+isolation policy, complete effective permission, tool, deny, and sandbox policy,
+and, for fallback access, the direct-filter contract, architecture, and exact
+byte hash. A receipt created for the superseded helper-based fallback, another
+architecture, or a prior permission policy cannot authorize later provider
+work.
 Claude derives its advertised read-only capability and turn arguments from one
 autonomous access envelope shared by read-only and local-commit readiness
 turns. It exposes only repository-inspection tools and omits broad shell-command

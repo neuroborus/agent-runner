@@ -24,22 +24,24 @@ remain in the owning documentation.
   parent invocation only after the exact probe recognizes
   nested-user-namespace denial. The authenticated provider-private launcher
   validates a closed argument grammar, rejects malformed or weakened input,
-  and applies the pinned Claude seccomp helper before one pinned real bubblewrap
-  boundary. The same path handles direct model-free probes and model commands.
+  and applies a small architecture-checked Runner seccomp filter directly
+  through one pinned real bubblewrap boundary. The same path handles direct
+  model-free probes and model commands without invoking Claude's helper.
   The Claude CLI retains its host provider transport and credentials; only
   command children cross the single Runner user, PID, mount, and network
   boundary with private `/proc`, `/tmp`, and `/run`, read-only host and Git
   views, credential scrubbing, and the requested workspace write authority.
-  The proved ordering blocks pathname Unix sockets, while consuming Claude's
-  already-satisfied user-namespace input avoids nesting another user namespace;
-  native policy stays strict.
+  The filter returns `EPERM` for Unix sockets and every io_uring entry point;
+  x64 and arm64 audit checks, one bubblewrap user namespace, sealed filter
+  bytes, and fail-closed setup avoid the helper's AppArmor-rejected nested user
+  namespace while native policy stays strict.
   Common envelope version 13 holds one provider-neutral receipt slot per
   resolved role and persists only a policy fingerprint and supported-access
-  list when that role is required; the fingerprint distinguishes this
-  corrected topology and resume rejects drift before provider work. This
-  restores provider connectivity and safe execution without host
-  `CAP_SYS_ADMIN`, host-policy changes, provider branches in pipelines, or
-  broader authority.
+  list when that role is required; the fingerprint distinguishes the filter
+  contract, architecture, and exact bytes, and resume rejects drift before
+  provider work. This restores provider connectivity and safe execution
+  without host `CAP_SYS_ADMIN`, host-policy changes, provider branches in
+  pipelines, or broader authority.
 - **Polishing freezes finalization guidance before bootstrap.** State version
   15 persists the configured policy, selected canonical skill or fallback, and
   its fingerprints before provider work. The selected skill remains mandatory

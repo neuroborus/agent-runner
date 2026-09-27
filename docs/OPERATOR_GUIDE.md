@@ -419,13 +419,16 @@ The fallback is selected and
 fingerprinted only after its direct model-free probe exercises that same
 validation and access-aware execution path. It also requires Claude's
 spawning-parent policy option so the real turn is bound to the proved launcher;
-the launcher pins Claude and bubblewrap, consumes the already-satisfied
-user-unshare argument, applies `ARGV0=apply-seccomp` before executing bubblewrap
-once, and removes helper control and credentials before the command payload.
+the launcher pins bubblewrap, verifies and inherits the exact Runner-owned x64
+or arm64 seccomp filter, and executes bubblewrap once with the single validated
+user namespace after removing launcher control and credentials from the command
+payload. The direct filter denies Unix sockets and io_uring entry points with
+`EPERM` without invoking Claude's helper.
 The fallback sets `allowAllUnixSockets: true` so Claude does not add a second
-automatic helper. A generic failure or incomplete access, argument, launcher,
-or cleanup proof remains `ERR_UNSUPPORTED_BACKEND` with a bounded access-mode
-diagnosis. Resume must reproduce the saved receipt. If it cannot, preserve the
+automatic helper. An unsupported architecture or generic failure in access,
+arguments, filter integrity or setup, launcher execution, or cleanup remains
+`ERR_UNSUPPORTED_BACKEND` with a bounded access-mode diagnosis. Resume must
+reproduce the saved architecture-specific receipt. If it cannot, preserve the
 run and repair the installed Claude, bubblewrap, or host environment instead of
 editing durable state or forcing weaker settings.
 
@@ -437,8 +440,9 @@ blocks workspace writes, Git and remote mutation, process escape, credential
 exposure, network access, and host socket access. Workspace-write turns keep
 their existing tools and command denials.
 After installing a change to this policy, repeat a fresh real Claude lazy
-plan-authoring run and require both successful preflight and a provider response
-before relying on the backend for subsequent work.
+plan-authoring run and require preflight to advertise read-only,
+workspace-write, and local-commit access plus a provider response before relying
+on the backend for subsequent work.
 
 A same-host execution or canonical-worktree lease is eligible for stale
 recovery after five minutes only when its recorded process is demonstrably

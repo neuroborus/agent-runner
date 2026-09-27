@@ -323,22 +323,25 @@ Claude bubblewrap grammar, rejects malformed or weakened input before spawning,
 and strengthens the validated invocation into one user, PID, mount, and network
 boundary with private `/proc`, `/tmp`, and `/run`, a read-only host root,
 access-specific workspace writes, and read-only Git metadata. Its file and
-containing directory are non-writable during the turn, and it pins both the
-Claude helper and canonical host `bwrap` executable rather than resolving them
-through a workspace-writable path. The launcher consumes Claude's required
-user-unshare input, invokes the helper with `ARGV0=apply-seccomp`, and lets that
-helper execute bubblewrap exactly once without a second user namespace. It
+containing directory are non-writable during the turn, and it pins canonical
+host `bwrap` rather than resolving it through a workspace-writable path. The
+launcher verifies an exact owner-read-only x64 or arm64 Runner seccomp filter,
+unlinks the verified resource, passes its sealed descriptor to bubblewrap, and
+executes bubblewrap directly once with the single validated user namespace.
+The filter returns `EPERM` for Unix-socket creation and all io_uring entry
+points that could bypass it, including x32 forms on x64. It
 removes `ARGV0`, credentials, and its token before the payload. The proof denies
 IP and host abstract and pathname Unix sockets, inherited credentials and host
 provider-proc access, remote writes, Git metadata, and outside writes. The
 fallback sets `allowAllUnixSockets: true` so Claude does not prepend a second
-automatic helper dispatch. Native policy stays strict; the
+automatic helper dispatch. Unsupported architectures, filter drift, setup
+failure, or cleanup failure fail closed. Native policy stays strict; the
 [architecture contract](../ARCHITECTURE.md) owns the exact launcher grammar and
 strengthening mechanics. Any failed or incomplete proof, argument rejection,
 launcher failure, or cleanup leaves that access mode unavailable. The bounded
 selected-policy receipt distinguishes the effective fallback settings and
-remains immutable for the run; resume or reconstruction fails closed if the
-provider's policy proof drifts.
+architecture-specific filter and remains immutable for the run; resume or
+reconstruction fails closed if the provider's policy proof drifts.
 
 Within either proved isolation topology, Claude's read-only and local-commit
 readiness turns may inspect autonomously with only Bash and read/search tools.

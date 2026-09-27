@@ -12,6 +12,8 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
 
+import { createClaudeSeccompFilter } from "./seccomp-filter.js";
+
 export const CLAUDE_COMMAND_LAUNCHER_TOKEN =
   "AGENT_RUNNER_CLAUDE_COMMAND_LAUNCHER_TOKEN";
 
@@ -109,9 +111,9 @@ function launcherSource({
   canonicalCwd,
   canonicalGitDirectories,
   canonicalTemporaryRoot,
-  claudeBinary,
   claudeWritablePaths,
   cwd,
+  filter,
   filesystemArguments,
   finalArguments,
   gitDirectories,
@@ -121,11 +123,29 @@ function launcherSource({
 }) {
   return `#!${process.execPath}
 const { spawnSync } = require("node:child_process");
-const { lstatSync, readdirSync, realpathSync } = require("node:fs");
+const { createHash, timingSafeEqual } = require("node:crypto");
+const {
+  chmodSync,
+  closeSync,
+  constants,
+  fstatSync,
+  fsyncSync,
+  lstatSync,
+  mkdtempSync,
+  openSync,
+  readSync,
+  readdirSync,
+  realpathSync,
+  rmdirSync,
+  rmSync,
+  unlinkSync,
+  writeSync,
+} = require("node:fs");
 const {
   basename,
   dirname,
   isAbsolute,
+  join,
   relative,
   resolve,
   sep,
@@ -139,6 +159,9 @@ const canonicalCwd = ${JSON.stringify(canonicalCwd)};
 const canonicalGitDirectories = ${JSON.stringify(canonicalGitDirectories)};
 const canonicalTemporaryRoot = ${JSON.stringify(canonicalTemporaryRoot)};
 const claudeWritablePaths = new Set(${JSON.stringify(claudeWritablePaths)});
+const expectedFilter = Buffer.from(${JSON.stringify(filter.base64)}, "base64");
+const expectedFilterByteLength = ${JSON.stringify(filter.byteLength)};
+const expectedFilterSha256 = ${JSON.stringify(filter.sha256)};
 const hiddenDirectory = ${JSON.stringify(hiddenDirectory)};
 const gitDirectories = new Set(
   ${JSON.stringify([...new Set(gitDirectories)])},
@@ -223,6 +246,116 @@ function pathKind(path) {
   } catch (cause) {
     if (["ENOENT", "ENOTDIR"].includes(cause?.code)) return "missing";
     fail();
+  }
+}
+function closeDescriptor(descriptor) {
+  if (descriptor === undefined) return true;
+  try {
+    closeSync(descriptor);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function createSeccompDescriptor() {
+  let directory;
+  let path;
+  let readDescriptor;
+  let writeDescriptor;
+  try {
+    if (
+      expectedFilter.length !== expectedFilterByteLength ||
+      createHash("sha256").update(expectedFilter).digest("hex") !==
+        expectedFilterSha256 ||
+      !Number.isInteger(constants.O_NOFOLLOW)
+    ) throw new Error("invalid filter");
+    directory = mkdtempSync(
+      join(canonicalTemporaryRoot, "agent-runner-claude-seccomp-"),
+    );
+    path = join(directory, "filter.bpf");
+    writeDescriptor = openSync(
+      path,
+      constants.O_CREAT |
+        constants.O_EXCL |
+        constants.O_NOFOLLOW |
+        constants.O_WRONLY,
+      0o600,
+    );
+    let offset = 0;
+    while (offset < expectedFilter.length) {
+      const written = writeSync(
+        writeDescriptor,
+        expectedFilter,
+        offset,
+        expectedFilter.length - offset,
+        offset,
+      );
+      if (written <= 0) throw new Error("incomplete filter");
+      offset += written;
+    }
+    fsyncSync(writeDescriptor);
+    if (!closeDescriptor(writeDescriptor)) throw new Error("close failed");
+    writeDescriptor = undefined;
+    chmodSync(path, 0o400);
+    readDescriptor = openSync(
+      path,
+      constants.O_NOFOLLOW | constants.O_RDONLY,
+    );
+    const metadata = fstatSync(readDescriptor);
+    if (
+      !metadata.isFile() ||
+      metadata.nlink !== 1 ||
+      metadata.size !== expectedFilter.length ||
+      (metadata.mode & 0o777) !== 0o400 ||
+      (process.getuid !== undefined && metadata.uid !== process.getuid())
+    ) throw new Error("invalid filter descriptor");
+    unlinkSync(path);
+    path = undefined;
+    const sealed = fstatSync(readDescriptor);
+    if (
+      sealed.dev !== metadata.dev ||
+      sealed.ino !== metadata.ino ||
+      sealed.nlink !== 0 ||
+      sealed.size !== metadata.size ||
+      (sealed.mode & 0o777) !== 0o400
+    ) throw new Error("unsealed filter descriptor");
+    rmdirSync(directory);
+    directory = undefined;
+    const actualFilter = Buffer.alloc(expectedFilter.length);
+    offset = 0;
+    while (offset < actualFilter.length) {
+      const count = readSync(
+        readDescriptor,
+        actualFilter,
+        offset,
+        actualFilter.length - offset,
+        offset,
+      );
+      if (count <= 0) throw new Error("incomplete filter");
+      offset += count;
+    }
+    if (!timingSafeEqual(actualFilter, expectedFilter)) {
+      throw new Error("unexpected filter");
+    }
+    return readDescriptor;
+  } catch {
+    closeDescriptor(writeDescriptor);
+    closeDescriptor(readDescriptor);
+    if (path !== undefined) {
+      try {
+        unlinkSync(path);
+      } catch {
+        // The authenticated launcher still fails closed below.
+      }
+    }
+    if (directory !== undefined) {
+      try {
+        rmSync(directory, { force: true, recursive: true });
+      } catch {
+        // Process exit closes descriptors when cleanup cannot complete.
+      }
+    }
+    return undefined;
   }
 }
 
@@ -379,8 +512,7 @@ while (["--bind", "--ro-bind", "--tmpfs"].includes(sourceArguments[index])) {
 take("--dev");
 take("/dev");
 take("--unshare-pid");
-if (sourceArguments[index] !== "--unshare-user") fail();
-index += 1;
+take("--unshare-user");
 if (
   sourceArguments[index] !== "--bind" ||
   sourceArguments[index + 1] !== "/proc" ||
@@ -402,35 +534,50 @@ if (
 
 const environment = { ...process.env };
 for (const name of protectedEnvironmentNames) delete environment[name];
-environment.ARGV0 = "apply-seccomp";
 const missingUnsetArguments = [...protectedEnvironmentNames]
   .filter((name) => !presentUnsetEnvironmentNames.includes(name))
   .flatMap((name) => ["--unsetenv", name]);
-const result = spawnSync(
-  ${JSON.stringify(claudeBinary)},
-  [
+const filterDescriptor = createSeccompDescriptor();
+if (filterDescriptor === undefined) fail();
+let result;
+try {
+  result = spawnSync(
     ${JSON.stringify(bubblewrapBinary)},
-    ...validatedArguments,
-    ...${JSON.stringify(finalArguments)},
-    ...missingUnsetArguments,
-    "--chdir",
-    cwd,
-    "--",
-    shell,
-    shellOption,
-    payload,
-  ],
-  { env: environment, stdio: "inherit" },
-);
-if (result.error !== undefined || result.signal !== null) process.exit(125);
+    [
+      ...validatedArguments,
+      ...${JSON.stringify(finalArguments)},
+      "--seccomp",
+      "3",
+      ...missingUnsetArguments,
+      "--chdir",
+      cwd,
+      "--",
+      shell,
+      shellOption,
+      payload,
+    ],
+    {
+      env: environment,
+      stdio: ["inherit", "inherit", "inherit", filterDescriptor],
+    },
+  );
+} catch {
+  result = undefined;
+}
+if (!closeDescriptor(filterDescriptor)) process.exit(125);
+if (
+  result === undefined ||
+  result.error !== undefined ||
+  result.signal !== null
+) process.exit(125);
 process.exit(result.status ?? 125);
 `;
 }
 
 export async function createClaudeCommandLauncher({
   access,
+  architecture = process.arch,
   bubblewrapBinary,
-  claudeBinary,
   cwd,
   environment,
   gitDirectories,
@@ -438,6 +585,7 @@ export async function createClaudeCommandLauncher({
 }) {
   let launcherDirectory;
   try {
+    const filter = createClaudeSeccompFilter(architecture);
     const temporaryRoot = await realpath(tmpdir());
     const canonicalCwd = await realpath(cwd);
     const canonicalGitDirectories = await Promise.all(
@@ -453,14 +601,9 @@ export async function createClaudeCommandLauncher({
       bubblewrapBinary,
       environment,
     );
-    const resolvedClaudeBinary = await resolveExecutable(
-      claudeBinary,
-      environment,
-    );
     if (
-      resolvedClaudeBinary === resolvedBubblewrapBinary ||
-      [resolvedBubblewrapBinary, resolvedClaudeBinary].some((executable) =>
-        protectedRoots.some((path) => containsPath(path, executable)),
+      protectedRoots.some((path) =>
+        containsPath(path, resolvedBubblewrapBinary),
       )
     ) {
       throw new Error("Claude command isolation executable is unsafe.");
@@ -486,9 +629,9 @@ export async function createClaudeCommandLauncher({
           canonicalCwd,
           canonicalGitDirectories,
           canonicalTemporaryRoot: temporaryRoot,
-          claudeBinary: resolvedClaudeBinary,
           claudeWritablePaths,
           cwd,
+          filter,
           filesystemArguments,
           finalArguments,
           gitDirectories,

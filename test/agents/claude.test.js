@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { execFile as executeFileCallback } from "node:child_process";
+import { execFile as executeFileCallback, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import {
   access,
   chmod,
   mkdtemp,
+  open,
   readFile,
   realpath,
   rm,
@@ -97,6 +98,40 @@ const WORKSPACE_DENY_POLICY = [
   "Bash(gh *)",
   "Bash(glab *)",
 ];
+const EXPECTED_SECCOMP_INSTRUCTIONS = Object.freeze({
+  arm64: Object.freeze([
+    [0x20, 0, 0, 4],
+    [0x15, 1, 0, 0xc00000b7],
+    [0x06, 0, 0, 0x80000000],
+    [0x20, 0, 0, 0],
+    [0x15, 6, 0, 425],
+    [0x15, 5, 0, 426],
+    [0x15, 4, 0, 427],
+    [0x15, 0, 2, 198],
+    [0x20, 0, 0, 16],
+    [0x15, 1, 0, 1],
+    [0x06, 0, 0, 0x7fff0000],
+    [0x06, 0, 0, 0x00050001],
+  ]),
+  x64: Object.freeze([
+    [0x20, 0, 0, 4],
+    [0x15, 1, 0, 0xc000003e],
+    [0x06, 0, 0, 0x80000000],
+    [0x20, 0, 0, 0],
+    [0x15, 10, 0, 425],
+    [0x15, 9, 0, 426],
+    [0x15, 8, 0, 427],
+    [0x15, 7, 0, 0x40000000 | 425],
+    [0x15, 6, 0, 0x40000000 | 426],
+    [0x15, 5, 0, 0x40000000 | 427],
+    [0x15, 1, 0, 41],
+    [0x15, 0, 2, 0x40000000 | 41],
+    [0x20, 0, 0, 16],
+    [0x15, 1, 0, 1],
+    [0x06, 0, 0, 0x7fff0000],
+    [0x06, 0, 0, 0x00050001],
+  ]),
+});
 
 function hasCode(code) {
   return (error) => error instanceof ClaudeAdapterError && error.code === code;
@@ -146,6 +181,29 @@ function includesSequence(argumentsList, sequence) {
   return argumentsList.some((_, index) =>
     sequence.every((value, offset) => argumentsList[index + offset] === value),
   );
+}
+
+function expectedSeccompFilter(architecture) {
+  const instructions = EXPECTED_SECCOMP_INSTRUCTIONS[architecture];
+  const buffer = Buffer.alloc(instructions.length * 8);
+  for (const [
+    index,
+    [code, trueOffset, falseOffset, value],
+  ] of instructions.entries()) {
+    const offset = index * 8;
+    buffer.writeUInt16LE(code, offset);
+    buffer.writeUInt8(trueOffset, offset + 2);
+    buffer.writeUInt8(falseOffset, offset + 3);
+    buffer.writeUInt32LE(value, offset + 4);
+  }
+  return buffer;
+}
+
+function expectedSeccompIdentity(architecture) {
+  const sha256 = createHash("sha256")
+    .update(expectedSeccompFilter(architecture))
+    .digest("hex");
+  return `claude-restricted-host-seccomp-v1:${architecture}:${sha256}`;
 }
 
 function shellArgument(value) {
@@ -294,42 +352,44 @@ async function createFakeBubblewrap(t) {
     join(tmpdir(), "agent-runner-fake-claude-bwrap-"),
   );
   const logPath = join(directory, "arguments.jsonl");
+  const filterLogPath = join(directory, "filters.jsonl");
   const helperLogPath = join(directory, "helper.jsonl");
   await Promise.all([
     writeFile(
       join(directory, "claude"),
       `#!${process.execPath}\n` +
-        `const { spawnSync } = require("node:child_process");\n` +
         `const { appendFileSync } = require("node:fs");\n` +
-        `if (process.env.ARGV0 !== "apply-seccomp" || ` +
-        `process.env.${COMMAND_LAUNCHER_TOKEN} !== undefined || ` +
-        `process.env.ANTHROPIC_API_KEY !== undefined || ` +
-        `process.env.HTTPS_PROXY !== undefined || ` +
-        `process.env.AGENT_RUNNER_CLAUDE_PROBE_CREDENTIAL !== undefined) ` +
-        `process.exit(12);\n` +
-        `const args = process.argv.slice(2);\n` +
-        `if (process.env.AGENT_RUNNER_FAKE_HELPER_LOG !== undefined) ` +
-        `appendFileSync(process.env.AGENT_RUNNER_FAKE_HELPER_LOG, ` +
-        `JSON.stringify({ argv0: process.env.ARGV0, file: args[0], argumentsList: args.slice(1) }) + "\\n");\n` +
-        `const result = spawnSync(args[0], args.slice(1), ` +
-        `{ env: process.env, stdio: "inherit" });\n` +
-        `if (result.error !== undefined || result.signal !== null) process.exit(125);\n` +
-        `process.exit(result.status ?? 125);\n`,
+        `appendFileSync(${JSON.stringify(helperLogPath)}, "invoked\\n");\n` +
+        `process.exit(125);\n`,
       { mode: 0o700 },
     ),
     writeFile(
       join(directory, "bwrap"),
       `#!${process.execPath}\n` +
         `const { spawnSync } = require("node:child_process");\n` +
-        `const { appendFileSync, writeSync } = require("node:fs");\n` +
-        `if (process.env.ARGV0 !== "apply-seccomp" || ` +
+        `const { appendFileSync, fstatSync, readFileSync, writeSync } = require("node:fs");\n` +
+        `if (process.env.ARGV0 !== undefined || ` +
         `process.env.${COMMAND_LAUNCHER_TOKEN} !== undefined || ` +
         `process.env.ANTHROPIC_API_KEY !== undefined || ` +
         `process.env.HTTPS_PROXY !== undefined || ` +
         `process.env.AGENT_RUNNER_CLAUDE_PROBE_CREDENTIAL !== undefined) ` +
         `process.exit(12);\n` +
         `const args = process.argv.slice(2);\n` +
-        `appendFileSync(process.env.AGENT_RUNNER_FAKE_BWRAP_LOG, JSON.stringify(args) + "\\n");\n` +
+        `const seccompIndex = args.indexOf("--seccomp");\n` +
+        `if (seccompIndex === -1 || args[seccompIndex + 1] !== "3" || ` +
+        `args.indexOf("--seccomp", seccompIndex + 1) !== -1) process.exit(13);\n` +
+        `const filter = readFileSync(3);\n` +
+        `const metadata = fstatSync(3);\n` +
+        `let writeError;\n` +
+        `try { writeSync(3, Buffer.from([0])); } catch (cause) { writeError = cause?.code; }\n` +
+        `appendFileSync(${JSON.stringify(filterLogPath)}, ` +
+        `JSON.stringify({ base64: filter.toString("base64"), ` +
+        `descriptor: args[seccompIndex + 1], mode: metadata.mode & 0o777, ` +
+        `nlink: metadata.nlink, writeError }) + "\\n");\n` +
+        `appendFileSync(process.env.AGENT_RUNNER_FAKE_BWRAP_LOG, ` +
+        `JSON.stringify(args) + "\\n");\n` +
+        `if (process.env.AGENT_RUNNER_FAKE_BWRAP_REJECT_SECCOMP === "1") ` +
+        `process.exit(15);\n` +
         `if (process.env.AGENT_RUNNER_FAKE_BWRAP_EXECUTE_PAYLOAD === "1") {\n` +
         `  const separator = args.indexOf("--");\n` +
         `  const environment = { ...process.env };\n` +
@@ -352,7 +412,7 @@ async function createFakeBubblewrap(t) {
     writeFile(join(directory, "package.json"), '{"type":"commonjs"}\n'),
   ]);
   t.after(() => rm(directory, { force: true, recursive: true }));
-  return { directory, helperLogPath, logPath };
+  return { directory, filterLogPath, helperLogPath, logPath };
 }
 
 async function resolveTestExecutable(binary) {
@@ -391,7 +451,17 @@ function capabilitiesWithoutReceipt(capabilities) {
   return rest;
 }
 
-function policyFingerprint(contract, policies, version = "2.1.233") {
+function policyFingerprint(
+  contract,
+  policies,
+  version = "2.1.233",
+  architecture = "x64",
+) {
+  const fallbackFilterIdentity = Object.values(policies).includes(
+    "runner-boundary",
+  )
+    ? expectedSeccompIdentity(architecture)
+    : undefined;
   const accessPolicies = Object.fromEntries(
     Object.entries(policies).map(([access, isolationPolicy]) => {
       const readOnly = access !== "workspace-write";
@@ -419,6 +489,9 @@ function policyFingerprint(contract, policies, version = "2.1.233") {
               workspaceWrite: !readOnly,
             },
             isolationPolicy,
+            ...(isolationPolicy === "runner-boundary"
+              ? { seccompFilter: fallbackFilterIdentity }
+              : {}),
             network: {
               allowedDomains: [],
               allowAllUnixSockets: isolationPolicy === "runner-boundary",
@@ -466,6 +539,7 @@ function socketServerFixture(socketServers) {
 }
 
 function createFixture({
+  architecture = "x64",
   claudeBinary,
   env,
   handle,
@@ -578,6 +652,7 @@ function createFixture({
     throw new Error(`Unexpected command: ${file} ${argumentsList.join(" ")}`);
   };
   const adapter = createClaudeAdapter({
+    architecture,
     ...(claudeBinary === undefined ? {} : { claudeBinary }),
     createSocketServer: () => socketServerFixture(socketServers),
     env: env ?? process.env,
@@ -1125,10 +1200,10 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
   t.after(() => rm(emptyMaskPath, { force: true, recursive: true }));
   const providerPath = `${fakeBubblewrap.directory}${delimiter}${process.env.PATH ?? ""}`;
   const fixture = createFixture({
+    architecture: "x64",
     env: {
       ...process.env,
       AGENT_RUNNER_FAKE_BWRAP_LOG: fakeBubblewrap.logPath,
-      AGENT_RUNNER_FAKE_HELPER_LOG: fakeBubblewrap.helperLogPath,
       [COMMAND_LAUNCHER_TOKEN]: "inherited-launcher-token",
       ANTHROPIC_API_KEY: "provider-token",
       ARGV0: "inherited-argv0",
@@ -1183,7 +1258,7 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
   assert.equal(
     capabilities.policyReceipt.fingerprint,
     policyFingerprint(
-      "claude-command-boundary-v6",
+      "claude-command-boundary-v7",
       {
         "read-only": "runner-boundary",
         "workspace-write": "runner-boundary",
@@ -1245,12 +1320,17 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
       ]),
       false,
     );
-    assert.equal(boundaryArguments.includes("--unshare-user"), false);
+    assert.equal(
+      boundaryArguments.filter((argument) => argument === "--unshare-user")
+        .length,
+      1,
+    );
     assert.ok(boundaryArguments.includes("--unshare-net"));
     assert.ok(boundaryArguments.includes("--as-pid-1"));
     assert.ok(includesSequence(boundaryArguments, ["--cap-drop", "ALL"]));
     assert.ok(includesSequence(boundaryArguments, ["--ro-bind", "/", "/"]));
     assert.ok(includesSequence(boundaryArguments, ["--proc", "/proc"]));
+    assert.ok(includesSequence(boundaryArguments, ["--seccomp", "3"]));
     assert.ok(includesSequence(boundaryArguments, ["--tmpfs", "/tmp"]));
     assert.ok(includesSequence(boundaryArguments, ["--dir", "/tmp/claude"]));
     assert.ok(includesSequence(boundaryArguments, ["--tmpfs", "/run"]));
@@ -1432,10 +1512,15 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
       ),
       false,
     );
-    assert.equal(boundaryArguments.includes("--unshare-user"), false);
+    assert.equal(
+      boundaryArguments.filter((argument) => argument === "--unshare-user")
+        .length,
+      1,
+    );
     assert.ok(boundaryArguments.includes("--unshare-pid"));
     assert.ok(boundaryArguments.includes("--unshare-net"));
     assert.ok(includesSequence(boundaryArguments, ["--proc", "/proc"]));
+    assert.ok(includesSequence(boundaryArguments, ["--seccomp", "3"]));
     assert.ok(includesSequence(boundaryArguments, ["--tmpfs", "/tmp"]));
     assert.ok(includesSequence(boundaryArguments, ["--dir", "/tmp/claude"]));
     assert.ok(includesSequence(boundaryArguments, ["--tmpfs", "/run"]));
@@ -1533,18 +1618,121 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
         option(argumentsList, "--permission-mode") === "auto",
     ),
   );
-  const helperInvocations = (
-    await readFile(fakeBubblewrap.helperLogPath, "utf8")
-  )
+  const filters = (await readFile(fakeBubblewrap.filterLogPath, "utf8"))
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line));
-  assert.equal(helperInvocations.length, 6);
-  for (const [index, invocation] of helperInvocations.entries()) {
-    assert.equal(invocation.argv0, "apply-seccomp");
-    assert.equal(invocation.file, join(fakeBubblewrap.directory, "bwrap"));
-    assert.deepEqual(invocation.argumentsList, exercisedBoundaries[index]);
+  assert.equal(filters.length, 6);
+  for (const filter of filters) {
+    assert.equal(filter.descriptor, "3");
+    assert.equal(filter.mode, 0o400);
+    assert.equal(filter.nlink, 0);
+    assert.equal(filter.writeError, "EBADF");
   }
+  await assert.rejects(readFile(fakeBubblewrap.helperLogPath), {
+    code: "ENOENT",
+  });
+});
+
+test("serializes every supported fallback seccomp instruction", async (t) => {
+  const fakeBubblewrap = await createFakeBubblewrap(t);
+  for (const architecture of ["x64", "arm64"]) {
+    const fixture = createFixture({
+      architecture,
+      env: {
+        ...process.env,
+        AGENT_RUNNER_FAKE_BWRAP_LOG: fakeBubblewrap.logPath,
+        PATH: `${fakeBubblewrap.directory}${delimiter}${process.env.PATH ?? ""}`,
+      },
+      executeFallbackLauncher: true,
+      nativeSandbox: "nested-denied",
+    });
+    const capabilities = await fixture.adapter.probe();
+    assert.equal(
+      capabilities.policyReceipt.fingerprint,
+      policyFingerprint(
+        "claude-command-boundary-v7",
+        {
+          "read-only": "runner-boundary",
+          "workspace-write": "runner-boundary",
+          "local-commit": "runner-boundary",
+        },
+        capabilities.version,
+        architecture,
+      ),
+    );
+  }
+  const filters = (await readFile(fakeBubblewrap.filterLogPath, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(filters.length, 6);
+  for (const [index, filter] of filters.entries()) {
+    const architecture = index < 3 ? "x64" : "arm64";
+    assert.deepEqual(
+      Buffer.from(filter.base64, "base64"),
+      expectedSeccompFilter(architecture),
+    );
+  }
+});
+
+test("fails closed before bubblewrap when the direct filter is tampered", async (t) => {
+  const fakeBubblewrap = await createFakeBubblewrap(t);
+  const fixture = createFixture({
+    architecture: "x64",
+    env: {
+      ...process.env,
+      AGENT_RUNNER_FAKE_BWRAP_LOG: fakeBubblewrap.logPath,
+      PATH: `${fakeBubblewrap.directory}${delimiter}${process.env.PATH ?? ""}`,
+    },
+    handle: async ({ call }) => {
+      if (!isRunnerBoundaryProbe(call)) return;
+      const launcherDirectory = parse(call.file).dir;
+      await chmod(launcherDirectory, 0o700);
+      await chmod(call.file, 0o700);
+      const source = await readFile(call.file, "utf8");
+      const changed = source.replace(
+        "    fsyncSync(writeDescriptor);\n",
+        "    writeSync(writeDescriptor, Buffer.from([expectedFilter[0] ^ 0xff]), 0, 1, 0);\n" +
+          "    fsyncSync(writeDescriptor);\n",
+      );
+      assert.notEqual(changed, source);
+      await writeFile(call.file, changed);
+      await chmod(call.file, 0o500);
+      await chmod(launcherDirectory, 0o500);
+      return executeFile(call.file, call.argumentsList, {
+        ...call.options,
+        env: { ...call.options.env, PATH: "" },
+      });
+    },
+    nativeSandbox: "nested-denied",
+  });
+
+  const capabilities = await fixture.adapter.probe();
+  assert.deepEqual(capabilities.policyReceipt.supportedAccess, []);
+  await assert.rejects(readFile(fakeBubblewrap.logPath), { code: "ENOENT" });
+});
+
+test("fails closed when bubblewrap rejects direct seccomp setup", async (t) => {
+  const fakeBubblewrap = await createFakeBubblewrap(t);
+  const fixture = createFixture({
+    architecture: "x64",
+    env: {
+      ...process.env,
+      AGENT_RUNNER_FAKE_BWRAP_LOG: fakeBubblewrap.logPath,
+      AGENT_RUNNER_FAKE_BWRAP_REJECT_SECCOMP: "1",
+      PATH: `${fakeBubblewrap.directory}${delimiter}${process.env.PATH ?? ""}`,
+    },
+    executeFallbackLauncher: true,
+    nativeSandbox: "nested-denied",
+  });
+
+  const capabilities = await fixture.adapter.probe();
+  assert.deepEqual(capabilities.policyReceipt.supportedAccess, []);
+  const invocations = (await readFile(fakeBubblewrap.logPath, "utf8"))
+    .trim()
+    .split("\n");
+  assert.equal(invocations.length, 3);
 });
 
 test("rejects unauthenticated and invalid fallback arguments before execution", async (t) => {
@@ -1801,44 +1989,24 @@ test("rejects unauthenticated and invalid fallback arguments before execution", 
   assert.equal(bubblewrapInvocations.length, 3);
 });
 
-test("rejects unsafe or unsupported fallback helper topology", async (t) => {
+test("rejects unsupported fallback seccomp architectures", async (t) => {
   const fakeBubblewrap = await createFakeBubblewrap(t);
-  const environment = {
-    ...process.env,
-    AGENT_RUNNER_FAKE_BWRAP_LOG: fakeBubblewrap.logPath,
-    PATH: `${fakeBubblewrap.directory}${delimiter}${process.env.PATH ?? ""}`,
-  };
-  const unsafe = createFixture({
-    claudeBinary: join(PROJECT_PATH, "bin/agent-run.js"),
-    env: environment,
+  const fixture = createFixture({
+    architecture: "riscv64",
+    env: {
+      ...process.env,
+      AGENT_RUNNER_FAKE_BWRAP_LOG: fakeBubblewrap.logPath,
+      PATH: `${fakeBubblewrap.directory}${delimiter}${process.env.PATH ?? ""}`,
+    },
     nativeSandbox: "nested-denied",
   });
-  assert.equal((await unsafe.adapter.probe()).readOnly, true);
-  await assert.rejects(
-    unsafe.adapter.run(request()),
-    hasCode("ERR_CLAUDE_ISOLATION"),
-  );
-  assert.equal(
-    unsafe.calls.filter(
-      ({ file, argumentsList }) =>
-        file === join(PROJECT_PATH, "bin/agent-run.js") &&
-        argumentsList.includes("-p"),
-    ).length,
-    0,
-  );
-
-  const unsupported = createFixture({
-    claudeBinary: join(fakeBubblewrap.directory, "bwrap"),
-    env: environment,
-    nativeSandbox: "nested-denied",
-  });
-  const capabilities = await unsupported.adapter.probe();
+  const capabilities = await fixture.adapter.probe();
   assert.deepEqual(capabilities.policyReceipt.supportedAccess, []);
   assert.equal(capabilities.readOnly, false);
   assert.equal(capabilities.workspaceWrite, false);
   assert.equal(capabilities.localCommit, false);
   assert.equal(
-    unsupported.calls.filter(
+    fixture.calls.filter(
       (call) => isIsolationProbe(call) && !isNativeSandboxProbe(call),
     ).length,
     0,
@@ -3243,50 +3411,66 @@ test("keeps commit-executor failures ambiguous", async () => {
 });
 
 test(
-  "runs read-only inspection and denies mutations through the installed Claude helper",
+  "runs read-only inspection and denies mutations through direct bubblewrap seccomp",
   { skip: process.platform !== "linux" },
   async (t) => {
-    const claudeBinary = await resolveTestExecutable("claude");
     const bubblewrapBinary = await resolveTestExecutable("bwrap");
-    if (claudeBinary === undefined || bubblewrapBinary === undefined) {
-      t.skip("Claude and bubblewrap are required for the real-process probe.");
+    if (
+      bubblewrapBinary === undefined ||
+      !Object.hasOwn(EXPECTED_SECCOMP_INSTRUCTIONS, process.arch)
+    ) {
+      t.skip("A supported architecture and bubblewrap are required.");
       return;
     }
-    const environment = {
-      PATH: process.env.PATH ?? "",
-      ARGV0: "apply-seccomp",
-    };
+    const capabilityDirectory = await mkdtemp(
+      join(tmpdir(), "agent-runner-bwrap-seccomp-"),
+    );
+    let capabilityResult;
     try {
-      await executeFile(
-        claudeBinary,
-        [
+      const filterPath = join(capabilityDirectory, "filter.bpf");
+      await writeFile(filterPath, expectedSeccompFilter(process.arch), {
+        mode: 0o400,
+      });
+      const descriptor = await open(filterPath, constants.O_RDONLY);
+      try {
+        await rm(filterPath);
+        capabilityResult = spawnSync(
           bubblewrapBinary,
-          "--new-session",
-          "--die-with-parent",
-          "--unshare-net",
-          "--ro-bind",
-          "/",
-          "/",
-          "--dev",
-          "/dev",
-          "--unshare-pid",
-          "--as-pid-1",
-          "--cap-drop",
-          "ALL",
-          "--proc",
-          "/proc",
-          "--",
-          "/bin/true",
-        ],
-        {
-          encoding: "utf8",
-          env: environment,
-          maxBuffer: 1024 * 1024,
-          timeout: 10_000,
-        },
-      );
-    } catch {
-      t.skip("The installed helper-first bubblewrap topology is unavailable.");
+          [
+            "--new-session",
+            "--die-with-parent",
+            "--unshare-net",
+            "--ro-bind",
+            "/",
+            "/",
+            "--dev",
+            "/dev",
+            "--unshare-pid",
+            "--unshare-user",
+            "--as-pid-1",
+            "--cap-drop",
+            "ALL",
+            "--proc",
+            "/proc",
+            "--seccomp",
+            "3",
+            "--",
+            "/bin/true",
+          ],
+          {
+            env: process.env,
+            stdio: ["ignore", "ignore", "ignore", descriptor.fd],
+            timeout: 10_000,
+          },
+        );
+      } finally {
+        await descriptor.close();
+      }
+    } finally {
+      await rm(capabilityDirectory, { force: true, recursive: true });
+    }
+    if (capabilityResult.error !== undefined || capabilityResult.status !== 0) {
+      t.skip("The direct bubblewrap seccomp capability is unavailable.");
       return;
     }
 
@@ -3294,10 +3478,10 @@ test(
     let realProbeCount = 0;
     const execute = async (file, argumentsList, options) => {
       const call = { file, argumentsList, options };
-      if (file === claudeBinary && argumentsList.at(-1) === "--version") {
+      if (file === process.execPath && argumentsList.at(-1) === "--version") {
         return { stdout: "2.1.233 (Claude Code)\n", stderr: "" };
       }
-      if (file === claudeBinary && argumentsList[0] === "--help") {
+      if (file === process.execPath && argumentsList[0] === "--help") {
         return { stdout: HELP, stderr: "" };
       }
       if (file === "socat") {
@@ -3328,7 +3512,7 @@ test(
       throw new Error(`Unexpected command: ${file} ${argumentsList.join(" ")}`);
     };
     const adapter = createClaudeAdapter({
-      claudeBinary,
+      claudeBinary: process.execPath,
       env: {
         ...process.env,
         PATH: `${dirname(bubblewrapBinary)}${delimiter}${process.env.PATH ?? ""}`,

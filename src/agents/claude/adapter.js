@@ -24,6 +24,7 @@ import {
   probeClaudeLocalCommit,
 } from "./local-commit.js";
 import { probeClaudeIsolationPolicies } from "./native-sandbox.js";
+import { createClaudeSeccompFilter } from "./seccomp-filter.js";
 
 export const CLAUDE_BACKEND_ID = "claude";
 
@@ -466,7 +467,7 @@ function accessConfigurationFor(request) {
     : READ_ONLY_ACCESS;
 }
 
-function policyIdentity(isolationPolicies) {
+function policyIdentity(isolationPolicies, architecture) {
   return Object.fromEntries(
     Object.entries(isolationPolicies).map(([access, isolationPolicy]) => {
       const configuration =
@@ -493,6 +494,12 @@ function policyIdentity(isolationPolicies) {
               workspaceWrite: access === "workspace-write",
             },
             isolationPolicy,
+            ...(isolationPolicy === "runner-boundary"
+              ? {
+                  seccompFilter:
+                    createClaudeSeccompFilter(architecture).identity,
+                }
+              : {}),
             network: {
               allowedDomains: [],
               allowAllUnixSockets: isolationPolicy === "runner-boundary",
@@ -1059,10 +1066,18 @@ function normalizeResult(payload, request, session) {
 export function createClaudeAdapter(options = {}) {
   assertFields(
     options,
-    ["claudeBinary", "createSocketServer", "env", "execute", "platform"],
+    [
+      "architecture",
+      "claudeBinary",
+      "createSocketServer",
+      "env",
+      "execute",
+      "platform",
+    ],
     "Claude adapter options",
   );
   const {
+    architecture = process.arch,
     claudeBinary = "claude",
     createSocketServer,
     env = process.env,
@@ -1077,6 +1092,9 @@ export function createClaudeAdapter(options = {}) {
       typeof createSocketServer !== "function") ||
     !isEnvironment(env) ||
     typeof execute !== "function" ||
+    typeof architecture !== "string" ||
+    architecture.length === 0 ||
+    /[\0\r\n]/u.test(architecture) ||
     typeof platform !== "string" ||
     platform.length === 0 ||
     /[\0\r\n]/u.test(platform)
@@ -1156,6 +1174,7 @@ export function createClaudeAdapter(options = {}) {
     let localCommitExecutorAvailable = false;
     if (cliSupported && platform === "linux" && socatAvailable) {
       selectedPolicies = await probeClaudeIsolationPolicies({
+        architecture,
         bubblewrapBinary: BUBBLEWRAP_BINARY,
         claudeBinary,
         credentialEnvironmentNames,
@@ -1185,11 +1204,11 @@ export function createClaudeAdapter(options = {}) {
       fingerprint: createHash("sha256")
         .update(
           JSON.stringify({
-            accessPolicies: policyIdentity(isolationPolicies),
+            accessPolicies: policyIdentity(isolationPolicies, architecture),
             contract: Object.values(isolationPolicies).includes(
               "runner-boundary",
             )
-              ? "claude-command-boundary-v6"
+              ? "claude-command-boundary-v7"
               : "claude-isolation-v1",
             policies: isolationPolicies,
             version: version.text,
@@ -1358,8 +1377,8 @@ export function createClaudeAdapter(options = {}) {
       try {
         commandLauncher = await createClaudeCommandLauncher({
           access: request.access,
+          architecture,
           bubblewrapBinary: BUBBLEWRAP_BINARY,
-          claudeBinary,
           cwd: request.cwd,
           environment: baseEnvironment,
           gitDirectories,

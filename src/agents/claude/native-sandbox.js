@@ -469,6 +469,7 @@ async function initializeProbeRepositories({
 
 async function probePolicy({
   access,
+  architecture,
   bubblewrapBinary,
   claudeBinary,
   createSocketServer = createServer,
@@ -515,8 +516,8 @@ async function probePolicy({
       ]);
       commandLauncher = await createClaudeCommandLauncher({
         access,
+        architecture,
         bubblewrapBinary,
-        claudeBinary,
         cwd: workspaceDirectory,
         environment: env,
         gitDirectories: [gitDirectory],

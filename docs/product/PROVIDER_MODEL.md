@@ -87,23 +87,24 @@ Remote writes remain blocked in every access mode.
 Claude prefers its full native sandbox. If and only if the exact effective
 probe recognizes nested-user-namespace denial, it may use Claude's weaker
 parent invocation through a Runner-owned launcher that validates and, where
-needed, strengthens it. The launcher applies the pinned Claude seccomp helper
-before executing the pinned real bubblewrap binary once, while consuming the
-already-satisfied user-namespace request. The Claude CLI stays outside that
-command boundary so its authentication environment and provider transport
-remain usable. The direct model-free
+needed, strengthens it. The launcher applies an architecture-checked
+Runner-owned seccomp filter through the pinned real bubblewrap binary, which it
+executes once with the single validated user namespace. The Claude CLI stays
+outside that command boundary so its authentication environment and provider
+transport remain usable. The direct model-free
 fallback probe invokes the same launcher grammar and access-specific topology.
 It proves the single-boundary user, PID, mount, and network isolation contract,
 including private `/proc`, `/tmp`, and `/run`, a read-only host root, exact
 workspace authority, read-only Git metadata, IP plus abstract and pathname
-Unix-socket denial, credential and helper-control removal, provider-proc
+Unix-socket denial, credential and launcher-control removal, provider-proc
 secrecy, and outside-write denial. Exact
 launcher mechanics belong to the [architecture contract](../ARCHITECTURE.md).
 Native policy remains stricter. The fallback does not require host
 `CAP_SYS_ADMIN`, change host policy, or expose host procfs. A generic sandbox
-failure, invalid invocation, incomplete proof, launcher failure, or cleanup
-failure leaves the affected access mode unavailable. There is no configuration
-switch that forces or weakens this selection.
+failure, unsupported architecture, invalid invocation or filter, incomplete
+proof, launcher failure, or cleanup failure leaves the affected access mode
+unavailable. The immutable receipt binds the effective architecture-specific
+filter. There is no configuration switch that forces or weakens this selection.
 
 The runner holds one provider-neutral receipt slot per resolved role and
 persists only a fingerprint and supported-access list when that role is first
