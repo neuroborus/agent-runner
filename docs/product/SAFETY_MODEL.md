@@ -327,12 +327,13 @@ containing directory are non-writable during the turn, and it pins the
 canonical host `bwrap` executable rather than resolving it through a
 workspace-writable path. The proof denies IP and host Unix sockets, inherited
 credentials and host provider-proc access, remote writes, Git metadata, and
-outside writes. Claude's embedded `apply-seccomp` guard remains inside the
-validated shell payload to block pathname Unix sockets without adding a second
-namespace; that payload crosses exactly one bubblewrap boundary. Native policy
-stays strict; the [architecture contract](../ARCHITECTURE.md) owns the exact
-launcher grammar and strengthening mechanics. Any failed or incomplete proof,
-argument rejection, launcher failure, or cleanup leaves that access mode
-unavailable. The bounded selected-policy receipt distinguishes the
-single-boundary topology and remains immutable for the run; resume or
-reconstruction fails closed if the provider's policy proof drifts.
+outside writes. The fallback sets `allowAllUnixSockets: true`, so Claude does
+not prepend its native-only `apply-seccomp` dispatch; the launcher rejects an
+attempted dispatch before spawning, and the Runner boundary blocks host sockets
+without a nested helper. Native policy stays strict; the
+[architecture contract](../ARCHITECTURE.md) owns the exact launcher grammar and
+strengthening mechanics. Any failed or incomplete proof, argument rejection,
+launcher failure, or cleanup leaves that access mode unavailable. The bounded
+selected-policy receipt distinguishes the effective fallback settings and
+remains immutable for the run; resume or reconstruction fails closed if the
+provider's policy proof drifts.

@@ -1323,9 +1323,9 @@ state version 12 expand capacity with leased migrations preserving legacy 64/128
 evidence, budgets, completed commits and handoffs, and one-shot effects. Item,
 structured-output, and durable byte limits do not change. Expanded schemas
 retain strict Claude preflight and native sandbox restrictions. Only Claude's
-independently proved command-boundary policy retains Claude's embedded
-Unix-socket seccomp guard inside the validated payload; its single bubblewrap
-boundary does not enclose or weaken provider transport.
+independently proved command-boundary policy sets `allowAllUnixSockets: true`
+to omit Claude's native-only seccomp helper; its single bubblewrap boundary
+does not enclose or weaken provider transport.
 In independent mode, the runner establishes that inventory from accepted Worker
 evidence followed by accepted Reviewer evidence; in lazy mode, accepted Worker
 evidence is complete. It deduplicates exact commands and paths in stable
@@ -1664,10 +1664,11 @@ model-free provider/child probe around Claude's embedded `apply-seccomp` helper
 for the full native sandbox. Only a positively recognized
 nested-user-namespace denial may try the fallback. A bounded model-free version
 invocation first proves that Claude accepts the spawning-parent policy option.
-The isolation proof invokes no model or provider transport. It invokes Claude's
-local embedded seccomp helper through the same provider-private command
-launcher, validation grammar, and access-aware topology installed for model
-commands.
+The isolation proofs invoke no model or provider transport. The native proof
+invokes Claude's local embedded seccomp helper. The fallback proof supplies
+representative effective arguments without that native-only dispatch through
+the same provider-private command launcher, validation grammar, and
+access-aware topology installed for model commands.
 Fallback turns launch the Claude CLI directly so authentication and provider
 transport retain the host environment and network path. The invocation-local
 spawning-parent policy selects the short-lived launcher only when Claude starts
@@ -1701,8 +1702,9 @@ its own private mounts. A later writable bind may not overlap an established
 read-only workspace restriction, and no later mount may re-expose a path hidden
 by a private workspace mask.
 Duplicate environment operations, protected environment assignments, writable
-roots, unsupported options, malformed option arity or ordering, and extra
-payload arguments exit before any child starts.
+roots, the native-only `--setenv ARGV0 apply-seccomp` dispatch, unsupported
+options, malformed option arity or ordering, and extra payload arguments exit
+before any child starts.
 
 After validation the launcher drops Claude's host `/proc` bind and strengthens
 the same invocation with PID-1 behavior, an empty capability set, private
@@ -1711,20 +1713,21 @@ path, the exact workspace authority, read-only resolved Git metadata, missing
 protected-environment removals, and the requested working directory. It removes
 its authorization token and provider credential variables from the real
 bubblewrap process environment, preserves the validated shell payload
-byte-for-byte, and executes the pinned real `bwrap` binary once. Claude's
-embedded seccomp helper remains within that payload to reject Unix-socket
-creation without adding a namespace boundary. The command therefore crosses
-one effective user, PID, mount, and network namespace boundary rather than an
-outer boundary containing Claude's bubblewrap.
+byte-for-byte, and executes the pinned real `bwrap` binary once. The fallback's
+`allowAllUnixSockets: true` setting suppresses Claude's embedded native-only
+`apply-seccomp` dispatch; the Runner boundary denies host sockets without that
+nested helper. The command therefore crosses one effective user, PID, mount,
+and network namespace boundary rather than an outer boundary containing
+Claude's bubblewrap.
 
 The direct fallback probe supplies representative effective Claude arguments
 to that same validator and execution path. It checks access-specific workspace
 writes, Git and outside-write denial, IP isolation, inability to reach a live
 host pathname Unix socket exposed through the workspace, credential removal,
 and host provider-proc secrecy. The selected fallback sets Claude's required
-weaker-nesting option but keeps `allowAllUnixSockets: false`, so its embedded
-`apply-seccomp` guard remains in the opaque command payload. Native policy
-retains the stricter setting.
+weaker-nesting option and `allowAllUnixSockets: true`, so its embedded
+`apply-seccomp` guard is not added to the opaque command payload. Native policy
+retains `allowAllUnixSockets: false` and the stricter helper topology.
 Arbitrary native failures, launcher construction or execution failure,
 incomplete proof, or cleanup failure do not enable the fallback.
 Both policies keep model-command network, host Unix sockets, credentials, Git
@@ -1734,9 +1737,9 @@ environment, and bounded time and output; they retain no host diagnostic and
 never apply a profile, authenticate, or invoke a model.
 The local-commit executor proof remains independent and `localCommit` requires
 both the local-commit turn policy and executor proof.
-The fallback policy identity advances with this single-boundary contract, so a
-receipt created for the former nested topology cannot authorize later provider
-work.
+The fallback policy identity advances with this effective-settings contract, so
+a receipt created for the incorrect helper-bearing fallback cannot authorize
+later provider work.
 Claude derives its advertised read-only capability and turn arguments from one
 plan-mode access envelope. It exposes only repository-inspection tools, allows
 Bash without prompting only when the required native sandbox is active, denies

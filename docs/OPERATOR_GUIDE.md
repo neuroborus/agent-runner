@@ -419,13 +419,14 @@ arguments fail before command execution. The fallback is selected and
 fingerprinted only after its direct model-free probe exercises that same
 validation and access-aware execution path. It also requires Claude's
 spawning-parent policy option so the real turn is bound to the proved launcher;
-Claude's embedded `apply-seccomp` guard remains inside the validated payload to
-block host pathname Unix sockets without creating another namespace. A generic
-failure or incomplete access, argument, launcher, or cleanup proof remains
-`ERR_UNSUPPORTED_BACKEND` with a bounded access-mode diagnosis. Resume must
-reproduce the saved receipt. If it cannot, preserve the run and repair the
-installed Claude, bubblewrap, or host environment instead of editing durable
-state or forcing weaker settings.
+the fallback sets `allowAllUnixSockets: true` so Claude does not start its
+native-only `apply-seccomp` helper, and the launcher rejects that dispatch if
+supplied. The Runner boundary blocks host pathname Unix sockets without a
+nested namespace. A generic failure or incomplete access, argument, launcher,
+or cleanup proof remains `ERR_UNSUPPORTED_BACKEND` with a bounded access-mode
+diagnosis. Resume must reproduce the saved receipt. If it cannot, preserve the
+run and repair the installed Claude, bubblewrap, or host environment instead of
+editing durable state or forcing weaker settings.
 
 A same-host execution or canonical-worktree lease is eligible for stale
 recovery after five minutes only when its recorded process is demonstrably

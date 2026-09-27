@@ -231,8 +231,12 @@ while (["--unsetenv", "--setenv"].includes(sourceArguments[index])) {
   if (operation === "--unsetenv") {
     presentUnsetEnvironmentNames.push(name);
   } else {
-    if (protectedEnvironmentNames.has(name)) fail();
-    validatedArguments.push(takeValue());
+    const value = takeValue();
+    if (
+      protectedEnvironmentNames.has(name) ||
+      (name === "ARGV0" && value === "apply-seccomp")
+    ) fail();
+    validatedArguments.push(value);
   }
 }
 take("--unshare-net");

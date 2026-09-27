@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile as executeFileCallback } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmod,
   mkdtemp,
@@ -277,6 +278,12 @@ function capabilitiesWithoutReceipt(capabilities) {
   assert.equal(policyReceipt.schemaVersion, 1);
   assert.match(policyReceipt.fingerprint, /^[a-f0-9]{64}$/u);
   return rest;
+}
+
+function policyFingerprint(contract, policies, version = "2.1.233") {
+  return createHash("sha256")
+    .update(JSON.stringify({ contract, policies, version }))
+    .digest("hex");
 }
 
 function socketServerFixture(socketServers) {
@@ -740,6 +747,13 @@ test("constructs and probes enforceable Claude capabilities", async () => {
   assert.ok(nativeSandboxCall.argumentsList.includes("--unshare-net"));
   assert.ok(nativeSandboxCall.argumentsList.includes("--unshare-user"));
   assert.ok(nativeSandboxCall.argumentsList.includes("--cap-drop"));
+  assert.ok(
+    includesSequence(nativeSandboxCall.argumentsList, [
+      "--setenv",
+      "ARGV0",
+      "apply-seccomp",
+    ]),
+  );
   assert.equal(nativeSandboxCall.options.timeout, 10_000);
   assert.equal(nativeSandboxCall.options.maxBuffer, 1024 * 1024);
   assert.equal(nativeSandboxCall.options.shell, undefined);
@@ -952,7 +966,7 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
         claudeBubblewrapArguments({
           access,
           emptyMaskPath,
-          payload: `apply-seccomp model-command ${turnIndex}`,
+          payload: `model-command ${turnIndex}`,
         }),
         {
           encoding: "utf8",
@@ -983,6 +997,18 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
   assert.equal(capabilities.readOnly, true);
   assert.equal(capabilities.workspaceWrite, true);
   assert.equal(capabilities.localCommit, true);
+  assert.equal(
+    capabilities.policyReceipt.fingerprint,
+    policyFingerprint(
+      "claude-command-boundary-v5",
+      {
+        "read-only": "runner-boundary",
+        "workspace-write": "runner-boundary",
+        "local-commit": "runner-boundary",
+      },
+      capabilities.version,
+    ),
+  );
   assert.equal(
     fixture.calls.filter(
       ({ file, argumentsList }) =>
@@ -1022,12 +1048,13 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
       fakeBubblewrap.directory,
     );
     assert.ok(argumentsList.at(-1).includes(`'${socketPath}'`));
-    assert.ok(
+    assert.equal(
       includesSequence(boundaryArguments, [
         "--setenv",
         "ARGV0",
         "apply-seccomp",
       ]),
+      false,
     );
     assert.ok(boundaryArguments.indexOf("--unshare-user") !== -1);
     assert.ok(
@@ -1110,11 +1137,12 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
     );
     assert.equal(call.commandLauncherDirectoryMode, 0o500);
     assert.equal(call.commandLauncherFileMode, 0o500);
-    assert.ok(
+    assert.equal(
       argumentsList.some(
         (argument) =>
           typeof argument === "string" && argument.includes("apply-seccomp"),
       ),
+      false,
     );
     const [commandProbe] = isolationProbeScripts(argumentsList);
     assert.match(commandProbe, /readFileSync/u);
@@ -1183,7 +1211,7 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
     assert.equal(call.commandLauncherDirectoryMode, 0o500);
     assert.equal(call.commandLauncherFileMode, 0o500);
     assert.equal(sandbox.enableWeakerNestedSandbox, true);
-    assert.equal(sandbox.network.allowAllUnixSockets, false);
+    assert.equal(sandbox.network.allowAllUnixSockets, true);
     assert.deepEqual(sandbox.network.deniedDomains, ["*"]);
     assert.deepEqual(
       sandbox.credentials.envVars.find(
@@ -1280,13 +1308,13 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
     assert.deepEqual(boundaryArguments.slice(commandIndex + 1), [
       "/bin/sh",
       "-c",
-      `apply-seccomp model-command ${index}`,
+      `model-command ${index}`,
     ]);
   }
   const settings = JSON.parse(option(turn.argumentsList, "--settings"));
   assert.equal(settings.sandbox.enableWeakerNestedSandbox, true);
   assert.equal(settings.sandbox.failIfUnavailable, true);
-  assert.equal(settings.sandbox.network.allowAllUnixSockets, false);
+  assert.equal(settings.sandbox.network.allowAllUnixSockets, true);
   assert.deepEqual(settings.sandbox.network.deniedDomains, ["*"]);
   assert.equal(option(turns[1].argumentsList, "--permission-mode"), "auto");
   assert.equal(option(turns[2].argumentsList, "--permission-mode"), "plan");
@@ -1325,6 +1353,12 @@ test("rejects unauthenticated and invalid fallback arguments before execution", 
       transform({ argumentsList }) {
         argumentsList[2] = "--setenv";
         argumentsList.splice(4, 0, "restored-provider-token");
+      },
+    },
+    {
+      name: "native-seccomp-dispatch",
+      transform({ argumentsList }) {
+        argumentsList.splice(2, 0, "--setenv", "ARGV0", "apply-seccomp");
       },
     },
     {

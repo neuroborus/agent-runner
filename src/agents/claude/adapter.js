@@ -528,7 +528,7 @@ function cliSettings(
       network: {
         allowedDomains: [],
         deniedDomains: ["*"],
-        allowAllUnixSockets: false,
+        allowAllUnixSockets: isolationPolicy === "runner-boundary",
         strictAllowlist: true,
       },
     },
@@ -1140,7 +1140,7 @@ export function createClaudeAdapter(options = {}) {
             contract: Object.values(isolationPolicies).includes(
               "runner-boundary",
             )
-              ? "claude-command-boundary-v4"
+              ? "claude-command-boundary-v5"
               : "claude-isolation-v1",
             policies: isolationPolicies,
             version: version.text,

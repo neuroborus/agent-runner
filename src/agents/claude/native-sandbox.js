@@ -232,7 +232,6 @@ function fallbackProbeArguments({
   ])) {
     argumentsList.push("--unsetenv", name);
   }
-  argumentsList.push("--setenv", "ARGV0", APPLY_SECCOMP_ARGV0);
   argumentsList.push("--unshare-net", "--ro-bind", "/", "/");
   if (access === "workspace-write") {
     argumentsList.push(
