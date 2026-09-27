@@ -86,19 +86,21 @@ Remote writes remain blocked in every access mode.
 
 Claude prefers its full native sandbox. If and only if the exact effective
 probe recognizes nested-user-namespace denial, it may use weaker native nesting
-inside a Runner-owned boundary with private user, PID, mount, and network
-isolation plus private `/proc`, `/tmp`, and `/run`. The same access-aware
-boundary encloses the direct model-free fallback probe and every accepted turn;
-the probe never dispatches Claude's native `apply-seccomp` helper again. It
-keeps the host root read-only, makes only workspace content writable for
-workspace-write access, re-binds all Git metadata read-only, and proves IP and
-host Unix-socket isolation, credential removal and provider-proc secrecy,
-workspace authority, and outside-write denial. The proved fallback enables
-weaker native nesting and skips only the redundant Unix-socket seccomp layer;
-native policy remains stricter. It does not require host `CAP_SYS_ADMIN`, change
-host policy, or expose host procfs. A generic sandbox failure, incomplete proof,
-or cleanup failure leaves the affected access mode unavailable. There is no
-configuration switch that forces or weakens this selection.
+inside a Runner-owned command boundary with private user, PID, mount, and
+network isolation plus private `/proc`, `/tmp`, and `/run`. The Claude CLI stays
+outside that boundary so its authentication environment and provider transport
+remain usable. A short-lived provider-private launcher applies the boundary
+only when Claude starts a model-issued command. The direct model-free fallback
+probe invokes that same launcher, outer arguments, and access-specific
+topology. It keeps the host root read-only, makes only workspace content
+writable for workspace-write access, re-binds all Git metadata read-only, and
+proves IP and host Unix-socket isolation, credential removal and provider-proc
+secrecy, workspace authority, and outside-write denial. The proved fallback
+skips only the redundant inner Unix-socket seccomp layer; native policy remains
+stricter. It does not require host `CAP_SYS_ADMIN`, change host policy, or
+expose host procfs. A generic sandbox failure, incomplete proof, launcher
+failure, or cleanup failure leaves the affected access mode unavailable. There
+is no configuration switch that forces or weakens this selection.
 
 The runner holds one provider-neutral receipt slot per resolved role and
 persists only a fingerprint and supported-access list when that role is first

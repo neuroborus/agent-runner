@@ -410,12 +410,16 @@ For Claude on a capability-restricted Linux host, do not grant `CAP_SYS_ADMIN`,
 change user-namespace policy, or disable sandboxing. The adapter first probes
 the full native policy for each required access mode. Only a recognized
 nested-user-namespace denial permits its Runner boundary with private user,
-PID, mount, network, `/proc`, `/tmp`, and `/run` isolation. That fallback is
-selected and fingerprinted only after its direct model-free probe proves the
-same access-aware boundary used by turns; it does not retry Claude's native
-`apply-seccomp` path. A generic failure or incomplete access or cleanup proof
-remains `ERR_UNSUPPORTED_BACKEND` with a bounded access-mode diagnosis. Resume
-must reproduce the saved receipt. If it cannot, preserve the run and repair the
+PID, mount, network, `/proc`, `/tmp`, and `/run` isolation. The Claude CLI and
+provider connection remain outside that boundary; a provider-private launcher
+applies it only to model-issued commands. The fallback is selected and
+fingerprinted only after its direct model-free probe exercises that same
+launcher and access-aware command topology. It also requires Claude's
+spawning-parent policy option so the real turn is bound to the proved launcher;
+it does not retry Claude's native `apply-seccomp` path. A generic failure or
+incomplete access, launcher, or cleanup proof remains
+`ERR_UNSUPPORTED_BACKEND` with a bounded access-mode diagnosis. Resume must
+reproduce the saved receipt. If it cannot, preserve the run and repair the
 installed Claude, bubblewrap, or host environment instead of editing durable
 state or forcing weaker settings.
 

@@ -15,13 +15,15 @@ import {
   STRUCTURED_OUTPUT_FAILURE_CLASS,
 } from "../adapter-contract.js";
 import {
+  CLAUDE_COMMAND_LAUNCHER_TOKEN,
+  claudeCommandLauncherSettings,
+  createClaudeCommandLauncher,
+} from "./command-launcher.js";
+import {
   executeClaudeLocalCommit,
   probeClaudeLocalCommit,
 } from "./local-commit.js";
-import {
-  claudeIsolationCommand,
-  probeClaudeIsolationPolicies,
-} from "./native-sandbox.js";
+import { probeClaudeIsolationPolicies } from "./native-sandbox.js";
 
 export const CLAUDE_BACKEND_ID = "claude";
 
@@ -170,6 +172,7 @@ const STRUCTURED_OUTPUT_TERMINAL_REASONS = new Set([
   "structured_output_retry_exhausted",
 ]);
 const IGNORED_CONTROL_ENVIRONMENT = new Set([
+  CLAUDE_COMMAND_LAUNCHER_TOKEN,
   "CLAUDE_AUTO_BACKGROUND_TASKS",
   "CLAUDE_CODE_AUTO_CONNECT_IDE",
   "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
@@ -538,11 +541,18 @@ function commandArguments(
   credentialEnvironmentNames,
   session,
   isolationPolicy,
+  commandLauncherPath,
 ) {
   const accessConfiguration = accessConfigurationFor(request);
   const argumentsList = [
     "-p",
     ...BASE_OPTIONS,
+    ...(commandLauncherPath === undefined
+      ? []
+      : [
+          "--managed-settings",
+          claudeCommandLauncherSettings(commandLauncherPath),
+        ]),
     "--settings",
     cliSettings(
       request,
@@ -1100,6 +1110,7 @@ export function createClaudeAdapter(options = {}) {
       selectedPolicies = await probeClaudeIsolationPolicies({
         bubblewrapBinary: BUBBLEWRAP_BINARY,
         claudeBinary,
+        credentialEnvironmentNames,
         ...(createSocketServer === undefined ? {} : { createSocketServer }),
         env: commandEnvironment,
         execute,
@@ -1129,7 +1140,7 @@ export function createClaudeAdapter(options = {}) {
             contract: Object.values(isolationPolicies).includes(
               "runner-boundary",
             )
-              ? "claude-runner-boundary-v2"
+              ? "claude-command-boundary-v3"
               : "claude-isolation-v1",
             policies: isolationPolicies,
             version: version.text,
@@ -1289,54 +1300,121 @@ export function createClaudeAdapter(options = {}) {
     const gitDirectories = await gitMetadataDirectories(request);
     const selectedSession = session === undefined ? request.session : session;
     const isolationPolicy = isolationPolicies?.[request.access];
-    const argumentsList = commandArguments(
-      request,
-      gitDirectories,
-      credentialEnvironmentNames,
-      selectedSession,
-      isolationPolicy,
-    );
-    const command = claudeIsolationCommand({
-      access: request.access,
-      argumentsList,
-      bubblewrapBinary: BUBBLEWRAP_BINARY,
-      claudeBinary,
-      cwd: request.cwd,
-      gitDirectories,
-      policy: isolationPolicy,
-    });
-    let processResult;
+    const baseEnvironment = executionEnvironment(processEnvironment, request);
+    let commandLauncher;
+    if (isolationPolicy === "runner-boundary") {
+      try {
+        commandLauncher = await createClaudeCommandLauncher({
+          access: request.access,
+          bubblewrapBinary: BUBBLEWRAP_BINARY,
+          cwd: request.cwd,
+          environment: baseEnvironment,
+          gitDirectories,
+          unsetEnvironmentNames: credentialEnvironmentNames,
+        });
+      } catch (cause) {
+        throw new ClaudeAdapterError(
+          "Claude command isolation is unavailable.",
+          { cause, code: "ERR_CLAUDE_ISOLATION" },
+        );
+      }
+    }
     try {
-      request.signal?.throwIfAborted();
-      processResult = await (
-        request.onProcess !== undefined && execute === executeFile
-          ? executeOwnedProcess
-          : execute
-      )(command.file, command.argumentsList, {
-        cwd: request.cwd,
-        encoding: "utf8",
-        env: executionEnvironment(processEnvironment, request),
-        input: turnPrompt(request, recovery),
-        maxBuffer: MAX_PROCESS_OUTPUT_BYTES,
-        ...(request.signal === undefined ? {} : { signal: request.signal }),
-        ...(request.onProcess === undefined
-          ? {}
-          : {
-              onProcess: request.onProcess,
-              ownershipMode: "native-sandbox-provider",
-            }),
-      });
-    } catch (cause) {
-      request.signal?.throwIfAborted();
+      const argumentsList = commandArguments(
+        request,
+        gitDirectories,
+        credentialEnvironmentNames,
+        selectedSession,
+        isolationPolicy,
+        commandLauncher?.path,
+      );
+      const turnEnvironment =
+        commandLauncher === undefined
+          ? baseEnvironment
+          : commandLauncher.environment(baseEnvironment);
+      let processResult;
+      try {
+        request.signal?.throwIfAborted();
+        processResult = await (
+          request.onProcess !== undefined && execute === executeFile
+            ? executeOwnedProcess
+            : execute
+        )(claudeBinary, argumentsList, {
+          cwd: request.cwd,
+          encoding: "utf8",
+          env: turnEnvironment,
+          input: turnPrompt(request, recovery),
+          maxBuffer: MAX_PROCESS_OUTPUT_BYTES,
+          ...(request.signal === undefined ? {} : { signal: request.signal }),
+          ...(request.onProcess === undefined
+            ? {}
+            : {
+                onProcess: request.onProcess,
+                ownershipMode: "native-sandbox-provider",
+              }),
+        });
+      } catch (cause) {
+        request.signal?.throwIfAborted();
+        if (
+          [
+            "ERR_EXECUTION_PROCESS_ACTIVE",
+            "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+          ].includes(cause?.code)
+        )
+          throw cause;
+        const standardError = processOutput(cause?.stderr);
+        if (PERMISSION_MODE_FALLBACK_PATTERN.test(standardError)) {
+          throw new ClaudeAdapterError(
+            "Claude permission mode fell back to Manual mode.",
+            {
+              code: "ERR_UNSUPPORTED_CLAUDE_CAPABILITY",
+              diagnosticClass: "capability_unavailable",
+              recoverable: true,
+            },
+          );
+        }
+        const standardOutput = processOutput(cause?.stdout);
+        const payload = parseJsonOutput(standardOutput);
+        if (payload === null) {
+          const reportedError = outputError(
+            { result: `${standardError}\n${standardOutput}`.trim() },
+            request,
+            selectedSession,
+          );
+          if (
+            ![
+              "ERR_CLAUDE_READ_ONLY_TURN_FAILED",
+              "ERR_CLAUDE_TURN_FAILED",
+            ].includes(reportedError.code)
+          ) {
+            throw reportedError;
+          }
+          throw processFailureError(request);
+        }
+        const sessionId = payloadSessionId(payload);
+        if (
+          Array.isArray(payload.permission_denials) &&
+          payload.permission_denials.length > 0
+        ) {
+          if (sessionId === undefined) {
+            throw new ClaudeAdapterError("Claude returned an invalid result.", {
+              code: "ERR_CLAUDE_PROTOCOL",
+            });
+          }
+          throw permissionError(payload.permission_denials, request, sessionId);
+        }
+        if (!isClaudeErrorResult(payload)) {
+          throw new ClaudeAdapterError("Claude returned an invalid result.", {
+            code: "ERR_CLAUDE_PROTOCOL",
+          });
+        }
+        throw outputError(payload, request, selectedSession);
+      }
       if (
-        [
-          "ERR_EXECUTION_PROCESS_ACTIVE",
-          "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
-        ].includes(cause?.code)
-      )
-        throw cause;
-      const standardError = processOutput(cause?.stderr);
-      if (PERMISSION_MODE_FALLBACK_PATTERN.test(standardError)) {
+        PERMISSION_MODE_FALLBACK_PATTERN.test(
+          processOutput(processResult.stderr),
+        )
+      ) {
         throw new ClaudeAdapterError(
           "Claude permission mode fell back to Manual mode.",
           {
@@ -1346,74 +1424,46 @@ export function createClaudeAdapter(options = {}) {
           },
         );
       }
-      const standardOutput = processOutput(cause?.stdout);
-      const payload = parseJsonOutput(standardOutput);
-      if (payload === null) {
-        const reportedError = outputError(
-          { result: `${standardError}\n${standardOutput}`.trim() },
-          request,
-          selectedSession,
-        );
-        if (
-          ![
-            "ERR_CLAUDE_READ_ONLY_TURN_FAILED",
-            "ERR_CLAUDE_TURN_FAILED",
-          ].includes(reportedError.code)
-        ) {
-          throw reportedError;
-        }
-        throw processFailureError(request);
-      }
-      const sessionId = payloadSessionId(payload);
+      const payload = parseJsonOutput(processOutput(processResult.stdout));
+      const result = normalizeResult(payload, request, selectedSession);
       if (
-        Array.isArray(payload.permission_denials) &&
-        payload.permission_denials.length > 0
+        selectedSession?.mode === "fork" &&
+        result.sessionId === selectedSession.id
       ) {
-        if (sessionId === undefined) {
-          throw new ClaudeAdapterError("Claude returned an invalid result.", {
-            code: "ERR_CLAUDE_PROTOCOL",
-          });
-        }
-        throw permissionError(payload.permission_denials, request, sessionId);
-      }
-      if (!isClaudeErrorResult(payload)) {
-        throw new ClaudeAdapterError("Claude returned an invalid result.", {
+        throw new ClaudeAdapterError("Claude returned invalid fork lineage.", {
           code: "ERR_CLAUDE_PROTOCOL",
         });
       }
-      throw outputError(payload, request, selectedSession);
+      if (
+        selectedSession?.mode === "continue" &&
+        result.sessionId !== selectedSession.id
+      ) {
+        throw new ClaudeAdapterError(
+          "Claude continued an unexpected session.",
+          { code: "ERR_CLAUDE_PROTOCOL" },
+        );
+      }
+      return result;
+    } finally {
+      if (commandLauncher !== undefined) {
+        try {
+          await commandLauncher.remove();
+        } catch (cause) {
+          throw new ClaudeAdapterError(
+            "Claude command isolation cleanup failed.",
+            {
+              ambiguous: request.access === "workspace-write",
+              cause,
+              code: "ERR_CLAUDE_ISOLATION",
+              diagnosticClass:
+                request.access === "workspace-write"
+                  ? "writable_process_ambiguous"
+                  : undefined,
+            },
+          );
+        }
+      }
     }
-    if (
-      PERMISSION_MODE_FALLBACK_PATTERN.test(processOutput(processResult.stderr))
-    ) {
-      throw new ClaudeAdapterError(
-        "Claude permission mode fell back to Manual mode.",
-        {
-          code: "ERR_UNSUPPORTED_CLAUDE_CAPABILITY",
-          diagnosticClass: "capability_unavailable",
-          recoverable: true,
-        },
-      );
-    }
-    const payload = parseJsonOutput(processOutput(processResult.stdout));
-    const result = normalizeResult(payload, request, selectedSession);
-    if (
-      selectedSession?.mode === "fork" &&
-      result.sessionId === selectedSession.id
-    ) {
-      throw new ClaudeAdapterError("Claude returned invalid fork lineage.", {
-        code: "ERR_CLAUDE_PROTOCOL",
-      });
-    }
-    if (
-      selectedSession?.mode === "continue" &&
-      result.sessionId !== selectedSession.id
-    ) {
-      throw new ClaudeAdapterError("Claude continued an unexpected session.", {
-        code: "ERR_CLAUDE_PROTOCOL",
-      });
-    }
-    return result;
   }
 
   async function createAuthorizedCommit(request) {

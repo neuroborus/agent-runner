@@ -3,6 +3,12 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
+import {
+  CLAUDE_COMMAND_LAUNCHER_TOKEN,
+  claudeCommandLauncherSettings,
+  createClaudeCommandLauncher,
+} from "./command-launcher.js";
+
 const APPLY_SECCOMP_ARGV0 = "apply-seccomp";
 const PROBE_CREDENTIAL = "AGENT_RUNNER_CLAUDE_PROBE_CREDENTIAL";
 const PROBE_OUTPUT = "agent-runner-claude-isolation-ok";
@@ -103,7 +109,10 @@ function write(path, expected) {
     if (expected || !denied.has(code)) process.exit(11);
   }
 }
-if (process.env.${PROBE_CREDENTIAL} !== undefined) process.exit(12);
+if (
+  process.env.${PROBE_CREDENTIAL} !== undefined ||
+  process.env.${CLAUDE_COMMAND_LAUNCHER_TOKEN} !== undefined
+) process.exit(12);
 if (!/^[1-9][0-9]*$/.test(providerPid)) process.exit(17);
 try {
   readFileSync(join("/proc", providerPid, "environ"));
@@ -203,41 +212,37 @@ function nativeArguments({
   return argumentsList;
 }
 
-function runnerBoundaryArguments({ access, command, cwd, gitDirectories }) {
-  const argumentsList = [
+function fallbackProbeArguments({
+  access,
+  gitDirectory,
+  outsideDirectory,
+  socketName,
+  workspaceDirectory,
+}) {
+  return [
     "--new-session",
     "--die-with-parent",
-    "--unshare-user",
-    "--unshare-pid",
-    "--unshare-net",
-    "--as-pid-1",
-    "--ro-bind",
+    "--bind",
     "/",
     "/",
     "--dev",
     "/dev",
-    "--proc",
+    "--bind",
     "/proc",
-    "--tmpfs",
-    "/tmp",
-    "--tmpfs",
-    "/run",
-    access === "workspace-write" ? "--bind" : "--ro-bind",
-    cwd,
-    cwd,
-  ];
-  for (const gitDirectory of new Set(gitDirectories)) {
-    argumentsList.push("--ro-bind", gitDirectory, gitDirectory);
-  }
-  argumentsList.push(
-    "--unsetenv",
-    PROBE_CREDENTIAL,
+    "/proc",
     "--chdir",
-    cwd,
+    workspaceDirectory,
     "--",
-    ...command,
-  );
-  return argumentsList;
+    process.execPath,
+    "--input-type=module",
+    "-e",
+    RUNNER_BOUNDARY_PROBE_SCRIPT,
+    access,
+    gitDirectory,
+    outsideDirectory,
+    socketName,
+    String(process.pid),
+  ];
 }
 
 async function listen(server, socketPath) {
@@ -263,16 +268,40 @@ async function close(server) {
   });
 }
 
+async function probeManagedSettings({ claudeBinary, env, execute }) {
+  try {
+    await execute(
+      claudeBinary,
+      [
+        "--managed-settings",
+        claudeCommandLauncherSettings(process.execPath),
+        "--version",
+      ],
+      {
+        encoding: "utf8",
+        env,
+        maxBuffer: 1024 * 1024,
+        timeout: 10_000,
+      },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function probePolicy({
   access,
   bubblewrapBinary,
   claudeBinary,
   createSocketServer = createServer,
+  credentialEnvironmentNames = [],
   env,
   execute,
   weaker,
 }) {
   let basePath;
+  let commandLauncher;
   let outcome;
   let socketServer;
   try {
@@ -290,22 +319,24 @@ async function probePolicy({
       const socketName = `${basename(basePath)}-${process.pid}`;
       socketServer = createSocketServer();
       await listen(socketServer, String.fromCharCode(0) + socketName);
-      file = bubblewrapBinary;
-      argumentsList = runnerBoundaryArguments({
+      commandLauncher = await createClaudeCommandLauncher({
         access,
-        command: [
-          process.execPath,
-          "--input-type=module",
-          "-e",
-          RUNNER_BOUNDARY_PROBE_SCRIPT,
-          access,
-          gitDirectory,
-          outsideDirectory,
-          socketName,
-          String(process.pid),
-        ],
+        bubblewrapBinary,
         cwd: workspaceDirectory,
+        environment: env,
         gitDirectories: [gitDirectory],
+        unsetEnvironmentNames: [
+          ...credentialEnvironmentNames,
+          PROBE_CREDENTIAL,
+        ],
+      });
+      file = commandLauncher.path;
+      argumentsList = fallbackProbeArguments({
+        access,
+        gitDirectory,
+        outsideDirectory,
+        socketName,
+        workspaceDirectory,
       });
     } else {
       const inner = nativeArguments({
@@ -327,9 +358,16 @@ async function probePolicy({
       file = providerCommand[0];
       argumentsList = providerCommand.slice(1);
     }
+    const probeEnvironment = {
+      ...env,
+      [PROBE_CREDENTIAL]: "unavailable-to-model-commands",
+    };
     const result = await execute(file, argumentsList, {
       encoding: "utf8",
-      env: { ...env, [PROBE_CREDENTIAL]: "unavailable-to-model-commands" },
+      env:
+        commandLauncher === undefined
+          ? probeEnvironment
+          : commandLauncher.environment(probeEnvironment),
       maxBuffer: 1024 * 1024,
       timeout: 10_000,
     });
@@ -346,6 +384,13 @@ async function probePolicy({
     };
   } finally {
     let cleanupFailed = false;
+    if (commandLauncher !== undefined) {
+      try {
+        await commandLauncher.remove();
+      } catch {
+        cleanupFailed = true;
+      }
+    }
     if (socketServer !== undefined) {
       try {
         await close(socketServer);
@@ -372,6 +417,7 @@ async function probePolicy({
 
 export async function probeClaudeIsolationPolicies(options) {
   const selected = {};
+  let managedSettingsAvailable;
   for (const access of ACCESS_MODES) {
     const native = await probePolicy({ ...options, access, weaker: false });
     if (native.available) {
@@ -382,34 +428,15 @@ export async function probeClaudeIsolationPolicies(options) {
       selected[access] = "unavailable";
       continue;
     }
+    if (managedSettingsAvailable === undefined) {
+      managedSettingsAvailable = await probeManagedSettings(options);
+    }
+    if (!managedSettingsAvailable) {
+      selected[access] = "unavailable";
+      continue;
+    }
     const fallback = await probePolicy({ ...options, access, weaker: true });
     selected[access] = fallback.available ? "runner-boundary" : "unavailable";
   }
   return Object.freeze(selected);
-}
-
-export function claudeIsolationCommand({
-  access,
-  argumentsList,
-  bubblewrapBinary,
-  claudeBinary,
-  cwd,
-  gitDirectories,
-  policy,
-}) {
-  if (policy === "native") {
-    return Object.freeze({ file: claudeBinary, argumentsList });
-  }
-  if (policy === "runner-boundary") {
-    return Object.freeze({
-      file: bubblewrapBinary,
-      argumentsList: runnerBoundaryArguments({
-        access,
-        command: [claudeBinary, ...argumentsList],
-        cwd,
-        gitDirectories,
-      }),
-    });
-  }
-  throw new Error("Claude isolation policy is unavailable.");
 }

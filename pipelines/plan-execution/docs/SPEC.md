@@ -1211,17 +1211,20 @@ and command network access remain disabled. On Linux, prove read-only,
 workspace-write, and local-commit turn policies independently with fixed,
 model-free effective invocations. Prefer Claude's full native sandbox. Only a
 recognized nested-user-namespace denial may select weaker native nesting, and
-only inside a Runner private PID namespace whose private `/proc` is what the
-inner sandbox binds. Each proof checks the access-specific workspace write,
-Git and outside-write denial, network and Unix-socket denial, and credential
-removal, including denial of the provider process's proc environment. Generic
-failures cannot enable the fallback, no diagnostic is retained,
-and no proof selects a profile, authenticates, or invokes a model. The separate
-local-commit executor proof remains required. Each resolved role has a
-provider-neutral receipt slot; its receipt is pinned when the role is first
-required and must match before later provider work. The opt-in real Claude
-smoke test exercises a representative inspection command; it remains outside
-the ordinary fast gate.
+only inside a Runner private command boundary whose PID namespace and private
+`/proc` contain the inner sandbox. Keep the Claude CLI outside that boundary so
+provider credentials and transport remain available, and install the
+provider-private launcher only for model-issued commands. The fallback proof
+uses that same launcher, outer arguments, and access-specific topology. Each
+proof checks workspace write authority, Git and outside-write denial, network
+and Unix-socket denial, and credential removal, including denial of the
+provider process's proc environment. Generic failures cannot enable the
+fallback, no diagnostic is retained, and no proof selects a profile,
+authenticates, or invokes a model. The separate local-commit executor proof
+remains required. Each resolved role has a provider-neutral receipt slot; its
+receipt is pinned when the role is first required and must match before later
+provider work. The opt-in real Claude smoke test exercises a representative
+inspection command; it remains outside the ordinary fast gate.
 
 Worker default:
 

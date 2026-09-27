@@ -315,15 +315,20 @@ host-service access to overcome a validation blocker.
 Claude selects isolation separately for read-only, workspace-write, and local
 commit access. It prefers the full native sandbox and considers the restricted
 host fallback only after the exact effective probe identifies the known nested
-user-namespace denial. The fallback's direct model-free probe and turns use one
-Runner-owned boundary with user, PID, mount, and network isolation, private
-`/proc`, `/tmp`, and `/run`, a read-only host root, access-specific workspace
-writes, and read-only Git metadata. The outer proof denies IP and host Unix
-sockets, inherited probe credentials and host provider-proc access, remote
-writes, Git metadata, and outside writes without invoking Claude's native
-`apply-seccomp` path again. Only that proved boundary enables weaker native
-nesting and skips the redundant Unix-socket seccomp layer; native policy stays
-strict. Any failed or incomplete proof or cleanup leaves that access mode
-unavailable. The bounded selected-policy receipt distinguishes the corrected
-fallback topology and remains immutable for the run; resume or reconstruction
-fails closed if the provider's policy proof drifts.
+user-namespace denial. The fallback leaves the Claude CLI, credentials, and
+provider network path outside the isolation boundary. Its direct model-free
+probe exercises the same provider-private launcher and outer arguments that
+wrap each model-issued command with user, PID, mount, and network isolation,
+private `/proc`, `/tmp`, and `/run`, a read-only host root, access-specific
+workspace writes, and read-only Git metadata. The launcher and its containing
+directory are non-writable during the turn, and it pins the canonical host
+`bwrap` executable rather than resolving it through a workspace-writable path.
+The outer proof denies IP and host Unix sockets, inherited credentials and host
+provider-proc access, remote writes, Git metadata, and outside writes without
+invoking Claude's native `apply-seccomp` path again. Only that proved command
+boundary enables weaker native nesting and skips the redundant inner
+Unix-socket seccomp layer; native policy stays strict. Any failed or incomplete
+proof, launcher failure, or cleanup leaves that access mode unavailable. The
+bounded selected-policy receipt distinguishes the corrected fallback topology
+and remains immutable for the run; resume or reconstruction fails closed if
+the provider's policy proof drifts.

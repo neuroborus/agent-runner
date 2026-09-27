@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
-import { parse } from "node:path";
+import { execFile as executeFileCallback } from "node:child_process";
+import {
+  chmod,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { delimiter, join, parse } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 
 import {
   CLAUDE_BACKEND_ID,
@@ -26,6 +37,8 @@ const EXPECTED_HEAD = "a".repeat(40);
 const SOURCE_SESSION = "11111111-1111-4111-8111-111111111111";
 const CHILD_SESSION = "22222222-2222-4222-8222-222222222222";
 const FRESH_SESSION = "33333333-3333-4333-8333-333333333333";
+const COMMAND_LAUNCHER_TOKEN = "AGENT_RUNNER_CLAUDE_COMMAND_LAUNCHER_TOKEN";
+const executeFile = promisify(executeFileCallback);
 const HELP = [
   "--append-system-prompt",
   "--autocompact",
@@ -111,7 +124,7 @@ function isNativeSandboxProbe({ file, argumentsList }) {
 
 function isRunnerBoundaryProbe({ file, argumentsList }) {
   return (
-    file === "bwrap" &&
+    parse(file).base === "bwrap" &&
     argumentsList.some(
       (argument) =>
         typeof argument === "string" &&
@@ -141,12 +154,43 @@ function localCommitSandboxCalls(fixture) {
 }
 
 function claudeArguments({ file, argumentsList }) {
-  if (file === "claude") return argumentsList;
-  if (file !== "bwrap" || isIsolationProbe({ file, argumentsList })) {
-    return null;
-  }
-  const index = argumentsList.lastIndexOf("claude");
-  return index === -1 ? null : argumentsList.slice(index + 1);
+  return file === "claude" ? argumentsList : null;
+}
+
+async function createFakeBubblewrap(t) {
+  const directory = await mkdtemp(
+    join(tmpdir(), "agent-runner-fake-claude-bwrap-"),
+  );
+  const logPath = join(directory, "arguments.jsonl");
+  await Promise.all([
+    writeFile(
+      join(directory, "bwrap"),
+      `#!${process.execPath}\n` +
+        `const { appendFileSync, writeSync } = require("node:fs");\n` +
+        `if (process.env.${COMMAND_LAUNCHER_TOKEN} !== undefined) ` +
+        `process.exit(12);\n` +
+        `appendFileSync(process.env.AGENT_RUNNER_FAKE_BWRAP_LOG, ` +
+        `JSON.stringify(process.argv.slice(2)) + "\\n");\n` +
+        `writeSync(1, "agent-runner-claude-isolation-ok");\n`,
+      { mode: 0o700 },
+    ),
+    writeFile(join(directory, "package.json"), '{"type":"commonjs"}\n'),
+  ]);
+  t.after(() => rm(directory, { force: true, recursive: true }));
+  return { directory, logPath };
+}
+
+async function commandLauncherEvidence(path) {
+  const directory = parse(path).dir;
+  const [fileStatus, directoryStatus] = await Promise.all([
+    stat(path),
+    stat(directory),
+  ]);
+  return {
+    commandLauncherDirectoryMode: directoryStatus.mode & 0o777,
+    commandLauncherFileMode: fileStatus.mode & 0o777,
+    commandLauncherPath: path,
+  };
 }
 
 function capabilitiesWithoutReceipt(capabilities) {
@@ -188,6 +232,7 @@ function createFixture({
   handle,
   help = HELP,
   nativeSandbox = true,
+  executeFallbackLauncher = false,
   fallbackSandbox = true,
   probeOutput = "agent-runner-claude-commit-ok",
   platform = "linux",
@@ -199,6 +244,21 @@ function createFixture({
   const execute = async (file, argumentsList, options) => {
     const call = { file, argumentsList, options };
     calls.push(call);
+    if (isRunnerBoundaryProbe(call)) {
+      Object.assign(call, await commandLauncherEvidence(file));
+    } else if (
+      file === "claude" &&
+      argumentsList.includes("-p") &&
+      options.env[COMMAND_LAUNCHER_TOKEN] !== undefined
+    ) {
+      const managedSettings = JSON.parse(
+        option(argumentsList, "--managed-settings"),
+      );
+      Object.assign(
+        call,
+        await commandLauncherEvidence(managedSettings.sandbox.bwrapPath),
+      );
+    }
     const handled = await handle?.({ call, calls, turnIndex });
     if (handled !== undefined) {
       if (file === "claude" && argumentsList.includes("-p")) {
@@ -206,7 +266,7 @@ function createFixture({
       }
       return handled;
     }
-    if (file === "claude" && argumentsList[0] === "--version") {
+    if (file === "claude" && argumentsList.at(-1) === "--version") {
       return { stdout: `${version} (Claude Code)\n`, stderr: "" };
     }
     if (file === "claude" && argumentsList[0] === "--help") {
@@ -236,6 +296,9 @@ function createFixture({
             !fallbackSandbox.includes(fallbackAccess)))
       ) {
         throw new Error("Fallback unavailable host-secret-value");
+      }
+      if (!isNativeSandboxProbe(call) && executeFallbackLauncher) {
+        return executeFile(file, argumentsList, options);
       }
       return {
         stdout: "agent-runner-claude-isolation-ok",
@@ -636,6 +699,15 @@ test("fails preflight when the CLI or isolation is unsupported", async () => {
     createFixture({ nativeSandbox: false }),
     createFixture({
       handle({ call }) {
+        if (call.argumentsList.includes("--managed-settings")) {
+          throw new Error("managed settings unavailable");
+        }
+        return undefined;
+      },
+      nativeSandbox: "nested-denied",
+    }),
+    createFixture({
+      handle({ call }) {
         if (call.file === "socat") {
           throw new Error("socat unavailable");
         }
@@ -652,7 +724,15 @@ test("fails preflight when the CLI or isolation is unsupported", async () => {
 });
 
 test("keeps native-turn and local-commit isolation proofs independent", async () => {
-  const unsupportedLocalCommit = createFixture({ probeOutput: "" });
+  const unsupportedLocalCommit = createFixture({
+    handle({ call }) {
+      if (call.argumentsList.includes("--managed-settings")) {
+        throw new Error("managed settings unavailable");
+      }
+      return undefined;
+    },
+    probeOutput: "",
+  });
 
   assert.deepEqual(
     capabilitiesWithoutReceipt(await unsupportedLocalCommit.adapter.probe()),
@@ -686,6 +766,12 @@ test("keeps native-turn and local-commit isolation proofs independent", async ()
     hasCode("ERR_UNSUPPORTED_CLAUDE_CAPABILITY"),
   );
   assert.equal(turnCalls(unsupportedLocalCommit).length, 1);
+  assert.equal(
+    unsupportedLocalCommit.calls.some(({ argumentsList }) =>
+      argumentsList.includes("--managed-settings"),
+    ),
+    false,
+  );
 
   const incompatibleNativeSandbox = createFixture({
     env: {
@@ -764,8 +850,45 @@ test("keeps native-turn and local-commit isolation proofs independent", async ()
   assert.equal(turnCalls(incompatibleNativeSandbox).length, 0);
 });
 
-test("uses the proved Runner boundary after nested userns denial", async () => {
-  const fixture = createFixture({ nativeSandbox: "nested-denied" });
+test("isolates fallback commands without blocking Claude transport", async (t) => {
+  const fakeBubblewrap = await createFakeBubblewrap(t);
+  const providerPath = `${fakeBubblewrap.directory}${delimiter}${process.env.PATH ?? ""}`;
+  const fixture = createFixture({
+    env: {
+      ...process.env,
+      AGENT_RUNNER_FAKE_BWRAP_LOG: fakeBubblewrap.logPath,
+      [COMMAND_LAUNCHER_TOKEN]: "inherited-launcher-token",
+      ANTHROPIC_API_KEY: "provider-token",
+      PATH: providerPath,
+    },
+    executeFallbackLauncher: true,
+    handle: async ({ call, turnIndex }) => {
+      if (call.file !== "claude" || !call.argumentsList.includes("-p")) return;
+      const managedSettings = JSON.parse(
+        option(call.argumentsList, "--managed-settings"),
+      );
+      await executeFile(
+        managedSettings.sandbox.bwrapPath,
+        ["--model-command", String(turnIndex)],
+        {
+          encoding: "utf8",
+          env: call.options.env,
+          timeout: 10_000,
+        },
+      );
+      const schema = option(call.argumentsList, "--json-schema");
+      const payload = result({
+        structured:
+          schema === undefined
+            ? undefined
+            : schema.includes('"ready"')
+              ? { ready: true }
+              : { ok: true },
+      });
+      return { stdout: JSON.stringify(payload), stderr: "" };
+    },
+    nativeSandbox: "nested-denied",
+  });
 
   const capabilities = await fixture.adapter.probe();
   assert.deepEqual(capabilities.policyReceipt.supportedAccess, [
@@ -776,6 +899,15 @@ test("uses the proved Runner boundary after nested userns denial", async () => {
   assert.equal(capabilities.readOnly, true);
   assert.equal(capabilities.workspaceWrite, true);
   assert.equal(capabilities.localCommit, true);
+  assert.equal(
+    fixture.calls.filter(
+      ({ file, argumentsList }) =>
+        file === "claude" &&
+        argumentsList[0] === "--managed-settings" &&
+        argumentsList.at(-1) === "--version",
+    ).length,
+    1,
+  );
   assert.equal(fixture.calls.filter(isNativeSandboxProbe).length, 3);
   const fallbackProbes = fixture.calls.filter(
     (call) => isIsolationProbe(call) && !isNativeSandboxProbe(call),
@@ -791,31 +923,53 @@ test("uses the proved Runner boundary after nested userns denial", async () => {
     }),
     ["read-only", "workspace-write", "local-commit"],
   );
-  for (const [index, { argumentsList }] of fallbackProbes.entries()) {
+  const provedBoundaries = (await readFile(fakeBubblewrap.logPath, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(provedBoundaries.length, 3);
+  for (const [index, call] of fallbackProbes.entries()) {
+    const { argumentsList } = call;
     const access = ["read-only", "workspace-write", "local-commit"][index];
     const accessIndex = argumentsList.lastIndexOf(access);
     const workspaceDirectory = option(argumentsList, "--chdir");
     const gitDirectory = argumentsList[accessIndex + 1];
     const socketName = argumentsList[accessIndex + 3];
-    assert.match(socketName, /^agent-runner-claude-policy-/u);
-    assert.ok(argumentsList.indexOf("--unshare-user") !== -1);
-    assert.ok(
-      argumentsList.indexOf("--unshare-user") <
-        argumentsList.indexOf("--unshare-pid"),
+    const boundaryArguments = provedBoundaries[index];
+    const commandIndex = boundaryArguments.indexOf("--");
+    assert.equal(call.file, call.commandLauncherPath);
+    assert.equal(
+      call.options.env.PATH.split(delimiter)[0],
+      fakeBubblewrap.directory,
     );
-    assert.ok(argumentsList.includes("--unshare-net"));
-    assert.ok(includesSequence(argumentsList, ["--ro-bind", "/", "/"]));
-    assert.ok(includesSequence(argumentsList, ["--proc", "/proc"]));
-    assert.ok(includesSequence(argumentsList, ["--tmpfs", "/tmp"]));
-    assert.ok(includesSequence(argumentsList, ["--tmpfs", "/run"]));
+    assert.match(socketName, /^agent-runner-claude-policy-/u);
+    assert.ok(boundaryArguments.indexOf("--unshare-user") !== -1);
     assert.ok(
-      includesSequence(argumentsList, [
+      boundaryArguments.indexOf("--unshare-user") <
+        boundaryArguments.indexOf("--unshare-pid"),
+    );
+    assert.ok(boundaryArguments.includes("--unshare-net"));
+    assert.ok(includesSequence(boundaryArguments, ["--ro-bind", "/", "/"]));
+    assert.ok(includesSequence(boundaryArguments, ["--proc", "/proc"]));
+    assert.ok(includesSequence(boundaryArguments, ["--tmpfs", "/tmp"]));
+    assert.ok(includesSequence(boundaryArguments, ["--tmpfs", "/run"]));
+    assert.ok(
+      includesSequence(boundaryArguments, [
         "--unsetenv",
         "AGENT_RUNNER_CLAUDE_PROBE_CREDENTIAL",
       ]),
     );
+    assert.ok(
+      includesSequence(boundaryArguments, ["--unsetenv", "ANTHROPIC_API_KEY"]),
+    );
+    assert.ok(
+      includesSequence(boundaryArguments, [
+        "--unsetenv",
+        "AGENT_RUNNER_CLAUDE_COMMAND_LAUNCHER_TOKEN",
+      ]),
+    );
     assert.equal(
-      includesSequence(argumentsList, [
+      includesSequence(boundaryArguments, [
         "--bind",
         workspaceDirectory,
         workspaceDirectory,
@@ -823,7 +977,7 @@ test("uses the proved Runner boundary after nested userns denial", async () => {
       access === "workspace-write",
     );
     assert.equal(
-      includesSequence(argumentsList, [
+      includesSequence(boundaryArguments, [
         "--ro-bind",
         workspaceDirectory,
         workspaceDirectory,
@@ -831,12 +985,19 @@ test("uses the proved Runner boundary after nested userns denial", async () => {
       access !== "workspace-write",
     );
     assert.ok(
-      includesSequence(argumentsList, [
+      includesSequence(boundaryArguments, [
         "--ro-bind",
         gitDirectory,
         gitDirectory,
       ]),
     );
+    assert.equal(
+      boundaryArguments[commandIndex + 1],
+      join(fakeBubblewrap.directory, "bwrap"),
+    );
+    assert.deepEqual(boundaryArguments.slice(commandIndex + 2), argumentsList);
+    assert.equal(call.commandLauncherDirectoryMode, 0o500);
+    assert.equal(call.commandLauncherFileMode, 0o500);
     assert.equal(
       argumentsList.some(
         (argument) =>
@@ -856,6 +1017,7 @@ test("uses the proved Runner boundary after nested userns denial", async () => {
       commandProbe,
       /finish\(\s*"unix",\s*code,\s*new Set\(\["EACCES", "ECONNREFUSED", "ENOENT", "EPERM"\]\),\s*\)/u,
     );
+    assert.match(commandProbe, /AGENT_RUNNER_CLAUDE_COMMAND_LAUNCHER_TOKEN/u);
   }
 
   await fixture.adapter.run(request());
@@ -874,79 +1036,105 @@ test("uses the proved Runner boundary after nested userns denial", async () => {
   const turns = turnCalls(fixture);
   assert.equal(turns.length, 3);
   const turn = turns[0];
-  assert.equal(turn.file, "bwrap");
-  assert.deepEqual(turn.argumentsList.slice(0, 13), [
-    "--new-session",
-    "--die-with-parent",
-    "--unshare-user",
-    "--unshare-pid",
-    "--unshare-net",
-    "--as-pid-1",
-    "--ro-bind",
-    "/",
-    "/",
-    "--dev",
-    "/dev",
-    "--proc",
-    "/proc",
-  ]);
+  assert.equal(turn.file, "claude");
+  const exercisedBoundaries = (await readFile(fakeBubblewrap.logPath, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(exercisedBoundaries.length, 6);
   for (const [index, call] of turns.entries()) {
-    const workspaceDirectory = option(call.argumentsList, "--chdir");
-    assert.ok(includesSequence(call.argumentsList, ["--tmpfs", "/tmp"]));
-    assert.ok(includesSequence(call.argumentsList, ["--tmpfs", "/run"]));
+    const settings = JSON.parse(option(call.argumentsList, "--settings"));
+    const sandbox = settings.sandbox;
+    const managedSettings = JSON.parse(
+      option(call.argumentsList, "--managed-settings"),
+    );
+    const boundaryArguments = exercisedBoundaries[index + 3];
+    const commandIndex = boundaryArguments.indexOf("--");
+    assert.equal(call.file, "claude");
+    assert.equal(call.options.env.ANTHROPIC_API_KEY, "provider-token");
+    assert.equal(call.options.env.PATH, providerPath);
+    assert.equal(
+      typeof call.options.env.AGENT_RUNNER_CLAUDE_COMMAND_LAUNCHER_TOKEN,
+      "string",
+    );
+    assert.notEqual(
+      call.options.env.AGENT_RUNNER_CLAUDE_COMMAND_LAUNCHER_TOKEN,
+      "inherited-launcher-token",
+    );
+    assert.equal(sandbox.bwrapPath, undefined);
+    assert.deepEqual(managedSettings, {
+      sandbox: { bwrapPath: call.commandLauncherPath },
+    });
+    assert.equal(parse(call.commandLauncherPath).base, "bwrap");
+    assert.equal(call.commandLauncherDirectoryMode, 0o500);
+    assert.equal(call.commandLauncherFileMode, 0o500);
+    assert.equal(sandbox.enableWeakerNestedSandbox, true);
+    assert.equal(sandbox.network.allowAllUnixSockets, true);
+    assert.deepEqual(sandbox.network.deniedDomains, ["*"]);
+    assert.deepEqual(
+      sandbox.credentials.envVars.find(
+        ({ name }) => name === "ANTHROPIC_API_KEY",
+      ),
+      { mode: "deny", name: "ANTHROPIC_API_KEY" },
+    );
+    assert.equal(
+      sandbox.credentials.envVars.some(
+        ({ name }) => name === "AGENT_RUNNER_CLAUDE_COMMAND_LAUNCHER_TOKEN",
+      ),
+      false,
+    );
+    assert.ok(boundaryArguments.includes("--unshare-user"));
+    assert.ok(boundaryArguments.includes("--unshare-pid"));
+    assert.ok(boundaryArguments.includes("--unshare-net"));
+    assert.ok(includesSequence(boundaryArguments, ["--proc", "/proc"]));
+    assert.ok(includesSequence(boundaryArguments, ["--tmpfs", "/tmp"]));
+    assert.ok(includesSequence(boundaryArguments, ["--tmpfs", "/run"]));
+    assert.ok(includesSequence(boundaryArguments, ["--ro-bind", "/", "/"]));
     assert.ok(
-      includesSequence(call.argumentsList, [
+      includesSequence(boundaryArguments, [
         "--unsetenv",
-        "AGENT_RUNNER_CLAUDE_PROBE_CREDENTIAL",
+        "AGENT_RUNNER_CLAUDE_COMMAND_LAUNCHER_TOKEN",
       ]),
-    );
-    assert.equal(
-      includesSequence(call.argumentsList, [
-        "--bind",
-        workspaceDirectory,
-        workspaceDirectory,
-      ]),
-      index === 1,
-    );
-    assert.equal(
-      includesSequence(call.argumentsList, [
-        "--ro-bind",
-        workspaceDirectory,
-        workspaceDirectory,
-      ]),
-      index !== 1,
     );
     assert.ok(
-      includesSequence(call.argumentsList, [
+      includesSequence(boundaryArguments, ["--unsetenv", "ANTHROPIC_API_KEY"]),
+    );
+    assert.ok(
+      includesSequence(boundaryArguments, [
+        index === 1 ? "--bind" : "--ro-bind",
+        PROJECT_PATH,
+        PROJECT_PATH,
+      ]),
+    );
+    assert.ok(
+      includesSequence(boundaryArguments, [
         "--ro-bind",
         `${PROJECT_PATH}/.git`,
         `${PROJECT_PATH}/.git`,
       ]),
     );
+    assert.deepEqual(boundaryArguments.slice(commandIndex + 1), [
+      join(fakeBubblewrap.directory, "bwrap"),
+      "--model-command",
+      String(index),
+    ]);
   }
-  const effectiveArguments = claudeArguments(turn);
-  const settings = JSON.parse(option(effectiveArguments, "--settings"));
+  const settings = JSON.parse(option(turn.argumentsList, "--settings"));
   assert.equal(settings.sandbox.enableWeakerNestedSandbox, true);
   assert.equal(settings.sandbox.failIfUnavailable, true);
   assert.equal(settings.sandbox.network.allowAllUnixSockets, true);
   assert.deepEqual(settings.sandbox.network.deniedDomains, ["*"]);
-  assert.ok(
-    turns.every((call) => {
-      const sandbox = JSON.parse(
-        option(claudeArguments(call), "--settings"),
-      ).sandbox;
-      return (
-        sandbox.enableWeakerNestedSandbox === true &&
-        sandbox.network.allowAllUnixSockets === true
-      );
-    }),
-  );
-  assert.equal(option(claudeArguments(turns[1]), "--permission-mode"), "auto");
-  assert.equal(option(claudeArguments(turns[2]), "--permission-mode"), "plan");
+  assert.equal(option(turns[1].argumentsList, "--permission-mode"), "auto");
+  assert.equal(option(turns[2].argumentsList, "--permission-mode"), "plan");
 });
 
-test("fails closed when the restricted-host fallback cannot be proved", async () => {
+test("fails closed when the restricted-host fallback cannot be proved", async (t) => {
+  const fakeBubblewrap = await createFakeBubblewrap(t);
   const fixture = createFixture({
+    env: {
+      ...process.env,
+      PATH: `${fakeBubblewrap.directory}${delimiter}${process.env.PATH ?? ""}`,
+    },
     nativeSandbox: "nested-denied",
     fallbackSandbox: false,
   });
@@ -964,8 +1152,13 @@ test("fails closed when the restricted-host fallback cannot be proved", async ()
   assert.equal(turnCalls(fixture).length, 0);
 });
 
-test("advertises restricted-host access modes only after their own proof", async () => {
+test("advertises restricted-host access modes only after their own proof", async (t) => {
+  const fakeBubblewrap = await createFakeBubblewrap(t);
   const fixture = createFixture({
+    env: {
+      ...process.env,
+      PATH: `${fakeBubblewrap.directory}${delimiter}${process.env.PATH ?? ""}`,
+    },
     nativeSandbox: "nested-denied",
     fallbackSandbox: ["read-only", "local-commit"],
   });
@@ -983,6 +1176,33 @@ test("advertises restricted-host access modes only after their own proof", async
     hasCode("ERR_UNSUPPORTED_CLAUDE_CAPABILITY"),
   );
   assert.equal(turnCalls(fixture).length, 0);
+});
+
+test("keeps fallback cleanup failures after writable turns ambiguous", async (t) => {
+  const fakeBubblewrap = await createFakeBubblewrap(t);
+  const fixture = createFixture({
+    env: {
+      ...process.env,
+      PATH: `${fakeBubblewrap.directory}${delimiter}${process.env.PATH ?? ""}`,
+    },
+    handle: async ({ call }) => {
+      if (call.file !== "claude" || !call.argumentsList.includes("-p")) return;
+      const launcherDirectory = parse(call.commandLauncherPath).dir;
+      await chmod(launcherDirectory, 0o700);
+      await rm(launcherDirectory, { force: true, recursive: true });
+    },
+    nativeSandbox: "nested-denied",
+  });
+
+  await assert.rejects(
+    fixture.adapter.run(request({ access: "workspace-write" })),
+    (error) => {
+      assert.ok(hasCode("ERR_CLAUDE_ISOLATION")(error));
+      assert.equal(error.ambiguous, true);
+      assert.equal(error.diagnosticClass, "writable_process_ambiguous");
+      return true;
+    },
+  );
 });
 
 test("runs strict read-only turns with isolated tools and an explicit model", async () => {
@@ -1012,6 +1232,7 @@ test("runs strict read-only turns with isolated tools and an explicit model", as
   assert.ok(Object.isFrozen(response));
   assert.ok(Object.isFrozen(response.structured));
   const turn = turnCalls(fixture)[0];
+  assert.equal(turn.file, "claude");
   assert.equal(turn.argumentsList[0], "-p");
   assert.equal(turn.options.input, "Inspect the repository.");
   assert.ok(!turn.argumentsList.includes("Inspect the repository."));
@@ -1042,6 +1263,8 @@ test("runs strict read-only turns with isolated tools and an explicit model", as
     sessionUrl: false,
   });
   assert.equal(settings.sandbox.enabled, true);
+  assert.equal(settings.sandbox.bwrapPath, undefined);
+  assert.equal(option(turn.argumentsList, "--managed-settings"), undefined);
   assert.equal(settings.sandbox.failIfUnavailable, true);
   assert.equal(settings.sandbox.autoAllowBashIfSandboxed, true);
   assert.equal(settings.sandbox.allowUnsandboxedCommands, false);

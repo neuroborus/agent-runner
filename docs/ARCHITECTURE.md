@@ -1323,9 +1323,9 @@ state version 12 expand capacity with leased migrations preserving legacy 64/128
 evidence, budgets, completed commits and handoffs, and one-shot effects. Item,
 structured-output, and durable byte limits do not change. Expanded schemas
 retain strict Claude preflight and native sandbox restrictions. Only Claude's
-independently proved Runner-boundary policy enables `allowAllUnixSockets: true`;
-its outer boundary replaces that redundant native seccomp layer without
-granting broader host access.
+independently proved command-boundary policy enables
+`allowAllUnixSockets: true`; its outer command boundary replaces that redundant
+native seccomp layer without enclosing or weakening provider transport.
 In independent mode, the runner establishes that inventory from accepted Worker
 evidence followed by accepted Reviewer evidence; in lazy mode, accepted Worker
 evidence is complete. It deduplicates exact commands and paths in stable
@@ -1662,24 +1662,37 @@ On Linux, Claude selects an isolation policy independently for read-only,
 workspace-write, and local-commit access. The selector first uses the fixed,
 model-free provider/child probe around Claude's embedded `apply-seccomp` helper
 for the full native sandbox. Only a positively recognized
-nested-user-namespace denial may try the fallback. That second proof invokes no
-Claude helper: it runs the probe command directly inside the same access-aware
-Runner boundary later used for fallback turns.
-The Runner boundary creates its own user, PID, mount, and network isolation,
-uses private `/proc`, `/tmp`, and `/run`, keeps the host root read-only, exposes
-only the requested workspace content as writable, and re-binds every resolved
-Git metadata path read-only. Its direct probe checks access-specific workspace
-writes, Git and outside-write denial, IP isolation, inability to reach a live
-host abstract Unix socket isolated by the network namespace, credential
-removal, and host provider-proc secrecy. The selected fallback enables Claude's weaker nested
-sandbox but sets `allowAllUnixSockets: true` so the native `apply-seccomp`
-socket layer is not repeated inside the already isolated boundary. Native
-policy retains the stricter setting. Arbitrary native failures, incomplete
-proof, or cleanup failure do not enable the fallback.
-Both policies keep network, host Unix sockets, credentials, Git metadata,
-remotes, and outside writes denied. Probes use fixed no-shell arguments, the
-credential-filtered command environment, and bounded time and output, retain no
-host diagnostic, and never apply a profile, authenticate, or invoke a model.
+nested-user-namespace denial may try the fallback. A bounded model-free version
+invocation first proves that Claude accepts the spawning-parent policy option.
+The isolation proof then invokes no Claude helper or model: it invokes the same
+provider-private command launcher, outer arguments, and access-aware topology
+installed for model commands.
+Fallback turns launch the Claude CLI directly so authentication and provider
+transport retain the host environment and network path. The invocation-local
+spawning-parent policy selects the short-lived launcher only when Claude starts
+a sandboxed command without changing the provider's `PATH`. The launcher pins
+the canonical host `bwrap` executable before the turn instead of resolving it
+through a potentially workspace-writable path. The Runner keeps the launcher
+and its directory owner read/execute-only during the turn and restores
+directory write permission only for cleanup.
+The launcher creates its own user, PID, mount, and network isolation, uses
+private `/proc`, `/tmp`, and `/run`, keeps the host root read-only, exposes only
+the requested workspace content as writable, and re-binds every resolved Git
+metadata path read-only. It removes provider credential variables and its own
+authorization token before starting Claude's weaker nested sandbox. Its direct
+probe checks access-specific workspace writes, Git and outside-write denial,
+IP isolation, inability to reach a live host abstract Unix socket isolated by
+the network namespace, credential removal, and host provider-proc secrecy. The
+selected fallback sets `allowAllUnixSockets: true` only for the inner sandbox
+so the native `apply-seccomp` socket layer is not repeated inside the already
+isolated command boundary. Native policy retains the stricter setting.
+Arbitrary native failures, launcher construction or execution failure,
+incomplete proof, or cleanup failure do not enable the fallback.
+Both policies keep model-command network, host Unix sockets, credentials, Git
+metadata, remotes, and outside writes denied. Probes use fixed no-shell
+arguments, the credential-filtered command environment, and bounded time and
+output, retain no host diagnostic, and never apply a profile, authenticate, or
+invoke a model.
 The local-commit executor proof remains independent and `localCommit` requires
 both the local-commit turn policy and executor proof.
 Claude derives its advertised read-only capability and turn arguments from one

@@ -77,11 +77,12 @@ valid after initial acceptance. See the [execution specification](pipelines/plan
 Claude does not require host `CAP_SYS_ADMIN`. It prefers its full native
 sandbox and may automatically use a restricted-host composition only when an
 exact probe proves that nested user namespaces are denied and that a private
-Runner user, PID, mount, network, and private-filesystem boundary preserves the
-requested access mode. There is no configuration override. If either
-composition cannot prove a requested read-only, workspace-write, or
-local-commit mode, the run fails early with a bounded unsupported-backend
-diagnosis through both CLI and MCP.
+Runner command launcher preserves the requested access mode. The Claude CLI
+and its provider transport remain on the host, while model-issued commands run
+with private user, PID, mount, network, `/proc`, `/tmp`, and `/run` views. There
+is no configuration override. If either composition cannot prove a requested
+read-only, workspace-write, or local-commit mode, the run fails early with a
+bounded unsupported-backend diagnosis through both CLI and MCP.
 
 The project uses native ES modules. External runtime dependencies comprise the
 official Node MCP server SDK and its schema library.
@@ -1069,6 +1070,7 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   │   ├── registry.js
 │   │   ├── claude/
 │   │   │   ├── adapter.js
+│   │   │   ├── command-launcher.js
 │   │   │   ├── index.js
 │   │   │   ├── local-commit.js
 │   │   │   └── native-sandbox.js
