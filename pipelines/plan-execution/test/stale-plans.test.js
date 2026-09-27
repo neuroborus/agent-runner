@@ -11,6 +11,7 @@ import {
   checkAndFix,
   clarificationReady,
   cleanConfirmation,
+  createFixture,
   createRealGitFixture,
   executeFile,
   finalizationPassed,
@@ -30,7 +31,8 @@ const calls = (fixture) => Object.values(fixture.calls).flat();
 const git = (fixture, ...args) =>
   executeFile("git", ["-C", fixture.projectPath, ...args]);
 const head = async (fixture) =>
-  (await git(fixture, "rev-parse", "HEAD")).stdout.trim();
+  (await fixture.runtime.git.inspectHead({ projectPath: fixture.projectPath }))
+    .head;
 function useHeadInspection(fixture) {
   fixture.runtime.git.inspectHead = createGitService().inspectHead;
 }
@@ -82,7 +84,7 @@ for (const mode of ["independent", "lazy", "combined"]) {
 
   for (const interrupted of [false, true]) {
     test(`${mode} ${interrupted ? "interrupted" : "paused"} implementation rejects an external commit`, async (t) => {
-      const fixture = await createRealGitFixture(t, {
+      const fixture = await createFixture(t, {
         mode,
         plan,
         workWorker: turns(mode),
@@ -91,7 +93,6 @@ for (const mode of ["independent", "lazy", "combined"]) {
           blockers: [{ command: "npm test", reason: "unavailable" }],
         }),
       });
-      useHeadInspection(fixture);
       const paused = await fixture.run();
       assert.equal(paused.pause.resumeState, "IMPLEMENT");
       const baseline = structuredClone(paused.pipelineState.repositoryBaseline);
@@ -108,13 +109,7 @@ for (const mode of ["independent", "lazy", "combined"]) {
         join(fixture.projectPath, "external.txt"),
         "External content\n",
       );
-      await git(fixture, "add", "external.txt");
-      await git(
-        fixture,
-        "commit",
-        "-qm",
-        "fix(test): externally change behavior",
-      );
+      await fixture.repository.commit("fix(test): externally change behavior");
       const before = await head(fixture);
       const count = calls(fixture).length;
       const rejected = await fixture.run();
@@ -135,7 +130,7 @@ for (const mode of ["independent", "lazy", "combined"]) {
 
   test(`${mode} consumed commit recovery precedes stale-subject inspection and resumes the next step`, async (t) => {
     let unavailable = true;
-    const fixture = await createRealGitFixture(t, {
+    const fixture = await createFixture(t, {
       mode,
       plan,
       workWorker: [...turns(mode), ...turns(mode)],
@@ -148,7 +143,6 @@ for (const mode of ["independent", "lazy", "combined"]) {
         }
       },
     });
-    useHeadInspection(fixture);
     const paused = await fixture.run();
     assert.equal(paused.pause.reason, "commit_failed");
     assert.equal(paused.pipelineState.pendingCommit.status, "consumed");
@@ -183,7 +177,7 @@ for (const mode of ["independent", "lazy", "combined"]) {
 }
 
 test("stop recovery never inspects stale plans or starts providers", async (t) => {
-  const fixture = await createRealGitFixture(t, {
+  const fixture = await createFixture(t, {
     onRequirementInspection: () => ({ status: "BLOCKED", blockers: [] }),
   });
   const paused = await fixture.run();
@@ -201,21 +195,21 @@ test("stop recovery never inspects stale plans or starts providers", async (t) =
   assert.equal(calls(fixture).length, count);
 });
 
-for (const [name, args, reason] of [
+for (const [name, mutate, reason] of [
   [
     "identity",
-    ["config", "user.name", "Changed Test Identity"],
+    (repository) => repository.changeIdentity(),
     "unexpected_git_identity_change",
   ],
   [
     "remote",
-    ["remote", "add", "fixture", "https://example.com/fixture.git"],
+    (repository) => repository.changeRemote(),
     "unexpected_remote_configuration_change",
   ],
-  ["ref", ["branch", "external-ref"], "unexpected_git_ref_change"],
+  ["ref", (repository) => repository.changeRefs(), "unexpected_git_ref_change"],
 ]) {
   test(`unrelated interrupted ${name} changes retain existing diagnostics`, async (t) => {
-    const fixture = await createRealGitFixture(t, {
+    const fixture = await createFixture(t, {
       onRequirementInspection: () => ({ status: "BLOCKED", blockers: [] }),
     });
     const paused = await fixture.run();
@@ -224,17 +218,16 @@ for (const [name, args, reason] of [
       pause: null,
       pipelineState: { ...paused.pipelineState, workflowState: "IMPLEMENT" },
     });
-    await git(fixture, ...args);
+    mutate(fixture.repository);
     assert.equal((await fixture.run()).pause.reason, reason);
   });
 }
 
 test("similar HEAD subjects are not treated as the exact current step", async (t) => {
-  const fixture = await createRealGitFixture(t, {
+  const fixture = await createFixture(t, {
     onRequirementInspection: () => ({ status: "BLOCKED", blockers: [] }),
   });
-  useHeadInspection(fixture);
-  await git(fixture, "commit", "--allow-empty", "-qm", `${subject} later`);
+  await fixture.repository.commit(`${subject} later`);
   const paused = await fixture.run();
   assert.equal(paused.pause.reason, "environment_blocked");
   assert.equal(paused.pause.resumeState, "IMPLEMENT");
@@ -243,7 +236,7 @@ test("similar HEAD subjects are not treated as the exact current step", async (t
 
 test("interrupted stale plans are classified before capability preparation", async (t) => {
   const settings = { trustedChecks: ["service-check"] };
-  const fixture = await createRealGitFixture(t, {
+  const fixture = await createFixture(t, {
     trustedValidation: trustedValidationSnapshot("service-check", "npm test"),
     modeSettings: settings,
     onRequirementInspection: () => ({ status: "BLOCKED", blockers: [] }),
@@ -255,7 +248,7 @@ test("interrupted stale plans are classified before capability preparation", asy
     pause: null,
     pipelineState: { ...paused.pipelineState, workflowState: "IMPLEMENT" },
   });
-  await git(fixture, "commit", "--allow-empty", "-qm", subject);
+  await fixture.repository.commit(subject);
   fixture.runtime.trustedValidation.preflight = () =>
     assert.fail("Classify HEAD before preparation");
   assertRevision(
@@ -266,7 +259,7 @@ test("interrupted stale plans are classified before capability preparation", asy
 
 for (const interrupted of [false, true]) {
   test(`HEAD drift racing ${interrupted ? "interrupted" : "ordinary"} reconciliation still requires plan revision`, async (t) => {
-    const fixture = await createRealGitFixture(t, {
+    const fixture = await createFixture(t, {
       onRequirementInspection: () => ({ status: "BLOCKED", blockers: [] }),
     });
     const paused = await fixture.run();
@@ -279,13 +272,7 @@ for (const interrupted of [false, true]) {
     fixture.runtime.git[
       interrupted ? "reconcileInterrupted" : "assertUnchanged"
     ] = async () => {
-      await git(
-        fixture,
-        "commit",
-        "--allow-empty",
-        "-qm",
-        "fix(test): external race",
-      );
+      await fixture.repository.commit("fix(test): external race");
       throw Object.assign(new Error("HEAD changed"), {
         code: interrupted
           ? "ERR_INTERRUPTED_REPOSITORY_CONTROL_CHANGED"

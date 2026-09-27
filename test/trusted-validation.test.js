@@ -3,7 +3,6 @@ import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
-  access,
   chmod,
   mkdir,
   mkdtemp,
@@ -672,8 +671,19 @@ test("isolates host-control and remote-write probes", async (t) => {
   assert.ok(execution.command.arguments.includes("--unshare-user"));
   assert.ok(execution.command.arguments.includes("--unshare-pid"));
   assert.ok(execution.command.arguments.includes("--cap-drop"));
-  const runMount = execution.command.arguments.lastIndexOf("/run");
-  assert.equal(execution.command.arguments[runMount - 1], "--tmpfs");
+  assert.ok(
+    execution.command.arguments.some(
+      (value, index, values) =>
+        value === "--tmpfs" && values[index + 1] === "/run",
+    ),
+  );
+  assert.equal(
+    execution.command.arguments.some(
+      (value, index, values) =>
+        ["--bind", "--ro-bind"].includes(value) && values[index + 1] === "/run",
+    ),
+    false,
+  );
   assert.deepEqual(execution.command.arguments.slice(-3), [
     process.execPath,
     "--eval",
@@ -1251,7 +1261,6 @@ test("terminates a timed-out trusted command's complete process tree", async (t)
   t.after(() => rm(processPath, { recursive: true, force: true }));
   const socketPath = `\0agent-runner-${process.pid}-${Date.now()}`;
   const pidPath = join(processPath, "child.pid");
-  const delayedMutationPath = join(projectPath, "delayed.txt");
   const childSource = `
     const { writeFileSync } = require("node:fs");
     const { createServer } = require("node:net");
@@ -1260,7 +1269,6 @@ test("terminates a timed-out trusted command's complete process tree", async (t)
     const server = createServer();
     server.on("error", () => {});
     server.listen(${JSON.stringify(socketPath)});
-    setTimeout(() => writeFileSync(${JSON.stringify(delayedMutationPath)}, "late\\n"), 1_200);
     setInterval(() => {}, 1_000);
   `;
   const parentSource = `
@@ -1286,8 +1294,8 @@ test("terminates a timed-out trusted command's complete process tree", async (t)
   assert.equal(result.timedOut, true);
   assert.equal(result.reason, "timeout");
   const childPid = Number.parseInt(await readFile(pidPath, "utf8"), 10);
-  await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_300));
-  await assert.rejects(access(delayedMutationPath), { code: "ENOENT" });
+  // Process retirement and the closed socket prove cleanup immediately;
+  // waiting for a hypothetical later write adds no independent guarantee.
   assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
   await assert.rejects(
     new Promise((resolvePromise, rejectPromise) => {

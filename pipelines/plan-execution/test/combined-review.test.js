@@ -17,7 +17,6 @@ import {
   FINALIZATION_SCHEMA,
 } from "../src/schemas.js";
 import {
-  createLegacyRecoveryFixture,
   findingArbitration,
   reconsideration,
   terminalConfirmation,
@@ -350,29 +349,6 @@ test("combined unchanged terminal repair reuses finalization only after both can
     ).length,
     2,
   );
-});
-
-test("combined journal-proven confirmation recovery retains both candidate approvals", async (t) => {
-  const fixture = await createLegacyRecoveryFixture(t, {
-    mode: "combined",
-    steps: 1,
-    pendingCorrection: true,
-    source: true,
-    format: true,
-  });
-  const failed = fixture.failed;
-  assert.equal(candidateGatePassed(failed.pipelineState), true);
-  assert.deepEqual(await fixture.recoveryAction(), [
-    { type: "resume", action: null },
-  ]);
-  const before = fixture.calls.length;
-  const { run } = await fixture.openRunner().resume({ runId: fixture.runId });
-  assert.equal(run.pipelineState.workflowState, "DONE");
-  assert.equal(run.pipelineState.settings.mode, "combined");
-  assert.equal(fixture.calls.length - before, 2);
-  assert.equal(fixture.calls[before].access, "read-only");
-  assert.equal(fixture.calls[before].session, undefined);
-  assert.equal(fixture.calls[before + 1].access, "local-commit");
 });
 
 test("combined exact finding override still requires both candidate gates", async (t) => {

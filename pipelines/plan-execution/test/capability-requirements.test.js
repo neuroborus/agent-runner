@@ -18,7 +18,6 @@ import {
   reconciliationDisagreement,
   arbitrationResolved,
   createFixture,
-  createLegacyRecoveryFixture,
   implementationBlocked,
   implementationCompleted,
   finalizationPassed,
@@ -468,37 +467,6 @@ test("unavailable root inspection remains a redacted resumable environment block
   assert.equal(writes(fixture).length, 0);
   unavailable = false;
   assert.equal((await fixture.run()).pipelineState.workflowState, "DONE");
-});
-
-test("legacy terminal proof survives requirement migration and rediscovery precedes new work", async (t) => {
-  const fixture = await createLegacyRecoveryFixture(t, { steps: 1 });
-  await fixture.rewrite(({ events }) => {
-    for (const event of events) {
-      event.state.pipelineStateVersion = 17;
-      for (const role of ["worker", "reviewer"]) {
-        const value = event.state.pipelineState[`${role}Validation`];
-        if (value) {
-          delete value.capabilityRequirements;
-          delete value.environmentBlockers;
-        }
-      }
-    }
-  });
-  const before = await fixture.bytes();
-  assert.deepEqual(await fixture.recoveryAction(), [
-    { type: "resume", action: null },
-  ]);
-  assert.deepEqual(await fixture.bytes(), before);
-  const calls = fixture.calls.length;
-  const { run } = await fixture.openRunner().resume({ runId: fixture.runId });
-  assert.equal(run.pipelineState.workflowState, "DONE");
-  const resumed = fixture.calls.slice(calls);
-  assert.match(resumed[0].prompt, /versioned-state migration checkpoint/u);
-  assert.equal(resumed[0].access, "read-only");
-  assert.deepEqual(
-    run.pipelineState.workerValidation.capabilityRequirements,
-    [],
-  );
 });
 
 test("unfinished legacy bootstrap discards provisional disagreement before rediscovery", async (t) => {

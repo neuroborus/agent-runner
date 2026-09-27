@@ -1,15 +1,14 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { readdirSync, readFileSync, readlinkSync } from "node:fs";
 import {
   appendFile,
   lstat,
   mkdir,
   mkdtemp,
   readFile,
-  readlink,
   realpath,
-  readdir,
   rm,
   symlink,
   writeFile,
@@ -766,11 +765,11 @@ async function optionalInput(path) {
   }
 }
 
-async function repositoryFingerprint(root, ignoredRoots = ["LOCAL_ARTIFACTS"]) {
+function repositoryFingerprint(root, ignoredRoots = ["LOCAL_ARTIFACTS"]) {
   const entries = [];
 
-  async function visit(directory) {
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
+  function visit(directory) {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
       if (entry.name === ".git") {
         continue;
       }
@@ -786,16 +785,16 @@ async function repositoryFingerprint(root, ignoredRoots = ["LOCAL_ARTIFACTS"]) {
         continue;
       }
       if (entry.isDirectory()) {
-        await visit(path);
+        visit(path);
       } else if (entry.isSymbolicLink()) {
-        entries.push([pathFromRoot, hash(await readlink(path))]);
+        entries.push([pathFromRoot, hash(readlinkSync(path))]);
       } else {
-        entries.push([pathFromRoot, hash(await readFile(path))]);
+        entries.push([pathFromRoot, hash(readFileSync(path))]);
       }
     }
   }
 
-  await visit(root);
+  visit(root);
   entries.sort(([left], [right]) => left.localeCompare(right));
   return hash(JSON.stringify(entries));
 }

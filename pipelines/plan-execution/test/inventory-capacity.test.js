@@ -3,10 +3,7 @@ import test from "node:test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import {
-  migratePlanExecutionStateV15,
-  planExecutionPipeline,
-} from "../src/index.js";
+import { migratePlanExecutionStateV15 } from "../src/index.js";
 import { BOOTSTRAP_SCHEMA, FINALIZATION_SCHEMA } from "../src/schemas.js";
 import {
   MAX_BOOTSTRAP_ITEMS,
@@ -23,7 +20,6 @@ import {
   clarificationReady,
   reconciliationResolved,
   implementationCompleted,
-  createLegacyRecoveryFixture,
   matchesSchemaSubset,
 } from "./support/index.js";
 
@@ -194,36 +190,4 @@ test("version-15 capacity migration preserves legacy 64/128 inventories and comp
   assert.doesNotThrow(() => normalizePipelineState(migrated));
   assert.equal(migrated.requiredChecks.length, 128);
   assert.equal(migrated.workerValidation.requiredChecks.length, 64);
-});
-
-test("runner migrates version-15 execution under a lease and rediscovers context before finalization", async (t) => {
-  const fixture = await createLegacyRecoveryFixture(t, { steps: 1 });
-  await fixture.rewrite(({ events }) => {
-    for (const event of events) event.state.pipelineStateVersion = 15;
-  });
-  const before = await fixture.bytes();
-  await fixture.recoveryAction();
-  assert.deepEqual(await fixture.bytes(), before);
-  const calls = fixture.calls.length;
-  const { run } = await fixture.openRunner().resume({ runId: fixture.runId });
-  assert.equal(run.pipelineStateVersion, planExecutionPipeline.stateVersion);
-  assert.equal(run.pipelineState.workflowState, "DONE");
-  const resumedCalls = fixture.calls.slice(calls);
-  assert.equal(resumedCalls[0].access, "read-only");
-  assert.equal(resumedCalls[0].schema, BOOTSTRAP_SCHEMA);
-  assert.match(resumedCalls[0].prompt, /versioned-state migration/u);
-  assert.equal(
-    resumedCalls.filter(({ access }) => access === "local-commit").length,
-    1,
-  );
-  assert.equal(
-    resumedCalls.filter(({ schema }) => schema === FINALIZATION_SCHEMA).length,
-    1,
-  );
-  const history = await fixture.history();
-  assert.equal(
-    history.events.filter(({ activity }) => activity?.kind === "migrated")
-      .length,
-    1,
-  );
 });

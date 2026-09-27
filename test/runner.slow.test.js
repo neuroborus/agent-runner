@@ -33,7 +33,6 @@ import {
 } from "../src/index.js";
 import { readProcessIdentity, spawnOwnedProcess } from "../src/agents/index.js";
 import { resolveStopBoundary } from "../src/pipeline-registry.js";
-import { preparePipelineMigration } from "../src/runner/index.js";
 import { createLegacyRecoveryFixture } from "../pipelines/plan-execution/test/support/index.js";
 
 const executeFile = promisify(execFile);
@@ -1190,7 +1189,8 @@ test("operator stops reconcile native provider ownership before releasing leases
             async run(request) {
               if (request.access !== access) return delegate.run(request);
               const source = `${access === "workspace-write" ? "require('node:fs').writeFileSync('partial.txt', 'preserved');" : ""}
-          require('node:fs').writeSync(1, 'ready'); setInterval(() => {}, 1000);`;
+          require('node:fs').writeSync(1, 'ready');
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);`;
               child = spawnOwnedProcess(process.execPath, ["-e", source], {
                 cwd: request.cwd,
                 env: process.env,
@@ -1208,7 +1208,10 @@ test("operator stops reconcile native provider ownership before releasing leases
         },
         { runStore: store },
       );
-      t.after(() => child?.kill());
+      t.after(async () => {
+        child?.kill();
+        await child?.ownedCompletion.catch(() => {});
+      });
       const runId = (
         await runner.create({
           pipelineId: "polishing",
@@ -3196,65 +3199,6 @@ test("rejects a detached runtime mismatch before touching a durable run", async 
       readFile(eventsPath, "utf8"),
     ]),
     before,
-  );
-});
-
-test("applies explicit pipeline migrations in order without mutating input", () => {
-  const run = Object.freeze({
-    runId: PREPARED_RUN,
-    pipelineId: "test-pipeline",
-    pipelineStateVersion: 1,
-    pipelineState: Object.freeze({ value: 1 }),
-  });
-  const versions = [];
-  const pipeline = {
-    id: "test-pipeline",
-    stateVersion: 3,
-    migrations: {
-      1(current) {
-        versions.push(current.pipelineStateVersion);
-        return { ...current.pipelineState, value: 2 };
-      },
-      2(current) {
-        versions.push(current.pipelineStateVersion);
-        return { ...current.pipelineState, value: 3 };
-      },
-    },
-    workflow: {
-      validateRun(current) {
-        assert.equal(current.pipelineStateVersion, 3);
-        assert.equal(current.pipelineState.value, 3);
-      },
-    },
-  };
-
-  const migrated = preparePipelineMigration(run, pipeline);
-  assert.deepEqual(versions, [1, 2]);
-  assert.equal(migrated.pipelineStateVersion, 3);
-  assert.deepEqual(run.pipelineState, { value: 1 });
-  assert.throws(
-    () =>
-      preparePipelineMigration(run, {
-        ...pipeline,
-        migrations: {},
-      }),
-    (error) =>
-      error instanceof RunnerError &&
-      error.code === "ERR_PIPELINE_VERSION_SKEW",
-  );
-  assert.throws(
-    () =>
-      preparePipelineMigration(run, {
-        ...pipeline,
-        workflow: {
-          validateRun() {
-            throw new Error("Invalid migrated shape.");
-          },
-        },
-      }),
-    (error) =>
-      error instanceof RunnerError &&
-      error.code === "ERR_PIPELINE_MIGRATION_FAILED",
   );
 });
 

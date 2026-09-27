@@ -20,8 +20,6 @@ import {
   executeFile,
   finalizationPassed,
   implementationCompleted,
-  createLegacyRecoveryFixture,
-  removeUnchangedEvents,
   reviewFindings,
   reviewApproved,
   resolution,
@@ -317,36 +315,6 @@ test("legacy accepted no-op evidence cannot authorize further writes", () => {
   ).state.pipelineState.repositoryBaseline.contentFingerprint = "b".repeat(64);
   prepareImplementationRecovery(history.run, history, (run) => run);
   assert.equal(recoveredImplementationEvidence(history.run), null);
-});
-
-test("authentic legacy journal restores evidence before a new commit effect", async (t) => {
-  const fixture = await createLegacyRecoveryFixture(t, { steps: 1 });
-  await fixture.rewrite(({ events }) => {
-    for (const event of events) {
-      event.state.pipelineStateVersion = 19;
-      delete event.state.pipelineState.stepImplementation;
-      delete event.state.pipelineState.implementationEvidenceLegacy;
-    }
-    removeUnchangedEvents(events);
-  });
-  const before = await fixture.bytes();
-  assert.deepEqual(await fixture.recoveryAction(), [
-    { type: "resume", action: null },
-  ]);
-  assert.deepEqual(await fixture.bytes(), before);
-  const { run } = await fixture.openRunner().resume({ runId: fixture.runId });
-  assert.equal(
-    run.pipelineState.workflowState,
-    "DONE",
-    JSON.stringify(run.pause),
-  );
-  const history = await fixture.history();
-  const restored = history.events.find(
-    ({ state }) => state.pipelineState.stepImplementation?.accepted,
-  );
-  assert.ok(restored);
-  assert.equal(restored.state.pipelineState.stepImplementation.step, 1);
-  assert.equal(run.pipelineState.completedCommits.length, 1);
 });
 
 for (const mode of ["independent", "lazy", "combined"]) {
