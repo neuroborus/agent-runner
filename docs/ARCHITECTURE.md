@@ -394,8 +394,9 @@ falls back to repository instructions and project-defined checks. `none`
 selects that fallback directly. Any other accepted value is a normalized
 repository-relative `SKILL.md` path; a missing or unsafe explicit path blocks
 the run. Runner configuration supplies the base value and a safe project
-overlay may replace it. The resolved selection is persisted with the other
-pipeline settings and is not reloaded on resume.
+overlay may replace it. The configured policy is persisted with the other
+pipeline settings; each owning workflow separately freezes the effective
+guidance decision and does not reload it on resume.
 
 Plan execution resolves its effective guidance through the root Git inspection
 and validation-infrastructure fingerprint capabilities after Git preflight and
@@ -410,6 +411,17 @@ and resumed work. Missing, invalid, or changed frozen guidance requires a fresh
 run; automatic selection never switches late. This decision does not replace
 the frozen trusted-validation snapshot, exact inventory matching, capability
 reports, environment blockers, or requirement inspection.
+
+Polishing owns the same behavior through its separate workflow, schemas,
+prompts, state validation, migration, and public pause projection; it does not
+import plan-execution internals. It freezes guidance after dirty-worktree Git
+preflight and before backend probing or bootstrap, includes any selected skill
+in established validation infrastructure, and rechecks the exact path and
+fingerprint before guidance-consuming, correction, and resumed work. Missing,
+invalid, or changed guidance requires a fresh run while environment blockers
+retain their existing resumable checkpoints. Completed `HANDOFF` recovery stays
+verification-only, index mutation remains runner-owned, and no extra provider
+turn is added.
 
 `trustedCommands` is accepted in root and safe project configuration through
 the same exact-vector validator. Each lowercase alias binds one exact inventory
@@ -1936,7 +1948,12 @@ Git metadata.
 Polishing uses the same ownership rule without requesting `local-commit`.
 Worker polishing, finalization, finding-resolution, and lazy or combined check/fix turns
 are content-only, including when selected finalization guidance normally
-requests staging. Bootstrap, validation-migration, and finalization inventories
+requests staging. Its independently persisted pre-bootstrap decision supplies
+only the frozen skill path or fallback to bootstrap and validation migration.
+Any selected skill remains in established infrastructure and must retain its
+path and fingerprint through correction, finalization, confirmation, and
+resume; repair or drift requires a new run without consuming fix or review
+rounds. Bootstrap, validation-migration, and finalization inventories
 use the same deterministic staging-independence policy as plan execution;
 applicable tracked content checks use `HEAD` or explicit trees, and established
 checks are input only to `FINALIZE`. Once candidate convergence has completed
@@ -1977,8 +1994,12 @@ writable entry. Cached declaration preflight cannot bypass this gate. Execution
 also checks unconsumed COMMIT; polishing inspects completed HANDOFF settlement
 before discovery or preparation and checks availability before new staging.
 Polishing state version 14 preserves historical handoff evidence while requiring
-read-only discovery before further content work. Neither pipeline imports the
-other's report schemas or workflow internals.
+read-only capability discovery before further content work. State version 15
+adds frozen finalization guidance. Terminal and completed-handoff recovery stay
+verification-only; other unfinished legacy work resolves the decision before
+provider work and repeats read-only validation migration when prior evidence
+cannot prove the selected skill is part of the established inventory. Neither
+pipeline imports the other's report schemas or workflow internals.
 
 Inspection accepts `inventory` (up to 512 unique, trimmed, single-line exact
 command strings, each at most 4,000 characters) and `requirements` (up to 1,024

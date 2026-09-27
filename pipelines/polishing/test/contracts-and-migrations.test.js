@@ -13,6 +13,7 @@ import {
   migratePolishingStateV7,
   migratePolishingStateV8,
   migratePolishingStateV9,
+  migratePolishingStateV14,
   polishingPipeline,
   runPolishing,
 } from "../src/index.js";
@@ -26,6 +27,7 @@ import {
 import {
   assertRun,
   assertSettings,
+  createFinalizationGuidanceDecision,
   MAX_BOOTSTRAP_ITEMS,
   MAX_DURABLE_RUN_BYTES,
   MAX_DISPUTES_PER_FINDING,
@@ -354,7 +356,7 @@ test("migrates version-2 state with empty trust and invalidates its active gate"
   assert.deepEqual(migrated.settings.trustedChecks, []);
   assert.deepEqual(migrated.trustedValidation.commands, []);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(polishingPipeline.stateVersion, 14);
+  assert.equal(polishingPipeline.stateVersion, 15);
 });
 
 test("migrates version-3 state with no consumed bootstrap corrections", () => {
@@ -367,6 +369,108 @@ test("migrates version-3 state with no consumed bootstrap corrections", () => {
   assert.equal(migrated.pendingBootstrapCorrection, null);
   assert.equal(migrated.validationMigrationDisagreement, null);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
+});
+
+test("version 14 migration preserves terminal handoff proof", async (t) => {
+  const fixture = await createFixture(t);
+  const completed = await fixture.run();
+  const legacy = { ...completed.pipelineState };
+  delete legacy.finalizationGuidance;
+
+  const migrated = migratePolishingStateV14({ pipelineState: legacy });
+
+  assert.equal(migrated.finalizationGuidance, null);
+  assert.deepEqual(migrated.finalizationResult, legacy.finalizationResult);
+  assert.deepEqual(migrated.workerValidation, legacy.workerValidation);
+  assert.deepEqual(migrated.reviewerValidation, legacy.reviewerValidation);
+  assert.doesNotThrow(() => normalizePipelineState(migrated));
+});
+
+test("version 14 migration makes active validation evidence provisional", async (t) => {
+  const fixture = await createFixture(t);
+  const completed = await fixture.run();
+  const legacy = {
+    ...completed.pipelineState,
+    workflowState: "FINALIZE",
+    finalizationResult: null,
+    finalizedFingerprint: null,
+    reviewResult: null,
+    reviewedFingerprint: null,
+  };
+  delete legacy.finalizationGuidance;
+
+  const migrated = migratePolishingStateV14({ pipelineState: legacy });
+
+  assert.equal(migrated.finalizationGuidance, null);
+  assert.equal(migrated.workerValidation.capabilityRequirements, null);
+  assert.equal(migrated.workerValidation.environmentBlockers, null);
+  assert.equal(migrated.reviewerValidation.capabilityRequirements, null);
+  assert.equal(migrated.reviewerValidation.environmentBlockers, null);
+  assert.doesNotThrow(() => normalizePipelineState(migrated));
+
+  const skillPath = ".agents/skills/finalization/SKILL.md";
+  const withoutGuidance = {
+    ...migrated,
+    workerValidation: {
+      ...migrated.workerValidation,
+      validationInfrastructure:
+        migrated.workerValidation.validationInfrastructure.filter(
+          (path) => path !== skillPath,
+        ),
+    },
+    reviewerValidation: {
+      ...migrated.reviewerValidation,
+      validationInfrastructure:
+        migrated.reviewerValidation.validationInfrastructure.filter(
+          (path) => path !== skillPath,
+        ),
+    },
+    validationInfrastructure: migrated.validationInfrastructure.filter(
+      (path) => path !== skillPath,
+    ),
+    validationInfrastructureFingerprint: hash("legacy validation inventory"),
+    finalizationGuidance: createFinalizationGuidanceDecision({
+      configuredPolicy: "auto",
+      skillPath,
+      selectedFileFingerprint: hash("selected guidance"),
+    }),
+  };
+  assert.doesNotThrow(() => normalizePipelineState(withoutGuidance));
+
+  const legacyPaused = {
+    ...completed,
+    pipelineStateVersion: 14,
+    pipelineState: {
+      ...legacy,
+      workflowState: "WAITING_FOR_USER",
+      settings: { ...legacy.settings, finalization: skillPath },
+    },
+    pause: {
+      reason: "finalization_skill_missing",
+      explanation: "The explicitly configured finalization skill is missing.",
+      evidence: [skillPath],
+      resumeState: "FINALIZE",
+      skillPath,
+    },
+  };
+  const migratedPaused = {
+    ...legacyPaused,
+    pipelineStateVersion: 15,
+    pipelineState: migratePolishingStateV14(legacyPaused),
+  };
+  assert.doesNotThrow(() => assertRun(migratedPaused));
+  assert.throws(() =>
+    polishingPipeline.validateResumeAction(migratedPaused, null),
+  );
+  assert.deepEqual(
+    polishingPipeline.projections.pause(migratedPaused).nextActions,
+    [
+      {
+        type: "start-new-run",
+        requirement: "resolved-finalization-guidance",
+      },
+    ],
+  );
 });
 
 test("migrates version-4 runs through the content-only handoff boundary", async (t) => {
@@ -837,6 +941,10 @@ test("invalidates version-1 validation evidence before completed polishing resum
   const revalidated = await fixture.run();
   assert.equal(revalidated.pipelineState.workflowState, "DONE");
   assert.equal(revalidated.pipelineState.validationMigrationPending, false);
+  assert.equal(
+    revalidated.pipelineState.finalizationGuidance.skillPath,
+    ".agents/skills/finalization/SKILL.md",
+  );
   assert.deepEqual(revalidated.pipelineState.bootstrapCorrections, [
     {
       attempt: 1,
@@ -848,13 +956,21 @@ test("invalidates version-1 validation evidence before completed polishing resum
     },
   ]);
   assert.ok(
-    fixture.calls.worker.some(({ prompt }) =>
-      prompt.includes("versioned-state migration checkpoint"),
+    fixture.calls.worker.some(
+      ({ prompt }) =>
+        prompt.includes("versioned-state migration checkpoint") &&
+        prompt.includes(
+          "The frozen finalization skill is .agents/skills/finalization/SKILL.md",
+        ),
     ),
   );
   assert.ok(
-    fixture.calls.reviewer.some(({ prompt }) =>
-      prompt.includes("versioned-state migration checkpoint"),
+    fixture.calls.reviewer.some(
+      ({ prompt }) =>
+        prompt.includes("versioned-state migration checkpoint") &&
+        prompt.includes(
+          "The frozen finalization skill is .agents/skills/finalization/SKILL.md",
+        ),
     ),
   );
 });
@@ -1050,17 +1166,14 @@ test("resumes an interrupted validation-migration Arbiter correction directly", 
       bootstrapReady("Migrating Worker"),
       reconciliationDisagreement(),
       reconciliationResolved(),
+      finalizationPassed(),
     ],
     arbiter: [{}, arbitrationResolved()],
   });
   const completed = await fixture.run();
-  const migrated = {
-    ...migrateVersionOneState(versionOneState(completed.pipelineState)),
-    settings: {
-      ...completed.pipelineState.settings,
-      finalization: ".agents/skills/missing/SKILL.md",
-    },
-  };
+  const migrated = migrateVersionOneState(
+    versionOneState(completed.pipelineState),
+  );
   await fixture.persistPipelineState(migrated);
 
   const paused = await fixture.run();
@@ -1076,7 +1189,8 @@ test("resumes an interrupted validation-migration Arbiter correction directly", 
 
   await fixture.recover();
   const resumed = await fixture.run();
-  assert.equal(resumed.pause.reason, "finalization_skill_missing");
+  assert.equal(resumed.pipelineState.workflowState, "DONE");
+  assert.equal(resumed.pause, null);
   assert.equal(resumed.pipelineState.validationMigrationPending, false);
   assert.equal(resumed.pipelineState.validationMigrationDisagreement, null);
   assert.equal(resumed.pipelineState.pendingBootstrapCorrection, null);
@@ -1233,6 +1347,31 @@ test("rejects and refuses to recover inconsistent correction progress", async (t
   }
 
   const completed = await fixture.run();
+  assert.throws(
+    () =>
+      assertRun({
+        ...completed,
+        pipelineState: {
+          ...completed.pipelineState,
+          finalizationGuidance: {
+            ...completed.pipelineState.finalizationGuidance,
+            decisionFingerprint: "0".repeat(64),
+          },
+        },
+      }),
+    /finalization guidance is invalid/u,
+  );
+  assert.throws(
+    () =>
+      assertRun({
+        ...completed,
+        pipelineState: {
+          ...completed.pipelineState,
+          validationInfrastructure: ["package.json"],
+        },
+      }),
+    /omits frozen finalization guidance/u,
+  );
   assert.throws(
     () =>
       assertRun({

@@ -120,6 +120,12 @@ or capability preparation; untouched legacy staging returns to discovery and
 candidate convergence. Current untouched handoffs recheck availability before
 runner-owned staging. Stop reconciliation starts no new effects.
 
+State version 15 adds the independently owned frozen finalization-guidance
+decision. Completed handoffs and terminal history remain verification-only.
+Other unfinished legacy runs resolve guidance before provider work and repeat
+the existing read-only validation migration before writable work when their
+prior evidence cannot prove the new contract.
+
 ## Combined Review
 
 Combined mode uses independent Worker/Reviewer bootstrap discovery and
@@ -249,7 +255,12 @@ It also owns `finalization`, a string setting whose default `auto` discovers a
 conventional confined repository `finalization` skill and otherwise falls back
 to repository instructions and project-defined checks. `none` selects that
 fallback directly. Any other valid value is a normalized repository-relative
-path ending in `SKILL.md` and requires that exact skill.
+path ending in `SKILL.md` and requires that exact skill. After Git preflight and
+before backend probing or bootstrap, the workflow durably persists the
+configured policy, selected canonical regular path or fallback, selected-file
+fingerprint when applicable, and a fingerprint of the complete decision. A
+backend pause retains that partial-preflight decision; resume verifies it before
+retrying probes and never reloads or switches it.
 
 `trustedChecks` is an array of unique runner-trusted command aliases and
 defaults to empty. Root and safe project `trustedCommands` catalogs use the same
@@ -375,12 +386,15 @@ Preflight:
 3. rejects task-input/change-set overlap;
 4. verifies the ignored run clarification path;
 5. records the dirty repository snapshot and requires at least one change;
-6. probes Worker and Reviewer independently in independent and combined modes,
+6. resolves and fingerprints finalization guidance without reading its content
+   into a prompt or activity;
+7. probes Worker and Reviewer independently in independent and combined modes,
    or Worker alone in lazy mode;
-7. resolves and persists the selected trusted-command vectors, identities,
+8. resolves and persists the selected trusted-command vectors, identities,
    ordered-command fingerprint, and trusted-configuration fingerprint;
-8. creates or preserves the run clarification transcript;
-9. stores the artifact root, settings, hashes, backend versions, and the repository baseline.
+9. creates or preserves the run clarification transcript;
+10. stores the artifact root, settings, frozen guidance, hashes, backend
+    versions, and the repository baseline.
 
 In independent and combined modes, Worker and Reviewer bootstrap independently and read-only.
 In lazy mode, Worker bootstraps alone and its complete accepted summary and
@@ -497,6 +511,12 @@ IDs. Every command or path found by any active role is preserved. Reconciliation
 and arbitration resolve only summaries and material disagreements; their output
 contains no inventory fields and cannot invent, select, or omit commands or
 paths. The runner—not an agent—fingerprints the derived files.
+Bootstrap and validation migration receive only the frozen selected path or
+fallback decision, never skill content. A selected skill is mandatory
+validation infrastructure; the runner retains it in the established inventory.
+If otherwise valid maximum-sized role inventories omit it, the producing role's
+bounded correction must reserve capacity instead of causing an unstructured
+aggregate overflow.
 Validation infrastructure consists of files owning commands, discovery, runners,
 configuration, or mandatory finalization guidance. Exclude ordinary source,
 individual tests, fixtures, and generated output merely consumed by checks.
@@ -608,9 +628,9 @@ finalization, and terminal-confirmation results are invalidated before the pause
 ### Finalize
 
 After mode-specific candidate convergence, run the target repository's complete
-finalization procedure in a dedicated Worker turn in every policy mode. Locate
-and validate resolved skill guidance first. When no skill is selected or
-automatic discovery finds none, derive the same complete gate from repository
+finalization procedure in a dedicated Worker turn in every policy mode. Reverify
+the frozen guidance path and fingerprint first. When the frozen decision selects
+no skill, derive the same complete gate from repository
 instructions and project-defined checks; never skip validation. Execute required
 formatting first and then any other generated output, but do not stage, unstage,
 or commit. When selected guidance requests staging,
@@ -622,8 +642,13 @@ deferral is neither a skipped check nor a validation blocker. Report strict
 `PASS`, `FAIL`, `SKILL_MISSING`, `SKILL_INVALID`, `BLOCKED`, or the narrowly
 allowed product decision outcome.
 
-An explicitly selected missing, escaping, or invalid skill pauses. An
-unavailable automatically discovered skill falls back to the skill-less gate.
+Missing, escaping, invalid, or changed frozen guidance pauses without a retry
+checkpoint and requires a new run; automatic guidance never switches or falls
+back after pre-bootstrap selection. Guidance is reverified before bootstrap,
+validation migration, finalization, every bounded correction, and resumed work.
+After a writable turn, the runner rechecks guidance against the safe resulting
+snapshot before reconciling output or charging a correction round. Drift
+persists that snapshot, invalidates stale gate evidence, and consumes no budget.
 Skill-less `PASS`, `FAIL`, and `BLOCKED` results carry no skill path.
 Finalization-generated content changes are permitted without invalidating the
 already accepted semantic candidate. Compute the content fingerprint after the
@@ -1022,7 +1047,9 @@ input hashes, clarification status, backend versions, bootstrap summaries,
 findings, disputes, arbitration, budgets, fingerprints, overrides, and pause
 details, including distinct candidate and terminal review records and
 fingerprints, candidate and terminal correction markers, the resolved mode,
-one-time lazy source-fork marker, and candidate lazy-correction ledger. The
+one-time lazy source-fork marker, candidate lazy-correction ledger, and the
+configured finalization policy, selected path or fallback, selected-file
+fingerprint, and complete decision fingerprint. The
 common versioned envelope also records an
 explicit runtime
 compatibility tuple maintained independently from the package version and, in
@@ -1051,6 +1078,9 @@ or finalization is blocked and the precise `POLISH`, `REVIEW`, `FINALIZE`, `CHEC
 `RESOLVE_FINDINGS` retry checkpoint. This read-only projection does not itself
 change the pipeline state version. The runner-owned handoff is represented by
 pipeline state version 5.
+Missing, invalid, or changed frozen guidance exposes only a `start-new-run`
+action with the `resolved-finalization-guidance` requirement; it is not an
+environment-recovery retry.
 Bootstrap capacity exhaustion instead has no retry action: its bounded public
 diagnostic identifies the producing role, full inventory field, and 256-item
 limit so the validation surface or Runner capacity can be addressed before a
@@ -1316,8 +1346,11 @@ semantics, and handoff behavior. Cover at least:
   worktree-versus-index checks, alternate indexes, and commit preparation in
   bootstrap, validation migration, and finalization, including corrected and
   repeated-invalid producing-role results;
-- resolved and fallback finalization guidance, corrected availability,
-  `BLOCKED`, `PASS`, and `FAIL` routes, interruption before and during the
+- frozen explicit, automatic, none, and fallback finalization guidance,
+  first-safe automatic selection, early explicit blockers, stable-content
+  resume, drift rejection without correction accounting, no added provider
+  turn, mandatory inventory capacity and omission correction, `BLOCKED`,
+  `PASS`, and `FAIL` routes, interruption before and during the
   read-only correction, strict redaction, content-fingerprint reset, and
   repeated-invalid terminal behavior;
 - read-only mutation plus ref, remote, and identity guards;
@@ -1345,12 +1378,13 @@ semantics, and handoff behavior. Cover at least:
   finalization, terminal confirmation, and handoff without replay, double
   counting, duplicate staging, or a second source fork;
 - automatic discovery, explicit skill selection, skill-less fallback, invalid
-  explicit paths, resume, and matching finalization/review fingerprints;
+  explicit paths requiring a new run, and matching finalization/review
+  fingerprints;
 - canonical-worktree conflicts across independently identified polishing or
   plan-execution runs, detached MCP retry, and same-host stale recovery;
 - compatible legacy migration, incompatible reader and detached-child
   rejection, and disconnects that leave durable state unchanged;
-- every supported legacy version migrating through state version 13 to safe
+- every supported legacy version migrating through state version 15 to safe
   candidate convergence while preserving paused and terminal runs without
   replaying `HANDOFF`;
 - sandbox, IPC, loopback, process-isolation, missing-service, and permission

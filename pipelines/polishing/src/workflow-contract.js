@@ -60,6 +60,7 @@ const PIPELINE_STATE_FIELDS = new Set([
   "artifactRoot",
   "preflightComplete",
   "settings",
+  "finalizationGuidance",
   "repositoryBaseline",
   "backendVersions",
   "proactiveClarification",
@@ -147,6 +148,13 @@ const SNAPSHOT_FIELDS = new Set([
   "identityFingerprint",
 ]);
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
+const FINALIZATION_GUIDANCE_FIELDS = Object.freeze([
+  "configuredPolicy",
+  "selection",
+  "skillPath",
+  "selectedFileFingerprint",
+  "decisionFingerprint",
+]);
 const RUN_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/u;
 const REVIEW_FINDING_ID_PATTERN = /^R[1-9][0-9]{0,8}$/u;
 const FINALIZATION_ISSUE_ID_PATTERN = /^F[1-9][0-9]{0,8}$/u;
@@ -362,6 +370,76 @@ export function workflowError(
 
 export function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function finalizationGuidanceFingerprint({
+  configuredPolicy,
+  selection,
+  skillPath,
+  selectedFileFingerprint,
+}) {
+  return sha256(
+    JSON.stringify({
+      configuredPolicy,
+      selection,
+      skillPath,
+      selectedFileFingerprint,
+    }),
+  );
+}
+
+export function createFinalizationGuidanceDecision({
+  configuredPolicy,
+  skillPath = null,
+  selectedFileFingerprint = null,
+}) {
+  const selection = skillPath === null ? "fallback" : "skill";
+  return normalizeFinalizationGuidanceDecision({
+    configuredPolicy,
+    selection,
+    skillPath,
+    selectedFileFingerprint,
+    decisionFingerprint: finalizationGuidanceFingerprint({
+      configuredPolicy,
+      selection,
+      skillPath,
+      selectedFileFingerprint,
+    }),
+  });
+}
+
+export function normalizeFinalizationGuidanceDecision(value) {
+  if (value === null) return null;
+  assertExactFields(
+    value,
+    FINALIZATION_GUIDANCE_FIELDS,
+    "Polishing finalization guidance",
+  );
+  const fallback = value.selection === "fallback";
+  const selected = value.selection === "skill";
+  const configuredPolicy = value.configuredPolicy;
+  const validSelectedPath =
+    selected &&
+    isFinalizationPolicy(value.skillPath) &&
+    !["auto", "none"].includes(value.skillPath) &&
+    HASH_PATTERN.test(value.selectedFileFingerprint ?? "") &&
+    (configuredPolicy === "auto"
+      ? CONVENTIONAL_FINALIZATION_SKILL_PATHS.includes(value.skillPath)
+      : configuredPolicy === value.skillPath);
+  if (
+    !isFinalizationPolicy(configuredPolicy) ||
+    (!fallback && !selected) ||
+    (fallback &&
+      (!["auto", "none"].includes(configuredPolicy) ||
+        value.skillPath !== null ||
+        value.selectedFileFingerprint !== null)) ||
+    (selected && !validSelectedPath) ||
+    !HASH_PATTERN.test(value.decisionFingerprint) ||
+    value.decisionFingerprint !== finalizationGuidanceFingerprint(value)
+  ) {
+    throw workflowError("Polishing finalization guidance is invalid.");
+  }
+  return value;
 }
 
 function capabilityError() {
@@ -3402,6 +3480,35 @@ export function normalizePipelineState(value) {
       value = { ...value, settings };
     }
   }
+  const finalizationGuidance = normalizeFinalizationGuidanceDecision(
+    value.finalizationGuidance,
+  );
+  const guidanceMayBeLegacyPending =
+    value.validationMigrationPending ||
+    [value.workerValidation, value.reviewerValidation].some(
+      (validation) => validation?.capabilityRequirements === null,
+    ) ||
+    (["CLARIFY", "BOOTSTRAP", "WAITING_FOR_USER"].includes(
+      value.workflowState,
+    ) &&
+      value.resolvedSummary === null);
+  const guidanceExempt = ["DONE", "FAILED", "CANCELED", "HANDOFF"].includes(
+    value.workflowState,
+  );
+  if (
+    (!value.preflightComplete &&
+      finalizationGuidance !== null &&
+      value.settings === null) ||
+    (value.preflightComplete &&
+      !guidanceExempt &&
+      !guidanceMayBeLegacyPending &&
+      finalizationGuidance === null) ||
+    (finalizationGuidance !== null &&
+      value.settings !== null &&
+      finalizationGuidance.configuredPolicy !== value.settings.finalization)
+  ) {
+    throw workflowError("Polishing finalization guidance is inconsistent.");
+  }
   const policy = polishingPolicy(value.settings);
   const primaryFindings = normalizePersistedFindings(value.primaryFindings);
   if (
@@ -3665,6 +3772,17 @@ export function normalizePipelineState(value) {
   ) {
     throw workflowError(
       "Polishing validation inventory omits a trusted command.",
+    );
+  }
+  if (
+    resolvedSummary !== null &&
+    !value.validationMigrationPending &&
+    !guidanceMayBeLegacyPending &&
+    finalizationGuidance?.selection === "skill" &&
+    !validationInfrastructure.includes(finalizationGuidance.skillPath)
+  ) {
+    throw workflowError(
+      "Polishing validation inventory omits frozen finalization guidance.",
     );
   }
   if (finalizationResult !== null) {
@@ -4370,6 +4488,7 @@ export function createPolishingState({
               ...settings,
               trustedChecks: Object.freeze([...settings.trustedChecks]),
             }),
+      finalizationGuidance: null,
       repositoryBaseline: null,
       backendVersions: null,
       proactiveClarification,
@@ -4530,7 +4649,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "polishing" ||
-    run.pipelineStateVersion !== 14 ||
+    run.pipelineStateVersion !== 15 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -4784,8 +4903,6 @@ export function assertRun(run) {
           "backend_unavailable",
           "confirmation_output_invalid",
           "environment_blocked",
-          "finalization_skill_invalid",
-          "finalization_skill_missing",
           "finalization_evidence_rejected",
           "review_output_invalid",
         ].includes(run.pause.reason)) ||

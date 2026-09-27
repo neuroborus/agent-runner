@@ -278,7 +278,7 @@ test("pauses atomically when content drifts before lazy terminal confirmation", 
   assert.equal(paused.pipelineState.candidateReviewResult, null);
 });
 
-test("reruns finalization when validation infrastructure drifts during lazy reconvergence", async (t) => {
+test("requires a fresh run when frozen guidance drifts during lazy reconvergence", async (t) => {
   let candidateRounds = 0;
   let drifted = false;
   const fixture = await createFixture(t, {
@@ -293,8 +293,6 @@ test("reruns finalization when validation infrastructure drifts during lazy reco
       cleanConfirmationFindings("R1"),
       checkAndFix(),
       candidateClean(),
-      finalizationPassed(),
-      cleanConfirmation("ACCEPTED"),
     ],
     onRoleRun(role, request) {
       if (
@@ -313,14 +311,87 @@ test("reruns finalization when validation infrastructure drifts during lazy reco
   fixture.runtime.git.validationInfrastructureFingerprint = (options) =>
     drifted ? "d".repeat(64) : validationInfrastructureFingerprint(options);
 
-  const completed = await fixture.run();
+  const paused = await fixture.run();
 
-  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(paused.pause.reason, "finalization_skill_invalid");
+  assert.equal(paused.pause.code, "ERR_FINALIZATION_GUIDANCE_CHANGED");
+  assert.equal(paused.pause.resumeState, undefined);
   assert.equal(
     fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
       .length,
-    2,
+    1,
   );
+});
+
+test("pauses a guidance-changing check/fix before charging its round", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      polishingCompleted(),
+      checkAndFix("CHANGED"),
+    ],
+    async onRoleRun(role, request, _turn, { projectPath }) {
+      if (role === "worker" && request.schema === CHECK_AND_FIX_SCHEMA) {
+        await writeFile(
+          join(projectPath, ".agents", "skills", "finalization", "SKILL.md"),
+          "---\nname: finalization\ndescription: Changed checks.\n---\n",
+        );
+      }
+    },
+  });
+
+  const paused = await fixture.run();
+
+  assert.equal(paused.pause.reason, "finalization_skill_invalid");
+  assert.equal(paused.pause.code, "ERR_FINALIZATION_GUIDANCE_CHANGED");
+  assert.equal(paused.counters.fixRounds, 0);
+  const baseline = paused.pipelineState.repositoryBaseline;
+  const current = await fixture.runtime.git.snapshot({
+    allowedPaths: baseline.allowedPaths,
+    projectPath: baseline.projectPath,
+  });
+  assert.equal(baseline.contentFingerprint, current.contentFingerprint);
+});
+
+test("pauses guidance-changing finding resolution before charging its round", async (t) => {
+  const fixture = await createFixture(t, {
+    reviewer: [bootstrapReady("Reviewer"), reviewFindings("R1")],
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationPassed(),
+      resolution("FIX", "R1"),
+    ],
+    async onRoleRun(role, request, _turn, { projectPath }) {
+      if (role === "worker" && request.schema === FINDING_RESOLUTION_SCHEMA) {
+        await writeFile(
+          join(projectPath, ".agents", "skills", "finalization", "SKILL.md"),
+          "---\nname: finalization\ndescription: Changed checks.\n---\n",
+        );
+      }
+    },
+  });
+
+  const paused = await fixture.run();
+
+  assert.equal(paused.pause.reason, "finalization_skill_invalid");
+  assert.equal(paused.pause.code, "ERR_FINALIZATION_GUIDANCE_CHANGED");
+  assert.equal(paused.counters.fixRounds, 0);
+  assert.deepEqual(
+    paused.pipelineState.previousFindings.map(({ id }) => id),
+    ["R1"],
+  );
+  const baseline = paused.pipelineState.repositoryBaseline;
+  const current = await fixture.runtime.git.snapshot({
+    allowedPaths: baseline.allowedPaths,
+    projectPath: baseline.projectPath,
+  });
+  assert.equal(baseline.contentFingerprint, current.contentFingerprint);
 });
 
 test("corrects one invalid lazy candidate check before finalization", async (t) => {
@@ -620,6 +691,16 @@ test("runs the dedicated finalization gate without skill guidance", async (t) =>
   const result = await fixture.run();
 
   assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(
+    result.pipelineState.finalizationGuidance.configuredPolicy,
+    "none",
+  );
+  assert.equal(result.pipelineState.finalizationGuidance.selection, "fallback");
+  assert.equal(result.pipelineState.finalizationGuidance.skillPath, null);
+  assert.match(
+    result.pipelineState.finalizationGuidance.decisionFingerprint,
+    /^[a-f0-9]{64}$/u,
+  );
   assert.equal(result.pipelineState.finalizationResult.skillPath, null);
   assert.equal(
     result.pipelineState.finalizedFingerprint,
@@ -755,7 +836,7 @@ test("routes corrected finalization PASS and FAIL through the existing gates", a
   });
 });
 
-test("uses resolved and fallback guidance for bounded finalization correction", async (t) => {
+test("uses frozen guidance for bounded finalization correction", async (t) => {
   await t.test("corrects availability without selected guidance", async (t) => {
     const fixture = await createFixture(t, {
       settings: { ...SETTINGS, finalization: "none" },
@@ -780,7 +861,7 @@ test("uses resolved and fallback guidance for bounded finalization correction", 
     assert.equal(correction.constraint, "selected-finalization-guidance");
   });
 
-  await t.test("reconstructs fallback guidance", async (t) => {
+  await t.test("does not switch away from selected guidance", async (t) => {
     const fixture = await createFixture(t, {
       worker: [
         clarificationReady(),
@@ -788,24 +869,19 @@ test("uses resolved and fallback guidance for bounded finalization correction", 
         reconciliationResolved(),
         polishingCompleted(),
         finalizationUnavailable("SKILL_INVALID"),
-        invalidProductionFinalization(),
-        finalizationPassed(""),
       ],
     });
 
-    const completed = await fixture.run();
-    const correctionCall = fixture.calls.worker.find(({ prompt }) =>
-      prompt.includes("one read-only correction"),
-    );
-    const correction = fixture.transitions.find(
-      ({ options }) => options.activity?.kind === "finalization-correction",
-    ).patch.pipelineState.finalizationCorrection;
+    const paused = await fixture.run();
 
-    assert.equal(completed.pipelineState.workflowState, "DONE");
-    assert.equal(correction.guidance, "fallback");
-    assert.match(
-      correctionCall.prompt,
-      /No finalization skill guidance is available/u,
+    assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+    assert.equal(paused.pause.reason, "finalization_skill_invalid");
+    assert.equal(paused.pause.resumeState, undefined);
+    assert.equal(
+      fixture.calls.worker.filter(
+        ({ schema }) => schema === FINALIZATION_SCHEMA,
+      ).length,
+      1,
     );
   });
 });
@@ -1022,6 +1098,8 @@ test("falls back when automatic finalization discovery finds no skill", async (t
 
   assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(result.pipelineState.settings.finalization, "auto");
+  assert.equal(result.pipelineState.finalizationGuidance.selection, "fallback");
+  assert.equal(result.pipelineState.finalizationGuidance.skillPath, null);
   assert.equal(result.pipelineState.finalizationResult.skillPath, null);
   assert.match(
     fixture.calls.worker.find(({ prompt }) =>
@@ -1041,32 +1119,61 @@ test("uses an explicitly configured finalization skill", async (t) => {
 
   assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(result.pipelineState.settings.finalization, skillPath);
+  assert.equal(result.pipelineState.finalizationGuidance.selection, "skill");
+  assert.equal(result.pipelineState.finalizationGuidance.skillPath, skillPath);
+  assert.match(
+    result.pipelineState.finalizationGuidance.selectedFileFingerprint,
+    /^[a-f0-9]{64}$/u,
+  );
+  assert.match(
+    result.pipelineState.finalizationGuidance.decisionFingerprint,
+    /^[a-f0-9]{64}$/u,
+  );
   assert.match(
     fixture.calls.worker.find(({ prompt }) =>
       prompt.includes("Run the complete project finalization procedure"),
     ).prompt,
-    /explicitly configured/u,
+    /frozen finalization skill/u,
   );
+  assert.doesNotMatch(JSON.stringify(fixture.calls), /Test validation\./u);
+  assert.doesNotMatch(
+    JSON.stringify(fixture.transitions),
+    /Test validation\./u,
+  );
+  assert.equal(fixture.calls.worker.length, 5);
+  assert.equal(fixture.calls.reviewer.length, 3);
 });
 
 test("pauses before invoking a missing explicit finalization skill", async (t) => {
   const skillPath = "checks/finalization/SKILL.md";
+  const trustedValidation = trustedValidationSnapshot();
   const fixture = await createFixture(t, {
-    settings: { ...SETTINGS, finalization: skillPath },
+    settings: {
+      ...SETTINGS,
+      finalization: skillPath,
+      trustedChecks: ["service-check"],
+    },
+    trustedValidation,
+    onTrustedValidation() {
+      assert.fail("Guidance preflight must not execute validation commands.");
+    },
   });
 
   const result = await fixture.run();
 
   assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
   assert.equal(result.pause.reason, "finalization_skill_missing");
-  assert.equal(result.pause.resumeState, "FINALIZE");
+  assert.equal(result.pause.resumeState, undefined);
   assert.equal(result.pause.skillPath, skillPath);
-  assert.equal(
-    fixture.calls.worker.some(({ prompt }) =>
-      prompt.includes("Run the complete project finalization procedure"),
-    ),
-    false,
-  );
+  assert.equal(fixture.probes.worker, 0);
+  assert.equal(fixture.probes.reviewer, 0);
+  assert.equal(fixture.calls.worker.length, 0);
+  assert.deepEqual(polishingPipeline.projections.pause(result).nextActions, [
+    {
+      type: "start-new-run",
+      requirement: "resolved-finalization-guidance",
+    },
+  ]);
 });
 
 test("blocks an explicit finalization skill that escapes through a symlink", async (t) => {
@@ -1080,17 +1187,82 @@ test("blocks an explicit finalization skill that escapes through a symlink", asy
 
   assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
   assert.equal(result.pause.reason, "finalization_skill_invalid");
-  assert.equal(result.pause.resumeState, "FINALIZE");
+  assert.equal(result.pause.resumeState, undefined);
   assert.equal(result.pause.skillPath, skillPath);
+  assert.equal(fixture.probes.worker, 0);
+  assert.equal(fixture.probes.reviewer, 0);
+  assert.equal(fixture.calls.worker.length, 0);
+});
+
+test("selects the first safely inspectable conventional guidance path", async (t) => {
+  const skillPath = ".claude/skills/finalization/SKILL.md";
+  const fixture = await createFixture(t, {
+    finalizationSkill: false,
+    async prepareProject(projectPath) {
+      await mkdir(join(projectPath, ".claude", "skills", "finalization"), {
+        recursive: true,
+      });
+      await writeFile(
+        join(projectPath, skillPath),
+        "---\nname: finalization\ndescription: Test validation.\n---\n\nRun tests.\n",
+      );
+    },
+    reviewer: [
+      {
+        ...bootstrapReady("Reviewer"),
+        validationInfrastructure: [skillPath],
+      },
+      reviewApproved(),
+    ],
+    worker: [
+      clarificationReady(),
+      {
+        ...bootstrapReady("Worker"),
+        validationInfrastructure: [skillPath],
+      },
+      reconciliationResolved(),
+      polishingCompleted(),
+      {
+        ...finalizationPassed(skillPath),
+        validationInfrastructure: [skillPath],
+      },
+    ],
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.pipelineState.finalizationGuidance.skillPath, skillPath);
+});
+
+test("corrects finalization that omits frozen guidance before confirmation", async (t) => {
+  const fixture = await createFixture(t, {
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      { ...finalizationPassed(), validationInfrastructure: [] },
+      finalizationPassed(),
+    ],
+  });
+
+  const result = await fixture.run();
+  const correction = fixture.transitions.find(
+    ({ options }) => options.activity?.kind === "finalization-correction",
+  ).patch.pipelineState.finalizationCorrection;
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(correction.field, "validationInfrastructure");
+  assert.equal(correction.constraint, "includes-frozen-finalization-guidance");
   assert.equal(
-    fixture.calls.worker.some(({ prompt }) =>
-      prompt.includes("Run the complete project finalization procedure"),
-    ),
-    false,
+    fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
+      .length,
+    2,
   );
 });
 
-test("resumes finalization after an explicit skill is corrected", async (t) => {
+test("requires a new run after an explicit skill is corrected", async (t) => {
   for (const kind of ["missing", "symlink-invalid"]) {
     await t.test(kind, async (t) => {
       const skillPath = `LOCAL_ARTIFACTS/skills/${kind}/SKILL.md`;
@@ -1125,9 +1297,7 @@ test("resumes finalization after an explicit skill is corrected", async (t) => {
           ? "finalization_skill_missing"
           : "finalization_skill_invalid",
       );
-      assert.doesNotThrow(() =>
-        polishingPipeline.validateResumeAction(paused, null),
-      );
+      assert.throws(() => polishingPipeline.validateResumeAction(paused, null));
       await rm(skillDirectory, { recursive: true, force: true });
       await mkdir(skillDirectory, { recursive: true });
       await writeFile(
@@ -1135,14 +1305,9 @@ test("resumes finalization after an explicit skill is corrected", async (t) => {
         "---\nname: finalization\ndescription: Test validation.\n---\n\nRun tests.\n",
       );
 
-      const resumed = await fixture.run();
-
-      assert.equal(resumed.pipelineState.workflowState, "DONE");
-      assert.equal(resumed.pause, null);
-      assert.equal(
-        resumed.pipelineState.finalizationResult.skillPath,
-        skillPath,
-      );
+      const unchanged = await fixture.run();
+      assert.equal(unchanged.pause.reason, paused.pause.reason);
+      assert.equal(unchanged.pipelineState.workflowState, "WAITING_FOR_USER");
     });
   }
 });
@@ -1476,7 +1641,10 @@ for (const [name, code, reason = "unsafe_git_state"] of [
 test("rejects validation-infrastructure drift after trusted polishing execution", async (t) => {
   const trustedValidation = trustedValidationSnapshot();
   const infrastructurePath = "LOCAL_ARTIFACTS/validation.json";
-  const validationInfrastructure = [infrastructurePath];
+  const validationInfrastructure = [
+    ".agents/skills/finalization/SKILL.md",
+    infrastructurePath,
+  ];
   const requiredChecks = [
     ...REQUIRED_CHECKS,
     { id: "C2", command: trustedValidation.commands[0].command },
@@ -1746,7 +1914,7 @@ test("reconverges persisted terminal findings before reusing finalization eviden
   );
 });
 
-test("reruns finalization when retained candidate-review correction scope drifts", async (t) => {
+test("rejects frozen guidance drift during candidate-review correction", async (t) => {
   let drifted = false;
   const fixture = await createFixture(t, {
     reviewer: [
@@ -1754,8 +1922,6 @@ test("reruns finalization when retained candidate-review correction scope drifts
       candidateApproved(),
       reviewFindings("R1"),
       { ...candidateApproved(), unexpected: "field" },
-      candidateApproved(),
-      reviewApproved("ACCEPTED"),
     ],
     worker: [
       clarificationReady(),
@@ -1764,7 +1930,6 @@ test("reruns finalization when retained candidate-review correction scope drifts
       polishingCompleted(),
       finalizationPassed(),
       resolution("FIX", "R1"),
-      finalizationPassed(),
     ],
     onRoleRun(role, request) {
       if (
@@ -1783,14 +1948,14 @@ test("reruns finalization when retained candidate-review correction scope drifts
 
   const result = await fixture.run();
 
-  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(result.pause.reason, "finalization_skill_invalid");
+  assert.equal(result.pause.code, "ERR_FINALIZATION_GUIDANCE_CHANGED");
   assert.equal(
     fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
       .length,
-    2,
+    1,
   );
-  assert.equal(result.pipelineState.reviewCorrection, null);
-  assert.equal(result.pipelineState.pendingReviewCorrection, null);
 });
 
 test("corrects terminal Reviewer output without rerunning finalization", async (t) => {
@@ -1828,7 +1993,7 @@ test("corrects terminal Reviewer output without rerunning finalization", async (
   );
 });
 
-test("reruns finalization when terminal correction scope drifts", async (t) => {
+test("rejects frozen guidance drift during terminal correction", async (t) => {
   let drifted = false;
   const fixture = await createFixture(t, {
     reviewer: [
@@ -1836,14 +2001,12 @@ test("reruns finalization when terminal correction scope drifts", async (t) => {
       candidateApproved(),
       { ...reviewApproved(), unexpected: "field" },
       reviewApproved(),
-      reviewApproved("ACCEPTED"),
     ],
     worker: [
       clarificationReady(),
       bootstrapReady("Worker"),
       reconciliationResolved(),
       polishingCompleted(),
-      finalizationPassed(),
       finalizationPassed(),
     ],
     onRoleRun(role, request) {
@@ -1863,19 +2026,19 @@ test("reruns finalization when terminal correction scope drifts", async (t) => {
 
   const result = await fixture.run();
 
-  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(result.pause.reason, "finalization_skill_invalid");
+  assert.equal(result.pause.code, "ERR_FINALIZATION_GUIDANCE_CHANGED");
   assert.equal(
     fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
       .length,
-    2,
+    1,
   );
   assert.equal(
     fixture.calls.reviewer.filter(({ schema }) => schema === REVIEW_SCHEMA)
       .length,
-    3,
+    2,
   );
-  assert.equal(result.pipelineState.confirmationCorrection, null);
-  assert.equal(result.pipelineState.pendingConfirmationCorrection, null);
 });
 
 test("fixes finalization failures in one batch and reruns the complete gate", async (t) => {
@@ -2467,7 +2630,7 @@ test("uses one bounded stagnation arbitration before continuing fixes", async (t
   assert.equal(fixture.calls.arbiter.at(-1).access, "read-only");
 });
 
-test("requires Reviewer acceptance for task-authorized validation changes", async (t) => {
+test("requires a new run when polishing changes frozen guidance", async (t) => {
   const fixture = await createFixture(t, {
     onRoleRun: async (role, request) => {
       if (role === "worker" && request.prompt.includes("Polish the existing")) {
@@ -2477,25 +2640,13 @@ test("requires Reviewer acceptance for task-authorized validation changes", asyn
         );
       }
     },
-    reviewer: [bootstrapReady("Reviewer"), reviewApproved("ACCEPTED")],
+    reviewer: [bootstrapReady("Reviewer")],
   });
-  const completed = await fixture.run();
-  assert.equal(completed.pipelineState.workflowState, "DONE");
-  assert.equal(
-    completed.pipelineState.reviewResult.validationChange,
-    "ACCEPTED",
-  );
-  const reviewPrompt = fixture.calls.reviewer.find(({ prompt }) =>
-    prompt.includes("Confirm the finalized change set"),
-  ).prompt;
-  assert.match(
-    reviewPrompt,
-    /Established validation tuple:[\s\S]*Candidate validation tuple and finalization evidence:/u,
-  );
-  assert.match(
-    reviewPrompt,
-    /"validationInfrastructureFingerprint": "[a-f0-9]{64}"/u,
-  );
+  const paused = await fixture.run();
+  assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(paused.pause.reason, "finalization_skill_invalid");
+  assert.equal(paused.pause.code, "ERR_FINALIZATION_GUIDANCE_CHANGED");
+  assert.equal(paused.pause.resumeState, undefined);
 });
 
 for (const mode of ["independent", "lazy"]) {

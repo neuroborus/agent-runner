@@ -239,21 +239,31 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
   assert.match(DISPUTE_RECONSIDERATION_INSTRUCTIONS, /Withdraw/u);
   assert.match(FINDING_ARBITRATION_INSTRUCTIONS, /WORKER_CORRECT/u);
   assert.match(STAGNATION_INSTRUCTIONS, /cannot approve/u);
-  assert.match(finalizationBootstrapInstructions("auto"), /conventional/u);
-  assert.match(finalizationBootstrapInstructions("none"), /do not skip/u);
+  assert.match(
+    finalizationBootstrapInstructions({
+      selection: "skill",
+      skillPath: ".agents/skills/finalization/SKILL.md",
+    }),
+    /frozen finalization skill/u,
+  );
+  assert.match(
+    finalizationBootstrapInstructions({
+      selection: "fallback",
+      skillPath: null,
+    }),
+    /do not skip/u,
+  );
   assert.match(
     finalizationGuidanceInstructions({
-      required: false,
       skillPath: null,
     }),
     /repository instructions and project-defined checks/u,
   );
   assert.match(
     finalizationGuidanceInstructions({
-      required: true,
       skillPath: "checks/finalize/SKILL.md",
     }),
-    /missing, escaping, or invalid skill is blocking/u,
+    /repairing guidance requires a new run/u,
   );
 });
 

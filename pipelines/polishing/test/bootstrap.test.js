@@ -3,6 +3,7 @@ import {
   appendFile,
   mkdir,
   readFile,
+  rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -127,25 +128,38 @@ test("persists and finalizes a disjoint maximum role-derived inventory", async (
   });
   const workerInventory = roleInventory("worker");
   const reviewerInventory = roleInventory("reviewer");
+  const correctedReviewerInventory = {
+    ...reviewerInventory,
+    validationInfrastructure: [
+      ...reviewerInventory.validationInfrastructure.slice(0, -1),
+      ".agents/skills/finalization/SKILL.md",
+    ],
+  };
   const derivedCommands = [
     ...workerInventory.requiredChecks,
     ...reviewerInventory.requiredChecks,
   ].map(({ command }, index) => ({ id: `C${index + 1}`, command }));
   const derivedPaths = [
     ...workerInventory.validationInfrastructure,
-    ...reviewerInventory.validationInfrastructure,
+    ...correctedReviewerInventory.validationInfrastructure,
   ];
   const fixture = await createFixture(t, {
     async prepareProject(projectPath) {
       await mkdir(join(projectPath, "validation"));
       await Promise.all(
-        derivedPaths.map((path) =>
-          writeFile(join(projectPath, path), `// ${path}\n`),
-        ),
+        [
+          ...new Set([
+            ...derivedPaths,
+            ...reviewerInventory.validationInfrastructure,
+          ]),
+        ]
+          .filter((path) => path !== ".agents/skills/finalization/SKILL.md")
+          .map((path) => writeFile(join(projectPath, path), `// ${path}\n`)),
       );
     },
     reviewer: [
       { ...bootstrapReady("Reviewer"), ...reviewerInventory },
+      { ...bootstrapReady("Reviewer"), ...correctedReviewerInventory },
       reviewApproved(),
     ],
     worker: [
@@ -185,6 +199,11 @@ test("persists and finalizes a disjoint maximum role-derived inventory", async (
   );
   assert.equal(state.requiredChecks.length, MAX_VALIDATION_ITEMS);
   assert.equal(state.validationInfrastructure.length, MAX_VALIDATION_ITEMS);
+  assert.equal(state.bootstrapCorrections.length, 1);
+  assert.equal(
+    state.bootstrapCorrections[0].constraint,
+    "includes-frozen-finalization-guidance",
+  );
   assert.equal(
     state.finalizationResult.requiredChecks.length,
     MAX_VALIDATION_ITEMS,
@@ -696,6 +715,53 @@ test("resumes preflight after a transient unsafe Git state", async (t) => {
   const completed = await fixture.run();
   assert.equal(completed.pipelineState.workflowState, "DONE");
   assert.equal(completed.pause, null);
+});
+
+test("freezes finalization guidance durably before backend probing", async (t) => {
+  const fixture = await createRealStoreFixture(t);
+  const probe = fixture.runtime.adapters.worker.probe;
+  let probeAttempts = 0;
+  fixture.runtime.adapters.worker.probe = async () => {
+    probeAttempts += 1;
+    if (probeAttempts === 1) {
+      throw new Error("Worker backend is temporarily unavailable.");
+    }
+    return probe();
+  };
+
+  const paused = await fixture.run();
+
+  assert.equal(paused.pause.reason, "backend_unavailable");
+  assert.equal(paused.pipelineState.preflightComplete, false);
+  assert.equal(paused.pipelineState.settings.finalization, "auto");
+  const frozenGuidance = paused.pipelineState.finalizationGuidance;
+  assert.equal(
+    frozenGuidance.skillPath,
+    ".agents/skills/finalization/SKILL.md",
+  );
+  await fixture.recover();
+
+  await rm(
+    join(fixture.projectPath, ".agents", "skills", "finalization", "SKILL.md"),
+  );
+  const replacementPath = join(
+    fixture.projectPath,
+    ".claude",
+    "skills",
+    "finalization",
+  );
+  await mkdir(replacementPath, { recursive: true });
+  await writeFile(
+    join(replacementPath, "SKILL.md"),
+    "---\nname: finalization\ndescription: Replacement checks.\n---\n",
+  );
+
+  const rejected = await fixture.run();
+
+  assert.equal(rejected.pause.reason, "finalization_skill_missing");
+  assert.equal(rejected.pause.code, "ERR_FINALIZATION_GUIDANCE_MISSING");
+  assert.deepEqual(rejected.pipelineState.finalizationGuidance, frozenGuidance);
+  assert.equal(probeAttempts, 1);
 });
 
 for (const taskLocation of [

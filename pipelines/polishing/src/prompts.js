@@ -80,23 +80,20 @@ For SKILL_MISSING or SKILL_INVALID, provide the attempted repository-relative sk
 For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or comparable external constraints. Use the selected skillPath or "" when no skill is selected; preserve the complete inventory, report every check as PASS, BLOCKED, or NOT_RUN, set summary, question, and whyBlocked to "", and issues and options to []; provide reason and evidence.
 For PRODUCT_DECISION_REQUIRED, set skillPath, summary, and reason to "", and issues, requiredChecks, validationInfrastructure, and checks to []; use the product-decision fields.`;
 
-export function finalizationBootstrapInstructions(policy) {
-  if (policy === "none") {
+export function finalizationBootstrapInstructions({ selection, skillPath }) {
+  if (selection === "fallback") {
     return "No finalization skill guidance is selected. Derive the complete finalization gate from repository instructions and project-defined checks; do not skip validation.";
   }
-  if (policy === "auto") {
-    return "Use a conventional repository finalization skill when one is available. Otherwise derive the complete finalization gate from repository instructions and project-defined checks; missing optional guidance must not skip validation.";
-  }
-  return `Use only the explicitly configured finalization skill at ${policy}. Treat a missing, escaping, or invalid configured skill as blocking.`;
+  return `The frozen finalization skill is ${skillPath}. Read only that exact confined repository-relative skill, do not substitute another path, and include it in validationInfrastructure.`;
 }
 
-export function finalizationGuidanceInstructions({ required, skillPath }) {
+export function finalizationGuidanceInstructions({ skillPath }) {
   if (skillPath === null) {
     return `No finalization skill guidance is available for this turn. Derive and run the complete gate from repository instructions and project-defined checks; inspect relevant scripts and established validation commands instead of skipping validation.
 For PASS, FAIL, or BLOCKED, set skillPath to "". Do not use SKILL_MISSING or SKILL_INVALID when no skill is selected.`;
   }
-  return `The resolved finalization skill is ${skillPath}. Validate that exact confined repository-relative skill before following it; do not substitute another path.
-${required ? "This skill is explicitly configured, so a missing, escaping, or invalid skill is blocking." : "This skill was discovered automatically; report SKILL_MISSING or SKILL_INVALID before invoking it so the runner can fall back to repository instructions and project checks."}
+  return `The frozen finalization skill is ${skillPath}. Validate that exact confined repository-relative skill before following it; do not substitute another path or fall back to different guidance.
+This frozen skill must remain present in validationInfrastructure. If it is missing or invalid, report SKILL_MISSING or SKILL_INVALID; repairing guidance requires a new run.
 For PASS, FAIL, SKILL_MISSING, SKILL_INVALID, or BLOCKED, set skillPath to ${JSON.stringify(skillPath)}.`;
 }
 

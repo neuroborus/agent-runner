@@ -71,6 +71,7 @@ import {
   assertRun,
   assertRuntime,
   assertSettings,
+  createFinalizationGuidanceDecision,
   createPolishingState,
   finalizationFeedbackFindings,
   findingFingerprint,
@@ -85,6 +86,7 @@ import {
   LAZY_OUTPUT_RETRY_EXPLANATION,
   MAX_DIAGNOSTIC_ITEMS,
   MAX_CLARIFICATION_ROUNDS,
+  MAX_VALIDATION_ITEMS,
   normalizeAdapterCapabilities,
   normalizeBootstrapArbitration,
   normalizeBootstrapResult,
@@ -141,8 +143,6 @@ const RETRYABLE_CHECKPOINT_PAUSES = new Set([
   "bootstrap_disagreement",
   "environment_blocked",
   "finalization_cannot_pass",
-  "finalization_skill_invalid",
-  "finalization_skill_missing",
   "confirmation_output_invalid",
   "lazy_output_invalid",
   "review_output_invalid",
@@ -1184,6 +1184,19 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       return false;
     }
     interruptedRepositoryReconciled = true;
+    if (
+      allowWorkspaceChanges &&
+      !(await verifyFinalizationGuidance({
+        projectPath: reconciledRepository.projectPath,
+        repositoryBaseline: reconciledRepository,
+      }))
+    ) {
+      currentRun = await runtime.finishAgentTurn(interruptedTurn);
+      assertRun(currentRun);
+      interruptedTurn = null;
+      interruptedRepositoryReconciled = false;
+      return false;
+    }
     const interruptedLazyCheckChanged =
       interruptedTurn.phase === "check-and-fix" &&
       state().workflowState === "CHECK_AND_FIX" &&
@@ -1287,6 +1300,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       reportWorkspaceChange = false,
     } = {},
   ) {
+    if (state().preflightComplete && !(await verifyFinalizationGuidance())) {
+      return null;
+    }
     if (!(await ensureTrustedCapabilities())) return null;
     if (access === "workspace-write" && !(await ensureCheckRequirements()))
       return null;
@@ -1399,6 +1415,14 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         );
         if (reason !== null) {
           await pause(reason);
+          return null;
+        }
+        if (
+          !(await verifyFinalizationGuidance({
+            projectPath: nextRepositoryBaseline.projectPath,
+            repositoryBaseline: nextRepositoryBaseline,
+          }))
+        ) {
           return null;
         }
         const contentChanged =
@@ -1741,10 +1765,13 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     });
   }
 
-  async function validationInfrastructureFingerprint(paths) {
+  async function validationInfrastructureFingerprint(
+    paths,
+    projectPath = state().repositoryBaseline.projectPath,
+  ) {
     return runtime.git.validationInfrastructureFingerprint({
       paths,
-      projectPath: state().repositoryBaseline.projectPath,
+      projectPath,
     });
   }
 
@@ -1922,6 +1949,29 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         },
       );
     }
+    const selectedGuidancePath = state().finalizationGuidance?.skillPath;
+    const projectedInventory = deriveValidationInventory(
+      context.role === "worker" ? result : state().workerValidation,
+      context.role === "reviewer" ? result : state().reviewerValidation,
+    );
+    const overflowsSelectedGuidance =
+      resolvedInventory &&
+      typeof selectedGuidancePath === "string" &&
+      !projectedInventory.validationInfrastructure.includes(
+        selectedGuidancePath,
+      ) &&
+      projectedInventory.validationInfrastructure.length >=
+        MAX_VALIDATION_ITEMS;
+    if (overflowsSelectedGuidance) {
+      throw invalidRoleOutput(
+        "Bootstrap validation inventory has no capacity for frozen finalization guidance.",
+        context,
+        {
+          field: "validationInfrastructure",
+          constraint: "includes-frozen-finalization-guidance",
+        },
+      );
+    }
     return result;
   }
 
@@ -1936,6 +1986,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
   }) {
     const context = roleOutputContextFor(role, schema, checkpoint);
     while (true) {
+      if (!(await verifyFinalizationGuidance())) return null;
       const correction = pendingBootstrapCorrection(context);
       try {
         const output = await runRole(
@@ -1952,6 +2003,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         if (output === null) {
           return null;
         }
+        if (!(await verifyFinalizationGuidance())) return null;
         const result = await validateValidationInventory(
           normalize(output),
           context,
@@ -2000,13 +2052,25 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       state().reviewerValidation,
     );
     assertTrustedValidationInventory(result);
+    const selectedGuidancePath = state().finalizationGuidance?.skillPath;
+    const validationInfrastructure =
+      typeof selectedGuidancePath === "string" &&
+      !result.validationInfrastructure.includes(selectedGuidancePath)
+        ? Object.freeze([
+            ...result.validationInfrastructure,
+            selectedGuidancePath,
+          ])
+        : result.validationInfrastructure;
+    if (validationInfrastructure.length > MAX_VALIDATION_ITEMS) {
+      throw workflowError(
+        "Established validation infrastructure exceeds its bounded capacity.",
+      );
+    }
     return {
       requiredChecks: result.requiredChecks,
-      validationInfrastructure: result.validationInfrastructure,
+      validationInfrastructure,
       validationInfrastructureFingerprint:
-        await validationInfrastructureFingerprint(
-          result.validationInfrastructure,
-        ),
+        await validationInfrastructureFingerprint(validationInfrastructure),
       validationMigrationPending: false,
     };
   }
@@ -2168,7 +2232,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
 
 This is a versioned-state migration checkpoint. Treat every persisted legacy check, path, fingerprint, and aggregate validation result as provisional. Independently rediscover the complete current validation inventory from repository evidence before work can advance.
 
-${finalizationBootstrapInstructions(state().settings.finalization)}
+${finalizationBootstrapInstructions(state().finalizationGuidance)}
 
 ${trustedValidationInstructions()}
 
@@ -2350,10 +2414,9 @@ ${JSON.stringify(
     return reconcileValidationMigration();
   }
 
-  async function resolveFinalizationGuidance() {
-    const policy = state().settings.finalization;
+  async function resolveFinalizationGuidance(projectPath, policy) {
     if (policy === "none") {
-      return Object.freeze({ required: false, skillPath: null });
+      return createFinalizationGuidanceDecision({ configuredPolicy: policy });
     }
     const candidates =
       policy === "auto" ? CONVENTIONAL_FINALIZATION_SKILL_PATHS : [policy];
@@ -2362,7 +2425,7 @@ ${JSON.stringify(
       try {
         inspection = await runtime.git.inspectPath({
           path: skillPath,
-          projectPath: state().repositoryBaseline.projectPath,
+          projectPath,
         });
       } catch (cause) {
         if (policy === "auto") {
@@ -2371,30 +2434,203 @@ ${JSON.stringify(
         await pause("finalization_skill_invalid", {
           code: diagnosticCode(cause, "ERR_FINALIZATION_SKILL_INVALID"),
           explanation:
-            "The explicitly configured finalization skill path is not safely confined to the repository.",
+            "The explicitly configured finalization skill path is not a safe canonical repository file. Repair the path and start a new run.",
           evidence: [skillPath],
-          resumeState: "FINALIZE",
           skillPath,
         });
         return null;
       }
-      if (inspection.exists) {
-        return Object.freeze({
-          required: policy !== "auto",
-          skillPath: inspection.relativePath,
+      if (
+        inspection.exists === true &&
+        inspection.kind === "file" &&
+        inspection.relativePath === skillPath
+      ) {
+        let selectedFileFingerprint;
+        try {
+          selectedFileFingerprint =
+            await runtime.git.validationInfrastructureFingerprint({
+              paths: [skillPath],
+              projectPath,
+            });
+        } catch (cause) {
+          if (policy === "auto") continue;
+          await pause("finalization_skill_invalid", {
+            code: diagnosticCode(cause, "ERR_FINALIZATION_SKILL_INVALID"),
+            explanation:
+              "The explicitly configured finalization skill could not be fingerprinted safely. Repair it and start a new run.",
+            evidence: [skillPath],
+            skillPath,
+          });
+          return null;
+        }
+        return createFinalizationGuidanceDecision({
+          configuredPolicy: policy,
+          skillPath,
+          selectedFileFingerprint,
         });
+      }
+      if (policy !== "auto" && inspection.exists === true) {
+        await pause("finalization_skill_invalid", {
+          code: "ERR_FINALIZATION_SKILL_INVALID",
+          explanation:
+            "The explicitly configured finalization skill is not a canonical regular repository file. Repair the path and start a new run.",
+          evidence: [skillPath],
+          skillPath,
+        });
+        return null;
       }
     }
     if (policy !== "auto") {
       await pause("finalization_skill_missing", {
-        explanation: "The explicitly configured finalization skill is missing.",
+        code: "ERR_FINALIZATION_SKILL_MISSING",
+        explanation:
+          "The explicitly configured finalization skill is missing. Restore it and start a new run.",
         evidence: [policy],
-        resumeState: "FINALIZE",
         skillPath: policy,
       });
       return null;
     }
-    return Object.freeze({ required: false, skillPath: null });
+    return createFinalizationGuidanceDecision({ configuredPolicy: policy });
+  }
+
+  async function verifyFinalizationGuidance({
+    projectPath = state().repositoryBaseline?.projectPath,
+    repositoryBaseline,
+  } = {}) {
+    const guidance = state().finalizationGuidance;
+    if (guidance?.selection !== "skill") return true;
+    const pauseForGuidance = async (reason, details) => {
+      const current = state();
+      const contentChanged =
+        repositoryBaseline !== undefined &&
+        current.repositoryBaseline !== null &&
+        current.repositoryBaseline.contentFingerprint !==
+          repositoryBaseline.contentFingerprint;
+      await transition(
+        {
+          ...current,
+          ...(contentChanged
+            ? {
+                ...clearedCandidateAndTerminalGate(),
+                previousFindings:
+                  current.findings.length === 0
+                    ? current.previousFindings
+                    : current.findings,
+                findings: [],
+                finalizationCorrection: null,
+                pendingFinalizationCorrection: null,
+                reviewReconsideration: [],
+              }
+            : {}),
+          ...(repositoryBaseline === undefined ? {} : { repositoryBaseline }),
+          workflowState: "WAITING_FOR_USER",
+        },
+        {
+          pause: { ...details, reason },
+          publicActivity: activity(
+            "runner",
+            "polishing",
+            "paused",
+            `Polishing paused: ${reason}.`,
+          ),
+        },
+      );
+      return false;
+    };
+    let inspection;
+    try {
+      inspection = await runtime.git.inspectPath({
+        path: guidance.skillPath,
+        projectPath,
+      });
+    } catch (cause) {
+      return pauseForGuidance("finalization_skill_invalid", {
+        code: diagnosticCode(cause, "ERR_FINALIZATION_GUIDANCE_INVALID"),
+        explanation:
+          "The frozen finalization guidance path is no longer safe or canonical. Repair it and start a new run.",
+        evidence: [guidance.skillPath],
+        skillPath: guidance.skillPath,
+      });
+    }
+    if (
+      inspection.exists !== true ||
+      inspection.kind !== "file" ||
+      inspection.relativePath !== guidance.skillPath
+    ) {
+      const missing = inspection.exists !== true;
+      return pauseForGuidance(
+        missing ? "finalization_skill_missing" : "finalization_skill_invalid",
+        {
+          code: missing
+            ? "ERR_FINALIZATION_GUIDANCE_MISSING"
+            : "ERR_FINALIZATION_GUIDANCE_INVALID",
+          explanation: missing
+            ? "The frozen finalization guidance file is missing. Restore it and start a new run."
+            : "The frozen finalization guidance path is no longer a canonical regular file. Repair it and start a new run.",
+          evidence: [guidance.skillPath],
+          skillPath: guidance.skillPath,
+        },
+      );
+    }
+    let fingerprint;
+    try {
+      fingerprint = await validationInfrastructureFingerprint(
+        [guidance.skillPath],
+        projectPath,
+      );
+    } catch (cause) {
+      return pauseForGuidance("finalization_skill_invalid", {
+        code: diagnosticCode(cause, "ERR_FINALIZATION_GUIDANCE_INVALID"),
+        explanation:
+          "The frozen finalization guidance could not be fingerprinted safely. Repair it and start a new run.",
+        evidence: [guidance.skillPath],
+        skillPath: guidance.skillPath,
+      });
+    }
+    if (fingerprint !== guidance.selectedFileFingerprint) {
+      return pauseForGuidance("finalization_skill_invalid", {
+        code: "ERR_FINALIZATION_GUIDANCE_CHANGED",
+        explanation:
+          "The frozen finalization guidance content changed. Start a new run to resolve and review the updated guidance.",
+        evidence: [guidance.skillPath],
+        skillPath: guidance.skillPath,
+      });
+    }
+    return true;
+  }
+
+  async function prepareFinalizationGuidance() {
+    const current = state();
+    if (
+      !current.preflightComplete ||
+      ["DONE", "FAILED", "CANCELED", "HANDOFF"].includes(current.workflowState)
+    ) {
+      return true;
+    }
+    const deferInterruptedVerification =
+      current.finalizationGuidance !== null &&
+      interruptedTurn !== null &&
+      interruptedTurnIsWritable(interruptedTurn);
+    if (current.finalizationGuidance === null) {
+      const guidance = await resolveFinalizationGuidance(
+        current.repositoryBaseline.projectPath,
+        current.settings.finalization,
+      );
+      if (guidance === null) return false;
+      await transition(
+        { ...state(), finalizationGuidance: guidance },
+        {
+          publicActivity: activity(
+            "runner",
+            "preflight",
+            "finalization-guidance-frozen",
+            "Finalization guidance was resolved and frozen.",
+          ),
+        },
+      );
+    }
+    if (deferInterruptedVerification) return true;
+    return verifyFinalizationGuidance();
   }
 
   function fixBudget() {
@@ -3157,6 +3393,36 @@ ${JSON.stringify(
       await pause("no_changes");
       return false;
     }
+    const effectiveSettings =
+      state().settings === null
+        ? Object.freeze({ ...settings })
+        : state().settings;
+    let finalizationGuidance = state().finalizationGuidance;
+    if (finalizationGuidance === null) {
+      finalizationGuidance = await resolveFinalizationGuidance(
+        repositoryPath,
+        effectiveSettings.finalization,
+      );
+      if (finalizationGuidance === null) return false;
+      await transition(
+        {
+          ...state(),
+          settings: effectiveSettings,
+          finalizationGuidance,
+        },
+        {
+          publicActivity: activity(
+            "runner",
+            "preflight",
+            "finalization-guidance-frozen",
+            "Finalization guidance was resolved and frozen.",
+          ),
+        },
+      );
+    }
+    if (!(await verifyFinalizationGuidance({ projectPath: repositoryPath }))) {
+      return false;
+    }
     const preflightRoles = Object.keys(currentRun.roles).filter(
       (role) => role !== "arbiter",
     );
@@ -3188,10 +3454,8 @@ ${JSON.stringify(
       {
         ...state(),
         preflightComplete: true,
-        settings:
-          state().settings === null
-            ? Object.freeze({ ...settings })
-            : state().settings,
+        settings: effectiveSettings,
+        finalizationGuidance,
         repositoryBaseline: preflight.snapshot,
         backendVersions: Object.fromEntries(
           Object.keys(currentRun.roles).map((role) => [
@@ -3231,7 +3495,7 @@ ${JSON.stringify(
           : ""
       }
 
-${finalizationBootstrapInstructions(state().settings.finalization)}
+${finalizationBootstrapInstructions(state().finalizationGuidance)}
 
 ${trustedValidationInstructions()}
 
@@ -3494,23 +3758,15 @@ ${evidence}${
   async function runFinalizationTurn() {
     if (!(await prepareFinalizationRecovery())) return false;
     const persistedCorrection = state().pendingFinalizationCorrection;
-    const beforeFingerprint =
-      persistedCorrection?.contentFingerprint ?? (await contentFingerprint());
-    const fallbackGuidance = Object.freeze({
-      required: false,
-      skillPath: null,
-    });
-    const guidance =
-      persistedCorrection?.guidance === "fallback"
-        ? fallbackGuidance
-        : await resolveFinalizationGuidance();
+    const guidance = state().finalizationGuidance;
     if (guidance === null) {
-      return false;
+      throw workflowError("Finalization guidance is missing.");
     }
     async function requestFinalization(selectedGuidance, guidanceScope) {
       const context = finalizationOutputContext();
       let fingerprint = await contentFingerprint();
       while (true) {
+        if (!(await verifyFinalizationGuidance())) return null;
         const correction = pendingFinalizationCorrection(
           context,
           guidanceScope,
@@ -3548,6 +3804,7 @@ ${establishedValidationPrompt(state())}${
           if (output === null) {
             return null;
           }
+          if (!(await verifyFinalizationGuidance())) return null;
           const result = await validateValidationInventory(
             normalizeFinalizationRoleOutput(
               output,
@@ -3629,6 +3886,26 @@ ${establishedValidationPrompt(state())}${
               "SKILL_INVALID",
               "PRODUCT_DECISION_REQUIRED",
             ].includes(result.status) &&
+            selectedGuidance.skillPath !== null &&
+            !result.validationInfrastructure.includes(
+              selectedGuidance.skillPath,
+            )
+          ) {
+            throw invalidRoleOutput(
+              "Worker omitted frozen finalization guidance from validation infrastructure.",
+              context,
+              {
+                field: "validationInfrastructure",
+                constraint: "includes-frozen-finalization-guidance",
+              },
+            );
+          }
+          if (
+            ![
+              "SKILL_MISSING",
+              "SKILL_INVALID",
+              "PRODUCT_DECISION_REQUIRED",
+            ].includes(result.status) &&
             state().trustedValidation.commands.some(
               ({ command }) =>
                 !result.requiredChecks.some(
@@ -3697,26 +3974,6 @@ ${establishedValidationPrompt(state())}${
     if (result === null) {
       return false;
     }
-    if (
-      guidance.skillPath !== null &&
-      !guidance.required &&
-      ["SKILL_MISSING", "SKILL_INVALID"].includes(result.status)
-    ) {
-      if ((await contentFingerprint()) !== beforeFingerprint) {
-        await pause("finalization_cannot_pass", {
-          code: "ERR_FINALIZATION_MODIFIED_BEFORE_VALIDATION",
-          explanation: result.reason,
-          evidence: result.evidence,
-          ...(result.skillPath === null ? {} : { skillPath: result.skillPath }),
-          resumeState: "FINALIZE",
-        });
-        return false;
-      }
-      result = await requestFinalization(fallbackGuidance, "fallback");
-      if (result === null) {
-        return false;
-      }
-    }
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "BOOTSTRAP");
     }
@@ -3730,26 +3987,19 @@ ${establishedValidationPrompt(state())}${
       return false;
     }
     if (["SKILL_MISSING", "SKILL_INVALID"].includes(result.status)) {
-      const modifiedBeforeValidation =
-        (await contentFingerprint()) !== beforeFingerprint;
       const reasons = {
         SKILL_MISSING: "finalization_skill_missing",
         SKILL_INVALID: "finalization_skill_invalid",
       };
-      await pause(
-        modifiedBeforeValidation
-          ? "finalization_cannot_pass"
-          : reasons[result.status],
-        {
-          explanation: result.reason,
-          evidence: result.evidence,
-          ...(modifiedBeforeValidation
-            ? { code: "ERR_FINALIZATION_MODIFIED_BEFORE_VALIDATION" }
-            : {}),
-          ...(result.skillPath === null ? {} : { skillPath: result.skillPath }),
-          resumeState: "FINALIZE",
-        },
-      );
+      await pause(reasons[result.status], {
+        code:
+          result.status === "SKILL_MISSING"
+            ? "ERR_FINALIZATION_GUIDANCE_MISSING"
+            : "ERR_FINALIZATION_GUIDANCE_INVALID",
+        explanation: `${result.reason} Repair the guidance and start a new run.`,
+        evidence: result.evidence,
+        ...(result.skillPath === null ? {} : { skillPath: result.skillPath }),
+      });
       return false;
     }
     const fingerprint = await contentFingerprint();
@@ -4105,6 +4355,7 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
     }
     const context = lazyOutputContext("CHECK_AND_FIX");
     while (true) {
+      if (!(await verifyFinalizationGuidance())) return false;
       current = state();
       const correction = current.pendingLazyCorrection;
       const scope = correction ?? lazyCorrectionScope("CHECK_AND_FIX", current);
@@ -4226,6 +4477,7 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
   async function runCleanConfirmTurn() {
     const context = lazyOutputContext("CLEAN_CONFIRM");
     while (true) {
+      if (!(await verifyFinalizationGuidance())) return false;
       const current = state();
       const correction = current.pendingLazyCorrection;
       const scope = correction ?? lazyCorrectionScope("CLEAN_CONFIRM", current);
@@ -4485,6 +4737,7 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}${
     let scope;
     let result;
     while (true) {
+      if (!(await verifyFinalizationGuidance())) return false;
       scope = await verifiedCandidateScope();
       if (scope === null) {
         return false;
@@ -4676,6 +4929,7 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}${
   async function runLazyConfirmationTurn() {
     const context = confirmationOutputContext("worker");
     while (true) {
+      if (!(await verifyFinalizationGuidance())) return false;
       const current = state();
       const correction = current.pendingConfirmationCorrection;
       const scope = confirmationCorrectionScope(current);
@@ -4889,6 +5143,7 @@ ${JSON.stringify(current.previousFindings, null, 2)}${
     let result;
     let fingerprint;
     while (true) {
+      if (!(await verifyFinalizationGuidance())) return false;
       const current = state();
       const correction = current.pendingConfirmationCorrection;
       const scope = confirmationCorrectionScope(current);
@@ -5759,6 +6014,9 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
       }
       return currentRun;
     }
+    if (!(await prepareFinalizationGuidance())) {
+      return currentRun;
+    }
     await prepareCapabilityDiscovery();
     if (!(await recoverInterruptedTurn())) {
       return currentRun;
@@ -5827,6 +6085,7 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
     }
 
     while (true) {
+      if (!(await prepareFinalizationGuidance())) return currentRun;
       if (await prepareCapabilityDiscovery()) {
         if (!(await recoverInterruptedTurn())) return currentRun;
         continue;

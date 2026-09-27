@@ -137,8 +137,6 @@ const RETRYABLE_PAUSE_REASONS = new Set([
   "environment_blocked",
   "finalization_cannot_pass",
   "finalization_evidence_rejected",
-  "finalization_skill_invalid",
-  "finalization_skill_missing",
   "lazy_output_invalid",
   "review_output_invalid",
 ]);
@@ -180,9 +178,9 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   finalization_cannot_pass:
     "The current finalization procedure cannot establish a passing gate.",
   finalization_skill_invalid:
-    "The explicitly configured finalization skill is invalid.",
+    "The frozen finalization guidance is invalid or changed; repair it and start a new run.",
   finalization_skill_missing:
-    "The explicitly configured finalization skill is missing.",
+    "The frozen finalization guidance is missing; restore it and start a new run.",
   confirmation_output_invalid:
     "The bounded automatic terminal-confirmation correction remains invalid.",
   lazy_output_invalid:
@@ -356,6 +354,17 @@ function projectPause(run) {
         Object.freeze({
           type: "start-new-run",
           requirement: "uncontaminated-worktree",
+        }),
+      );
+    } else if (
+      ["finalization_skill_invalid", "finalization_skill_missing"].includes(
+        run.pause.reason,
+      )
+    ) {
+      nextActions.push(
+        Object.freeze({
+          type: "start-new-run",
+          requirement: "resolved-finalization-guidance",
         }),
       );
     } else {
@@ -996,9 +1005,66 @@ export function migratePolishingStateV13(run) {
   });
 }
 
+export function migratePolishingStateV14(run) {
+  const current = run.pipelineState;
+  const resumeState = run.pause?.resumeState;
+  const operatorState = run.pause?.operatorResume?.workflowState;
+  const checkpoint =
+    current.workflowState === "WAITING_FOR_USER"
+      ? ([operatorState, resumeState].find((state) =>
+          WORKFLOW_STATES.includes(state),
+        ) ?? current.workflowState)
+      : current.workflowState;
+  const terminal = ["DONE", "FAILED", "CANCELED"].includes(checkpoint);
+  const handoff = checkpoint === "HANDOFF";
+  if (terminal || handoff || !current.preflightComplete) {
+    return Object.freeze({
+      ...current,
+      finalizationGuidance: null,
+    });
+  }
+  const unfinishedBootstrap =
+    current.resolvedSummary === null &&
+    (checkpoint === "BOOTSTRAP" ||
+      current.workerSummary !== null ||
+      current.reviewerSummary !== null);
+  if (unfinishedBootstrap) {
+    return Object.freeze({
+      ...current,
+      finalizationGuidance: null,
+      workerSummary: null,
+      reviewerSummary: null,
+      workerValidation: null,
+      reviewerValidation: null,
+      bootstrapDisagreement: null,
+      bootstrapArbitrationUsed: false,
+    });
+  }
+  if (current.resolvedSummary === null) {
+    return Object.freeze({
+      ...current,
+      finalizationGuidance: null,
+    });
+  }
+  const provisional = (value) =>
+    value === null
+      ? null
+      : Object.freeze({
+          ...value,
+          capabilityRequirements: null,
+          environmentBlockers: null,
+        });
+  return Object.freeze({
+    ...current,
+    finalizationGuidance: null,
+    workerValidation: provisional(current.workerValidation),
+    reviewerValidation: provisional(current.reviewerValidation),
+  });
+}
+
 export const polishingPipeline = Object.freeze({
   id: POLISHING_PIPELINE_ID,
-  stateVersion: 14,
+  stateVersion: 15,
   migrations: Object.freeze({
     1: migratePolishingStateV1,
     2: migratePolishingStateV2,
@@ -1013,6 +1079,7 @@ export const polishingPipeline = Object.freeze({
     11: migratePolishingStateV11,
     12: migratePolishingStateV12,
     13: migratePolishingStateV13,
+    14: migratePolishingStateV14,
   }),
   roles: ROLES,
   resolveActiveRoles,

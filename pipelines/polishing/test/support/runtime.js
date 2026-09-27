@@ -41,6 +41,9 @@ import {
   migratePolishingStateV9,
   migratePolishingStateV10,
   migratePolishingStateV11,
+  migratePolishingStateV12,
+  migratePolishingStateV13,
+  migratePolishingStateV14,
   runPolishing,
 } from "../../src/index.js";
 import {
@@ -261,11 +264,18 @@ function migrateVersionOneState(state) {
   const versionNine = migratePolishingStateV8({
     pipelineState: versionEight,
   });
-  return migratePolishingStateV11({
+  const versionTwelve = migratePolishingStateV11({
     pipelineState: migratePolishingStateV10({
       pipelineState: migratePolishingStateV9({ pipelineState: versionNine }),
     }),
   });
+  const versionThirteen = migratePolishingStateV12({
+    pipelineState: versionTwelve,
+  });
+  const versionFourteen = migratePolishingStateV13({
+    pipelineState: versionThirteen,
+  });
+  return migratePolishingStateV14({ pipelineState: versionFourteen });
 }
 
 function hash(value) {
@@ -1096,7 +1106,7 @@ async function createFixture(
     store = createRunStore({ stateRoot });
     const created = await store.createRun({
       pipelineId: "polishing",
-      pipelineStateVersion: 14,
+      pipelineStateVersion: 15,
       projectPath,
       taskPath,
       roles,
@@ -1119,7 +1129,7 @@ async function createFixture(
       revision: 1,
       runId: "run-1",
       pipelineId: "polishing",
-      pipelineStateVersion: 14,
+      pipelineStateVersion: 15,
       projectPath,
       taskPath,
       roles,

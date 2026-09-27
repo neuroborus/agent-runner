@@ -42,8 +42,17 @@ import {
   reviewFindings,
 } from "./support/index.js";
 
-const ESTABLISHED = ["package.json", "docs/OPERATOR_GUIDE.md"];
-const SUBSTITUTED = ["package.json", "docs/ARCHITECTURE.md"];
+const FINALIZATION_SKILL = ".agents/skills/finalization/SKILL.md";
+const ESTABLISHED = [
+  FINALIZATION_SKILL,
+  "package.json",
+  "docs/OPERATOR_GUIDE.md",
+];
+const SUBSTITUTED = [
+  FINALIZATION_SKILL,
+  "package.json",
+  "docs/ARCHITECTURE.md",
+];
 const EXPANDED = [...ESTABLISHED, "docs/ARCHITECTURE.md"];
 
 function finalized(infrastructure = ESTABLISHED) {
@@ -798,6 +807,7 @@ test("infrastructure scope drift discards stale feedback without losing a pendin
     const value = await fingerprint(options);
     if (
       fixture.currentRun.pipelineState.finalizationRecovery.required &&
+      options.paths.length > 1 &&
       !drifted
     ) {
       drifted = true;
