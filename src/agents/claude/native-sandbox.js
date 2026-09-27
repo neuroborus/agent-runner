@@ -132,7 +132,11 @@ internet.once("error", ({ code }) =>
 const unix = createConnection(String.fromCharCode(0) + socketName);
 unix.once("connect", () => process.exit(15));
 unix.once("error", ({ code }) =>
-  finish("unix", code, new Set(["EACCES", "ENOENT", "EPERM"])),
+  finish(
+    "unix",
+    code,
+    new Set(["EACCES", "ECONNREFUSED", "ENOENT", "EPERM"]),
+  ),
 );
 setTimeout(() => process.exit(16), 1_000);
 `.trim();

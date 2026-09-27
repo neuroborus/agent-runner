@@ -852,6 +852,10 @@ test("uses the proved Runner boundary after nested userns denial", async () => {
       /readFileSync\([^;]+\);\n  process\.exit\(18\)/u,
     );
     assert.match(commandProbe, /AGENT_RUNNER_CLAUDE_PROBE_CREDENTIAL/u);
+    assert.match(
+      commandProbe,
+      /finish\(\s*"unix",\s*code,\s*new Set\(\["EACCES", "ECONNREFUSED", "ENOENT", "EPERM"\]\),\s*\)/u,
+    );
   }
 
   await fixture.adapter.run(request());
