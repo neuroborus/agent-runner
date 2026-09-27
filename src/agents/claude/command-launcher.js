@@ -8,7 +8,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export const CLAUDE_COMMAND_LAUNCHER_TOKEN =
@@ -42,29 +42,39 @@ async function resolveExecutable(binary, environment) {
   throw new Error("Claude command isolation executable is unavailable.");
 }
 
+async function claudeIncidentalWritablePaths(environment) {
+  const homeDirectory =
+    typeof environment.HOME === "string" && isAbsolute(environment.HOME)
+      ? environment.HOME
+      : homedir();
+  const candidates = [
+    "/tmp/claude",
+    "/private/tmp/claude",
+    join(homeDirectory, ".npm/_logs"),
+    join(homeDirectory, ".claude/debug"),
+  ];
+  const paths = new Set(candidates.map((path) => resolve(path)));
+  for (const path of candidates) {
+    try {
+      paths.add(await realpath(path));
+    } catch {
+      // Claude omits missing default write paths from its bubblewrap arguments.
+    }
+  }
+  return [...paths];
+}
+
 function runnerBoundaryArguments({
   access,
   cwd,
   gitDirectories,
   hiddenDirectory,
-  unsetEnvironmentNames,
 }) {
-  const argumentsList = [
-    "--new-session",
-    "--die-with-parent",
-    "--unshare-user",
-    "--unshare-pid",
-    "--unshare-net",
-    "--as-pid-1",
-    "--ro-bind",
-    "/",
-    "/",
-    "--dev",
-    "/dev",
-    "--proc",
-    "/proc",
+  const filesystemArguments = [
     "--tmpfs",
     "/tmp",
+    "--dir",
+    "/tmp/claude",
     "--tmpfs",
     "/run",
   ];
@@ -73,41 +83,330 @@ function runnerBoundaryArguments({
     !containsPath("/run", hiddenDirectory) &&
     !containsPath("/dev", hiddenDirectory)
   ) {
-    argumentsList.push("--tmpfs", hiddenDirectory);
+    filesystemArguments.push("--tmpfs", hiddenDirectory);
   }
-  argumentsList.push(
+  filesystemArguments.push(
     access === "workspace-write" ? "--bind" : "--ro-bind",
     cwd,
     cwd,
   );
+  const finalArguments = ["--as-pid-1", "--cap-drop", "ALL", "--proc", "/proc"];
   for (const gitDirectory of new Set(gitDirectories)) {
-    argumentsList.push("--ro-bind", gitDirectory, gitDirectory);
+    finalArguments.push("--ro-bind", gitDirectory, gitDirectory);
   }
-  for (const name of new Set([
-    CLAUDE_COMMAND_LAUNCHER_TOKEN,
-    ...unsetEnvironmentNames,
-  ])) {
-    argumentsList.push("--unsetenv", name);
-  }
-  argumentsList.push("--chdir", cwd);
-  return argumentsList;
+  return { filesystemArguments, finalArguments };
 }
 
-function launcherSource({ argumentsList, bubblewrapBinary, token }) {
+function launcherSource({
+  access,
+  bubblewrapBinary,
+  canonicalCwd,
+  canonicalGitDirectories,
+  canonicalTemporaryRoot,
+  claudeWritablePaths,
+  cwd,
+  filesystemArguments,
+  finalArguments,
+  gitDirectories,
+  hiddenDirectory,
+  token,
+  unsetEnvironmentNames,
+}) {
   return `#!${process.execPath}
 const { spawnSync } = require("node:child_process");
+const { lstatSync, readdirSync, realpathSync } = require("node:fs");
+const {
+  basename,
+  dirname,
+  isAbsolute,
+  relative,
+  resolve,
+  sep,
+} = require("node:path");
 
 const tokenName = ${JSON.stringify(CLAUDE_COMMAND_LAUNCHER_TOKEN)};
 if (process.env[tokenName] !== ${JSON.stringify(token)}) process.exit(125);
+const access = ${JSON.stringify(access)};
+const cwd = ${JSON.stringify(cwd)};
+const canonicalCwd = ${JSON.stringify(canonicalCwd)};
+const canonicalGitDirectories = ${JSON.stringify(canonicalGitDirectories)};
+const canonicalTemporaryRoot = ${JSON.stringify(canonicalTemporaryRoot)};
+const claudeWritablePaths = new Set(${JSON.stringify(claudeWritablePaths)});
+const hiddenDirectory = ${JSON.stringify(hiddenDirectory)};
+const gitDirectories = new Set(
+  ${JSON.stringify([...new Set(gitDirectories)])},
+);
+const protectedEnvironmentNames = new Set(${JSON.stringify([
+    CLAUDE_COMMAND_LAUNCHER_TOKEN,
+    ...unsetEnvironmentNames,
+  ])});
+const sourceArguments = process.argv.slice(2);
+const validatedArguments = [];
+const presentUnsetEnvironmentNames = [];
+const environmentOperations = new Set();
+const privateWorkspaceMasks = new Map();
+const readOnlyWorkspacePaths = new Set();
+let index = 0;
+
+function fail() {
+  process.exit(125);
+}
+function take(expected) {
+  if (sourceArguments[index] !== expected) fail();
+  validatedArguments.push(sourceArguments[index]);
+  index += 1;
+}
+function takeValue() {
+  const value = sourceArguments[index];
+  if (typeof value !== "string" || value.includes("\\0")) {
+    fail();
+  }
+  index += 1;
+  return value;
+}
+function validEnvironmentName(name) {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name);
+}
+function validPath(path) {
+  return isAbsolute(path) && resolve(path) === path;
+}
+function containsPath(parent, child) {
+  const path = relative(parent, child);
+  return path === "" || (path !== ".." && !path.startsWith(".." + sep));
+}
+function canonicalPath(path) {
+  let candidate = path;
+  const missing = [];
+  while (true) {
+    try {
+      const metadata = lstatSync(candidate);
+      if (missing.length > 0 && !metadata.isDirectory()) fail();
+      return resolve(realpathSync(candidate), ...missing);
+    } catch (cause) {
+      if (!["ENOENT", "ENOTDIR"].includes(cause?.code)) fail();
+      const parent = dirname(candidate);
+      if (parent === candidate) fail();
+      missing.unshift(basename(candidate));
+      candidate = parent;
+    }
+  }
+}
+function validClaudeEmptyMask(path) {
+  try {
+    const metadata = lstatSync(path);
+    const canonical = realpathSync(path);
+    return (
+      metadata.isDirectory() &&
+      !metadata.isSymbolicLink() &&
+      (process.getuid === undefined || metadata.uid === process.getuid()) &&
+      (metadata.mode & 0o077) === 0 &&
+      basename(path).startsWith("claude-empty-") &&
+      canonical !== canonicalTemporaryRoot &&
+      containsPath(canonicalTemporaryRoot, canonical) &&
+      readdirSync(path).length === 0
+    );
+  } catch {
+    return false;
+  }
+}
+function pathKind(path) {
+  try {
+    return lstatSync(path).isDirectory() ? "directory" : "file";
+  } catch (cause) {
+    if (["ENOENT", "ENOTDIR"].includes(cause?.code)) return "missing";
+    fail();
+  }
+}
+
+take("--new-session");
+take("--die-with-parent");
+while (["--unsetenv", "--setenv"].includes(sourceArguments[index])) {
+  const operation = sourceArguments[index];
+  validatedArguments.push(operation);
+  index += 1;
+  const name = takeValue();
+  if (!validEnvironmentName(name) || environmentOperations.has(name)) fail();
+  environmentOperations.add(name);
+  validatedArguments.push(name);
+  if (operation === "--unsetenv") {
+    presentUnsetEnvironmentNames.push(name);
+  } else {
+    if (protectedEnvironmentNames.has(name)) fail();
+    validatedArguments.push(takeValue());
+  }
+}
+take("--unshare-net");
+take("--ro-bind");
+take("/");
+take("/");
+validatedArguments.push(...${JSON.stringify(filesystemArguments)});
+while (["--bind", "--ro-bind", "--tmpfs"].includes(sourceArguments[index])) {
+  const operation = sourceArguments[index];
+  index += 1;
+  if (operation === "--tmpfs") {
+    const path = takeValue();
+    if (!["/tmp", "/run"].includes(path)) fail();
+    continue;
+  }
+  const source = takeValue();
+  const destination = takeValue();
+  if (!validPath(source) || !validPath(destination)) fail();
+  const runnerWorkspaceMount =
+    operation ===
+      (access === "workspace-write" ? "--bind" : "--ro-bind") &&
+    source === cwd &&
+    destination === cwd;
+  const runnerGitMount =
+    operation === "--ro-bind" &&
+    source === destination &&
+    gitDirectories.has(destination);
+  const discardedClaudeWriteMount =
+    operation === "--bind" &&
+    source === destination &&
+    claudeWritablePaths.has(destination);
+  if (
+    !runnerWorkspaceMount &&
+    !runnerGitMount &&
+    !discardedClaudeWriteMount
+  ) {
+    if (source === destination && pathKind(source) === "missing") fail();
+    const canonicalDestination = canonicalPath(destination);
+    if (operation === "--bind") {
+      if (access !== "workspace-write" || source !== destination) fail();
+      if (
+        !containsPath(canonicalCwd, canonicalDestination) ||
+        canonicalGitDirectories.some((path) =>
+          containsPath(path, canonicalDestination),
+        ) ||
+        [...readOnlyWorkspacePaths].some(
+          (path) =>
+            containsPath(path, canonicalDestination) ||
+            containsPath(canonicalDestination, path),
+        )
+      ) fail();
+    } else {
+      const withinWorkspace = containsPath(
+        canonicalCwd,
+        canonicalDestination,
+      );
+      const withinGit = canonicalGitDirectories.some((path) =>
+        containsPath(path, canonicalDestination),
+      );
+      const emptyMask =
+        source !== destination && validClaudeEmptyMask(source);
+      const safeMask =
+        source !== destination &&
+        (source === "/dev/null" || emptyMask);
+      const maskKind = emptyMask
+        ? "directory"
+        : source === "/dev/null"
+          ? "file"
+          : undefined;
+      const maskIdentity =
+        maskKind === undefined
+          ? undefined
+          : JSON.stringify([maskKind, destination]);
+      if (withinGit) {
+        if (source !== destination && !safeMask) fail();
+        continue;
+      }
+      if (withinWorkspace) {
+        const overlapsPrivateMask = [...privateWorkspaceMasks.keys()].some(
+          (path) =>
+            containsPath(path, canonicalDestination) ||
+            containsPath(canonicalDestination, path),
+        );
+        const existingMaskIdentity = privateWorkspaceMasks.get(
+          canonicalDestination,
+        );
+        if (
+          access !== "workspace-write" ||
+          canonicalDestination === canonicalCwd ||
+          (source !== destination && !safeMask) ||
+          (emptyMask && pathKind(destination) === "file") ||
+          (source === "/dev/null" &&
+            pathKind(destination) === "directory") ||
+          (overlapsPrivateMask &&
+            !(safeMask && existingMaskIdentity === maskIdentity))
+        ) fail();
+        readOnlyWorkspacePaths.add(canonicalDestination);
+        if (emptyMask) {
+          if (existingMaskIdentity === undefined) {
+            privateWorkspaceMasks.set(canonicalDestination, maskIdentity);
+            validatedArguments.push(
+              "--tmpfs",
+              destination,
+              "--remount-ro",
+              destination,
+            );
+          }
+          continue;
+        }
+        if (source === "/dev/null") {
+          if (existingMaskIdentity !== undefined) continue;
+          privateWorkspaceMasks.set(canonicalDestination, maskIdentity);
+        }
+      } else if (source !== destination) {
+        fail();
+      }
+      if (
+        access === "workspace-write" &&
+        containsPath(canonicalDestination, canonicalCwd)
+      ) fail();
+      if (
+        !withinWorkspace &&
+        ["/dev", "/proc", "/run", "/tmp", hiddenDirectory].some(
+          (path) =>
+            containsPath(path, destination) ||
+            containsPath(path, canonicalDestination) ||
+            containsPath(destination, path) ||
+            containsPath(canonicalDestination, path),
+        )
+      ) fail();
+    }
+    validatedArguments.push(operation, source, destination);
+  }
+}
+take("--dev");
+take("/dev");
+take("--unshare-pid");
+take("--unshare-user");
+if (
+  sourceArguments[index] !== "--bind" ||
+  sourceArguments[index + 1] !== "/proc" ||
+  sourceArguments[index + 2] !== "/proc"
+) fail();
+index += 3;
+if (sourceArguments[index] !== "--") fail();
+index += 1;
+const shell = takeValue();
+const shellOption = takeValue();
+const payload = takeValue();
+if (
+  !validPath(shell) ||
+  shellOption !== "-c" ||
+  index !== sourceArguments.length
+) {
+  fail();
+}
+
 const environment = { ...process.env };
-delete environment[tokenName];
+for (const name of protectedEnvironmentNames) delete environment[name];
+const missingUnsetArguments = [...protectedEnvironmentNames]
+  .filter((name) => !presentUnsetEnvironmentNames.includes(name))
+  .flatMap((name) => ["--unsetenv", name]);
 const result = spawnSync(
   ${JSON.stringify(bubblewrapBinary)},
   [
-    ...${JSON.stringify(argumentsList)},
+    ...validatedArguments,
+    ...${JSON.stringify(finalArguments)},
+    ...missingUnsetArguments,
+    "--chdir",
+    cwd,
     "--",
-    ${JSON.stringify(bubblewrapBinary)},
-    ...process.argv.slice(2),
+    shell,
+    shellOption,
+    payload,
   ],
   { env: environment, stdio: "inherit" },
 );
@@ -127,9 +426,13 @@ export async function createClaudeCommandLauncher({
   let launcherDirectory;
   try {
     const temporaryRoot = await realpath(tmpdir());
-    const protectedRoots = await Promise.all(
-      [...new Set([cwd, ...gitDirectories])].map((path) => realpath(path)),
+    const canonicalCwd = await realpath(cwd);
+    const canonicalGitDirectories = await Promise.all(
+      [...new Set(gitDirectories)].map((path) => realpath(path)),
     );
+    const claudeWritablePaths =
+      await claudeIncidentalWritablePaths(environment);
+    const protectedRoots = [canonicalCwd, ...canonicalGitDirectories];
     if (protectedRoots.some((path) => containsPath(path, temporaryRoot))) {
       throw new Error("Claude command launcher temporary root is unsafe.");
     }
@@ -150,20 +453,29 @@ export async function createClaudeCommandLauncher({
     const path = join(launcherDirectory, "bwrap");
     const packagePath = join(launcherDirectory, "package.json");
     const token = randomUUID();
-    const argumentsList = runnerBoundaryArguments({
+    const { filesystemArguments, finalArguments } = runnerBoundaryArguments({
       access,
       cwd,
       gitDirectories,
       hiddenDirectory: launcherDirectory,
-      unsetEnvironmentNames,
     });
     await Promise.all([
       writeFile(
         path,
         launcherSource({
-          argumentsList,
+          access,
           bubblewrapBinary: resolvedBubblewrapBinary,
+          canonicalCwd,
+          canonicalGitDirectories,
+          canonicalTemporaryRoot: temporaryRoot,
+          claudeWritablePaths,
+          cwd,
+          filesystemArguments,
+          finalArguments,
+          gitDirectories,
+          hiddenDirectory: launcherDirectory,
           token,
+          unsetEnvironmentNames,
         }),
         { mode: 0o500 },
       ),

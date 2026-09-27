@@ -62,3 +62,12 @@ finalization. Keep the ordinary gate as `npm run check`.
 Live provider tests remain opt-in as described in the repository README. Normal
 tests never consume model turns. Repeated full-suite runs require a specific
 unresolved risk, not a ritual.
+
+Claude restricted-host launcher changes use deterministic public-adapter tests
+with a controlled fake bubblewrap for the commit gate. That coverage must prove
+the single real-binary invocation, provider connectivity, argument rejection
+before payload execution, and the complete command-isolation argument contract.
+It does not replace post-install acceptance: after the finalized commit is
+installed, the supervising agent starts a fresh real Claude lazy
+plan-authoring run and requires successful preflight plus a provider response
+before dependent provider work continues.

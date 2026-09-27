@@ -412,12 +412,16 @@ the full native policy for each required access mode. Only a recognized
 nested-user-namespace denial permits its Runner boundary with private user,
 PID, mount, network, `/proc`, `/tmp`, and `/run` isolation. The Claude CLI and
 provider connection remain outside that boundary; a provider-private launcher
-applies it only to model-issued commands. The fallback is selected and
+applies it only to model-issued commands. That launcher accepts only the
+supported authenticated Claude bubblewrap invocation, strengthens it, and
+executes the pinned real binary once; malformed, weakened, or unsupported
+arguments fail before command execution. The fallback is selected and
 fingerprinted only after its direct model-free probe exercises that same
-launcher and access-aware command topology. It also requires Claude's
+validation and access-aware execution path. It also requires Claude's
 spawning-parent policy option so the real turn is bound to the proved launcher;
-it does not retry Claude's native `apply-seccomp` path. A generic failure or
-incomplete access, launcher, or cleanup proof remains
+Claude's embedded `apply-seccomp` guard remains inside the validated payload to
+block host pathname Unix sockets without creating another namespace. A generic
+failure or incomplete access, argument, launcher, or cleanup proof remains
 `ERR_UNSUPPORTED_BACKEND` with a bounded access-mode diagnosis. Resume must
 reproduce the saved receipt. If it cannot, preserve the run and repair the
 installed Claude, bubblewrap, or host environment instead of editing durable

@@ -317,18 +317,22 @@ commit access. It prefers the full native sandbox and considers the restricted
 host fallback only after the exact effective probe identifies the known nested
 user-namespace denial. The fallback leaves the Claude CLI, credentials, and
 provider network path outside the isolation boundary. Its direct model-free
-probe exercises the same provider-private launcher and outer arguments that
-wrap each model-issued command with user, PID, mount, and network isolation,
-private `/proc`, `/tmp`, and `/run`, a read-only host root, access-specific
-workspace writes, and read-only Git metadata. The launcher and its containing
-directory are non-writable during the turn, and it pins the canonical host
-`bwrap` executable rather than resolving it through a workspace-writable path.
-The outer proof denies IP and host Unix sockets, inherited credentials and host
-provider-proc access, remote writes, Git metadata, and outside writes without
-invoking Claude's native `apply-seccomp` path again. Only that proved command
-boundary enables weaker native nesting and skips the redundant inner
-Unix-socket seccomp layer; native policy stays strict. Any failed or incomplete
-proof, launcher failure, or cleanup leaves that access mode unavailable. The
-bounded selected-policy receipt distinguishes the corrected fallback topology
-and remains immutable for the run; resume or reconstruction fails closed if
-the provider's policy proof drifts.
+probe exercises the same provider-private launcher validation and execution
+path used by each model-issued command. The launcher accepts only the supported
+Claude bubblewrap grammar, rejects malformed or weakened input before spawning,
+and strengthens the validated invocation into one user, PID, mount, and network
+boundary with private `/proc`, `/tmp`, and `/run`, a read-only host root,
+access-specific workspace writes, and read-only Git metadata. Its file and
+containing directory are non-writable during the turn, and it pins the
+canonical host `bwrap` executable rather than resolving it through a
+workspace-writable path. The proof denies IP and host Unix sockets, inherited
+credentials and host provider-proc access, remote writes, Git metadata, and
+outside writes. Claude's embedded `apply-seccomp` guard remains inside the
+validated shell payload to block pathname Unix sockets without adding a second
+namespace; that payload crosses exactly one bubblewrap boundary. Native policy
+stays strict; the [architecture contract](../ARCHITECTURE.md) owns the exact
+launcher grammar and strengthening mechanics. Any failed or incomplete proof,
+argument rejection, launcher failure, or cleanup leaves that access mode
+unavailable. The bounded selected-policy receipt distinguishes the
+single-boundary topology and remains immutable for the run; resume or
+reconstruction fails closed if the provider's policy proof drifts.

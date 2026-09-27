@@ -8,7 +8,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { delimiter, join, parse } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
@@ -38,6 +38,7 @@ const SOURCE_SESSION = "11111111-1111-4111-8111-111111111111";
 const CHILD_SESSION = "22222222-2222-4222-8222-222222222222";
 const FRESH_SESSION = "33333333-3333-4333-8333-333333333333";
 const COMMAND_LAUNCHER_TOKEN = "AGENT_RUNNER_CLAUDE_COMMAND_LAUNCHER_TOKEN";
+const CLAUDE_LOG_PATH = join(homedir(), ".npm/_logs");
 const executeFile = promisify(executeFileCallback);
 const HELP = [
   "--append-system-prompt",
@@ -144,7 +145,15 @@ function isolationProbeScripts(argumentsList) {
   const scriptIndexes = argumentsList.flatMap((value, index) =>
     value === "-e" ? [index + 1] : [],
   );
-  return scriptIndexes.map((index) => argumentsList[index]);
+  return [
+    ...scriptIndexes.map((index) => argumentsList[index]),
+    ...argumentsList.filter(
+      (argument) =>
+        typeof argument === "string" &&
+        argument.includes("agent-runner-claude-isolation-ok") &&
+        !scriptIndexes.some((index) => argumentsList[index] === argument),
+    ),
+  ];
 }
 
 function localCommitSandboxCalls(fixture) {
@@ -157,6 +166,67 @@ function claudeArguments({ file, argumentsList }) {
   return file === "claude" ? argumentsList : null;
 }
 
+function fallbackAccess(argumentsList) {
+  return ["read-only", "workspace-write", "local-commit"].find((access) =>
+    argumentsList.some(
+      (argument) =>
+        typeof argument === "string" && argument.includes(`'${access}'`),
+    ),
+  );
+}
+
+function claudeBubblewrapArguments({ access, emptyMaskPath, payload }) {
+  const argumentsList = [
+    "--new-session",
+    "--die-with-parent",
+    "--unsetenv",
+    "ANTHROPIC_API_KEY",
+    "--unshare-net",
+    "--ro-bind",
+    "/",
+    "/",
+  ];
+  if (access === "workspace-write") {
+    argumentsList.push("--bind", PROJECT_PATH, PROJECT_PATH);
+  }
+  argumentsList.push(
+    "--bind",
+    CLAUDE_LOG_PATH,
+    CLAUDE_LOG_PATH,
+    "--ro-bind",
+    `${PROJECT_PATH}/.git`,
+    `${PROJECT_PATH}/.git`,
+    ...(access !== "workspace-write"
+      ? []
+      : [
+          "--ro-bind",
+          `${PROJECT_PATH}/.git/config`,
+          `${PROJECT_PATH}/.git/config`,
+          "--ro-bind",
+          "/dev/null",
+          `${PROJECT_PATH}/.mcp.json`,
+          "--ro-bind",
+          `${PROJECT_PATH}/package.json`,
+          `${PROJECT_PATH}/package.json`,
+          ...(emptyMaskPath === undefined
+            ? []
+            : ["--ro-bind", emptyMaskPath, `${PROJECT_PATH}/.claude`]),
+        ]),
+    "--dev",
+    "/dev",
+    "--unshare-pid",
+    "--unshare-user",
+    "--bind",
+    "/proc",
+    "/proc",
+    "--",
+    "/bin/sh",
+    "-c",
+    payload,
+  );
+  return argumentsList;
+}
+
 async function createFakeBubblewrap(t) {
   const directory = await mkdtemp(
     join(tmpdir(), "agent-runner-fake-claude-bwrap-"),
@@ -166,11 +236,20 @@ async function createFakeBubblewrap(t) {
     writeFile(
       join(directory, "bwrap"),
       `#!${process.execPath}\n` +
+        `const { spawnSync } = require("node:child_process");\n` +
         `const { appendFileSync, writeSync } = require("node:fs");\n` +
-        `if (process.env.${COMMAND_LAUNCHER_TOKEN} !== undefined) ` +
+        `if (process.env.${COMMAND_LAUNCHER_TOKEN} !== undefined || ` +
+        `process.env.ANTHROPIC_API_KEY !== undefined || ` +
+        `process.env.AGENT_RUNNER_CLAUDE_PROBE_CREDENTIAL !== undefined) ` +
         `process.exit(12);\n` +
-        `appendFileSync(process.env.AGENT_RUNNER_FAKE_BWRAP_LOG, ` +
-        `JSON.stringify(process.argv.slice(2)) + "\\n");\n` +
+        `const args = process.argv.slice(2);\n` +
+        `appendFileSync(process.env.AGENT_RUNNER_FAKE_BWRAP_LOG, JSON.stringify(args) + "\\n");\n` +
+        `if (process.env.AGENT_RUNNER_FAKE_BWRAP_EXECUTE_PAYLOAD === "1") {\n` +
+        `  const separator = args.indexOf("--");\n` +
+        `  const result = spawnSync(args[separator + 1], args.slice(separator + 2), ` +
+        `{ env: process.env, stdio: "inherit" });\n` +
+        `  process.exit(result.status ?? 125);\n` +
+        `}\n` +
         `writeSync(1, "agent-runner-claude-isolation-ok");\n`,
       { mode: 0o700 },
     ),
@@ -284,16 +363,11 @@ function createFixture({
             : "bwrap: Creating new namespace failed: Operation not permitted host-secret-value";
         throw error;
       }
-      const fallbackAccess = [
-        "read-only",
-        "workspace-write",
-        "local-commit",
-      ].find((access) => argumentsList.includes(access));
+      const access = fallbackAccess(argumentsList);
       if (
         !isNativeSandboxProbe(call) &&
         (fallbackSandbox === false ||
-          (Array.isArray(fallbackSandbox) &&
-            !fallbackSandbox.includes(fallbackAccess)))
+          (Array.isArray(fallbackSandbox) && !fallbackSandbox.includes(access)))
       ) {
         throw new Error("Fallback unavailable host-secret-value");
       }
@@ -852,6 +926,9 @@ test("keeps native-turn and local-commit isolation proofs independent", async ()
 
 test("isolates fallback commands without blocking Claude transport", async (t) => {
   const fakeBubblewrap = await createFakeBubblewrap(t);
+  const emptyMaskPath = await mkdtemp(join(tmpdir(), "claude-empty-"));
+  await chmod(emptyMaskPath, 0o700);
+  t.after(() => rm(emptyMaskPath, { force: true, recursive: true }));
   const providerPath = `${fakeBubblewrap.directory}${delimiter}${process.env.PATH ?? ""}`;
   const fixture = createFixture({
     env: {
@@ -867,9 +944,16 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
       const managedSettings = JSON.parse(
         option(call.argumentsList, "--managed-settings"),
       );
+      const access = ["read-only", "workspace-write", "local-commit"][
+        turnIndex
+      ];
       await executeFile(
         managedSettings.sandbox.bwrapPath,
-        ["--model-command", String(turnIndex)],
+        claudeBubblewrapArguments({
+          access,
+          emptyMaskPath,
+          payload: `apply-seccomp model-command ${turnIndex}`,
+        }),
         {
           encoding: "utf8",
           env: call.options.env,
@@ -916,11 +1000,7 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
   assert.equal(fixture.socketServers.length, 3);
   assert.ok(fixture.socketServers.every(({ closed }) => closed));
   assert.deepEqual(
-    fallbackProbes.map(({ argumentsList }) => {
-      return ["read-only", "workspace-write", "local-commit"].find((access) =>
-        argumentsList.includes(access),
-      );
-    }),
+    fallbackProbes.map(({ argumentsList }) => fallbackAccess(argumentsList)),
     ["read-only", "workspace-write", "local-commit"],
   );
   const provedBoundaries = (await readFile(fakeBubblewrap.logPath, "utf8"))
@@ -931,27 +1011,36 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
   for (const [index, call] of fallbackProbes.entries()) {
     const { argumentsList } = call;
     const access = ["read-only", "workspace-write", "local-commit"][index];
-    const accessIndex = argumentsList.lastIndexOf(access);
-    const workspaceDirectory = option(argumentsList, "--chdir");
-    const gitDirectory = argumentsList[accessIndex + 1];
-    const socketName = argumentsList[accessIndex + 3];
     const boundaryArguments = provedBoundaries[index];
     const commandIndex = boundaryArguments.indexOf("--");
+    const workspaceDirectory = option(boundaryArguments, "--chdir");
+    const gitDirectory = join(workspaceDirectory, ".git");
+    const socketPath = join(workspaceDirectory, "host.sock");
     assert.equal(call.file, call.commandLauncherPath);
     assert.equal(
       call.options.env.PATH.split(delimiter)[0],
       fakeBubblewrap.directory,
     );
-    assert.match(socketName, /^agent-runner-claude-policy-/u);
+    assert.ok(argumentsList.at(-1).includes(`'${socketPath}'`));
+    assert.ok(
+      includesSequence(boundaryArguments, [
+        "--setenv",
+        "ARGV0",
+        "apply-seccomp",
+      ]),
+    );
     assert.ok(boundaryArguments.indexOf("--unshare-user") !== -1);
     assert.ok(
-      boundaryArguments.indexOf("--unshare-user") <
-        boundaryArguments.indexOf("--unshare-pid"),
+      boundaryArguments.indexOf("--unshare-pid") <
+        boundaryArguments.indexOf("--unshare-user"),
     );
     assert.ok(boundaryArguments.includes("--unshare-net"));
+    assert.ok(boundaryArguments.includes("--as-pid-1"));
+    assert.ok(includesSequence(boundaryArguments, ["--cap-drop", "ALL"]));
     assert.ok(includesSequence(boundaryArguments, ["--ro-bind", "/", "/"]));
     assert.ok(includesSequence(boundaryArguments, ["--proc", "/proc"]));
     assert.ok(includesSequence(boundaryArguments, ["--tmpfs", "/tmp"]));
+    assert.ok(includesSequence(boundaryArguments, ["--dir", "/tmp/claude"]));
     assert.ok(includesSequence(boundaryArguments, ["--tmpfs", "/run"]));
     assert.ok(
       includesSequence(boundaryArguments, [
@@ -992,18 +1081,40 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
       ]),
     );
     assert.equal(
-      boundaryArguments[commandIndex + 1],
-      join(fakeBubblewrap.directory, "bwrap"),
+      includesSequence(boundaryArguments, [
+        "--bind",
+        "/tmp/claude",
+        "/tmp/claude",
+      ]),
+      false,
     );
-    assert.deepEqual(boundaryArguments.slice(commandIndex + 2), argumentsList);
+    assert.equal(
+      includesSequence(boundaryArguments, [
+        "--tmpfs",
+        join(workspaceDirectory, ".claude"),
+        "--remount-ro",
+        join(workspaceDirectory, ".claude"),
+      ]),
+      access === "workspace-write",
+    );
+    assert.deepEqual(boundaryArguments.slice(commandIndex + 1, -1), [
+      "/bin/sh",
+      "-c",
+    ]);
+    assert.equal(boundaryArguments.at(-1), argumentsList.at(-1));
+    assert.equal(
+      boundaryArguments.filter(
+        (argument) => argument === join(fakeBubblewrap.directory, "bwrap"),
+      ).length,
+      0,
+    );
     assert.equal(call.commandLauncherDirectoryMode, 0o500);
     assert.equal(call.commandLauncherFileMode, 0o500);
-    assert.equal(
+    assert.ok(
       argumentsList.some(
         (argument) =>
           typeof argument === "string" && argument.includes("apply-seccomp"),
       ),
-      false,
     );
     const [commandProbe] = isolationProbeScripts(argumentsList);
     assert.match(commandProbe, /readFileSync/u);
@@ -1013,9 +1124,12 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
       /readFileSync\([^;]+\);\n  process\.exit\(18\)/u,
     );
     assert.match(commandProbe, /AGENT_RUNNER_CLAUDE_PROBE_CREDENTIAL/u);
+    assert.match(commandProbe, /statSync\("\.claude"\)\.isDirectory/u);
+    assert.match(commandProbe, /\.claude\/mask-probe/u);
+    assert.match(commandProbe, /statSync\(socketPath\)\.isSocket/u);
     assert.match(
       commandProbe,
-      /finish\(\s*"unix",\s*code,\s*new Set\(\["EACCES", "ECONNREFUSED", "ENOENT", "EPERM"\]\),\s*\)/u,
+      /finish\("unix", code, new Set\(\["EACCES", "EPERM"\]\)\)/u,
     );
     assert.match(commandProbe, /AGENT_RUNNER_CLAUDE_COMMAND_LAUNCHER_TOKEN/u);
   }
@@ -1069,7 +1183,7 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
     assert.equal(call.commandLauncherDirectoryMode, 0o500);
     assert.equal(call.commandLauncherFileMode, 0o500);
     assert.equal(sandbox.enableWeakerNestedSandbox, true);
-    assert.equal(sandbox.network.allowAllUnixSockets, true);
+    assert.equal(sandbox.network.allowAllUnixSockets, false);
     assert.deepEqual(sandbox.network.deniedDomains, ["*"]);
     assert.deepEqual(
       sandbox.credentials.envVars.find(
@@ -1088,6 +1202,7 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
     assert.ok(boundaryArguments.includes("--unshare-net"));
     assert.ok(includesSequence(boundaryArguments, ["--proc", "/proc"]));
     assert.ok(includesSequence(boundaryArguments, ["--tmpfs", "/tmp"]));
+    assert.ok(includesSequence(boundaryArguments, ["--dir", "/tmp/claude"]));
     assert.ok(includesSequence(boundaryArguments, ["--tmpfs", "/run"]));
     assert.ok(includesSequence(boundaryArguments, ["--ro-bind", "/", "/"]));
     assert.ok(
@@ -1113,19 +1228,296 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
         `${PROJECT_PATH}/.git`,
       ]),
     );
+    assert.equal(
+      includesSequence(boundaryArguments, [
+        "--ro-bind",
+        `${PROJECT_PATH}/.git/config`,
+        `${PROJECT_PATH}/.git/config`,
+      ]),
+      false,
+    );
+    assert.equal(
+      includesSequence(boundaryArguments, [
+        "--ro-bind",
+        "/dev/null",
+        `${PROJECT_PATH}/.mcp.json`,
+      ]),
+      index === 1,
+    );
+    assert.equal(
+      includesSequence(boundaryArguments, [
+        "--ro-bind",
+        `${PROJECT_PATH}/package.json`,
+        `${PROJECT_PATH}/package.json`,
+      ]),
+      index === 1,
+    );
+    assert.equal(
+      includesSequence(boundaryArguments, [
+        "--ro-bind",
+        emptyMaskPath,
+        `${PROJECT_PATH}/.claude`,
+      ]),
+      false,
+    );
+    assert.equal(
+      includesSequence(boundaryArguments, [
+        "--tmpfs",
+        `${PROJECT_PATH}/.claude`,
+        "--remount-ro",
+        `${PROJECT_PATH}/.claude`,
+      ]),
+      index === 1,
+    );
+    assert.equal(
+      includesSequence(boundaryArguments, [
+        "--bind",
+        CLAUDE_LOG_PATH,
+        CLAUDE_LOG_PATH,
+      ]),
+      false,
+    );
     assert.deepEqual(boundaryArguments.slice(commandIndex + 1), [
-      join(fakeBubblewrap.directory, "bwrap"),
-      "--model-command",
-      String(index),
+      "/bin/sh",
+      "-c",
+      `apply-seccomp model-command ${index}`,
     ]);
   }
   const settings = JSON.parse(option(turn.argumentsList, "--settings"));
   assert.equal(settings.sandbox.enableWeakerNestedSandbox, true);
   assert.equal(settings.sandbox.failIfUnavailable, true);
-  assert.equal(settings.sandbox.network.allowAllUnixSockets, true);
+  assert.equal(settings.sandbox.network.allowAllUnixSockets, false);
   assert.deepEqual(settings.sandbox.network.deniedDomains, ["*"]);
   assert.equal(option(turns[1].argumentsList, "--permission-mode"), "auto");
   assert.equal(option(turns[2].argumentsList, "--permission-mode"), "plan");
+});
+
+test("rejects unauthenticated and invalid fallback arguments before execution", async (t) => {
+  const fakeBubblewrap = await createFakeBubblewrap(t);
+  const emptyMaskPath = await mkdtemp(join(tmpdir(), "claude-empty-"));
+  await chmod(emptyMaskPath, 0o700);
+  const markerDirectory = await mkdtemp(
+    join(tmpdir(), "agent-runner-claude-rejected-command-"),
+  );
+  t.after(() => rm(emptyMaskPath, { force: true, recursive: true }));
+  t.after(() => rm(markerDirectory, { force: true, recursive: true }));
+  const cases = [
+    {
+      name: "unauthenticated",
+      transform({ environment }) {
+        delete environment[COMMAND_LAUNCHER_TOKEN];
+      },
+    },
+    {
+      name: "writable-root",
+      transform({ argumentsList }) {
+        argumentsList[argumentsList.indexOf("--ro-bind")] = "--bind";
+      },
+    },
+    {
+      name: "conflicting-environment",
+      transform({ argumentsList }) {
+        argumentsList.splice(4, 0, "--unsetenv", "ANTHROPIC_API_KEY");
+      },
+    },
+    {
+      name: "protected-environment-assignment",
+      transform({ argumentsList }) {
+        argumentsList[2] = "--setenv";
+        argumentsList.splice(4, 0, "restored-provider-token");
+      },
+    },
+    {
+      name: "unsupported-option",
+      transform({ argumentsList }) {
+        argumentsList[argumentsList.indexOf("--unshare-net")] = "--share-net";
+      },
+    },
+    {
+      access: "workspace-write",
+      name: "conflicting-workspace-access",
+      transform({ argumentsList }) {
+        const workspaceParent = parse(PROJECT_PATH).dir;
+        argumentsList.splice(
+          argumentsList.indexOf("--dev"),
+          0,
+          "--ro-bind",
+          workspaceParent,
+          workspaceParent,
+        );
+      },
+    },
+    {
+      access: "workspace-write",
+      name: "unexpected-outside-write",
+      transform({ argumentsList }) {
+        const workspaceParent = parse(PROJECT_PATH).dir;
+        argumentsList.splice(
+          argumentsList.indexOf("--dev"),
+          0,
+          "--bind",
+          workspaceParent,
+          workspaceParent,
+        );
+      },
+    },
+    {
+      access: "workspace-write",
+      name: "weakened-workspace-mask",
+      transform({ argumentsList }) {
+        const maskedPath = `${PROJECT_PATH}/package.json`;
+        argumentsList.splice(
+          argumentsList.indexOf("--dev"),
+          0,
+          "--bind",
+          maskedPath,
+          maskedPath,
+        );
+      },
+    },
+    {
+      access: "workspace-write",
+      name: "reexposed-private-mask",
+      transform({ argumentsList }) {
+        const maskedPath = `${PROJECT_PATH}/.claude`;
+        argumentsList.splice(
+          argumentsList.indexOf("--dev"),
+          0,
+          "--ro-bind",
+          "/dev/null",
+          maskedPath,
+        );
+      },
+    },
+    {
+      access: "workspace-write",
+      name: "reexposed-file-mask",
+      transform({ argumentsList }) {
+        const maskedPath = `${PROJECT_PATH}/README.md`;
+        argumentsList.splice(
+          argumentsList.indexOf("--dev"),
+          0,
+          "--ro-bind",
+          "/dev/null",
+          maskedPath,
+          "--ro-bind",
+          maskedPath,
+          maskedPath,
+        );
+      },
+    },
+    {
+      access: "workspace-write",
+      name: "directory-mask-on-file",
+      transform({ argumentsList }) {
+        const sourceIndex = argumentsList.indexOf(emptyMaskPath);
+        argumentsList[sourceIndex + 1] = `${PROJECT_PATH}/package.json`;
+      },
+    },
+    {
+      name: "private-runtime-rebind",
+      transform({ argumentsList }) {
+        argumentsList.splice(
+          argumentsList.indexOf("--dev"),
+          0,
+          "--ro-bind",
+          "/run",
+          "/run",
+        );
+      },
+    },
+    {
+      name: "private-process-rebind",
+      transform({ argumentsList }) {
+        argumentsList.splice(
+          argumentsList.indexOf("--dev"),
+          0,
+          "--ro-bind",
+          "/proc/self",
+          "/proc/self",
+        );
+      },
+    },
+    {
+      name: "relocated-read-only-bind",
+      transform({ argumentsList }) {
+        argumentsList.splice(
+          argumentsList.indexOf("--dev"),
+          0,
+          "--ro-bind",
+          "/etc",
+          PROJECT_PATH,
+        );
+      },
+    },
+    {
+      name: "unsupported-tmpfs",
+      transform({ argumentsList }) {
+        argumentsList.splice(
+          argumentsList.indexOf("--dev"),
+          0,
+          "--tmpfs",
+          "/var",
+        );
+      },
+    },
+    {
+      name: "extra-payload-argument",
+      transform({ argumentsList }) {
+        argumentsList.push("unsupported");
+      },
+    },
+  ];
+  let caseIndex = 0;
+  const fixture = createFixture({
+    env: {
+      ...process.env,
+      AGENT_RUNNER_FAKE_BWRAP_LOG: fakeBubblewrap.logPath,
+      ANTHROPIC_API_KEY: "provider-token",
+      PATH: `${fakeBubblewrap.directory}${delimiter}${process.env.PATH ?? ""}`,
+    },
+    executeFallbackLauncher: true,
+    handle: async ({ call }) => {
+      if (call.file !== "claude" || !call.argumentsList.includes("-p")) return;
+      const current = cases[caseIndex];
+      caseIndex += 1;
+      const markerPath = join(markerDirectory, current.name);
+      const managedSettings = JSON.parse(
+        option(call.argumentsList, "--managed-settings"),
+      );
+      const argumentsList = claudeBubblewrapArguments({
+        access: current.access ?? "read-only",
+        emptyMaskPath,
+        payload: `printf executed > '${markerPath}'`,
+      });
+      const environment = {
+        ...call.options.env,
+        AGENT_RUNNER_FAKE_BWRAP_EXECUTE_PAYLOAD: "1",
+      };
+      current.transform({ argumentsList, environment });
+      await executeFile(managedSettings.sandbox.bwrapPath, argumentsList, {
+        encoding: "utf8",
+        env: environment,
+        timeout: 10_000,
+      });
+    },
+    nativeSandbox: "nested-denied",
+  });
+
+  assert.equal((await fixture.adapter.probe()).readOnly, true);
+  for (const current of cases) {
+    await assert.rejects(
+      fixture.adapter.run(request({ access: current.access ?? "read-only" })),
+      hasCode("ERR_CLAUDE_PROCESS_INTERRUPTED"),
+    );
+    await assert.rejects(readFile(join(markerDirectory, current.name)), {
+      code: "ENOENT",
+    });
+  }
+  const bubblewrapInvocations = (await readFile(fakeBubblewrap.logPath, "utf8"))
+    .trim()
+    .split("\n");
+  assert.equal(bubblewrapInvocations.length, 3);
 });
 
 test("fails closed when the restricted-host fallback cannot be proved", async (t) => {

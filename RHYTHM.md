@@ -9,16 +9,20 @@ remain in the owning documentation.
 
 - **Claude restricted-host fallback is capability-driven and immutable.** The
   Claude adapter proves read-only, workspace-write, and local-commit isolation
-  independently. It prefers the full native sandbox and enables weak native
-  nesting only after the exact probe recognizes nested-user-namespace denial
-  and a direct model-free probe exercises the same provider-private launcher,
-  outer arguments, and access-aware topology installed for model commands. The
-  Claude CLI retains its host provider transport and credentials. Only command
-  children enter the Runner user, PID, mount, and network boundary with private
+  independently. It prefers the full native sandbox and accepts Claude's weaker
+  parent invocation only after the exact probe recognizes
+  nested-user-namespace denial. The authenticated provider-private launcher
+  validates a closed argument grammar, rejects malformed or weakened input,
+  adds the required isolation constraints, scrubs its token and credentials,
+  and executes the pinned real bubblewrap once with the unchanged payload. The
+  same path handles direct model-free probes and model commands. The Claude CLI
+  retains its host provider transport and credentials; only command children
+  cross the single Runner user, PID, mount, and network boundary with private
   `/proc`, `/tmp`, and `/run`, read-only host and Git views, credential
-  scrubbing, and the requested workspace write authority. The fallback skips
-  the redundant inner Unix-socket seccomp helper only after that outer command
-  boundary proves IP and host-socket isolation; native policy stays strict.
+  scrubbing, and the requested workspace write authority. Claude's embedded
+  seccomp helper stays inside the validated payload to block pathname Unix
+  sockets without creating another namespace boundary; native policy stays
+  strict.
   Common envelope version 13 holds one provider-neutral receipt slot per
   resolved role and persists only a policy fingerprint and supported-access
   list when that role is required; the fingerprint distinguishes this

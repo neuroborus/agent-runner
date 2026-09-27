@@ -1210,21 +1210,27 @@ without a prompt only inside the required native sandbox. Unsandboxed fallback
 and command network access remain disabled. On Linux, prove read-only,
 workspace-write, and local-commit turn policies independently with fixed,
 model-free effective invocations. Prefer Claude's full native sandbox. Only a
-recognized nested-user-namespace denial may select weaker native nesting, and
-only inside a Runner private command boundary whose PID namespace and private
-`/proc` contain the inner sandbox. Keep the Claude CLI outside that boundary so
-provider credentials and transport remain available, and install the
-provider-private launcher only for model-issued commands. The fallback proof
-uses that same launcher, outer arguments, and access-specific topology. Each
-proof checks workspace write authority, Git and outside-write denial, network
-and Unix-socket denial, and credential removal, including denial of the
-provider process's proc environment. Generic failures cannot enable the
-fallback, no diagnostic is retained, and no proof selects a profile,
-authenticates, or invokes a model. The separate local-commit executor proof
-remains required. Each resolved role has a provider-neutral receipt slot; its
-receipt is pinned when the role is first required and must match before later
-provider work. The opt-in real Claude smoke test exercises a representative
-inspection command; it remains outside the ordinary fast gate.
+recognized nested-user-namespace denial may select Claude's weaker parent
+invocation through a Runner-private authenticated launcher. Keep the Claude CLI
+outside the command boundary so provider credentials and transport remain
+available, and install the launcher only for model-issued commands. It accepts
+only the supported Claude bubblewrap grammar, rejects malformed, conflicting,
+weakened, or unsupported arguments before spawning, adds the missing
+Runner-owned restrictions, scrubs its token and credential environment, and
+executes the pinned real bubblewrap binary once with the validated payload. The
+fallback proof uses representative effective arguments through that identical
+launcher validation, strengthening, and execution path. Each proof checks
+workspace write authority, Git and outside-write denial, network and
+Unix-socket denial, and credential removal, including denial of the provider
+process's proc environment. Generic failures cannot enable the fallback, no
+diagnostic is retained, and no proof selects a profile, authenticates, or
+invokes a model. The separate local-commit executor proof remains required.
+Each resolved role has a provider-neutral receipt slot; its receipt is pinned
+when the role is first required and must match before later provider work. The
+deterministic adapter gate uses controlled launcher coverage. After the
+finalized commit is installed, a fresh real Claude lazy plan-authoring
+acceptance must report successful preflight and a provider response before
+dependent provider work continues.
 
 Worker default:
 

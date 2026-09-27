@@ -85,22 +85,22 @@ advertises each access mode only after its effective isolation policy is proven.
 Remote writes remain blocked in every access mode.
 
 Claude prefers its full native sandbox. If and only if the exact effective
-probe recognizes nested-user-namespace denial, it may use weaker native nesting
-inside a Runner-owned command boundary with private user, PID, mount, and
-network isolation plus private `/proc`, `/tmp`, and `/run`. The Claude CLI stays
-outside that boundary so its authentication environment and provider transport
-remain usable. A short-lived provider-private launcher applies the boundary
-only when Claude starts a model-issued command. The direct model-free fallback
-probe invokes that same launcher, outer arguments, and access-specific
-topology. It keeps the host root read-only, makes only workspace content
-writable for workspace-write access, re-binds all Git metadata read-only, and
-proves IP and host Unix-socket isolation, credential removal and provider-proc
-secrecy, workspace authority, and outside-write denial. The proved fallback
-skips only the redundant inner Unix-socket seccomp layer; native policy remains
-stricter. It does not require host `CAP_SYS_ADMIN`, change host policy, or
-expose host procfs. A generic sandbox failure, incomplete proof, launcher
-failure, or cleanup failure leaves the affected access mode unavailable. There
-is no configuration switch that forces or weakens this selection.
+probe recognizes nested-user-namespace denial, it may use Claude's weaker
+parent invocation through a Runner-owned launcher that validates and, where
+needed, strengthens it before executing the real bubblewrap binary once. The
+Claude CLI stays outside that command boundary so its authentication
+environment and provider transport remain usable. The direct model-free
+fallback probe invokes the same launcher grammar and access-specific topology.
+It proves the single-boundary user, PID, mount, and network isolation contract,
+including private `/proc`, `/tmp`, and `/run`, a read-only host root, exact
+workspace authority, read-only Git metadata, IP and host Unix-socket denial,
+credential removal, provider-proc secrecy, and outside-write denial. Exact
+launcher mechanics belong to the [architecture contract](../ARCHITECTURE.md).
+Native policy remains stricter. The fallback does not require host
+`CAP_SYS_ADMIN`, change host policy, or expose host procfs. A generic sandbox
+failure, invalid invocation, incomplete proof, launcher failure, or cleanup
+failure leaves the affected access mode unavailable. There is no configuration
+switch that forces or weakens this selection.
 
 The runner holds one provider-neutral receipt slot per resolved role and
 persists only a fingerprint and supported-access list when that role is first

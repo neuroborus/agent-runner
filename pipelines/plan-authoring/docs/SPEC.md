@@ -102,14 +102,17 @@ explicitly prohibit modifying the resolved project configuration.
 
 On Linux, every Claude role that performs a read-only turn requires the
 adapter's fixed, model-free read-only policy proof. The adapter prefers full
-native isolation and tries weaker native nesting only for a recognized
-nested-user-namespace denial after a private Runner PID/`/proc` boundary proves
-the complete access envelope. The exact proof covers network, Unix sockets,
-credentials, workspace and Git writes, and outside writes with bounded no-shell
-execution, no profile, authentication, or model call, and no retained native
-diagnostic. A failed proof remains an early provider-neutral unsupported
-backend. The persisted read-only policy receipt must match on resume. The
-independent local-commit executor proof is not required by this pipeline.
+native isolation and tries Claude's weaker parent invocation only for a
+recognized nested-user-namespace denial. The authenticated provider-private
+launcher validates and strengthens that invocation, then executes the pinned
+real bubblewrap once so the command crosses one effective boundary while the
+provider stays outside. The exact proof follows the same launcher path and
+covers network, Unix sockets, credentials, workspace and Git writes, and
+outside writes with bounded model-free execution, no profile, authentication,
+or model call, and no retained native diagnostic. A failed proof remains an
+early provider-neutral unsupported backend. The persisted read-only policy
+receipt must match on resume. The independent local-commit executor proof is
+not required by this pipeline.
 
 A configured runner artifact root does not affect this pipeline. Its task-owned
 `clarifications.md` and `plan.md` remain beside `task.md`.

@@ -77,10 +77,11 @@ valid after initial acceptance. See the [execution specification](pipelines/plan
 Claude does not require host `CAP_SYS_ADMIN`. It prefers its full native
 sandbox and may automatically use a restricted-host composition only when an
 exact probe proves that nested user namespaces are denied and that a private
-Runner command launcher preserves the requested access mode. The Claude CLI
-and its provider transport remain on the host, while model-issued commands run
-with private user, PID, mount, network, `/proc`, `/tmp`, and `/run` views. There
-is no configuration override. If either composition cannot prove a requested
+Runner command launcher validates and strengthens Claude's effective
+bubblewrap invocation. The Claude CLI and its provider transport remain on the
+host, while each model-issued command crosses one bubblewrap boundary with
+private user, PID, mount, network, `/proc`, `/tmp`, and `/run` views. There is
+no configuration override. If either composition cannot prove a requested
 read-only, workspace-write, or local-commit mode, the run fails early with a
 bounded unsupported-backend diagnosis through both CLI and MCP.
 
@@ -1238,6 +1239,9 @@ Run the opt-in real-backend smoke turns explicitly:
 AGENT_RUNNER_LIVE_CODEX=1 npm test -- test/agents/codex.test.js
 AGENT_RUNNER_LIVE_CLAUDE=1 npm test -- test/agents/claude.test.js
 ```
+
+Claude launcher changes follow the deterministic commit gate and post-install
+real acceptance procedure owned by [Testing](docs/TESTING.md).
 
 Inspect the CLI:
 
