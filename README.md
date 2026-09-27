@@ -273,7 +273,10 @@ complete gate from repository instructions and project-defined checks. Use
 `"none"` to select that fallback deliberately, or a normalized
 repository-relative path ending in `SKILL.md` to require that exact skill. A
 missing, escaping, or invalid explicit skill blocks the run. Every path retains
-the dedicated fingerprint-bound finalization turn.
+the dedicated fingerprint-bound finalization turn. Both workflows freeze the
+effective path or fallback decision before bootstrap; automatic discovery never
+switches later, and missing, invalid, or changed frozen guidance requires a new
+run.
 
 Required checks that need loopback listeners, Docker, a local database, or a
 comparable host service may be delegated to the runner's trusted validation
@@ -1146,12 +1149,14 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   │   ├── publication.test.js
 │   │   └── support/
 │   ├── integration/
-│   │   └── workflows.test.js
+│   │   └── workflows.slow.test.js
 │   ├── mcp/
+│   │   ├── control-plane.slow.test.js
 │   │   ├── control-plane.test.js
 │   │   ├── guidance.test.js
 │   │   └── issue-reporting.test.js
 │   ├── state/
+│   │   ├── operator-stops.slow.test.js
 │   │   ├── persistence.test.js
 │   │   └── safety.test.js
 │   └── source-boundaries.test.js
@@ -1160,6 +1165,7 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   ├── ARCHITECTURE.md
 │   ├── CONVENTIONS.md
 │   ├── OPERATOR_GUIDE.md
+│   ├── TESTING.md
 │   └── README.md
 ├── .agents/skills/
 ├── AGENTS.md
@@ -1179,7 +1185,7 @@ Create the local workspace links from the committed lockfile:
 npm ci
 ```
 
-Run the unit tests:
+Run the fast tests:
 
 ```bash
 npm test
@@ -1197,13 +1203,23 @@ Verify formatting without changing files:
 npm run format:check
 ```
 
-Run the complete repository gate:
+Run the ordinary repository gate (approximately one minute):
 
 ```bash
 npm run check
 git diff --check HEAD
 git diff --cached --check
 ```
+
+Run the durable cross-service regression tier when its contracts change, and
+before release:
+
+```bash
+npm run test:slow
+```
+
+See [Testing](docs/TESTING.md) for coverage ownership, temporary storage, and
+the distinction between the ordinary and slow gates.
 
 Run the opt-in real-backend smoke turns explicitly:
 

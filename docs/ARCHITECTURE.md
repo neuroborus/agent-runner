@@ -1183,7 +1183,10 @@ monitors durable revisions while executing. An accepted request aborts only
 the owned provider or trusted execution and publishes stopping activity.
 Provider recovery attempts and the constrained commit executor check the same
 abort signal before starting. The run/worktree leases remain held through
-process shutdown, read-only reconciliation, and the final stop event. Persisted
+process shutdown, read-only reconciliation, and the final stop event. The monitor
+serializes process registration/retirement and stop-activity writes under that
+lease, so abort-triggered cleanup cannot race publication of the stopping event.
+Persisted
 process ownership also prevents a different run from reclaiming the worktree
 after owner loss, and prevents checkpoint advancement before process cleanup.
 CLI/MCP command registration remains transport-owned.
@@ -1995,11 +1998,13 @@ also checks unconsumed COMMIT; polishing inspects completed HANDOFF settlement
 before discovery or preparation and checks availability before new staging.
 Polishing state version 14 preserves historical handoff evidence while requiring
 read-only capability discovery before further content work. State version 15
-adds frozen finalization guidance. Terminal and completed-handoff recovery stay
-verification-only; other unfinished legacy work resolves the decision before
-provider work and repeats read-only validation migration when prior evidence
-cannot prove the selected skill is part of the established inventory. Neither
-pipeline imports the other's report schemas or workflow internals.
+adds frozen finalization guidance, including a partial-preflight state that
+durably retains the decision across backend-probe pauses. Terminal and
+completed-handoff recovery stay verification-only; other unfinished legacy work
+resolves the decision before provider work and repeats read-only validation
+migration when prior evidence cannot prove the selected skill is part of the
+established inventory. Neither pipeline imports the other's report schemas or
+workflow internals.
 
 Inspection accepts `inventory` (up to 512 unique, trimmed, single-line exact
 command strings, each at most 4,000 characters) and `requirements` (up to 1,024

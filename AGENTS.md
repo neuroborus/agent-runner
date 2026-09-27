@@ -38,7 +38,8 @@ contract.
 - Write source code, comments, logs, tests, and repository documentation in English.
 - Target Node.js `>=24 <25` with native ES modules and the standard library.
 - Keep internal workspace dependencies explicit; do not add an external runtime dependency until the implementation demonstrates that it is necessary.
-- Use `node:test`; keep real Codex and Claude smoke tests opt-in.
+- Use `node:test` and the `test-authoring` skill for necessary, deterministic,
+  fast coverage; keep real Codex and Claude smoke tests opt-in.
 - Prefer small functional modules and split them only when they become meaningfully large.
 - Keep backend-specific flags and output normalization inside `src/agents/`.
 - Register each backend once in the frozen `src/agents/registry.js` descriptor
@@ -257,5 +258,9 @@ performs the staged check after it alone stages the accepted content.
 The test suite imports every root and workspace source module, validates
 canonical project skill frontmatter and content without requiring local
 provider interface metadata, and checks the central product-document map.
+
+`npm run check` is the ordinary fast gate. Follow `docs/TESTING.md` for affected
+slow-tier checks; do not present the fast result as completion of unrun slow
+coverage.
 
 Use the `finalization` skill for the complete handoff gate.

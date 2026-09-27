@@ -74,6 +74,12 @@ before generation and every established non-mutating check, and accepts no
 omission or substitution. A project-required content change is fingerprinted
 after it finishes.
 
+Both workflows freeze their effective finalization-guidance path or fallback
+decision before bootstrap. A selected skill remains mandatory fingerprinted
+validation infrastructure for the run; automatic discovery does not switch or
+fall back later. Missing, invalid, or changed frozen guidance requires a new
+run rather than consuming correction or review budgets.
+
 In independent mode, the Reviewer first checks the complete candidate without
 attesting finalization. All findings remain blocking until fixed, withdrawn,
 arbitrated, or explicitly overridden for the exact candidate fingerprint.

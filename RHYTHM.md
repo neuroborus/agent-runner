@@ -5,6 +5,26 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-09-27
+
+- **Polishing freezes finalization guidance before bootstrap.** State version
+  15 persists the configured policy, selected canonical skill or fallback, and
+  its fingerprints before provider work. The selected skill remains mandatory
+  validation infrastructure, and missing or changed guidance requires a new run
+  instead of a late automatic fallback. Legacy active work rediscovers
+  validation under the frozen decision, while terminal and completed-handoff
+  recovery remains verification-only.
+- **Development validation has a measured one-minute budget.** A canonical
+  test-authoring skill rejects redundant tests and artificial waiting. Disposable
+  test storage prefers executable tmpfs without changing runtime durability.
+  Long cross-service recovery matrices remain explicit slow checks, selected by
+  the changed contract and run before release; the ordinary finalization gate
+  retains focused safety and regression coverage. TESTING.md owns selection.
+- **Stop publication cannot race process retirement for its lease.** The stop
+  monitor queues its activity and process-ownership writes before delivering
+  cancellation. Native-provider cleanup can then persist retirement instead of
+  leaving a dead private-namespace owner because a concurrent write was rejected.
+
 ## 2026-09-26
 
 - **Shared-host recovery anchors new lineages to frozen launch ancestry.** Before

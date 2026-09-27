@@ -13,6 +13,7 @@ contract changes.
 | [`RHYTHM.md`](../RHYTHM.md)                                                         | Newest-first record of meaningful implemented repository decisions; read when a change creates or revises a durable decision                               |
 | [`docs/CONVENTIONS.md`](CONVENTIONS.md)                                             | Intended architecture and repository-wide code, module, test, documentation, and formatting conventions                                                    |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md)                                           | Runtime design, dependency direction, configuration, persistence, recovery, pinned dependencies, MCP, Git, and clarification                               |
+| [`docs/TESTING.md`](TESTING.md)                                                     | Fast and slow test tiers, temporary test storage, suite ownership, and affected-check selection                                                            |
 | [`docs/OPERATOR_GUIDE.md`](OPERATOR_GUIDE.md)                                       | Shared CLI/MCP supervision procedure; read before preparing, running, recovering, or recording project operating lessons                                   |
 | [`docs/product/PIPELINE_MODEL.md`](product/PIPELINE_MODEL.md)                       | Pipeline purposes, relationships, modes, and clarification boundaries; read before changing workflow meaning                                               |
 | [`docs/product/VALIDATION_AND_REVIEW.md`](product/VALIDATION_AND_REVIEW.md)         | Initial implementation evidence, validation, pinned dependencies, review, fingerprints, and effect gates; read before changing how work becomes acceptable |
@@ -25,9 +26,15 @@ contract changes.
 | [`pipelines/plan-execution/docs/SPEC.md`](../pipelines/plan-execution/docs/SPEC.md) | Plan-execution roles, prompts, validation, review, commit, recovery, and completion rules                                                                  |
 | [`pipelines/polishing/docs/SPEC.md`](../pipelines/polishing/docs/SPEC.md)           | Polishing roles, capability discovery, validation, review, handoff, recovery, and completion rules                                                         |
 | [`project-structure` skill](../.agents/skills/project-structure/SKILL.md)           | Operational ownership guidance for placing, moving, or splitting repository code                                                                           |
+| [`test-authoring` skill](../.agents/skills/test-authoring/SKILL.md)                 | Test necessity, deterministic design, execution cost, and fast/slow coverage policy                                                                        |
 | [`finalization` skill](../.agents/skills/finalization/SKILL.md)                     | Post-change operator-surface review and validation; phase-owned staging and commit-message handoff gate                                                    |
 
 ## Change gate
+
+Testing ownership: [TESTING.md](TESTING.md) defines the fast/slow commands and
+selection rules; the [test-authoring skill](../.agents/skills/test-authoring/SKILL.md)
+defines necessary, minimal, deterministic coverage. Read both before changing
+tests or finalization cost.
 
 `AGENTS.md` and `docs/CONVENTIONS.md` apply to every tracked change. Then use
 the narrowest matching row; more than one row may apply.

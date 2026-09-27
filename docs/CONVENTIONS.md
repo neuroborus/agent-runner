@@ -448,6 +448,11 @@ The runtime floor is Node.js `>=24 <25`; keep `package.json` engines aligned.
 
 ## Tests
 
+- Follow the [test-authoring skill](../.agents/skills/test-authoring/SKILL.md)
+  for necessity and speed; use [TESTING.md](TESTING.md) for tier selection.
+  Keep the ordinary repository gate near or below 60 seconds. Add regressions
+  for reproduced defects and known fragile boundaries, not every edit.
+
 - Use `node:test` and descriptive behavior names; avoid names such as `works`
   or `test1`.
 - Keep normal full-suite success output compact with Node's built-in `dot`
@@ -481,7 +486,8 @@ The runtime floor is Node.js `>=24 <25`; keep `package.json` engines aligned.
 - Keep real Codex and Claude smoke tests explicit and opt-in.
 - Test public directory indexes and workspace exports so private-path imports do
   not become accidental API.
-- Add or update tests in the same change as behavior.
+- Cover important uncovered behavior in the same change; do not add a test
+  when existing coverage already proves the contract.
 - Before handoff, run the root repository gate and required Git whitespace
   checks from `AGENTS.md` and the finalization skill.
 

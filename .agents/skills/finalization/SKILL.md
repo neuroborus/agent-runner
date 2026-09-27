@@ -107,8 +107,9 @@ accept user-attested results. An agent-sandbox limitation of a selected command
 does not block agent content work. Fresh evidence after interruption or repair
 may require trusted checks to rerun; do not promise exactly-once execution.
 
-Add or update tests in the same change when behavior changes. Prefer fake adapters
-and temporary Git repositories. Keep live Codex/Claude calls opt-in and report
+Review test necessity, coverage, determinism, and cost using the canonical
+[`test-authoring` skill](../test-authoring/SKILL.md). Follow `docs/TESTING.md`
+for fast and slow gate selection. Keep live Codex/Claude calls opt-in and report
 them as skipped unless the task specifically requires them.
 
 Use the repository tests to import every root and workspace source module and to
