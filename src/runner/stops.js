@@ -45,12 +45,18 @@ export function createStopMonitor({ runId, lease, runStore, publish }) {
   let stopping = null;
   let preEffectRejection = null;
   let monitoringFailure = null;
+  let pendingWrite = Promise.resolve();
+
+  function write(operation) {
+    const result = pendingWrite.then(operation);
+    pendingWrite = result.catch(() => {});
+    return result;
+  }
 
   async function detect(current = null) {
     current ??= await runStore.loadRun(runId);
     if (!stopImmediately(current)) return current;
     if (stopping === null) {
-      if (!controller.signal.aborted) controller.abort(stopError());
       stopping = (async () => {
         const activity = {
           actor: "runner",
@@ -58,10 +64,13 @@ export function createStopMonitor({ runId, lease, runStore, publish }) {
           kind: "stopping",
           message: "Operator stop requested; owned execution is stopping.",
         };
-        const next = await runStore.recordStopActivity(lease, activity);
+        const next = await write(() =>
+          runStore.recordStopActivity(lease, activity),
+        );
         await publish(activity, next);
         return next;
       })();
+      if (!controller.signal.aborted) controller.abort(stopError());
     }
     await stopping;
     return current;
@@ -107,7 +116,7 @@ export function createStopMonitor({ runId, lease, runStore, publish }) {
           ...request,
           signal,
           onProcess: (pid, proof) =>
-            runStore.recordExecutionProcess(lease, pid, proof),
+            write(() => runStore.recordExecutionProcess(lease, pid, proof)),
         });
       } catch (cause) {
         if (
