@@ -464,7 +464,44 @@ export function createRunner(options = {}) {
     });
   }
 
-  async function execute(pipeline, run, lease, action = null) {
+  function selectedRoleAdapters(pipeline, run, lease) {
+    const currentPolicies = { ...run.providerPolicies };
+    let pendingPolicyReceipt = Promise.resolve();
+    return roleAdapters(run, pipeline, adapters, providers, (role, receipt) => {
+      const operation = pendingPolicyReceipt.then(async () => {
+        const expected = currentPolicies[role];
+        if (expected !== null) {
+          if (!isDeepStrictEqual(expected, receipt)) {
+            throw new RunnerError(`Provider policy changed for role ${role}.`, {
+              code: "ERR_PROVIDER_POLICY_CHANGED",
+            });
+          }
+          return;
+        }
+        const next = await runStore.recordProviderPolicy(lease, role, receipt);
+        currentPolicies[role] = next.providerPolicies[role];
+        await publish(
+          {
+            actor: "runner",
+            phase: "runtime",
+            kind: "provider-policy-recorded",
+            message: `Recorded immutable provider policy for ${role}.`,
+          },
+          next,
+        );
+      });
+      pendingPolicyReceipt = operation.catch(() => {});
+      return operation;
+    });
+  }
+
+  async function execute(
+    pipeline,
+    run,
+    lease,
+    action = null,
+    verifyProviderPolicies = false,
+  ) {
     if (run.pipelineState.workflowState === "CANCELED") return run;
     if (
       run.schemaVersion !== RUN_STATE_SCHEMA_VERSION ||
@@ -510,7 +547,7 @@ export function createRunner(options = {}) {
         code: "ERR_MISSING_RUN_SETTINGS",
       });
     }
-    const selected = roleAdapters(run, adapters, providers);
+    const selected = selectedRoleAdapters(pipeline, run, lease);
     const baseRuntime = runtimeFor(pipeline, lease, run, selected);
     if (stopPending(run))
       return reconcileOperatorStop({
@@ -544,6 +581,27 @@ export function createRunner(options = {}) {
       run.activeTurn === null
     ) {
       return pauseForProjectConfiguration(run, lease);
+    }
+    if (verifyProviderPolicies && run.pause?.reason !== "environment_blocked") {
+      const migrationRequired = Object.entries(run.providerPolicies).some(
+        ([role, receipt]) => role !== "arbiter" && receipt === null,
+      );
+      for (const [role, adapter] of Object.entries(selected)) {
+        if (role !== "arbiter") await adapter.probe();
+      }
+      if (migrationRequired) {
+        run = await runStore.loadRun(run.runId);
+        if (pipeline.prepareRecovery !== undefined && runStore.loadRunHistory) {
+          const history = await runStore.loadRunHistory(run.runId);
+          if (!isDeepStrictEqual(history.run, run)) {
+            throw new RunnerError(
+              "Run changed before provider policy recovery inspection.",
+              { code: "ERR_RUN_REVISION_CHANGED" },
+            );
+          }
+          pipeline.prepareRecovery(run, history);
+        }
+      }
     }
     const monitor = createStopMonitor({
       runId: run.runId,
@@ -625,7 +683,7 @@ export function createRunner(options = {}) {
         pipeline,
         lease,
         current,
-        roleAdapters(current, adapters, providers),
+        selectedRoleAdapters(pipeline, current, lease),
       ),
       configurationFailure,
     });
@@ -972,8 +1030,11 @@ export function createRunner(options = {}) {
         capabilityFailure = cause;
       }
     }
+    let providerPolicies = Object.fromEntries(
+      Object.keys(resolved.roles).map((role) => [role, null]),
+    );
     if (capabilityFailure === null) {
-      await probeRequiredRoles(
+      providerPolicies = await probeRequiredRoles(
         pipeline,
         resolved.roles,
         adapters,
@@ -999,6 +1060,7 @@ export function createRunner(options = {}) {
       taskPath,
       projectConfigurationProtection: projectConfiguration?.protection ?? null,
       roles: resolved.roles,
+      providerPolicies,
       sourceSession: normalized.sourceSession?.id ?? null,
       sourceProfile: resolved.sourceProfile,
       pipelineState,
@@ -1115,14 +1177,14 @@ export function createRunner(options = {}) {
     if (stopPending(recovered)) {
       return withStopReconciliationLease(
         recovered,
-        (current) => execute(pipeline, current, lease),
+        (current) => execute(pipeline, current, lease, null, true),
         lease,
       );
     }
     if (configurationChanged) {
       return withWorktreeLease(
         recovered,
-        () => execute(pipeline, recovered, lease),
+        () => execute(pipeline, recovered, lease, null, true),
         lease,
       );
     }
@@ -1187,7 +1249,7 @@ export function createRunner(options = {}) {
           );
         }
         await validatePersistedBoundary(recovered);
-        return execute(pipeline, recovered, lease, normalized.action);
+        return execute(pipeline, recovered, lease, normalized.action, true);
       },
       lease,
     );

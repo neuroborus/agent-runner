@@ -107,6 +107,12 @@ Run state lives under the user's OS state directory, outside both the target
 repository and task directory. Each transition is a complete write-ahead event
 followed by atomic current-state replacement. The human-readable progress file
 is derived and can be regenerated; the event journal remains authoritative.
+The common run envelope also holds one bounded provider-policy receipt slot per
+resolved role. Legacy state migrates before provider work and pins a role's
+first current receipt when that role is required; resume rejects policy drift
+instead of re-resolving isolation.
+The receipt exposes only a fingerprint and common supported access modes, never
+provider flags, credentials, native output, prompts, or session storage.
 
 Plan authoring writes its declared task artifacts. Plan execution and polishing
 may place runner-owned clarification artifacts below the configured repository

@@ -81,8 +81,26 @@ an unrelated fresh context.
 Read-only turns cannot change repository content or Git control state.
 Workspace-write turns may change safe content but cannot write Git metadata.
 Codex uses a runner-owned private temporary root for writable attempts; Claude
-advertises writable capability only after its native sandbox policy is proven.
+advertises each access mode only after its effective isolation policy is proven.
 Remote writes remain blocked in every access mode.
+
+Claude prefers its full native sandbox. If and only if the exact effective
+probe recognizes nested-user-namespace denial, it may use weaker native nesting
+inside a Runner-owned private PID namespace and private `/proc`. The proof is
+separate for read-only, workspace-write, and local-commit access and verifies
+command network and Unix-socket denial, credential removal and provider-proc
+secrecy, workspace authority, Git-metadata protection, and outside-write
+denial. It does not require `CAP_SYS_ADMIN`, change host policy, or expose host
+procfs. A generic sandbox failure or failed fallback leaves the affected access
+mode unavailable. There is no configuration switch that forces or weakens this
+selection.
+
+The runner holds one provider-neutral receipt slot per resolved role and
+persists only a fingerprint and supported-access list when that role is first
+required. Resume and reconstruction must reproduce the receipt before later
+provider work, so a host or CLI policy change cannot silently widen authority.
+Pipeline descriptors declare their role access needs; unsupported access uses
+the same early bounded diagnosis through CLI and MCP for every provider.
 
 Codex model-issued commands derive from the provider process environment only
 through a strict shell policy. Automatic secret-name exclusions run before

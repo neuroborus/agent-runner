@@ -110,8 +110,9 @@ local issue publication within the capability.
 
 The Claude provider lives under `src/agents/claude/` behind its provider
 `index.js`. The root agent boundary imports only that index; the adapter,
-local-commit executor, and native-sandbox probe remain private siblings that
-own Claude processes, flags, parsing, sessions, and sandbox behavior.
+local-commit executor, and isolation-policy selector remain private siblings
+that own Claude processes, flags, parsing, sessions, sandbox composition, and
+native failure recognition.
 
 The Codex provider lives under `src/agents/codex/` behind its provider
 `index.js`. The root agent boundary imports only that index; the adapter, App
@@ -454,6 +455,17 @@ Common run-envelope version 8 persists effort for every active role and retains
 the optional project-configuration protection record. Older runs normalize the
 absent protection record to `null`; migration
 never fabricates evidence by inspecting a current file.
+Common run-envelope version 13 adds a provider-neutral policy-receipt slot for
+every resolved role. A receipt contains only schema version `1`, a SHA-256 policy
+fingerprint, and ordered supported access modes; it contains no provider flags,
+payloads, prompts, credentials, stderr, or session storage. New runs persist
+required-role receipts at capability preflight. Version-12 and older runs
+migrate under the execution lease with null receipts before provider work and
+then pin each required role's first valid receipt. Resume and reconstruction
+reproduce the receipt before provider invocation; later policy drift fails
+closed. The on-demand Arbiter receipt is pinned when first used. Pipeline
+descriptors own role access requirements, so CLI and MCP receive the same
+bounded `ERR_UNSUPPORTED_BACKEND` diagnosis without provider branches.
 `run` then holds the new run's per-run lease while invoking its statically
 registered workflow. Plan execution and polishing additionally hold one external lease
 keyed by the canonical Git worktree before any workflow-owned mutation. The
@@ -1644,17 +1656,25 @@ semantics. A specific Claude effort rejection takes precedence over a generic
 turn-setup failure. Native rejection text is not retained, and commit-readiness
 failure cannot start or replay the constrained executor.
 
-On Linux, Claude proves native-turn sandbox support with a fixed, model-free
-bubblewrap invocation that runs `/usr/bin/true` through the resolved Claude
-executable's embedded `apply-seccomp` helper. The probe uses the same outer
-user, PID, mount, and network namespace shape required when
-`allowAllUnixSockets: false`, fixed no-shell arguments, the credential-filtered
-command environment, and bounded time and output. Its boolean result retains
-no host diagnostic and remains distinct from the Runner-owned bubblewrap
-local-commit executor probe. Read-only and workspace-write capabilities require
-the native-turn proof; `localCommit` requires both proofs. Structured-output
-and native-session capabilities remain properties of the supported CLI and the
-probe never applies a profile, authenticates, or invokes a model.
+On Linux, Claude selects an isolation policy independently for read-only,
+workspace-write, and local-commit access. Each fixed, model-free proof
+reproduces the effective provider/child topology around Claude's embedded
+`apply-seccomp` helper and checks workspace and Git writes, an outside write,
+IP network, Unix sockets, and a probe credential. The selector prefers Claude's
+full native sandbox. Only a positively recognized nested-user-namespace denial
+may try the fallback: a Runner-owned private PID namespace and private `/proc`
+enclose Claude while `enableWeakerNestedSandbox` binds that private procfs,
+never the host procfs. That provider/child probe retains a synthetic credential
+in the provider while proving that the inner command cannot recover it through
+`/proc/<provider-pid>/environ`. Arbitrary native failures do not enable the
+fallback.
+Both policies keep network, Unix sockets, credentials, Git metadata, remotes,
+and outside writes denied; a failed proof advertises that access mode as
+unavailable. Probes use fixed no-shell arguments, the credential-filtered
+command environment, and bounded time and output, retain no host diagnostic,
+and never apply a profile, authenticate, or invoke a model. The local-commit
+executor proof remains independent and `localCommit` requires both the
+local-commit turn policy and executor proof.
 Claude derives its advertised read-only capability and turn arguments from one
 plan-mode access envelope. It exposes only repository-inspection tools, allows
 Bash without prompting only when the required native sandbox is active, denies

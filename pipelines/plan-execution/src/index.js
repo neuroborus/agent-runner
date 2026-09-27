@@ -103,6 +103,11 @@ function trustedCheckSelection(value) {
 }
 
 const ROLES = resolveActiveRoles();
+const ROLE_ACCESS = Object.freeze({
+  worker: Object.freeze(["read-only", "workspace-write", "local-commit"]),
+  reviewer: Object.freeze(["read-only"]),
+  arbiter: Object.freeze(["read-only"]),
+});
 const SETTINGS = Object.freeze({
   finalization: Object.freeze({
     defaultValue: DEFAULT_FINALIZATION_POLICY,
@@ -1297,6 +1302,7 @@ export const planExecutionPipeline = Object.freeze({
     21: migratePlanExecutionStateV21,
   }),
   roles: ROLES,
+  roleAccess: ROLE_ACCESS,
   resolveActiveRoles,
   settings: SETTINGS,
   taskInputs: TASK_INPUTS,

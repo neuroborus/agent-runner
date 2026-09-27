@@ -683,6 +683,7 @@ test("migrates legacy envelopes on stop acceptance without changing historical c
   const journalPath = join(f.directoryPath, "events.jsonl");
   const legacy = JSON.parse(await readFile(statePath, "utf8"));
   legacy.schemaVersion = 3;
+  delete legacy.providerPolicies;
   legacy.runtimeCompatibility.runStateVersion = 3;
   delete legacy.stopRequest;
   const event = JSON.parse((await readFile(journalPath, "utf8")).trim());
@@ -1657,6 +1658,7 @@ test("legacy timing-less receipts and pending intents preserve their original id
         .map(JSON.parse);
       for (const event of events) {
         event.schemaVersion = event.state.schemaVersion = 6;
+        delete event.state.providerPolicies;
         event.state.runtimeCompatibility.runStateVersion = 6;
         if (event.state.stopRequest)
           for (const field of [

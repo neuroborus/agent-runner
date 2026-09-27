@@ -1207,18 +1207,21 @@ from the same access envelope. They do not expose editing tools, deny command
 writes to the workspace and Git metadata, and set
 `sandbox.autoAllowBashIfSandboxed: true` so repository inspection proceeds
 without a prompt only inside the required native sandbox. Unsandboxed fallback
-and command network access remain disabled. On Linux, advertise read-only,
-workspace-write, Git-metadata-blocking, and remote-write-blocking capabilities
-only after a fixed, model-free exact-policy probe proves the Unix-socket denial
-required by that native sandbox. Invoke bubblewrap directly with fixed
-arguments for the outer user, PID, mount, and network namespaces, and run
-`/usr/bin/true` through the resolved Claude executable's embedded
-`apply-seccomp` helper. Use the credential-filtered command environment,
-bounded output and time, and no shell, selected profile, authentication, or
-model call; reduce failures to a boolean without retaining host diagnostics. A
-generic user-namespace check is not evidence for this policy. The opt-in real
-Claude smoke test must exercise a representative repository-inspection command
-through this exact envelope.
+and command network access remain disabled. On Linux, prove read-only,
+workspace-write, and local-commit turn policies independently with fixed,
+model-free effective invocations. Prefer Claude's full native sandbox. Only a
+recognized nested-user-namespace denial may select weaker native nesting, and
+only inside a Runner private PID namespace whose private `/proc` is what the
+inner sandbox binds. Each proof checks the access-specific workspace write,
+Git and outside-write denial, network and Unix-socket denial, and credential
+removal, including denial of the provider process's proc environment. Generic
+failures cannot enable the fallback, no diagnostic is retained,
+and no proof selects a profile, authenticates, or invokes a model. The separate
+local-commit executor proof remains required. Each resolved role has a
+provider-neutral receipt slot; its receipt is pinned when the role is first
+required and must match before later provider work. The opt-in real Claude
+smoke test exercises a representative inspection command; it remains outside
+the ordinary fast gate.
 
 Worker default:
 

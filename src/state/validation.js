@@ -3,7 +3,7 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { isAdapterDiagnosticClass } from "../agents/index.js";
 import { validStopTiming, validStopSettlement } from "./stop-contract.js";
 
-export const RUN_STATE_SCHEMA_VERSION = 12;
+export const RUN_STATE_SCHEMA_VERSION = 13;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
   runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
@@ -28,6 +28,7 @@ const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   9,
   10,
   11,
+  12,
   RUN_STATE_SCHEMA_VERSION,
 ]);
 
@@ -47,6 +48,7 @@ const STATE_FIELDS = new Set([
   "taskPath",
   "projectConfigurationProtection",
   "roles",
+  "providerPolicies",
   "counters",
   "hashes",
   "pause",
@@ -63,6 +65,11 @@ const SESSION_LINEAGE_FIELDS = new Set(["source", "sourceProfile", "children"]);
 const CHILD_SESSION_FIELDS = new Set(["role", "sessionId", "contextKey"]);
 const ACTIVITY_FIELDS = new Set(["actor", "phase", "kind", "message"]);
 const ACTIVE_TURN_FIELDS = new Set(["role", "phase"]);
+const PROVIDER_ACCESS_ORDER = Object.freeze([
+  "read-only",
+  "workspace-write",
+  "local-commit",
+]);
 const INPUT_REQUEST_FIELDS = new Set([
   "id",
   "kind",
@@ -623,6 +630,57 @@ export function normalizeRoles(value, { allowMissingEffort = true } = {}) {
   return roles;
 }
 
+function normalizeProviderPolicies(value, roles, schemaVersion) {
+  if (schemaVersion < RUN_STATE_SCHEMA_VERSION) {
+    if (value !== undefined) {
+      fail("Legacy run state cannot contain provider policies.");
+    }
+    return Object.fromEntries(Object.keys(roles).map((role) => [role, null]));
+  }
+  assertRecord(value, "run.providerPolicies");
+  const roleNames = Object.keys(roles);
+  if (
+    Object.keys(value).length !== roleNames.length ||
+    roleNames.some((role) => !Object.hasOwn(value, role))
+  ) {
+    fail("run.providerPolicies must match the active roles.");
+  }
+  return Object.fromEntries(
+    roleNames.map((role) => {
+      const receipt = value[role];
+      if (receipt === null) return [role, null];
+      assertRecord(receipt, `run.providerPolicies.${role}`);
+      if (
+        Object.keys(receipt).length !== 3 ||
+        receipt.schemaVersion !== 1 ||
+        typeof receipt.fingerprint !== "string" ||
+        !/^[a-f0-9]{64}$/u.test(receipt.fingerprint) ||
+        !Array.isArray(receipt.supportedAccess) ||
+        receipt.supportedAccess.length > PROVIDER_ACCESS_ORDER.length ||
+        receipt.supportedAccess.some((access, index, values) => {
+          const position = PROVIDER_ACCESS_ORDER.indexOf(access);
+          return (
+            position === -1 ||
+            values.indexOf(access) !== index ||
+            (index > 0 &&
+              PROVIDER_ACCESS_ORDER.indexOf(values[index - 1]) >= position)
+          );
+        })
+      ) {
+        fail(`run.providerPolicies.${role} is invalid.`);
+      }
+      return [
+        role,
+        {
+          schemaVersion: 1,
+          fingerprint: receipt.fingerprint,
+          supportedAccess: [...receipt.supportedAccess],
+        },
+      ];
+    }),
+  );
+}
+
 function normalizeActiveTurn(value, schemaVersion = RUN_STATE_SCHEMA_VERSION) {
   if (schemaVersion < ACTIVITY_RUN_STATE_SCHEMA_VERSION) {
     if (value !== undefined) {
@@ -981,6 +1039,9 @@ export function normalizeRunState(value, expectedRunId) {
     fail("run.updatedAt must not precede run.createdAt.");
   }
 
+  const roles = normalizeRoles(value.roles, {
+    allowMissingEffort: value.schemaVersion < 8,
+  });
   const normalized = {
     schemaVersion: value.schemaVersion,
     revision: value.revision,
@@ -997,9 +1058,12 @@ export function normalizeRunState(value, expectedRunId) {
       value.projectConfigurationProtection,
       value,
     ),
-    roles: normalizeRoles(value.roles, {
-      allowMissingEffort: value.schemaVersion < 8,
-    }),
+    roles,
+    providerPolicies: normalizeProviderPolicies(
+      value.providerPolicies,
+      roles,
+      value.schemaVersion,
+    ),
     counters: cloneRecord(value.counters, "run.counters"),
     hashes: cloneRecord(value.hashes, "run.hashes"),
     pause,

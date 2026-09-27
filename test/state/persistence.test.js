@@ -136,6 +136,91 @@ test("resolves the external state root and creates a complete run", async (t) =>
   assert.match(progress, /runner\/run\/created: Run created\./u);
 });
 
+test("pins one bounded provider policy receipt per role", async (t) => {
+  const { created, store } = await createFixture(t);
+  const receipt = {
+    schemaVersion: 1,
+    fingerprint: "a".repeat(64),
+    supportedAccess: ["read-only", "workspace-write", "local-commit"],
+  };
+
+  const recorded = await store.recordProviderPolicy(
+    created.lease,
+    "worker",
+    receipt,
+  );
+  assert.deepEqual(recorded.providerPolicies, {
+    reviewer: null,
+    worker: receipt,
+  });
+  const repeated = await store.recordProviderPolicy(
+    created.lease,
+    "worker",
+    receipt,
+  );
+  assert.equal(repeated.revision, recorded.revision);
+  assert.ok(Object.isFrozen(repeated));
+  await assert.rejects(
+    store.recordProviderPolicy(created.lease, "worker", {
+      ...receipt,
+      fingerprint: "b".repeat(64),
+    }),
+    { code: "ERR_PROVIDER_POLICY_CHANGED" },
+  );
+  await assert.rejects(
+    store.recordProviderPolicy(created.lease, "missing", receipt),
+    { code: "ERR_INVALID_PROVIDER_POLICY" },
+  );
+  await assert.rejects(
+    store.recordProviderPolicy(created.lease, "reviewer", null),
+    { code: "ERR_INVALID_PROVIDER_POLICY" },
+  );
+});
+
+test("migrates legacy provider policy state before a receipt is recorded", async (t) => {
+  const { created, store } = await createFixture(t);
+  await created.lease.release();
+  const statePath = join(created.directoryPath, "state.json");
+  const eventsPath = join(created.directoryPath, "events.jsonl");
+  const legacy = JSON.parse(await readFile(statePath, "utf8"));
+  legacy.schemaVersion = 12;
+  legacy.runtimeCompatibility.runStateVersion = 12;
+  delete legacy.providerPolicies;
+  const event = JSON.parse((await readFile(eventsPath, "utf8")).trim());
+  event.schemaVersion = 12;
+  event.state = legacy;
+  await writeFile(statePath, JSON.stringify(legacy));
+  await writeFile(eventsPath, `${JSON.stringify(event)}\n`);
+
+  const loaded = await store.loadRun(legacy.runId);
+  assert.deepEqual(loaded.providerPolicies, {
+    reviewer: null,
+    worker: null,
+  });
+  const lease = await store.acquireRunLease(legacy.runId);
+  try {
+    const migrated = await store.migrateRun(
+      lease,
+      {
+        pipelineState: loaded.pipelineState,
+        pipelineStateVersion: loaded.pipelineStateVersion,
+      },
+      {
+        activity: {
+          actor: "runner",
+          phase: "runtime",
+          kind: "migrated",
+          message: "Migrated provider policy state.",
+        },
+      },
+    );
+    assert.equal(migrated.schemaVersion, RUN_STATE_SCHEMA_VERSION);
+    assert.deepEqual(migrated.providerPolicies, loaded.providerPolicies);
+  } finally {
+    await lease.release();
+  }
+});
+
 test("normalizes legacy role records for every pipeline without rewriting history", async (t) => {
   const roleNames = {
     "plan-authoring": ["planner", "reviewer", "arbiter"],
@@ -221,6 +306,7 @@ test("migrates version-7 active role effort without rewriting journal history", 
         mode === "lazy" ? [primary] : [primary, "reviewer", "arbiter"];
       legacy.pipelineId = pipelineId;
       legacy.schemaVersion = 7;
+      delete legacy.providerPolicies;
       legacy.runtimeCompatibility.runStateVersion = 7;
       legacy.roles = Object.fromEntries(
         active.map((role) => [
@@ -335,6 +421,7 @@ test("migrates legacy process evidence without inventing ancestry authority", as
       const eventsPath = join(created.directoryPath, "events.jsonl");
       const legacy = JSON.parse(await readFile(statePath, "utf8"));
       legacy.schemaVersion = schemaVersion;
+      delete legacy.providerPolicies;
       legacy.runtimeCompatibility.runStateVersion = schemaVersion;
       legacy.executionProcess = {
         pid: 4242,
@@ -501,6 +588,7 @@ test("projects version-2 activity state for every pipeline without rewriting", a
     const eventsPath = join(created.directoryPath, "events.jsonl");
     const versionTwoState = JSON.parse(await readFile(statePath, "utf8"));
     versionTwoState.schemaVersion = 2;
+    delete versionTwoState.providerPolicies;
     versionTwoState.runtimeCompatibility.runStateVersion = 2;
     delete versionTwoState.activeTurn;
     const versionTwoEvent = JSON.parse(
@@ -582,6 +670,7 @@ test("migrates a legacy run envelope as one leased journal transition", async (t
   const eventsPath = join(created.directoryPath, "events.jsonl");
   const legacyState = JSON.parse(await readFile(statePath, "utf8"));
   legacyState.schemaVersion = 1;
+  delete legacyState.providerPolicies;
   delete legacyState.runtimeCompatibility;
   delete legacyState.activeTurn;
   delete legacyState.projectConfigurationProtection;
@@ -1040,6 +1129,7 @@ test("legacy storage ownership migrates to null without allocating resources", a
   const eventsPath = join(created.directoryPath, "events.jsonl");
   const legacy = JSON.parse(await readFile(statePath, "utf8"));
   legacy.schemaVersion = 8;
+  delete legacy.providerPolicies;
   legacy.runtimeCompatibility.runStateVersion = 8;
   delete legacy.executionResource;
   const event = JSON.parse((await readFile(eventsPath, "utf8")).trim());
@@ -1090,6 +1180,7 @@ for (const phase of ["allocating", "allocated"]) {
     const eventsPath = join(created.directoryPath, "events.jsonl");
     const legacy = JSON.parse(await readFile(statePath, "utf8"));
     legacy.schemaVersion = 9;
+    delete legacy.providerPolicies;
     legacy.runtimeCompatibility.runStateVersion = 9;
     legacy.executionResource = {
       id: "55555555-5555-4555-8555-555555555555",
@@ -1150,6 +1241,7 @@ test("version-9 state cannot carry the version-10 acquiring phase", async (t) =>
   const eventsPath = join(created.directoryPath, "events.jsonl");
   const legacy = JSON.parse(await readFile(statePath, "utf8"));
   legacy.schemaVersion = 9;
+  delete legacy.providerPolicies;
   legacy.runtimeCompatibility.runStateVersion = 9;
   legacy.executionResource = {
     id: "55555555-5555-4555-8555-555555555555",

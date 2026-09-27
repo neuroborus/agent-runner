@@ -55,6 +55,7 @@ const CREATE_RUN_FIELDS = new Set([
   "taskPath",
   "projectConfigurationProtection",
   "roles",
+  "providerPolicies",
   "counters",
   "hashes",
   "pause",
@@ -543,6 +544,12 @@ export function createRunStore({
               ? null
               : input.projectConfigurationProtection,
           roles: normalizeRoles(input.roles),
+          providerPolicies:
+            input.providerPolicies === undefined
+              ? Object.fromEntries(
+                  Object.keys(input.roles).map((role) => [role, null]),
+                )
+              : input.providerPolicies,
           counters: input.counters === undefined ? {} : input.counters,
           hashes: input.hashes === undefined ? {} : input.hashes,
           pause: input.pause === undefined ? null : input.pause,
@@ -920,6 +927,58 @@ export function createRunStore({
     });
   }
 
+  async function recordProviderPolicy(lease, role, receipt) {
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
+      const snapshot = await loadSnapshot(runDirectory, record.runId);
+      if (!Object.hasOwn(snapshot.state.providerPolicies, role)) {
+        throw new RunStoreError(`Run role is unavailable: ${role}.`, {
+          code: "ERR_INVALID_PROVIDER_POLICY",
+        });
+      }
+      const normalizedPolicies = normalizeRunState(
+        {
+          ...snapshot.state,
+          providerPolicies: {
+            ...snapshot.state.providerPolicies,
+            [role]: receipt,
+          },
+        },
+        record.runId,
+      ).providerPolicies;
+      if (normalizedPolicies[role] === null) {
+        throw new RunStoreError("Provider policy receipt is unavailable.", {
+          code: "ERR_INVALID_PROVIDER_POLICY",
+        });
+      }
+      const previous = snapshot.state.providerPolicies[role];
+      if (previous !== null) {
+        if (!isDeepStrictEqual(previous, normalizedPolicies[role])) {
+          throw new RunStoreError(`Provider policy changed for role ${role}.`, {
+            code: "ERR_PROVIDER_POLICY_CHANGED",
+          });
+        }
+        return deepFreeze(snapshot.state);
+      }
+      assertRunCanAdvance(snapshot.state, resolveStopBoundary);
+      const nextState = normalizeRunState(
+        {
+          ...snapshot.state,
+          providerPolicies: normalizedPolicies,
+          revision: snapshot.state.revision + 1,
+          updatedAt: timestamp(snapshot.state.updatedAt),
+        },
+        record.runId,
+      );
+      await journal.appendTransition(runDirectory, nextState, snapshot, {
+        actor: "runner",
+        phase: "runtime",
+        kind: "provider-policy-recorded",
+        message: `Recorded immutable provider policy for ${role}.`,
+      });
+      return deepFreeze(nextState);
+    });
+  }
+
   async function startAgentTurn(
     lease,
     activeTurn,
@@ -1267,6 +1326,7 @@ export function createRunStore({
     readPublicActivity,
     readAction: actions.read,
     recordChildSession,
+    recordProviderPolicy,
     recoverRun,
     runIsLeased,
     runLeaseOwnerIsLive,

@@ -95,14 +95,54 @@ function option(argumentsList, name) {
   return index === -1 ? undefined : argumentsList[index + 1];
 }
 
+function includesSequence(argumentsList, sequence) {
+  return argumentsList.some((_, index) =>
+    sequence.every((value, offset) => argumentsList[index + offset] === value),
+  );
+}
+
 function isNativeSandboxProbe({ file, argumentsList }) {
-  return file === "bwrap" && argumentsList.includes("apply-seccomp");
+  return (
+    file === process.execPath &&
+    argumentsList.includes("apply-seccomp") &&
+    argumentsList.includes("--cap-drop")
+  );
+}
+
+function isIsolationProbe({ file, argumentsList }) {
+  return (
+    ["bwrap", process.execPath].includes(file) &&
+    argumentsList.includes("apply-seccomp")
+  );
+}
+
+function isolationProbeScripts(argumentsList) {
+  const scriptIndexes = argumentsList.flatMap((value, index) =>
+    value === "-e" ? [index + 1] : [],
+  );
+  return scriptIndexes.map((index) => argumentsList[index]);
 }
 
 function localCommitSandboxCalls(fixture) {
   return fixture.calls.filter(
-    (call) => call.file === "bwrap" && !isNativeSandboxProbe(call),
+    (call) => call.file === "bwrap" && !isIsolationProbe(call),
   );
+}
+
+function claudeArguments({ file, argumentsList }) {
+  if (file === "claude") return argumentsList;
+  if (file !== "bwrap" || isIsolationProbe({ file, argumentsList })) {
+    return null;
+  }
+  const index = argumentsList.lastIndexOf("claude");
+  return index === -1 ? null : argumentsList.slice(index + 1);
+}
+
+function capabilitiesWithoutReceipt(capabilities) {
+  const { policyReceipt, ...rest } = capabilities;
+  assert.equal(policyReceipt.schemaVersion, 1);
+  assert.match(policyReceipt.fingerprint, /^[a-f0-9]{64}$/u);
+  return rest;
 }
 
 function createFixture({
@@ -110,6 +150,7 @@ function createFixture({
   handle,
   help = HELP,
   nativeSandbox = true,
+  fallbackSandbox = true,
   probeOutput = "agent-runner-claude-commit-ok",
   platform = "linux",
   version = "2.1.233",
@@ -135,28 +176,47 @@ function createFixture({
     if (file === "socat") {
       return { stdout: "socat version 1.8", stderr: "" };
     }
-    if (isNativeSandboxProbe(call)) {
-      if (!nativeSandbox) {
-        throw new Error("/proc/self/setgroups host-secret-value");
+    if (isIsolationProbe(call)) {
+      if (isNativeSandboxProbe(call) && nativeSandbox !== true) {
+        const error = new Error("Claude isolation probe failed.");
+        error.stderr =
+          nativeSandbox === "nested-denied"
+            ? "apply-seccomp: write /proc/self/setgroups (nested userns is capability-restricted; caller must provide CAP_SYS_ADMIN) Permission denied"
+            : "bwrap: Creating new namespace failed: Operation not permitted host-secret-value";
+        throw error;
       }
-      return { stdout: "", stderr: "" };
-    }
-    if (file === "bwrap") {
-      return { stdout: probeOutput, stderr: "" };
+      const fallbackAccess = [
+        "read-only",
+        "workspace-write",
+        "local-commit",
+      ].find((access) => argumentsList.includes(access));
+      if (
+        !isNativeSandboxProbe(call) &&
+        (fallbackSandbox === false ||
+          (Array.isArray(fallbackSandbox) &&
+            !fallbackSandbox.includes(fallbackAccess)))
+      ) {
+        throw new Error("Fallback unavailable host-secret-value");
+      }
+      return {
+        stdout: "agent-runner-claude-isolation-ok",
+        stderr: "",
+      };
     }
     if (file === "git") {
       return { stdout: `${PROJECT_PATH}/.git\n.git\n`, stderr: "" };
     }
-    if (file === "claude" && argumentsList.includes("-p")) {
-      const resume = option(argumentsList, "--resume");
-      const schema = option(argumentsList, "--json-schema");
-      const model = option(argumentsList, "--model");
+    const effectiveArguments = claudeArguments(call);
+    if (effectiveArguments?.includes("-p")) {
+      const resume = option(effectiveArguments, "--resume");
+      const schema = option(effectiveArguments, "--json-schema");
+      const model = option(effectiveArguments, "--model");
       const localCommit = schema?.includes('"ready"') === true;
       const payload = result({
         sessionId:
           resume === undefined
             ? FRESH_SESSION
-            : argumentsList.includes("--fork-session")
+            : effectiveArguments.includes("--fork-session")
               ? CHILD_SESSION
               : resume,
         structured:
@@ -171,6 +231,9 @@ function createFixture({
       });
       turnIndex += 1;
       return { stdout: JSON.stringify(payload), stderr: "" };
+    }
+    if (file === "bwrap") {
+      return { stdout: probeOutput, stderr: "" };
     }
     throw new Error(`Unexpected command: ${file} ${argumentsList.join(" ")}`);
   };
@@ -193,8 +256,7 @@ function request(overrides = {}) {
 
 function turnCalls(fixture) {
   return fixture.calls.filter(
-    ({ file, argumentsList }) =>
-      file === "claude" && argumentsList.includes("-p"),
+    (call) => claudeArguments(call)?.includes("-p") === true,
   );
 }
 
@@ -451,7 +513,8 @@ test("constructs and probes enforceable Claude capabilities", async () => {
   const fixture = createFixture();
 
   assert.equal(fixture.adapter.id, CLAUDE_BACKEND_ID);
-  assert.deepEqual(await fixture.adapter.probe({ model: "claude-test" }), {
+  const capabilities = await fixture.adapter.probe({ model: "claude-test" });
+  assert.deepEqual(capabilitiesWithoutReceipt(capabilities), {
     version: "2.1.233",
     structuredOutput: true,
     readOnly: true,
@@ -465,41 +528,43 @@ test("constructs and probes enforceable Claude capabilities", async () => {
   });
   assert.deepEqual(
     fixture.calls
-      .slice(0, 5)
+      .slice(0, 7)
       .map(({ file, argumentsList }) => [file, argumentsList[0]]),
     [
       ["claude", "--version"],
       ["claude", "--help"],
       ["socat", "-V"],
-      ["bwrap", "--new-session"],
+      [process.execPath, "--input-type=module"],
+      [process.execPath, "--input-type=module"],
+      [process.execPath, "--input-type=module"],
       ["bwrap", "--die-with-parent"],
     ],
   );
   const nativeSandboxCall = fixture.calls[3];
-  assert.deepEqual(nativeSandboxCall.argumentsList, [
-    "--new-session",
-    "--die-with-parent",
-    "--unshare-net",
-    "--ro-bind",
-    "/",
-    "/",
-    "--dev",
-    "/dev",
-    "--unshare-pid",
-    "--unshare-user",
-    "--cap-drop",
-    "ALL",
-    "--proc",
-    "/proc",
-    "--setenv",
-    "ARGV0",
-    "apply-seccomp",
-    "--",
-    "claude",
-    "/usr/bin/true",
+  assert.deepEqual(nativeSandboxCall.argumentsList.slice(0, 4), [
+    "--input-type=module",
+    "-e",
+    nativeSandboxCall.argumentsList[2],
+    "bwrap",
   ]);
+  const [providerProbe, commandProbe] = isolationProbeScripts(
+    nativeSandboxCall.argumentsList,
+  );
+  assert.match(providerProbe, /spawnSync/u);
+  assert.match(providerProbe, /String\(process\.pid\)/u);
+  assert.match(
+    providerProbe,
+    /delete commandEnvironment\.AGENT_RUNNER_CLAUDE_PROBE_CREDENTIAL/u,
+  );
+  assert.match(commandProbe, /readFileSync/u);
+  assert.match(commandProbe, /join\("\/proc", providerPid, "environ"\)/u);
+  assert.match(commandProbe, /readFileSync\([^;]+\);\n  process\.exit\(18\)/u);
+  assert.match(commandProbe, /AGENT_RUNNER_CLAUDE_PROBE_CREDENTIAL/u);
+  assert.ok(nativeSandboxCall.argumentsList.includes("--unshare-net"));
+  assert.ok(nativeSandboxCall.argumentsList.includes("--unshare-user"));
+  assert.ok(nativeSandboxCall.argumentsList.includes("--cap-drop"));
   assert.equal(nativeSandboxCall.options.timeout, 10_000);
-  assert.equal(nativeSandboxCall.options.maxBuffer, 64 * 1024);
+  assert.equal(nativeSandboxCall.options.maxBuffer, 1024 * 1024);
   assert.equal(nativeSandboxCall.options.shell, undefined);
   assert.equal(turnCalls(fixture).length, 0);
   assert.ok(
@@ -549,18 +614,21 @@ test("fails preflight when the CLI or isolation is unsupported", async () => {
 test("keeps native-turn and local-commit isolation proofs independent", async () => {
   const unsupportedLocalCommit = createFixture({ probeOutput: "" });
 
-  assert.deepEqual(await unsupportedLocalCommit.adapter.probe(), {
-    version: "2.1.233",
-    structuredOutput: true,
-    readOnly: true,
-    autonomousWrite: true,
-    gitMetadataWriteBlocked: true,
-    workspaceWrite: true,
-    localCommit: false,
-    remoteWriteBlocked: true,
-    nativeSessionContinuation: true,
-    nativeSessionFork: true,
-  });
+  assert.deepEqual(
+    capabilitiesWithoutReceipt(await unsupportedLocalCommit.adapter.probe()),
+    {
+      version: "2.1.233",
+      structuredOutput: true,
+      readOnly: true,
+      autonomousWrite: true,
+      gitMetadataWriteBlocked: true,
+      workspaceWrite: true,
+      localCommit: false,
+      remoteWriteBlocked: true,
+      nativeSessionContinuation: true,
+      nativeSessionFork: true,
+    },
+  );
   await unsupportedLocalCommit.adapter.run(
     request({ access: "workspace-write" }),
   );
@@ -590,10 +658,12 @@ test("keeps native-turn and local-commit isolation proofs independent", async ()
     nativeSandbox: false,
   });
   assert.deepEqual(
-    await incompatibleNativeSandbox.adapter.probe({
-      profile: "/profiles/work",
-      model: "claude-test",
-    }),
+    capabilitiesWithoutReceipt(
+      await incompatibleNativeSandbox.adapter.probe({
+        profile: "/profiles/work",
+        model: "claude-test",
+      }),
+    ),
     {
       version: "2.1.233",
       structuredOutput: true,
@@ -633,11 +703,11 @@ test("keeps native-turn and local-commit isolation proofs independent", async ()
   assert.equal(
     incompatibleNativeSandbox.calls.filter(({ file }) => file === "bwrap")
       .length,
-    2,
+    1,
   );
   assert.equal(
     incompatibleNativeSandbox.calls.filter(isNativeSandboxProbe).length,
-    1,
+    3,
   );
   assert.equal(
     incompatibleNativeSandbox.calls.some(
@@ -652,6 +722,169 @@ test("keeps native-turn and local-commit isolation proofs independent", async ()
     [["--version"], ["--help"]],
   );
   assert.equal(turnCalls(incompatibleNativeSandbox).length, 0);
+});
+
+test("uses the proved Runner boundary after nested userns denial", async () => {
+  const fixture = createFixture({ nativeSandbox: "nested-denied" });
+
+  const capabilities = await fixture.adapter.probe();
+  assert.deepEqual(capabilities.policyReceipt.supportedAccess, [
+    "read-only",
+    "workspace-write",
+    "local-commit",
+  ]);
+  assert.equal(capabilities.readOnly, true);
+  assert.equal(capabilities.workspaceWrite, true);
+  assert.equal(capabilities.localCommit, true);
+  assert.equal(fixture.calls.filter(isNativeSandboxProbe).length, 3);
+  const fallbackProbes = fixture.calls.filter(
+    (call) => isIsolationProbe(call) && !isNativeSandboxProbe(call),
+  );
+  assert.equal(fallbackProbes.length, 3);
+  assert.deepEqual(
+    fallbackProbes.map(({ argumentsList }) => {
+      return ["read-only", "workspace-write", "local-commit"].find((access) =>
+        argumentsList.includes(access),
+      );
+    }),
+    ["read-only", "workspace-write", "local-commit"],
+  );
+  for (const [index, { argumentsList }] of fallbackProbes.entries()) {
+    const access = ["read-only", "workspace-write", "local-commit"][index];
+    const accessIndex = argumentsList.lastIndexOf(access);
+    const workspaceDirectory = option(argumentsList, "--chdir");
+    const gitDirectory = argumentsList[accessIndex + 1];
+    assert.equal(
+      argumentsList[accessIndex + 3],
+      "/run/agent-runner-claude-probe.sock",
+    );
+    assert.ok(argumentsList.includes("--unshare-net"));
+    assert.ok(argumentsList.includes("--unshare-user"));
+    assert.ok(includesSequence(argumentsList, ["--bind", "/proc", "/proc"]));
+    assert.ok(includesSequence(argumentsList, ["--tmpfs", "/tmp"]));
+    assert.ok(includesSequence(argumentsList, ["--tmpfs", "/run"]));
+    assert.ok(
+      includesSequence(argumentsList, [
+        "--unsetenv",
+        "AGENT_RUNNER_CLAUDE_PROBE_CREDENTIAL",
+      ]),
+    );
+    assert.equal(
+      includesSequence(argumentsList, [
+        "--bind",
+        workspaceDirectory,
+        workspaceDirectory,
+      ]),
+      access === "workspace-write",
+    );
+    assert.ok(
+      includesSequence(argumentsList, [
+        "--ro-bind",
+        gitDirectory,
+        gitDirectory,
+      ]),
+    );
+    const [providerProbe, commandProbe] = isolationProbeScripts(argumentsList);
+    assert.match(providerProbe, /spawnSync/u);
+    assert.match(providerProbe, /String\(process\.pid\)/u);
+    assert.match(
+      providerProbe,
+      /delete commandEnvironment\.AGENT_RUNNER_CLAUDE_PROBE_CREDENTIAL/u,
+    );
+    assert.match(commandProbe, /readFileSync/u);
+    assert.match(commandProbe, /join\("\/proc", providerPid, "environ"\)/u);
+    assert.match(
+      commandProbe,
+      /readFileSync\([^;]+\);\n  process\.exit\(18\)/u,
+    );
+    assert.match(commandProbe, /AGENT_RUNNER_CLAUDE_PROBE_CREDENTIAL/u);
+  }
+
+  await fixture.adapter.run(request());
+  await fixture.adapter.run(request({ access: "workspace-write" }));
+  await fixture.adapter.run(
+    request({
+      access: "local-commit",
+      authorizationId: "restricted-host-commit",
+      commit: {
+        expectedHead: EXPECTED_HEAD,
+        message: "test(claude): prove restricted host commit",
+      },
+    }),
+  );
+
+  const turns = turnCalls(fixture);
+  assert.equal(turns.length, 3);
+  const turn = turns[0];
+  assert.equal(turn.file, "bwrap");
+  assert.deepEqual(turn.argumentsList.slice(0, 11), [
+    "--new-session",
+    "--die-with-parent",
+    "--unshare-pid",
+    "--as-pid-1",
+    "--bind",
+    "/",
+    "/",
+    "--dev",
+    "/dev",
+    "--proc",
+    "/proc",
+  ]);
+  const effectiveArguments = claudeArguments(turn);
+  const settings = JSON.parse(option(effectiveArguments, "--settings"));
+  assert.equal(settings.sandbox.enableWeakerNestedSandbox, true);
+  assert.equal(settings.sandbox.failIfUnavailable, true);
+  assert.equal(settings.sandbox.network.allowAllUnixSockets, false);
+  assert.deepEqual(settings.sandbox.network.deniedDomains, ["*"]);
+  assert.ok(
+    turns.every(
+      (call) =>
+        JSON.parse(option(claudeArguments(call), "--settings")).sandbox
+          .enableWeakerNestedSandbox === true,
+    ),
+  );
+  assert.equal(option(claudeArguments(turns[1]), "--permission-mode"), "auto");
+  assert.equal(option(claudeArguments(turns[2]), "--permission-mode"), "plan");
+});
+
+test("fails closed when the restricted-host fallback cannot be proved", async () => {
+  const fixture = createFixture({
+    nativeSandbox: "nested-denied",
+    fallbackSandbox: false,
+  });
+
+  const capabilities = await fixture.adapter.probe();
+  assert.deepEqual(capabilities.policyReceipt.supportedAccess, []);
+  assert.equal(capabilities.readOnly, false);
+  assert.equal(capabilities.workspaceWrite, false);
+  assert.equal(capabilities.localCommit, false);
+  await assert.rejects(fixture.adapter.run(request()), (error) => {
+    assert.ok(hasCode("ERR_UNSUPPORTED_CLAUDE_CAPABILITY")(error));
+    assert.doesNotMatch(error.message, /setgroups|CAP_SYS_ADMIN|host-secret/u);
+    return true;
+  });
+  assert.equal(turnCalls(fixture).length, 0);
+});
+
+test("advertises restricted-host access modes only after their own proof", async () => {
+  const fixture = createFixture({
+    nativeSandbox: "nested-denied",
+    fallbackSandbox: ["read-only", "local-commit"],
+  });
+
+  const capabilities = await fixture.adapter.probe();
+  assert.deepEqual(capabilities.policyReceipt.supportedAccess, [
+    "read-only",
+    "local-commit",
+  ]);
+  assert.equal(capabilities.readOnly, true);
+  assert.equal(capabilities.workspaceWrite, false);
+  assert.equal(capabilities.localCommit, true);
+  await assert.rejects(
+    fixture.adapter.run(request({ access: "workspace-write" })),
+    hasCode("ERR_UNSUPPORTED_CLAUDE_CAPABILITY"),
+  );
+  assert.equal(turnCalls(fixture).length, 0);
 });
 
 test("runs strict read-only turns with isolated tools and an explicit model", async () => {

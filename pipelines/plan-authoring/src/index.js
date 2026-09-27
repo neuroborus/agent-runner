@@ -50,6 +50,11 @@ function pipelineMode(value) {
 }
 
 const ROLES = resolveActiveRoles();
+const ROLE_ACCESS = Object.freeze({
+  planner: Object.freeze(["read-only"]),
+  reviewer: Object.freeze(["read-only"]),
+  arbiter: Object.freeze(["read-only"]),
+});
 const SETTINGS = Object.freeze({
   maxRevisionRounds: positiveIntegerSetting(20),
   mode: Object.freeze({
@@ -320,6 +325,7 @@ export const planAuthoringPipeline = Object.freeze({
     4: migratePlanAuthoringStateV4,
   }),
   roles: ROLES,
+  roleAccess: ROLE_ACCESS,
   resolveActiveRoles,
   settings: SETTINGS,
   taskInputs: TASK_INPUTS,

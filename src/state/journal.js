@@ -45,6 +45,7 @@ const TRANSITION_STATE_FIELDS = [
   "counters",
   "hashes",
   "pause",
+  "providerPolicies",
   "activeTurn",
   "executionProcess",
   "executionResource",
@@ -82,9 +83,21 @@ function normalizeEvent(value, runId, lineNumber) {
     if (
       Number.isSafeInteger(value.schemaVersion) &&
       value.schemaVersion > 0 &&
-      ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, RUN_STATE_SCHEMA_VERSION].includes(
-        value.schemaVersion,
-      )
+      ![
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        RUN_STATE_SCHEMA_VERSION,
+      ].includes(value.schemaVersion)
     ) {
       throw new RunStoreError(
         `Unsupported event.schemaVersion: ${String(value.schemaVersion)}; ` +

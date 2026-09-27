@@ -1,4 +1,5 @@
 import { execFile as executeFileCallback } from "node:child_process";
+import { createHash } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -17,7 +18,10 @@ import {
   executeClaudeLocalCommit,
   probeClaudeLocalCommit,
 } from "./local-commit.js";
-import { probeClaudeNativeSandbox } from "./native-sandbox.js";
+import {
+  claudeIsolationCommand,
+  probeClaudeIsolationPolicies,
+} from "./native-sandbox.js";
 
 export const CLAUDE_BACKEND_ID = "claude";
 
@@ -454,6 +458,7 @@ function cliSettings(
   accessConfiguration,
   gitDirectories,
   credentialEnvironmentNames,
+  isolationPolicy,
 ) {
   const deniedWritePaths =
     request.access === "workspace-write"
@@ -506,7 +511,7 @@ function cliSettings(
       autoAllowBashIfSandboxed: accessConfiguration.autoAllowBashIfSandboxed,
       excludedCommands: [],
       allowUnsandboxedCommands: false,
-      enableWeakerNestedSandbox: false,
+      enableWeakerNestedSandbox: isolationPolicy === "runner-boundary",
       credentials: {
         envVars: credentialEnvironmentNames.map((name) => ({
           mode: "deny",
@@ -532,6 +537,7 @@ function commandArguments(
   gitDirectories,
   credentialEnvironmentNames,
   session,
+  isolationPolicy,
 ) {
   const accessConfiguration = accessConfigurationFor(request);
   const argumentsList = [
@@ -543,6 +549,7 @@ function commandArguments(
       accessConfiguration,
       gitDirectories,
       credentialEnvironmentNames,
+      isolationPolicy,
     ),
     "--append-system-prompt",
     SYSTEM_INSTRUCTIONS,
@@ -1026,6 +1033,7 @@ export function createClaudeAdapter(options = {}) {
       .sort(),
   );
   let probePromise;
+  let isolationPolicies;
   let supportedEfforts = new Set();
 
   async function inspectCapabilities() {
@@ -1079,10 +1087,14 @@ export function createClaudeAdapter(options = {}) {
         effortHelp.match(/\b(?:low|medium|high|max)\b/gu) ?? [],
       );
     }
-    let nativeSandboxAvailable = false;
+    let selectedPolicies = Object.freeze({
+      "read-only": "unavailable",
+      "workspace-write": "unavailable",
+      "local-commit": "unavailable",
+    });
     let localCommitExecutorAvailable = false;
     if (cliSupported && platform === "linux" && socatAvailable) {
-      nativeSandboxAvailable = await probeClaudeNativeSandbox({
+      selectedPolicies = await probeClaudeIsolationPolicies({
         bubblewrapBinary: BUBBLEWRAP_BINARY,
         claudeBinary,
         env: commandEnvironment,
@@ -1094,20 +1106,51 @@ export function createClaudeAdapter(options = {}) {
         execute,
       });
     }
+    isolationPolicies = Object.freeze({
+      ...selectedPolicies,
+      "local-commit": localCommitExecutorAvailable
+        ? selectedPolicies["local-commit"]
+        : "unavailable",
+    });
+    const supportedAccess = Object.freeze(
+      Object.entries(isolationPolicies)
+        .filter(([, policy]) => policy !== "unavailable")
+        .map(([access]) => access),
+    );
+    const policyReceipt = Object.freeze({
+      schemaVersion: 1,
+      fingerprint: createHash("sha256")
+        .update(
+          JSON.stringify({
+            contract: "claude-isolation-v1",
+            policies: isolationPolicies,
+            version: version.text,
+          }),
+        )
+        .digest("hex"),
+      supportedAccess,
+    });
+    const readOnlyAvailable = isolationPolicies["read-only"] !== "unavailable";
+    const workspaceWriteAvailable =
+      isolationPolicies["workspace-write"] !== "unavailable";
+    const remoteWriteBlocked = supportedAccess.length > 0;
     return Object.freeze({
       version: version.text,
       structuredOutput: cliSupported,
       readOnly:
-        nativeSandboxAvailable &&
+        readOnlyAvailable &&
         READ_ONLY_ACCESS.permissionMode === "plan" &&
         READ_ONLY_ACCESS.autoAllowBashIfSandboxed,
-      autonomousWrite: nativeSandboxAvailable,
-      gitMetadataWriteBlocked: nativeSandboxAvailable,
-      workspaceWrite: nativeSandboxAvailable,
-      localCommit: nativeSandboxAvailable && localCommitExecutorAvailable,
-      remoteWriteBlocked: nativeSandboxAvailable,
+      autonomousWrite: workspaceWriteAvailable,
+      gitMetadataWriteBlocked: workspaceWriteAvailable,
+      workspaceWrite: workspaceWriteAvailable,
+      localCommit:
+        isolationPolicies["local-commit"] !== "unavailable" &&
+        localCommitExecutorAvailable,
+      remoteWriteBlocked,
       nativeSessionContinuation: cliSupported,
       nativeSessionFork: cliSupported,
+      policyReceipt,
     });
   }
 
@@ -1136,7 +1179,7 @@ export function createClaudeAdapter(options = {}) {
         "gitMetadataWriteBlocked",
         "workspaceWrite",
       );
-    } else {
+    } else if (request.access === "read-only") {
       required.push("readOnly");
     }
     if (request.access === "local-commit") {
@@ -1154,6 +1197,7 @@ export function createClaudeAdapter(options = {}) {
         { code: "ERR_UNSUPPORTED_CLAUDE_CAPABILITY" },
       );
     }
+    return capabilities;
   }
 
   async function gitMetadataDirectories(request) {
@@ -1236,12 +1280,21 @@ export function createClaudeAdapter(options = {}) {
     request.signal?.throwIfAborted();
     const gitDirectories = await gitMetadataDirectories(request);
     const selectedSession = session === undefined ? request.session : session;
+    const isolationPolicy = isolationPolicies?.[request.access];
     const argumentsList = commandArguments(
       request,
       gitDirectories,
       credentialEnvironmentNames,
       selectedSession,
+      isolationPolicy,
     );
+    const command = claudeIsolationCommand({
+      argumentsList,
+      bubblewrapBinary: BUBBLEWRAP_BINARY,
+      claudeBinary,
+      cwd: request.cwd,
+      policy: isolationPolicy,
+    });
     let processResult;
     try {
       request.signal?.throwIfAborted();
@@ -1249,7 +1302,7 @@ export function createClaudeAdapter(options = {}) {
         request.onProcess !== undefined && execute === executeFile
           ? executeOwnedProcess
           : execute
-      )(claudeBinary, argumentsList, {
+      )(command.file, command.argumentsList, {
         cwd: request.cwd,
         encoding: "utf8",
         env: executionEnvironment(processEnvironment, request),

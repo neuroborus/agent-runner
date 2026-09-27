@@ -260,6 +260,7 @@ async function rewriteRunAsLegacy(directoryPath) {
   const eventsPath = join(directoryPath, "events.jsonl");
   const state = JSON.parse(await readFile(statePath, "utf8"));
   state.schemaVersion = 1;
+  delete state.providerPolicies;
   delete state.runtimeCompatibility;
   delete state.activeTurn;
   const events = (await readFile(eventsPath, "utf8"))
@@ -284,6 +285,7 @@ async function rewriteRunAsLegacy(directoryPath) {
     previousActiveTurn = activeTurn;
     event.schemaVersion = 1;
     event.state.schemaVersion = 1;
+    delete event.state.providerPolicies;
     delete event.state.runtimeCompatibility;
     delete event.state.activeTurn;
   }

@@ -187,6 +187,14 @@ test("runner construction, probing, and source sessions use the registry", async
       new Set(Object.values(run.roles).map(({ backend }) => backend)),
       new Set(["fake"]),
     );
+    for (const [role, receipt] of Object.entries(run.providerPolicies)) {
+      if (role === "arbiter") {
+        assert.equal(receipt, null);
+      } else {
+        assert.equal(receipt.schemaVersion, 1);
+        assert.match(receipt.fingerprint, /^[a-f0-9]{64}$/u);
+      }
+    }
   }
   assert.ok(adapter.probes.length > 0);
   assert.ok(adapter.probes.every(({ profile }) => profile === "native-work"));

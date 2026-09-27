@@ -311,3 +311,14 @@ and plan execution also requires the current planned commit to do so. A
 violation is corrected through the normal finding loop rather than a user
 question. The runner does not broaden network, filesystem, process, or
 host-service access to overcome a validation blocker.
+
+Claude selects isolation separately for read-only, workspace-write, and local
+commit access. It prefers the full native sandbox and considers the restricted
+host fallback only after the exact effective probe identifies the known nested
+user-namespace denial. The fallback encloses Claude in a Runner-owned private
+PID and proc boundary, then proves the effective weaker native sandbox denies
+network and Unix sockets, inherited credentials and provider-proc credential
+access, remote writes, Git metadata, and writes outside the access-specific
+workspace. Any failed proof leaves that access mode unavailable. The bounded
+selected-policy receipt is immutable for the run; resume or reconstruction
+fails closed if the provider's policy proof drifts.

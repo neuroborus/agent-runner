@@ -101,16 +101,15 @@ pause before this pipeline can continue. Complete and recovery role envelopes
 explicitly prohibit modifying the resolved project configuration.
 
 On Linux, every Claude role that performs a read-only turn requires the
-adapter's fixed, model-free exact-policy proof in addition to its CLI and native
-sandbox dependencies. Through fixed no-shell bubblewrap arguments, the probe
-runs an inert command through the resolved Claude executable's embedded
-`apply-seccomp` helper and the outer user-namespace shape required by
-`allowAllUnixSockets: false`. It uses the credential-filtered environment,
-bounded time and output, no selected profile, authentication, or model call,
-and retains no host diagnostic. It remains independent from the Runner-owned
-local-commit executor probe, which this read-only pipeline does not require;
-native session and structured-output capabilities retain their existing
-CLI-based semantics.
+adapter's fixed, model-free read-only policy proof. The adapter prefers full
+native isolation and tries weaker native nesting only for a recognized
+nested-user-namespace denial after a private Runner PID/`/proc` boundary proves
+the complete access envelope. The exact proof covers network, Unix sockets,
+credentials, workspace and Git writes, and outside writes with bounded no-shell
+execution, no profile, authentication, or model call, and no retained native
+diagnostic. A failed proof remains an early provider-neutral unsupported
+backend. The persisted read-only policy receipt must match on resume. The
+independent local-commit executor proof is not required by this pipeline.
 
 A configured runner artifact root does not affect this pipeline. Its task-owned
 `clarifications.md` and `plan.md` remain beside `task.md`.

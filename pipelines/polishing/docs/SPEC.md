@@ -212,17 +212,17 @@ Worker capability preflight requires structured output, read-only inspection,
 autonomous safe content writes, remote-write blocking, and the explicit
 `gitMetadataWriteBlocked` guarantee. Codex satisfies it through workspace-write
 isolation; Claude satisfies it through its Git-directory write and `git add`
-denials. On Linux, Claude advertises those turn capabilities only when a fixed,
-model-free exact-policy probe succeeds under the credential-filtered command
-environment. Fixed no-shell bubblewrap arguments reproduce the outer user,
-PID, mount, and network namespace shape for `allowAllUnixSockets: false` and
-run an inert command through the resolved Claude executable's embedded
-`apply-seccomp` helper. The probe has bounded output and time, retains no host
-diagnostic, and does not apply a profile, authenticate, or invoke a model. This
-native-turn proof remains independent from the Runner-owned local-commit
-executor proof, which polishing never requires; structured-output and native
-session capabilities remain CLI-derived. Neither backend receives broader
-`.git` access for polishing.
+denials. On Linux, Claude proves read-only and workspace-write policies
+separately. It prefers full native isolation and may use weaker native nesting
+only after a recognized nested-user-namespace denial and a complete proof
+inside a private Runner PID/`/proc` boundary. That proof covers the exact
+workspace authority plus Git, outside-write, network, Unix-socket, and
+credential restrictions with bounded model-free execution and no retained
+native diagnostic. A generic failure leaves the affected mode unavailable.
+The provider-neutral receipt is pinned before that role's work and must match
+before later provider work.
+The local-commit executor proof remains irrelevant to polishing, and neither
+backend receives broader `.git` access.
 Each Codex workspace-write app-server attempt receives one canonical owner-only
 runner-created root beneath the fixed platform temporary location. Exactly the
 repository and that private root are writable; host `/tmp`, ambient temporary
