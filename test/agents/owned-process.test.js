@@ -33,10 +33,11 @@ function hostSessionLauncher(cwd, { ownershipMode }) {
   });
 }
 
-async function inspectionSequenceEnvironment(t, sequence) {
+async function inspectionSequenceFixture(t, sequence, { record = false } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "owned-process-inspection-"));
   t.after(() => rm(directory, { force: true, recursive: true }));
   const preloadPath = join(directory, "inspection-sequence.cjs");
+  const inspectionPath = record ? join(directory, "inspections.txt") : null;
   await writeFile(
     preloadPath,
     `if (process.argv[1] === "session") {
@@ -54,6 +55,9 @@ async function inspectionSequenceEnvironment(t, sequence) {
     .digest("hex");
   fs.readdirSync = function readdirSync(path, ...argumentsList) {
     if (path === "/proc") {
+      if (${JSON.stringify(inspectionPath)} !== null) {
+        fs.appendFileSync(${JSON.stringify(inspectionPath)}, "inspection\\n");
+      }
       const observation = sequence[Math.min(index, sequence.length - 1)];
       index += 1;
       if (observation === "incomplete") {
@@ -83,11 +87,18 @@ async function inspectionSequenceEnvironment(t, sequence) {
 `,
   );
   return {
-    ...process.env,
-    NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${preloadPath}`]
-      .filter(Boolean)
-      .join(" "),
+    environment: {
+      ...process.env,
+      NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${preloadPath}`]
+        .filter(Boolean)
+        .join(" "),
+    },
+    inspectionPath,
   };
+}
+
+async function inspectionSequenceEnvironment(t, sequence) {
+  return (await inspectionSequenceFixture(t, sequence)).environment;
 }
 
 async function productionTopologyEnvironment(t, bootId) {
@@ -1021,17 +1032,26 @@ test(
   "bounds persistent incomplete inspection and retires an empty supervisor",
   { timeout: 5_000 },
   async (t) => {
+    // Drive the parent's watchdog separately from the real supervisor's
+    // inspection grace; host load must not decide which proof is observed.
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const registrations = [];
+    const deregistrationStarted = Promise.withResolvers();
+    const releaseDeregistration = Promise.withResolvers();
+    const inspection = await inspectionSequenceFixture(t, ["incomplete"], {
+      record: true,
+    });
     let registeredIdentity;
     const child = spawnOwnedProcess(
       process.execPath,
       ["-e", "process.exit(0)"],
       {
         descendantGraceMs: 50,
-        env: await inspectionSequenceEnvironment(t, ["incomplete"]),
+        env: inspection.environment,
         onProcess: async (pid, proof) => {
           if (pid === null) {
-            await new Promise((resolve) => setTimeout(resolve, 125));
+            deregistrationStarted.resolve();
+            await releaseDeregistration.promise;
           }
           registrations.push(pid);
           if (pid !== null) registeredIdentity = proof.processIdentity;
@@ -1053,14 +1073,33 @@ test(
         } catch {}
       }
     });
-    const startedAt = Date.now();
-
-    await assert.rejects(child.ownedCompletion, {
-      code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
-    });
-    const elapsed = Date.now() - startedAt;
-    assert.ok(elapsed >= 40, `inspection failed after only ${elapsed}ms`);
-    assert.ok(elapsed < 1_000, `inspection remained pending for ${elapsed}ms`);
+    let completed = false;
+    const completion = assert
+      .rejects(child.ownedCompletion, {
+        code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+      })
+      .then(() => {
+        completed = true;
+      });
+    await deregistrationStarted.promise;
+    try {
+      await new Promise(setImmediate);
+      assert.equal(
+        completed,
+        false,
+        "completion must await durable deregistration",
+      );
+      assert.throws(() => process.kill(child.pid, 0), { code: "ESRCH" });
+    } finally {
+      releaseDeregistration.resolve();
+    }
+    await completion;
+    assert.ok(
+      (await readFile(inspection.inspectionPath, "utf8"))
+        .split("\n")
+        .filter(Boolean).length > 1,
+      "persistent uncertainty must consume the bounded retry window",
+    );
     assert.deepEqual(registrations, [child.ownedPid, null]);
     assert.equal(child.ownedContainmentRetained, true);
     assert.throws(() => process.kill(child.pid, 0), { code: "ESRCH" });
@@ -1369,20 +1408,20 @@ test(
 
     const controller = new AbortController();
     const registrations = [];
+    const registered = Promise.withResolvers();
     const canceled = spawnOwnedProcess(
       process.execPath,
       ["-e", "setInterval(() => {}, 1000)"],
       {
         descendantGraceMs: 25,
-        onProcess: async (pid) => registrations.push(pid),
+        onProcess: async (pid) => {
+          registrations.push(pid);
+          if (pid !== null) registered.resolve();
+        },
         signal: controller.signal,
       },
     );
-    await new Promise((resolve) => {
-      const wait = () =>
-        registrations.length === 0 ? setImmediate(wait) : resolve();
-      wait();
-    });
+    await registered.promise;
     controller.abort();
     await canceled.ownedCompletion;
     assert.equal(Number.isSafeInteger(registrations[0]), true);

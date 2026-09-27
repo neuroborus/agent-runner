@@ -1253,6 +1253,8 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
       terminationFailureTimer = setTimeout(
         () => {
           if (closed) return;
+          child.unref();
+          child.channel?.unref?.();
           rejectCompletion?.(
             retainedContainmentFailure ??
               ownedError(
@@ -1370,10 +1372,16 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
             : "ERR_EXECUTION_PROCESS_ACTIVE",
         );
         failure ??= retainedContainmentFailure;
-        if (!child.ownedContainmentRetained) child.kill("SIGKILL");
+        if (!child.ownedContainmentRetained) {
+          child.kill("SIGKILL");
+          const terminationSignaled = kill("SIGKILL");
+          // The supervisor has already reported that it cannot provide a
+          // trustworthy outcome. Retire that live control process directly;
+          // durable registration continues to protect any uncertain
+          // descendants until the parent can prove the session empty.
+          if (!terminationSignaled) killLauncher("SIGKILL");
+        }
         child.ownedContainmentRetained = true;
-        child.unref();
-        child.channel?.unref?.();
         return;
       }
       if (message?.type === "outcome") {
