@@ -217,7 +217,6 @@ function nativeArguments({
 
 function fallbackProbeArguments({
   access,
-  claudeBinary,
   credentialEnvironmentNames,
   emptyMaskDirectory,
   gitDirectory,
@@ -260,9 +259,7 @@ function fallbackProbeArguments({
     "--",
     "/bin/sh",
     "-c",
-    `${shellArgument(claudeBinary)} ${shellArgument(
-      process.execPath,
-    )} --input-type=module -e ${shellArgument(RUNNER_BOUNDARY_PROBE_SCRIPT)} ${[
+    `${shellArgument(process.execPath)} --input-type=module -e ${shellArgument(RUNNER_BOUNDARY_PROBE_SCRIPT)} ${[
       access,
       gitDirectory,
       outsideDirectory,
@@ -366,7 +363,6 @@ async function probePolicy({
       file = commandLauncher.path;
       argumentsList = fallbackProbeArguments({
         access,
-        claudeBinary,
         credentialEnvironmentNames,
         emptyMaskDirectory,
         gitDirectory,

@@ -116,6 +116,10 @@ function includesSequence(argumentsList, sequence) {
   );
 }
 
+function shellArgument(value) {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
 function isNativeSandboxProbe({ file, argumentsList }) {
   return (
     file === process.execPath &&
@@ -1047,7 +1051,13 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
       call.options.env.PATH.split(delimiter)[0],
       fakeBubblewrap.directory,
     );
-    assert.ok(argumentsList.at(-1).includes(`'${socketPath}'`));
+    const fallbackPayload = argumentsList.at(-1);
+    const nodeExecutable = shellArgument(process.execPath);
+    assert.equal(
+      fallbackPayload.slice(0, fallbackPayload.indexOf(" --input-type=module")),
+      nodeExecutable,
+    );
+    assert.ok(fallbackPayload.includes(`'${socketPath}'`));
     assert.equal(
       includesSequence(boundaryArguments, [
         "--setenv",
