@@ -107,13 +107,44 @@ const BASE_OPTIONS = Object.freeze([
 ]);
 const READ_ONLY_TOOLS = "Bash,Read,Glob,Grep";
 const WORKSPACE_TOOLS = "Bash,Read,Edit,Write,Glob,Grep";
+const COMMON_DENY_POLICY = Object.freeze([
+  "Agent",
+  "Task",
+  "WebFetch",
+  "WebSearch",
+  "Edit(/.git)",
+  "Edit(/.git/**)",
+]);
+const WORKSPACE_DENY_POLICY = Object.freeze([
+  ...COMMON_DENY_POLICY,
+  "Bash(git add *)",
+  "Bash(git branch *)",
+  "Bash(git checkout *)",
+  "Bash(git cherry-pick *)",
+  "Bash(git clean *)",
+  "Bash(git commit *)",
+  "Bash(git merge *)",
+  "Bash(git push *)",
+  "Bash(git rebase *)",
+  "Bash(git remote *)",
+  "Bash(git reset *)",
+  "Bash(git restore *)",
+  "Bash(git revert *)",
+  "Bash(git stash *)",
+  "Bash(git switch *)",
+  "Bash(git tag *)",
+  "Bash(gh *)",
+  "Bash(glab *)",
+]);
 const READ_ONLY_ACCESS = Object.freeze({
   autoAllowBashIfSandboxed: true,
-  permissionMode: "plan",
+  deny: COMMON_DENY_POLICY,
+  permissionMode: "auto",
   tools: READ_ONLY_TOOLS,
 });
 const WORKSPACE_ACCESS = Object.freeze({
   autoAllowBashIfSandboxed: false,
+  deny: WORKSPACE_DENY_POLICY,
   permissionMode: "auto",
   tools: WORKSPACE_TOOLS,
 });
@@ -435,6 +466,47 @@ function accessConfigurationFor(request) {
     : READ_ONLY_ACCESS;
 }
 
+function policyIdentity(isolationPolicies) {
+  return Object.fromEntries(
+    Object.entries(isolationPolicies).map(([access, isolationPolicy]) => {
+      const configuration =
+        access === "workspace-write" ? WORKSPACE_ACCESS : READ_ONLY_ACCESS;
+      return [
+        access,
+        {
+          autoMode: { classifyAllShell: true },
+          disableBypassPermissionsMode: "disable",
+          permissionMode: configuration.permissionMode,
+          permissions: { deny: configuration.deny },
+          sandbox: {
+            allowUnsandboxedCommands: false,
+            autoAllowBashIfSandboxed: configuration.autoAllowBashIfSandboxed,
+            credentials: { denyDiscoveredEnvironment: true },
+            enabled: true,
+            enableWeakerNestedSandbox: isolationPolicy === "runner-boundary",
+            excludedCommands: [],
+            failIfUnavailable: true,
+            filesystem: {
+              disabled: false,
+              gitMetadataWrite: false,
+              outsideWrite: false,
+              workspaceWrite: access === "workspace-write",
+            },
+            isolationPolicy,
+            network: {
+              allowedDomains: [],
+              allowAllUnixSockets: isolationPolicy === "runner-boundary",
+              deniedDomains: ["*"],
+              strictAllowlist: true,
+            },
+          },
+          tools: configuration.tools,
+        },
+      ];
+    }),
+  );
+}
+
 function turnPrompt(request, recovery) {
   const prefix =
     recovery === "compact"
@@ -482,32 +554,7 @@ function cliSettings(
     fallbackModel: [],
     fileCheckpointingEnabled: false,
     permissions: {
-      deny: [
-        "Agent",
-        "Task",
-        "WebFetch",
-        "WebSearch",
-        "Edit(/.git)",
-        "Edit(/.git/**)",
-        "Bash(git add *)",
-        "Bash(git branch *)",
-        "Bash(git checkout *)",
-        "Bash(git cherry-pick *)",
-        "Bash(git clean *)",
-        "Bash(git commit *)",
-        "Bash(git merge *)",
-        "Bash(git push *)",
-        "Bash(git rebase *)",
-        "Bash(git remote *)",
-        "Bash(git reset *)",
-        "Bash(git restore *)",
-        "Bash(git revert *)",
-        "Bash(git stash *)",
-        "Bash(git switch *)",
-        "Bash(git tag *)",
-        "Bash(gh *)",
-        "Bash(glab *)",
-      ],
+      deny: accessConfiguration.deny,
     },
     sandbox: {
       enabled: true,
@@ -1138,6 +1185,7 @@ export function createClaudeAdapter(options = {}) {
       fingerprint: createHash("sha256")
         .update(
           JSON.stringify({
+            accessPolicies: policyIdentity(isolationPolicies),
             contract: Object.values(isolationPolicies).includes(
               "runner-boundary",
             )
@@ -1151,22 +1199,25 @@ export function createClaudeAdapter(options = {}) {
       supportedAccess,
     });
     const readOnlyAvailable = isolationPolicies["read-only"] !== "unavailable";
+    const readOnlyPolicyAvailable =
+      READ_ONLY_ACCESS.permissionMode === "auto" &&
+      READ_ONLY_ACCESS.autoAllowBashIfSandboxed &&
+      READ_ONLY_ACCESS.tools === READ_ONLY_TOOLS &&
+      READ_ONLY_ACCESS.deny === COMMON_DENY_POLICY;
     const workspaceWriteAvailable =
       isolationPolicies["workspace-write"] !== "unavailable";
     const remoteWriteBlocked = supportedAccess.length > 0;
     return Object.freeze({
       version: version.text,
       structuredOutput: cliSupported,
-      readOnly:
-        readOnlyAvailable &&
-        READ_ONLY_ACCESS.permissionMode === "plan" &&
-        READ_ONLY_ACCESS.autoAllowBashIfSandboxed,
+      readOnly: readOnlyAvailable && readOnlyPolicyAvailable,
       autonomousWrite: workspaceWriteAvailable,
       gitMetadataWriteBlocked: workspaceWriteAvailable,
       workspaceWrite: workspaceWriteAvailable,
       localCommit:
         isolationPolicies["local-commit"] !== "unavailable" &&
-        localCommitExecutorAvailable,
+        localCommitExecutorAvailable &&
+        readOnlyPolicyAvailable,
       remoteWriteBlocked,
       nativeSessionContinuation: cliSupported,
       nativeSessionFork: cliSupported,

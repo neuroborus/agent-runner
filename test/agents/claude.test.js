@@ -68,6 +68,35 @@ const STRICT_SCHEMA = Object.freeze({
   required: ["ok"],
   additionalProperties: false,
 });
+const COMMON_DENY_POLICY = [
+  "Agent",
+  "Task",
+  "WebFetch",
+  "WebSearch",
+  "Edit(/.git)",
+  "Edit(/.git/**)",
+];
+const WORKSPACE_DENY_POLICY = [
+  ...COMMON_DENY_POLICY,
+  "Bash(git add *)",
+  "Bash(git branch *)",
+  "Bash(git checkout *)",
+  "Bash(git cherry-pick *)",
+  "Bash(git clean *)",
+  "Bash(git commit *)",
+  "Bash(git merge *)",
+  "Bash(git push *)",
+  "Bash(git rebase *)",
+  "Bash(git remote *)",
+  "Bash(git reset *)",
+  "Bash(git restore *)",
+  "Bash(git revert *)",
+  "Bash(git stash *)",
+  "Bash(git switch *)",
+  "Bash(git tag *)",
+  "Bash(gh *)",
+  "Bash(glab *)",
+];
 
 function hasCode(code) {
   return (error) => error instanceof ClaudeAdapterError && error.code === code;
@@ -162,6 +191,31 @@ function isolationProbeScripts(argumentsList) {
         !scriptIndexes.some((index) => argumentsList[index] === argument),
     ),
   ];
+}
+
+function assertReadOnlyInspectionProbe(script) {
+  assert.match(
+    script,
+    /git log -1 --format=%H[\s\S]+git cat-file -e[\s\S]+git branch -a[\s\S]+ls/u,
+  );
+  assert.match(script, /GIT_CONFIG_GLOBAL: "\/dev\/null"/u);
+  assert.match(script, /GIT_CONFIG_NOSYSTEM: "1"/u);
+  assert.match(script, /GIT_TERMINAL_PROMPT: "0"/u);
+  assert.match(script, /workspace-command-probe/u);
+  assert.match(script, /"branch", "sandbox-command-probe"/u);
+  assert.match(script, /"push", outsideDirectory/u);
+}
+
+function isProbeRepositorySetup({ file, argumentsList }) {
+  const directory = argumentsList[1];
+  return (
+    file === "git" &&
+    argumentsList[0] === "-C" &&
+    typeof directory === "string" &&
+    parse(dirname(directory)).base.startsWith("ar-c-") &&
+    ["outside", "w"].includes(parse(directory).base) &&
+    ["add", "commit", "init"].some((command) => argumentsList.includes(command))
+  );
 }
 
 function localCommitSandboxCalls(fixture) {
@@ -338,8 +392,49 @@ function capabilitiesWithoutReceipt(capabilities) {
 }
 
 function policyFingerprint(contract, policies, version = "2.1.233") {
+  const accessPolicies = Object.fromEntries(
+    Object.entries(policies).map(([access, isolationPolicy]) => {
+      const readOnly = access !== "workspace-write";
+      return [
+        access,
+        {
+          autoMode: { classifyAllShell: true },
+          disableBypassPermissionsMode: "disable",
+          permissionMode: "auto",
+          permissions: {
+            deny: readOnly ? COMMON_DENY_POLICY : WORKSPACE_DENY_POLICY,
+          },
+          sandbox: {
+            allowUnsandboxedCommands: false,
+            autoAllowBashIfSandboxed: readOnly,
+            credentials: { denyDiscoveredEnvironment: true },
+            enabled: true,
+            enableWeakerNestedSandbox: isolationPolicy === "runner-boundary",
+            excludedCommands: [],
+            failIfUnavailable: true,
+            filesystem: {
+              disabled: false,
+              gitMetadataWrite: false,
+              outsideWrite: false,
+              workspaceWrite: !readOnly,
+            },
+            isolationPolicy,
+            network: {
+              allowedDomains: [],
+              allowAllUnixSockets: isolationPolicy === "runner-boundary",
+              deniedDomains: ["*"],
+              strictAllowlist: true,
+            },
+          },
+          tools: readOnly
+            ? "Bash,Read,Glob,Grep"
+            : "Bash,Read,Edit,Write,Glob,Grep",
+        },
+      ];
+    }),
+  );
   return createHash("sha256")
-    .update(JSON.stringify({ contract, policies, version }))
+    .update(JSON.stringify({ accessPolicies, contract, policies, version }))
     .digest("hex");
 }
 
@@ -773,8 +868,28 @@ test("constructs and probes enforceable Claude capabilities", async () => {
     nativeSessionContinuation: true,
     nativeSessionFork: true,
   });
+  assert.equal(
+    capabilities.policyReceipt.fingerprint,
+    policyFingerprint(
+      "claude-isolation-v1",
+      {
+        "read-only": "native",
+        "workspace-write": "native",
+        "local-commit": "native",
+      },
+      capabilities.version,
+    ),
+  );
+  const probeRepositoryCalls = fixture.calls.filter(isProbeRepositorySetup);
+  assert.ok(probeRepositoryCalls.length > 0);
+  for (const { options } of probeRepositoryCalls) {
+    assert.equal(options.env.GIT_CONFIG_GLOBAL, "/dev/null");
+    assert.equal(options.env.GIT_CONFIG_NOSYSTEM, "1");
+    assert.equal(options.env.GIT_TERMINAL_PROMPT, "0");
+  }
   assert.deepEqual(
     fixture.calls
+      .filter(({ file }) => file !== "git")
       .slice(0, 7)
       .map(({ file, argumentsList }) => [file, argumentsList[0]]),
     [
@@ -787,7 +902,8 @@ test("constructs and probes enforceable Claude capabilities", async () => {
       ["bwrap", "--die-with-parent"],
     ],
   );
-  const nativeSandboxCall = fixture.calls[3];
+  const nativeSandboxCall = fixture.calls.find(isNativeSandboxProbe);
+  assert.ok(nativeSandboxCall);
   assert.deepEqual(nativeSandboxCall.argumentsList.slice(0, 4), [
     "--input-type=module",
     "-e",
@@ -807,6 +923,7 @@ test("constructs and probes enforceable Claude capabilities", async () => {
   assert.match(commandProbe, /join\("\/proc", providerPid, "environ"\)/u);
   assert.match(commandProbe, /readFileSync\([^;]+\);\n  process\.exit\(18\)/u);
   assert.match(commandProbe, /AGENT_RUNNER_CLAUDE_PROBE_CREDENTIAL/u);
+  assertReadOnlyInspectionProbe(commandProbe);
   assert.ok(nativeSandboxCall.argumentsList.includes("--unshare-net"));
   assert.ok(nativeSandboxCall.argumentsList.includes("--unshare-user"));
   assert.ok(nativeSandboxCall.argumentsList.includes("--cap-drop"));
@@ -1217,6 +1334,7 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
       false,
     );
     const [commandProbe] = isolationProbeScripts(argumentsList);
+    assertReadOnlyInspectionProbe(commandProbe);
     assert.match(commandProbe, /readFileSync/u);
     assert.match(commandProbe, /join\("\/proc", providerPid, "environ"\)/u);
     assert.match(
@@ -1409,8 +1527,12 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
   assert.equal(settings.sandbox.failIfUnavailable, true);
   assert.equal(settings.sandbox.network.allowAllUnixSockets, true);
   assert.deepEqual(settings.sandbox.network.deniedDomains, ["*"]);
-  assert.equal(option(turns[1].argumentsList, "--permission-mode"), "auto");
-  assert.equal(option(turns[2].argumentsList, "--permission-mode"), "plan");
+  assert.ok(
+    turns.every(
+      ({ argumentsList }) =>
+        option(argumentsList, "--permission-mode") === "auto",
+    ),
+  );
   const helperInvocations = (
     await readFile(fakeBubblewrap.helperLogPath, "utf8")
   )
@@ -1800,7 +1922,7 @@ test("keeps fallback cleanup failures after writable turns ambiguous", async (t)
   );
 });
 
-test("runs strict read-only turns with isolated tools and an explicit model", async () => {
+test("runs autonomous read-only turns with isolated tools and an explicit model", async () => {
   const fixture = createFixture({
     env: {
       ...process.env,
@@ -1831,7 +1953,7 @@ test("runs strict read-only turns with isolated tools and an explicit model", as
   assert.equal(turn.argumentsList[0], "-p");
   assert.equal(turn.options.input, "Inspect the repository.");
   assert.ok(!turn.argumentsList.includes("Inspect the repository."));
-  assert.equal(option(turn.argumentsList, "--permission-mode"), "plan");
+  assert.equal(option(turn.argumentsList, "--permission-mode"), "auto");
   assert.equal(option(turn.argumentsList, "--tools"), "Bash,Read,Glob,Grep");
   assert.equal(option(turn.argumentsList, "--model"), "claude-test");
   assert.equal(option(turn.argumentsList, "--prompt-suggestions"), "false");
@@ -1871,9 +1993,10 @@ test("runs strict read-only turns with isolated tools and an explicit model", as
     ),
     { mode: "deny", name: "ANTHROPIC_API_KEY" },
   );
-  assert.ok(settings.permissions.deny.includes("Edit(/.git/**)"));
-  assert.ok(settings.permissions.deny.includes("Bash(git push *)"));
-  assert.ok(settings.permissions.deny.includes("Bash(git commit *)"));
+  assert.deepEqual(settings.permissions.deny, COMMON_DENY_POLICY);
+  assert.ok(
+    settings.permissions.deny.every((entry) => !entry.startsWith("Bash(")),
+  );
   assert.deepEqual(settings.sandbox.network.deniedDomains, ["*"]);
   assert.equal(settings.sandbox.network.strictAllowlist, true);
   assert.ok(settings.sandbox.filesystem.denyWrite.includes(PROJECT_PATH));
@@ -1977,7 +2100,7 @@ test("rejects invalid Claude profiles and context sizes", async () => {
   assert.equal(fixture.calls.length, 0);
 });
 
-test("uses auto mode only for autonomous workspace turns", async () => {
+test("keeps autonomous workspace policy unchanged", async () => {
   const fixture = createFixture();
 
   await fixture.adapter.run(request({ access: "workspace-write" }));
@@ -1994,7 +2117,7 @@ test("uses auto mode only for autonomous workspace turns", async () => {
   assert.ok(
     settings.sandbox.filesystem.denyWrite.includes(`${PROJECT_PATH}/.git`),
   );
-  assert.ok(settings.permissions.deny.includes("Bash(git add *)"));
+  assert.deepEqual(settings.permissions.deny, WORKSPACE_DENY_POLICY);
 });
 
 test("passes option-like prompts through stdin", async () => {
@@ -2942,9 +3065,19 @@ test("creates one exact authorized commit in a networkless sandbox", async () =>
   assert.equal(metadata.options.ownershipMode, undefined);
   assert.ok(commitSandbox);
 
+  const readinessTurn = turnCalls(fixture)[0];
   assert.equal(
-    option(turnCalls(fixture)[0].argumentsList, "--permission-mode"),
-    "plan",
+    option(readinessTurn.argumentsList, "--permission-mode"),
+    "auto",
+  );
+  assert.equal(
+    option(readinessTurn.argumentsList, "--tools"),
+    "Bash,Read,Glob,Grep",
+  );
+  assert.deepEqual(
+    JSON.parse(option(readinessTurn.argumentsList, "--settings")).permissions
+      .deny,
+    COMMON_DENY_POLICY,
   );
   const bubblewrapCalls = localCommitSandboxCalls(fixture);
   assert.equal(bubblewrapCalls.length, 2);
@@ -3033,7 +3166,12 @@ test("preserves immutable and primitive abort reasons before local commit execut
       },
     );
     assert.equal(turnCalls(fixture).length, 0);
-    assert.equal(fixture.calls.filter(({ file }) => file === "git").length, 0);
+    assert.equal(
+      fixture.calls.filter(
+        (call) => call.file === "git" && !isProbeRepositorySetup(call),
+      ).length,
+      0,
+    );
   }
 });
 
@@ -3105,7 +3243,7 @@ test("keeps commit-executor failures ambiguous", async () => {
 });
 
 test(
-  "denies a visible pathname socket through the installed Claude helper",
+  "runs read-only inspection and denies mutations through the installed Claude helper",
   { skip: process.platform !== "linux" },
   async (t) => {
     const claudeBinary = await resolveTestExecutable("claude");
@@ -3164,6 +3302,9 @@ test(
       }
       if (file === "socat") {
         return { stdout: "socat version 1.8", stderr: "" };
+      }
+      if (file === "git") {
+        return executeFile(file, argumentsList, options);
       }
       if (isNativeSandboxProbe(call)) {
         const error = new Error("Claude isolation probe failed.");
@@ -3257,7 +3398,10 @@ test("expanded pipeline inventory schemas preserve strict Claude preflight and s
       assert.equal(settings.sandbox.enableWeakerNestedSandbox, false);
       assert.notEqual(settings.sandbox.network.allowAllUnixSockets, true);
       assert.deepEqual(settings.sandbox.network.deniedDomains, ["*"]);
-      assert.ok(settings.permissions.deny.includes("Bash(git commit *)"));
+      assert.deepEqual(
+        settings.permissions.deny,
+        access === "read-only" ? COMMON_DENY_POLICY : WORKSPACE_DENY_POLICY,
+      );
       assert.ok(
         settings.sandbox.filesystem.denyWrite.includes(`${PROJECT_PATH}/.git`),
       );

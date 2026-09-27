@@ -68,6 +68,10 @@ with controlled helper and bubblewrap processes for the commit gate. That
 coverage must prove helper-before-bubblewrap ordering, the single bubblewrap
 invocation, provider connectivity, environment scrubbing, argument rejection
 before payload execution, and the complete command-isolation argument contract.
+Access-policy coverage also proves that one compound `git log`, `git cat-file`,
+`git branch -a`, and `ls` inspection succeeds in the read-only sandbox while
+representative workspace, Git, and remote mutations fail, local-commit
+readiness uses the same policy, and workspace-write settings stay unchanged.
 One bounded capability-gated Linux process regression exercises the installed
 local helper and bubblewrap without a model request, sleep, retry loop, or
 slow-tier promotion. It does not replace post-install acceptance: after the

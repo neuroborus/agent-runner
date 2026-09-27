@@ -112,6 +112,16 @@ provider work, so a host or CLI policy change cannot silently widen authority.
 Pipeline descriptors declare their role access needs; unsupported access uses
 the same early bounded diagnosis through CLI and MCP for every provider.
 
+Claude read-only and local-commit readiness turns use autonomous inspection
+inside their proved read-only sandbox while exposing only Bash and file-search
+tools. Provider command-denial patterns that reject safe compound inspection
+are omitted from that access policy; collaboration, editing, and web tools stay
+restricted, and the sandbox remains the authority for filesystem and Git
+mutation, process escape, socket access, credential exposure, and remote-write
+denial. Workspace-write turns retain their existing tool and denial policy. The
+private receipt fingerprint binds these effective access-specific settings and
+the installed CLI version without expanding the provider-neutral receipt.
+
 Codex model-issued commands derive from the provider process environment only
 through a strict shell policy. Automatic secret-name exclusions run before
 explicit workspace values, and an exact allowlist retains Codex's standard core

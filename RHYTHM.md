@@ -7,6 +7,17 @@ remain in the owning documentation.
 
 ## 2026-09-27
 
+- **Proved read-only isolation, not command text, authorizes Claude
+  inspection.** Read-only and local-commit readiness turns now use autonomous
+  permission mode with only Bash and repository read/search tools. Their
+  access policy omits broad shell and hosting-command denials that rejected
+  safe compound inspection, while collaboration, editing, and web restrictions
+  remain explicit. The independently proved sandbox continues to preserve the
+  content, Git, remote-write, credential, process-escape, network, socket, and
+  outside-write boundaries; workspace-write policy is unchanged. Provider
+  receipts now bind the complete effective access-specific permission, tool,
+  deny, sandbox, isolation, and CLI version contract so resume cannot reuse
+  evidence from the prior policy.
 - **Claude restricted-host fallback is capability-driven and immutable.** The
   Claude adapter proves read-only, workspace-write, and local-commit isolation
   independently. It prefers the full native sandbox and accepts Claude's weaker

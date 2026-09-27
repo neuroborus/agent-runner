@@ -1725,10 +1725,13 @@ The command crosses one effective user, PID, mount, and network namespace
 boundary rather than nesting a second user namespace around bubblewrap.
 
 The direct fallback probe supplies representative effective Claude arguments
-to that same validator and execution path. It checks access-specific workspace
-writes, Git and outside-write denial, private temporary storage, IP isolation,
-inability to reach live host abstract and pathname Unix sockets, credential and
-`ARGV0` removal, and host provider-proc secrecy. The selected fallback sets
+to that same validator and execution path. Native and fallback child probes use
+a disposable committed repository to require compound repository inspection
+and, for read-only access, reject workspace, Git, and local remote-ref
+mutations. They also check access-specific workspace writes, outside-write
+denial, private temporary storage, IP isolation, inability to reach live host
+abstract and pathname Unix sockets, credential and `ARGV0` removal, and host
+provider-proc secrecy. The selected fallback sets
 Claude's required weaker-nesting option and `allowAllUnixSockets: true`, so no
 second automatic helper is added to the opaque command payload. Native policy
 retains `allowAllUnixSockets: false` and its existing stricter topology.
@@ -1741,16 +1744,21 @@ environment, and bounded time and output; they retain no host diagnostic and
 never apply a profile, authenticate, or invoke a model.
 The local-commit executor proof remains independent and `localCommit` requires
 both the local-commit turn policy and executor proof.
-The fallback policy identity advances with this effective-settings contract, so
-a receipt created for the superseded helper-free fallback cannot authorize
-later provider work.
+The provider-private policy identity binds the installed CLI version, selected
+isolation policy, and complete effective permission, tool, deny, and sandbox
+policy for every access mode. A receipt created for the superseded fallback or
+permission policy cannot authorize later provider work.
 Claude derives its advertised read-only capability and turn arguments from one
-plan-mode access envelope. It exposes only repository-inspection tools, allows
-Bash without prompting only when the required native sandbox is active, denies
-workspace and Git-metadata writes, closes command network access, and forbids
-unsandboxed fallback. Workspace-write turns retain Claude's separate `auto`
-permission policy and background classifier while denying Git-directory writes
-and `git add`. Codex workspace-write isolation likewise exposes safe content
+autonomous access envelope shared by read-only and local-commit readiness
+turns. It exposes only repository-inspection tools and omits broad shell-command
+denials that would reject compound inspection, while retaining collaboration,
+editing, and web restrictions. Autonomous Bash is available only inside the
+proved sandbox, which denies workspace and Git-metadata writes, closes command
+network and Unix-socket access, and forbids unsandboxed fallback.
+Workspace-write turns retain their separate `auto` permission policy,
+background classifier, broader content tools, and existing command denials
+while denying Git-directory writes and `git add`. Codex workspace-write
+isolation likewise exposes safe content
 writes without Git-metadata writes. Codex protects project-root `.agents` as
 provider metadata by default, so a workspace-write turn adds it as an explicit
 writable root only when it exists as a real directory. A missing or symlinked

@@ -339,3 +339,13 @@ launcher failure, or cleanup leaves that access mode unavailable. The bounded
 selected-policy receipt distinguishes the effective fallback settings and
 remains immutable for the run; resume or reconstruction fails closed if the
 provider's policy proof drifts.
+
+Within either proved isolation topology, Claude's read-only and local-commit
+readiness turns may inspect autonomously with only Bash and read/search tools.
+They do not rely on broad shell-command denials that can misclassify compound
+inspection; collaboration, editing, and web restrictions remain explicit, and
+the sandbox continues to deny repository content writes, Git and remote
+mutation, credentials, process escape, network access, and host Unix sockets.
+Workspace-write turns retain their existing command denials and
+autonomous-write restrictions. The access-specific effective policy is part of
+the immutable provider receipt, so resume fails closed after policy drift.

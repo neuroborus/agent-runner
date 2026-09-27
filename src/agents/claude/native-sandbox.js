@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -43,6 +43,7 @@ if (result.error !== undefined || result.signal !== null) process.exit(21);
 process.exit(result.status ?? 22);
 `.trim();
 const NATIVE_PROBE_SCRIPT = String.raw`
+import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync, writeSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { join } from "node:path";
@@ -51,6 +52,12 @@ const [access, gitDirectory, outsideDirectory, socketPath, providerPid] =
   process.argv.slice(1);
 const writable = access === "workspace-write";
 const denied = new Set(["EACCES", "ENOENT", "EPERM", "EROFS"]);
+const gitEnvironment = {
+  ...process.env,
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_TERMINAL_PROMPT: "0",
+};
 function write(path, expected) {
   try {
     writeFileSync(path, "");
@@ -59,6 +66,16 @@ function write(path, expected) {
     if (expected || !denied.has(code)) process.exit(11);
   }
 }
+function run(file, argumentsList, expected) {
+  const result = spawnSync(file, argumentsList, {
+    encoding: "utf8",
+    env: gitEnvironment,
+    maxBuffer: 1024 * 1024,
+    timeout: 1_000,
+  });
+  if (result.error !== undefined || result.signal !== null) process.exit(27);
+  if ((result.status === 0) !== expected) process.exit(26);
+}
 if (process.env.${PROBE_CREDENTIAL} !== undefined) process.exit(12);
 if (!/^[1-9][0-9]*$/.test(providerPid)) process.exit(17);
 try {
@@ -66,6 +83,23 @@ try {
   process.exit(18);
 } catch ({ code }) {
   if (!denied.has(code)) process.exit(19);
+}
+run(
+  "/bin/sh",
+  [
+    "-c",
+    "git log -1 --format=%H >/dev/null && git cat-file -e 'HEAD^{commit}' && git branch -a >/dev/null && ls >/dev/null",
+  ],
+  true,
+);
+if (!writable) {
+  run("/bin/sh", ["-c", ": > workspace-command-probe"], false);
+  run("git", ["branch", "sandbox-command-probe"], false);
+  run(
+    "git",
+    ["push", outsideDirectory, "HEAD:refs/heads/sandbox-command-probe"],
+    false,
+  );
 }
 write("workspace-probe", writable);
 write(join(gitDirectory, "git-probe"), false);
@@ -93,6 +127,7 @@ server.listen(socketPath, () => {
 setTimeout(() => process.exit(16), 1_000);
 `.trim();
 const RUNNER_BOUNDARY_PROBE_SCRIPT = String.raw`
+import { spawnSync } from "node:child_process";
 import { readFileSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { createConnection } from "node:net";
 import { join } from "node:path";
@@ -107,6 +142,12 @@ const [
 ] = process.argv.slice(1);
 const writable = access === "workspace-write";
 const denied = new Set(["EACCES", "ENOENT", "EPERM", "EROFS"]);
+const gitEnvironment = {
+  ...process.env,
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_TERMINAL_PROMPT: "0",
+};
 function write(path, expected) {
   try {
     writeFileSync(path, "");
@@ -114,6 +155,16 @@ function write(path, expected) {
   } catch ({ code }) {
     if (expected || !denied.has(code)) process.exit(11);
   }
+}
+function run(file, argumentsList, expected) {
+  const result = spawnSync(file, argumentsList, {
+    encoding: "utf8",
+    env: gitEnvironment,
+    maxBuffer: 1024 * 1024,
+    timeout: 1_000,
+  });
+  if (result.error !== undefined || result.signal !== null) process.exit(27);
+  if ((result.status === 0) !== expected) process.exit(26);
 }
 if (
   process.env.${PROBE_CREDENTIAL} !== undefined ||
@@ -126,6 +177,23 @@ try {
   process.exit(18);
 } catch ({ code }) {
   if (!denied.has(code)) process.exit(19);
+}
+run(
+  "/bin/sh",
+  [
+    "-c",
+    "git log -1 --format=%H >/dev/null && git cat-file -e 'HEAD^{commit}' && git branch -a >/dev/null && ls >/dev/null",
+  ],
+  true,
+);
+if (!writable) {
+  run("/bin/sh", ["-c", ": > workspace-command-probe"], false);
+  run("git", ["branch", "sandbox-command-probe"], false);
+  run(
+    "git",
+    ["push", outsideDirectory, "HEAD:refs/heads/sandbox-command-probe"],
+    false,
+  );
 }
 write("workspace-probe", writable);
 if (writable && !statSync(".claude").isDirectory()) process.exit(23);
@@ -337,6 +405,68 @@ async function probeManagedSettings({ claudeBinary, env, execute }) {
   }
 }
 
+async function initializeProbeRepositories({
+  env,
+  execute,
+  outsideDirectory,
+  workspaceDirectory,
+}) {
+  const options = {
+    encoding: "utf8",
+    env: {
+      ...env,
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_TERMINAL_PROMPT: "0",
+    },
+    maxBuffer: 1024 * 1024,
+    timeout: 10_000,
+  };
+  await execute(
+    "git",
+    [
+      "-C",
+      workspaceDirectory,
+      "-c",
+      "init.defaultBranch=main",
+      "init",
+      "--quiet",
+    ],
+    options,
+  );
+  await writeFile(join(workspaceDirectory, "inspection.txt"), "inspection\n");
+  await execute(
+    "git",
+    ["-C", workspaceDirectory, "add", "inspection.txt"],
+    options,
+  );
+  await execute(
+    "git",
+    [
+      "-C",
+      workspaceDirectory,
+      "-c",
+      "commit.gpgSign=false",
+      "-c",
+      "core.hooksPath=/dev/null",
+      "-c",
+      "user.email=agent-runner@example.invalid",
+      "-c",
+      "user.name=Agent Runner",
+      "commit",
+      "--quiet",
+      "--message",
+      "probe",
+    ],
+    options,
+  );
+  await execute(
+    "git",
+    ["-C", outsideDirectory, "init", "--bare", "--quiet"],
+    options,
+  );
+}
+
 async function probePolicy({
   access,
   bubblewrapBinary,
@@ -365,6 +495,12 @@ async function probePolicy({
         mkdir(path, { mode: 0o700 }),
       ),
     );
+    await initializeProbeRepositories({
+      env,
+      execute,
+      outsideDirectory,
+      workspaceDirectory,
+    });
     let file;
     let argumentsList;
     if (weaker) {

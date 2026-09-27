@@ -429,6 +429,17 @@ diagnosis. Resume must reproduce the saved receipt. If it cannot, preserve the
 run and repair the installed Claude, bubblewrap, or host environment instead of
 editing durable state or forcing weaker settings.
 
+Read-only and local-commit readiness turns use Claude's autonomous permission
+mode only after that access mode's sandbox has been proved. They expose only
+repository inspection tools and permit compound Git and filesystem inspection
+without native approval prompts; the sandbox, not broad command matching,
+blocks workspace writes, Git and remote mutation, process escape, credential
+exposure, network access, and host socket access. Workspace-write turns keep
+their existing tools and command denials.
+After installing a change to this policy, repeat a fresh real Claude lazy
+plan-authoring run and require both successful preflight and a provider response
+before relying on the backend for subsequent work.
+
 A same-host execution or canonical-worktree lease is eligible for stale
 recovery after five minutes only when its recorded process is demonstrably
 dead, while short state-mutation contention returns a retryable busy result
