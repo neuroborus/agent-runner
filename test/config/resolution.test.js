@@ -9,6 +9,61 @@ import {
 } from "../../src/config/index.js";
 import { getPipeline } from "../../src/pipeline-registry.js";
 
+test("availability policy resolves a strict common ceiling before freezing", () => {
+  const runner = parseRunnerConfiguration(
+    JSON.stringify({ schemaVersion: 1, defaultBackend: "codex" }),
+  );
+  assert.equal(runner.availabilityRetryMaxDelayMs, 1_800_000);
+  for (const value of [5_000, 7_001, 2_147_483_647]) {
+    const root = parseRunnerConfiguration(
+      JSON.stringify({
+        schemaVersion: 1,
+        defaultBackend: "codex",
+        availabilityRetryMaxDelayMs: value,
+      }),
+    );
+    const project = parseProjectConfiguration(
+      JSON.stringify({ schemaVersion: 1, availabilityRetryMaxDelayMs: value }),
+      runner,
+    );
+    assert.equal(project.availabilityRetryMaxDelayMs, value);
+    for (const pipeline of ["plan-authoring", "plan-execution", "polishing"]) {
+      for (const [configuration, projectConfiguration] of [
+        [root, null],
+        [runner, project],
+      ]) {
+        const resolved = resolvePipelineConfiguration(
+          pipeline,
+          configuration,
+          {},
+          {},
+          null,
+          projectConfiguration,
+        );
+        assert.deepEqual(resolved.availabilityPolicy, {
+          initialDelayMs: 5_000,
+          maxDelayMs: value,
+        });
+        assert.ok(Object.isFrozen(resolved.availabilityPolicy));
+      }
+    }
+  }
+  for (const value of [null, true, "5000", 4_999, 5_000.5, 2_147_483_648]) {
+    const source = JSON.stringify({
+      schemaVersion: 1,
+      availabilityRetryMaxDelayMs: value,
+    });
+    assert.throws(
+      () => parseRunnerConfiguration(source),
+      /availabilityRetryMaxDelayMs/u,
+    );
+    assert.throws(
+      () => parseProjectConfiguration(source, runner),
+      /availabilityRetryMaxDelayMs/u,
+    );
+  }
+});
+
 test("role resolution applies CLI, role, runner, and native defaults", () => {
   const configuration = parseRunnerConfiguration(
     JSON.stringify({
@@ -85,6 +140,7 @@ test("role resolution normalizes configuration objects", () => {
 
   assert.deepEqual(resolved, {
     artifactRoot: "LOCAL_ARTIFACTS",
+    availabilityPolicy: { initialDelayMs: 5_000, maxDelayMs: 1_800_000 },
     pipelineId: "plan-authoring",
     roles: {
       planner: {

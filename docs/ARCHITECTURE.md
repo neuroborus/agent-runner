@@ -272,6 +272,7 @@ The V1 shape is:
   "defaultEffort": "current",
   "defaultContextSize": "current",
   "trustedCommandTimeoutMs": 3600000,
+  "availabilityRetryMaxDelayMs": 1800000,
   "profiles": {
     "codex-work": {
       "backend": "codex",
@@ -319,6 +320,14 @@ a strict integer from `1` through `2147483647` milliseconds and defaults to
 `3600000` (60 minutes). The project value overrides the root value. It has no
 CLI or MCP override because configuration resolution, not a transport-specific
 surface, owns the deadline.
+
+`availabilityRetryMaxDelayMs` is a common root/project setting, a strict integer
+from `5000` through `2147483647` milliseconds, defaulting to `1800000` (30
+minutes). Project configuration overrides root configuration; CLI, MCP, roles,
+and pipelines do not introduce separate ceilings. Resolution freezes
+`availabilityPolicy: { initialDelayMs: 5000, maxDelayMs }` when creating the run.
+The state boundary owns the validated policy and deterministic schedule;
+configuration consumes it through the public state index.
 
 `defaultBackend` is optional. A role's `profile`, `model`, `contextSize`, and
 `effort` resolve from its role-specific override, the run-wide override, its
@@ -899,6 +908,39 @@ collision-safe names, ending with random-token candidates. None of these loops
 waits for user work or makes an external service more available, so exposing
 their counts as configuration would weaken the persistence proof without
 creating a useful operator control.
+
+### Durable availability episodes
+
+Common envelope version 15 adds immutable `availabilityPolicy` and nullable
+`availabilityRetry`. Runtime compatibility includes this envelope version.
+Legacy versions project the documented default policy and no pending episode;
+the leased runtime migration journals those values without replacing saved
+roles, checkpoints, modes, corrections, session lineage, or provider receipts.
+Current configuration never replaces a frozen policy on resume. Legacy records
+cannot claim a custom policy or pending episode.
+
+The state service's `scheduleAvailabilityRetry` accepts an inspected revision,
+active role, bounded logical checkpoint, finite provider-neutral reason, and
+reconciled content fingerprint. It requires retired turn/process/resource
+ownership and the existing exclusive mutation lease, then appends the complete
+event before replacing state and returning. The episode stores a UUID, role,
+checkpoint, reason, attempt, delay, scheduling time, retry deadline, content
+fingerprint, and reconciled revision. The caller owns repository reconciliation;
+a hash-shaped value alone does not prove Git safety.
+
+Delays are `min(maxDelayMs, 5000 * 2^(attempt - 1))`: at the default ceiling,
+5, 10, 20, 40, 80, 160, 320, 640, 1280, 1800 seconds, then 1800 repeatedly.
+The attempt has no policy quota; its numeric representation saturates at the
+largest safe integer without stopping capped retries. Journal validation rejects
+policy drift, changed episode identity/role/checkpoint, skipped attempts,
+inconsistent deadlines, and progression before the prior deadline. Deadlines
+are calculated from the current scheduling time, so overdue recovery cannot
+produce a catch-up schedule. Unrelated transitions and restart retain the episode;
+clearing it is reserved for the successful-provider-turn coordinator path.
+
+This is persistence support only. No current pipeline schedules availability
+episodes, waits on their deadlines, or dispatches automatic retries. Existing
+bounded recovery and pause behavior remains active.
 
 ### State-owned operator stop protocol
 
@@ -2005,8 +2047,9 @@ precedence over text. A Claude budget-exhaustion terminal reason precedes transi
 statuses but cannot replace a structured authentication, request, or output
 rejection. Killed processes cannot use even parseable diagnostics to hide
 uncertain effects.
-Unknown errors receive no availability reason. This optional evidence adds no
-timer or durable retry episode; existing bounded recovery and pause policy remain.
+Unknown errors receive no availability reason. The common envelope can persist
+availability policy and episodes, but failure classification does not activate
+their scheduling; existing bounded recovery and pause policy remain.
 
 Codex App Server `usageLimitExceeded` and explicit Claude rate, quota, credit,
 or spend-limit rejections bypass context recovery and provider fallback. Their

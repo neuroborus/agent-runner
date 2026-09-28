@@ -330,6 +330,13 @@ projects may safely use different deadlines. Legacy snapshot versions use the
 same deterministic 60-minute fallback. Capability preparation remains capped
 at the smaller of this value and 10 seconds.
 
+`availabilityRetryMaxDelayMs` sets the frozen common availability-policy ceiling
+for new runs. It accepts integers from `5000` through `2147483647` milliseconds,
+defaults to `1800000` (30 minutes), and resolves project over runner configuration.
+The initial delay is fixed at five seconds. Resume preserves the saved policy;
+legacy runs use the default. Durable policy/episode storage is available, while
+automatic retry activation remains pending; existing pause/resume behavior applies.
+
 An ignored project configuration may select root or project aliases through
 the same pipeline setting, replacing that pipeline's root selection. The tracked
 configuration example demonstrates `repository-check` in both writable pipelines.
@@ -662,6 +669,8 @@ live supervision and replacement-owner recovery. Version 14 adds the owner's
 control-group identity so an inaccessible same-user process can be excluded
 only when it is proven to belong elsewhere. Legacy states migrate with no new
 authority and remain compatibility-blocked when that evidence is needed.
+Version 15 adds frozen availability policy and nullable retry episodes, with
+default-only legacy migration that preserves saved workflow and session evidence.
 The mode-aware pipeline versions are plan-authoring version 5, plan-execution
 version 17, and polishing version 13. Their ordered migrations resolve missing
 legacy modes to `independent` and preserve explicitly saved modes without

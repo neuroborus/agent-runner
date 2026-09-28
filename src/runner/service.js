@@ -1061,6 +1061,7 @@ export function createRunner(options = {}) {
       projectConfigurationProtection: projectConfiguration?.protection ?? null,
       roles: resolved.roles,
       providerPolicies,
+      availabilityPolicy: resolved.availabilityPolicy,
       sourceSession: normalized.sourceSession?.id ?? null,
       sourceProfile: resolved.sourceProfile,
       pipelineState,

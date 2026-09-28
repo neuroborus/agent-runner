@@ -4,6 +4,10 @@ import { isDeepStrictEqual } from "node:util";
 import { PROVIDER_REGISTRY } from "../agents/index.js";
 import { listPipelines } from "../pipeline-registry.js";
 import {
+  DEFAULT_AVAILABILITY_POLICY,
+  MAX_AVAILABILITY_DELAY_MS,
+} from "../state/index.js";
+import {
   createTrustedValidationSnapshot,
   DEFAULT_TRUSTED_COMMAND_TIMEOUT_MS,
   MAX_TRUSTED_COMMAND_TIMEOUT_MS,
@@ -19,6 +23,7 @@ export const CURRENT = "current";
 const PROFILE_NAME_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const TOP_LEVEL_FIELDS = new Set([
   "artifactRoot",
+  "availabilityRetryMaxDelayMs",
   "schemaVersion",
   "defaultBackend",
   "defaultContextSize",
@@ -103,6 +108,18 @@ function assertTrustedCommandTimeoutMs(value, path) {
   ) {
     throw new ConfigurationError(
       `${path} must be an integer from 1 through ${MAX_TRUSTED_COMMAND_TIMEOUT_MS}.`,
+    );
+  }
+}
+
+function assertAvailabilityRetryMaxDelayMs(value, path) {
+  if (
+    !Number.isSafeInteger(value) ||
+    value < DEFAULT_AVAILABILITY_POLICY.initialDelayMs ||
+    value > MAX_AVAILABILITY_DELAY_MS
+  ) {
+    throw new ConfigurationError(
+      `${path} must be an integer from 5000 through ${MAX_AVAILABILITY_DELAY_MS}.`,
     );
   }
 }
@@ -273,6 +290,12 @@ function normalizePipeline(
 export function normalizeConfiguration(input, providers = PROVIDER_REGISTRY) {
   assertRecord(input, "configuration");
   rejectUnknownFields(input, TOP_LEVEL_FIELDS, "configuration");
+  if (input.availabilityRetryMaxDelayMs !== undefined) {
+    assertAvailabilityRetryMaxDelayMs(
+      input.availabilityRetryMaxDelayMs,
+      "configuration.availabilityRetryMaxDelayMs",
+    );
+  }
 
   if (!Object.hasOwn(input, "schemaVersion")) {
     throw new ConfigurationError("configuration.schemaVersion is required.");
@@ -351,6 +374,9 @@ export function normalizeConfiguration(input, providers = PROVIDER_REGISTRY) {
   const normalized = {
     schemaVersion: CONFIG_SCHEMA_VERSION,
     artifactRoot: input.artifactRoot ?? DEFAULT_ARTIFACT_ROOT,
+    availabilityRetryMaxDelayMs:
+      input.availabilityRetryMaxDelayMs ??
+      DEFAULT_AVAILABILITY_POLICY.maxDelayMs,
     issueReporting: input.issueReporting ?? true,
     defaultProfile: input.defaultProfile ?? CURRENT,
     defaultModel: input.defaultModel ?? CURRENT,
@@ -420,6 +446,12 @@ export function normalizeProjectConfiguration(
   const rootPath = "projectConfiguration";
   assertRecord(input, rootPath);
   rejectUnknownFields(input, PROJECT_TOP_LEVEL_FIELDS, rootPath);
+  if (input.availabilityRetryMaxDelayMs !== undefined) {
+    assertAvailabilityRetryMaxDelayMs(
+      input.availabilityRetryMaxDelayMs,
+      `${rootPath}.availabilityRetryMaxDelayMs`,
+    );
+  }
   if (!Object.hasOwn(input, "schemaVersion")) {
     throw new ConfigurationError(
       "projectConfiguration.schemaVersion is required.",
@@ -507,6 +539,7 @@ export function normalizeProjectConfiguration(
   );
   for (const field of [
     "artifactRoot",
+    "availabilityRetryMaxDelayMs",
     "defaultBackend",
     "defaultProfile",
     "defaultModel",

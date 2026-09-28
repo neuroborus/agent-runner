@@ -34,6 +34,14 @@ without shared service state. For example, `"trustedCommandTimeoutMs": 7200000`
 selects two hours. Legacy snapshot versions use the one-hour fallback, while
 capability preparation remains capped at 10 seconds.
 
+Root and project configuration also accept `availabilityRetryMaxDelayMs`, a
+strict integer from `5000` through `2147483647` milliseconds with a `1800000`
+(30-minute) default. The project value wins, without CLI/MCP or role overrides.
+Each run freezes the ceiling with a five-second initial delay. Resume preserves
+it, and legacy migration supplies the documented default with no pending retry.
+The common envelope now supports durable episodes and capped exponential delays;
+automatic retry execution is not activated by this persistence support.
+
 Both configuration layers accept portable `defaultEffort` and role `effort`
 values: `current`, `low`, `medium`, `high`, and `xhigh`. Effort stays separate
 from model selection and follows shared execution-preference precedence through

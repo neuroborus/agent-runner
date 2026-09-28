@@ -508,7 +508,7 @@ test("CLI and MCP project the same persisted launch recovery", async () => {
   assert.deepEqual(status.launchRecovery, launchRecovery);
 });
 
-test("Runner recreation rejects policy drift before provider execution", async (t) => {
+test("Runner recreation retains frozen availability policy and rejects provider policy drift", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "agent-runner-policy-resume-"));
   const projectPath = join(root, "project");
   const taskPath = join(root, "task");
@@ -517,8 +517,12 @@ test("Runner recreation rejects policy drift before provider execution", async (
   await writeFile(join(taskPath, "task.md"), "Inspect policy drift.\n");
   t.after(() => rm(root, { force: true, recursive: true }));
 
-  const configuration = parseRunnerConfiguration(
-    JSON.stringify({ schemaVersion: 1, defaultBackend: "codex" }),
+  let configuration = parseRunnerConfiguration(
+    JSON.stringify({
+      schemaVersion: 1,
+      defaultBackend: "codex",
+      availabilityRetryMaxDelayMs: 9_000,
+    }),
   );
   const git = {
     async assertUnchanged() {},
@@ -572,6 +576,15 @@ test("Runner recreation rejects policy drift before provider execution", async (
   });
   const receipt = created.run.providerPolicies.planner;
   assert.match(receipt.fingerprint, /^[a-f0-9]{64}$/u);
+  assert.equal(created.run.availabilityPolicy.maxDelayMs, 9_000);
+  assert.equal(created.run.availabilityRetry, null);
+  configuration = parseRunnerConfiguration(
+    JSON.stringify({
+      schemaVersion: 1,
+      defaultBackend: "codex",
+      availabilityRetryMaxDelayMs: 17_000,
+    }),
+  );
 
   let providerRuns = 0;
   const recreated = createRunner({
@@ -599,6 +612,10 @@ test("Runner recreation rejects policy drift before provider execution", async (
   assert.equal(providerRuns, 0);
   const persisted = await recreated.status(created.run.runId);
   assert.deepEqual(persisted.run.providerPolicies.planner, receipt);
+  assert.deepEqual(
+    persisted.run.availabilityPolicy,
+    created.run.availabilityPolicy,
+  );
 });
 
 test("CLI and MCP preserve the same bounded capability diagnosis", async () => {

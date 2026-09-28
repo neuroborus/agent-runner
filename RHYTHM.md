@@ -7,6 +7,12 @@ remain in the owning documentation.
 
 ## 2026-09-28
 
+- **Availability retry policy and episodes survive restart.** Common envelope
+  version 15 freezes a configurable ceiling with a five-second start and a
+  30-minute default. Leased scheduling journals exact role/checkpoint, attempt,
+  deadline, and reconciled content binding; capped delays repeat without a quota.
+  Legacy migration preserves progress and uses the documented default. This
+  prerequisite adds no automatic retry dispatch or timer.
 - **Explicit provider availability has shared, bounded evidence.** Both adapters
   normalize transport, overload, model-busy, and server failures through the
   registry-validated contract while retaining terminal and uncertain-effect

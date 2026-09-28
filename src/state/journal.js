@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
+import { assertAvailabilityContinuity } from "./availability.js";
 import {
   appendDurableLine,
   atomicWriteFile,
@@ -34,6 +35,7 @@ const IMMUTABLE_STATE_FIELDS = [
   "taskPath",
   "projectConfigurationProtection",
   "roles",
+  "availabilityPolicy",
   "createdAt",
 ];
 const VERSION_STATE_FIELDS = [
@@ -42,6 +44,7 @@ const VERSION_STATE_FIELDS = [
   "runtimeCompatibility",
 ];
 const TRANSITION_STATE_FIELDS = [
+  "availabilityRetry",
   "counters",
   "hashes",
   "pause",
@@ -97,6 +100,7 @@ function normalizeEvent(value, runId, lineNumber) {
         11,
         12,
         13,
+        14,
         RUN_STATE_SCHEMA_VERSION,
       ].includes(value.schemaVersion)
     ) {
@@ -162,10 +166,25 @@ function assertEventContinuity(
       code: "ERR_INVALID_EVENT_LOG",
     });
   }
+  if (events[0].state.availabilityRetry !== null) {
+    throw new RunStoreError(
+      "Initial run cannot contain an availability episode.",
+      {
+        code: "ERR_INVALID_EVENT_LOG",
+      },
+    );
+  }
 
   for (let index = startIndex; index < events.length; index += 1) {
     const previousState = events[index - 1].state;
     const state = events[index].state;
+    try {
+      assertAvailabilityContinuity(previousState, state);
+    } catch {
+      throw new RunStoreError("Availability retry history is inconsistent.", {
+        code: "ERR_INVALID_EVENT_LOG",
+      });
+    }
     const previousChildren = previousState.sessionLineage.children;
     const children = state.sessionLineage.children;
     const immutableFieldChanged = IMMUTABLE_STATE_FIELDS.some(
@@ -315,6 +334,7 @@ function assertStopContinuity(events, index, migrating, resolveStopBoundary) {
     invalid();
   if (
     [
+      "availabilityRetry",
       "pipelineState",
       "pause",
       "activeTurn",

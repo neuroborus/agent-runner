@@ -1,10 +1,11 @@
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 import { isAdapterDiagnosticClass } from "../agents/index.js";
+import { normalizeAvailabilityState } from "./availability.js";
 import { normalizeLaunchRecovery } from "./launch-recovery.js";
 import { validStopTiming, validStopSettlement } from "./stop-contract.js";
 
-export const RUN_STATE_SCHEMA_VERSION = 14;
+export const RUN_STATE_SCHEMA_VERSION = 15;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
   runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
@@ -32,6 +33,7 @@ const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   11,
   12,
   13,
+  14,
   RUN_STATE_SCHEMA_VERSION,
 ]);
 
@@ -52,6 +54,8 @@ const STATE_FIELDS = new Set([
   "projectConfigurationProtection",
   "roles",
   "providerPolicies",
+  "availabilityPolicy",
+  "availabilityRetry",
   "counters",
   "hashes",
   "pause",
@@ -88,6 +92,7 @@ const INPUT_QUESTION_FIELDS = new Set([
 ]);
 const INPUT_RESPONSE_FIELDS = new Set(["requestId", "transcriptHash"]);
 const TRANSITION_FIELDS = new Set([
+  "availabilityRetry",
   "counters",
   "hashes",
   "pause",
@@ -1104,6 +1109,11 @@ export function normalizeRunState(value, expectedRunId) {
     createdAt,
     updatedAt,
   };
+  try {
+    Object.assign(normalized, normalizeAvailabilityState({ ...value, roles }));
+  } catch {
+    fail("Run availability policy or retry episode is invalid.");
+  }
   assertSerializedSize(normalized, "run");
   return normalized;
 }
@@ -1114,6 +1124,12 @@ export function normalizeTransitionPatch(value) {
   rejectUnknownFields(patch, TRANSITION_FIELDS, "transition");
 
   const normalized = {};
+  if (Object.hasOwn(patch, "availabilityRetry")) {
+    normalized.availabilityRetry =
+      patch.availabilityRetry === null
+        ? null
+        : cloneRecord(patch.availabilityRetry, "transition.availabilityRetry");
+  }
   for (const field of ["counters", "hashes", "pipelineState"]) {
     if (Object.hasOwn(patch, field)) {
       normalized[field] = cloneRecord(patch[field], `transition.${field}`);

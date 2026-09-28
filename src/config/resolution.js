@@ -1,5 +1,9 @@
 import { PROVIDER_REGISTRY } from "../agents/index.js";
 import { getPipeline } from "../pipeline-registry.js";
+import {
+  DEFAULT_AVAILABILITY_POLICY,
+  normalizeAvailabilityPolicy,
+} from "../state/index.js";
 import { createTrustedValidationSnapshot } from "../trusted-validation/index.js";
 
 import {
@@ -308,6 +312,12 @@ export function resolvePipelineConfiguration(
     artifactRoot:
       normalizedProjectConfiguration?.artifactRoot ??
       normalizedConfiguration.artifactRoot,
+    availabilityPolicy: normalizeAvailabilityPolicy({
+      initialDelayMs: DEFAULT_AVAILABILITY_POLICY.initialDelayMs,
+      maxDelayMs:
+        normalizedProjectConfiguration?.availabilityRetryMaxDelayMs ??
+        normalizedConfiguration.availabilityRetryMaxDelayMs,
+    }),
     pipelineId,
     roles: Object.freeze(resolvedRoles),
     settings,

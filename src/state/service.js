@@ -6,6 +6,10 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import { createActionStore } from "./actions.js";
+import {
+  availabilityDelayMs,
+  DEFAULT_AVAILABILITY_POLICY,
+} from "./availability.js";
 import { atomicWriteFile, resolveRunArtifactPath } from "./files.js";
 import { createStateJournal } from "./journal.js";
 import { createLeaseManager } from "./lease.js";
@@ -56,6 +60,7 @@ const CREATE_RUN_FIELDS = new Set([
   "projectConfigurationProtection",
   "roles",
   "providerPolicies",
+  "availabilityPolicy",
   "counters",
   "hashes",
   "pause",
@@ -544,6 +549,11 @@ export function createRunStore({
               ? null
               : input.projectConfigurationProtection,
           roles: normalizeRoles(input.roles),
+          availabilityPolicy:
+            input.availabilityPolicy === undefined
+              ? DEFAULT_AVAILABILITY_POLICY
+              : input.availabilityPolicy,
+          availabilityRetry: null,
           providerPolicies:
             input.providerPolicies === undefined
               ? Object.fromEntries(
@@ -923,6 +933,77 @@ export function createRunStore({
         snapshot,
         normalizedActivity,
       );
+      return deepFreeze(nextState);
+    });
+  }
+
+  async function scheduleAvailabilityRetry(lease, input) {
+    if (!isRecord(input)) {
+      throw new RunStoreError("Availability retry input is invalid.", {
+        code: "ERR_INVALID_RUN_STATE",
+      });
+    }
+    rejectUnknownFields(
+      input,
+      new Set([
+        "role",
+        "checkpoint",
+        "reason",
+        "contentFingerprint",
+        "expectedRevision",
+      ]),
+      "availabilityRetry",
+    );
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
+      const snapshot = await loadSnapshot(runDirectory, record.runId);
+      const state = snapshot.state;
+      assertRunCanAdvance(state, resolveStopBoundary);
+      if (input.expectedRevision !== state.revision) {
+        throw new RunStoreError("Run changed before availability scheduling.", {
+          code: "ERR_RUN_REVISION_CHANGED",
+        });
+      }
+      if (
+        state.schemaVersion !== RUN_STATE_SCHEMA_VERSION ||
+        state.activeTurn !== null ||
+        state.executionProcess !== null ||
+        state.executionResource !== null
+      ) {
+        throw new RunStoreError(
+          "Availability scheduling requires a migrated, reconciled checkpoint.",
+          { code: "ERR_INVALID_RUN_STATE" },
+        );
+      }
+      const previous = state.availabilityRetry;
+      const attempt =
+        previous === null
+          ? 1
+          : Math.min(Number.MAX_SAFE_INTEGER, previous.attempt + 1);
+      const delayMs = availabilityDelayMs(state.availabilityPolicy, attempt);
+      const scheduledAt = timestamp(state.updatedAt);
+      const nextState = normalizeRunState(
+        {
+          ...state,
+          revision: state.revision + 1,
+          updatedAt: scheduledAt,
+          availabilityRetry: {
+            id: previous?.id ?? randomUUID(),
+            role: input.role,
+            checkpoint: input.checkpoint,
+            reason: input.reason,
+            attempt,
+            delayMs,
+            scheduledAt,
+            nextRetryAt: new Date(
+              Date.parse(scheduledAt) + delayMs,
+            ).toISOString(),
+            contentFingerprint: input.contentFingerprint,
+            reconciledRevision: state.revision,
+          },
+        },
+        record.runId,
+      );
+      await journal.appendTransition(runDirectory, nextState, snapshot, null);
       return deepFreeze(nextState);
     });
   }
@@ -1328,6 +1409,7 @@ export function createRunStore({
     readAction: actions.read,
     recordChildSession,
     recordProviderPolicy,
+    scheduleAvailabilityRetry,
     recoverRun,
     runIsLeased,
     runLeaseOwnerIsLive,

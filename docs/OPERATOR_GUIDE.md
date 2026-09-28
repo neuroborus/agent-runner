@@ -190,6 +190,15 @@ for a two-hour deadline. Legacy snapshots retain a deterministic 60-minute
 deadline, and capability preparation still uses the smaller of the resolved
 deadline and 10 seconds.
 
+`availabilityRetryMaxDelayMs` prepares the common availability retry policy for
+new runs. Root and ignored project configuration accept integers from `5000`
+through `2147483647` milliseconds; the project value wins. The default ceiling
+is `1800000` (30 minutes) and the starting delay is fixed at five seconds.
+Runs freeze this policy; resume never replaces it from current configuration.
+Legacy runs migrate with the default and no pending episode. Persistence support
+does not yet activate automatic retries: follow the existing offered pause and
+resume actions. Do not edit configuration or run state to reset an episode.
+
 Writable implementation, polishing, lazy or combined check/fix, and finding-resolution turns
 receive only the persisted exact selected command text, including after resume
 or reconstruction. Established required-check execution and attestation belong
