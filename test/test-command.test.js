@@ -9,13 +9,74 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
+import { temporaryRoots } from "../scripts/test-storage.js";
+import { STORAGE_PATHS } from "../src/trusted-validation/resources.js";
+
 const execute = promisify(execFile);
 const script = fileURLToPath(new URL("../scripts/test.js", import.meta.url));
+
+test("temporary roots honor overrides without filtering or fallback", () => {
+  for (const override of ["test-storage", "/run/agent-runner/scratch"]) {
+    assert.deepEqual(
+      temporaryRoots({
+        override,
+        runtimeRoot: "/run/user/1000",
+        systemRoot: "/tmp",
+      }),
+      [resolve(override)],
+    );
+  }
+});
+
+test("temporary roots preserve ordinary host ordering", () => {
+  assert.deepEqual(
+    temporaryRoots({ runtimeRoot: "/run/user/1000", systemRoot: "/tmp" }),
+    ["/run/user/1000", "/tmp"],
+  );
+  assert.deepEqual(temporaryRoots({ override: "", systemRoot: "/var/tmp" }), [
+    "/var/tmp",
+  ]);
+  assert.deepEqual(
+    temporaryRoots({
+      runtimeRoot: "/run/agent-runner-other",
+      systemRoot: "/run/agent-runner-other/tmp",
+    }),
+    ["/run/agent-runner-other", "/run/agent-runner-other/tmp"],
+  );
+});
+
+test("temporary roots replace reserved system storage and drop reserved runtime storage", () => {
+  assert.deepEqual(temporaryRoots({ systemRoot: "/run/agent-runner" }), [
+    "/tmp",
+  ]);
+  assert.deepEqual(
+    temporaryRoots({
+      runtimeRoot: "/run/user/1000",
+      systemRoot: "/run/agent-runner/scratch",
+    }),
+    ["/run/user/1000", "/tmp"],
+  );
+  assert.deepEqual(
+    temporaryRoots({
+      runtimeRoot: "/run/agent-runner/scratch/nested",
+      systemRoot: "/var/tmp",
+    }),
+    ["/var/tmp"],
+  );
+});
+
+test("temporary roots reject every fixed trusted storage mount", () => {
+  for (const root of Object.values(STORAGE_PATHS)) {
+    assert.deepEqual(temporaryRoots({ runtimeRoot: root, systemRoot: root }), [
+      "/tmp",
+    ]);
+  }
+});
 
 test("test command partitions coverage, propagates failures, and cleans private storage", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "test-command-"));

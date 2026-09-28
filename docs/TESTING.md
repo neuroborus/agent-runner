@@ -16,6 +16,9 @@ when available, otherwise the system temporary directory. This removes physical
 disk latency from disposable fixtures without mocking filesystem operations or
 disabling production synchronization. Set `AGENT_RUNNER_TEST_TMPDIR` to choose
 an explicit writable, executable parent; an invalid override fails visibly.
+Without an override, the launcher never uses a parent at or under Agent Runner's
+fixed trusted mount root `/run/agent-runner`, using the sandbox's private `/tmp`
+instead of the scratch mount inside trusted validation.
 The parent must remain visible inside process namespaces; `/dev/shm` does not,
 because their private device mount hides it. Runtime tmpfs (`XDG_RUNTIME_DIR`
 or Linux `/run/user/<uid>`) avoids that conflict.

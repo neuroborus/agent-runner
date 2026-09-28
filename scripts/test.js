@@ -11,7 +11,9 @@ import {
   writeSync,
 } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
+
+import { temporaryRoots } from "./test-storage.js";
 
 const CONTAINMENT_TESTS = new Set([
   "test/agents/owned-process.test.js",
@@ -58,9 +60,11 @@ function temporaryDirectory() {
   } catch {
     // A runtime tmpfs is optional; the system temporary directory remains valid.
   }
-  const roots = process.env.AGENT_RUNNER_TEST_TMPDIR
-    ? [resolve(process.env.AGENT_RUNNER_TEST_TMPDIR)]
-    : [...(memoryRoot ? [memoryRoot] : []), tmpdir()];
+  const roots = temporaryRoots({
+    override: process.env.AGENT_RUNNER_TEST_TMPDIR,
+    runtimeRoot: memoryRoot,
+    systemRoot: tmpdir(),
+  });
   for (const root of roots) {
     let directory;
     try {
