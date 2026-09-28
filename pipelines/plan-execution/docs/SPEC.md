@@ -1281,12 +1281,15 @@ diagnostic class. Never attach denied `tool_input`, provider result text, raw
 standard error, or the native process error. A denial of an unexposed tool or a
 Bash command outside the positive repository-inspection allowlist is a terminal
 safety failure. An exposed non-Bash tool or a positively recognized safe Bash
-inspection may be a recoverable capability/configuration failure. Treat only
-explicit transient HTTP statuses as provider unavailability; fail closed on
-non-transient client statuses and `api_error` without such a status. Unknown
+inspection may be a recoverable capability/configuration failure. For structured
+API errors, treat only explicit transient HTTP statuses as provider unavailability;
+fail closed on non-transient client statuses and `api_error` without such a status. Unknown
 valid read-only result failures and unclassified read-only process exits are
 recoverable; the same unknown outcomes during workspace-write or one-shot
 commit work are not.
+Explicit native transport, overload, model-busy, and server evidence may carry
+the provider contract's shared availability reason without changing this
+pipeline's pause or retry policy.
 
 Map a trusted Claude alias only to its configured absolute isolated
 configuration directory through `CLAUDE_CONFIG_DIR`. Map an explicit decimal

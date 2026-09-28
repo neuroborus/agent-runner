@@ -75,6 +75,7 @@ export {
 } from "./codex/index.js";
 export {
   ADAPTER_FAILURE_CLASS,
+  AVAILABILITY_REASONS,
   createCapabilityProof,
   deriveEffectStarted,
   deriveLaunchRecovery,

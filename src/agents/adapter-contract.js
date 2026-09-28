@@ -55,6 +55,12 @@ export const LAUNCH_OUTCOMES = Object.freeze([
 ]);
 export const EFFECT_EVIDENCE = Object.freeze(["none", "possible", "started"]);
 export const RETRY_ELIGIBILITY = Object.freeze(["transient", "terminal"]);
+export const AVAILABILITY_REASONS = Object.freeze([
+  "transport_unavailable",
+  "temporarily_overloaded",
+  "model_busy",
+  "server_unavailable",
+]);
 export const PROVIDER_NEUTRAL_LAUNCH_FAILURE_CLASSES = Object.freeze([
   "launch_process_exited",
   "launch_version_unsupported",
@@ -72,6 +78,7 @@ const FAILURE_FIELDS = Object.freeze([
   "retry",
   "commitExecutor",
   "processOutcome",
+  "availabilityReason",
 ]);
 const PROCESS_OUTCOME_FIELDS = Object.freeze(["exitCode", "signal"]);
 const CAPABILITY_FIELDS = Object.freeze([
@@ -269,7 +276,14 @@ export function normalizeFailureRecord(value, failureClasses = []) {
     (value.failureClass === "launch_process_exited" &&
       (!PROCESS_EXIT_OUTCOME_SET.has(value.outcome) ||
         (value.outcome === "exited" && value.effect !== "none"))) ||
-    (value.processOutcome !== undefined && value.outcome === "not_started")
+    (value.processOutcome !== undefined && value.outcome === "not_started") ||
+    (Object.hasOwn(value, "availabilityReason") &&
+      (!AVAILABILITY_REASONS.includes(value.availabilityReason) ||
+        value.retry !== "transient" ||
+        !["not_started", "rejected", "exited"].includes(value.outcome) ||
+        value.effect === "started" ||
+        (value.checkpoint === "commit" &&
+          value.commitExecutor !== "not_started")))
   ) {
     throw new TypeError("Adapter failure record is invalid.");
   }
@@ -279,6 +293,9 @@ export function normalizeFailureRecord(value, failureClasses = []) {
     outcome: value.outcome,
     effect: value.effect,
     retry: value.retry,
+    ...(Object.hasOwn(value, "availabilityReason")
+      ? { availabilityReason: value.availabilityReason }
+      : {}),
     ...(Object.hasOwn(value, "commitExecutor")
       ? { commitExecutor: value.commitExecutor }
       : {}),

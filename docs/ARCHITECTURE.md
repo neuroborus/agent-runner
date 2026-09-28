@@ -1982,6 +1982,32 @@ configuration failure. Structured provider recovery accepts only explicit
 transient HTTP statuses; non-transient client statuses and an `api_error`
 without a transient status fail closed with a fixed request-rejected error.
 
+The shared failure record optionally carries `availabilityReason`, restricted to
+`transport_unavailable`, `temporarily_overloaded`, `model_busy`, and
+`server_unavailable`. The adapter contract and registry accept this evidence only
+with transient retry eligibility, a `not_started`, `rejected`, or `exited`
+outcome, and no started effects. A commit checkpoint additionally requires
+validated `commitExecutor: "not_started"` proof. Possible workspace changes still
+require repository reconciliation; ambiguous outcomes cannot carry this evidence.
+
+Provider-private availability recognition maps explicit offline, DNS, refused or
+reset connections, timeouts, overload, and model-busy errors. Both adapters map
+statuses 408, 425, 500, 502, 503, 504, and 529 to the same finite reasons. Codex
+also recognizes native connection/stream and internal-server variants through
+closed variant payloads. Its private HTTP-wrapper parser requires bounded,
+duplicate-free envelopes; matching transient native statuses may be corroborated
+by closed server-error wrappers. Conflicting or malformed evidence cannot qualify.
+Only native server-error RPC codes can establish availability at `turn/start`;
+protocol/request codes retain precedence. Native text is bounded to 16 KiB for
+Codex and below Claude's 4 KiB diagnostic truncation bound. Terminal evidence
+excludes an availability reason, and existing structured classifications retain
+precedence over text. A Claude budget-exhaustion terminal reason precedes transient
+statuses but cannot replace a structured authentication, request, or output
+rejection. Killed processes cannot use even parseable diagnostics to hide
+uncertain effects.
+Unknown errors receive no availability reason. This optional evidence adds no
+timer or durable retry episode; existing bounded recovery and pause policy remain.
+
 Codex App Server `usageLimitExceeded` and explicit Claude rate, quota, credit,
 or spend-limit rejections bypass context recovery and provider fallback. Their
 adapters own native recognition and expose only bounded normalized diagnostics;
@@ -2004,10 +2030,11 @@ adapter's finite client-error allowlist. Optional native URL, CF ray, and reques
 ID suffixes are discarded. Unknown codes, malformed JSON, duplicate fields or
 metadata, inconsistent status text, oversized evidence, transient statuses,
 and prose lookalikes remain opaque; additional details and variant payloads
-are never alternative classification sources.
+are never alternative sources for this client-envelope refinement.
 Opaque failures retain `turn_other`; the native `serverOverloaded` variant maps
 to `turn_server_overloaded`. Both classes are recoverable after the turn-item
-audit, while the structured HTTP refinement remains limited to `other`. Neither
+audit unless a validated client envelope rejects the request. Explicit native
+transport/server availability is recoverable after the same audit. Neither
 path retains native messages, variant payloads, additional details, or causes.
 Completion notifications and hydrated turns accept only `completed`, `failed`,
 and `interrupted` statuses before failure classification. For these failures,
@@ -2445,8 +2472,9 @@ rather than silently losing lineage.
 
 Adapter failures retain only bounded diagnostics. Every adapter classification
 produces the same closed record: `failureClass`, `checkpoint`, `outcome`,
-`effect`, and `retry`, with optional commit-executor proof and an optional
-sanitized process outcome containing only an exit code or signal.
+`effect`, and `retry`, with optional commit-executor proof, finite availability
+reason, and an optional sanitized process outcome containing only an exit code
+or signal.
 `commitExecutor: "not_started"` is valid only at the `commit` checkpoint with
 `none` or `possible` effect evidence; it is invalid with `started` evidence or
 at any other checkpoint. Checkpoints are `probe`, `spawn`, `initialize`,

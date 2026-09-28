@@ -1042,7 +1042,11 @@ test("scopes correction after an invalid finalization turn changes content", asy
 
 for (const backend of ["codex", "claude"]) {
   test(`keeps the ${backend} finalization correction turn index-read-only`, async (t) => {
-    const fixture = await createRealGitFixture(t, {
+    let corrected = false;
+    const fixture = await createFixture(t, {
+      // One real-Git run proves the shared boundary; provider routing uses
+      // the same policy with the in-memory Git fixture.
+      repository: backend === "codex" ? "git" : "memory",
       roleBackends: {
         worker: backend,
         reviewer: backend === "codex" ? "claude" : "codex",
@@ -1053,12 +1057,17 @@ for (const backend of ["codex", "claude"]) {
           role === "worker" &&
           request.prompt.includes("one read-only correction")
         ) {
+          corrected = true;
           assert.equal(request.access, "read-only");
-          assert.equal(
-            (await runGit(projectPath, "diff", "--cached", "--name-only"))
-              .stdout,
-            "",
-          );
+          const current = await fixture.runtime.git.snapshot({ projectPath });
+          assert.equal(current.indexFingerprint, baseline.indexFingerprint);
+          if (backend === "codex") {
+            assert.equal(
+              (await runGit(projectPath, "diff", "--cached", "--name-only"))
+                .stdout,
+              "",
+            );
+          }
         }
       },
       worker: [
@@ -1070,9 +1079,13 @@ for (const backend of ["codex", "claude"]) {
         finalizationPassed(),
       ],
     });
+    const baseline = await fixture.runtime.git.snapshot({
+      projectPath: fixture.projectPath,
+    });
 
     const completed = await fixture.run();
 
+    assert.equal(corrected, true);
     assert.equal(completed.pipelineState.workflowState, "DONE");
   });
 }

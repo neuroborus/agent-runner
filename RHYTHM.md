@@ -7,6 +7,12 @@ remain in the owning documentation.
 
 ## 2026-09-28
 
+- **Explicit provider availability has shared, bounded evidence.** Both adapters
+  normalize transport, overload, model-busy, and server failures through the
+  registry-validated contract while retaining terminal and uncertain-effect
+  precedence. Native diagnostics stay private. Commit readiness requires
+  validated proof that its executor did not start; possible workspace changes
+  still require reconciliation. Classification adds no retry scheduler.
 - **Execution validation follows the planned commit's guarantees.** Bootstrap
   preserves each active role's command-to-step assignments and derives a complete
   ordered inventory for every canonical step. Finalization and terminal

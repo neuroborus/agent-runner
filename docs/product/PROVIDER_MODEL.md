@@ -200,8 +200,9 @@ bounded proof for safe recovery.
 
 Adapters classify native failures into one finite provider-neutral control
 surface. Each record contains exactly a failure class, checkpoint, outcome,
-effect evidence, and retry eligibility, plus optional commit-executor proof and
-an optional process outcome with only an exit code or signal.
+effect evidence, and retry eligibility, plus optional commit-executor proof,
+finite provider-neutral `availabilityReason`, and an optional process outcome
+with only an exit code or signal.
 `commitExecutor: "not_started"` is valid only at the `commit` checkpoint with
 `none` or `possible` effect evidence; it is invalid with `started` evidence or
 at any other checkpoint. The shared checkpoints are `probe`, `spawn`,
@@ -212,6 +213,16 @@ are terminal; process-exit eligibility is carried explicitly. Unknown fields,
 oversized values, and contradictory records are rejected at the adapter
 contract and registry boundaries. An unclassified cause becomes a rejected,
 possible-effect, terminal failure.
+
+Explicit offline, DNS, connection, timeout, overload, model-busy, and transient
+server failures carry shared availability evidence in both providers.
+Authentication, authorization, usage limits, request/protocol and permission
+failures retain precedence. Unknown or contradictory diagnostics cannot establish
+availability. Its finite reason cannot accompany terminal retry eligibility,
+ambiguous outcomes, started effects, or commit work without validated
+pre-executor proof. Safe partial workspace changes still require reconciliation.
+This evidence augments existing bounded recovery and pauses without scheduling
+automatic backoff.
 
 After the adapter's single applicable reconstruction is exhausted, the shared
 boundary may derive one resumable launch-recovery projection only from a
@@ -271,7 +282,9 @@ oversized, ambiguous, or transient-status evidence does not become a bad request
 
 The remaining Codex `turn_other` and the explicit native `serverOverloaded`
 variant, normalized as `turn_server_overloaded`, are recoverable provider
-failures. The adapter audits reported turn items first so policy, protocol, and
+failures unless a validated client envelope rejects the request. Native
+transport/server failures with explicit availability evidence are also
+recoverable. The adapter audits reported turn items first so policy, protocol, and
 isolation violations retain precedence. An ordinary non-commit request uses the
 existing single fresh reconstruction from its complete persisted recovery
 context and the observed workspace. A second failure returns to the pipeline

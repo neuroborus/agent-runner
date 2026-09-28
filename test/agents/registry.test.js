@@ -7,6 +7,7 @@ import test from "node:test";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 
 import {
+  AVAILABILITY_REASONS,
   createCapabilityProof,
   createProviderRegistry,
   deriveEffectStarted,
@@ -194,6 +195,66 @@ test("shared failure records strictly bound commit-executor proof", () => {
     { ...none, nativeCause: "must not cross the boundary" },
   ]) {
     assert.throws(() => normalizeFailureRecord(value), TypeError);
+  }
+});
+
+test("availability evidence is finite, redacted, and excludes uncertain commit effects", () => {
+  const base = {
+    failureClass: "adapter_failure",
+    checkpoint: "turn",
+    outcome: "rejected",
+    effect: "possible",
+    retry: "transient",
+  };
+  for (const availabilityReason of AVAILABILITY_REASONS) {
+    const failure = { ...base, availabilityReason };
+    const providers = createProviderRegistry([
+      {
+        ...PROVIDER_REGISTRY.list()[0],
+        id: "availability-test",
+        failures: { classes: new Set(), classify: () => failure },
+      },
+    ]);
+    const normalized = normalizeAdapterFailure(
+      "availability-test",
+      { availabilityReason: "DO_NOT_RETAIN", cause: "DO_NOT_RETAIN" },
+      providers,
+    );
+    assert.deepEqual(normalized.failure, failure);
+    assert.ok(Object.isFrozen(normalized.failure));
+    assert.doesNotMatch(JSON.stringify(normalized), /DO_NOT_RETAIN/u);
+    const commit = {
+      ...failure,
+      checkpoint: "commit",
+      commitExecutor: "not_started",
+    };
+    assert.equal(deriveEffectStarted(normalizeFailureRecord(commit)), false);
+  }
+  const available = { ...base, availabilityReason: "transport_unavailable" };
+  for (const invalid of [
+    ...[null, undefined, "unknown", {}, "native-provider-reason"].map(
+      (availabilityReason) => ({ ...base, availabilityReason }),
+    ),
+    { ...available, retry: "terminal" },
+    { ...available, outcome: "ambiguous" },
+    { ...available, outcome: "completed" },
+    { ...available, effect: "started" },
+    { ...available, checkpoint: "commit" },
+    {
+      ...available,
+      checkpoint: "commit",
+      outcome: "ambiguous",
+      commitExecutor: "not_started",
+    },
+  ]) {
+    assert.throws(() => normalizeFailureRecord(invalid), TypeError);
+  }
+  for (const backend of ["codex", "claude"]) {
+    assert.equal(
+      normalizeAdapterFailure(backend, new Error("ECONNRESET")).failure
+        .availabilityReason,
+      undefined,
+    );
   }
 });
 

@@ -16,6 +16,8 @@ import {
   STRUCTURED_OUTPUT_FAILURE_CLASS,
 } from "../adapter-contract.js";
 import { createCodexAppServerClient } from "./app-server.js";
+import { codexAvailabilityEvidence } from "./availability.js";
+import { MAX_HTTP_ERROR_BYTES, parseHttpError } from "./http-error.js";
 import {
   executeCodexLocalCommit,
   probeCodexLocalCommit,
@@ -70,7 +72,6 @@ const RECOVERABLE_TURN_DIAGNOSTICS = new Set([
   TERMINAL_TURN_DIAGNOSTICS.other,
   TERMINAL_TURN_DIAGNOSTICS.serverOverloaded,
 ]);
-const MAX_HTTP_ERROR_BYTES = 16_384;
 const CLIENT_ERROR_STATUSES = new Map([
   [400, "Bad Request"],
   [401, "Unauthorized"],
@@ -332,6 +333,10 @@ function codexFailureRecord(cause) {
     outcome: ambiguous ? "ambiguous" : "rejected",
     effect,
     retry: cause?.recoverable === true ? "transient" : "terminal",
+    ...(cause instanceof CodexAdapterError &&
+    cause.availabilityReason !== undefined
+      ? { availabilityReason: cause.availabilityReason }
+      : {}),
     ...(checkpoint === "commit" && cause?.effectStarted === false
       ? { commitExecutor: "not_started" }
       : {}),
@@ -361,6 +366,7 @@ export class CodexAdapterError extends Error {
     message,
     {
       ambiguous = false,
+      availabilityReason,
       cause,
       code = "ERR_CODEX_ADAPTER",
       diagnosticClass,
@@ -375,6 +381,8 @@ export class CodexAdapterError extends Error {
     this.code = code;
     this.ambiguous = ambiguous;
     this.recoverable = recoverable;
+    if (availabilityReason !== undefined)
+      this.availabilityReason = availabilityReason;
     if (typeof effectStarted === "boolean") {
       this.effectStarted = effectStarted;
     }
@@ -917,75 +925,24 @@ function terminalTurnDiagnosticClass(turn) {
 }
 
 function structuredClientError(message) {
-  if (
-    typeof message !== "string" ||
-    message.length > MAX_HTTP_ERROR_BYTES ||
-    Buffer.byteLength(message, "utf8") > MAX_HTTP_ERROR_BYTES
-  ) {
-    return false;
-  }
-  // Recognize the native HTTP wrapper, never a status mentioned in prose,
-  // additionalDetails, or an arbitrary codexErrorInfo payload.
-  const match =
-    /^unexpected status ([0-9]{3})(?: ([A-Za-z ]+))?: [\t\r\n ]*(\{[\s\S]*\})[\t\r\n ]*((?:, (?:url|cf-ray|request id): [^,\s{}]+)*)$/u.exec(
-      message,
-    );
-  if (match === null) {
-    return false;
-  }
-  const [, statusText, reason, body, metadata] = match;
-  const status = Number(statusText);
+  const parsed = parseHttpError(message);
+  if (!parsed) return false;
+  const { status, reason, error } = parsed;
   if (
     !CLIENT_ERROR_STATUSES.has(status) ||
-    (reason !== undefined && reason !== CLIENT_ERROR_STATUSES.get(status))
-  ) {
-    return false;
-  }
-  const metadataKeys = [...metadata.matchAll(/, ([^:]+):/gu)].map(
-    (entry) => entry[1],
-  );
-  if (new Set(metadataKeys).size !== metadataKeys.length) {
-    return false;
-  }
-  let envelope;
-  try {
-    envelope = JSON.parse(body);
-  } catch {
-    return false;
-  }
-  if (
-    !isRecord(envelope) ||
-    Object.keys(envelope).length !== 1 ||
-    !isRecord(envelope.error)
-  ) {
-    return false;
-  }
-  const error = envelope.error;
-  const keys = Object.keys(error);
-  if (
-    keys.some((key) => !["message", "type", "param", "code"].includes(key)) ||
-    typeof error.message !== "string" ||
+    (reason !== undefined && reason !== CLIENT_ERROR_STATUSES.get(status)) ||
     !(
       error.type === "invalid_request_error" ||
       (status === 401 && error.type === "authentication_error") ||
       (status === 403 && error.type === "permission_error")
     ) ||
-    (error.param !== undefined &&
-      error.param !== null &&
-      typeof error.param !== "string") ||
     (error.code !== undefined &&
       error.code !== null &&
       !CLIENT_ERROR_CODES.has(error.code))
   ) {
     return false;
   }
-  // This envelope is shallow and all values are scalar. Count JSON keys while
-  // consuming whole strings to reject duplicates, including escaped names,
-  // which JSON.parse would otherwise silently overwrite.
-  const keyCount = [...body.matchAll(/"(?:[^"\\]|\\.)*"\s*(:)?/gsu)].filter(
-    (entry) => entry[1] !== undefined,
-  ).length;
-  return keyCount === keys.length + 1 ? { ...error, status } : false;
+  return { ...error, status };
 }
 
 function rejectsEffort(message) {
@@ -1019,7 +976,7 @@ function isEffortRejection(message) {
   );
 }
 
-function effortRequestError(error, method, request) {
+function classifyRequestError(error, method, request) {
   if (
     request.effort !== undefined &&
     ["turn/start", "thread/start", "thread/resume", "thread/fork"].includes(
@@ -1030,6 +987,24 @@ function effortRequestError(error, method, request) {
     isEffortRejection(error.message)
   )
     return effortError();
+  if (
+    method === "turn/start" &&
+    isRecord(error) &&
+    [-32603, -32000].includes(error.code)
+  ) {
+    const { availabilityReason } = codexAvailabilityEvidence({
+      codexErrorInfo: "other",
+      message: error.message,
+    });
+    if (availabilityReason !== undefined) {
+      return new CodexAdapterError("Codex provider is unavailable.", {
+        code: "ERR_CODEX_TURN_FAILED",
+        diagnosticClass: "turn_other",
+        availabilityReason,
+        recoverable: true,
+      });
+    }
+  }
   return undefined;
 }
 
@@ -1247,6 +1222,28 @@ async function runTurn(
   }
   if (turn.status !== "completed") {
     let diagnosticClass = terminalTurnDiagnosticClass(turn);
+    const availability = codexAvailabilityEvidence(turn.error);
+    const canRefine =
+      diagnosticClass === TERMINAL_TURN_DIAGNOSTICS.badRequest ||
+      RECOVERABLE_TURN_DIAGNOSTICS.has(diagnosticClass) ||
+      Object.hasOwn(availability, "status");
+    if (canRefine) {
+      // Native availability cannot hide policy, protocol, or isolation violations.
+      auditItems(turn.items, request);
+    }
+    const rejection = canRefine && structuredClientError(turn.error?.message);
+    if ([401, 403].includes(availability.status)) {
+      diagnosticClass = TERMINAL_TURN_DIAGNOSTICS.unauthorized;
+    } else if (availability.status === 429) {
+      diagnosticClass = TERMINAL_TURN_DIAGNOSTICS.usageLimitExceeded;
+    } else if (
+      rejection ||
+      (availability.status >= 400 &&
+        availability.status < 500 &&
+        ![408, 425].includes(availability.status))
+    ) {
+      diagnosticClass = TERMINAL_TURN_DIAGNOSTICS.badRequest;
+    }
     if (diagnosticClass === TERMINAL_TURN_DIAGNOSTICS.usageLimitExceeded) {
       throw new CodexAdapterError("Codex usage capacity is unavailable.", {
         code: "ERR_CODEX_USAGE_LIMIT",
@@ -1255,34 +1252,25 @@ async function runTurn(
       });
     }
     if (
-      diagnosticClass === TERMINAL_TURN_DIAGNOSTICS.badRequest ||
-      RECOVERABLE_TURN_DIAGNOSTICS.has(diagnosticClass)
-    ) {
-      // Classification and recovery cannot hide policy, protocol, or
-      // isolation violations.
-      auditItems(turn.items, request);
-    }
-    if (
       [
         TERMINAL_TURN_DIAGNOSTICS.other,
         TERMINAL_TURN_DIAGNOSTICS.badRequest,
-      ].includes(diagnosticClass)
+      ].includes(diagnosticClass) &&
+      request.effort !== undefined &&
+      isEffortRejection(turn.error.message)
     ) {
-      const rejection = structuredClientError(turn.error.message);
-      if (
-        request.effort !== undefined &&
-        isEffortRejection(turn.error.message)
-      ) {
-        throw effortError();
-      }
-      if (rejection) {
-        diagnosticClass = TERMINAL_TURN_DIAGNOSTICS.badRequest;
-      }
+      throw effortError();
     }
+    const availabilityReason = rejection
+      ? undefined
+      : availability.availabilityReason;
     throw new CodexAdapterError("Codex turn failed.", {
       code: "ERR_CODEX_TURN_FAILED",
       diagnosticClass,
-      recoverable: RECOVERABLE_TURN_DIAGNOSTICS.has(diagnosticClass),
+      recoverable:
+        RECOVERABLE_TURN_DIAGNOSTICS.has(diagnosticClass) ||
+        availabilityReason !== undefined,
+      availabilityReason,
     });
   }
   return turn;
@@ -1788,7 +1776,7 @@ export function createCodexAdapter(options = {}) {
         child,
         CodexAdapterError,
         request.signal,
-        (error, method) => effortRequestError(error, method, request),
+        (error, method) => classifyRequestError(error, method, request),
       );
       let result;
       let operationFailed = false;

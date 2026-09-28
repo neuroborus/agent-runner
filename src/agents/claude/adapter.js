@@ -15,6 +15,7 @@ import {
   isolateGitEnvironment,
   STRUCTURED_OUTPUT_FAILURE_CLASS,
 } from "../adapter-contract.js";
+import { claudeAvailabilityReason } from "./availability.js";
 import {
   CLAUDE_COMMAND_LAUNCHER_TOKEN,
   claudeCommandLauncherSettings,
@@ -171,7 +172,7 @@ const CONTEXT_ERROR_PATTERN =
 const USAGE_LIMIT_ERROR_PATTERN =
   /(?:rate[_ -]?limit|(?:usage|spend(?:ing)?|credit)[_ -]?limit[^\n]{0,80}(?:exceed|exhaust|reach)|quota[^\n]{0,80}(?:exceed|exhaust|reach)|(?:exceed|exhaust|reach)[^\n]{0,80}(?:quota|(?:usage|spend(?:ing)?|credit)[_ -]?limit)|credits?[^\n]{0,80}(?:deplet|exhaust)|insufficient credits?|credit balance[^\n]{0,80}(?:deplet|exhaust|low)|out of credits?|you(?:'ve| have) hit (?:your|the) limit)/iu;
 const AUTHENTICATION_ERROR_PATTERN =
-  /(?:authentication[_ -](?:error|failed|required)|not authenticated|unauthenticated|unauthorized|invalid (?:api[_ -]?)?key|(?:api[_ -]?)?key[^\n]{0,80}(?:invalid|expired|revoked)|(?:oauth|access|auth) token[^\n]{0,80}(?:invalid|expired|revoked)|(?:log|sign) ?in required|please (?:log|sign) ?in|\b401\b)/iu;
+  /(?:authentication[_ -](?:error|failed|required)|not authenticated|unauthenticated|unauthorized|invalid (?:api[_ -]?)?key|(?:api[_ -]?)?key[^\n]{0,80}(?:invalid|expired|revoked)|(?:oauth|access|auth|refresh) token[^\n]{0,80}(?:invalid|expired|revoked)|(?:log|sign) ?in required|please (?:log|sign) ?in|\b401\b)/iu;
 const PROFILE_ERROR_PATTERN =
   /(?:(?:profile|configuration|config(?:uration)? directory)[^\n]{0,80}(?:not found|does not exist|cannot (?:be )?load|missing|unavailable|invalid|inaccessible|permission denied)|CLAUDE_CONFIG_DIR[^\n]{0,80}(?:not found|does not exist|missing|invalid|inaccessible))/iu;
 const PROVIDER_ERROR_PATTERN =
@@ -254,6 +255,10 @@ function claudeFailureRecord(cause) {
     outcome: ambiguous ? "ambiguous" : "rejected",
     effect,
     retry: cause?.recoverable === true ? "transient" : "terminal",
+    ...(cause instanceof ClaudeAdapterError &&
+    cause.availabilityReason !== undefined
+      ? { availabilityReason: cause.availabilityReason }
+      : {}),
     ...(checkpoint === "commit" && cause?.effectStarted === false
       ? { commitExecutor: "not_started" }
       : {}),
@@ -290,6 +295,7 @@ export class ClaudeAdapterError extends Error {
     message,
     {
       ambiguous = false,
+      availabilityReason,
       cause,
       code = "ERR_CLAUDE_ADAPTER",
       diagnosticClass,
@@ -305,6 +311,8 @@ export class ClaudeAdapterError extends Error {
     this.ambiguous = ambiguous;
     this.recoverable =
       recoverable && RECOVERABLE_CLAUDE_DIAGNOSTIC_CLASSES.has(diagnosticClass);
+    if (availabilityReason !== undefined)
+      this.availabilityReason = availabilityReason;
     if (typeof effectStarted === "boolean") {
       this.effectStarted = effectStarted;
     }
@@ -748,11 +756,12 @@ function usageLimitError(sessionId) {
   });
 }
 
-function providerUnavailableError(sessionId) {
+function providerUnavailableError(sessionId, availabilityReason) {
   return diagnosticError("Claude provider is unavailable.", {
     code: "ERR_CLAUDE_PROVIDER_UNAVAILABLE",
     diagnosticClass: "provider_unavailable",
     recoverable: true,
+    availabilityReason,
     sessionId,
   });
 }
@@ -784,8 +793,12 @@ function classifiedAvailabilityError(message, { profile, session, sessionId }) {
       sessionId,
     });
   }
-  if (PROVIDER_ERROR_PATTERN.test(message)) {
-    return providerUnavailableError(sessionId);
+  const availabilityReason = claudeAvailabilityReason(message);
+  if (
+    availabilityReason !== undefined ||
+    PROVIDER_ERROR_PATTERN.test(message)
+  ) {
+    return providerUnavailableError(sessionId, availabilityReason);
   }
   if (BACKEND_ERROR_PATTERN.test(message)) {
     return diagnosticError("Claude backend is unavailable.", {
@@ -861,19 +874,22 @@ function structuredProviderError(payload, sessionId) {
   if (status === 401 || status === 403) {
     return authenticationUnavailableError(sessionId);
   }
-  if (
+  const transientStatus =
     status === 408 ||
     status === 425 ||
     status === 529 ||
-    (Number.isInteger(status) && status >= 500 && status <= 599)
-  ) {
-    return providerUnavailableError(sessionId);
-  }
-  if (status !== undefined) {
+    (Number.isInteger(status) && status >= 500 && status <= 599);
+  if (status !== undefined && !transientStatus) {
     return requestRejectedError(sessionId);
   }
   if (payload?.terminal_reason === "budget_exhausted") {
     return usageLimitError(sessionId);
+  }
+  if (transientStatus) {
+    return providerUnavailableError(
+      sessionId,
+      claudeAvailabilityReason(diagnosticText(payload), status),
+    );
   }
   if (payload?.terminal_reason === "api_error") {
     return requestRejectedError(sessionId);
@@ -1498,6 +1514,10 @@ export function createClaudeAdapter(options = {}) {
           ].includes(cause?.code)
         )
           throw cause;
+        if (cause?.signal != null || cause?.killed === true) {
+          // Even a parseable diagnostic cannot prove a killed process completed.
+          throw processFailureError(request);
+        }
         const standardError = processOutput(cause?.stderr);
         if (PERMISSION_MODE_FALLBACK_PATTERN.test(standardError)) {
           throw new ClaudeAdapterError(

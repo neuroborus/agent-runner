@@ -2642,6 +2642,153 @@ test("classifies explicit usage limits without retrying the rejected turn", asyn
   }
 });
 
+test("normalizes Claude availability while preserving rejection precedence and commit proof", async () => {
+  let payload;
+  const fixture = createFixture({
+    handle({ call }) {
+      if (call.file === "claude" && call.argumentsList.includes("-p")) {
+        return { stdout: JSON.stringify(payload), stderr: "" };
+      }
+    },
+  });
+  for (const [message, fields, expected, expectedCode] of [
+    ...[
+      "network is offline",
+      "EAI_AGAIN",
+      "ENOTFOUND",
+      "connection refused",
+      "ECONNRESET",
+      "request timed out",
+    ].map((text) => [text, {}, "transport_unavailable"]),
+    ["overloaded_error", {}, "temporarily_overloaded"],
+    ["model is busy", {}, "model_busy"],
+    ...[
+      [408, "transport_unavailable"],
+      [425, "server_unavailable"],
+      [500, "server_unavailable"],
+      [502, "server_unavailable"],
+      [503, "server_unavailable"],
+      [504, "transport_unavailable"],
+      [529, "temporarily_overloaded"],
+    ].map(([api_error_status, reason]) => [
+      "native error",
+      { api_error_status },
+      reason,
+    ]),
+    ...[400, 401, 403, 429, 501, "503"].map((api_error_status) => [
+      "ECONNRESET",
+      { api_error_status },
+      undefined,
+    ]),
+    ...[
+      [503, "ERR_CLAUDE_USAGE_LIMIT"],
+      [401, "ERR_CLAUDE_AUTHENTICATION_UNAVAILABLE"],
+      [403, "ERR_CLAUDE_AUTHENTICATION_UNAVAILABLE"],
+      [400, "ERR_CLAUDE_REQUEST_REJECTED"],
+    ].map(([api_error_status, code]) => [
+      "ENOTFOUND",
+      { api_error_status, terminal_reason: "budget_exhausted" },
+      undefined,
+      code,
+    ]),
+    [
+      "ENOTFOUND",
+      {
+        subtype: "error_max_structured_output_retries",
+        terminal_reason: "budget_exhausted",
+      },
+      undefined,
+      "ERR_CLAUDE_STRUCTURED_OUTPUT",
+    ],
+    ["ENOTFOUND", { terminal_reason: "api_error" }, undefined],
+    ["model is busy; quota exhausted", {}, undefined],
+    ["permission denied; connection reset", {}, undefined],
+    ["refresh token expired; ECONNRESET", {}, undefined],
+    ["refresh token expired", { api_error_status: 503 }, undefined],
+    ...["not authenticated", "please log in"].map((message) => [
+      `${message}; ECONNRESET`,
+      { api_error_status: 503 },
+      undefined,
+    ]),
+    ["rate_limit_error; ECONNRESET", { api_error_status: 503 }, undefined],
+    ["ENOTFOUND" + "x".repeat(4_096), {}, undefined],
+    ["unclassified failure", {}, undefined],
+    [
+      "model is busy",
+      {
+        permission_denials: [
+          { tool_name: "Agent", tool_input: "DO_NOT_RETAIN" },
+        ],
+      },
+      undefined,
+    ],
+  ]) {
+    payload = result({
+      error: true,
+      output: `${message}: DO_NOT_RETAIN`,
+      ...fields,
+    });
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          access: "local-commit",
+          authorizationId: "availability-authorization",
+          commit: {
+            expectedHead: EXPECTED_HEAD,
+            message: "fix(test): preserve readiness",
+          },
+        }),
+      ),
+      (error) => {
+        const normalized = normalizeAdapterFailure("claude", error);
+        assert.equal(normalized.failure.availabilityReason, expected, message);
+        if (expectedCode !== undefined)
+          assert.equal(normalized.code, expectedCode);
+        assert.equal(normalized.effectStarted, false);
+        assert.equal(normalized.failure.commitExecutor, "not_started");
+        if (expected !== undefined) assert.equal(normalized.recoverable, true);
+        assert.doesNotMatch(JSON.stringify(error), /DO_NOT_RETAIN/u);
+        assert.doesNotMatch(JSON.stringify(normalized), /DO_NOT_RETAIN/u);
+        return true;
+      },
+    );
+  }
+  assert.equal(
+    fixture.calls.filter(
+      ({ file, argumentsList }) =>
+        file === "bwrap" && argumentsList.includes("git"),
+    ).length,
+    0,
+  );
+});
+
+test("Claude availability diagnostics cannot hide interrupted effects", async () => {
+  let payload;
+  const fixture = createFixture({
+    handle({ call }) {
+      if (call.file === "claude" && call.argumentsList.includes("-p")) {
+        throw Object.assign(
+          processFailure(payload, "ECONNRESET DO_NOT_RETAIN"),
+          { signal: "SIGKILL" },
+        );
+      }
+    },
+  });
+  for (payload of [undefined, result({ error: true, output: "ECONNRESET" })]) {
+    await assert.rejects(
+      fixture.adapter.run(request({ access: "workspace-write" })),
+      (error) => {
+        const normalized = normalizeAdapterFailure("claude", error);
+        assert.equal(normalized.ambiguous, true);
+        assert.equal(normalized.recoverable, false);
+        assert.equal(normalized.failure.availabilityReason, undefined);
+        assert.doesNotMatch(JSON.stringify(normalized), /DO_NOT_RETAIN/u);
+        return true;
+      },
+    );
+  }
+});
+
 test("prefers structured Claude failure fields over native text", async (t) => {
   for (const { code, diagnosticClass, payload, recoverable } of [
     {

@@ -488,13 +488,16 @@ terminal-reason fields before bounded native-text matching. Only finite
 allowlisted backend, capability, configuration, usage, provider, expected-tool
 permission, and harmless read-only execution failures are resumable. A Bash
 denial is an expected-tool capability failure only for a positively recognized
-safe repository inspection; all other Bash denials fail closed. Provider
+safe repository inspection; all other Bash denials fail closed. Structured API-error
 recovery requires an explicit transient HTTP status, while non-transient client
 statuses and an unqualified structured `api_error` are terminal. An
 unclassified valid read-only result or process failure may use this path only
 after the repository guard proves the turn remained read-only. Authentication,
 forbidden-operation permission denials, protocol failures, and isolation
 failures remain terminal. Denied input and native provider text are discarded.
+Explicit native transport, overload, model-busy, and server evidence may carry
+the provider contract's shared availability reason without changing this
+pipeline's pause or retry policy.
 The root agent boundary normalizes those finite adapter-owned classes before
 workflow code sees the failure. In particular, Codex collaboration activity
 despite disabled multi-agent support remains terminal

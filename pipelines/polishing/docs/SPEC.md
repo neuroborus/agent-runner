@@ -454,12 +454,15 @@ and terminal reason before consulting a bounded native-text slice. Only finite
 allowlisted backend, capability, configuration, usage, provider, expected-tool
 permission, and harmless read-only execution failures are resumable. Bash
 permission recovery requires a positively recognized safe repository
-inspection; every other Bash denial fails closed. Provider recovery requires an
-explicit transient HTTP status, while non-transient client statuses and an
-unqualified structured `api_error` are terminal. Authentication,
+inspection; every other Bash denial fails closed. Structured API-error recovery
+requires an explicit transient HTTP status, while non-transient client statuses
+and an unqualified structured `api_error` are terminal. Authentication,
 forbidden-operation denials, isolation or protocol failures, and unclassified
 writable process outcomes remain terminal. Denied input,
 native result text, raw standard error, and native process causes are discarded.
+Explicit native transport, overload, model-busy, and server evidence may carry
+the provider contract's shared availability reason without changing this
+pipeline's pause or retry policy.
 An explicit rate, quota, credit, or spend-limit rejection is not retried through
 compaction, a fresh session, or provider fallback. Persist
 `backend_unavailable`, safe Worker workspace changes, and invalidation of stale

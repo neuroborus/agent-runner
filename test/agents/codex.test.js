@@ -2758,6 +2758,10 @@ test("never replays an interrupted local-commit turn", async () => {
                 id: "interrupted-turn",
                 itemsView: "full",
                 status: "interrupted",
+                error: {
+                  codexErrorInfo: "serverOverloaded",
+                  message: "server overloaded",
+                },
                 items: [],
               },
             },
@@ -2791,6 +2795,7 @@ test("never replays an interrupted local-commit turn", async () => {
       assert.equal(normalized.ambiguous, true);
       assert.equal(normalized.effectStarted, false);
       assert.equal(normalized.failure.commitExecutor, "not_started");
+      assert.equal(normalized.failure.availabilityReason, undefined);
       assert.equal(normalized.diagnosticClass, undefined);
       return true;
     },
@@ -2939,27 +2944,10 @@ test("classifies recognized terminal turn failures without retaining native deta
     ],
     ["badRequest", "turn_bad_request"],
     ["cyberPolicy", "turn_cyber_policy"],
-    [
-      { httpConnectionFailed: { httpStatusCode: 429 } },
-      "turn_http_connection_failed",
-    ],
-    ["internalServerError", "turn_internal_server_error"],
+    [{ httpConnectionFailed: { httpStatusCode: 403 } }, "turn_unauthorized"],
     ["misalignmentPolicyViolation", "turn_misalignment_policy_violation"],
     ["other", "turn_other"],
-    [
-      { responseStreamConnectionFailed: { httpStatusCode: 503 } },
-      "turn_response_stream_connection_failed",
-    ],
-    [
-      { responseStreamDisconnected: { httpStatusCode: null } },
-      "turn_response_stream_disconnected",
-    ],
-    [
-      { responseTooManyFailedAttempts: { httpStatusCode: 500 } },
-      "turn_response_too_many_failed_attempts",
-    ],
     ["sandboxError", "turn_sandbox_error"],
-    ["serverOverloaded", "turn_server_overloaded"],
     ["sessionBudgetExceeded", "turn_session_budget_exceeded"],
     ["threadRollbackFailed", "turn_thread_rollback_failed"],
     ["unauthorized", "turn_unauthorized"],
@@ -3009,6 +2997,187 @@ test("classifies recognized terminal turn failures without retaining native deta
           ? 2
           : 1,
       );
+    });
+  }
+});
+
+test("normalizes Codex availability while preserving rejection precedence and commit proof", async () => {
+  const wrapper = (status, fields = {}) =>
+    `unexpected status ${status}: ${JSON.stringify({ error: { message: "DO_NOT_RETAIN", type: "server_error", ...fields } })}`;
+  let nativeError;
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method !== "turn/start") return undefined;
+      return {
+        result: { turn: { id: "availability-turn" } },
+        notification: failedTurn(
+          message.params.threadId,
+          "availability-turn",
+          nativeError,
+        ),
+      };
+    },
+  });
+  for (const [info, message, expected] of [
+    ...[
+      "network is offline",
+      "EAI_AGAIN",
+      "ENOTFOUND",
+      "connection refused",
+      "ECONNRESET",
+      "request timed out",
+    ].map((text) => ["other", text, "transport_unavailable"]),
+    ["serverOverloaded", "server overloaded", "temporarily_overloaded"],
+    ["other", "model is busy", "model_busy"],
+    ["internalServerError", "server failed", "server_unavailable"],
+    [
+      { responseStreamDisconnected: { httpStatusCode: null } },
+      "stream closed",
+      "transport_unavailable",
+    ],
+    [
+      { responseStreamConnectionFailed: { httpStatusCode: 503 } },
+      "service unavailable",
+      "server_unavailable",
+    ],
+    [
+      { responseTooManyFailedAttempts: { httpStatusCode: 500 } },
+      "server failed",
+      "server_unavailable",
+    ],
+    ...[
+      [408, "request failed", "transport_unavailable"],
+      [425, "request failed", "server_unavailable"],
+      [502, "request failed", "server_unavailable"],
+      [503, wrapper(503), "server_unavailable"],
+      [
+        504,
+        `${wrapper("504 Gateway Timeout")}, request id: DO_NOT_RETAIN`,
+        "transport_unavailable",
+      ],
+      [529, "request failed", "temporarily_overloaded"],
+      ...[400, 401, 403, 429, 501, "503"].map((status) => [
+        status,
+        "ECONNRESET",
+        undefined,
+      ]),
+      [503, wrapper(504), undefined],
+      [503, wrapper("503 Gateway Timeout"), undefined],
+      [503, wrapper(503).slice(0, -1), undefined],
+      [
+        503,
+        wrapper(503).replace(
+          '"type":',
+          '"type":"authentication_error","type":',
+        ),
+        undefined,
+      ],
+      ...[
+        "authentication_error",
+        "permission_error",
+        "invalid_request_error",
+        "rate_limit_error",
+      ].map((type) => [503, wrapper(503, { type }), undefined]),
+      [
+        503,
+        wrapper(503, { message: "token expired; DO_NOT_RETAIN" }),
+        undefined,
+      ],
+      [
+        503,
+        wrapper(503, { message: "unauthorized" }).replace(
+          "unauthorized",
+          "\\u0075nauthorized",
+        ),
+        undefined,
+      ],
+      [503, wrapper(503, { code: "invalid_api_key" }), undefined],
+      [503, wrapper(503, { extra: "DO_NOT_RETAIN" }), undefined],
+    ].map(([status, text, reason]) => [
+      { httpConnectionFailed: { httpStatusCode: status } },
+      text,
+      reason,
+    ]),
+    ["unauthorized", "ENOTFOUND", undefined],
+    ["usageLimitExceeded", "model is busy", undefined],
+    ["serverOverloaded", httpClientErrorMessage(), undefined],
+    ["other", wrapper(503), undefined],
+    ["other", "unclassified failure", undefined],
+    ["other", "ENOTFOUND" + "x".repeat(16_384), undefined],
+    ["other", "permission denied; model is busy", undefined],
+    ["other", "invalid_request_error; ECONNRESET", undefined],
+    ...["rate_limit_error", "insufficient_quota", "protocol_incompatible"].map(
+      (code) => ["other", `${code}; ECONNRESET`, undefined],
+    ),
+    ["other", "refresh token expired; ECONNRESET", undefined],
+    ...["not authenticated", "please log in"].map((message) => [
+      "other",
+      `${message}; ECONNRESET`,
+      undefined,
+    ]),
+    ["responseTooManyFailedAttempts", "unclassified failure", undefined],
+  ]) {
+    nativeError = {
+      codexErrorInfo: info,
+      message,
+      additionalDetails: "ENOTFOUND DO_NOT_RETAIN",
+    };
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          access: "local-commit",
+          authorizationId: "availability-authorization",
+          commit: {
+            expectedHead: EXPECTED_HEAD,
+            message: "fix(test): preserve readiness",
+          },
+        }),
+      ),
+      (error) => {
+        const normalized = normalizeAdapterFailure("codex", error);
+        assert.equal(normalized.failure.availabilityReason, expected, message);
+        assert.equal(normalized.failure.checkpoint, "commit");
+        assert.equal(normalized.failure.commitExecutor, "not_started");
+        assert.equal(normalized.effectStarted, false);
+        if (expected !== undefined) assert.equal(normalized.recoverable, true);
+        if (info === "serverOverloaded" && expected === undefined) {
+          assert.equal(normalized.diagnosticClass, "turn_bad_request");
+          assert.equal(normalized.recoverable, false);
+        }
+        assert.doesNotMatch(
+          JSON.stringify(error),
+          /DO_NOT_RETAIN|httpStatusCode/u,
+        );
+        assert.doesNotMatch(JSON.stringify(normalized), /DO_NOT_RETAIN/u);
+        return true;
+      },
+    );
+  }
+  assert.equal(
+    fixture.executeCalls.filter(({ file }) => file === "git").length,
+    0,
+  );
+});
+
+test("Codex turn-start availability preserves RPC rejection precedence", async () => {
+  let code;
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method === "turn/start") {
+        return { error: { code, message: "ECONNREFUSED DO_NOT_RETAIN" } };
+      }
+    },
+  });
+  for (code of [-32000, -32603, -32602]) {
+    await assert.rejects(fixture.adapter.run(request()), (error) => {
+      const failure = normalizeAdapterFailure("codex", error).failure;
+      assert.equal(
+        failure.availabilityReason,
+        code === -32602 ? undefined : "transport_unavailable",
+      );
+      assert.equal(failure.retry, code === -32602 ? "terminal" : "transient");
+      assert.doesNotMatch(JSON.stringify(error), /DO_NOT_RETAIN/u);
+      return true;
     });
   }
 });
@@ -3445,7 +3614,11 @@ test("propagates a second recoverable or terminal turn failure without another r
 });
 
 test("recoverable turn failures cannot hide forbidden operations", async (t) => {
-  for (const failureVariant of ["other", "serverOverloaded"]) {
+  for (const failureVariant of [
+    "other",
+    "serverOverloaded",
+    "httpConnectionFailed",
+  ]) {
     for (const nativeMessage of [
       "DO_NOT_RETAIN_NATIVE_MESSAGE",
       httpClientErrorMessage(),
