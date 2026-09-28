@@ -38,6 +38,13 @@ export function restoreOperatorPause(run) {
   });
 }
 
+function withoutLaunchRecovery(pause) {
+  if (pause === null || !Object.hasOwn(pause, "launchRecovery")) return pause;
+  const retained = { ...pause };
+  delete retained.launchRecovery;
+  return retained;
+}
+
 export function createStopMonitor({ runId, lease, runStore, publish }) {
   const controller = new AbortController();
   const watcher = new AbortController();
@@ -184,7 +191,7 @@ export function stopSettlement(
         resumeAction: null,
         operatorResume: {
           workflowState: patch.pipelineState.workflowState,
-          pause: patch.pause,
+          pause: canceled ? withoutLaunchRecovery(patch.pause) : patch.pause,
           activeTurn: patch.activeTurn ?? null,
         },
       },

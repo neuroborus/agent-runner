@@ -558,6 +558,7 @@ export async function runPolishing({
   let currentRun = run;
   let interruptedTurn = run.activeTurn;
   let interruptedRepositoryReconciled = false;
+  let failedSourceForkLaunchRecovery = false;
 
   function state() {
     return normalizePipelineState(currentRun.pipelineState);
@@ -760,9 +761,13 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     return currentRun;
   }
 
-  async function pause(reason, details = {}) {
+  async function pause(reason, details = {}, pipelineStatePatch = {}) {
     await transition(
-      { ...state(), workflowState: "WAITING_FOR_USER" },
+      {
+        ...state(),
+        ...pipelineStatePatch,
+        workflowState: "WAITING_FOR_USER",
+      },
       {
         pause: { ...details, reason },
         publicActivity: activity(
@@ -1508,6 +1513,10 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       assertRun(currentRun);
     }
     if (agentError !== undefined) {
+      failedSourceForkLaunchRecovery =
+        consumeSourceFork &&
+        agentError?.launchRecovery !== undefined &&
+        currentRun.sessionLineage.children.length === 0;
       if (
         outputContext !== undefined &&
         agentError?.failureClass === STRUCTURED_OUTPUT_FAILURE_CLASS
@@ -6369,12 +6378,26 @@ ${evidence}`,
       cause?.code === "ERR_POLISHING_BACKEND_UNAVAILABLE" ||
       cause?.recoverable === true
     ) {
-      return pause("backend_unavailable", {
-        code: diagnosticCode(cause, "ERR_BACKEND_UNAVAILABLE"),
-        ...(state().preflightComplete
-          ? { resumeState: state().workflowState }
-          : {}),
-      });
+      const current = state();
+      const restoreLazySourceFork =
+        failedSourceForkLaunchRecovery &&
+        current.settings.mode === "lazy" &&
+        currentRun.sessionLineage.source !== null &&
+        current.lazySourceForkConsumed &&
+        currentRun.sessionLineage.children.length === 0;
+      return pause(
+        "backend_unavailable",
+        {
+          code: diagnosticCode(cause, "ERR_BACKEND_UNAVAILABLE"),
+          ...(current.preflightComplete
+            ? { resumeState: current.workflowState }
+            : {}),
+          ...(cause.launchRecovery === undefined
+            ? {}
+            : { launchRecovery: cause.launchRecovery }),
+        },
+        restoreLazySourceFork ? { lazySourceForkConsumed: false } : {},
+      );
     }
     return fail(cause);
   }

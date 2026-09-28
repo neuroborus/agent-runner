@@ -476,6 +476,18 @@ local-commit turns never use this retry or replay a commit effect. An overload
 that rejects commit readiness before the isolated executor starts remains a
 proven pre-effect rejection for the runner's Git verification path.
 
+When bounded adapter recovery ends in an eligible transient pre-effect launch
+failure, the availability pause retains only `failureClass` and the `spawn`,
+`initialize`, `session`, or `turn_start` checkpoint. CLI status renders
+`Launch recovery: <checkpoint> (<failureClass>)`; MCP status returns the same
+two-field `launchRecovery` value. Source-fork requests retain it only before
+native forking can begin (`spawn` or `initialize`). In lazy mode that early
+failure restores the unconsumed one-time fork marker when no child exists, so
+resume performs the source fork once. A failure at `session` or `turn_start`
+fails the run instead of offering a resume that could create a second child.
+Resume clears the projection; an operator pause preserves it, and cancellation
+clears it.
+
 ## Task Inputs
 
 Plan authoring accepts:
@@ -1037,7 +1049,8 @@ history after a cursor and a next cursor. Use activity for explicit inspection
 or recovery. `run_wait` can emit the same bounded events as progress
 notifications while the model sleeps; live rendering depends on the MCP host.
 Public projections contain no inactive role configuration or provider-private
-data.
+data. When present, `launchRecovery` is the same strict checkpoint/class value
+shown by CLI status.
 
 ## Provider Boundary
 

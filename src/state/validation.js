@@ -1,6 +1,7 @@
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 import { isAdapterDiagnosticClass } from "../agents/index.js";
+import { normalizeLaunchRecovery } from "./launch-recovery.js";
 import { validStopTiming, validStopSettlement } from "./stop-contract.js";
 
 export const RUN_STATE_SCHEMA_VERSION = 13;
@@ -201,6 +202,16 @@ function assertInputText(value, path, maximumLength = MAX_INPUT_TEXT_LENGTH) {
 
 function normalizePause(value) {
   const pause = cloneRecord(value, "run.pause");
+  if (Object.hasOwn(pause, "launchRecovery")) {
+    if (pause.reason !== "backend_unavailable") {
+      fail("run.pause.launchRecovery is invalid.");
+    }
+    try {
+      pause.launchRecovery = normalizeLaunchRecovery(pause.launchRecovery);
+    } catch {
+      fail("run.pause.launchRecovery is invalid.");
+    }
+  }
   const operatorReason = ["operator_paused", "operator_canceled"].includes(
     pause.reason,
   );

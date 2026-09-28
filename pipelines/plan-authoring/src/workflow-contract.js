@@ -1433,6 +1433,7 @@ export function assertRun(run) {
       throw workflowError("Plan-authoring pending edit pause is invalid.");
     }
     const hasResumeState = Object.hasOwn(run.pause, "resumeState");
+    const hasLaunchRecovery = Object.hasOwn(run.pause, "launchRecovery");
     if (run.pause.reason === "lazy_output_invalid") {
       const expectedEvidence =
         pipelineState.pendingLazyCorrection?.diagnostics.map(
@@ -1476,6 +1477,12 @@ export function assertRun(run) {
           run.pause.resumeState !== pipelineState.pendingLazyCorrection.phase))
     ) {
       throw workflowError("Plan-authoring pause resume state is invalid.");
+    }
+    if (
+      hasLaunchRecovery &&
+      (run.pause.reason !== "backend_unavailable" || !hasResumeState)
+    ) {
+      throw workflowError("Plan-authoring launch recovery pause is invalid.");
     }
   }
   const hashFields = ["task", "context", "clarifications"];

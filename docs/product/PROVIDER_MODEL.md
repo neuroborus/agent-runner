@@ -210,6 +210,24 @@ oversized values, and contradictory records are rejected at the adapter
 contract and registry boundaries. An unclassified cause becomes a rejected,
 possible-effect, terminal failure.
 
+After the adapter's single applicable reconstruction is exhausted, the shared
+boundary may derive one resumable launch-recovery projection only from a
+validated transient record with `effect: "none"`, outcome `not_started` or
+`exited`, checkpoint `spawn`, `initialize`, `session`, or `turn_start`, and no
+commit-executor evidence. The projection contains exactly `failureClass` and
+`checkpoint`; it never contains native messages, standard error, process
+causes, or provider-specific fields. Deterministic launch incompatibilities,
+ambiguous effects, turn failures, and commit evidence cannot qualify.
+
+For a source-fork request, the runner retains that projection only at `spawn`
+or `initialize`. A later checkpoint could have created a native child before
+durable lineage was recorded, so retrying it could fork the source twice. In
+lazy mode an eligible early failure with no child atomically restores the
+one-time fork marker when the pipeline pauses. Resume then performs exactly one
+successful fork for the same logical role. A late fork failure keeps its
+normalized provider record but is non-resumable for that request; a recorded
+child is never reforked.
+
 Capability probes reproduce the `adapter-capabilities-v1` policy receipt and
 prove the version and the capabilities required for the logical role. The
 runner consumes only that proof and the normalized failure record. It derives
@@ -264,9 +282,11 @@ without replay. Native error details are discarded.
 
 Explicit rate, quota, credit, or spend-limit failures are not hidden behind
 context compaction or provider fallback. A resumable failure records only its
-bounded normalized class and checkpoint. Resume reconstructs the same logical
-request after the operator restores availability; it does not depend on raw
-native output or a surviving provider session.
+bounded normalized class and checkpoint. Eligible launch failure records use
+the same two-field durable projection after bounded adapter recovery is
+exhausted. Resume reconstructs the same logical request after the operator
+restores availability; it does not depend on raw native output or a surviving
+provider session.
 
 Provider messages, responses, prompts, denied tool input, standard error,
 credentials, and process causes do not enter public activity or durable state.

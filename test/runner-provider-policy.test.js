@@ -8,6 +8,8 @@ import { planExecutionPipeline } from "@agent-runner/plan-execution";
 
 import {
   createProviderRegistry,
+  deriveLaunchRecovery,
+  normalizeFailureRecord,
   PROVIDER_REGISTRY,
 } from "../src/agents/index.js";
 import { main } from "../src/cli.js";
@@ -16,7 +18,7 @@ import { createMcpControlPlane } from "../src/mcp/index.js";
 import { createRunner } from "../src/runner/index.js";
 import { RunnerError } from "../src/runner/input.js";
 import { probeRequiredRoles, roleAdapters } from "../src/runner/roles.js";
-import { createRunStore } from "../src/state/index.js";
+import { createRunStore, projectLaunchRecovery } from "../src/state/index.js";
 
 const CONFIGURATION = Object.freeze({
   backend: "codex",
@@ -80,6 +82,43 @@ function failureAdapter(classify, run) {
     failureProviders(classify),
     async () => {},
   ).worker;
+}
+
+function projectionFixture(launchRecovery) {
+  const runId = "11111111-1111-4111-8111-111111111111";
+  return {
+    directoryPath: `/state/runs/${runId}`,
+    run: {
+      runId,
+      revision: 7,
+      pipelineId: "plan-execution",
+      taskPath: "/task",
+      pause: {
+        reason: "backend_unavailable",
+        code: "ERR_BACKEND_UNAVAILABLE",
+        resumeState: "IMPLEMENT",
+        launchRecovery,
+      },
+      activeTurn: null,
+      executionProcess: null,
+      stopRequest: null,
+      pipelineState: {
+        workflowState: "WAITING_FOR_USER",
+        pendingEdit: null,
+        preflightComplete: true,
+        clarificationPath: "/project/clarifications.md",
+        currentStep: 1,
+        additionalFixRounds: 0,
+        settings: { maxFixRoundsPerStep: 5, mode: "lazy" },
+        finalizationResult: null,
+        findings: [],
+        findingOverrides: [],
+        finalizedFingerprint: null,
+        reviewedFingerprint: null,
+        completedCommits: [],
+      },
+    },
+  };
 }
 
 test("pipeline access requirements produce one bounded policy receipt", async () => {
@@ -328,6 +367,145 @@ test("matching stop codes without cause identity do not prove a stop", async () 
     assert.equal(error.failure.effect, "possible");
     return true;
   });
+});
+
+test("launch recovery is derived only from eligible normalized failures", () => {
+  const eligible = normalizeFailureRecord(
+    {
+      failureClass: "fixture_failure",
+      checkpoint: "spawn",
+      outcome: "not_started",
+      effect: "none",
+      retry: "transient",
+    },
+    ["fixture_failure"],
+  );
+  assert.deepEqual(deriveLaunchRecovery(eligible), {
+    failureClass: "fixture_failure",
+    checkpoint: "spawn",
+  });
+  assert.ok(Object.isFrozen(deriveLaunchRecovery(eligible)));
+
+  for (const record of [
+    { ...eligible, retry: "terminal" },
+    { ...eligible, effect: "possible", outcome: "ambiguous" },
+    { ...eligible, outcome: "rejected" },
+    { ...eligible, checkpoint: "turn" },
+    {
+      ...eligible,
+      checkpoint: "commit",
+      commitExecutor: "not_started",
+    },
+  ]) {
+    assert.equal(deriveLaunchRecovery(record), undefined);
+  }
+});
+
+test("source forks retain recovery only before native forking can start", async () => {
+  for (const checkpoint of ["spawn", "initialize", "session", "turn_start"]) {
+    const adapter = failureAdapter(
+      () => ({
+        failureClass: "fixture_failure",
+        checkpoint,
+        outcome: "not_started",
+        effect: "none",
+        retry: "transient",
+      }),
+      async () => {
+        throw Object.assign(new Error("DO_NOT_RETAIN_NATIVE_MESSAGE"), {
+          code: "ERR_FIXTURE_UNAVAILABLE",
+          launchRecovery: { native: "DO_NOT_RETAIN" },
+        });
+      },
+    );
+
+    await assert.rejects(
+      adapter.run({ session: { id: "source", mode: "fork" } }),
+      (error) => {
+        assert.deepEqual(
+          error.launchRecovery,
+          ["spawn", "initialize"].includes(checkpoint)
+            ? { failureClass: "fixture_failure", checkpoint }
+            : undefined,
+        );
+        assert.equal(
+          error.recoverable,
+          ["spawn", "initialize"].includes(checkpoint),
+        );
+        assert.equal(error.failure.retry, "transient");
+        assert.doesNotMatch(JSON.stringify(error), /DO_NOT_RETAIN/u);
+        return true;
+      },
+    );
+  }
+
+  const continued = failureAdapter(
+    () => ({
+      failureClass: "fixture_failure",
+      checkpoint: "session",
+      outcome: "exited",
+      effect: "none",
+      retry: "transient",
+    }),
+    async () => {
+      throw new Error("Provider exited.");
+    },
+  );
+  await assert.rejects(
+    continued.run({ session: { id: "child", mode: "continue" } }),
+    (error) => {
+      assert.deepEqual(error.launchRecovery, {
+        failureClass: "fixture_failure",
+        checkpoint: "session",
+      });
+      assert.equal(error.recoverable, true);
+      return true;
+    },
+  );
+});
+
+test("CLI and MCP project the same persisted launch recovery", async () => {
+  const launchRecovery = Object.freeze({
+    failureClass: "launch_process_exited",
+    checkpoint: "initialize",
+  });
+  const fixture = projectionFixture(launchRecovery);
+  let output = "";
+  const runner = {
+    async status() {
+      return fixture;
+    },
+  };
+
+  assert.equal(
+    await main(["status", "--run", fixture.run.runId], {
+      runner,
+      stdout: {
+        write(value) {
+          output += value;
+        },
+      },
+      stderr: { write() {} },
+    }),
+    0,
+  );
+  assert.match(
+    output,
+    /Launch recovery: initialize \(launch_process_exited\)/u,
+  );
+
+  const control = createMcpControlPlane({
+    issueReporter: {},
+    runner,
+    runStore: {
+      async inspectRunLeaseOwner() {
+        return { status: "none" };
+      },
+    },
+  });
+  const status = await control.runStatus({ runId: fixture.run.runId });
+  assert.deepEqual(status.launchRecovery, projectLaunchRecovery(fixture.run));
+  assert.deepEqual(status.launchRecovery, launchRecovery);
 });
 
 test("Runner recreation rejects policy drift before provider execution", async (t) => {

@@ -192,6 +192,17 @@ async function runAdapter(adapter, backend, request, providers) {
     return await adapter.run(request);
   } catch (cause) {
     const failure = normalizeAdapterFailure(backend, cause, providers);
+    if (
+      request.session?.mode === "fork" &&
+      failure.launchRecovery !== undefined &&
+      !["spawn", "initialize"].includes(failure.launchRecovery.checkpoint)
+    ) {
+      // Native forking may already have created an unrecorded child. Preserve
+      // the normalized failure, but do not let pipeline retry policy replay
+      // this request from the source session.
+      delete failure.launchRecovery;
+      failure.recoverable = false;
+    }
     const stopReason = request.signal?.reason;
     // Preserve the runner's pre-effect stop proof before redacting the native
     // abort reason. No provider cause crosses this boundary.

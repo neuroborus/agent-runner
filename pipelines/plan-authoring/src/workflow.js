@@ -266,6 +266,7 @@ export async function runPlanAuthoring({
   let currentRun = run;
   let interruptedTurn = run.activeTurn;
   let interruptedRepositoryReconciled = false;
+  let failedSourceForkLaunchRecovery = false;
   const clarificationPath = join(run.taskPath, "clarifications.md");
   const planPath = join(run.taskPath, "plan.md");
 
@@ -299,9 +300,13 @@ export async function runPlanAuthoring({
     return currentRun;
   }
 
-  async function pause(reason, details = {}) {
+  async function pause(reason, details = {}, pipelineStatePatch = {}) {
     await transition(
-      { ...pipelineState(), workflowState: "WAITING_FOR_USER" },
+      {
+        ...pipelineState(),
+        ...pipelineStatePatch,
+        workflowState: "WAITING_FOR_USER",
+      },
       {
         pause: { reason, ...details },
         publicActivity: activity(
@@ -573,6 +578,10 @@ export async function runPlanAuthoring({
       assertRun(currentRun);
     }
     if (agentError !== undefined) {
+      failedSourceForkLaunchRecovery =
+        consumeSourceFork &&
+        agentError?.launchRecovery !== undefined &&
+        currentRun.sessionLineage.children.length === 0;
       if (
         outputContext !== undefined &&
         agentError?.failureClass === STRUCTURED_OUTPUT_FAILURE_CLASS
@@ -1764,10 +1773,24 @@ ${findingPrompt(pipelineState())}`,
         typeof cause.code === "string" && /^[A-Z0-9_]{1,64}$/u.test(cause.code)
           ? cause.code
           : "ERR_BACKEND_UNAVAILABLE";
-      return pause("backend_unavailable", {
-        code,
-        resumeState: pipelineState().workflowState,
-      });
+      const current = pipelineState();
+      const restoreLazySourceFork =
+        failedSourceForkLaunchRecovery &&
+        current.settings.mode === "lazy" &&
+        currentRun.sessionLineage.source !== null &&
+        current.lazySourceForkConsumed &&
+        currentRun.sessionLineage.children.length === 0;
+      return pause(
+        "backend_unavailable",
+        {
+          code,
+          resumeState: current.workflowState,
+          ...(cause.launchRecovery === undefined
+            ? {}
+            : { launchRecovery: cause.launchRecovery }),
+        },
+        restoreLazySourceFork ? { lazySourceForkConsumed: false } : {},
+      );
     }
     return fail(cause);
   }

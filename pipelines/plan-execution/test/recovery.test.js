@@ -3,7 +3,11 @@ import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
-import { normalizeAdapterFailure } from "../../../src/agents/index.js";
+import {
+  AgentBoundaryError,
+  normalizeAdapterFailure,
+  normalizeFailureRecord,
+} from "../../../src/agents/index.js";
 import { planExecutionPipeline } from "../src/index.js";
 import {
   CANDIDATE_CLEAN_CONFIRM_SCHEMA,
@@ -53,6 +57,22 @@ function exhaustedCodexTurnFailure(diagnosticClass = "turn_other") {
       additionalDetails: "DO_NOT_RETAIN_ADDITIONAL_DETAILS",
     }),
   );
+}
+
+function blockedLateSourceForkFailure(checkpoint) {
+  const error = new AgentBoundaryError(
+    { code: "ERR_FIXTURE_UNAVAILABLE" },
+    normalizeFailureRecord({
+      failureClass: "launch_process_exited",
+      checkpoint,
+      outcome: "exited",
+      effect: "none",
+      retry: "transient",
+    }),
+  );
+  delete error.launchRecovery;
+  error.recoverable = false;
+  return error;
 }
 
 test("local Codex schema and structured bad-request failures stay terminal at CONFIRM", async (t) => {
@@ -985,6 +1005,180 @@ test("reconstructs an ownerless lazy candidate confirmation without recounting",
   );
   assert.equal(fixture.calls.reviewer.length, 0);
   assert.equal(fixture.calls.arbiter.length, 0);
+});
+
+test("restores an eligible lazy source fork before resumable launch recovery", async (t) => {
+  let rejectBeforeSpawn = true;
+  let successfulForks = 0;
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    sourceSession: SOURCE_SESSION,
+    worker: [clarificationReady(), bootstrapReady("Worker")],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmation(),
+    ],
+    onRoleRun(role, request) {
+      if (role !== "worker" || request.session?.mode !== "fork") return;
+      if (rejectBeforeSpawn) {
+        rejectBeforeSpawn = false;
+        throw Object.assign(
+          new Error("Provider process exited before spawn."),
+          {
+            code: "ERR_BACKEND_UNAVAILABLE",
+            recoverable: true,
+            launchRecovery: Object.freeze({
+              failureClass: "launch_process_exited",
+              checkpoint: "spawn",
+            }),
+          },
+        );
+      }
+      successfulForks += 1;
+    },
+  });
+
+  const paused = await fixture.run();
+
+  assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.deepEqual(paused.pause, {
+    code: "ERR_BACKEND_UNAVAILABLE",
+    resumeState: "CLARIFY",
+    launchRecovery: {
+      failureClass: "launch_process_exited",
+      checkpoint: "spawn",
+    },
+    reason: "backend_unavailable",
+  });
+  assert.equal(paused.activeTurn, null);
+  assert.equal(paused.pipelineState.lazySourceForkConsumed, false);
+  assert.deepEqual(paused.sessionLineage.children, []);
+  assert.equal(paused.counters.fixRounds, 0);
+  assert.equal(paused.counters.correctionRounds, 0);
+  assert.equal(paused.pipelineState.pendingCommit, null);
+  assert.deepEqual(paused.pipelineState.completedCommits, []);
+  assert.equal(
+    fixture.calls.worker.filter(({ access }) => access === "local-commit")
+      .length,
+    0,
+  );
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(successfulForks, 1);
+  assert.equal(
+    fixture.calls.worker.filter(({ session }) => session?.mode === "fork")
+      .length,
+    2,
+  );
+  assert.equal(completed.pipelineState.lazySourceForkConsumed, true);
+  assert.equal(completed.sessionLineage.children.length, 1);
+  assert.equal(completed.counters.fixRounds, 1);
+  assert.equal(completed.counters.correctionRounds, 0);
+  assert.equal(completed.pipelineState.completedCommits.length, 1);
+  assert.equal(
+    fixture.calls.worker.filter(({ access }) => access === "local-commit")
+      .length,
+    1,
+  );
+});
+
+test("does not resume a late source-fork launch failure", async (t) => {
+  for (const [mode, checkpoint] of [
+    ["independent", "session"],
+    ["combined", "turn_start"],
+  ]) {
+    await t.test(`${mode}/${checkpoint}`, async (t) => {
+      let forkAttempts = 0;
+      const fixture = await createFixture(t, {
+        mode,
+        sourceSession: SOURCE_SESSION,
+        onRoleRun(_role, request) {
+          if (request.session?.mode !== "fork") return;
+          forkAttempts += 1;
+          throw blockedLateSourceForkFailure(checkpoint);
+        },
+      });
+
+      await assert.rejects(fixture.run(), (error) => {
+        assert.equal(error.code, "ERR_FIXTURE_UNAVAILABLE");
+        assert.equal(error.recoverable, false);
+        assert.equal(error.launchRecovery, undefined);
+        return true;
+      });
+      assert.equal(fixture.currentRun.pipelineState.workflowState, "FAILED");
+      assert.deepEqual(fixture.currentRun.pause, {
+        reason: "internal_failure",
+        code: "ERR_FIXTURE_UNAVAILABLE",
+        diagnosticClass: "launch_process_exited",
+      });
+      assert.deepEqual(fixture.currentRun.sessionLineage.children, []);
+      assert.equal(forkAttempts, 1);
+
+      const terminal = await fixture.run();
+      assert.equal(terminal.pipelineState.workflowState, "FAILED");
+      assert.equal(forkAttempts, 1);
+    });
+  }
+});
+
+test("does not restore a lazy source fork for a later fresh launch failure", async (t) => {
+  let confirmationFailures = 0;
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    sourceSession: SOURCE_SESSION,
+    worker: [clarificationReady(), bootstrapReady("Worker")],
+    workWorker: [
+      implementationCompleted(),
+      finalizationPassed(),
+      checkAndFix(),
+      cleanConfirmation(),
+    ],
+    onRoleRun(role, request) {
+      if (
+        role !== "worker" ||
+        request.schema !== CANDIDATE_CLEAN_CONFIRM_SCHEMA
+      ) {
+        return;
+      }
+      confirmationFailures += 1;
+      if (confirmationFailures === 1) {
+        throw Object.assign(new Error("Provider is unavailable."), {
+          code: "ERR_BACKEND_UNAVAILABLE",
+          recoverable: true,
+        });
+      }
+      assert.equal(request.session, undefined);
+      throw Object.assign(new Error("Fresh provider process exited."), {
+        code: "ERR_BACKEND_UNAVAILABLE",
+        recoverable: true,
+        launchRecovery: Object.freeze({
+          failureClass: "launch_process_exited",
+          checkpoint: "spawn",
+        }),
+      });
+    },
+  });
+
+  const firstPause = await fixture.run();
+  assert.equal(firstPause.pipelineState.lazySourceForkConsumed, true);
+  assert.equal(firstPause.sessionLineage.children.length, 1);
+  Object.assign(fixture.currentRun, {
+    sessionLineage: { ...firstPause.sessionLineage, children: [] },
+  });
+
+  const paused = await fixture.run();
+
+  assert.equal(paused.pause.reason, "backend_unavailable");
+  assert.deepEqual(paused.pause.launchRecovery, {
+    failureClass: "launch_process_exited",
+    checkpoint: "spawn",
+  });
+  assert.equal(paused.pipelineState.lazySourceForkConsumed, true);
+  assert.deepEqual(paused.sessionLineage.children, []);
 });
 
 test("resumes lazy CLEAN_CONFIRM after Codex usage exhaustion", async (t) => {

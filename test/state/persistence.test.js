@@ -14,7 +14,13 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  restoreOperatorPause,
+  stopSettlement,
+} from "../../src/runner/stops.js";
+import {
   createRunStore,
+  normalizeLaunchRecovery,
+  projectLaunchRecovery,
   resolveStateRoot,
   RUNTIME_COMPATIBILITY,
   RUN_STATE_SCHEMA_VERSION,
@@ -937,6 +943,107 @@ test("accepts only finite adapter diagnostics in durable pause state", async (t)
     (error) =>
       error instanceof RunStoreError && error.code === "ERR_INVALID_RUN_STATE",
   );
+});
+
+test("persists only strict launch recovery and applies operator stop semantics", async (t) => {
+  const { created, store } = await createFixture(t);
+  const launchRecovery = {
+    failureClass: "launch_process_exited",
+    checkpoint: "initialize",
+  };
+  assert.deepEqual(normalizeLaunchRecovery(launchRecovery), launchRecovery);
+
+  const recovered = await store.transitionRun(created.lease, {
+    pause: {
+      reason: "backend_unavailable",
+      code: "ERR_BACKEND_UNAVAILABLE",
+      resumeState: "IMPLEMENT",
+      launchRecovery,
+    },
+  });
+  assert.deepEqual(projectLaunchRecovery(recovered), launchRecovery);
+  assert.ok(Object.isFrozen(recovered.pause.launchRecovery));
+
+  const resumed = await store.transitionRun(created.lease, { pause: null });
+  assert.equal(projectLaunchRecovery(resumed), null);
+
+  for (const invalidPause of [
+    {
+      reason: "environment_blocked",
+      launchRecovery,
+    },
+    {
+      reason: "backend_unavailable",
+      launchRecovery: { ...launchRecovery, native: "private" },
+    },
+    {
+      reason: "backend_unavailable",
+      launchRecovery: { ...launchRecovery, checkpoint: "turn" },
+    },
+    {
+      reason: "backend_unavailable",
+      launchRecovery: {
+        ...launchRecovery,
+        failureClass: "native_provider_value",
+      },
+    },
+  ]) {
+    await assert.rejects(
+      store.transitionRun(created.lease, { pause: invalidPause }),
+      (error) =>
+        error instanceof RunStoreError &&
+        error.code === "ERR_INVALID_RUN_STATE",
+    );
+  }
+
+  const checkpoint = {
+    workflowState: "WAITING_FOR_USER",
+    pause: recovered.pause,
+    activeTurn: null,
+  };
+  const paused = await store.transitionRun(created.lease, {
+    pause: {
+      reason: "operator_paused",
+      resumeAction: null,
+      operatorResume: checkpoint,
+    },
+  });
+  assert.deepEqual(projectLaunchRecovery(paused), launchRecovery);
+  assert.deepEqual(restoreOperatorPause(paused).pause, recovered.pause);
+
+  for (const [kind, expectedRecovery] of [
+    ["pause_requested", launchRecovery],
+    ["cancel_requested", null],
+  ]) {
+    const settlement = stopSettlement(
+      {
+        stopRequest: {
+          kind,
+          reconciledRevision: null,
+          effectiveTiming: "immediate",
+        },
+      },
+      {
+        pipelineState: { workflowState: "WAITING_FOR_USER" },
+        pause: recovered.pause,
+        activeTurn: null,
+      },
+      null,
+    );
+    const settled = await store.transitionRun(created.lease, {
+      pipelineState: {
+        ...created.state.pipelineState,
+        workflowState: settlement.patch.pipelineState.workflowState,
+      },
+      pause: settlement.patch.pause,
+      activeTurn: null,
+    });
+    assert.deepEqual(projectLaunchRecovery(settled), expectedRecovery);
+    assert.equal(
+      Object.hasOwn(settled.pause.operatorResume.pause, "launchRecovery"),
+      expectedRecovery !== null,
+    );
+  }
 });
 
 test("recovers every transition write boundary from the complete event", async (t) => {

@@ -5,6 +5,21 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-09-28
+
+- **Eligible provider launch recovery is durable and provider-neutral.** After
+  bounded adapter reconstruction, a transient `not_started` or `exited`
+  failure with no effect and no commit-executor evidence may persist only its
+  normalized class and early launch checkpoint on `backend_unavailable`. CLI
+  and MCP project that same redacted value; operator pause preserves it, while
+  accepted resume and cancellation clear it. Source-fork requests retain the
+  proof only at `spawn` or `initialize`. A lazy early failure with no recorded
+  child atomically restores its one-time marker so resume makes exactly one
+  successful source fork without recounting corrections or risking duplicate
+  effects. Later fork checkpoints fail closed because native child creation is
+  uncertain. Pipelines retain independent pause and lineage policy without
+  branching on provider identity.
+
 ## 2026-09-27
 
 - **Proved read-only isolation, not command text, authorizes Claude

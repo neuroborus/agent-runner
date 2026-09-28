@@ -512,6 +512,15 @@ unsafe reconciliation, changed inputs, or ambiguous effects have their own
 bounded recovery rules. Do not erase locks, patch state files, reset stagnation
 history, or assume every `no_progress` pause has the same recovery path.
 
+For an eligible transient pre-effect provider launch failure, CLI status prints
+`Launch recovery: <checkpoint> (<failureClass>)` and MCP status returns the
+equivalent two-field `launchRecovery` object. Restore availability and use only
+the offered resume action. An operator pause preserves this diagnosis; resuming
+the underlying pause clears it before retry, while cancellation clears it
+permanently. A lazy source fork failed at `spawn` or `initialize` is still the
+run's unconsumed single fork. Later fork checkpoints are not offered this
+recovery and fail closed because a provider child may already exist.
+
 Owned execution requires Linux PID namespaces and system-installed bubblewrap.
 The runner-trusted executor may reuse its already-private PID namespace for a
 nested runner test when its sandbox correctly denies another namespace; it does

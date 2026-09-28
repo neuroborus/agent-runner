@@ -40,6 +40,12 @@ export const LAUNCH_CHECKPOINTS = Object.freeze([
   "turn",
   "commit",
 ]);
+export const LAUNCH_RECOVERY_CHECKPOINTS = Object.freeze([
+  "spawn",
+  "initialize",
+  "session",
+  "turn_start",
+]);
 export const LAUNCH_OUTCOMES = Object.freeze([
   "not_started",
   "rejected",
@@ -288,6 +294,22 @@ export function deriveEffectStarted(record) {
   }
   if (record.effect === "started") return true;
   return undefined;
+}
+
+export function deriveLaunchRecovery(record) {
+  if (
+    record.retry !== "transient" ||
+    record.effect !== "none" ||
+    !["not_started", "exited"].includes(record.outcome) ||
+    !LAUNCH_RECOVERY_CHECKPOINTS.includes(record.checkpoint) ||
+    Object.hasOwn(record, "commitExecutor")
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    failureClass: record.failureClass,
+    checkpoint: record.checkpoint,
+  });
 }
 
 export function createCapabilityProof(

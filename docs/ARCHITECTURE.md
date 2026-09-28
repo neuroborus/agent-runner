@@ -1996,9 +1996,15 @@ classified usage and provider failures may pause only after safe workspace
 changes and control state have been reconciled. After the adapter's applicable
 retry policy is exhausted, the owning pipeline persists `backend_unavailable`,
 the exact resumable workflow checkpoint, reconciled one-shot authorization
-state, and any safe workspace changes before entering `WAITING_FOR_USER`.
-Resume reconstructs the same durable request after availability returns. No new
-persisted field or state version is required.
+state, and any safe workspace changes before entering `WAITING_FOR_USER`. An
+eligible normalized transient launch failure also persists only
+`launchRecovery: { failureClass, checkpoint }`. Eligibility requires `none`
+effect evidence, a `not_started` or `exited` outcome, one of `spawn`,
+`initialize`, `session`, or `turn_start`, and no commit-executor evidence.
+Deterministic incompatibilities, ambiguous effects, turn and commit failures,
+and provider-native details remain ineligible. Resume clears the pause and
+reconstructs the same durable request after availability returns. The optional
+pause field requires no state-version migration.
 
 A Worker returns a bounded structured blocker when sandbox, IPC, loopback,
 process-isolation, missing-service, permission, or comparable external
@@ -2391,7 +2397,14 @@ first eligible turn of each new primary or review checkpoint creates a direct
 child and returns its ID without resuming or mutating the source. In lazy mode,
 only the first eligible primary turn may create that child, and the durable
 one-time marker forbids later source forks even when a native session must be
-reconstructed. If the source cannot be forked, the turn fails before agent work
+reconstructed. If an eligible `spawn` or `initialize` launch failure occurs
+before a lazy fork can create a child, the same atomic availability-pause
+transition restores the one-time marker. Resume then makes the run's single
+fork for the same logical role. Recovery at `session` or `turn_start` is removed
+from a fork request and the request becomes non-resumable because a native child
+may already exist without durable lineage; recorded children are continued or
+reconstructed and never reforked.
+If the source cannot otherwise be forked, the turn fails before agent work
 rather than silently losing lineage.
 
 Adapter failures retain only bounded diagnostics. Every adapter classification
@@ -2409,6 +2422,16 @@ eligibility remains explicit in the record. The contract rejects unknown
 fields, unbounded values, and contradictory combinations. Capability probes
 produce a proof containing the version, required capabilities, and the existing
 `adapter-capabilities-v1` policy receipt.
+
+The root boundary derives launch recovery only from that validated record and
+never from raw provider causes. The frozen projection contains exactly the
+normalized failure class and checkpoint. Fork requests retain it only at
+`spawn` and `initialize`; a later eligible checkpoint keeps its normalized
+failure record but cannot enter pipeline retry policy. All other requests may
+retain any eligible launch checkpoint. CLI and MCP status read the same
+persisted projection, including through an operator pause. Accepted resume
+removes it with the pause, while terminal cancellation removes it from the
+retained private checkpoint.
 
 Codex capability, isolation, prohibited-operation, and recognized App Server
 failures and Claude session, profile, authentication, backend, capability,

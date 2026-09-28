@@ -426,9 +426,13 @@ and confirmation. It never resolves or invokes Reviewer or Arbiter. A supplied
 source session is forked once on the first eligible Planner turn for the entire
 run. The durable one-time marker prevents reforking after interruption or
 context reconstruction; a compatible child may continue, otherwise a fresh
-native session reconstructs the same logical Planner from durable state. All
-agent turns remain repository-read-only. Draft changes occur only in external
-runner state and the runner remains the sole writer of the final artifact.
+native session reconstructs the same logical Planner from durable state. An
+eligible transient failure at `spawn` or `initialize` before a child exists
+restores that marker in the same atomic `backend_unavailable` transition; later
+fork checkpoints fail without a resumable availability pause because an
+unrecorded native child may exist. All agent turns remain repository-read-only.
+Draft changes occur only in external runner state and the runner remains the
+sole writer of the final artifact.
 
 Keep role prompts short. Their mandatory English cores are:
 
@@ -497,8 +501,11 @@ An explicit rate, quota, credit, or spend-limit rejection is not retried through
 compaction, a fresh session, or provider fallback. Persist
 `backend_unavailable` with the current authoring state and resume by
 reconstructing the complete durable request after availability returns; do not
-require the failed native session. This uses the current pipeline state and
-common run envelope without an additional migration.
+require the failed native session. When the normalized failure proves eligible
+transient pre-effect launch recovery, also persist only its strict
+`launchRecovery: { failureClass, checkpoint }` projection. Resume, cancellation,
+and operator-pause restoration follow the common state contract. This uses the
+current pipeline state and common run envelope without an additional migration.
 The planning checkpoint is seeded from the validated inputs and its current
 draft, blockers, and bounded correction history. A product-decision edit
 invalidates it before planning resumes.

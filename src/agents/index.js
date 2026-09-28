@@ -1,6 +1,7 @@
 import {
   ADAPTER_FAILURE_CLASS,
   deriveEffectStarted,
+  deriveLaunchRecovery,
   normalizeFailureRecord,
   STRUCTURED_OUTPUT_FAILURE_CLASS,
 } from "./adapter-contract.js";
@@ -23,6 +24,8 @@ export class AgentBoundaryError extends Error {
     this.recoverable = failure.retry === "transient";
     const effectStarted = deriveEffectStarted(failure);
     if (effectStarted !== undefined) this.effectStarted = effectStarted;
+    const launchRecovery = deriveLaunchRecovery(failure);
+    if (launchRecovery !== undefined) this.launchRecovery = launchRecovery;
     if (cause?.failureClass === STRUCTURED_OUTPUT_FAILURE_CLASS) {
       this.failureClass = STRUCTURED_OUTPUT_FAILURE_CLASS;
     }
@@ -74,9 +77,11 @@ export {
   ADAPTER_FAILURE_CLASS,
   createCapabilityProof,
   deriveEffectStarted,
+  deriveLaunchRecovery,
   EFFECT_EVIDENCE,
   LAUNCH_CHECKPOINTS,
   LAUNCH_OUTCOMES,
+  LAUNCH_RECOVERY_CHECKPOINTS,
   normalizeFailureRecord,
   PROVIDER_NEUTRAL_LAUNCH_FAILURE_CLASSES,
   RETRY_ELIGIBILITY,

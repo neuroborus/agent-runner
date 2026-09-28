@@ -1,4 +1,8 @@
 export { createRunStore, resolveStateRoot } from "./service.js";
+export {
+  normalizeLaunchRecovery,
+  projectLaunchRecovery,
+} from "./launch-recovery.js";
 export { projectOperatorStop } from "./stop-projection.js";
 export {
   deepFreeze,

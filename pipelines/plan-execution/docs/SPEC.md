@@ -997,6 +997,18 @@ outcomes remain terminal. Resume reconstructs the complete request from durable
 state rather than requiring the failed native session. These rules add no new
 pipeline-state field, provider branch, or migration.
 
+When the normalized failure proves an eligible transient pre-effect launch
+failure, the same pause also persists only
+`launchRecovery: { failureClass, checkpoint }`. In lazy mode, a failed source
+fork at `spawn` or `initialize` with no recorded child restores
+`lazySourceForkConsumed: false` in that atomic pause transition. Resume rebuilds
+the same request and performs the run's one successful fork without charging a
+correction round, consuming commit authorization, or replaying work. Recovery
+at later fork checkpoints is stripped because an unrecorded native child may
+already exist; the failure is terminal for that request rather than exposing a
+resume that could refork the source. Operator pause, resume, and cancellation
+use the common state semantics.
+
 Codex App Server `serverOverloaded` is a distinct recoverable provider
 diagnostic. After turn-item policy, protocol, and isolation auditing, eligible
 ordinary non-commit requests outside source forks use the existing single fresh

@@ -5392,6 +5392,7 @@ export function assertRun(run) {
       throw workflowError("Plan-execution pending edit pause is invalid.");
     }
     const hasResumeState = Object.hasOwn(run.pause, "resumeState");
+    const hasLaunchRecovery = Object.hasOwn(run.pause, "launchRecovery");
     const allowedResumeStates = Object.hasOwn(
       PAUSE_RESUME_STATES,
       run.pause.reason,
@@ -5422,6 +5423,12 @@ export function assertRun(run) {
       (requiresResumeState && !hasResumeState)
     ) {
       throw workflowError("Plan-execution pause resume state is invalid.");
+    }
+    if (
+      hasLaunchRecovery &&
+      (run.pause.reason !== "backend_unavailable" || !hasResumeState)
+    ) {
+      throw workflowError("Plan-execution launch recovery pause is invalid.");
     }
     if (hasResumeState && !state.candidateMigrationPending) {
       normalizePipelineState({

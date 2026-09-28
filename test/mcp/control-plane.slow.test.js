@@ -2604,6 +2604,7 @@ test("resumes only an action valid for the persisted pause", async (t) => {
     revision: 1,
     activityCursor: 1,
     status: "WAITING_FOR_USER",
+    launchRecovery: null,
     pendingStop: null,
     stop: null,
     execution: {

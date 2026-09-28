@@ -226,6 +226,14 @@ the safe resume checkpoint when one exists, and concrete next actions. It does
 not expose prompts, transcripts, credentials, rejected provider output, or raw
 diagnostics.
 
+An eligible pre-effect transient launch failure adds the same strict
+`launchRecovery` value to CLI and MCP status: only its normalized failure class
+and launch checkpoint. An operator pause preserves that projection with the
+underlying availability blocker so action-free restoration shows the same
+state. Accepted resume clears it with the pause, and cancellation removes it
+from the retained private checkpoint. It never authorizes a second source fork
+or a commit effect.
+
 If an unexpected runner-owned invariant rejects a plan-execution finalization
 transition, both CLI and MCP status expose the same bounded diagnostic and an
 explicit retry from the retained `FINALIZE` checkpoint. Rejected finalization

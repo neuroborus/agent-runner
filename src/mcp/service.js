@@ -27,6 +27,7 @@ import {
 } from "../runner/index.js";
 import {
   createRunStore,
+  projectLaunchRecovery,
   projectOperatorStop,
   RUNTIME_VERSION_SKEW_EXIT_CODE,
   RunStoreError,
@@ -356,6 +357,7 @@ function statusProjection({ directoryPath, run }, leaseOwner) {
     revision: run.revision,
     activityCursor: run.revision,
     status: run.pipelineState.workflowState,
+    launchRecovery: projectLaunchRecovery(run),
     stop: projectOperatorStop(run),
     pendingStop:
       run.stopRequest?.reconciledRevision === null

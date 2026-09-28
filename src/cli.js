@@ -11,6 +11,7 @@ import {
 import { getPipeline, listPipelines } from "./pipeline-registry.js";
 import { createRunner, parseSourceSession } from "./runner/index.js";
 import {
+  projectLaunchRecovery,
   projectOperatorStop,
   RUNTIME_VERSION_SKEW_EXIT_CODE,
 } from "./state/index.js";
@@ -220,6 +221,12 @@ function runSummary({ directoryPath, run }) {
       lines.push(
         `Stop settlement: ${stop.settlement.kind}${stop.settlement.commit === null ? "" : ` ${stop.settlement.commit}`}`,
       );
+  }
+  const launchRecovery = projectLaunchRecovery(run);
+  if (launchRecovery !== null) {
+    lines.push(
+      `Launch recovery: ${launchRecovery.checkpoint} (${launchRecovery.failureClass})`,
+    );
   }
   if (pause !== null) {
     lines.push(`Pause: ${pause.reason}`);

@@ -467,6 +467,14 @@ fingerprint-bound results before pausing so the complete durable request can be
 reconstructed after capacity returns. Classified usage and provider failures
 from writable turns use this path only after workspace and repository-control
 reconciliation; no native session is required.
+An eligible normalized transient pre-effect launch failure adds only
+`launchRecovery: { failureClass, checkpoint }` to that pause. If a lazy source
+fork fails at `spawn` or `initialize` before a child exists, the same atomic
+transition restores `lazySourceForkConsumed: false`; later fork checkpoints are
+non-resumable because native lineage may already exist. Resume rebuilds an
+eligible early request without charging correction work or duplicating a
+handoff effect. Operator pause, resume, and cancellation use the common state
+semantics.
 The root agent boundary normalizes the selected adapter's finite diagnostic
 class before workflow code sees a terminal failure. Only its fixed message,
 bounded code, safe control flags, shared structured-output class, and validated
