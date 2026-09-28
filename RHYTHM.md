@@ -52,6 +52,15 @@ remain in the owning documentation.
   precedence. Native diagnostics stay private. Commit readiness requires
   validated proof that its executor did not start; possible workspace changes
   still require reconciliation. Classification adds no retry scheduler.
+- **Opaque trusted finalization failures have an operator-bounded retry.** An
+  explicit plan-execution resume from an unchanged `environment_blocked`
+  finding-resolution pause reruns complete finalization only when persisted
+  checks and generated issues prove every blocker came from runner-trusted
+  execution. This removes the dead end caused by deliberately discarded native
+  diagnostics without retaining output or accepting host attestations. Mixed
+  blockers remain in resolution, repeated failures require another explicit
+  resume, and all modes preserve candidate acceptance, terminal confirmation,
+  frozen validation bindings, and correction accounting.
 - **Execution validation follows the planned commit's guarantees.** Bootstrap
   preserves each active role's command-to-step assignments and derives a complete
   ordered inventory for every canonical step. Finalization and terminal

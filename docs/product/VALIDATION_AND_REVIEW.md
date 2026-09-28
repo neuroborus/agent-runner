@@ -268,7 +268,14 @@ under the lease without losing completed effects or resetting budgets.
 ## Failure and blocking behavior
 
 A legitimate nonzero check result is a finalization failure and returns to
-Worker correction. An external sandbox, process, service, IPC, loopback, or
+Worker correction. In plan execution, an explicit resume of an unchanged
+environment-blocked resolution may repeat complete finalization when every
+blocker is solely a runner-trusted failure with intentionally unavailable native
+output. Mixed or attributable failures remain on the ordinary resolution path.
+This does not accept host evidence or enable automatic retries: another failure
+returns to resolution and requires another explicit resume if blocked again.
+Mode-specific terminal confirmation and correction accounting remain intact.
+An external sandbox, process, service, IPC, loopback, or
 permission limitation affecting nondelegated work is an environment blocker,
 even when another command is selected for trusted execution. The trusted
 executor's own environment constraints can still block `FINALIZE`. The workflow

@@ -2644,6 +2644,17 @@ boundary. Consequently, a full repository check may pass on the host yet fail
 closed in trusted isolation with only a generic nonzero exit code; increasing
 `trustedCommandTimeoutMs` neither explains nor fixes that difference.
 
+Plan execution can retry these opaque failures through an explicit resume from
+an `environment_blocked` finding-resolution pause. Pipeline policy recognizes
+only a complete persisted match between failed runner checks and their generated
+issues, with no agent failure or other unresolved work. After input, repository,
+and failure-fingerprint revalidation, one write-ahead transition clears terminal
+evidence and enters complete `FINALIZE`, retaining candidate acceptance and
+correction accounting. A repeated failure rejoins resolution and does not retry
+automatically. The trusted executor's authority, output-retention policy, and
+mode-specific confirmation gates remain unchanged; the
+[execution specification](../pipelines/plan-execution/docs/SPEC.md) owns eligibility.
+
 Before plan execution or polishing accepts a producing role's bootstrap or
 legacy validation-migration inventory, and before either pipeline fingerprints
 finalization evidence, the root Git boundary verifies every

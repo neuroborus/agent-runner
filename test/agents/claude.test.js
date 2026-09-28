@@ -5,8 +5,8 @@ import { constants } from "node:fs";
 import {
   access,
   chmod,
-  mkdtemp,
   mkdir,
+  mkdtemp,
   readdir,
   rename,
   open,
@@ -301,7 +301,28 @@ function fallbackAccess(argumentsList) {
   );
 }
 
-function claudeBubblewrapArguments({ access, emptyMaskPath, payload }) {
+async function createFallbackProject(t) {
+  // The launcher validates real paths; do not depend on this checkout's Git layout.
+  const projectPath = await mkdtemp(join(tmpdir(), "claude-fallback-project-"));
+  t.after(() => rm(projectPath, { force: true, recursive: true }));
+  await Promise.all([
+    mkdir(join(projectPath, ".git")),
+    mkdir(join(projectPath, ".claude")),
+  ]);
+  await Promise.all([
+    writeFile(join(projectPath, ".git/config"), "[core]\n\tbare = false\n"),
+    writeFile(join(projectPath, "package.json"), '{"private":true}\n'),
+    writeFile(join(projectPath, "README.md"), "Fixture project.\n"),
+  ]);
+  return projectPath;
+}
+
+function claudeBubblewrapArguments({
+  access,
+  emptyMaskPath,
+  payload,
+  projectPath = PROJECT_PATH,
+}) {
   const argumentsList = [
     "--new-session",
     "--die-with-parent",
@@ -315,11 +336,11 @@ function claudeBubblewrapArguments({ access, emptyMaskPath, payload }) {
   if (access === "workspace-write") {
     argumentsList.push(
       "--bind",
-      PROJECT_PATH,
-      PROJECT_PATH,
+      projectPath,
+      projectPath,
       "--ro-bind",
-      PROJECT_PATH,
-      PROJECT_PATH,
+      projectPath,
+      projectPath,
     );
   }
   argumentsList.push(
@@ -327,20 +348,20 @@ function claudeBubblewrapArguments({ access, emptyMaskPath, payload }) {
     CLAUDE_LOG_PATH,
     CLAUDE_LOG_PATH,
     "--ro-bind",
-    `${PROJECT_PATH}/.git`,
-    `${PROJECT_PATH}/.git`,
+    `${projectPath}/.git`,
+    `${projectPath}/.git`,
     ...(access !== "workspace-write"
       ? []
       : [
           "--ro-bind",
-          `${PROJECT_PATH}/.git/config`,
-          `${PROJECT_PATH}/.git/config`,
+          `${projectPath}/.git/config`,
+          `${projectPath}/.git/config`,
           "--ro-bind",
-          `${PROJECT_PATH}/package.json`,
-          `${PROJECT_PATH}/package.json`,
+          `${projectPath}/package.json`,
+          `${projectPath}/package.json`,
           ...(emptyMaskPath === undefined
             ? []
-            : ["--ro-bind", emptyMaskPath, `${PROJECT_PATH}/.claude`]),
+            : ["--ro-bind", emptyMaskPath, `${projectPath}/.claude`]),
         ]),
     "--dev",
     "/dev",
@@ -641,7 +662,7 @@ function createFixture({
       };
     }
     if (file === "git") {
-      return { stdout: `${PROJECT_PATH}/.git\n.git\n`, stderr: "" };
+      return { stdout: `${argumentsList[1]}/.git\n.git\n`, stderr: "" };
     }
     const effectiveArguments = isClaudeCall ? argumentsList : null;
     if (effectiveArguments?.includes("-p")) {
@@ -1212,6 +1233,7 @@ test("keeps native-turn and local-commit isolation proofs independent", async ()
 });
 
 test("isolates fallback commands without blocking Claude transport", async (t) => {
+  const projectPath = await createFallbackProject(t);
   const fakeBubblewrap = await createFakeBubblewrap(t);
   const emptyMaskPath = await mkdtemp(join(tmpdir(), "claude-empty-"));
   await chmod(emptyMaskPath, 0o700);
@@ -1240,6 +1262,7 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
       await executeFile(
         managedSettings.sandbox.bwrapPath,
         claudeBubblewrapArguments({
+          projectPath,
           access,
           emptyMaskPath,
           payload: `model-command ${turnIndex}`,
@@ -1461,10 +1484,13 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
     assert.match(commandProbe, /process\.env\.ARGV0/u);
   }
 
-  await fixture.adapter.run(request());
-  await fixture.adapter.run(request({ access: "workspace-write" }));
+  await fixture.adapter.run(request({ cwd: projectPath }));
+  await fixture.adapter.run(
+    request({ cwd: projectPath, access: "workspace-write" }),
+  );
   await fixture.adapter.run(
     request({
+      cwd: projectPath,
       access: "local-commit",
       authorizationId: "restricted-host-commit",
       commit: {
@@ -1559,22 +1585,22 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
     assert.ok(
       includesSequence(boundaryArguments, [
         index === 1 ? "--bind" : "--ro-bind",
-        PROJECT_PATH,
-        PROJECT_PATH,
+        projectPath,
+        projectPath,
       ]),
     );
     assert.ok(
       includesSequence(boundaryArguments, [
         "--ro-bind",
-        `${PROJECT_PATH}/.git`,
-        `${PROJECT_PATH}/.git`,
+        `${projectPath}/.git`,
+        `${projectPath}/.git`,
       ]),
     );
     assert.equal(
       includesSequence(boundaryArguments, [
         "--ro-bind",
-        `${PROJECT_PATH}/.git/config`,
-        `${PROJECT_PATH}/.git/config`,
+        `${projectPath}/.git/config`,
+        `${projectPath}/.git/config`,
       ]),
       false,
     );
@@ -1582,15 +1608,15 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
       includesSequence(boundaryArguments, [
         "--ro-bind",
         "/dev/null",
-        `${PROJECT_PATH}/.mcp.json`,
+        `${projectPath}/.mcp.json`,
       ]),
       false,
     );
     assert.equal(
       includesSequence(boundaryArguments, [
         "--ro-bind",
-        `${PROJECT_PATH}/package.json`,
-        `${PROJECT_PATH}/package.json`,
+        `${projectPath}/package.json`,
+        `${projectPath}/package.json`,
       ]),
       index === 1,
     );
@@ -1598,16 +1624,16 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
       includesSequence(boundaryArguments, [
         "--ro-bind",
         emptyMaskPath,
-        `${PROJECT_PATH}/.claude`,
+        `${projectPath}/.claude`,
       ]),
       false,
     );
     assert.equal(
       includesSequence(boundaryArguments, [
         "--tmpfs",
-        `${PROJECT_PATH}/.claude`,
+        `${projectPath}/.claude`,
         "--remount-ro",
-        `${PROJECT_PATH}/.claude`,
+        `${projectPath}/.claude`,
       ]),
       index === 1,
     );
@@ -1754,6 +1780,7 @@ test("fails closed when bubblewrap rejects direct seccomp setup", async (t) => {
 });
 
 test("rejects unauthenticated and invalid fallback arguments before execution", async (t) => {
+  const projectPath = await createFallbackProject(t);
   const fakeBubblewrap = await createFakeBubblewrap(t);
   const emptyMaskPath = await mkdtemp(join(tmpdir(), "claude-empty-"));
   await chmod(emptyMaskPath, 0o700);
@@ -1850,7 +1877,7 @@ test("rejects unauthenticated and invalid fallback arguments before execution", 
       access: "workspace-write",
       name: "conflicting-workspace-access",
       transform({ argumentsList }) {
-        const workspaceParent = parse(PROJECT_PATH).dir;
+        const workspaceParent = parse(projectPath).dir;
         argumentsList.splice(
           argumentsList.indexOf("--dev"),
           0,
@@ -1864,7 +1891,7 @@ test("rejects unauthenticated and invalid fallback arguments before execution", 
       access: "workspace-write",
       name: "unexpected-outside-write",
       transform({ argumentsList }) {
-        const workspaceParent = parse(PROJECT_PATH).dir;
+        const workspaceParent = parse(projectPath).dir;
         argumentsList.splice(
           argumentsList.indexOf("--dev"),
           0,
@@ -1878,7 +1905,7 @@ test("rejects unauthenticated and invalid fallback arguments before execution", 
       access: "workspace-write",
       name: "weakened-workspace-mask",
       transform({ argumentsList }) {
-        const maskedPath = `${PROJECT_PATH}/package.json`;
+        const maskedPath = `${projectPath}/package.json`;
         argumentsList.splice(
           argumentsList.indexOf("--dev"),
           0,
@@ -1892,7 +1919,7 @@ test("rejects unauthenticated and invalid fallback arguments before execution", 
       access: "workspace-write",
       name: "reexposed-private-mask",
       transform({ argumentsList }) {
-        const maskedPath = `${PROJECT_PATH}/.claude`;
+        const maskedPath = `${projectPath}/.claude`;
         argumentsList.splice(
           argumentsList.indexOf("--dev"),
           0,
@@ -1906,7 +1933,7 @@ test("rejects unauthenticated and invalid fallback arguments before execution", 
       access: "workspace-write",
       name: "reexposed-file-mask",
       transform({ argumentsList }) {
-        const maskedPath = `${PROJECT_PATH}/README.md`;
+        const maskedPath = `${projectPath}/README.md`;
         argumentsList.splice(
           argumentsList.indexOf("--dev"),
           0,
@@ -1924,7 +1951,7 @@ test("rejects unauthenticated and invalid fallback arguments before execution", 
       name: "directory-mask-on-file",
       transform({ argumentsList }) {
         const sourceIndex = argumentsList.indexOf(emptyMaskPath);
-        argumentsList[sourceIndex + 1] = `${PROJECT_PATH}/package.json`;
+        argumentsList[sourceIndex + 1] = `${projectPath}/package.json`;
       },
     },
     {
@@ -1959,7 +1986,7 @@ test("rejects unauthenticated and invalid fallback arguments before execution", 
           0,
           "--ro-bind",
           "/etc",
-          PROJECT_PATH,
+          projectPath,
         );
       },
     },
@@ -1999,6 +2026,7 @@ test("rejects unauthenticated and invalid fallback arguments before execution", 
         option(call.argumentsList, "--managed-settings"),
       );
       const argumentsList = claudeBubblewrapArguments({
+        projectPath,
         access: current.access ?? "read-only",
         emptyMaskPath,
         payload: `printf executed > '${markerPath}'`,
@@ -2020,7 +2048,9 @@ test("rejects unauthenticated and invalid fallback arguments before execution", 
   assert.equal((await fixture.adapter.probe()).readOnly, true);
   for (const current of cases) {
     await assert.rejects(
-      fixture.adapter.run(request({ access: current.access ?? "read-only" })),
+      fixture.adapter.run(
+        request({ cwd: projectPath, access: current.access ?? "read-only" }),
+      ),
       hasCode("ERR_CLAUDE_PROCESS_INTERRUPTED"),
     );
     await assert.rejects(readFile(join(markerDirectory, current.name)), {

@@ -182,6 +182,30 @@ const INVALID_VALIDATION_PATH_CODES = new Set([
 ]);
 const STRUCTURED_OUTPUT_FAILURE_CLASS = "structured-output";
 const ADAPTER_DIAGNOSTIC_CLASS_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
+const TRUSTED_CHECK_FAILURE_PROBLEM =
+  "A runner-trusted validation command failed.";
+
+function hasOnlyOpaqueTrustedFailures(finalization) {
+  if (finalization?.status !== "FAIL") return false;
+  const failedChecks = finalization.checks.filter(
+    ({ status }) => status === "FAIL",
+  );
+  // With no Worker issues, the runner creates exactly these ordered issues.
+  // Command matching alone would also admit agent-authored or mixed blockers.
+  return (
+    failedChecks.length > 0 &&
+    failedChecks.every(({ executor }) => executor === "runner") &&
+    isDeepStrictEqual(
+      finalization.issues,
+      failedChecks.map(({ command, evidence }, index) => ({
+        id: `F${index + 1}`,
+        command,
+        problem: TRUSTED_CHECK_FAILURE_PROBLEM,
+        evidence,
+      })),
+    )
+  );
+}
 
 function activity(actor, phase, kind, message) {
   return Object.freeze({ actor, phase, kind, message });
@@ -3943,6 +3967,53 @@ The runner will derive validation inventories from the independently accepted ro
 
   async function applyResumeAction() {
     if (resumeAction === null) {
+      const current = state();
+      if (
+        current.workflowState === "WAITING_FOR_USER" &&
+        current.pendingEdit === null &&
+        currentRun.pause.reason === "environment_blocked" &&
+        currentRun.pause.resumeState === "RESOLVE_FINDINGS" &&
+        current.findings.length === 0 &&
+        current.primaryFindings.length === 0 &&
+        current.pendingDisputes.length === 0 &&
+        current.reviewReconsideration.length === 0 &&
+        candidateGatePassed(current) &&
+        hasOnlyOpaqueTrustedFailures(current.finalizationResult)
+      ) {
+        if (
+          (await readCurrentInputs()) === null ||
+          !(await verifyPersistedRepository())
+        )
+          return false;
+        const failed = current.finalizationResult;
+        if (
+          (await contentFingerprint()) !== failed.fingerprint ||
+          (await validationInfrastructureFingerprint(
+            failed.validationInfrastructure,
+          )) !== failed.validationInfrastructureFingerprint
+        ) {
+          await pause("unsafe_git_state", {
+            code: "ERR_TRUSTED_VALIDATION_BINDING_CHANGED",
+          });
+          return false;
+        }
+        await transition(
+          {
+            ...state(),
+            workflowState: "FINALIZE",
+            ...clearedTerminalGate(),
+          },
+          {
+            pause: null,
+            publicActivity: activity(
+              "runner",
+              "finalization",
+              "trusted-retry-authorized",
+              "Complete finalization explicitly retried after opaque trusted check failures.",
+            ),
+          },
+        );
+      }
       if (
         state().workflowState === "WAITING_FOR_USER" &&
         currentRun.pause.reason === "finalization_evidence_rejected"
@@ -4714,7 +4785,7 @@ ${
         issues.push({
           id,
           command: required.command,
-          problem: "A runner-trusted validation command failed.",
+          problem: TRUSTED_CHECK_FAILURE_PROBLEM,
           evidence: executed.evidence,
         });
       }

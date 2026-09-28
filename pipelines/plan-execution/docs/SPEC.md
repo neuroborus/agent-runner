@@ -2664,6 +2664,27 @@ resumes at `REVIEW` or `CHECK_AND_FIX` according to mode.
 When content is unchanged, it preserves the current blockers and resumes at
 `RESOLVE_FINDINGS`.
 
+An explicit null-action resume from `environment_blocked` at
+`RESOLVE_FINDINGS` instead retries complete `FINALIZE` when the persisted failure
+contains only opaque runner-trusted failures. Every failed check must have
+runner provenance, and the complete ordered issue list must match the issues
+the runner generates from those checks, including IDs, commands, fixed problem
+text, and bounded evidence. An agent-authored issue, an agent-executed failure,
+or any pending finding, dispute, or reconsideration excludes this retry.
+Candidate acceptance must remain valid. Revalidate frozen inputs, repository
+safety, and the failed content and validation-infrastructure fingerprints before
+atomically clearing terminal evidence and entering `FINALIZE`.
+
+This path works in independent, lazy, and combined modes and repeats the whole
+Worker finalization procedure followed by the runner's own exact trusted checks.
+It preserves candidate evidence and correction accounting; it neither grants a
+fix round nor resets a budget. Success still requires the mode's distinct
+terminal confirmation over fresh evidence. Another failure returns to ordinary
+finding resolution; another unchanged `environment_blocked` pause requires
+another explicit resume. No automatic retry, retained native output, host
+attestation, or broader execution authority is introduced. Ordinary and mixed
+failure sets keep the existing resolution path.
+
 #### FIX
 
 If the Worker agrees:

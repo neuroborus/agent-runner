@@ -834,6 +834,12 @@ If an unexpected runner-owned invariant rejects a finalization transition,
 status retains a resumable `FINALIZE` checkpoint and exposes only a bounded
 diagnostic through both the CLI and MCP.
 
+When plan execution is environment-blocked in finding resolution solely by
+opaque runner-trusted check failures, an explicit resume retries complete
+finalization on the unchanged content. A repeated failure returns to resolution
+and needs another explicit resume if blocked again. Mixed blockers retain their
+ordinary resolution path; host check results never replace runner evidence.
+
 Polishing follows the same mode-specific, fingerprint-bound ordering and
 terminal evidence-rejection recovery, with two automatic semantic retries per
 run. Pure evidence rejection preserves candidate acceptance; mixed findings

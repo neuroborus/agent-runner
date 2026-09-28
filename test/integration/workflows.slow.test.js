@@ -2438,7 +2438,7 @@ test("runs registered workflows through recoverable MCP controls", async (t) => 
 });
 
 async function projectCommandScenario(t, pipelineId, hooks = {}) {
-  const paths = await fixture(t);
+  const paths = await fixture(t, { plan: hooks.plan });
   if (pipelineId === "polishing") {
     await writeFile(
       join(paths.projectPath, "src/base.js"),
@@ -2499,14 +2499,22 @@ async function projectCommandScenario(t, pipelineId, hooks = {}) {
           configurationPath,
         );
         calls.push(request);
-        await hooks.beforeTurn?.(request, durable, {
+        const supplied = await hooks.beforeTurn?.(request, durable, {
           configurationPath,
           projectConfiguration,
         });
-        const response = await backend.run(request);
+        const response = supplied ?? (await backend.run(request));
         const result = response.structured.result ?? response.structured;
         if (result.requiredChecks !== undefined) {
-          const steps = result.requiredChecks[0]?.steps;
+          // Lazy continuation need not repeat the plan in the current prompt.
+          const steps =
+            result.requiredChecks[0]?.steps === undefined
+              ? undefined
+              : [
+                  ...durable.pipelineState.canonicalPlan.matchAll(
+                    /^## Commit ([0-9]+):/gm,
+                  ),
+                ].map((match) => Number(match[1]));
           result.requiredChecks = requiredChecks.map((check) =>
             steps === undefined ? check : { ...check, steps },
           );
@@ -2566,6 +2574,7 @@ async function projectCommandScenario(t, pipelineId, hooks = {}) {
       assert.equal(options.environment.GIT_CONFIG_GLOBAL, "/dev/null");
       assert.equal(options.readinessRequired, true);
       const preparing = command.arguments.at(-1) === "";
+      let executed;
       if (preparing) {
         assert.deepEqual(command.arguments.slice(-3), [
           process.execPath,
@@ -2589,7 +2598,7 @@ async function projectCommandScenario(t, pipelineId, hooks = {}) {
           definition.executable,
           ...definition.arguments,
         ]);
-        await hooks.execute?.(paths);
+        executed = await hooks.execute?.(paths);
       }
       return {
         status: "PASS",
@@ -2597,6 +2606,7 @@ async function projectCommandScenario(t, pipelineId, hooks = {}) {
         signal: null,
         timedOut: false,
         reason: "exit",
+        ...executed,
         stdout: "PRIVATE_EXECUTOR_OUTPUT",
         stderr: "PRIVATE_EXECUTOR_OUTPUT",
       };
@@ -2906,6 +2916,103 @@ for (const pipelineId of ["plan-execution", "polishing"]) {
     );
   });
 }
+
+test("persisted lazy opaque trusted failures retry only after each explicit resume", async (t) => {
+  let attempts = 0;
+  const turns = [];
+  const scenario = await projectCommandScenario(t, "plan-execution", {
+    mode: "lazy",
+    plan: TWO_STEP_PLAN.split("\n## Commit 2:")[0],
+    beforeTurn(request, durable) {
+      const phase = durable.activeTurn.phase;
+      turns.push([durable.pipelineState.currentStep, phase]);
+      if (phase !== "resolve-findings") return;
+      return {
+        sessionId: request.session?.id ?? "blocked-resolution",
+        structured: {
+          status: "BLOCKED",
+          decisions: [],
+          reason:
+            "Trusted failure diagnostics are unavailable for a safe repair.",
+          evidence: ["The runner retains only the check exit status."],
+          question: "",
+          whyBlocked: "",
+          options: [],
+        },
+      };
+    },
+    afterTurn(request, durable, result) {
+      if (durable.activeTurn.phase === "confirm") result.status = "CLEAN";
+    },
+    execute() {
+      attempts += 1;
+      return {
+        status: attempts <= 2 ? "FAIL" : "PASS",
+        exitCode: attempts <= 2 ? 7 : 0,
+      };
+    },
+  });
+
+  const first = (await scenario.resume()).run;
+  assert.equal(first.pause.reason, "environment_blocked");
+  assert.equal(first.pause.resumeState, "RESOLVE_FINDINGS");
+  assert.equal(attempts, 1);
+  const persisted = await createRunStore({
+    stateRoot: scenario.stateRoot,
+  }).loadRun(scenario.runId);
+  assert.deepEqual(
+    persisted.pipelineState.finalizationResult,
+    first.pipelineState.finalizationResult,
+  );
+  const before = turns.length;
+  scenario.reopen();
+  const repeated = (await scenario.resume()).run;
+  assert.equal(repeated.pause.reason, "environment_blocked");
+  assert.equal(repeated.pause.resumeState, "RESOLVE_FINDINGS");
+  assert.equal(attempts, 2);
+  assert.deepEqual(turns.slice(before), [
+    [1, "finalize"],
+    [1, "resolve-findings"],
+  ]);
+  assert.deepEqual(repeated.counters, first.counters);
+  assert.deepEqual(
+    repeated.pipelineState.finalizationResult,
+    first.pipelineState.finalizationResult,
+  );
+
+  const retryStart = turns.length;
+  scenario.reopen();
+  const completed = (await scenario.resume()).run;
+  assert.equal(
+    completed.pipelineState.workflowState,
+    "DONE",
+    JSON.stringify(completed.pause),
+  );
+  assert.equal(completed.pipelineState.completedCommits.length, 1);
+  assert.equal(attempts, 3);
+  assert.deepEqual(completed.counters, first.counters);
+  assert.deepEqual(turns.slice(retryStart), [
+    [1, "finalize"],
+    [1, "confirm"],
+    [1, "commit"],
+  ]);
+  assert.deepEqual(
+    completed.pipelineState.trustedValidation,
+    scenario.expected,
+  );
+  assert.equal(scenario.loads, 1);
+  const durable = (
+    await Promise.all(
+      ["state.json", "events.jsonl"].map((name) =>
+        readFile(
+          join(scenario.stateRoot, "runs", scenario.runId, name),
+          "utf8",
+        ),
+      ),
+    )
+  ).join("\n");
+  assert.doesNotMatch(durable, /PRIVATE_EXECUTOR_OUTPUT|PRIVATE_CREDENTIAL/u);
+});
 
 test("project command drift preserves an already verified commit", async (t) => {
   let preserved;
