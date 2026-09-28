@@ -2,18 +2,25 @@ import { isAbsolute, resolve } from "node:path";
 
 import {
   CLAUDE_BACKEND_ID,
+  CLAUDE_FAILURE_CLASSES,
+  classifyClaudeFailure,
   createClaudeAdapter,
-  normalizeClaudeDiagnosticClass,
   validateClaudeExecutionOptions,
 } from "./claude/index.js";
 import {
   CODEX_BACKEND_ID,
+  CODEX_FAILURE_CLASSES,
+  classifyCodexFailure,
   createCodexAdapter,
-  normalizeCodexDiagnosticClass,
   validateCodexExecutionOptions,
 } from "./codex/index.js";
+import {
+  normalizeFailureRecord,
+  PROVIDER_NEUTRAL_LAUNCH_FAILURE_CLASSES,
+} from "./adapter-contract.js";
 
 const BACKEND_ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
+const FAILURE_CLASS_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
 const CURRENT = "current";
 
 export class ProviderRegistryError extends Error {
@@ -26,6 +33,38 @@ export class ProviderRegistryError extends Error {
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function readonlySet(values) {
+  const target = new Set(values);
+  const reject = () => {
+    throw new ProviderRegistryError("Provider failure classes are immutable.");
+  };
+  let result;
+  result = new Proxy(target, {
+    get(set, property, receiver) {
+      if (["add", "clear", "delete"].includes(property)) return reject;
+      if (property === "size") return set.size;
+      if (property === "forEach") {
+        return (callback, thisArgument) => {
+          if (typeof callback !== "function") {
+            throw new TypeError("Set callback must be a function.");
+          }
+          return set.forEach((value) =>
+            Reflect.apply(callback, thisArgument, [value, value, result]),
+          );
+        };
+      }
+      if (
+        property === Symbol.iterator ||
+        ["entries", "has", "keys", "values"].includes(property)
+      ) {
+        return Set.prototype[property].bind(set);
+      }
+      return Reflect.get(set, property, receiver);
+    },
+  });
+  return Object.freeze(result);
 }
 
 function assertSelection(value, path) {
@@ -69,7 +108,10 @@ const BUILTIN_PROVIDER_DESCRIPTORS = Object.freeze([
       resolve: (profile) => profile.profile,
     }),
     sourceSession: Object.freeze({ fork: true }),
-    normalizeDiagnosticClass: normalizeCodexDiagnosticClass,
+    failures: Object.freeze({
+      classes: new Set(CODEX_FAILURE_CLASSES),
+      classify: classifyCodexFailure,
+    }),
   }),
   Object.freeze({
     id: CLAUDE_BACKEND_ID,
@@ -81,7 +123,10 @@ const BUILTIN_PROVIDER_DESCRIPTORS = Object.freeze([
       resolve: (profile) => profile.configDirectory,
     }),
     sourceSession: Object.freeze({ fork: true }),
-    normalizeDiagnosticClass: normalizeClaudeDiagnosticClass,
+    failures: Object.freeze({
+      classes: new Set(CLAUDE_FAILURE_CLASSES),
+      classify: classifyClaudeFailure,
+    }),
   }),
 ]);
 
@@ -105,7 +150,18 @@ function normalizeDescriptor(value, index) {
     typeof value.trustedProfile.resolve !== "function" ||
     !isRecord(value.sourceSession) ||
     typeof value.sourceSession.fork !== "boolean" ||
-    typeof value.normalizeDiagnosticClass !== "function"
+    !isRecord(value.failures) ||
+    Reflect.ownKeys(value.failures).length !== 2 ||
+    !Object.hasOwn(value.failures, "classes") ||
+    !Object.hasOwn(value.failures, "classify") ||
+    !(value.failures.classes instanceof Set) ||
+    value.failures.classes.size > 256 ||
+    [...value.failures.classes].some(
+      (failureClass) =>
+        typeof failureClass !== "string" ||
+        !FAILURE_CLASS_PATTERN.test(failureClass),
+    ) ||
+    typeof value.failures.classify !== "function"
   ) {
     throw new ProviderRegistryError(`${path} is invalid.`);
   }
@@ -119,7 +175,10 @@ function normalizeDescriptor(value, index) {
       resolve: value.trustedProfile.resolve,
     }),
     sourceSession: Object.freeze({ fork: value.sourceSession.fork }),
-    normalizeDiagnosticClass: value.normalizeDiagnosticClass,
+    failures: Object.freeze({
+      classes: readonlySet(value.failures.classes),
+      classify: value.failures.classify,
+    }),
   });
 }
 
@@ -212,14 +271,23 @@ export function createProviderRegistry(
     supportsSourceSessionFork(backend) {
       return get(backend)?.sourceSession.fork === true;
     },
-    normalizeDiagnosticClass(backend, value) {
-      const diagnosticClass = get(backend)?.normalizeDiagnosticClass(value);
-      return typeof diagnosticClass === "string" ? diagnosticClass : undefined;
+    classifyFailure(backend, cause) {
+      const failures = get(backend)?.failures;
+      if (failures === undefined) return undefined;
+      try {
+        const failure = failures.classify(cause);
+        if (failure === undefined) return undefined;
+        return normalizeFailureRecord(failure, [...failures.classes]);
+      } catch {
+        throw new ProviderRegistryError(
+          `Provider ${backend} returned an invalid failure record.`,
+        );
+      }
     },
     isDiagnosticClass(value) {
-      return normalized.some(
-        (descriptor) =>
-          typeof descriptor.normalizeDiagnosticClass(value) === "string",
+      return (
+        PROVIDER_NEUTRAL_LAUNCH_FAILURE_CLASSES.includes(value) ||
+        normalized.some((descriptor) => descriptor.failures.classes.has(value))
       );
     },
   });

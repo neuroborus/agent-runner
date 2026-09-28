@@ -141,7 +141,7 @@ export function createRunner(options = {}) {
     typeof providers.createAdapters !== "function" ||
     typeof providers.validateExecutionOptions !== "function" ||
     typeof providers.supportsSourceSessionFork !== "function" ||
-    typeof providers.normalizeDiagnosticClass !== "function" ||
+    typeof providers.classifyFailure !== "function" ||
     typeof providers.isDiagnosticClass !== "function"
   ) {
     throw new RunnerError("Runner services are invalid.", {

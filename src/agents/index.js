@@ -1,25 +1,33 @@
-import { STRUCTURED_OUTPUT_FAILURE_CLASS } from "./adapter-contract.js";
+import {
+  ADAPTER_FAILURE_CLASS,
+  deriveEffectStarted,
+  normalizeFailureRecord,
+  STRUCTURED_OUTPUT_FAILURE_CLASS,
+} from "./adapter-contract.js";
 import { PROVIDER_REGISTRY } from "./registry.js";
 
 const ERROR_CODE_PATTERN = /^[A-Z0-9_]{1,64}$/u;
 
 export class AgentBoundaryError extends Error {
-  constructor(cause, diagnosticClass) {
+  constructor(cause, failure) {
     super("Agent backend turn failed.");
     this.name = "AgentBoundaryError";
-    if (ERROR_CODE_PATTERN.test(cause?.code)) {
+    this.failure = failure;
+    if (
+      typeof cause?.code === "string" &&
+      ERROR_CODE_PATTERN.test(cause.code)
+    ) {
       this.code = cause.code;
     }
-    this.ambiguous = cause?.ambiguous === true;
-    this.recoverable = cause?.recoverable === true;
-    if (typeof cause?.effectStarted === "boolean") {
-      this.effectStarted = cause.effectStarted;
-    }
+    this.ambiguous = failure.outcome === "ambiguous";
+    this.recoverable = failure.retry === "transient";
+    const effectStarted = deriveEffectStarted(failure);
+    if (effectStarted !== undefined) this.effectStarted = effectStarted;
     if (cause?.failureClass === STRUCTURED_OUTPUT_FAILURE_CLASS) {
       this.failureClass = STRUCTURED_OUTPUT_FAILURE_CLASS;
     }
-    if (diagnosticClass !== undefined) {
-      this.diagnosticClass = diagnosticClass;
+    if (failure.failureClass !== ADAPTER_FAILURE_CLASS) {
+      this.diagnosticClass = failure.failureClass;
     }
   }
 }
@@ -32,11 +40,16 @@ export function normalizeAdapterFailure(
   if (cause instanceof AgentBoundaryError) {
     return cause;
   }
-  const diagnosticClass = providers.normalizeDiagnosticClass(
-    backend,
-    cause?.diagnosticClass,
-  );
-  return new AgentBoundaryError(cause, diagnosticClass);
+  const failure =
+    providers.classifyFailure(backend, cause) ??
+    normalizeFailureRecord({
+      failureClass: ADAPTER_FAILURE_CLASS,
+      checkpoint: "turn",
+      outcome: "rejected",
+      effect: "possible",
+      retry: "terminal",
+    });
+  return new AgentBoundaryError(cause, failure);
 }
 
 export function isAdapterDiagnosticClass(value, providers = PROVIDER_REGISTRY) {
@@ -45,17 +58,30 @@ export function isAdapterDiagnosticClass(value, providers = PROVIDER_REGISTRY) {
 
 export {
   CLAUDE_BACKEND_ID,
+  CLAUDE_FAILURE_CLASSES,
   ClaudeAdapterError,
+  classifyClaudeFailure,
   createClaudeAdapter,
-  normalizeClaudeDiagnosticClass,
 } from "./claude/index.js";
 export {
   CODEX_BACKEND_ID,
+  CODEX_FAILURE_CLASSES,
   CodexAdapterError,
+  classifyCodexFailure,
   createCodexAdapter,
-  normalizeCodexDiagnosticClass,
 } from "./codex/index.js";
-export { STRUCTURED_OUTPUT_FAILURE_CLASS };
+export {
+  ADAPTER_FAILURE_CLASS,
+  createCapabilityProof,
+  deriveEffectStarted,
+  EFFECT_EVIDENCE,
+  LAUNCH_CHECKPOINTS,
+  LAUNCH_OUTCOMES,
+  normalizeFailureRecord,
+  PROVIDER_NEUTRAL_LAUNCH_FAILURE_CLASSES,
+  RETRY_ELIGIBILITY,
+  STRUCTURED_OUTPUT_FAILURE_CLASS,
+} from "./adapter-contract.js";
 export {
   assertOwnedProcessLauncherProtected,
   inspectOwnedSessionProcesses,

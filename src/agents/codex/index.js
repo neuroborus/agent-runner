@@ -1,8 +1,9 @@
 export {
   CODEX_BACKEND_ID,
+  CODEX_FAILURE_CLASSES,
   CodexAdapterError,
+  classifyCodexFailure,
   createCodexAdapter,
-  normalizeCodexDiagnosticClass,
   validateCodexExecutionOptions,
 } from "./adapter.js";
 export {

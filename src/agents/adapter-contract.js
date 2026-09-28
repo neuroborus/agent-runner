@@ -1,6 +1,11 @@
 import { dirname, isAbsolute, resolve } from "node:path";
 
-const ACCESS_MODES = new Set(["read-only", "workspace-write", "local-commit"]);
+const ACCESS_ORDER = Object.freeze([
+  "read-only",
+  "workspace-write",
+  "local-commit",
+]);
+const ACCESS_MODES = new Set(ACCESS_ORDER);
 const REQUEST_FIELDS = Object.freeze([
   "access",
   "authorizationId",
@@ -25,8 +30,66 @@ const EXECUTION_FIELDS = Object.freeze([
 ]);
 const EFFORT_VALUES = new Set(["current", "low", "medium", "high", "xhigh"]);
 export const EFFORT_DIAGNOSTIC_CLASS = "effort_unsupported";
+export const ADAPTER_FAILURE_CLASS = "adapter_failure";
+export const LAUNCH_CHECKPOINTS = Object.freeze([
+  "probe",
+  "spawn",
+  "initialize",
+  "session",
+  "turn_start",
+  "turn",
+  "commit",
+]);
+export const LAUNCH_OUTCOMES = Object.freeze([
+  "not_started",
+  "rejected",
+  "exited",
+  "completed",
+  "ambiguous",
+]);
+export const EFFECT_EVIDENCE = Object.freeze(["none", "possible", "started"]);
+export const RETRY_ELIGIBILITY = Object.freeze(["transient", "terminal"]);
+export const PROVIDER_NEUTRAL_LAUNCH_FAILURE_CLASSES = Object.freeze([
+  "launch_process_exited",
+  "launch_version_unsupported",
+  "launch_arguments_unsupported",
+  "launch_protocol_incompatible",
+  "launch_configuration_rejected",
+]);
 const SESSION_FIELDS = Object.freeze(["id", "mode"]);
 const COMMIT_FIELDS = Object.freeze(["expectedHead", "message"]);
+const FAILURE_FIELDS = Object.freeze([
+  "failureClass",
+  "checkpoint",
+  "outcome",
+  "effect",
+  "retry",
+  "commitExecutor",
+  "processOutcome",
+]);
+const PROCESS_OUTCOME_FIELDS = Object.freeze(["exitCode", "signal"]);
+const CAPABILITY_FIELDS = Object.freeze([
+  "version",
+  "structuredOutput",
+  "readOnly",
+  "autonomousWrite",
+  "gitMetadataWriteBlocked",
+  "workspaceWrite",
+  "localCommit",
+  "remoteWriteBlocked",
+  "nativeSessionContinuation",
+  "nativeSessionFork",
+  "policyReceipt",
+]);
+const POLICY_RECEIPT_FIELDS = Object.freeze([
+  "schemaVersion",
+  "fingerprint",
+  "supportedAccess",
+]);
+const FAILURE_CLASS_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
+const CAPABILITY_NAME_PATTERN = /^[a-z][A-Za-z0-9]{0,63}$/u;
+const SIGNAL_PATTERN = /^SIG[A-Z0-9]{1,15}$/u;
+const FINGERPRINT_PATTERN = /^[a-f0-9]{64}$/u;
 const OBJECT_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 const MAX_PROMPT_BYTES = 1024 * 1024;
 const MAX_SCHEMA_BYTES = 1024 * 1024;
@@ -59,6 +122,22 @@ const SCHEMA_MAP_KEYWORDS = Object.freeze([
 ]);
 
 export const STRUCTURED_OUTPUT_FAILURE_CLASS = "structured-output";
+
+const CHECKPOINT_SET = new Set(LAUNCH_CHECKPOINTS);
+const OUTCOME_SET = new Set(LAUNCH_OUTCOMES);
+const EFFECT_SET = new Set(EFFECT_EVIDENCE);
+const RETRY_SET = new Set(RETRY_ELIGIBILITY);
+const SHARED_FAILURE_CLASS_SET = new Set([
+  ADAPTER_FAILURE_CLASS,
+  ...PROVIDER_NEUTRAL_LAUNCH_FAILURE_CLASSES,
+]);
+const DETERMINISTIC_LAUNCH_FAILURE_CLASS_SET = new Set([
+  "launch_version_unsupported",
+  "launch_arguments_unsupported",
+  "launch_protocol_incompatible",
+  "launch_configuration_rejected",
+]);
+const PROCESS_EXIT_OUTCOME_SET = new Set(["exited", "ambiguous"]);
 
 export function isRecord(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -112,8 +191,183 @@ export function deepFreeze(value) {
   return value;
 }
 
-export function createAdapterContract({ AdapterError, backendName }) {
+function hasExactFields(value, fields, required = fields) {
+  const keys = Reflect.ownKeys(value);
+  return (
+    keys.every((field) => fields.includes(field)) &&
+    required.every((field) => Object.hasOwn(value, field))
+  );
+}
+
+function isFailureClassList(value) {
+  return (
+    Array.isArray(value) &&
+    value.length <= 256 &&
+    new Set(value).size === value.length &&
+    [...value].every(
+      (entry) => typeof entry === "string" && FAILURE_CLASS_PATTERN.test(entry),
+    )
+  );
+}
+
+function normalizeProcessOutcome(value) {
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, PROCESS_OUTCOME_FIELDS, []) ||
+    Reflect.ownKeys(value).length !== 1 ||
+    (Object.hasOwn(value, "exitCode") &&
+      (!Number.isInteger(value.exitCode) ||
+        value.exitCode < 0 ||
+        value.exitCode > 2_147_483_647)) ||
+    (Object.hasOwn(value, "signal") &&
+      (typeof value.signal !== "string" || !SIGNAL_PATTERN.test(value.signal)))
+  ) {
+    throw new TypeError("Adapter process outcome is invalid.");
+  }
+  return Object.freeze(
+    Object.hasOwn(value, "exitCode")
+      ? { exitCode: value.exitCode }
+      : { signal: value.signal },
+  );
+}
+
+export function normalizeFailureRecord(value, failureClasses = []) {
+  if (
+    !isFailureClassList(failureClasses) ||
+    !isRecord(value) ||
+    !hasExactFields(value, FAILURE_FIELDS, [
+      "failureClass",
+      "checkpoint",
+      "outcome",
+      "effect",
+      "retry",
+    ]) ||
+    typeof value.failureClass !== "string" ||
+    !FAILURE_CLASS_PATTERN.test(value.failureClass) ||
+    (!SHARED_FAILURE_CLASS_SET.has(value.failureClass) &&
+      !failureClasses.includes(value.failureClass)) ||
+    !CHECKPOINT_SET.has(value.checkpoint) ||
+    !OUTCOME_SET.has(value.outcome) ||
+    !EFFECT_SET.has(value.effect) ||
+    !RETRY_SET.has(value.retry) ||
+    (Object.hasOwn(value, "commitExecutor") &&
+      (value.commitExecutor !== "not_started" ||
+        value.checkpoint !== "commit" ||
+        !["none", "possible"].includes(value.effect))) ||
+    (value.outcome === "not_started" && value.effect !== "none") ||
+    (value.outcome === "ambiguous" && value.effect === "none") ||
+    (DETERMINISTIC_LAUNCH_FAILURE_CLASS_SET.has(value.failureClass) &&
+      (value.outcome !== "rejected" ||
+        value.effect !== "none" ||
+        value.retry !== "terminal")) ||
+    (value.failureClass === "launch_process_exited" &&
+      (!PROCESS_EXIT_OUTCOME_SET.has(value.outcome) ||
+        (value.outcome === "exited" && value.effect !== "none"))) ||
+    (value.processOutcome !== undefined && value.outcome === "not_started")
+  ) {
+    throw new TypeError("Adapter failure record is invalid.");
+  }
+  return Object.freeze({
+    failureClass: value.failureClass,
+    checkpoint: value.checkpoint,
+    outcome: value.outcome,
+    effect: value.effect,
+    retry: value.retry,
+    ...(Object.hasOwn(value, "commitExecutor")
+      ? { commitExecutor: value.commitExecutor }
+      : {}),
+    ...(value.processOutcome === undefined
+      ? {}
+      : { processOutcome: normalizeProcessOutcome(value.processOutcome) }),
+  });
+}
+
+export function deriveEffectStarted(record) {
+  if (record.effect === "none" || record.commitExecutor === "not_started") {
+    return false;
+  }
+  if (record.effect === "started") return true;
+  return undefined;
+}
+
+export function createCapabilityProof(
+  capabilities,
+  requiredCapabilities,
+  policyReceipt,
+) {
+  if (
+    !isRecord(capabilities) ||
+    !hasExactFields(capabilities, CAPABILITY_FIELDS, ["version"]) ||
+    typeof capabilities.version !== "string" ||
+    capabilities.version.length === 0 ||
+    capabilities.version.length > 256 ||
+    capabilities.version.trim() !== capabilities.version ||
+    /[\0\r\n]/u.test(capabilities.version) ||
+    !Array.isArray(requiredCapabilities) ||
+    requiredCapabilities.length === 0 ||
+    requiredCapabilities.length > 32 ||
+    new Set(requiredCapabilities).size !== requiredCapabilities.length ||
+    [...requiredCapabilities].some(
+      (name) =>
+        typeof name !== "string" ||
+        !CAPABILITY_NAME_PATTERN.test(name) ||
+        !CAPABILITY_FIELDS.includes(name) ||
+        name === "version" ||
+        name === "policyReceipt" ||
+        !Object.hasOwn(capabilities, name) ||
+        capabilities[name] !== true,
+    ) ||
+    CAPABILITY_FIELDS.some(
+      (name) =>
+        name !== "version" &&
+        name !== "policyReceipt" &&
+        Object.hasOwn(capabilities, name) &&
+        typeof capabilities[name] !== "boolean",
+    ) ||
+    !isRecord(policyReceipt) ||
+    !hasExactFields(policyReceipt, POLICY_RECEIPT_FIELDS) ||
+    policyReceipt.schemaVersion !== 1 ||
+    typeof policyReceipt.fingerprint !== "string" ||
+    !FINGERPRINT_PATTERN.test(policyReceipt.fingerprint) ||
+    !Array.isArray(policyReceipt.supportedAccess) ||
+    policyReceipt.supportedAccess.length > ACCESS_ORDER.length ||
+    new Set(policyReceipt.supportedAccess).size !==
+      policyReceipt.supportedAccess.length ||
+    [...policyReceipt.supportedAccess].some(
+      (access) => !ACCESS_ORDER.includes(access),
+    ) ||
+    ACCESS_ORDER.filter((access) =>
+      policyReceipt.supportedAccess.includes(access),
+    ).some((access, index) => access !== policyReceipt.supportedAccess[index])
+  ) {
+    throw new TypeError("Adapter capability proof is invalid.");
+  }
+  return Object.freeze({
+    ...Object.fromEntries(
+      CAPABILITY_FIELDS.filter(
+        (name) => name !== "policyReceipt" && Object.hasOwn(capabilities, name),
+      ).map((name) => [name, capabilities[name]]),
+    ),
+    requiredCapabilities: Object.freeze([...requiredCapabilities]),
+    policyReceipt: Object.freeze({
+      schemaVersion: 1,
+      fingerprint: policyReceipt.fingerprint,
+      supportedAccess: Object.freeze([...policyReceipt.supportedAccess]),
+    }),
+  });
+}
+
+export function createAdapterContract({
+  AdapterError,
+  backendName,
+  failureClasses = [],
+}) {
   const errorPrefix = backendName.toUpperCase();
+
+  if (!isFailureClassList(failureClasses)) {
+    throw new TypeError(`${backendName} failure classes are invalid.`);
+  }
+  const supportedFailureClasses = Object.freeze([...failureClasses]);
 
   function optionsError(message) {
     return new AdapterError(message, {
@@ -405,6 +659,7 @@ export function createAdapterContract({ AdapterError, backendName }) {
           diagnosticClass: EFFORT_DIAGNOSTIC_CLASS,
         },
       ),
+    failure: (value) => normalizeFailureRecord(value, supportedFailureClasses),
     normalizeExecutionOptions,
     normalizeRequest,
   });

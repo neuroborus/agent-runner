@@ -43,8 +43,13 @@ contract.
 - Prefer small functional modules and split them only when they become meaningfully large.
 - Keep backend-specific flags and output normalization inside `src/agents/`.
 - Register each backend once in the frozen `src/agents/registry.js` descriptor
-  list; derive configuration, runner, source-session, failure, and MCP backend
-  behavior from it without provider branches in pipelines.
+  list; derive configuration, runner, source-session, failure-classification,
+  trusted-profile, execution-option, and MCP backend behavior from it without
+  provider branches in pipelines.
+- Keep provider failure records strict and redacted. A
+  `commitExecutor: "not_started"` proof is valid only at the `commit` checkpoint
+  with `none` or `possible` effect evidence, and public `effectStarted` state is
+  derived only from that validated record rather than raw provider causes.
 - Keep runner configuration behind `src/config/index.js`; keep strict parsing,
   confined file loading, trusted profiles, and resolution precedence private
   to that capability. Let pipeline descriptors own their roles, settings,

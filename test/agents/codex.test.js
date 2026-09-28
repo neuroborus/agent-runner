@@ -2695,9 +2695,13 @@ test("does not invoke the commit executor when Codex is not ready", async () => 
         },
       }),
     ),
-    (error) =>
-      hasCode("ERR_CODEX_LOCAL_COMMIT_POLICY")(error) &&
-      error.effectStarted === false,
+    (error) => {
+      assert.ok(hasCode("ERR_CODEX_LOCAL_COMMIT_POLICY")(error));
+      assert.equal(error.effectStarted, false);
+      assert.equal(error.failure.effect, "none");
+      assert.equal(error.failure.commitExecutor, "not_started");
+      return true;
+    },
   );
   assert.equal(
     fixture.executeCalls.filter(({ file }) => file === "git").length,
@@ -2775,10 +2779,21 @@ test("never replays an interrupted local-commit turn", async () => {
         },
       }),
     ),
-    (error) =>
-      hasCode("ERR_CODEX_TURN_INTERRUPTED")(error) &&
-      error.recoverable === true &&
-      error.effectStarted === false,
+    (error) => {
+      assert.ok(hasCode("ERR_CODEX_TURN_INTERRUPTED")(error));
+      assert.equal(error.ambiguous, true);
+      assert.equal(error.recoverable, true);
+      assert.equal(error.effectStarted, false);
+      assert.equal(error.failure.outcome, "ambiguous");
+      assert.equal(error.failure.effect, "possible");
+      assert.equal(error.failure.commitExecutor, "not_started");
+      const normalized = normalizeAdapterFailure("codex", error);
+      assert.equal(normalized.ambiguous, true);
+      assert.equal(normalized.effectStarted, false);
+      assert.equal(normalized.failure.commitExecutor, "not_started");
+      assert.equal(normalized.diagnosticClass, undefined);
+      return true;
+    },
   );
   assert.equal(turns, 1);
   assert.equal(fixture.processes.length, 1);

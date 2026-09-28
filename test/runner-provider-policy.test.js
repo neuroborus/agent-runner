@@ -6,7 +6,10 @@ import test from "node:test";
 
 import { planExecutionPipeline } from "@agent-runner/plan-execution";
 
-import { PROVIDER_REGISTRY } from "../src/agents/index.js";
+import {
+  createProviderRegistry,
+  PROVIDER_REGISTRY,
+} from "../src/agents/index.js";
 import { main } from "../src/cli.js";
 import { parseRunnerConfiguration } from "../src/config/index.js";
 import { createMcpControlPlane } from "../src/mcp/index.js";
@@ -37,6 +40,46 @@ function capabilities(overrides = {}) {
     nativeSessionFork: true,
     ...overrides,
   };
+}
+
+function failureProviders(classify) {
+  const descriptor = PROVIDER_REGISTRY.list()[0];
+  return createProviderRegistry([
+    {
+      ...descriptor,
+      id: "fixture",
+      failures: {
+        classes: new Set(["fixture_failure"]),
+        classify,
+      },
+    },
+  ]);
+}
+
+const FAILURE_CONFIGURATION = Object.freeze({
+  ...CONFIGURATION,
+  backend: "fixture",
+});
+
+function failureAdapter(classify, run) {
+  return roleAdapters(
+    {
+      pipelineId: planExecutionPipeline.id,
+      roles: { worker: FAILURE_CONFIGURATION },
+      sessionLineage: { source: null },
+    },
+    planExecutionPipeline,
+    {
+      fixture: {
+        async probe() {
+          return capabilities();
+        },
+        run,
+      },
+    },
+    failureProviders(classify),
+    async () => {},
+  ).worker;
 }
 
 test("pipeline access requirements produce one bounded policy receipt", async () => {
@@ -131,7 +174,22 @@ test("adapter probing verifies the immutable receipt before provider work", asyn
     },
   );
 
-  await selected.worker.probe();
+  const proof = await selected.worker.probe();
+  assert.deepEqual(
+    new Set(proof.requiredCapabilities),
+    new Set([
+      "structuredOutput",
+      "remoteWriteBlocked",
+      "readOnly",
+      "autonomousWrite",
+      "gitMetadataWriteBlocked",
+      "workspaceWrite",
+      "localCommit",
+    ]),
+  );
+  assert.equal(proof.policyReceipt.schemaVersion, 1);
+  assert.ok(Object.isFrozen(proof));
+  assert.ok(Object.isFrozen(proof.requiredCapabilities));
   await selected.worker.run({});
   assert.deepEqual(order, ["probe", "receipt", "run"]);
 
@@ -160,6 +218,116 @@ test("adapter probing verifies the immutable receipt before provider work", asyn
     code: "ERR_PROVIDER_POLICY_CHANGED",
   });
   assert.equal(providerRuns, 0);
+});
+
+test("an abort race does not derive stop proof from raw cause fields", async () => {
+  const controller = new AbortController();
+  const stopReason = Object.assign(new Error("Operator stop requested."), {
+    code: "ERR_OPERATOR_STOP_BEFORE_COMMIT",
+  });
+  controller.abort(stopReason);
+  const adapter = failureAdapter(
+    () => ({
+      failureClass: "fixture_failure",
+      checkpoint: "commit",
+      outcome: "ambiguous",
+      effect: "possible",
+      retry: "transient",
+    }),
+    async () => {
+      throw Object.assign(new Error("Unrelated rejection."), {
+        cause: stopReason,
+        code: "ERR_UNRELATED_REJECTION",
+        effectStarted: false,
+      });
+    },
+  );
+
+  await assert.rejects(adapter.run({ signal: controller.signal }), (error) => {
+    assert.equal(error.code, "ERR_UNRELATED_REJECTION");
+    assert.equal(error.effectStarted, undefined);
+    assert.equal(Object.hasOwn(error, "effectStarted"), false);
+    assert.equal(error.ambiguous, true);
+    assert.equal(error.recoverable, true);
+    assert.equal(error.diagnosticClass, "fixture_failure");
+    return true;
+  });
+});
+
+test("runner stop proof follows normalized commit-executor evidence", async () => {
+  const controller = new AbortController();
+  const stopReason = Object.assign(new Error("Operator stop requested."), {
+    code: "ERR_OPERATOR_STOP_BEFORE_COMMIT",
+  });
+  controller.abort(stopReason);
+  const adapter = failureAdapter(
+    () => ({
+      failureClass: "fixture_failure",
+      checkpoint: "commit",
+      outcome: "ambiguous",
+      effect: "possible",
+      retry: "transient",
+      commitExecutor: "not_started",
+    }),
+    async () => {
+      throw Object.assign(new Error("Interrupted provider turn."), {
+        cause: stopReason,
+        code: "ERR_PROVIDER_INTERRUPTED",
+        effectStarted: true,
+      });
+    },
+  );
+
+  await assert.rejects(adapter.run({ signal: controller.signal }), (error) => {
+    assert.equal(error.code, "ERR_OPERATOR_STOP_BEFORE_COMMIT");
+    assert.equal(error.effectStarted, false);
+    assert.equal(error.ambiguous, false);
+    assert.equal(error.recoverable, false);
+    assert.equal(error.diagnosticClass, undefined);
+    assert.deepEqual(error.failure, {
+      failureClass: "adapter_failure",
+      checkpoint: "commit",
+      outcome: "rejected",
+      effect: "none",
+      retry: "terminal",
+      commitExecutor: "not_started",
+    });
+    return true;
+  });
+});
+
+test("matching stop codes without cause identity do not prove a stop", async () => {
+  const controller = new AbortController();
+  controller.abort(
+    Object.assign(new Error("Operator stop requested."), {
+      code: "ERR_OPERATOR_STOP_BEFORE_COMMIT",
+    }),
+  );
+  const adapter = failureAdapter(
+    () => ({
+      failureClass: "fixture_failure",
+      checkpoint: "commit",
+      outcome: "ambiguous",
+      effect: "possible",
+      retry: "transient",
+      commitExecutor: "not_started",
+    }),
+    async () => {
+      throw Object.assign(new Error("Independent provider rejection."), {
+        code: "ERR_OPERATOR_STOP_BEFORE_COMMIT",
+      });
+    },
+  );
+
+  await assert.rejects(adapter.run({ signal: controller.signal }), (error) => {
+    assert.equal(error.code, "ERR_OPERATOR_STOP_BEFORE_COMMIT");
+    assert.equal(error.effectStarted, false);
+    assert.equal(error.ambiguous, true);
+    assert.equal(error.recoverable, true);
+    assert.equal(error.diagnosticClass, "fixture_failure");
+    assert.equal(error.failure.effect, "possible");
+    return true;
+  });
 });
 
 test("Runner recreation rejects policy drift before provider execution", async (t) => {

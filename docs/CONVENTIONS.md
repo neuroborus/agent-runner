@@ -151,10 +151,19 @@ provider import private siblings directly rather than routing through the index.
 The source-controlled provider registry is the one composition seam for a
 backend. Each frozen descriptor supplies its backend ID, adapter factory,
 execution-option validator, trusted-profile normalization and resolution,
-source-session capability, and native diagnostic classifier. Configuration,
-runner construction, source checks, failure normalization, and MCP schemas
-derive from those descriptors. Production registration remains static; an
-injected registry exists for deterministic tests, not runtime plugin loading.
+source-session capability, and one failure hook with a finite class set and
+classifier. The classifier converts provider-native evidence into the strict
+provider-neutral failure record; native messages and causes remain inside the
+provider. Configuration, runner construction, source checks, failure
+normalization, and MCP schemas derive from those descriptors. Production
+registration remains static; an injected registry exists for deterministic
+tests, not runtime plugin loading.
+
+The failure record has closed checkpoint, outcome, effect, retry, and class
+vocabularies. `commitExecutor: "not_started"` is valid only at the `commit`
+checkpoint with `none` or `possible` effect evidence. Public `effectStarted`
+state is derived solely from the validated record; raw provider cause fields do
+not participate in runner policy.
 
 A provider adapter owns:
 

@@ -3301,9 +3301,13 @@ test("proves a rejected local-commit policy did not start the effect", async () 
         },
       }),
     ),
-    (error) =>
-      hasCode("ERR_CLAUDE_LOCAL_COMMIT_POLICY")(error) &&
-      error.effectStarted === false,
+    (error) => {
+      assert.ok(hasCode("ERR_CLAUDE_LOCAL_COMMIT_POLICY")(error));
+      assert.equal(error.effectStarted, false);
+      assert.equal(error.failure.effect, "none");
+      assert.equal(error.failure.commitExecutor, "not_started");
+      return true;
+    },
   );
   assert.equal(localCommitSandboxCalls(fixture).length, 1);
 });
@@ -3364,12 +3368,22 @@ test("never replays an interrupted local-commit turn", async () => {
         },
       }),
     ),
-    (error) =>
-      hasCode("ERR_CLAUDE_PROCESS_INTERRUPTED")(error) &&
-      error.ambiguous === true &&
-      error.recoverable === false &&
-      error.diagnosticClass === "writable_process_ambiguous" &&
-      error.effectStarted === false,
+    (error) => {
+      assert.ok(hasCode("ERR_CLAUDE_PROCESS_INTERRUPTED")(error));
+      assert.equal(error.ambiguous, true);
+      assert.equal(error.recoverable, false);
+      assert.equal(error.diagnosticClass, "writable_process_ambiguous");
+      assert.equal(error.effectStarted, false);
+      assert.equal(error.failure.outcome, "ambiguous");
+      assert.equal(error.failure.effect, "possible");
+      assert.equal(error.failure.commitExecutor, "not_started");
+      const normalized = normalizeAdapterFailure("claude", error);
+      assert.equal(normalized.ambiguous, true);
+      assert.equal(normalized.effectStarted, false);
+      assert.equal(normalized.failure.commitExecutor, "not_started");
+      assert.equal(normalized.diagnosticClass, "writable_process_ambiguous");
+      return true;
+    },
   );
   assert.equal(turnCalls(fixture).length, 1);
   assert.equal(localCommitSandboxCalls(fixture).length, 1);

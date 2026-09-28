@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 
 import { executeOwnedProcess } from "../owned-process.js";
 import {
+  ADAPTER_FAILURE_CLASS,
   createAdapterContract,
   deepFreeze,
   EFFORT_DIAGNOSTIC_CLASS,
@@ -52,6 +53,9 @@ const CLAUDE_DIAGNOSTIC_CLASSES = new Set([
   "source_session_unavailable",
   "usage_limit",
   "writable_process_ambiguous",
+]);
+export const CLAUDE_FAILURE_CLASSES = Object.freeze([
+  ...CLAUDE_DIAGNOSTIC_CLASSES,
 ]);
 const RECOVERABLE_CLAUDE_DIAGNOSTIC_CLASSES = new Set([
   "backend_unavailable",
@@ -223,8 +227,55 @@ const IGNORED_CONTROL_ENVIRONMENT = new Set([
   "DISABLE_COMPACT",
 ]);
 
-export function normalizeClaudeDiagnosticClass(value) {
-  return CLAUDE_DIAGNOSTIC_CLASSES.has(value) ? value : undefined;
+let buildClaudeFailure;
+
+function claudeFailureRecord(cause) {
+  const diagnosticClass = CLAUDE_DIAGNOSTIC_CLASSES.has(cause?.diagnosticClass)
+    ? cause.diagnosticClass
+    : undefined;
+  const ambiguous = cause?.ambiguous === true;
+  const checkpoint =
+    (cause instanceof ClaudeAdapterError &&
+      typeof cause.effectStarted === "boolean") ||
+    (typeof cause?.code === "string" && cause.code.includes("LOCAL_COMMIT"))
+      ? "commit"
+      : "turn";
+  const effect =
+    ambiguous && cause?.effectStarted === false
+      ? "possible"
+      : cause?.effectStarted === false
+        ? "none"
+        : cause?.effectStarted === true
+          ? "started"
+          : "possible";
+  return buildClaudeFailure({
+    failureClass: diagnosticClass ?? ADAPTER_FAILURE_CLASS,
+    checkpoint,
+    outcome: ambiguous ? "ambiguous" : "rejected",
+    effect,
+    retry: cause?.recoverable === true ? "transient" : "terminal",
+    ...(checkpoint === "commit" && cause?.effectStarted === false
+      ? { commitExecutor: "not_started" }
+      : {}),
+  });
+}
+
+export function classifyClaudeFailure(cause) {
+  if (cause?.failure !== undefined) {
+    return buildClaudeFailure(cause.failure);
+  }
+  if (
+    !(cause instanceof ClaudeAdapterError) &&
+    !CLAUDE_DIAGNOSTIC_CLASSES.has(cause?.diagnosticClass) &&
+    cause?.recoverable !== true &&
+    cause?.ambiguous !== true &&
+    typeof cause?.effectStarted !== "boolean"
+  ) {
+    return undefined;
+  }
+  const failure = claudeFailureRecord(cause);
+  if (cause instanceof ClaudeAdapterError) cause.failure = failure;
+  return failure;
 }
 
 function executeFile(file, argumentsList, { input, ...options }) {
@@ -260,26 +311,39 @@ export class ClaudeAdapterError extends Error {
     if (failureClass === STRUCTURED_OUTPUT_FAILURE_CLASS) {
       this.failureClass = failureClass;
     }
-    const normalizedDiagnosticClass =
-      normalizeClaudeDiagnosticClass(diagnosticClass);
+    const normalizedDiagnosticClass = CLAUDE_DIAGNOSTIC_CLASSES.has(
+      diagnosticClass,
+    )
+      ? diagnosticClass
+      : undefined;
     if (normalizedDiagnosticClass !== undefined) {
       this.diagnosticClass = normalizedDiagnosticClass;
     }
     if (sessionId !== undefined) {
       this.sessionId = sessionId;
     }
+    this.failure = claudeFailureRecord(this);
+  }
+
+  setEffectStarted(value) {
+    this.effectStarted = value;
+    this.failure = claudeFailureRecord(this);
   }
 }
+
+const claudeContract = createAdapterContract({
+  AdapterError: ClaudeAdapterError,
+  backendName: "Claude",
+  failureClasses: CLAUDE_FAILURE_CLASSES,
+});
+buildClaudeFailure = claudeContract.failure;
 
 const {
   assertFields,
   effortError,
   normalizeExecutionOptions: normalizeContractExecutionOptions,
   normalizeRequest: normalizeContractRequest,
-} = createAdapterContract({
-  AdapterError: ClaudeAdapterError,
-  backendName: "Claude",
-});
+} = claudeContract;
 
 function validateExecutionOptions(options) {
   const resolvedProfile =
@@ -1597,7 +1661,7 @@ export function createClaudeAdapter(options = {}) {
         request.access === "local-commit" &&
         cause instanceof ClaudeAdapterError
       ) {
-        cause.effectStarted = false;
+        cause.setEffectStarted(false);
       }
       throw cause;
     }
@@ -1623,12 +1687,12 @@ export function createClaudeAdapter(options = {}) {
       }
       if (cause.code === "ERR_CLAUDE_USAGE_LIMIT") {
         if (request.access === "local-commit") {
-          cause.effectStarted = false;
+          cause.setEffectStarted(false);
         }
         throw cause;
       }
       if (request.access === "local-commit") {
-        cause.effectStarted = false;
+        cause.setEffectStarted(false);
         throw cause;
       }
       if (cause.code === "ERR_CLAUDE_CONTEXT_EXHAUSTED") {

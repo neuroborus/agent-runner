@@ -1,6 +1,13 @@
 import { createHash } from "node:crypto";
 
-import { normalizeAdapterFailure, PROVIDER_REGISTRY } from "../agents/index.js";
+import {
+  ADAPTER_FAILURE_CLASS,
+  AgentBoundaryError,
+  createCapabilityProof,
+  normalizeAdapterFailure,
+  normalizeFailureRecord,
+  PROVIDER_REGISTRY,
+} from "../agents/index.js";
 
 import { isRecord, RunnerError } from "./input.js";
 
@@ -110,10 +117,19 @@ function validateCapabilities(
   capabilities,
   { access, backend, pipelineId, role, sourceSession },
 ) {
+  const requiredCapabilities = [
+    "structuredOutput",
+    "remoteWriteBlocked",
+    ...access.flatMap((mode) => ACCESS_CAPABILITIES[mode]),
+    ...(sourceSession === null ? [] : ["nativeSessionFork"]),
+  ].filter((value, index, values) => values.indexOf(value) === index);
   const invalidBase =
     !isRecord(capabilities) ||
     typeof capabilities.version !== "string" ||
-    capabilities.version.trim().length === 0;
+    capabilities.version.length === 0 ||
+    capabilities.version.length > 256 ||
+    capabilities.version.trim() !== capabilities.version ||
+    /[\0\r\n]/u.test(capabilities.version);
   const unsupported = [
     ...(invalidBase ? ["adapter-contract"] : []),
     ...(capabilities?.structuredOutput === true ? [] : ["structured-output"]),
@@ -141,9 +157,22 @@ function validateCapabilities(
       },
     );
   }
+  const policyReceipt = normalizePolicyReceipt(capabilities);
+  let proof;
+  try {
+    proof = createCapabilityProof(
+      capabilities,
+      requiredCapabilities,
+      policyReceipt,
+    );
+  } catch {
+    throw new RunnerError("Backend returned an invalid capability proof.", {
+      code: "ERR_UNSUPPORTED_BACKEND",
+    });
+  }
   return Object.freeze({
-    capabilities,
-    policyReceipt: normalizePolicyReceipt(capabilities),
+    capabilities: proof,
+    policyReceipt,
   });
 }
 
@@ -162,19 +191,35 @@ async function runAdapter(adapter, backend, request, providers) {
   try {
     return await adapter.run(request);
   } catch (cause) {
-    // Preserve the runner's pre-effect stop proof before redacting provider and
-    // supervised-process error wrappers. No native cause crosses this boundary.
+    const failure = normalizeAdapterFailure(backend, cause, providers);
+    const stopReason = request.signal?.reason;
+    // Preserve the runner's pre-effect stop proof before redacting the native
+    // abort reason. No provider cause crosses this boundary.
     if (
-      cause?.effectStarted === false &&
       request.signal?.aborted &&
-      [cause, cause?.cause, cause?.cause?.cause].includes(request.signal.reason)
+      [cause, cause?.cause, cause?.cause?.cause].includes(stopReason) &&
+      failure.effectStarted === false
     ) {
-      throw normalizeAdapterFailure(
-        backend,
-        { code: request.signal.reason?.code, effectStarted: false },
-        providers,
-      );
+      const record = normalizeFailureRecord({
+        failureClass: ADAPTER_FAILURE_CLASS,
+        checkpoint: failure.failure.checkpoint,
+        outcome: "rejected",
+        effect: "none",
+        retry: "terminal",
+        ...(failure.failure.checkpoint === "commit"
+          ? { commitExecutor: "not_started" }
+          : {}),
+      });
+      throw new AgentBoundaryError({ code: stopReason?.code }, record);
     }
+    throw failure;
+  }
+}
+
+async function probeAdapter(adapter, backend, options, providers) {
+  try {
+    return await adapter.probe(options);
+  } catch (cause) {
     throw normalizeAdapterFailure(backend, cause, providers);
   }
 }
@@ -200,7 +245,14 @@ function lazyArbiterAdapter(
   };
   const resolveCapabilities = async () => {
     capabilitiesPromise ??= Promise.resolve()
-      .then(() => resolve().probe(executionOptions(configuration, providers)))
+      .then(() =>
+        probeAdapter(
+          resolve(),
+          configuration.backend,
+          executionOptions(configuration, providers),
+          providers,
+        ),
+      )
       .then((capabilities) =>
         validateCapabilities(capabilities, {
           access: roleAccess(pipeline, "arbiter"),
@@ -248,7 +300,14 @@ function configuredAdapter(
   let capabilitiesPromise;
   const resolveCapabilities = async () => {
     capabilitiesPromise ??= Promise.resolve()
-      .then(() => adapter.probe(executionOptions(configuration, providers)))
+      .then(() =>
+        probeAdapter(
+          adapter,
+          configuration.backend,
+          executionOptions(configuration, providers),
+          providers,
+        ),
+      )
       .then((capabilities) =>
         validateCapabilities(capabilities, {
           access: roleAccess(pipeline, role),
@@ -356,7 +415,12 @@ export async function probeRequiredRoles(
       const adapter = resolveAdapter(adapters, pipeline.id, role, backend);
       capabilitiesByConfiguration.set(
         key,
-        await adapter.probe(executionOptions(configuration, providers)),
+        await probeAdapter(
+          adapter,
+          backend,
+          executionOptions(configuration, providers),
+          providers,
+        ),
       );
     }
     const { policyReceipt } = validateCapabilities(

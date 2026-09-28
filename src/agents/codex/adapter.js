@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { executeOwnedProcess, spawnOwnedProcess } from "../owned-process.js";
 import packageMetadata from "../../../package.json" with { type: "json" };
 import {
+  ADAPTER_FAILURE_CLASS,
   createAdapterContract,
   deepFreeze,
   EFFORT_DIAGNOSTIC_CLASS,
@@ -113,6 +114,9 @@ const CODEX_DIAGNOSTIC_CLASSES = new Set([
   "operation_plugin",
   "operation_read_only_write",
   "operation_remote_write",
+]);
+export const CODEX_FAILURE_CLASSES = Object.freeze([
+  ...CODEX_DIAGNOSTIC_CLASSES,
 ]);
 const DISABLED_FEATURES = Object.freeze([
   "apps",
@@ -301,8 +305,55 @@ const SAFE_TURN_ITEM_TYPES = new Set([
 const TERMINAL_ITEM_STATUSES = new Set(["completed", "declined", "failed"]);
 const TERMINAL_TURN_STATUSES = new Set(["completed", "failed", "interrupted"]);
 
-export function normalizeCodexDiagnosticClass(value) {
-  return CODEX_DIAGNOSTIC_CLASSES.has(value) ? value : undefined;
+let buildCodexFailure;
+
+function codexFailureRecord(cause) {
+  const diagnosticClass = CODEX_DIAGNOSTIC_CLASSES.has(cause?.diagnosticClass)
+    ? cause.diagnosticClass
+    : undefined;
+  const ambiguous = cause?.ambiguous === true;
+  const checkpoint =
+    (cause instanceof CodexAdapterError &&
+      typeof cause.effectStarted === "boolean") ||
+    (typeof cause?.code === "string" && cause.code.includes("LOCAL_COMMIT"))
+      ? "commit"
+      : "turn";
+  const effect =
+    ambiguous && cause?.effectStarted === false
+      ? "possible"
+      : cause?.effectStarted === false
+        ? "none"
+        : cause?.effectStarted === true
+          ? "started"
+          : "possible";
+  return buildCodexFailure({
+    failureClass: diagnosticClass ?? ADAPTER_FAILURE_CLASS,
+    checkpoint,
+    outcome: ambiguous ? "ambiguous" : "rejected",
+    effect,
+    retry: cause?.recoverable === true ? "transient" : "terminal",
+    ...(checkpoint === "commit" && cause?.effectStarted === false
+      ? { commitExecutor: "not_started" }
+      : {}),
+  });
+}
+
+export function classifyCodexFailure(cause) {
+  if (cause?.failure !== undefined) {
+    return buildCodexFailure(cause.failure);
+  }
+  if (
+    !(cause instanceof CodexAdapterError) &&
+    !CODEX_DIAGNOSTIC_CLASSES.has(cause?.diagnosticClass) &&
+    cause?.recoverable !== true &&
+    cause?.ambiguous !== true &&
+    typeof cause?.effectStarted !== "boolean"
+  ) {
+    return undefined;
+  }
+  const failure = codexFailureRecord(cause);
+  if (cause instanceof CodexAdapterError) cause.failure = failure;
+  return failure;
 }
 
 export class CodexAdapterError extends Error {
@@ -330,26 +381,39 @@ export class CodexAdapterError extends Error {
     if (failureClass === STRUCTURED_OUTPUT_FAILURE_CLASS) {
       this.failureClass = failureClass;
     }
-    const normalizedDiagnosticClass =
-      normalizeCodexDiagnosticClass(diagnosticClass);
+    const normalizedDiagnosticClass = CODEX_DIAGNOSTIC_CLASSES.has(
+      diagnosticClass,
+    )
+      ? diagnosticClass
+      : undefined;
     if (normalizedDiagnosticClass !== undefined) {
       this.diagnosticClass = normalizedDiagnosticClass;
     }
     if (method !== undefined) {
       this.method = method;
     }
+    this.failure = codexFailureRecord(this);
+  }
+
+  setEffectStarted(value) {
+    this.effectStarted = value;
+    this.failure = codexFailureRecord(this);
   }
 }
+
+const codexContract = createAdapterContract({
+  AdapterError: CodexAdapterError,
+  backendName: "Codex",
+  failureClasses: CODEX_FAILURE_CLASSES,
+});
+buildCodexFailure = codexContract.failure;
 
 const {
   assertFields,
   effortError,
   normalizeExecutionOptions: normalizeContractExecutionOptions,
   normalizeRequest: normalizeContractRequest,
-} = createAdapterContract({
-  AdapterError: CodexAdapterError,
-  backendName: "Codex",
-});
+} = codexContract;
 
 function validateExecutionOptions(options) {
   if (
@@ -1811,7 +1875,7 @@ export function createCodexAdapter(options = {}) {
         request.access === "local-commit" &&
         cause instanceof CodexAdapterError
       ) {
-        cause.effectStarted = false;
+        cause.setEffectStarted(false);
       }
       throw cause;
     }
@@ -1839,7 +1903,7 @@ export function createCodexAdapter(options = {}) {
         cause.method === "mcp/list"
       ) {
         if (request.access === "local-commit") {
-          cause.effectStarted = false;
+          cause.setEffectStarted(false);
         }
         throw cause;
       }
@@ -1847,7 +1911,7 @@ export function createCodexAdapter(options = {}) {
         request.access === "local-commit" &&
         cause instanceof CodexAdapterError
       ) {
-        cause.effectStarted = false;
+        cause.setEffectStarted(false);
         throw cause;
       }
       if (

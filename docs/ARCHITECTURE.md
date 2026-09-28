@@ -134,10 +134,12 @@ The root `src/agents/index.js` is the only agent API consumed outside the agent
 capability. Its private `registry.js` defines one frozen, source-controlled
 descriptor per provider. A descriptor binds the backend ID to its adapter
 factory, execution-option validation, trusted-profile normalization and
-resolution, source-session fork capability, and native diagnostic
-classification. Configuration validation, runner adapter construction and
-source checks, normalized failures, and MCP backend schemas all derive from
-that registry. Tests may inject another complete descriptor; production has no
+resolution, source-session fork capability, and one `failures` hook containing
+a finite class set and classifier. The classifier is provider-private; the
+registry validates its provider-neutral result before the public agent boundary
+exposes it. Configuration validation, runner adapter construction and source
+checks, normalized failures, and MCP backend schemas all derive from that
+registry. Tests may inject another complete descriptor; production has no
 dynamic discovery, plugin loading, or provider-specific pipeline branches.
 
 ## Pipeline Ownership
@@ -1280,10 +1282,12 @@ earlier history. Missing, failing, or forward-version migrations fail closed.
 Plan execution persists each prepared or consumed one-shot commit authorization
 and every verified commit SHA. After an ambiguous commit turn, resume verifies
 the recorded authorization against Git state and never replays the effect.
-An adapter may attach `effectStarted: false` only when it proves that its
-isolated commit executor was never invoked. The pipeline durably records that
-bounded proof on the consumed authorization before Git verification. After Git
-independently confirms that no commit was created, the pipeline retires the
+An adapter may record `commitExecutor: "not_started"` only at the `commit`
+checkpoint, with `none` or `possible` effect evidence, when it proves that its
+isolated commit executor was never invoked. The boundary derives
+`effectStarted: false` from that validated record. The pipeline durably records
+that bounded proof on the consumed authorization before Git verification. After
+Git independently confirms that no commit was created, the pipeline retires the
 authorization before a later resume can issue a fresh ID. An absent marker or
 executor failure keeps the consumed authorization on the verification-only
 path, while interrupted verification retains any recorded proof for resume.
@@ -1978,8 +1982,9 @@ path attempts one fresh session with the complete `recoveryPrompt` and observed
 workspace. The failure itself does not request compaction, and the second
 attempt's failure propagates unchanged without another reconstruction. Source
 forks remain ineligible for fresh fallback. Local-commit readiness failures
-exit before retry with `effectStarted: false`; an overload rejected before the
-isolated executor starts therefore remains a proven pre-effect rejection.
+record that the commit executor did not start; the boundary-derived
+`effectStarted: false` projection therefore keeps an overload rejected before
+the isolated executor as a proven pre-effect rejection.
 Executor outcomes remain on their verification-only path and are never
 replayed.
 
@@ -2389,19 +2394,38 @@ one-time marker forbids later source forks even when a native session must be
 reconstructed. If the source cannot be forked, the turn fails before agent work
 rather than silently losing lineage.
 
-Adapter failures retain only bounded diagnostics. Codex capability, isolation,
-prohibited-operation, and recognized App Server failures carry one allowlisted
-diagnostic class rather than a command or native response. Claude classifies
-unavailable sessions, effective-profile, authentication, backend, capability,
-configuration, usage, provider, permission, and process failures and derives
-recoverability only from its finite class allowlist. The root agent boundary
-uses those adapter-owned allowlists to normalize every thrown turn failure into
-a fixed message and safe control fields; it does not duplicate backend class
-lists. Every pipeline may persist the normalized class for a terminal failure
-and projects it only through a deterministic CLI/MCP explanation. Native
-messages, additional details, denied input, provider responses, prompts,
-commands, credentials, transcripts, and process causes never cross that
-boundary or enter durable state.
+Adapter failures retain only bounded diagnostics. Every adapter classification
+produces the same closed record: `failureClass`, `checkpoint`, `outcome`,
+`effect`, and `retry`, with optional commit-executor proof and an optional
+sanitized process outcome containing only an exit code or signal.
+`commitExecutor: "not_started"` is valid only at the `commit` checkpoint with
+`none` or `possible` effect evidence; it is invalid with `started` evidence or
+at any other checkpoint. Checkpoints are `probe`, `spawn`, `initialize`,
+`session`, `turn_start`, `turn`, or `commit`; outcomes, effect evidence, and
+retry eligibility are likewise finite shared vocabularies. The shared launch
+classes cover process exit and version, argument, protocol, and configuration
+incompatibility. Deterministic incompatibilities are terminal; process-exit
+eligibility remains explicit in the record. The contract rejects unknown
+fields, unbounded values, and contradictory combinations. Capability probes
+produce a proof containing the version, required capabilities, and the existing
+`adapter-capabilities-v1` policy receipt.
+
+Codex capability, isolation, prohibited-operation, and recognized App Server
+failures and Claude session, profile, authentication, backend, capability,
+configuration, usage, provider, permission, and process failures remain native
+recognition owned by their provider directories. The root agent boundary
+validates the descriptor classification once, derives pipeline control
+properties only from the shared record, and maps an unclassified cause to a
+terminal rejected outcome with possible effects. When an ambiguous provider
+turn precedes a local commit, the record retains its possible provider effects
+and may separately prove that the isolated commit executor never started. The
+boundary derives `effectStarted` solely from that validated record; raw cause
+fields cannot override it. It does not duplicate backend class lists or
+traverse native cause chains. Every pipeline may persist the normalized class
+for a terminal failure and projects it only through a deterministic CLI/MCP
+explanation. Native messages, additional details, denied input, provider
+responses, prompts, commands, credentials, transcripts, and process causes
+never cross that boundary or enter durable state.
 
 Codex `subAgentActivity` or another collaboration audit signal remains a
 terminal `operation_multi_agent` isolation failure even though collaboration is
@@ -2412,9 +2436,10 @@ Context exhaustion and interruption retain their dedicated recovery paths.
 Interrupted one-shot effects are also different. In particular, a
 `local-commit` turn is never replayed; control returns to the runner for pending
 authorization and Git-state verification. Backend policy, profile, provider,
-or turn rejection before the isolated executor may prove `effectStarted:
-false`; that proof permits authorization renewal only after Git verifies that
-the effect did not occur. It never makes the consumed authorization replayable.
+or turn rejection before the isolated executor may record
+`commitExecutor: "not_started"`; the derived `effectStarted: false` proof
+permits authorization renewal only after Git verifies that the effect did not
+occur. It never makes the consumed authorization replayable.
 
 Each state transition is a small write-ahead transaction:
 

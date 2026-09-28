@@ -45,17 +45,20 @@ Unsupported explicit selections and provider-reported effort/model
 incompatibilities produce terminal `ERR_UNSUPPORTED_EFFORT` with the bounded
 `effort_unsupported` diagnostic. They never silently downgrade, enter
 availability retry, or expose native error text. Rejected commit readiness
-retains `effectStarted: false`; the commit executor does not run.
+records `commitExecutor: "not_started"`; the boundary derives
+`effectStarted: false`, and the commit executor does not run.
 
 ## Registration
 
 Providers are registered through one frozen, source-controlled descriptor list.
 Each descriptor binds a backend ID to its adapter factory, execution-option
 validation, trusted-profile rules, source-session capability, and native
-failure classifier. Configuration, runner construction and source checks,
-failure normalization, and MCP backend discovery all consume that list. Adding
-a backend is one explicit repository change rather than a plugin installation
-or a set of provider branches in pipeline policy.
+failure hook. That hook supplies a finite class set and converts native evidence
+to the shared failure record. Configuration, runner construction and source
+checks, failure normalization, and MCP backend discovery all consume that list.
+Adding a backend requires only a descriptor and its adapter implementation,
+rather than a plugin installation or provider branches in pipeline, runner,
+CLI, or MCP policy.
 
 Tests may inject a complete fake descriptor to prove the seam. Production
 registration is fixed at process startup and does not load descriptors from
@@ -192,10 +195,34 @@ or recovery attempt checks the abort signal. A constrained commit that may alrea
 on the verification-only path; a proven pre-effect interruption retains that
 bounded proof for safe recovery.
 
-Adapters classify native failures into a finite provider-neutral control
-surface. Authentication, unsafe permissions, forbidden collaboration,
-isolation failure, invalid contracts, and ambiguous writable outcomes fail
-closed. Allowlisted backend, capability, configuration, usage, provider, and
+Adapters classify native failures into one finite provider-neutral control
+surface. Each record contains exactly a failure class, checkpoint, outcome,
+effect evidence, and retry eligibility, plus optional commit-executor proof and
+an optional process outcome with only an exit code or signal.
+`commitExecutor: "not_started"` is valid only at the `commit` checkpoint with
+`none` or `possible` effect evidence; it is invalid with `started` evidence or
+at any other checkpoint. The shared checkpoints are `probe`, `spawn`,
+`initialize`, `session`, `turn_start`, `turn`, and `commit`; shared launch
+classes cover process exit and unsupported version or arguments, protocol
+incompatibility, and rejected configuration. Deterministic incompatibilities
+are terminal; process-exit eligibility is carried explicitly. Unknown fields,
+oversized values, and contradictory records are rejected at the adapter
+contract and registry boundaries. An unclassified cause becomes a rejected,
+possible-effect, terminal failure.
+
+Capability probes reproduce the `adapter-capabilities-v1` policy receipt and
+prove the version and the capabilities required for the logical role. The
+runner consumes only that proof and the normalized failure record. It derives
+the established pipeline control properties, including `effectStarted`, solely
+from the record. An ambiguous provider turn retains possible effect evidence
+when `commitExecutor: "not_started"` separately proves that a following
+local-commit executor never started. Raw cause fields cannot override the
+validated record. Provider flags, transports, sandbox composition, protocol
+parsing, and native error recognition remain inside the provider directory.
+
+Authentication, unsafe permissions, forbidden collaboration, isolation
+failure, invalid contracts, and ambiguous writable outcomes fail closed.
+Allowlisted backend, capability, configuration, usage, provider, and
 source-session availability failures may enter a durable pause only after the
 runner proves the repository is safe.
 
