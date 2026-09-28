@@ -58,9 +58,22 @@ evidence. Pure migration validation remains in the fast tier.
 ## Finalization
 
 The canonical finalization skill applies both directly and inside Agent Runner;
-there is no second divergent test policy. Establish any affected slow checks in
-the run's inventory before work, rather than discovering new commands during
-finalization. Keep the ordinary gate as `npm run check`.
+there is no second divergent test policy. Establish affected slow checks before
+work. Plan execution discovers a complete procedure for each canonical plan
+step: `npm run check` applies to every step, while a slow check applies only to
+steps changing its documented guarantee. Persist those assignments at bootstrap
+and retain later checks for their owning steps. Trusted selection alone does
+not make a command applicable to every step. Polishing retains its single
+workspace inventory.
+
+Run each applicable slow batch for the finalized fingerprint with the existing
+concurrency. Reuse accepted evidence on unchanged-fingerprint confirmation
+resume; repairs or invalidated evidence require fresh affected validation.
+Preparation of the complete trusted catalog is separate from check execution.
+Keep the ordinary gate as `npm run check`; never fold slow matrices into it.
+The fast execution `validation-schedule.test.js` uses injected effects to cover
+two-step selection in all modes, persisted reload, confirmation reuse, and
+migration of pending rework and correction accounting.
 
 Live provider tests remain opt-in as described in the repository README. Normal
 tests never consume model turns. Repeated full-suite runs require a specific

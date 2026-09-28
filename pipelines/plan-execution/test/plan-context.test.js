@@ -343,7 +343,7 @@ test("legacy rediscovery rejects a changed subject before work", async (t) => {
     onRequirementInspection: () => ({ status: "BLOCKED", blockers: [] }),
   });
   await fixture.run();
-  const bad = bootstrapReady("Worker");
+  const bad = bootstrapReady("Worker", [1, 2]);
   bad.stepAssessment = {
     ...assessment(),
     subject: "feat(test): another subject",

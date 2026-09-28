@@ -58,6 +58,30 @@ deterministic rules. Reconciliation may resolve summaries, but cannot add, selec
 checks. Only independent mode permits bootstrap arbitration; unresolved combined
 bootstrap disagreements remain blocking.
 
+Execution inventories are scoped to canonical plan steps. Every active role
+discovers a complete procedure for every step: the ordinary fast gate and only
+slow checks whose documented guarantees that step affects. The runner preserves
+the accepted role assignments, merges commands in Worker-first order, and unions
+their applicability. A Reviewer-only requirement survives reconciliation.
+Later requirements remain persisted without executing during earlier finalization.
+Polishing continues to use one workspace inventory.
+
+Execution finalization and terminal confirmation bind the active step and its
+exact ordered evidence. A confirmed inventory amendment affects only that
+step; advancing clears its amendment and gate evidence and selects the next
+persisted inventory. Shared infrastructure remains fingerprinted for the run,
+and confirmation must explicitly assess authorized changes against future
+requirements. Trusted capability preparation retains the complete catalog and
+both roles' reports, while finalization reserves and executes only active
+trusted commands. The frozen command vectors and identities never change.
+
+Legacy execution inventories have no reliable applicability. Version-22 state
+migrates explicitly to version 23 with provisional historical evidence; fresh
+read-only discovery by every mode-required role precedes unfinished work.
+Migration does not infer assignments from the old union, reset correction
+accounting, adopt mutable configuration, or replay consumed commits. Terminal
+history remains readable and consumed effects settle by verification first.
+
 Commands, paths, capacity limits, and selected runner-trusted commands are
 validated before acceptance. Validation-infrastructure paths must identify
 canonical regular files. The runner fingerprints those files instead of

@@ -34,6 +34,7 @@ import {
   migratePlanExecutionStateV14,
   migratePlanExecutionStateV15,
   migratePlanExecutionStateV21,
+  migratePlanExecutionStateV22,
   planExecutionPipeline,
   runPlanExecution,
 } from "../../src/index.js";
@@ -259,8 +260,10 @@ function migrateVersionOneState(state) {
   const versionSixteen = migratePlanExecutionStateV15({
     pipelineState: versionFifteen,
   });
-  return migratePlanExecutionStateV21({
-    pipelineState: versionSixteen,
+  return migratePlanExecutionStateV22({
+    pipelineState: migratePlanExecutionStateV21({
+      pipelineState: versionSixteen,
+    }),
   });
 }
 
@@ -372,14 +375,14 @@ function clarificationPlanRevision() {
   };
 }
 
-function bootstrapReady(role) {
+function bootstrapReady(role, steps = [1]) {
   return {
     stepAssessment: currentStepAssessment(),
     status: "READY",
     summary: `${role} understands the task, architecture, plan, risks, and finalization procedure.`,
     capabilityRequirements: [],
     environmentBlockers: [],
-    requiredChecks: REQUIRED_CHECKS,
+    requiredChecks: REQUIRED_CHECKS.map((check) => ({ ...check, steps })),
     validationInfrastructure: VALIDATION_INFRASTRUCTURE,
     capacityField: "",
     capacityLimit: 0,
@@ -1200,7 +1203,14 @@ async function createFixture(
     prepareProject,
     proactiveClarification = false,
     repository = "memory",
-    reviewer = [bootstrapReady("Reviewer")],
+    reviewer = [
+      bootstrapReady(
+        "Reviewer",
+        [...plan.matchAll(/^## Commit ([0-9]+):/gm)].map((match) =>
+          Number(match[1]),
+        ),
+      ),
+    ],
     sessionIds = ROLE_SESSIONS,
     sourceSession = null,
     trustedValidation,
@@ -1208,7 +1218,12 @@ async function createFixture(
     workWorker = [implementationCompleted(), finalizationPassed()],
     worker = [
       clarificationReady(),
-      bootstrapReady("Worker"),
+      bootstrapReady(
+        "Worker",
+        [...plan.matchAll(/^## Commit ([0-9]+):/gm)].map((match) =>
+          Number(match[1]),
+        ),
+      ),
       reconciliationResolved(),
     ],
   } = {},
@@ -1513,6 +1528,19 @@ async function createFixture(
               subject: position.subject,
             };
           }
+          if (
+            request.schema === BOOTSTRAP_SCHEMA &&
+            Array.isArray(structured.requiredChecks)
+          ) {
+            structured.requiredChecks = structured.requiredChecks.map(
+              (check) => ({
+                steps: [...plan.matchAll(/^## Commit ([0-9]+):/gm)].map(
+                  (match) => Number(match[1]),
+                ),
+                ...check,
+              }),
+            );
+          }
           const candidateStructured = [
             CANDIDATE_REVIEW_SCHEMA,
             CANDIDATE_CLEAN_CONFIRM_SCHEMA,
@@ -1640,7 +1668,7 @@ async function createFixture(
     revision: 1,
     runId,
     pipelineId: "plan-execution",
-    pipelineStateVersion: 22,
+    pipelineStateVersion: 23,
     projectPath,
     taskPath,
     roles: Object.fromEntries(
@@ -2053,7 +2081,7 @@ async function createFixture(
   ) {
     currentRun = {
       ...currentRun,
-      pipelineStateVersion: 22,
+      pipelineStateVersion: 23,
       pipelineState,
       pause,
       revision: currentRun.revision + 1,

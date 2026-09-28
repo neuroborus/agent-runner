@@ -17,6 +17,7 @@ import {
   migratePlanExecutionStateV12,
   migratePlanExecutionStateV13,
   migratePlanExecutionStateV21,
+  migratePlanExecutionStateV22,
   planExecutionPipeline,
 } from "../src/index.js";
 
@@ -569,7 +570,9 @@ test("bootstrap schemas use portable patterns with authoritative normalization",
       invalid.push(
         {
           ...contract.valid,
-          requiredChecks: [{ ...REQUIRED_CHECKS[0], command: " npm test" }],
+          requiredChecks: [
+            { ...REQUIRED_CHECKS[0], steps: [1], command: " npm test" },
+          ],
         },
         {
           ...contract.valid,
@@ -623,8 +626,8 @@ test("requires unique bootstrap check IDs, exact commands, and paths", () => {
   const duplicateCases = [
     {
       requiredChecks: [
-        REQUIRED_CHECKS[0],
-        { id: "C1", command: "npm run check" },
+        { ...REQUIRED_CHECKS[0], steps: [1] },
+        { id: "C1", command: "npm run check", steps: [1] },
       ],
       diagnostic: {
         field: "requiredChecks",
@@ -633,8 +636,8 @@ test("requires unique bootstrap check IDs, exact commands, and paths", () => {
     },
     {
       requiredChecks: [
-        REQUIRED_CHECKS[0],
-        { id: "C2", command: REQUIRED_CHECKS[0].command },
+        { ...REQUIRED_CHECKS[0], steps: [1] },
+        { id: "C2", command: REQUIRED_CHECKS[0].command, steps: [1] },
       ],
       diagnostic: {
         field: "requiredChecks",
@@ -686,7 +689,7 @@ test("rejects staging-dependent validation commands while allowing HEAD checks",
         normalizeBootstrapResult(
           {
             ...bootstrapReady("Worker"),
-            requiredChecks: [{ id: "C1", command }],
+            requiredChecks: [{ id: "C1", command, steps: [1] }],
           },
           "Worker",
         ),
@@ -711,7 +714,7 @@ test("rejects staging-dependent validation commands while allowing HEAD checks",
       normalizeBootstrapResult(
         {
           ...bootstrapReady("Worker"),
-          requiredChecks: [{ id: "C1", command }],
+          requiredChecks: [{ id: "C1", command, steps: [1] }],
         },
         "Worker",
       ),
@@ -839,7 +842,7 @@ test("migrates version-3 execution state with no consumed bootstrap corrections"
   assert.deepEqual(migrated.bootstrapCorrections, []);
   assert.equal(migrated.pendingBootstrapCorrection, null);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(planExecutionPipeline.stateVersion, 22);
+  assert.equal(planExecutionPipeline.stateVersion, 23);
 });
 
 test("version 21 migration preserves terminal proof", async (t) => {
@@ -1287,7 +1290,11 @@ test("migrates version-4 state with empty trust and invalidates its active gate"
   assert.deepEqual(migrated.trustedValidation.commands, []);
   const current = migratePlanExecutionStateV13({ pipelineState: migrated });
   assert.equal(current.workflowState, "REVIEW");
-  assert.doesNotThrow(() => normalizePipelineState(current));
+  assert.doesNotThrow(() =>
+    normalizePipelineState(
+      migratePlanExecutionStateV22({ pipelineState: current }),
+    ),
+  );
 });
 
 test("preserves version-4 consumed commit authority for verification", async (t) => {
@@ -1316,7 +1323,11 @@ test("preserves version-4 consumed commit authority for verification", async (t)
   assert.equal(migrated.validationMigrationPending, true);
   assert.equal(migrated.finalizationResult.status, "PASS");
   assert.deepEqual(migrated.trustedValidation.commands, []);
-  assert.doesNotThrow(() => normalizePipelineState(migrated));
+  assert.doesNotThrow(() =>
+    normalizePipelineState(
+      migratePlanExecutionStateV22({ pipelineState: migrated }),
+    ),
+  );
 });
 
 test("migrates version-5 states according to their safe checkpoint", async (t) => {
@@ -1398,7 +1409,11 @@ test("migrates version-5 states according to their safe checkpoint", async (t) =
       upgraded.workflowState,
       expectedState === "IMPLEMENT" ? "IMPLEMENT" : "REVIEW",
     );
-    assert.doesNotThrow(() => normalizePipelineState(upgraded));
+    assert.doesNotThrow(() =>
+      normalizePipelineState(
+        migratePlanExecutionStateV22({ pipelineState: upgraded }),
+      ),
+    );
   }
 
   let resolving;
@@ -1427,7 +1442,11 @@ test("migrates version-5 states according to their safe checkpoint", async (t) =
   assert.equal(migratedResolution.finalizationResult, null);
   assert.deepEqual(migratedResolution.findings, []);
   assert.deepEqual(migratedResolution.previousFindings, resolving.findings);
-  assert.doesNotThrow(() => normalizePipelineState(migratedResolution));
+  assert.doesNotThrow(() =>
+    normalizePipelineState(
+      migratePlanExecutionStateV22({ pipelineState: migratedResolution }),
+    ),
+  );
 
   for (const workflowState of ["DONE", "FAILED"]) {
     const immutable = {
@@ -1457,7 +1476,11 @@ test("migrates version-5 states according to their safe checkpoint", async (t) =
         ),
       },
     };
-    assert.doesNotThrow(() => normalizePipelineState(immutable));
+    assert.doesNotThrow(() =>
+      normalizePipelineState(
+        migratePlanExecutionStateV22({ pipelineState: immutable }),
+      ),
+    );
     assert.deepEqual(
       migratePlanExecutionStateV5({ pipelineState: immutable }),
       immutable,
@@ -1801,13 +1824,20 @@ test("resumes a pre-fix paused implementation through phase-safe validation", as
     reviewerValidation: unsafeValidation,
     requiredChecks: unsafeValidation.requiredChecks,
   };
-  assert.doesNotThrow(() => normalizePipelineState(legacy));
+  assert.doesNotThrow(() =>
+    normalizePipelineState(
+      migratePlanExecutionStateV22({ pipelineState: legacy }),
+    ),
+  );
   const migrated = migratePlanExecutionStateV5({
     pipelineState: legacy,
     pause: paused.pause,
   });
   assert.equal(migrated.validationMigrationPending, true);
-  fixture.persistPipelineState(migrated, { pause: paused.pause });
+  fixture.persistPipelineState(
+    migratePlanExecutionStateV22({ pipelineState: migrated }),
+    { pause: paused.pause },
+  );
 
   const completed = await fixture.run();
 
@@ -1923,7 +1953,10 @@ test("migrates duplicate overrides into fresh validation discovery", async (t) =
     findingOverrides: [override, override, override],
   };
   assert.throws(
-    () => normalizePipelineState(legacy),
+    () =>
+      normalizePipelineState(
+        migratePlanExecutionStateV22({ pipelineState: legacy }),
+      ),
     /overrides must be unique/u,
   );
 
@@ -1931,10 +1964,17 @@ test("migrates duplicate overrides into fresh validation discovery", async (t) =
     pipelineState: legacy,
     pause: paused.pause,
   });
-  assert.doesNotThrow(() => normalizePipelineState(migrated));
+  assert.doesNotThrow(() =>
+    normalizePipelineState(
+      migratePlanExecutionStateV22({ pipelineState: migrated }),
+    ),
+  );
   assert.deepEqual(migrated.findingOverrides, [override]);
   assert.equal(migrated.validationMigrationPending, true);
-  fixture.persistPipelineState(migrated, { pause: paused.pause });
+  fixture.persistPipelineState(
+    migratePlanExecutionStateV22({ pipelineState: migrated }),
+    { pause: paused.pause },
+  );
   const projection = planExecutionPipeline.projections.pause(
     fixture.currentRun,
   );
@@ -1974,7 +2014,7 @@ Implement the second behavior.`;
       reviewApproved(),
       reviewFindings("R1"),
       reviewFindings("R1"),
-      bootstrapReady("Migrating Reviewer"),
+      bootstrapReady("Migrating Reviewer", [1, 2]),
       reviewApproved(),
     ],
     workWorker: [
@@ -1985,7 +2025,7 @@ Implement the second behavior.`;
       resolution({ id: "R1", decision: "FIX" }),
       finalizationPassed(),
       resolution({ id: "R1", decision: "FIX" }),
-      bootstrapReady("Migrating Worker"),
+      bootstrapReady("Migrating Worker", [1, 2]),
       reconciliationResolved(),
       finalizationPassed(),
     ],
@@ -2040,7 +2080,11 @@ Implement the second behavior.`;
     validationInfrastructure: invalidInfrastructure,
     validationInfrastructureFingerprint: invalidInfrastructureFingerprint,
   };
-  assert.doesNotThrow(() => normalizePipelineState(legacy));
+  assert.doesNotThrow(() =>
+    normalizePipelineState(
+      migratePlanExecutionStateV22({ pipelineState: legacy }),
+    ),
+  );
 
   const migrated = migratePlanExecutionStateV8({
     pipelineState: legacy,
@@ -2050,7 +2094,10 @@ Implement the second behavior.`;
   assert.deepEqual(migrated.completedCommits, [completedHead]);
   assert.equal(migrated.finalizationResult, null);
   assert.equal(migrated.candidateReviewResult.status, "FINDINGS");
-  fixture.persistPipelineState(migrated, { pause: paused.pause });
+  fixture.persistPipelineState(
+    migratePlanExecutionStateV22({ pipelineState: migrated }),
+    { pause: paused.pause },
+  );
   const resumedCallOffsets = Object.fromEntries(
     Object.entries(fixture.calls).map(([role, calls]) => [role, calls.length]),
   );

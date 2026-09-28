@@ -7,6 +7,17 @@ remain in the owning documentation.
 
 ## 2026-09-28
 
+- **Execution validation follows the planned commit's guarantees.** Bootstrap
+  preserves each active role's command-to-step assignments and derives a complete
+  ordered inventory for every canonical step. Finalization and terminal
+  confirmation bind the active step and exact evidence; later slow checks stay
+  available without running early. Trusted preparation still examines the full
+  frozen catalog, and accepted inventory amendments cannot alter future steps.
+  State version 23 marks version-22 evidence provisional and requires fresh
+  mode-required read-only discovery before unfinished work, preserving journal
+  history, correction accounting, and verification-only consumed effects. This
+  fixes repeated future-contract slow suites without weakening applicable checks
+  or changing their concurrency.
 - **Shared-host recovery distinguishes unrelated protected processes without
   weakening containment.** Common envelope version 14 records the owned
   supervisor's control-group identity before provider work. When another

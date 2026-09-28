@@ -52,11 +52,11 @@ test("bootstrap instructions preserve independent evidence and arbitration", () 
   assert.match(BOOTSTRAP_INSTRUCTIONS, /against HEAD or explicit trees/u);
   assert.match(
     BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
-    /runner derives the final required-check/u,
+    /runner derives each plan step's required-check/u,
   );
   assert.match(
     BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
-    /runner derives the final required-check/u,
+    /runner derives each plan step's required-check/u,
   );
   for (const instructions of [
     BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
@@ -238,7 +238,7 @@ Otherwise, return each FIX or DISPUTE decision using the provided schema.`,
 test("finalization and dispute prompts preserve their narrow roles", () => {
   assert.match(
     FINALIZATION_INSTRUCTIONS,
-    /^Run the complete project finalization procedure in this dedicated turn/u,
+    /Run the complete project finalization procedure in this dedicated turn/u,
   );
   assert.match(
     FINALIZATION_INSTRUCTIONS,

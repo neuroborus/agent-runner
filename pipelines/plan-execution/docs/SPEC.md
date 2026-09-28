@@ -564,8 +564,9 @@ Persist at least:
 - latest candidate-review result and finding IDs, plus candidate-reviewed,
   primary-clean-confirmed, finalized, and terminal-confirmed content
   fingerprints;
-- complete required-check inventory, validation-infrastructure file list, and
-  runner-computed infrastructure fingerprint;
+- complete per-step validation schedule, active required-check inventory,
+  optional current-step amendment, legacy-scope marker, validation-infrastructure
+  file list, and runner-computed infrastructure fingerprint;
 - bounded bootstrap-correction attempts containing only attempt number and
   deduplicated role, phase, contract, field, and constraint diagnostic batches;
 - the current step's bounded finalization-correction ledger and optional
@@ -1868,18 +1869,28 @@ Each summary should cover:
 - risks/ambiguities;
 - finalization procedure.
 
-Each active bootstrap role also returns an independently discovered ordered
-inventory of stable `C`-prefixed check IDs and exact commands, plus every repository-relative file
-that controls package scripts, test discovery, test runners, skill guidance, or
-validation configuration. In independent mode, the runner establishes the
-complete inventory from accepted Worker evidence followed by accepted Reviewer
-evidence. In lazy mode, the complete inventory is accepted Worker evidence. It
-deduplicates exact commands and paths in stable first-seen order, ignores conflicting role
-IDs, and assigns the final contiguous `C1`-through-`Cn` IDs. Every command and
-path found by any active role is preserved. Reconciliation and arbitration
-return no inventory fields and cannot invent, select, or omit commands or repository
-paths. The runner fingerprints the derived file list; an agent-supplied digest
-is never trusted.
+Each active bootstrap role returns an independently discovered ordered inventory
+of stable `C`-prefixed IDs, exact commands, and `steps`: a nonempty ascending
+array of unique canonical plan step numbers. Missing applicability, invalid
+references, and missing step coverage are rejected. Every role discovers a
+complete procedure for every step, including the repository's ordinary fast
+gate and only slow checks whose documented guarantees that exact step affects.
+It also reports every canonical repository-relative validation-infrastructure
+file. Independent and combined modes preserve accepted Worker evidence followed
+by Reviewer evidence; lazy mode uses Worker evidence alone. The runner unions
+applicability for identical commands, preserves first-seen command order, and
+assigns contiguous `C1`-through-`Cn` IDs within each step. Reconciliation and
+arbitration cannot discard or reassign requirements. Infrastructure paths are
+deduplicated globally and fingerprinted by the runner.
+
+`validationSchedule` persists the complete ordered `{step, requiredChecks}`
+schedule and must equal the deterministic derivation from accepted role
+assignments. `requiredChecks` is the selected step's inventory. A confirmed
+`validationAmendment` records only that step, its amended inventory, and the
+confirming evidence fingerprint. It does not rewrite original role assignments
+or another step's schedule. Verified advancement clears the amendment and prior
+gates before selecting the next persisted inventory.
+
 Each summary and inventory covers every substantive validation requirement but
 must not require staging, staged handoff, index mutation or inspection, an
 implicit worktree-versus-index assertion, an alternate index, or commit-message
@@ -1903,7 +1914,9 @@ creating an oversized persisted inventory.
 Each role may return at most 256 `requiredChecks` and 256
 `validationInfrastructure` entries. The independently derived, persisted,
 finalization, and fingerprint-input inventories each allow at most 512 entries,
-so two disjoint maximum role inventories remain representable. If a complete
+so two disjoint maximum role inventories remain representable. Current-step
+amendments must also keep the complete retained command catalog within 512;
+overflow receives the existing bounded finalization correction. If a complete
 role field would exceed 256 items, the role must return the strict
 `CAPACITY_EXHAUSTED` result with empty inventory and ordinary result fields,
 `capacityField` equal to `requiredChecks` or `validationInfrastructure`, and
@@ -2103,10 +2116,11 @@ alternate with read-only candidate `CLEAN_CONFIRM` turns until one unchanged
 clean pass accepts the candidate fingerprint. Candidate turns cannot provide
 finalization, terminal-confirmation, or commit evidence.
 
-Run the complete project finalization procedure in a dedicated Worker turn for
-every policy mode only after candidate convergence. Follow every substantive instruction in the applicable
-project guidance, including required checks, project-required formatting or
-generation, hygiene, and staging-independent review of the exact content.
+Run the active step's complete project finalization procedure in a dedicated
+Worker turn for every policy mode only after candidate convergence. Follow
+every substantive instruction in the applicable project guidance, including
+required checks, project-required formatting or generation, hygiene, and
+staging-independent review of the exact content.
 
 The finalization turn should execute the validation procedure and report its
 result. It should not perform unrelated discretionary fixes in the same turn.
@@ -2124,7 +2138,12 @@ placeholders described below; every other omission, `NOT_RUN`, skip, exclusion,
 substitution, replacement, or weakening is invalid structured output. Evidence is bounded and direct;
 external host results and user attestations do not satisfy the gate.
 
-Every selected runner-trusted command must appear exactly once in the inventory
+Every selected runner-trusted command must appear in each role's complete
+bootstrap catalog with its actual applicability; selection alone does not
+make it applicable to every step. Capability preparation uses the complete
+catalog and both active roles' reports without executing checks. Finalization
+reserves and executes only selected commands in the active step's inventory.
+Every active runner-trusted command must appear exactly once in that inventory
 using its persisted exact command text. The Worker does not execute it and
 returns `NOT_RUN` only for that selected entry. After the Worker turn completes
 and repository changes are reconciled, the root runs the exact persisted
@@ -2174,6 +2193,14 @@ runner-trusted results. It derives the aggregate status, normalizes every issue
 and ordered check with its executor provenance, and binds the complete record
 to the current content and validation fingerprints. Agent or runner evidence is
 not accepted merely because its producing boundary returned it.
+
+Persisted finalization carries the runner-selected `step` and exact ordered
+check results. Terminal confirmation records `validationTupleFingerprint`, a
+canonical digest of that complete finalization evidence, in addition to its
+content fingerprint. Step or tuple mismatches fail closed, including on resume.
+Confirmation receives the complete schedule and explicitly evaluates shared
+infrastructure changes against future requirements. Frozen command identities,
+vectors, and command/configuration fingerprints remain unchanged.
 
 If that validated record or the runner-owned transition still encounters the
 unexpected `ERR_INVALID_PLAN_EXECUTION_STATE` invariant, retain the last valid
@@ -3113,6 +3140,25 @@ resolves and freezes guidance before another provider turn; when its prior
 evidence cannot prove the new contract, the existing read-only validation
 migration re-establishes the inventory before writable work.
 
+Pipeline state version 23 introduces scoped discovery and evidence. Its explicit
+version-22 migration preserves legacy tuples with null step/confirmation
+bindings, a null schedule/amendment, and `validationScopeLegacy: true` when
+accepted discovery exists. This marker makes the old gates provisional; it
+never infers applicability from the union. Before unfinished work advances, the
+workflow clears unscoped active gates and rediscovers independently with every
+mode-required bootstrap role. Partial accepted scoped discovery survives
+interruption without replaying a completed role. Historical tuples remain in
+the journal, completed commits and correction accounting remain intact, and
+paused runs retain their required resume authorization. Terminal history stays
+readable. Consumed stagnation arbitration and pending implementation rework
+survive discovery, including fix-budget pauses. Restarting candidate convergence
+retires a pending correction from an incompatible checkpoint but preserves its
+consumed ledger and fix accounting; migration grants no new correction attempt.
+Consumed commit recovery verifies its existing effect before any
+preparation or discovery; unfinished subsequent work then crosses the same
+rediscovery barrier. Journal-proven terminal-confirmation recovery also crosses
+that barrier before new work when its retained tuple is unscoped.
+
 A completed operator pause uses `WAITING_FOR_USER`, `operator_paused`, and a
 null resume action. Its private checkpoint preserves the reconciled workflow
 position, logical turn, and preceding pause. Resuming an already paused
@@ -3459,7 +3505,7 @@ At minimum cover:
 73. lazy no-progress, stable-finding, fix, and additional-round behavior remains
     bounded without weakening exact commits, trusted checks, fingerprints, Git
     controls, product decisions, or no-coauthor/no-push rules.
-74. every supported legacy version migrates through state version 22 to
+74. every supported legacy version migrates through state version 23 to
     `independent` without reviving terminal runs or replaying completed or
     pending commit effects; unfinished work freezes guidance and repeats
     read-only validation discovery when prior evidence is provisional.

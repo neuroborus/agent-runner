@@ -2400,7 +2400,7 @@ Implement the second behavior.`;
     mode: "lazy",
     plan,
     sourceSession: SOURCE_SESSION,
-    worker: [clarificationReady(), bootstrapReady("Worker")],
+    worker: [clarificationReady(), bootstrapReady("Worker", [1, 2])],
     workWorker: [
       implementationCompleted(),
       finalizationPassed(),

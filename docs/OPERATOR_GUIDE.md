@@ -135,8 +135,11 @@ services, and any expected baseline failures. A check must detect a regression,
 not merely pass the existing base. Distinguish checks applicable throughout the
 plan from step-specific acceptance criteria.
 
-Bootstrap establishes one complete, staging-independent inventory. Keep its
-exact commands, stable check IDs, order, and validation-infrastructure paths.
+Execution bootstrap establishes a complete, staging-independent inventory for
+each canonical plan step: the ordinary fast gate plus slow checks affected by
+that step. Polishing establishes one workspace inventory. Execute only the
+active inventory; retain future checks for their owning steps. Keep its exact
+commands, stable check IDs, order, and shared validation-infrastructure paths.
 Do not duplicate it in competing lists, renumber it, omit checks, substitute an
 equivalent command, or add infrastructure paths because they seem relevant.
 Infrastructure describes what controls validation; it is not a second list of
@@ -158,6 +161,8 @@ responsibility, not filename. Report complete inventories; when capacity is
 exhausted, report `requiredChecks` first if both fields overflow. Do not omit
 entries or weaken checks. Byte limits remain unchanged, and legacy execution
 and polishing runs retain their saved evidence and completed work on migration.
+Unfinished legacy execution requires fresh read-only scoped discovery before
+work advances; applicability is never inferred from its old union.
 
 Commands requiring unavailable sandbox capabilities, IPC, sockets, or host
 services may need runner-trusted execution. Root and safe project

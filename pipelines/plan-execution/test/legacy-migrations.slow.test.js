@@ -11,6 +11,62 @@ import {
   removeUnchangedEvents,
 } from "./support/index.js";
 
+test("version-22 terminal history remains readable and scoped discovery precedes recovery work", async (t) => {
+  const fixture = await createLegacyRecoveryFixture(t, {
+    mode: "combined",
+    steps: 2,
+  });
+  await fixture.rewrite(({ events }) => {
+    for (const event of events) {
+      event.state.pipelineStateVersion = 22;
+      const state = event.state.pipelineState;
+      delete state.validationSchedule;
+      delete state.validationAmendment;
+      delete state.validationScopeLegacy;
+      if (state.finalizationResult) delete state.finalizationResult.step;
+      if (state.reviewResult)
+        delete state.reviewResult.validationTupleFingerprint;
+      for (const role of ["worker", "reviewer"]) {
+        for (const check of state[`${role}Validation`]?.requiredChecks ?? [])
+          delete check.steps;
+      }
+    }
+  });
+  const before = await fixture.bytes();
+  assert.deepEqual(await fixture.recoveryAction(), [
+    { type: "resume", action: null },
+  ]);
+  assert.deepEqual(await fixture.bytes(), before);
+  const offset = fixture.calls.length;
+  const { run } = await fixture.openRunner().resume({ runId: fixture.runId });
+  assert.equal(run.pipelineState.workflowState, "DONE");
+  assert.equal(run.pipelineStateVersion, 23);
+  assert.equal(
+    run.pipelineState.completedCommits[0],
+    fixture.failed.pipelineState.completedCommits[0],
+  );
+  const resumed = fixture.calls.slice(offset);
+  const discoveries = resumed.filter(
+    ({ schema }) => schema === BOOTSTRAP_SCHEMA,
+  );
+  assert.equal(discoveries.length, 2);
+  assert.ok(
+    discoveries.every(
+      ({ access, prompt }) =>
+        access === "read-only" && prompt.includes("versioned-state migration"),
+    ),
+  );
+  const firstWrite = resumed.findIndex(({ access }) => access !== "read-only");
+  assert.ok(
+    discoveries.every((request) => resumed.indexOf(request) < firstWrite),
+  );
+  assert.equal(
+    resumed.filter(({ schema }) => schema === FINALIZATION_SCHEMA).length,
+    1,
+  );
+  assert.equal(run.pipelineState.validationScopeLegacy, false);
+});
+
 test("combined journal-proven confirmation recovery retains both candidate approvals", async (t) => {
   const fixture = await createLegacyRecoveryFixture(t, {
     mode: "combined",

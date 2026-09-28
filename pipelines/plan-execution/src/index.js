@@ -1273,11 +1273,41 @@ export function migratePlanExecutionStateV21(run) {
   });
 }
 
+export function migratePlanExecutionStateV22(run) {
+  const current = run.pipelineState;
+  // Preserve the historical tuple for journal readers and consumed effects.
+  // The legacy marker makes it provisional: the workflow rediscovery barrier
+  // retires it before any unfinished, unconsumed work can advance.
+  return Object.freeze({
+    ...current,
+    validationSchedule: null,
+    validationAmendment: null,
+    validationScopeLegacy:
+      current.resolvedSummary !== null ||
+      current.workerValidation !== null ||
+      current.reviewerValidation !== null,
+    finalizationResult:
+      current.finalizationResult === null
+        ? null
+        : {
+            ...current.finalizationResult,
+            step: null,
+          },
+    reviewResult:
+      current.reviewResult === null
+        ? null
+        : {
+            ...current.reviewResult,
+            validationTupleFingerprint: null,
+          },
+  });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
   classifyStopCheckpoint,
   resolveStopBoundary,
-  stateVersion: 22,
+  stateVersion: 23,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1300,6 +1330,7 @@ export const planExecutionPipeline = Object.freeze({
     19: migratePlanExecutionStateV19,
     20: migratePlanExecutionStateV20,
     21: migratePlanExecutionStateV21,
+    22: migratePlanExecutionStateV22,
   }),
   roles: ROLES,
   roleAccess: ROLE_ACCESS,

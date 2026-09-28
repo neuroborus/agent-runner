@@ -79,6 +79,18 @@ const REQUIRED_CHECKS = {
 };
 const BOOTSTRAP_REQUIRED_CHECKS = {
   ...REQUIRED_CHECKS,
+  items: {
+    ...REQUIRED_CHECK,
+    properties: {
+      ...REQUIRED_CHECK.properties,
+      steps: {
+        type: "array",
+        items: { type: "integer", minimum: 1 },
+        minItems: 1,
+      },
+    },
+    required: [...REQUIRED_CHECK.required, "steps"],
+  },
   maxItems: MAX_BOOTSTRAP_ITEMS,
 };
 const EMPTY_REQUIRED_CHECKS = { ...BOOTSTRAP_REQUIRED_CHECKS, maxItems: 0 };

@@ -36,6 +36,13 @@ import {
   clearedCandidateAndConfirmationGate,
   clearedGateAfterResolvedFindings,
 } from "./gate-evidence.js";
+import {
+  deriveValidationSchedule,
+  activeTrustedCommands,
+  validationCatalog,
+  validationEvidenceFingerprint,
+  acceptedValidationAmendment,
+} from "./validation-schedule.js";
 import { verifiedCommitCheckpoint } from "./commit-checkpoint.js";
 import { canRecoverLegacyConfirmation } from "./legacy-confirmation-recovery.js";
 import {
@@ -506,9 +513,10 @@ function normalizeBootstrapRoleOutputCandidate(
   output,
   role,
   phase = "bootstrap",
+  stepCount,
 ) {
   return normalizeRoleOutput(
-    (value) => normalizeBootstrapResultCandidate(value, role),
+    (value) => normalizeBootstrapResultCandidate(value, role, stepCount),
     output,
     bootstrapOutputContext(role, phase),
   );
@@ -530,11 +538,12 @@ function normalizeBootstrapArbitrationOutput(output, phase = "bootstrap") {
   );
 }
 
-function normalizeValidationMigrationRoleOutput(output, role) {
+function normalizeValidationMigrationRoleOutput(output, role, stepCount) {
   const candidate = normalizeBootstrapRoleOutputCandidate(
     output,
     role,
     "validation-migration",
+    stepCount,
   );
   const { result } = candidate;
   if (
@@ -756,16 +765,20 @@ Phase ownership: the established required-check inventory is input only to FINAL
 ${JSON.stringify(commands)}`;
   }
 
-  function trustedValidationInstructions() {
-    const commands = state().trustedValidation.commands.map(
-      ({ alias, command, identity }) => ({ alias, command, identity }),
-    );
+  function trustedValidationInstructions(activeOnly = false) {
+    const commands = (
+      activeOnly
+        ? activeTrustedCommands(state())
+        : state().trustedValidation.commands
+    ).map(({ alias, command, identity }) => ({ alias, command, identity }));
     if (commands.length === 0) {
-      return "No runner-trusted validation commands are selected for this run.";
+      return activeOnly
+        ? "No runner-trusted validation commands apply to this plan step. Commands selected for other steps remain reserved and must not execute in this turn."
+        : "No runner-trusted validation commands are selected for this run.";
     }
     return `Runner-trusted validation commands selected before agent work:
 ${JSON.stringify(commands, null, 2)}
-Include every listed command exactly once in requiredChecks. Do not execute these commands in an agent turn. During finalization, return NOT_RUN for only these checks with evidence that each is reserved for the runner; the runner will execute their persisted exact vectors outside the agent turn.`;
+Include every listed command exactly once in requiredChecks with its actual canonical plan-step applicability during discovery; selection does not make it applicable to every step. Do not execute these commands in an agent turn. During finalization, return NOT_RUN for only these checks with evidence that each is reserved for the runner; the runner will execute their persisted exact vectors outside the agent turn.`;
   }
 
   async function checkpointAfterCandidateConvergence(fingerprint, evidence) {
@@ -788,7 +801,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     return {
       workflowState: "FINALIZE",
       ...clearedTerminalGate(),
-      finalizationCorrections: [],
+      finalizationCorrections: current.finalizationCorrections.filter(
+        (correction) => correction.contentFingerprint === fingerprint,
+      ),
       pendingFinalizationCorrection: null,
     };
   }
@@ -1037,6 +1052,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         reviewerStep: null,
         implementationDirection: null,
         requiredChecks: null,
+        validationSchedule: null,
+        validationAmendment: null,
+        validationScopeLegacy: false,
         validationInfrastructure: null,
         validationInfrastructureFingerprint: null,
         validationMigrationPending: false,
@@ -1314,7 +1332,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     let result;
     try {
       result = await runtime.trustedValidation.inspectRequirements({
-        inventory: current.requiredChecks.map(({ command }) => command),
+        inventory: validationCatalog(current),
         requirements: inspectionRequirements([
           current.workerValidation,
           current.reviewerValidation,
@@ -2054,6 +2072,15 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
             feedback: null,
           },
           requiredChecks: bootstrapDecision ? null : current.requiredChecks,
+          validationSchedule: bootstrapDecision
+            ? null
+            : current.validationSchedule,
+          validationAmendment: bootstrapDecision
+            ? null
+            : current.validationAmendment,
+          validationScopeLegacy: bootstrapDecision
+            ? false
+            : current.validationScopeLegacy,
           validationInfrastructure: bootstrapDecision
             ? null
             : current.validationInfrastructure,
@@ -2627,8 +2654,16 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         "Established validation infrastructure exceeds its bounded capacity.",
       );
     }
+    const validationSchedule = deriveValidationSchedule(
+      [state().workerValidation, state().reviewerValidation],
+      parseCommitPlan(state().canonicalPlan).steps.length,
+    );
     return {
-      requiredChecks: result.requiredChecks,
+      requiredChecks:
+        validationSchedule[(state().currentStep ?? 1) - 1].requiredChecks,
+      validationSchedule,
+      validationAmendment: null,
+      validationScopeLegacy: false,
       validationInfrastructure,
       validationInfrastructureFingerprint:
         await validationInfrastructureFingerprint(validationInfrastructure),
@@ -2637,16 +2672,28 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     };
   }
 
-  function invalidatedLegacyValidation(current) {
+  function invalidatedLegacyValidation(
+    current,
+    workflowState = current.workflowState === "IMPLEMENT"
+      ? "IMPLEMENT"
+      : candidateCheckpoint(current.settings),
+  ) {
     return {
       ...current,
       ...clearedCandidateAndTerminalGate(),
-      implementationDirection: null,
-      stagnationDirection: null,
-      // Inventory migration retains the existing bounded correction ledger.
+      workflowState,
+      implementationDirection:
+        workflowState === "IMPLEMENT" ? current.implementationDirection : null,
+      // Retain consumed arbitration and correction accounting. A pending
+      // correction applies only when its checkpoint survives invalidation.
       lazyCorrections: current.lazyCorrections,
-      pendingLazyCorrection: current.pendingLazyCorrection,
-      finalizationCorrections: [],
+      pendingLazyCorrection:
+        current.pendingLazyCorrection?.phase === workflowState
+          ? current.pendingLazyCorrection
+          : null,
+      finalizationCorrections: current.validationScopeLegacy
+        ? current.finalizationCorrections
+        : [],
       pendingFinalizationCorrection: null,
       previousFindings:
         current.findings.length === 0
@@ -2672,6 +2719,50 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     );
   }
 
+  async function prepareScopedDiscovery() {
+    const current = state();
+    if (
+      !current.validationScopeLegacy ||
+      current.pendingCommit?.status === "consumed" ||
+      ["DONE", "FAILED", "CANCELED"].includes(current.workflowState) ||
+      current.pendingEdit !== null ||
+      !validationMigrationMayResume()
+    )
+      return false;
+    if (
+      current.validationMigrationPending &&
+      [current.workerValidation, current.reviewerValidation].every(
+        (validation) =>
+          validation === null ||
+          validation.requiredChecks.every((check) =>
+            Array.isArray(check.steps),
+          ),
+      )
+    )
+      return false;
+    if (current.resolvedSummary === null) {
+      await transition({
+        ...current,
+        validationScopeLegacy: false,
+        workerSummary: null,
+        reviewerSummary: null,
+        workerValidation: null,
+        reviewerValidation: null,
+        bootstrapDisagreement: null,
+        bootstrapArbitrationUsed: false,
+      });
+    } else {
+      const paused = current.workflowState === "WAITING_FOR_USER";
+      await transition({
+        ...(paused ? current : invalidatedLegacyValidation(current)),
+        workerValidation: null,
+        reviewerValidation: null,
+        validationMigrationPending: true,
+      });
+    }
+    return true;
+  }
+
   async function prepareCapabilityDiscovery() {
     const current = state();
     if (
@@ -2691,6 +2782,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       await transition({
         ...current,
         planContextVersion: 1,
+        validationScopeLegacy: false,
+        validationSchedule: null,
+        validationAmendment: null,
         workerSummary: null,
         reviewerSummary: null,
         workerValidation: null,
@@ -2703,6 +2797,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       await transition({
         ...(paused ? current : invalidatedLegacyValidation(current)),
         validationMigrationPending: true,
+        validationScopeLegacy: true,
+        validationSchedule: null,
+        validationAmendment: null,
         ...(current.planContextVersion === 0
           ? {
               workerValidation: null,
@@ -2710,10 +2807,6 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
               planContextVersion: 1,
             }
           : {}),
-        workflowState:
-          paused || current.workflowState === "IMPLEMENT"
-            ? current.workflowState
-            : candidateCheckpoint(current.settings),
       });
     }
     return true;
@@ -2745,10 +2838,12 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       verifyConsumedCommit
         ? { ...current, workflowState: "COMMIT", additionalFixRounds }
         : {
-            ...invalidatedLegacyValidation(current),
-            workflowState: resumeImplementation
-              ? "IMPLEMENT"
-              : candidateCheckpoint(current.settings),
+            ...invalidatedLegacyValidation(
+              current,
+              resumeImplementation
+                ? "IMPLEMENT"
+                : candidateCheckpoint(current.settings),
+            ),
             additionalFixRounds,
           },
       {
@@ -2817,7 +2912,11 @@ ${PRODUCT_DECISION_INSTRUCTIONS}
 
 ${evidence}`,
       normalize: (output) =>
-        normalizeValidationMigrationRoleOutput(output, role),
+        normalizeValidationMigrationRoleOutput(
+          output,
+          role,
+          parseCommitPlan(state().canonicalPlan).steps.length,
+        ),
     });
     if (result === null) {
       return false;
@@ -2864,7 +2963,9 @@ ${evidence}`,
       {
         ...state(),
         ...validation,
-        finalizationCorrections: [],
+        finalizationCorrections: state().validationScopeLegacy
+          ? state().finalizationCorrections
+          : [],
         pendingFinalizationCorrection: null,
         resolvedSummary: summary,
         bootstrapDisagreement: null,
@@ -3569,7 +3670,12 @@ ${PRODUCT_DECISION_INSTRUCTIONS}
 
 ${evidence}`,
       normalize: (output) =>
-        normalizeBootstrapRoleOutputCandidate(output, role),
+        normalizeBootstrapRoleOutputCandidate(
+          output,
+          role,
+          "bootstrap",
+          parseCommitPlan(state().canonicalPlan).steps.length,
+        ),
     });
     if (result === null) {
       return false;
@@ -4143,7 +4249,7 @@ ${establishedValidationPrompt(state())}
 
 ${state().finalizationRecovery.required ? FINALIZATION_RECOVERY_INSTRUCTIONS + "\n\nAccepted evidence findings:\n" + JSON.stringify(finalizationFeedbackFindings(state())) : ""}
 
-${trustedValidationInstructions()}
+${trustedValidationInstructions(true)}
 
 ${evidence}
 
@@ -4174,8 +4280,44 @@ ${
           if (!(await verifyFinalizationGuidance())) return null;
           const result = normalizeFinalizationRoleOutput(
             output,
-            state().trustedValidation.commands.map(({ command }) => command),
+            activeTrustedCommands(state()).map(({ command }) => command),
           );
+          if (
+            result.requiredChecks &&
+            validationCatalog({
+              ...state(),
+              requiredChecks: result.requiredChecks,
+            }).length > MAX_VALIDATION_ITEMS
+          ) {
+            throw invalidRoleOutput(
+              "Finalization exceeds the complete validation catalog capacity.",
+              context,
+              {
+                field: "requiredChecks",
+                constraint: "maximum-512-catalog-commands",
+              },
+            );
+          }
+          const inactiveTrusted = state().trustedValidation.commands.filter(
+            ({ command }) =>
+              !activeTrustedCommands(state()).some(
+                (active) => active.command === command,
+              ),
+          );
+          if (
+            result.requiredChecks?.some(({ command }) =>
+              inactiveTrusted.some((inactive) => inactive.command === command),
+            )
+          ) {
+            throw invalidRoleOutput(
+              "Finalization cannot execute a future step's trusted check.",
+              context,
+              {
+                field: "requiredChecks",
+                constraint: "active-step-trusted-commands",
+              },
+            );
+          }
           await inspectValidationInfrastructure(
             result,
             context,
@@ -4271,7 +4413,7 @@ ${
           }
           if (
             !["SKILL_MISSING", "SKILL_INVALID"].includes(result.status) &&
-            state().trustedValidation.commands.some(
+            activeTrustedCommands(state()).some(
               ({ command }) =>
                 !result.requiredChecks.some(
                   (required) => required.command === command,
@@ -4390,7 +4532,7 @@ ${
         result.validationInfrastructure,
       );
     const trustedByCommand = new Map(
-      state().trustedValidation.commands.map((command) => [
+      activeTrustedCommands(state()).map((command) => [
         command.command,
         command,
       ]),
@@ -4513,6 +4655,7 @@ ${
     let finalizationResult;
     try {
       finalizationResult = createPersistedFinalizationEvidence({
+        step: state().currentStep,
         workerResult: result,
         issues,
         checks,
@@ -4599,6 +4742,7 @@ ${
     return `Established validation tuple:
 ${JSON.stringify(
   {
+    step: current.currentStep,
     requiredChecks: current.requiredChecks,
     validationInfrastructure: current.validationInfrastructure,
     validationInfrastructureFingerprint:
@@ -4614,6 +4758,10 @@ ${JSON.stringify(
 
   function confirmationValidationPrompt(current) {
     return `${establishedValidationPrompt(current)}
+
+Complete persisted plan-step schedule (an inventory amendment affects only the current step):
+${JSON.stringify(current.validationSchedule)}
+Explicitly assess how any shared validation-infrastructure change affects future requirements. Preserve every future step's accepted assignments.
 
 Candidate validation tuple and finalization evidence:
 ${JSON.stringify(current.finalizationResult, null, 2)}`;
@@ -5173,18 +5321,14 @@ ${JSON.stringify(state().previousFindings, null, 2)}${
           status: result.status === "CLEAN" ? "APPROVED" : "FINDINGS",
           validationChange: result.validationChange,
           validationEvidence: result.validationEvidence,
+          validationTupleFingerprint: validationEvidenceFingerprint(
+            current.finalizationResult,
+          ),
           fingerprint: confirmedFingerprint,
         };
         const acceptedValidation =
           result.validationChange === "ACCEPTED"
-            ? {
-                requiredChecks: current.finalizationResult.requiredChecks,
-                validationInfrastructure:
-                  current.finalizationResult.validationInfrastructure,
-                validationInfrastructureFingerprint:
-                  current.finalizationResult
-                    .validationInfrastructureFingerprint,
-              }
+            ? acceptedValidationAmendment(current)
             : {};
         if (result.status === "FINDINGS") {
           const progress = correctionUpdate({
@@ -5788,6 +5932,9 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
       status: result.status,
       validationChange: result.validationChange,
       validationEvidence: result.validationEvidence,
+      validationTupleFingerprint: validationEvidenceFingerprint(
+        current.finalizationResult,
+      ),
       fingerprint: reviewedFingerprint,
     };
     const findings =
@@ -5807,14 +5954,7 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
         {
           ...state(),
           ...(result.validationChange === "ACCEPTED"
-            ? {
-                requiredChecks: current.finalizationResult.requiredChecks,
-                validationInfrastructure:
-                  current.finalizationResult.validationInfrastructure,
-                validationInfrastructureFingerprint:
-                  current.finalizationResult
-                    .validationInfrastructureFingerprint,
-              }
+            ? acceptedValidationAmendment(current)
             : {}),
           ...clearedCandidateAndConfirmationGate(current),
           workflowState: "RESOLVE_FINDINGS",
@@ -5845,13 +5985,7 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
         ...state(),
         workflowState: "COMMIT",
         ...(result.validationChange === "ACCEPTED"
-          ? {
-              requiredChecks: current.finalizationResult.requiredChecks,
-              validationInfrastructure:
-                current.finalizationResult.validationInfrastructure,
-              validationInfrastructureFingerprint:
-                current.finalizationResult.validationInfrastructureFingerprint,
-            }
+          ? acceptedValidationAmendment(current)
           : {}),
         reviewResult,
         reviewedFingerprint,
@@ -6882,6 +7016,7 @@ ${step.subject}`),
       }
       return currentRun;
     }
+    await prepareScopedDiscovery();
     await prepareCapabilityDiscovery();
     if (!(await recoverInterruptedTurn())) {
       return currentRun;
@@ -6969,6 +7104,7 @@ ${step.subject}`),
     }
 
     while (true) {
+      if (await prepareScopedDiscovery()) continue;
       if (await prepareCapabilityDiscovery()) {
         if (!(await recoverInterruptedTurn())) return currentRun;
         continue;

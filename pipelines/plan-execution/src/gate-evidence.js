@@ -1,4 +1,5 @@
 import { executionPolicy } from "./mode-policy.js";
+import { validationEvidenceFingerprint } from "./validation-schedule.js";
 
 // These predicates consume normalized state, not provider output. Candidate
 // evidence names the inspected content; finalization may format that content
@@ -73,6 +74,9 @@ export function finalizationGatePassed(
   return (
     hasFingerprint(fingerprint) &&
     state.finalizationResult?.status === "PASS" &&
+    (state.validationScopeLegacy ||
+      state.finalizationResult.step ===
+        (state.currentStep ?? state.completedCommits?.length)) &&
     state.finalizedFingerprint === fingerprint &&
     state.finalizationResult.fingerprint === fingerprint
   );
@@ -86,6 +90,9 @@ function terminalConfirmationGatePassed(
     !finalizationGatePassed(state, fingerprint) ||
     state.reviewedFingerprint !== fingerprint ||
     state.reviewResult?.fingerprint !== fingerprint ||
+    (!state.validationScopeLegacy &&
+      state.reviewResult?.validationTupleFingerprint !==
+        validationEvidenceFingerprint(state.finalizationResult)) ||
     state.findings.length !== 0
   )
     return false;

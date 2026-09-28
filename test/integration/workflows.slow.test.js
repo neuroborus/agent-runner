@@ -1406,7 +1406,24 @@ function createBackend(
           summary:
             `${reviewer ? "Reviewer" : "Worker"} understands the task, ` +
             "plan, risks, and finalization procedure.",
-          requiredChecks: [{ id: "C1", command: "git diff --check HEAD" }],
+          requiredChecks: [
+            {
+              id: "C1",
+              command: "git diff --check HEAD",
+              ...(request.schema?.properties?.result?.anyOf?.[0]?.properties
+                ?.requiredChecks?.items?.properties?.steps
+                ? {
+                    steps: [
+                      ...new Set(
+                        [
+                          ...request.prompt.matchAll(/^## Commit ([0-9]+):/gm),
+                        ].map((match) => Number(match[1])),
+                      ),
+                    ].sort((a, b) => a - b),
+                  }
+                : {}),
+            },
+          ],
           validationInfrastructure: [],
           ...((request.schema?.properties?.result?.anyOf?.[0]?.properties
             ?.capabilityRequirements ??
@@ -2471,7 +2488,10 @@ async function projectCommandScenario(t, pipelineId, hooks = {}) {
         const response = await backend.run(request);
         const result = response.structured.result ?? response.structured;
         if (result.requiredChecks !== undefined) {
-          result.requiredChecks = requiredChecks;
+          const steps = result.requiredChecks[0]?.steps;
+          result.requiredChecks = requiredChecks.map((check) =>
+            steps === undefined ? check : { ...check, steps },
+          );
           if (result.checks !== undefined) {
             result.checks.push({
               checkId: "C2",

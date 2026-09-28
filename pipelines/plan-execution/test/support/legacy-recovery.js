@@ -147,7 +147,10 @@ export async function createLegacyRecoveryFixture(
         structured = {
           result: {
             ...bootstrapReady("Role"),
-            requiredChecks: checks,
+            requiredChecks: checks.map((check) => ({
+              ...check,
+              steps: Array.from({ length: steps }, (_, index) => index + 1),
+            })),
             validationInfrastructure: infrastructure,
           },
         };

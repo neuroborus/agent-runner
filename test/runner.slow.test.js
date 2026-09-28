@@ -321,7 +321,24 @@ function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
           summary:
             `${reviewer ? "Reviewer" : "Worker"} understands the task, ` +
             "plan, risks, and finalization procedure.",
-          requiredChecks: [{ id: "C1", command: "git diff --check HEAD" }],
+          requiredChecks: [
+            {
+              id: "C1",
+              command: "git diff --check HEAD",
+              ...(request.schema?.properties?.result?.anyOf?.[0]?.properties
+                ?.requiredChecks?.items?.properties?.steps
+                ? {
+                    steps: [
+                      ...new Set(
+                        [
+                          ...request.prompt.matchAll(/^## Commit ([0-9]+):/gm),
+                        ].map((match) => Number(match[1])),
+                      ),
+                    ].sort((a, b) => a - b),
+                  }
+                : {}),
+            },
+          ],
           validationInfrastructure: [],
           ...((request.schema?.properties?.result?.anyOf?.[0]?.properties
             ?.capabilityRequirements ??

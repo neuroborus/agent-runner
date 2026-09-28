@@ -23,11 +23,12 @@ import {
   matchesSchemaSubset,
 } from "./support/index.js";
 
-function inventory(count, prefix = "check") {
+function inventory(count, prefix = "check", scoped = true) {
   return {
     requiredChecks: Array.from({ length: count }, (_, index) => ({
       id: `C${index + 1}`,
       command: `node validation/${prefix}-${index}.js`,
+      ...(scoped ? { steps: [1] } : {}),
     })),
     validationInfrastructure: Array.from(
       { length: count },
@@ -37,7 +38,7 @@ function inventory(count, prefix = "check") {
 }
 
 function finalization(count) {
-  const fields = inventory(count);
+  const fields = inventory(count, "check", false);
   return {
     ...finalizationPassed(),
     ...fields,
@@ -133,9 +134,56 @@ test("expanded execution inventories retain structured-output and per-item byte 
   assert.throws(() => normalizeFinalizationResult(result), /too large/u);
   const tooLong = {
     ...bootstrapReady("Worker"),
-    requiredChecks: [{ id: "C1", command: "x".repeat(4001) }],
+    requiredChecks: [{ id: "C1", command: "x".repeat(4001), steps: [1] }],
   };
   assert.throws(() => normalizeBootstrapResult(tooLong, "Worker"));
+});
+
+test("a finalization amendment cannot overflow the retained complete catalog", async (t) => {
+  const worker = inventory(256, "worker").requiredChecks;
+  const reviewer = inventory(256, "reviewer").requiredChecks;
+  const requiredChecks = [...worker, ...reviewer].map(({ command }, index) => ({
+    id: `C${index + 1}`,
+    command,
+  }));
+  const result = (checks) => ({
+    ...finalizationPassed(),
+    requiredChecks: checks,
+    checks: checks.map(({ id, command }) => ({
+      checkId: id,
+      command,
+      status: "PASS",
+      evidence: ["Passed."],
+    })),
+  });
+  const replacement = structuredClone(requiredChecks);
+  replacement[0].command = "node replacement-check.js";
+  const fixture = await createFixture(t, {
+    worker: [
+      clarificationReady(),
+      { ...bootstrapReady("Worker"), requiredChecks: worker },
+      reconciliationResolved(),
+    ],
+    reviewer: [{ ...bootstrapReady("Reviewer"), requiredChecks: reviewer }],
+    workWorker: [
+      implementationCompleted(),
+      result(replacement),
+      result(requiredChecks),
+    ],
+  });
+  const completed = await fixture.run();
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.deepEqual(completed.pipelineState.requiredChecks, requiredChecks);
+  const correction = fixture.transitions.find(
+    ({ patch }) =>
+      patch?.pipelineState?.pendingFinalizationCorrection !== null &&
+      patch?.pipelineState?.pendingFinalizationCorrection !== undefined,
+  );
+  assert.equal(
+    correction.patch.pipelineState.pendingFinalizationCorrection.diagnostics[0]
+      .constraint,
+    "maximum-512-catalog-commands",
+  );
 });
 
 test("version-15 capacity migration preserves legacy 64/128 inventories and completed effects", async (t) => {

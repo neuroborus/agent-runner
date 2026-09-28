@@ -19,6 +19,12 @@ import {
   finalizationGatePassed,
 } from "./gate-evidence.js";
 import { executionPolicy, combinedReview } from "./mode-policy.js";
+import {
+  deriveValidationSchedule,
+  scheduledChecks,
+  validationCatalog,
+  validationEvidenceFingerprint,
+} from "./validation-schedule.js";
 
 export const MAX_CLARIFICATION_ROUNDS = 3;
 export const DEFAULT_FINALIZATION_POLICY = "auto";
@@ -93,6 +99,9 @@ const PIPELINE_STATE_FIELDS = new Set([
   "finalizationResult",
   "finalizedFingerprint",
   "requiredChecks",
+  "validationSchedule",
+  "validationAmendment",
+  "validationScopeLegacy",
   "validationInfrastructure",
   "validationInfrastructureFingerprint",
   "trustedValidation",
@@ -1146,7 +1155,7 @@ export function normalizeCompatibilityResult(payload) {
   return Object.freeze({ status: payload.status });
 }
 
-export function normalizeBootstrapResultCandidate(payload, role) {
+export function normalizeBootstrapResultCandidate(payload, role, stepCount) {
   assertStepAssessment(payload?.stepAssessment);
   const statuses = [
     "READY",
@@ -1252,7 +1261,7 @@ export function normalizeBootstrapResultCandidate(payload, role) {
   const requiredChecks = normalizeRequiredChecks(
     payload.requiredChecks,
     INVALID_OUTPUT_CODE,
-    { maxItems: MAX_BOOTSTRAP_ITEMS },
+    { maxItems: MAX_BOOTSTRAP_ITEMS, scoped: true, stepCount },
   );
   if (!validCapabilityReports(payload, requiredChecks)) {
     throw outputError(
@@ -1290,8 +1299,8 @@ export function normalizeBootstrapResultCandidate(payload, role) {
   });
 }
 
-export function normalizeBootstrapResult(payload, role) {
-  const candidate = normalizeBootstrapResultCandidate(payload, role);
+export function normalizeBootstrapResult(payload, role, stepCount) {
+  const candidate = normalizeBootstrapResultCandidate(payload, role, stepCount);
   if (candidate.diagnostics.length !== 0) {
     throw new PlanExecutionWorkflowError(
       "Required checks must be staging-independent.",
@@ -1709,7 +1718,12 @@ function normalizeValidationInfrastructurePath(value, name, code, diagnostic) {
 function normalizeRequiredChecks(
   value,
   code,
-  { allowEmpty = false, maxItems = MAX_VALIDATION_ITEMS } = {},
+  {
+    allowEmpty = false,
+    maxItems = MAX_VALIDATION_ITEMS,
+    scoped = false,
+    stepCount,
+  } = {},
 ) {
   if (
     !Array.isArray(value) ||
@@ -1729,7 +1743,10 @@ function normalizeRequiredChecks(
   }
   const checks = Object.freeze(
     value.map((check, index) => {
-      if (!isRecord(check) || !hasExactFields(check, REQUIRED_CHECK_FIELDS)) {
+      const fields = scoped
+        ? [...REQUIRED_CHECK_FIELDS, "steps"]
+        : REQUIRED_CHECK_FIELDS;
+      if (!isRecord(check) || !hasExactFields(check, fields)) {
         throw workflowError(
           "Required check has an invalid field set.",
           code,
@@ -1743,8 +1760,30 @@ function normalizeRequiredChecks(
           outputConstraint(`requiredChecks[${index}].id`, "required-check-id"),
         );
       }
+      if (
+        scoped &&
+        (!Array.isArray(check.steps) ||
+          check.steps.length === 0 ||
+          check.steps.some(
+            (step, position) =>
+              !Number.isSafeInteger(step) ||
+              step < 1 ||
+              (stepCount !== undefined && step > stepCount) ||
+              (position > 0 && step <= check.steps[position - 1]),
+          ))
+      ) {
+        throw workflowError(
+          "Required-check applicability is invalid.",
+          code,
+          outputConstraint(
+            `requiredChecks[${index}].steps`,
+            "ascending-canonical-plan-steps",
+          ),
+        );
+      }
       return Object.freeze({
         id: check.id,
+        ...(scoped ? { steps: Object.freeze([...check.steps]) } : {}),
         command: normalizeExactCommand(
           check.command,
           `required check ${check.id} command`,
@@ -1765,6 +1804,17 @@ function normalizeRequiredChecks(
       "Required checks must have unique IDs and commands.",
       code,
       outputConstraint("requiredChecks", "unique-ids-and-commands"),
+    );
+  }
+  if (
+    scoped &&
+    stepCount !== undefined &&
+    new Set(checks.flatMap(({ steps }) => steps)).size !== stepCount
+  ) {
+    throw workflowError(
+      "Every plan step requires a complete validation procedure.",
+      code,
+      outputConstraint("requiredChecks", "complete-plan-step-coverage"),
     );
   }
   return checks;
@@ -3291,6 +3341,7 @@ function normalizePersistedFinalization(value) {
     value,
     [
       "status",
+      "step",
       "skillPath",
       "summary",
       "issues",
@@ -3307,6 +3358,8 @@ function normalizePersistedFinalization(value) {
   );
   if (
     !["PASS", "FAIL"].includes(value.status) ||
+    (value.step !== null &&
+      (!Number.isSafeInteger(value.step) || value.step < 1)) ||
     !HASH_PATTERN.test(value.fingerprint)
   ) {
     throw workflowError("Plan-execution finalization result is invalid.");
@@ -3411,6 +3464,7 @@ function normalizePersistedFinalization(value) {
   }
   return Object.freeze({
     status: value.status,
+    step: value.step,
     skillPath: value.skillPath,
     summary,
     issues,
@@ -3428,6 +3482,7 @@ function normalizePersistedFinalization(value) {
 
 /** Constructs the canonical persisted Worker and runner finalization tuple. */
 export function createPersistedFinalizationEvidence({
+  step = null,
   workerResult,
   issues,
   checks,
@@ -3440,6 +3495,7 @@ export function createPersistedFinalizationEvidence({
   const status = issues.length === 0 ? "PASS" : "FAIL";
   return normalizePersistedFinalization({
     status,
+    step,
     skillPath: workerResult.skillPath,
     summary:
       status === workerResult.status
@@ -3457,7 +3513,7 @@ export function createPersistedFinalizationEvidence({
   });
 }
 
-function normalizePersistedValidation(value, name) {
+function normalizePersistedValidation(value, name, stepCount, allowLegacy) {
   if (value === null) {
     return null;
   }
@@ -3474,7 +3530,16 @@ function normalizePersistedValidation(value, name) {
   normalizeRequiredChecks(
     value.requiredChecks,
     "ERR_INVALID_PLAN_EXECUTION_STATE",
-    { maxItems: MAX_BOOTSTRAP_ITEMS },
+    {
+      maxItems: MAX_BOOTSTRAP_ITEMS,
+      scoped:
+        !allowLegacy ||
+        (Array.isArray(value.requiredChecks) &&
+          value.requiredChecks.some(
+            (check) => isRecord(check) && Object.hasOwn(check, "steps"),
+          )),
+      stepCount,
+    },
   );
   normalizeValidationInfrastructure(
     value.validationInfrastructure,
@@ -3492,18 +3557,91 @@ function normalizePersistedValidation(value, name) {
   return value;
 }
 
+function validateValidationSchedule(state, planSteps, validations) {
+  if (state.validationScopeLegacy || state.resolvedSummary === null) {
+    if (
+      state.validationSchedule !== null ||
+      state.validationAmendment !== null
+    ) {
+      throw workflowError(
+        "Unestablished validation cannot carry a scoped schedule.",
+      );
+    }
+    return;
+  }
+  if (
+    !planSteps ||
+    validations[0] === null ||
+    (executionPolicy(state.settings).independentBootstrap &&
+      validations[1] === null)
+  ) {
+    throw workflowError(
+      "Scoped validation requires every active role's assignments.",
+    );
+  }
+  const expected = deriveValidationSchedule(validations, planSteps.length);
+  if (
+    !isDeepStrictEqual(state.validationSchedule, expected) ||
+    expected.some(
+      ({ requiredChecks }) =>
+        requiredChecks.length === 0 ||
+        requiredChecks.length > MAX_VALIDATION_ITEMS,
+    ) ||
+    validationCatalog(state).length > MAX_VALIDATION_ITEMS
+  ) {
+    throw workflowError(
+      "Validation schedule does not preserve the accepted role assignments.",
+    );
+  }
+  const step = state.currentStep ?? state.completedCommits.length;
+  let checks = scheduledChecks(state, step);
+  if (state.validationAmendment !== null) {
+    const amendment = state.validationAmendment;
+    assertExactFields(
+      amendment,
+      ["step", "requiredChecks", "confirmationFingerprint"],
+      "Validation amendment",
+    );
+    if (
+      amendment.step !== step ||
+      !HASH_PATTERN.test(amendment.confirmationFingerprint)
+    ) {
+      throw workflowError(
+        "A validation amendment may affect only the current step.",
+      );
+    }
+    checks = normalizePhaseSafeRequiredChecks(
+      amendment.requiredChecks,
+      "ERR_INVALID_PLAN_EXECUTION_STATE",
+    );
+  }
+  if (!isDeepStrictEqual(state.requiredChecks, checks)) {
+    throw workflowError(
+      "Active validation does not match the selected plan step.",
+    );
+  }
+}
+
 function normalizePersistedReview(value) {
   if (value === null) {
     return null;
   }
   assertExactFields(
     value,
-    ["status", "validationChange", "validationEvidence", "fingerprint"],
+    [
+      "status",
+      "validationChange",
+      "validationEvidence",
+      "fingerprint",
+      "validationTupleFingerprint",
+    ],
     "Plan-execution review result",
   );
   if (
     !["APPROVED", "FINDINGS"].includes(value.status) ||
     !["UNCHANGED", "ACCEPTED", "REJECTED"].includes(value.validationChange) ||
+    (value.validationTupleFingerprint !== null &&
+      !HASH_PATTERN.test(value.validationTupleFingerprint)) ||
     !HASH_PATTERN.test(value.fingerprint)
   ) {
     throw workflowError("Plan-execution review result is invalid.");
@@ -3838,6 +3976,7 @@ export function normalizePipelineState(value) {
     "bootstrapArbitrationUsed",
     "compatibilityCheckRequired",
     "validationMigrationPending",
+    "validationScopeLegacy",
     "candidateMigrationPending",
     "pendingCorrection",
     "stagnationArbitrationUsed",
@@ -4035,10 +4174,14 @@ export function normalizePipelineState(value) {
   const workerValidation = normalizePersistedValidation(
     value.workerValidation,
     "Worker validation evidence",
+    planSteps?.length,
+    value.validationScopeLegacy,
   );
   const reviewerValidation = normalizePersistedValidation(
     value.reviewerValidation,
     "Reviewer validation evidence",
+    planSteps?.length,
+    value.validationScopeLegacy,
   );
   const resolvedSummary = normalizedSummary(
     value.resolvedSummary,
@@ -4293,6 +4436,10 @@ export function normalizePipelineState(value) {
   const candidateReviewResult = normalizePersistedCandidateReview(
     value.candidateReviewResult,
   );
+  validateValidationSchedule(value, planSteps, [
+    workerValidation,
+    reviewerValidation,
+  ]);
   if (
     (requiredChecks === null) !== (resolvedSummary === null) ||
     (validationInfrastructure === null) !== (resolvedSummary === null) ||
@@ -4306,8 +4453,7 @@ export function normalizePipelineState(value) {
   if (
     requiredChecks !== null &&
     trustedValidation.commands.some(
-      ({ command }) =>
-        !requiredChecks.some((required) => required.command === command),
+      ({ command }) => !validationCatalog(value).includes(command),
     )
   ) {
     throw workflowError(
@@ -4326,6 +4472,28 @@ export function normalizePipelineState(value) {
     );
   }
   if (finalizationResult !== null) {
+    const evidenceStep = value.currentStep ?? value.completedCommits.length;
+    if (
+      !(value.validationScopeLegacy && finalizationResult.step === null) &&
+      finalizationResult.step !== evidenceStep
+    ) {
+      throw workflowError(
+        "Finalization evidence belongs to another plan step.",
+      );
+    }
+    if (
+      reviewResult !== null &&
+      !(
+        value.validationScopeLegacy &&
+        reviewResult.validationTupleFingerprint === null
+      ) &&
+      reviewResult.validationTupleFingerprint !==
+        validationEvidenceFingerprint(finalizationResult)
+    ) {
+      throw workflowError(
+        "Terminal confirmation does not bind the exact validation evidence.",
+      );
+    }
     const trustedCommands = new Map(
       trustedValidation.commands.map((command) => [command.command, command]),
     );
@@ -4366,7 +4534,11 @@ export function normalizePipelineState(value) {
         finalizationResult.validationChanged) ||
       (reviewedChange === "ACCEPTED" &&
         !finalizationResult.validationChanged) ||
-      (reviewedChange === "ACCEPTED" && !matchesEstablishedValidation)
+      (reviewedChange === "ACCEPTED" && !matchesEstablishedValidation) ||
+      (!value.validationScopeLegacy &&
+        reviewedChange === "ACCEPTED" &&
+        value.validationAmendment?.confirmationFingerprint !==
+          validationEvidenceFingerprint(finalizationResult))
     ) {
       throw workflowError(
         "Plan-execution validation-change evidence is inconsistent.",
@@ -5054,6 +5226,9 @@ export function createPlanExecutionState({
       finalizationResult: null,
       finalizedFingerprint: null,
       requiredChecks: null,
+      validationSchedule: null,
+      validationAmendment: null,
+      validationScopeLegacy: false,
       validationInfrastructure: null,
       validationInfrastructureFingerprint: null,
       trustedValidation: normalizedTrustedValidation,
@@ -5163,7 +5338,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 22 ||
+    run.pipelineStateVersion !== 23 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||

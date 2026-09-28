@@ -1314,6 +1314,36 @@ version-2 migration initializes both fields empty without moving active or
 terminal workflow positions, reviving terminal work, replaying an accepted
 checkpoint, consuming revision or correction budgets, or writing `plan.md`.
 
+Plan execution state version 23 scopes validation to canonical plan steps. Its
+private `validation-schedule.js` derives per-step inventories from immutable
+Worker-first accepted role assignments, unioning applicability of identical
+commands. Independent and combined retain both roles; lazy retains Worker only.
+Each role must cover every step with its complete applicable procedure. Shared
+infrastructure stays globally fingerprinted. The persisted schedule must match
+its role evidence; only a confirmed current-step amendment may overlay the
+active inventory. Verified advancement clears that amendment and prior gates
+and selects the next schedule entry.
+
+Finalization records its active step and exact ordered checks; terminal
+confirmation hashes the complete canonical evidence tuple. Resume validates
+both bindings before reuse. Confirmation also sees future requirements when
+assessing shared infrastructure changes. Trusted capability inspection uses the
+complete catalog and both roles' additive reports; finalization reserves and
+executes only active selected commands. The frozen snapshot, vectors, identities,
+and command/configuration fingerprints stay intact.
+
+The explicit version-22 migration retains historical unscoped evidence under a
+provisional legacy marker. It never infers applicability. Before unfinished
+work advances, a read-only barrier invalidates active gates and requires scoped
+discovery by every mode-required role. Accepted partial discovery survives
+restart. Completed effects, pauses, configuration, and correction accounting
+are preserved; terminal history remains readable. Consumed stagnation arbitration
+and pending rework survive discovery; incompatible pending correction markers
+retire without resetting their ledgers or fix accounting. Consumed commit
+verification precedes discovery and capability preparation, with any subsequent
+unfinished step subject to the same barrier. Older historical inventory contracts below
+remain relevant to their migration chain.
+
 Plan execution and polishing state version 2 persist the mode-specific
 bootstrapped required-check inventory, the repository-relative files that own
 validation infrastructure, and a runner-computed fingerprint of those files.

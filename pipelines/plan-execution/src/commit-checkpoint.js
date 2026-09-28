@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import { parseCommitPlan } from "@agent-runner/commit-plan";
 import { clearedCandidateAndTerminalGate } from "./gate-evidence.js";
 import { createFinalizationRecovery } from "./workflow-contract.js";
+import { scheduledChecks } from "./validation-schedule.js";
 
 // The journal checkpoint, not only the current workflow label, proves that
 // this stop preceded repository, artifact, and execution ownership.
@@ -82,6 +83,12 @@ export function verifiedCommitCheckpoint({
   const nextStepState = done
     ? {}
     : {
+        ...(current.validationScopeLegacy
+          ? {}
+          : {
+              requiredChecks: scheduledChecks(current, current.currentStep + 1),
+              validationAmendment: null,
+            }),
         implementationDirection: null,
         ...clearedCandidateAndTerminalGate(),
         findings: [],
