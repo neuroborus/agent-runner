@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-09-28
 
+- **Shared-host recovery distinguishes unrelated protected processes without
+  weakening containment.** Common envelope version 14 records the owned
+  supervisor's control-group identity before provider work. When another
+  same-user process protects its environment metadata, live cleanup and
+  recovery may ignore it only after its lineage reaches no owned evidence and
+  its stable control-group identity proves it belongs elsewhere. Matching, missing, malformed, legacy, session, or
+  ownership-token evidence remains fail-closed. This prevents unrelated
+  desktop sandboxes from blocking provider retirement while preserving the
+  existing PID, boot, namespace, ancestry, and descendant guarantees.
 - **Eligible provider launch recovery is durable and provider-neutral.** After
   bounded adapter reconstruction, a transient `not_started` or `exited`
   failure with no effect and no commit-executor evidence may persist only its

@@ -4,7 +4,7 @@ import { isAdapterDiagnosticClass } from "../agents/index.js";
 import { normalizeLaunchRecovery } from "./launch-recovery.js";
 import { validStopTiming, validStopSettlement } from "./stop-contract.js";
 
-export const RUN_STATE_SCHEMA_VERSION = 13;
+export const RUN_STATE_SCHEMA_VERSION = 14;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
   runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
@@ -17,6 +17,7 @@ export const RUNTIME_VERSION_SKEW_EXIT_CODE = 78;
 
 const LEGACY_RUN_STATE_SCHEMA_VERSION = 1;
 const ACTIVITY_RUN_STATE_SCHEMA_VERSION = 3;
+const PROVIDER_POLICY_SCHEMA_VERSION = 13;
 const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   LEGACY_RUN_STATE_SCHEMA_VERSION,
   2,
@@ -30,6 +31,7 @@ const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   10,
   11,
   12,
+  13,
   RUN_STATE_SCHEMA_VERSION,
 ]);
 
@@ -642,7 +644,7 @@ export function normalizeRoles(value, { allowMissingEffort = true } = {}) {
 }
 
 function normalizeProviderPolicies(value, roles, schemaVersion) {
-  if (schemaVersion < RUN_STATE_SCHEMA_VERSION) {
+  if (schemaVersion < PROVIDER_POLICY_SCHEMA_VERSION) {
     if (value !== undefined) {
       fail("Legacy run state cannot contain provider policies.");
     }
@@ -877,6 +879,7 @@ function normalizeExecutionProcess(value, schemaVersion) {
   const fields = ["pid", "hostname", "processIdentity", "namespaceId"];
   if (schemaVersion >= 11) fields.push("launchCutoff");
   if (schemaVersion >= 12) fields.push("ancestryBaseline");
+  if (schemaVersion >= 14) fields.push("controlGroup");
   rejectUnknownFields(value, new Set(fields), "run.executionProcess");
   if (
     schemaVersion < 5 ||
@@ -916,6 +919,13 @@ function normalizeExecutionProcess(value, schemaVersion) {
           value.ancestryBaseline,
           processIdentity,
         );
+  const controlGroup = schemaVersion < 14 ? null : value.controlGroup;
+  if (
+    controlGroup !== null &&
+    (typeof controlGroup !== "string" || !/^[a-f0-9]{64}$/u.test(controlGroup))
+  ) {
+    fail("Run execution process control group is invalid.");
+  }
   return {
     pid: value.pid,
     hostname: value.hostname,
@@ -923,6 +933,7 @@ function normalizeExecutionProcess(value, schemaVersion) {
     namespaceId: value.namespaceId ?? null,
     launchCutoff,
     ancestryBaseline,
+    controlGroup,
   };
 }
 

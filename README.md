@@ -658,9 +658,10 @@ persists active-role effort; legacy missing values migrate to `current` without
 provider activity or changes to saved progress and session evidence. Version 11
 adds the supervisor's boot/start launch cutoff for durable shared-host recovery.
 Version 12 adds the bounded frozen boot/PID/start ancestry baseline used by both
-live supervision and replacement-owner recovery. Legacy states migrate with no
-baseline authority and remain compatibility-blocked when that evidence is
-needed.
+live supervision and replacement-owner recovery. Version 14 adds the owner's
+control-group identity so an inaccessible same-user process can be excluded
+only when it is proven to belong elsewhere. Legacy states migrate with no new
+authority and remain compatibility-blocked when that evidence is needed.
 The mode-aware pipeline versions are plan-authoring version 5, plan-execution
 version 17, and polishing version 13. Their ordered migrations resolve missing
 legacy modes to `independent` and preserve explicitly saved modes without
@@ -760,11 +761,13 @@ clears a process record only after proving the recorded process and descendants
 absent. A post-launch shared-host process is excluded only after its complete,
 stabilized lineage reaches an unchanged entry in the frozen launch baseline.
 Every observed session and ownership token is checked before accepting that
-anchor. Replaced or reused PIDs, a stale or missing anchor, a boot mismatch,
-cycles, inaccessible current metadata, surviving descendants, and otherwise
-unverifiable evidence remain blocked and must not be bypassed by killing a
-persisted PID. A stable inaccessible intermediate may be crossed only when the
-same walk reaches its exact baseline anchor. If a snapshot PID exits or
+anchor. An inaccessible current environment is excluded only when its stable
+control-group identity differs from the recorded owner. Replaced or reused
+PIDs, a stale or missing anchor, a boot mismatch, cycles, missing or matching
+control-group evidence, surviving descendants, and otherwise unverifiable
+evidence remain blocked and must not be bypassed by killing a persisted PID. A
+stable inaccessible intermediate may be crossed only when the same walk reaches
+its exact baseline anchor. If a snapshot PID exits or
 reparents during inspection, the runner retries that PID and its new ancestry
 under a fixed small bound and ignores it only after a fresh read proves it
 absent; namespace mismatch and exhausted churn remain unverifiable.

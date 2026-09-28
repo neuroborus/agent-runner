@@ -161,16 +161,18 @@ session or namespace. Complete unrelated ancestry excludes a candidate only
 after every stabilized hop reaches an unchanged pre-launch identity. Before
 provider work, the session path durably records a bounded,
 ordered baseline of boot ID, PID, and start tick identities captured before
-supervisor launch. Parent loss before target launch exits the inert supervisor
+supervisor launch plus the supervisor's control-group identity. Parent loss
+before target launch exits the inert supervisor
 directly because no provider descendant can yet exist. Live supervision and
 recovery traverse the same frozen evidence, checking observed session and token
 ownership before accepting an anchor. An inaccessible intermediate environment
 may be crossed only when the walk still reaches that exact anchor.
-PID reuse, a stale or missing anchor, a boot mismatch, inaccessible current
-metadata, cycles, owned evidence, malformed identities, a recovery namespace
-mismatch, or otherwise unproven candidates fail closed whenever the session
-scan is needed. Legacy records do not gain baseline authority through migration
-or recovery.
+An inaccessible current environment is excluded only when its lineage reaches no
+owned evidence and its stable control-group identity differs. PID reuse, a stale or missing anchor, a boot mismatch,
+missing or matching current control-group evidence, cycles, owned evidence,
+malformed identities, a recovery namespace mismatch, or otherwise unproven
+candidates fail closed whenever the session scan is needed. Legacy records do
+not gain baseline or control-group authority through migration or recovery.
 A recorded previous boot remains independent proof that the old process tree
 cannot survive. Nested runner tests inside the trusted-validation namespace
 retain the owned-session path when that enclosing sandbox denies another PID

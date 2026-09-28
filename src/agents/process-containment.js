@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile, readlink } from "node:fs/promises";
 
 const UNAVAILABLE_CODES = new Set(["EACCES", "ENOENT", "EPERM", "ESRCH"]);
@@ -29,6 +30,24 @@ export async function readProcessNamespace(pid) {
     return null;
   try {
     return await readlink(`/proc/${pid}/ns/pid`);
+  } catch (cause) {
+    if (UNAVAILABLE_CODES.has(cause?.code)) return null;
+    throw cause;
+  }
+}
+
+export async function readProcessControlGroup(pid) {
+  if (process.platform !== "linux" || !Number.isSafeInteger(pid) || pid < 1)
+    return null;
+  try {
+    const source = await readFile(`/proc/${pid}/cgroup`, "utf8");
+    if (
+      Buffer.byteLength(source) === 0 ||
+      Buffer.byteLength(source) > 64 * 1024 ||
+      !source.endsWith("\n")
+    )
+      return null;
+    return createHash("sha256").update(source).digest("hex");
   } catch (cause) {
     if (UNAVAILABLE_CODES.has(cause?.code)) return null;
     throw cause;

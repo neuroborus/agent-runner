@@ -1211,6 +1211,7 @@ export function createRunStore({
                   namespaceId: proof?.namespaceId ?? null,
                   launchCutoff,
                   ancestryBaseline,
+                  controlGroup: proof?.controlGroup ?? null,
                 },
           revision: snapshot.state.revision + 1,
           updatedAt: timestamp(snapshot.state.updatedAt),

@@ -146,11 +146,13 @@ blocking ownership condition. Retirement and stop settlement are separate
 journaled transitions so an interruption safely retries either boundary.
 For shared-host sessions, the persisted frozen boot/PID/start baseline lets
 recovery exclude a new unrelated process only when every stabilized ancestry
-hop reaches an unchanged pre-launch identity. Observed session and token
-ownership always wins over an anchor. PID reuse, a stale or missing anchor,
-boot or namespace mismatch, cycles, inaccessible current metadata, or
-incomplete evidence remain conservative; a recorded previous boot remains
-independent absence proof. A process or ancestor that exits or reparents during
+hop reaches an unchanged pre-launch identity, or when inaccessible current
+environment metadata is paired with a stable control-group identity different
+from the recorded owner. Observed session and token ownership always wins over
+an anchor. PID reuse, a stale or missing anchor, boot or namespace mismatch,
+cycles, missing or matching control-group evidence, or incomplete evidence
+remain conservative; a recorded previous boot remains independent absence
+proof. A process or ancestor that exits or reparents during
 inspection receives only the fixed per-entry retry bound; recovery ignores it
 only after a fresh read proves the snapshot PID absent. Reuse, surviving
 ownership, malformed evidence, and exhausted churn remain blocking. Legacy

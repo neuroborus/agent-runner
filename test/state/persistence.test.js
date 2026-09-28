@@ -184,46 +184,48 @@ test("pins one bounded provider policy receipt per role", async (t) => {
 });
 
 test("migrates legacy provider policy state before a receipt is recorded", async (t) => {
-  const { created, store } = await createFixture(t);
-  await created.lease.release();
-  const statePath = join(created.directoryPath, "state.json");
-  const eventsPath = join(created.directoryPath, "events.jsonl");
-  const legacy = JSON.parse(await readFile(statePath, "utf8"));
-  legacy.schemaVersion = 12;
-  legacy.runtimeCompatibility.runStateVersion = 12;
-  delete legacy.providerPolicies;
-  const event = JSON.parse((await readFile(eventsPath, "utf8")).trim());
-  event.schemaVersion = 12;
-  event.state = legacy;
-  await writeFile(statePath, JSON.stringify(legacy));
-  await writeFile(eventsPath, `${JSON.stringify(event)}\n`);
+  for (const schemaVersion of [12, 13]) {
+    const { created, store } = await createFixture(t);
+    await created.lease.release();
+    const statePath = join(created.directoryPath, "state.json");
+    const eventsPath = join(created.directoryPath, "events.jsonl");
+    const legacy = JSON.parse(await readFile(statePath, "utf8"));
+    legacy.schemaVersion = schemaVersion;
+    legacy.runtimeCompatibility.runStateVersion = schemaVersion;
+    if (schemaVersion === 12) delete legacy.providerPolicies;
+    const event = JSON.parse((await readFile(eventsPath, "utf8")).trim());
+    event.schemaVersion = schemaVersion;
+    event.state = legacy;
+    await writeFile(statePath, JSON.stringify(legacy));
+    await writeFile(eventsPath, `${JSON.stringify(event)}\n`);
 
-  const loaded = await store.loadRun(legacy.runId);
-  assert.deepEqual(loaded.providerPolicies, {
-    reviewer: null,
-    worker: null,
-  });
-  const lease = await store.acquireRunLease(legacy.runId);
-  try {
-    const migrated = await store.migrateRun(
-      lease,
-      {
-        pipelineState: loaded.pipelineState,
-        pipelineStateVersion: loaded.pipelineStateVersion,
-      },
-      {
-        activity: {
-          actor: "runner",
-          phase: "runtime",
-          kind: "migrated",
-          message: "Migrated provider policy state.",
+    const loaded = await store.loadRun(legacy.runId);
+    assert.deepEqual(loaded.providerPolicies, {
+      reviewer: null,
+      worker: null,
+    });
+    const lease = await store.acquireRunLease(legacy.runId);
+    try {
+      const migrated = await store.migrateRun(
+        lease,
+        {
+          pipelineState: loaded.pipelineState,
+          pipelineStateVersion: loaded.pipelineStateVersion,
         },
-      },
-    );
-    assert.equal(migrated.schemaVersion, RUN_STATE_SCHEMA_VERSION);
-    assert.deepEqual(migrated.providerPolicies, loaded.providerPolicies);
-  } finally {
-    await lease.release();
+        {
+          activity: {
+            actor: "runner",
+            phase: "runtime",
+            kind: "migrated",
+            message: "Migrated provider policy state.",
+          },
+        },
+      );
+      assert.equal(migrated.schemaVersion, RUN_STATE_SCHEMA_VERSION);
+      assert.deepEqual(migrated.providerPolicies, loaded.providerPolicies);
+    } finally {
+      await lease.release();
+    }
   }
 });
 
@@ -512,6 +514,7 @@ test("rejects missing, malformed, and widened current launch cutoffs", async (t)
       namespaceId: "pid:[4026531836]",
       ...(launchCutoff === undefined ? {} : { launchCutoff }),
       ancestryBaseline: null,
+      controlGroup: "a".repeat(64),
     };
     await writeFile(statePath, JSON.stringify(invalid));
     await writeFile(
@@ -558,6 +561,40 @@ test("validates current frozen ancestry baselines strictly and bounds their size
       namespaceId: "pid:[4026531836]",
       launchCutoff: processIdentity,
       ...(ancestryBaseline === undefined ? {} : { ancestryBaseline }),
+      controlGroup: "a".repeat(64),
+    };
+    await writeFile(statePath, JSON.stringify(invalid));
+    await writeFile(
+      eventsPath,
+      `${JSON.stringify({ ...event, state: invalid })}\n`,
+    );
+    await assert.rejects(store.loadRun(current.runId), {
+      code: "ERR_INVALID_RUN_STATE",
+    });
+  }
+});
+
+test("validates current execution control-group evidence", async (t) => {
+  const { created, store } = await createFixture(t);
+  await created.lease.release();
+  const statePath = join(created.directoryPath, "state.json");
+  const eventsPath = join(created.directoryPath, "events.jsonl");
+  const current = JSON.parse(await readFile(statePath, "utf8"));
+  const event = JSON.parse((await readFile(eventsPath, "utf8")).trim());
+  const processIdentity = {
+    bootId: "55555555-5555-4555-8555-555555555555",
+    startTicks: "4242",
+  };
+  for (const controlGroup of [undefined, "", "A".repeat(64), "a".repeat(63)]) {
+    const invalid = structuredClone(current);
+    invalid.executionProcess = {
+      pid: 4242,
+      hostname: "current-host",
+      processIdentity,
+      namespaceId: "pid:[4026531836]",
+      launchCutoff: processIdentity,
+      ancestryBaseline: null,
+      ...(controlGroup === undefined ? {} : { controlGroup }),
     };
     await writeFile(statePath, JSON.stringify(invalid));
     await writeFile(

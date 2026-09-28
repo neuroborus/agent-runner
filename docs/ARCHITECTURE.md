@@ -1095,16 +1095,19 @@ Common envelope version 5 adds nullable `executionProcess` ownership. Version
 11 adds the supervisor's bounded boot/start launch cutoff and changes the
 runtime compatibility token. Version 12 adds a nullable, ordered launch-time
 ancestry baseline bounded to 4,096 entries, each containing the boot ID, PID,
-and start tick observed immediately before supervisor launch. Versions 5
-through 10 derive the cutoff from a valid recorded supervisor identity during
-normalization. Versions 5 through 11 normalize the baseline to null and never
-rescan the host or synthesize recovery authority. The ordinary leased runtime
-migration persists that conservative shape, while malformed, unsorted,
-oversized, mixed-boot, or mismatched current evidence is rejected. Before a
-provider or trusted command can execute, a private supervisor waits on a
-separate inherited Node IPC channel while the runner journals its host PID,
-hostname, boot/start identity, launch cutoff, frozen ancestry baseline, and PID
-namespace identity. The shared agents boundary owns the
+and start tick observed immediately before supervisor launch. Version 14 adds
+the nullable SHA-256 identity of the supervisor's exact Linux control-group
+membership. Versions 5 through 10 derive the cutoff from a valid recorded
+supervisor identity during normalization. Versions 5 through 11 normalize the
+baseline to null; versions 5 through 13 normalize the control-group identity to
+null. Neither migration rescans the host or synthesizes recovery authority.
+The ordinary leased runtime migration persists that conservative shape, while
+malformed, unsorted, oversized, mixed-boot, or mismatched current evidence is
+rejected. Before a provider or trusted command can execute, a private
+supervisor waits on a separate inherited Node IPC channel while the runner
+journals its host PID, hostname, boot/start identity, launch cutoff, frozen
+ancestry baseline, control-group identity, and PID namespace identity. The
+shared agents boundary owns the
 closed `ordinary` and `native-sandbox-provider` supervision modes. Ordinary
 processes launch this supervisor as PID 1 in a private Linux namespace using
 system-protected bubblewrap. Provider launches use that mode only when a cached,
@@ -1156,9 +1159,11 @@ each hop before accepting an exact boot/PID/start anchor. It checks observed
 session and token evidence first, so an anchor cannot skip known ownership. A
 stable inaccessible intermediate environment may be crossed only if the
 lineage subsequently reaches an unchanged anchor; inaccessible current-process
-metadata, a stale or reused anchor, a missing baseline, a boot mismatch, a
-cycle, malformed identity evidence, and otherwise unproven candidates remain
-unverifiable during both live execution and recovery. Recovery also rejects a
+environment is excluded only when its lineage reaches no owned evidence and its
+stable control-group identity differs from the recorded owner. A missing or matching control-group identity, a stale
+or reused anchor, a missing baseline, a boot mismatch, a cycle, malformed
+identity evidence, and otherwise unproven candidates remain unverifiable
+during both live execution and recovery. Recovery also rejects a
 recorded PID namespace that differs from its own because the envelope does not
 grant authority to infer that the old namespace was private. Legacy state with
 a null baseline reports that it predates frozen ancestry recovery evidence
@@ -1206,7 +1211,8 @@ after owner loss, and prevents checkpoint advancement before process cleanup.
 CLI/MCP command registration remains transport-owned.
 
 After owner loss, the replacement execution lease inspects the recorded
-PID/boot/start, frozen ancestry baseline, and namespace evidence. A PID that
+PID/boot/start, frozen ancestry baseline, control-group identity, and namespace
+evidence. A PID that
 vanishes between liveness and identity reads is checked again and classified
 dead only when that second read proves absence. Same-boot PID replacement, a
 live or unverifiable owner, an initial-host namespace hidden from the recovery

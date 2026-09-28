@@ -14,6 +14,7 @@ import { dirname, isAbsolute, sep } from "node:path";
 
 import {
   readProcessChildren,
+  readProcessControlGroup,
   readProcessIdentity,
   readProcessNamespace,
 } from "./process-containment.js";
@@ -36,6 +37,7 @@ const namespaceLaunchSupport = new Map();
 const SUPERVISOR_SOURCE = String.raw`
 const { readdirSync } = require("node:fs");
 const { spawn } = require("node:child_process");
+const { createHash } = require("node:crypto");
 const [mode, graceText, executable, encodedArguments, extraText, initialToken] =
   process.argv.slice(1);
 const grace = Number(graceText);
@@ -48,6 +50,7 @@ let outcome;
 let ownerToken = initialToken;
 let launchCutoff;
 let ancestryBaseline;
+let controlGroup;
 let retentionTimer;
 function processStatDetails(stat) {
   const separator = stat.lastIndexOf(")");
@@ -116,6 +119,18 @@ function processUid(pid) {
   const match = /^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)$/m.exec(status);
   if (match === null) throw new Error("invalid process uid");
   return match.slice(1).map(Number);
+}
+function processControlGroup(pid) {
+  const source = require("node:fs").readFileSync(
+    "/proc/" + pid + "/cgroup",
+    "utf8",
+  );
+  if (
+    Buffer.byteLength(source) === 0 ||
+    Buffer.byteLength(source) > 64 * 1024 ||
+    !source.endsWith("\n")
+  ) throw new Error("invalid process control group");
+  return createHash("sha256").update(source).digest("hex");
 }
 function verifyProcessDetails(pid, expected) {
   try {
@@ -230,9 +245,10 @@ function inspectSessionProcess(pid, session) {
           ownership = "anchored";
         } else {
           const ancestry = inspectOwnedAncestry(details.parentPid, session);
-          ownership = ["current", "retry"].includes(ancestry)
-            ? ancestry
-            : null;
+          if (["current", "retry"].includes(ancestry)) ownership = ancestry;
+          else if (processControlGroup(pid) !== controlGroup) {
+            ownership = "unrelated";
+          } else ownership = null;
         }
       } else return null;
     }
@@ -408,7 +424,15 @@ process.on("message", (message) => {
     launchCutoff === null
       ? null
       : normalizedAncestryBaseline(message.ancestryBaseline, launchCutoff);
-  if (mode === "session" && ancestryBaseline === null) process.exit(126);
+  controlGroup =
+    typeof message.controlGroup === "string" &&
+    /^[a-f0-9]{64}$/.test(message.controlGroup)
+      ? message.controlGroup
+      : null;
+  if (
+    mode === "session" &&
+    (ancestryBaseline === null || controlGroup === null)
+  ) process.exit(126);
   ownerToken = message.ownerToken;
   const stdio = [0, 1, 2];
   for (let index = 0; index < extra; index += 1) stdio.push(index + 4);
@@ -610,6 +634,23 @@ function processUid(pid, read = readFileSync) {
   return match.slice(1).map(Number);
 }
 
+function processControlGroup(pid, read = readFileSync) {
+  const source = read(`/proc/${pid}/cgroup`, "utf8");
+  if (
+    Buffer.byteLength(source) === 0 ||
+    Buffer.byteLength(source) > 64 * 1024 ||
+    !source.endsWith("\n")
+  )
+    return null;
+  return createHash("sha256").update(source).digest("hex");
+}
+
+function hasDifferentControlGroup(pid, controlGroup, read = readFileSync) {
+  if (controlGroup === null) return false;
+  const candidate = processControlGroup(pid, read);
+  return candidate !== null && candidate !== controlGroup;
+}
+
 function processStatDetails(stat) {
   const separator = stat.lastIndexOf(")");
   if (separator < 0) return null;
@@ -807,6 +848,7 @@ function inspectSessionProcess(
   ownerToken,
   includeSession,
   ancestryBaseline,
+  controlGroup,
   getuid,
   read,
 ) {
@@ -877,7 +919,10 @@ function inspectSessionProcess(
             ancestryBaseline,
             read,
           );
-          ownership = ["current", "retry"].includes(ancestry) ? ancestry : null;
+          if (["current", "retry"].includes(ancestry)) ownership = ancestry;
+          else if (hasDifferentControlGroup(pid, controlGroup, read)) {
+            ownership = "unrelated";
+          } else ownership = null;
         }
       } else return null;
     }
@@ -896,6 +941,7 @@ export function inspectOwnedSessionProcesses(
   ownerToken,
   {
     ancestryBaseline = null,
+    controlGroup = null,
     getuid = () => process.getuid(),
     includeSession = true,
     list = readdirSync,
@@ -907,6 +953,9 @@ export function inspectOwnedSessionProcesses(
       ? null
       : ancestryBaselineIndex(ancestryBaseline, read);
   if (ancestryBaseline !== null && baseline === null) return null;
+  if (controlGroup !== null && !/^[a-f0-9]{64}$/u.test(controlGroup)) {
+    return null;
+  }
   try {
     const members = [];
     for (const name of list("/proc")) {
@@ -918,6 +967,7 @@ export function inspectOwnedSessionProcesses(
         ownerToken,
         includeSession,
         baseline,
+        controlGroup,
         getuid,
         read,
       );
@@ -935,10 +985,12 @@ function signalSession(
   ownerToken,
   signal,
   ancestryBaseline,
+  controlGroup,
   inspectSessionProcesses,
 ) {
   const members = inspectSessionProcesses(sessionId, ownerToken, {
     ancestryBaseline,
+    controlGroup,
   });
   if (members === null) {
     throw ownedError(
@@ -1190,6 +1242,7 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
   const killChild = child.kill.bind(child);
   let containmentFailure = null;
   let launchCutoff = null;
+  let controlGroup = null;
   let startRequested = false;
   const killLauncher = (signal) => {
     if (launcher.isolatedNamespace) {
@@ -1213,6 +1266,7 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
           ownerToken,
           signal,
           ancestryBaseline,
+          controlGroup,
           inspectSessionProcesses,
         );
       } catch (cause) {
@@ -1298,6 +1352,7 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
       ) {
         const members = inspectSessionProcesses(child.pid, ownerToken, {
           ancestryBaseline,
+          controlGroup,
         });
         if (members === null) {
           containmentFailure = ownedError(
@@ -1410,17 +1465,24 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
           );
         }
         child.ownedPid = children?.[0] ?? child.pid;
-        const [processIdentity, namespaceId, runnerNamespaceId] =
-          await Promise.all([
-            readProcessIdentity(child.ownedPid),
-            readProcessNamespace(child.ownedPid),
-            readProcessNamespace(process.pid),
-          ]);
+        const [
+          processIdentity,
+          namespaceId,
+          runnerNamespaceId,
+          ownerControlGroup,
+        ] = await Promise.all([
+          readProcessIdentity(child.ownedPid),
+          readProcessNamespace(child.ownedPid),
+          readProcessNamespace(process.pid),
+          readProcessControlGroup(child.ownedPid),
+        ]);
         launchCutoff = processIdentity;
+        controlGroup = ownerControlGroup;
         if (
           processIdentity === null ||
           namespaceId === null ||
           runnerNamespaceId === null ||
+          controlGroup === null ||
           (launcher.isolatedNamespace
             ? namespaceId === runnerNamespaceId
             : namespaceId !== runnerNamespaceId)
@@ -1441,6 +1503,7 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
           namespaceId,
           launchCutoff,
           ancestryBaseline,
+          controlGroup,
         };
         await onProcess(child.ownedPid, proof);
         registered = true;
@@ -1454,6 +1517,7 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
             ownerToken,
             launchCutoff,
             ancestryBaseline,
+            controlGroup,
           },
           (cause) => {
             if (cause !== null && cause !== undefined) child.kill("SIGKILL");
@@ -1532,6 +1596,7 @@ export async function terminateOwnedProcess(
       ownedProcessToken(owner.pid, owner.processIdentity),
       {
         ancestryBaseline: owner.ancestryBaseline,
+        controlGroup: owner.controlGroup ?? null,
         includeSession: true,
       },
     );

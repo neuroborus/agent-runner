@@ -1029,11 +1029,13 @@ It never rolls back content or changes Git controls.
 Common envelope version 12 persists the bounded frozen boot/PID/start ancestry
 baseline captured before supervisor launch. Owner-loss recovery excludes a new
 unrelated process only after every stabilized hop reaches an unchanged baseline
-identity without bypassing observed session or token ownership. PID reuse,
-stale or missing anchors, boot or namespace mismatch, cycles, inaccessible
-current metadata, and surviving descendants fail closed before the process
-record can be retired. Legacy envelopes migrate with a null baseline and gain
-no recovery authority.
+identity without bypassing observed session or token ownership. Version 14
+also persists the owner's control-group identity; inaccessible current
+environment metadata is unrelated only when its stable identity differs. PID
+reuse, stale or missing anchors, boot or namespace mismatch, cycles, missing or
+matching control-group evidence, and surviving descendants fail closed before
+the process record can be retired. Legacy envelopes migrate with null evidence
+and gain no recovery authority.
 
 A completed operator pause uses `WAITING_FOR_USER`, `operator_paused`, and a
 null resume action. Its private checkpoint preserves the reconciled workflow

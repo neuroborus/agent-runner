@@ -1000,6 +1000,27 @@ test("rejects inaccessible new processes but retains an owned session", () => {
   );
 });
 
+test("ignores an unowned inaccessible process in a different control group", () => {
+  const ownerSource = "0::/owned.scope\n";
+  const ownerControlGroup = createHash("sha256")
+    .update(ownerSource)
+    .digest("hex");
+  const options = inaccessibleProcessOptions();
+  const read = options.read;
+  const inspect = (source, sessionId = "44") =>
+    inspectOwnedSessionProcesses(sessionId, "a".repeat(64), {
+      ...options,
+      controlGroup: ownerControlGroup,
+      read(path) {
+        return path === "/proc/101/cgroup" ? source : read(path);
+      },
+    });
+
+  assert.deepEqual(inspect("0::/unrelated.scope\n"), []);
+  assert.equal(inspect(ownerSource), null);
+  assert.deepEqual(inspect("0::/unrelated.scope\n", 1), [101]);
+});
+
 test(
   "recovers from a transient incomplete completion inspection",
   { timeout: 5_000 },
@@ -1644,6 +1665,7 @@ test("recovery clears a dead session only after proving descendants absent", asy
         assert.equal(sessionId, ownerPid);
         assert.deepEqual(options, {
           ancestryBaseline: frozenBaseline,
+          controlGroup: null,
           includeSession: true,
         });
         return [];
@@ -1680,6 +1702,7 @@ test("recovery retains a dead session owner while descendants remain", async () 
           assert.equal(token, ownerToken);
           assert.deepEqual(options, {
             ancestryBaseline: frozenBaseline,
+            controlGroup: null,
             includeSession: true,
           });
           return [123_456];
