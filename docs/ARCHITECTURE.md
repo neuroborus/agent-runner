@@ -1016,9 +1016,12 @@ checkpoint and propagate without inventing a terminal pipeline failure.
 
 Plan-execution state version 24 permits a bounded availability reason and
 `commitExecutor: "not_started"` in a persisted pre-effect rejection. Version 23
-migrates without inventing that proof. Consumed authorization remains
-verification-only until Git proves no commit and unchanged state; only then can
-one atomic journal transition retire it and schedule a fresh authorization.
+migrates without inventing that proof. Version 25 makes the plan-execution
+source-projection need explicit and defaults version-24 reports to false without
+changing frozen authority, workflow evidence, correction accounting, or effects.
+Consumed authorization remains verification-only until Git proves no commit and
+unchanged state; only then can one atomic journal transition retire it and
+schedule a fresh authorization.
 Potentially executed commit/handoff effects never enter availability replay.
 Polishing state version 16 preserves charged partial resolutions at their original
 checkpoint. Both writable pipelines persist whether the current availability
@@ -2403,13 +2406,13 @@ command strings, each at most 4,000 characters) and `requirements` (up to 1,024
 reports, accommodating two role inventories with 256 needs and 256 blockers each).
 Every selected frozen command must appear in the inventory. Each
 report names an inventory `command` and may supply `commandIdentity` (null or a
-lowercase SHA-256 identity), `capabilities` (the existing scratch, cache, and
-exact artifact declaration shape), and `unsupported` (up to 16 unique lowercase
-capability labels of at most 64 characters). Unknown fields, malformed parameters,
-or commands outside the inventory raise `ERR_INVALID_TRUSTED_REQUIREMENTS`
-before effects. Unsupported labels describe needs, never executable requests,
-paths, environment values, or authority. The capability copies and freezes the
-accepted request before asynchronous work.
+lowercase SHA-256 identity), `capabilities` (the closed scratch, cache,
+source-projection, and exact artifact declaration shape), and `unsupported` (up
+to 16 unique lowercase capability labels of at most 64 characters). Unknown
+fields, malformed parameters, or commands outside the inventory raise
+`ERR_INVALID_TRUSTED_REQUIREMENTS` before effects. Unsupported labels describe
+needs, never executable requests, paths, environment values, or authority. The
+capability copies and freezes the accepted request before asynchronous work.
 
 All reports for a command are additive; one role's smaller report cannot remove
 another's requirement. A valid report without trusted selection, with unsupported

@@ -1303,11 +1303,38 @@ export function migratePlanExecutionStateV22(run) {
   });
 }
 
+export function migratePlanExecutionStateV24(run) {
+  // Historical reports cannot acquire a projection need from current
+  // configuration; frozen authority and every other checkpoint stay intact.
+  const upgradeValidation = (validation) => {
+    if (validation?.capabilityRequirements == null) return validation;
+    return Object.freeze({
+      ...validation,
+      capabilityRequirements: Object.freeze(
+        validation.capabilityRequirements.map((report) =>
+          Object.freeze({
+            ...report,
+            capabilities: Object.freeze({
+              ...report.capabilities,
+              sourceProjection: false,
+            }),
+          }),
+        ),
+      ),
+    });
+  };
+  return Object.freeze({
+    ...run.pipelineState,
+    workerValidation: upgradeValidation(run.pipelineState.workerValidation),
+    reviewerValidation: upgradeValidation(run.pipelineState.reviewerValidation),
+  });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
   classifyStopCheckpoint,
   resolveStopBoundary,
-  stateVersion: 24,
+  stateVersion: 25,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1337,6 +1364,7 @@ export const planExecutionPipeline = Object.freeze({
         ...run.pipelineState,
         availabilityCorrectionCharged: false,
       }),
+    24: migratePlanExecutionStateV24,
   }),
   roles: ROLES,
   roleAccess: ROLE_ACCESS,

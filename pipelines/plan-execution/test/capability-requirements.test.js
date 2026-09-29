@@ -4,7 +4,10 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { createTrustedValidationService } from "../../../src/trusted-validation/index.js";
-import { migratePlanExecutionStateV17 } from "../src/index.js";
+import {
+  migratePlanExecutionStateV17,
+  migratePlanExecutionStateV24,
+} from "../src/index.js";
 import {
   normalizeBootstrapResult,
   normalizePipelineState,
@@ -31,13 +34,23 @@ const command = REQUIRED_CHECKS[0].command;
 const requirement = (target = command) => ({
   command: target,
   commandIdentity: null,
-  capabilities: { scratch: true, cache: false, artifacts: [] },
+  capabilities: {
+    scratch: true,
+    cache: false,
+    sourceProjection: false,
+    artifacts: [],
+  },
   unsupported: [],
 });
 const emptyRequirement = (target = command) => ({
   command: target,
   commandIdentity: null,
-  capabilities: { scratch: false, cache: false, artifacts: [] },
+  capabilities: {
+    scratch: false,
+    cache: false,
+    sourceProjection: false,
+    artifacts: [],
+  },
   unsupported: [],
 });
 const blocked = (target = command) => ({
@@ -78,12 +91,29 @@ test("capability reports reject empty needs, mismatched identities, and malforme
       ...requirement(),
       capabilities: { ...requirement().capabilities, scratch: "/tmp" },
     },
+    {
+      ...requirement(),
+      capabilities: {
+        scratch: true,
+        cache: false,
+        artifacts: [],
+      },
+    },
+    {
+      ...emptyRequirement(),
+      capabilities: {
+        ...emptyRequirement().capabilities,
+        sourceProjection: true,
+        sourcePath: "/tmp/projected-source",
+      },
+    },
     { ...requirement(), unsupported: ["secret\ntext"] },
     {
       ...requirement(),
       capabilities: {
         scratch: true,
         cache: false,
+        sourceProjection: false,
         artifacts: [{ url: "https://localhost/file", sha256: "a".repeat(64) }],
       },
     },
@@ -119,6 +149,24 @@ test("capability reports reject empty needs, mismatched identities, and malforme
     "worker",
   );
   assert.ok(Object.isFrozen(normalized.capabilityRequirements[0].capabilities));
+  assert.equal(
+    normalizeBootstrapResult(
+      {
+        ...result,
+        capabilityRequirements: [
+          {
+            ...emptyRequirement(),
+            capabilities: {
+              ...emptyRequirement().capabilities,
+              sourceProjection: true,
+            },
+          },
+        ],
+      },
+      "worker",
+    ).capabilityRequirements[0].capabilities.sourceProjection,
+    true,
+  );
 
   const snapshot = trustedValidationSnapshot();
   const selected = snapshot.commands[0];
@@ -164,6 +212,65 @@ test("capability reports reject empty needs, mismatched identities, and malforme
     ).capabilityRequirements[0].commandIdentity,
     selected.identity,
   );
+});
+
+test("version-24 migration denies source projection without disturbing workflow proof", () => {
+  const capabilityRequirements = [
+    {
+      command,
+      commandIdentity: null,
+      capabilities: { scratch: true, cache: false, artifacts: [] },
+      unsupported: [],
+    },
+  ];
+  const validation = {
+    requiredChecks: REQUIRED_CHECKS,
+    validationInfrastructure: ["package.json"],
+    capabilityRequirements,
+    environmentBlockers: [],
+  };
+  const trustedValidation = trustedValidationSnapshot();
+  const bootstrapCorrections = [{ attempt: 1, diagnostics: [] }];
+  const reviewResult = { status: "APPROVED", fingerprint: "a".repeat(64) };
+  const pendingCommit = {
+    status: "consumed",
+    authorization: { token: "opaque" },
+  };
+  const legacy = {
+    workerValidation: validation,
+    reviewerValidation: validation,
+    trustedValidation,
+    workflowState: "COMMIT",
+    currentStep: 2,
+    bootstrapCorrections,
+    reviewResult,
+    pendingCommit,
+  };
+
+  const migrated = migratePlanExecutionStateV24({ pipelineState: legacy });
+
+  for (const role of ["worker", "reviewer"]) {
+    assert.deepEqual(
+      migrated[`${role}Validation`].capabilityRequirements[0].capabilities,
+      {
+        scratch: true,
+        cache: false,
+        artifacts: [],
+        sourceProjection: false,
+      },
+    );
+    assert.ok(
+      Object.isFrozen(
+        migrated[`${role}Validation`].capabilityRequirements[0].capabilities,
+      ),
+    );
+  }
+  assert.equal(migrated.trustedValidation, trustedValidation);
+  assert.equal(migrated.bootstrapCorrections, bootstrapCorrections);
+  assert.equal(migrated.reviewResult, reviewResult);
+  assert.equal(migrated.pendingCommit, pendingCommit);
+  assert.equal(migrated.workflowState, "COMMIT");
+  assert.equal(migrated.currentStep, 2);
 });
 
 test("empty capability output is corrected without delegating an ordinary check", async (t) => {
@@ -498,6 +605,7 @@ test("reports cannot add authority to frozen selected commands", async (t) => {
             capabilities: {
               scratch: false,
               cache: false,
+              sourceProjection: false,
               artifacts: [
                 {
                   url: "https://downloads.example.com/tool",

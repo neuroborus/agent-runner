@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-09-29
 
+- **Plan execution discovers source-projection needs without choosing paths.**
+  Bootstrap and validation migration now require a boolean projection need for
+  every exact-command capability report. Accepted needs remain additive and
+  frozen-authority checked; finalization runs an active projected check only
+  against its fingerprint-bound source. The ordered state migration defaults
+  historical reports to no projection while preserving workflow position,
+  review and correction evidence, immutable snapshots, and consumed-effect
+  verification.
+
 - **Writable validation uses exact disposable source, not host authority.**
   Trusted snapshot version 4 adds the closed `sourceProjection: true` command
   capability. The runner journals an owned allocation, reconstructs frozen HEAD

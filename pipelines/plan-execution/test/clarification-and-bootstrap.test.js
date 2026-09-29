@@ -209,6 +209,17 @@ test("clarifies and bootstraps through independent source-session forks", async 
     readySchema.properties.validationInfrastructure.maxItems,
     MAX_BOOTSTRAP_ITEMS,
   );
+  const capabilitySchema =
+    readySchema.properties.capabilityRequirements.items.properties.capabilities;
+  assert.deepEqual(capabilitySchema.required, [
+    "scratch",
+    "cache",
+    "sourceProjection",
+    "artifacts",
+  ]);
+  assert.deepEqual(capabilitySchema.properties.sourceProjection, {
+    type: "boolean",
+  });
   const validationPathPattern = new RegExp(
     readySchema.properties.validationInfrastructure.items.pattern,
     "u",

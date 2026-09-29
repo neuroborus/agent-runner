@@ -43,6 +43,9 @@ test("bootstrap instructions preserve independent evidence and arbitration", () 
     /independently identify every required check/iu,
   );
   assert.match(BOOTSTRAP_INSTRUCTIONS, /validationInfrastructure/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /sourceProjection: boolean/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /frozen exact command/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /Do not request projection paths/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /capacity of 256 items/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /CAPACITY_EXHAUSTED/u);
   assert.match(

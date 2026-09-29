@@ -259,6 +259,12 @@ states remain inert except for already supported journal-proven recovery. A cons
 commit keeps its exact gate and authorization for verification first; discovery
 continues only if settlement leaves more work. Migration preserves frozen
 configuration, completed commits, and correction budgets.
+State version 25 requires every plan-execution capability report to carry the
+boolean `sourceProjection` need. The ordered version-24 migration sets it to
+`false` without changing the trusted snapshot, workflow position, correction
+accounting, review evidence, or prepared and consumed effects. It does not infer
+authority from current configuration. Null provisional reports stay null and
+continue through the existing read-only discovery barrier.
 Discovery does not authorize leaving a safety pause. Interrupted correction
 edits are reconciled and charged before new writable work, without recounting
 them on a later resume.
@@ -424,14 +430,17 @@ the smaller of the snapshot deadline and 10 seconds.
 Bootstrap and validation migration report bounded exact-command needs alongside
 each active role's inventory. `capabilityRequirements` permits 256 reports per
 role: `command`, nullable frozen `commandIdentity`, `capabilities` with boolean
-`scratch`/`cache` and up to 32 exact `{url, sha256}` artifacts, and `unsupported`
-with up to 16 unique lowercase capability identifiers. `environmentBlockers`
-permits 256 reports per role: `command`, `source` (`agent-sandbox` or `runner`),
-and 1–8 bounded single-line evidence strings. Every command must occur in that
-role's exact inventory; existing structured-result byte bounds also apply.
-Every capability report must contain at least one scratch, cache, artifact, or
-unsupported need. A non-null `commandIdentity` must exactly equal the frozen
-identity supplied for that selected command; the field may remain null.
+`scratch`, `cache`, and `sourceProjection`, up to 32 exact `{url, sha256}`
+artifacts, and `unsupported` with up to 16 unique lowercase capability
+identifiers. `sourceProjection` may be true only when the frozen exact command
+must write beside the staging-independent source it checks; agents cannot name a
+path or grant authority. `environmentBlockers` permits 256 reports per role:
+`command`, `source` (`agent-sandbox` or `runner`), and 1–8 bounded single-line
+evidence strings. Every command must occur in that role's exact inventory;
+existing structured-result byte bounds also apply. Every capability report must
+contain at least one scratch, cache, source-projection, artifact, or unsupported
+need. A non-null `commandIdentity` must exactly equal the frozen identity supplied
+for that selected command; the field may remain null.
 Non-READY outcomes carry empty report arrays. Zero-need reports, substituted
 identities, malformed fields or parameters, and invalid references use the
 existing bounded read-only bootstrap correction path. A corrected empty array
@@ -3564,7 +3573,7 @@ At minimum cover:
 73. lazy no-progress, stable-finding, fix, and additional-round behavior remains
     bounded without weakening exact commits, trusted checks, fingerprints, Git
     controls, product decisions, or no-coauthor/no-push rules.
-74. every supported legacy version migrates through state version 24 to
+74. every supported legacy version migrates through state version 25 to
     `independent` without reviving terminal runs or replaying completed or
     pending commit effects; unfinished work freezes guidance and repeats
     read-only validation discovery when prior evidence is provisional.

@@ -35,6 +35,7 @@ import {
   migratePlanExecutionStateV15,
   migratePlanExecutionStateV21,
   migratePlanExecutionStateV22,
+  migratePlanExecutionStateV24,
   planExecutionPipeline,
   runPlanExecution,
 } from "../../src/index.js";
@@ -260,9 +261,11 @@ function migrateVersionOneState(state) {
   const versionSixteen = migratePlanExecutionStateV15({
     pipelineState: versionFifteen,
   });
-  return migratePlanExecutionStateV22({
-    pipelineState: migratePlanExecutionStateV21({
-      pipelineState: versionSixteen,
+  return migratePlanExecutionStateV24({
+    pipelineState: migratePlanExecutionStateV22({
+      pipelineState: migratePlanExecutionStateV21({
+        pipelineState: versionSixteen,
+      }),
     }),
   });
 }
@@ -299,24 +302,26 @@ function hash(value) {
 function trustedValidationSnapshot(
   alias = "service-check",
   command = "npm run test:service",
+  capabilities = {},
 ) {
   const vector = {
     alias,
     command,
     executable: "npm",
     arguments: ["run", "test:service"],
-    capabilities: {},
+    capabilities,
   };
   const identity = hash(JSON.stringify(vector));
   const commands = [{ ...vector, identity }];
+  const schemaVersion = capabilities.sourceProjection === true ? 4 : 3;
   return Object.freeze({
-    schemaVersion: 3,
+    schemaVersion,
     timeoutMs: 3_600_000,
     commands: Object.freeze(commands.map(Object.freeze)),
     commandFingerprint: hash(JSON.stringify([identity])),
     configurationFingerprint: hash(
       JSON.stringify({
-        schemaVersion: 3,
+        schemaVersion,
         commands: [vector],
         timeoutMs: 3_600_000,
       }),
@@ -1668,7 +1673,7 @@ async function createFixture(
     revision: 1,
     runId,
     pipelineId: "plan-execution",
-    pipelineStateVersion: 24,
+    pipelineStateVersion: 25,
     projectPath,
     taskPath,
     roles: Object.fromEntries(
@@ -2081,7 +2086,7 @@ async function createFixture(
   ) {
     currentRun = {
       ...currentRun,
-      pipelineStateVersion: 24,
+      pipelineStateVersion: 25,
       pipelineState,
       pause,
       revision: currentRun.revision + 1,

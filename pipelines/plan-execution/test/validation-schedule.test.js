@@ -97,7 +97,8 @@ test("scoped discovery rejects missing, unordered, and out-of-plan applicability
   ]);
 });
 
-function discovery(role, independent) {
+function discovery(role, independent, trustedValidation) {
+  const trusted = trustedValidation.commands[0];
   return {
     ...bootstrapReady(role),
     requiredChecks: [
@@ -106,6 +107,19 @@ function discovery(role, independent) {
       ...(role === "Reviewer" && independent
         ? [check("C3", reviewerOnly, [2])]
         : []),
+    ],
+    capabilityRequirements: [
+      {
+        command: slow,
+        commandIdentity: trusted.identity,
+        capabilities: {
+          scratch: false,
+          cache: false,
+          sourceProjection: true,
+          artifacts: [],
+        },
+        unsupported: [],
+      },
     ],
   };
 }
@@ -133,8 +147,11 @@ function finalized(commands) {
 for (const mode of ["independent", "lazy", "combined"]) {
   test(`${mode} persists per-step selection and reuses unchanged confirmation evidence`, async (t) => {
     const independent = mode !== "lazy";
-    const trustedValidation = trustedValidationSnapshot();
+    const trustedValidation = trustedValidationSnapshot("service-check", slow, {
+      sourceProjection: true,
+    });
     const trustedSteps = [];
+    const trustedBindings = [];
     const agentChecks = [];
     const preparation = [];
     const stop = Object.assign(new Error("persist and reload checkpoint"), {
@@ -148,10 +165,12 @@ for (const mode of ["independent", "lazy", "combined"]) {
       modeSettings: { trustedChecks: ["service-check"] },
       worker: [
         clarificationReady(),
-        discovery("Worker", independent),
+        discovery("Worker", independent, trustedValidation),
         ...(independent ? [reconciliationResolved()] : []),
       ],
-      reviewer: independent ? [discovery("Reviewer", true)] : [],
+      reviewer: independent
+        ? [discovery("Reviewer", true, trustedValidation)]
+        : [],
       workWorker: [
         implementationCompleted(),
         ...(mode === "independent" ? [] : [checkAndFix()]),
@@ -161,7 +180,7 @@ for (const mode of ["independent", "lazy", "combined"]) {
         finalized([fast, slow, ...(independent ? [reviewerOnly] : [])]),
       ],
       onRequirementInspection(request) {
-        preparation.push(request.inventory);
+        preparation.push(structuredClone(request));
         return { status: "READY", blockers: [] };
       },
       onRoleRun(_role, request) {
@@ -186,8 +205,15 @@ for (const mode of ["independent", "lazy", "combined"]) {
         }
       },
       onTrustedValidation(request) {
-        trustedSteps.push(fixture.currentRun.pipelineState.currentStep);
+        const state = fixture.currentRun.pipelineState;
+        trustedSteps.push(state.currentStep);
+        trustedBindings.push(request.bindings);
         assert.deepEqual(request.snapshot, trustedValidation);
+        assert.equal(request.sourceHead, state.repositoryBaseline.head);
+        assert.equal(
+          request.bindings.contentFingerprint,
+          state.repositoryBaseline.contentFingerprint,
+        );
         return {
           status: "PASS",
           commandIdentity: request.commandIdentity,
@@ -236,17 +262,28 @@ for (const mode of ["independent", "lazy", "combined"]) {
     fixture.persistPipelineState(confirmation);
     const completed = await fixture.run(settings);
     assert.equal(completed.pipelineState.workflowState, "DONE");
+    assert.equal(completed.pipelineState.completedCommits.length, 2);
     assert.deepEqual(completed.pipelineState.finalizationResult, evidence);
     assert.deepEqual(trustedSteps, [2]);
+    assert.equal(trustedBindings[0].contentFingerprint, evidence.fingerprint);
     assert.deepEqual(agentChecks, [
       [1, [fast]],
       [2, [fast, slow, ...(independent ? [reviewerOnly] : [])]],
     ]);
     assert.ok(preparation.length > 0);
-    assert.ok(preparation.every((inventory) => inventory.includes(slow)));
+    assert.ok(preparation.every(({ inventory }) => inventory.includes(slow)));
+    assert.ok(
+      preparation.every(({ requirements }) =>
+        requirements.some(
+          (requirement) =>
+            requirement.command === slow &&
+            requirement.capabilities.sourceProjection === true,
+        ),
+      ),
+    );
     if (independent)
       assert.ok(
-        preparation.every((inventory) => inventory.includes(reviewerOnly)),
+        preparation.every(({ inventory }) => inventory.includes(reviewerOnly)),
       );
     assert.deepEqual(
       completed.pipelineState.trustedValidation,
