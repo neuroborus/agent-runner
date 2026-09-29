@@ -85,6 +85,7 @@ test("test command partitions coverage, propagates failures, and cleans private 
   await Promise.all([mkdir(join(root, "test")), mkdir(storage)]);
   for (const [file, name, fails] of [
     ["fast.test.js", "fast", false],
+    ["timing.slow.test.js", "timed-slow", false],
     ["recovery.slow.test.js", "slow", true],
   ]) {
     await writeFile(
@@ -107,6 +108,7 @@ test("${name} boundary", () => {
 
   const fast = await run();
   assert.match(fast.stderr, /Tests: 1 files/u);
+  assert.match(fast.stdout, /^\.+\n$/u);
   assert.ok(
     (await readFile(join(root, "fast.ran"), "utf8")).startsWith(storage + "/"),
   );
@@ -115,13 +117,24 @@ test("${name} boundary", () => {
 
   await assert.rejects(run("--slow"), (error) => {
     assert.equal(error.code, 1);
+    assert.match(
+      error.stdout,
+      /^✔ (?:timed-slow boundary|test\/timing\.slow\.test\.js) \(\d+(?:\.\d+)?(?:ms|s)\)$/mu,
+    );
     assert.match(error.stdout, /slow boundary/u);
     assert.match(error.stdout, /deliberate command failure/u);
     assert.match(error.stdout, /AssertionError/u);
     assert.match(error.stdout, /at TestContext/u);
+    assert.match(
+      error.stderr,
+      /Failure diagnostics: test\/recovery\.slow\.test\.js/u,
+    );
     return true;
   });
-  await readFile(join(root, "slow.ran"));
+  await Promise.all([
+    readFile(join(root, "slow.ran")),
+    readFile(join(root, "timed-slow.ran")),
+  ]);
   assert.deepEqual(await readdir(storage), []);
   await run("test/fast.test.js");
   assert.deepEqual(await readdir(storage), []);

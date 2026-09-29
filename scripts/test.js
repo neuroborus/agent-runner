@@ -135,7 +135,7 @@ try {
       [
         "--test",
         `--test-concurrency=${batch.concurrency}`,
-        "--test-reporter=dot",
+        `--test-reporter=${slow ? "spec" : "dot"}`,
         ...batch.files,
       ],
       join(directory, `test-output-${index}.log`),
@@ -154,8 +154,12 @@ try {
   if (exitCode !== 0) {
     const failedFiles = [
       ...new Set(
-        [...output.matchAll(/^✖ (.+?\.test\.js) \(/gmu)]
-          .map((match) => match[1])
+        [
+          ...output.matchAll(
+            /^(?:✖ (.+?\.test\.js) \(|test at (.+?\.test\.js):\d+:\d+$)/gmu,
+          ),
+        ]
+          .map((match) => match[1] ?? match[2])
           .filter((path) => files.includes(path)),
       ),
     ];
