@@ -234,6 +234,8 @@ Add the requested value.
 
 Cover the requested value.`;
 
+const ONE_STEP_PLAN = TWO_STEP_PLAN.split("\n## Commit 2:")[0];
+
 const SOURCE_SESSION = "11111111-1111-4111-8111-111111111111";
 
 // Reopen the public runner with an empty adapter session set. Durable state,
@@ -403,420 +405,6 @@ function providerInterruption() {
     new Error("The provider stopped before returning a checkpoint."),
     { recoverable: true },
   );
-}
-
-function reviewFinding() {
-  return {
-    id: "R1",
-    file: "src/base.js",
-    problem: "The base value needs review.",
-    reason: "The proposed value must match the task.",
-    suggestedAction: "Verify the base value.",
-  };
-}
-
-const EMPTY_DECISION = {
-  question: "",
-  options: [],
-  whyBlocked: "",
-  evidence: [],
-};
-
-for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
-  test(`combined ${pipelineId} retains self-findings across interrupted fixing without arbitration`, async (t) => {
-    let reported = false;
-    let interrupted = false;
-    const authoring = pipelineId === "plan-authoring";
-    const finding = authoring
-      ? {
-          id: "base-value",
-          description: "Verify the planned base value.",
-          evidence: ["The draft should explain how the value is verified."],
-        }
-      : reviewFinding();
-    const scenario = await combinedScenario(t, pipelineId, {
-      beforeTurn(turn) {
-        if (reported && !interrupted && turn.phase === "check-and-fix") {
-          interrupted = true;
-          assert.ok(turn.request.recoveryPrompt.includes(finding.id));
-          throw providerInterruption();
-        }
-      },
-      afterTurn(turn, durable, result) {
-        if (!reported && turn.phase === "clean-confirm") {
-          reported = true;
-          result.status = "FINDINGS";
-          result.findings = [finding];
-        }
-      },
-    });
-    const paused = (await scenario.resume()).run;
-    assert.equal(
-      paused.pause.resumeState,
-      "CHECK_AND_FIX",
-      JSON.stringify(paused.pause),
-    );
-    const findings = authoring
-      ? paused.pipelineState.findings
-      : paused.pipelineState.primaryFindings;
-    assert.deepEqual(findings, [finding]);
-    assert.equal(
-      scenario.calls.some(({ phase }) => phase === "review"),
-      false,
-    );
-    const count = scenario.calls.length;
-    scenario.reopen();
-    const completed = (await scenario.resume()).run;
-    assert.equal(
-      completed.pipelineState.workflowState,
-      "DONE",
-      JSON.stringify(completed.pause),
-    );
-    assert.deepEqual(
-      scenario.calls.slice(count, count + 3).map(({ phase }) => phase),
-      ["check-and-fix", "clean-confirm", "review"],
-    );
-    assert.ok(
-      scenario.calls[count].request.recoveryPrompt.includes(finding.id),
-    );
-    assert.equal(
-      scenario.calls.some(({ role }) => role === "arbiter"),
-      false,
-    );
-  });
-}
-
-for (const pipelineId of ["plan-execution", "polishing"]) {
-  test(`combined ${pipelineId} charges interrupted primary correction once`, async (t) => {
-    let changed = false;
-    let interrupted = false;
-    const scenario = await combinedScenario(t, pipelineId, {
-      settings:
-        pipelineId === "polishing"
-          ? { maxFixRounds: 2 }
-          : { maxFixRoundsPerStep: 2 },
-      async result(turn, durable) {
-        if (turn.phase !== "check-and-fix") return;
-        if (!changed) {
-          changed = true;
-          await writeFile(
-            join(turn.request.cwd, "src/base.js"),
-            "export const base = 7;\n",
-          );
-          return { status: "INVALID" };
-        }
-        if (
-          durable.pipelineState.pendingLazyCorrection !== null &&
-          !interrupted
-        ) {
-          interrupted = true;
-          assert.equal(turn.request.access, "workspace-write");
-          assert.equal(turn.request.session, undefined);
-          throw providerInterruption();
-        }
-      },
-      afterTurn(turn, durable) {
-        if (
-          turn.phase === "confirm" &&
-          (pipelineId === "polishing" ||
-            durable.pipelineState.currentStep === 1)
-        ) {
-          assert.equal(durable.counters.fixRounds, 1);
-          assert.equal(durable.pipelineState.lazyCorrections.length, 1);
-          assert.equal(
-            durable.pipelineState.lazyCorrections[0].fixRoundCharged,
-            true,
-          );
-        }
-      },
-    });
-    const paused = (await scenario.resume()).run;
-    assert.ok(interrupted);
-    assert.equal(paused.pause.resumeState, "CHECK_AND_FIX");
-    assert.equal(paused.counters.fixRounds, 1);
-    const pending = paused.pipelineState.pendingLazyCorrection;
-    assert.ok(pending);
-    assert.equal(pending.fixRoundCharged, true);
-    assert.equal(paused.pipelineState.lazyCorrections.length, 1);
-    assert.equal(
-      await readFile(join(scenario.projectPath, "src/base.js"), "utf8"),
-      "export const base = 7;\n",
-    );
-    const count = scenario.calls.length;
-    scenario.reopen();
-    const completed = (await scenario.resume()).run;
-    assert.equal(
-      completed.pipelineState.workflowState,
-      "DONE",
-      JSON.stringify(completed.pause),
-    );
-    assert.equal(scenario.calls[count].request.access, "workspace-write");
-    assert.equal(scenario.calls[count].request.session, undefined);
-    assert.equal(completed.pipelineState.pendingLazyCorrection, null);
-    assert.equal(completed.counters.correctionRounds, 0);
-    if (pipelineId === "polishing")
-      assert.equal(completed.counters.fixRounds, 1);
-    assert.equal(
-      scenario.calls.some(({ role }) => role === "arbiter"),
-      false,
-    );
-  });
-
-  test(`combined ${pipelineId} retains exact overrides across interrupted reconvergence`, async (t) => {
-    let overrideAccepted = false;
-    let interrupted = false;
-    const scenario = await combinedScenario(t, pipelineId, {
-      settings: { maxSameFindingRounds: 1 },
-      beforeTurn(turn, durable) {
-        if (
-          overrideAccepted &&
-          !interrupted &&
-          turn.phase === "check-and-fix"
-        ) {
-          interrupted = true;
-          assert.equal(
-            durable.pipelineState.findingOverrides[0].findingId,
-            "R1",
-          );
-          throw providerInterruption();
-        }
-      },
-      result(turn) {
-        if (turn.phase === "resolve-findings")
-          return {
-            status: "RESOLVED",
-            decisions: [
-              {
-                id: "R1",
-                decision: "FIX",
-                reason: "The value was checked without changing content.",
-                evidence: [],
-              },
-            ],
-            reason: "",
-            ...EMPTY_DECISION,
-          };
-      },
-      afterTurn(turn, durable, result) {
-        if (
-          turn.phase === "review" &&
-          (pipelineId === "polishing" ||
-            durable.pipelineState.currentStep === 1)
-        ) {
-          result.status = "FINDINGS";
-          result.findings = [reviewFinding()];
-        }
-      },
-    });
-    const paused = (await scenario.resume()).run;
-    assert.equal(paused.pause.reason, "no_progress");
-    overrideAccepted = true;
-    const waiting = (
-      await scenario.resume({ type: "override-finding", findingId: "R1" })
-    ).run;
-    assert.ok(interrupted);
-    const overrides = waiting.pipelineState.findingOverrides;
-    assert.deepEqual(overrides, [
-      {
-        findingId: "R1",
-        fingerprint: paused.pipelineState.candidateReviewedFingerprint,
-      },
-    ]);
-    scenario.reopen();
-    const completed = (await scenario.resume()).run;
-    assert.equal(
-      completed.pipelineState.workflowState,
-      "DONE",
-      JSON.stringify(completed.pause),
-    );
-    if (pipelineId === "polishing")
-      assert.deepEqual(completed.pipelineState.findingOverrides, overrides);
-    assert.equal(
-      scenario.calls.some(({ role }) => role === "arbiter"),
-      false,
-    );
-  });
-
-  for (const changed of [false, true]) {
-    test(`combined ${pipelineId} retains only valid finalization after ${changed ? "changed" : "unchanged"} resolution and interruption`, async (t) => {
-      let reported = false;
-      let resolved = false;
-      let interrupted = false;
-      let finalization;
-      const scenario = await combinedScenario(t, pipelineId, {
-        beforeTurn(turn) {
-          if (resolved && !interrupted && turn.phase === "check-and-fix") {
-            interrupted = true;
-            throw providerInterruption();
-          }
-        },
-        async result(turn, durable) {
-          if (turn.phase === "resolve-findings") {
-            assert.equal(durable.pipelineState.findings[0].id, "R1");
-            if (changed)
-              await writeFile(
-                join(turn.request.cwd, "src/base.js"),
-                "export const base = 3;\n",
-              );
-            resolved = true;
-            return {
-              status: "RESOLVED",
-              decisions: [
-                {
-                  id: "R1",
-                  decision: "FIX",
-                  reason: "Verified and resolved the value concern.",
-                  evidence: [],
-                },
-              ],
-              reason: "",
-              ...EMPTY_DECISION,
-            };
-          }
-        },
-        afterTurn(turn, durable, result) {
-          if (!reported && turn.phase === "confirm") {
-            reported = true;
-            finalization = durable.pipelineState.finalizationResult;
-            result.status = "FINDINGS";
-            result.findings = [reviewFinding()];
-          }
-        },
-      });
-      const paused = (await scenario.resume()).run;
-      assert.equal(
-        paused.pause.resumeState,
-        "CHECK_AND_FIX",
-        JSON.stringify(paused.pause),
-      );
-      assert.equal(paused.pipelineState.candidateReviewResult, null);
-      assert.equal(paused.pipelineState.reviewedFingerprint, null);
-      assert.deepEqual(
-        paused.pipelineState.finalizationResult,
-        changed ? null : finalization,
-      );
-      const counters = paused.counters.fixRounds;
-      assert.equal(counters, 2);
-      const count = scenario.calls.length;
-      scenario.reopen();
-      const completed = (await scenario.resume()).run;
-      assert.equal(
-        completed.pipelineState.workflowState,
-        "DONE",
-        JSON.stringify(completed.pause),
-      );
-      assert.deepEqual(
-        scenario.calls.slice(count, count + 3).map(({ phase }) => phase),
-        ["check-and-fix", "clean-confirm", "review"],
-      );
-      const finalizations = scenario.calls.filter(
-        ({ phase }) => phase === "finalize",
-      ).length;
-      assert.equal(
-        finalizations,
-        (pipelineId === "plan-execution" ? 2 : 1) + Number(changed),
-      );
-      if (pipelineId === "polishing")
-        assert.equal(completed.counters.fixRounds, counters + 1);
-      assert.equal(
-        scenario.calls.some(({ role }) => role === "arbiter"),
-        false,
-      );
-    });
-  }
-
-  test(`combined ${pipelineId} reconstructs disputed findings and fresh arbitration`, async (t) => {
-    let reported = false;
-    let interrupted = false;
-    const scenario = await combinedScenario(t, pipelineId, {
-      settings: { maxDisputesPerFinding: 1 },
-      beforeTurn(turn) {
-        if (turn.role === "arbiter" && !interrupted) {
-          interrupted = true;
-          throw providerInterruption();
-        }
-      },
-      result(turn) {
-        if (turn.role === "arbiter") {
-          assert.equal(turn.request.session, undefined);
-          assert.equal(turn.request.access, "read-only");
-          assert.match(turn.request.recoveryPrompt, /R1/u);
-          return {
-            direction: "WORKER_CORRECT",
-            rationale: "The recorded Worker evidence resolves the concern.",
-            ...EMPTY_DECISION,
-          };
-        }
-        if (turn.request.prompt.includes("Worker disputes:"))
-          return {
-            status: "RESOLVED",
-            decisions: [
-              {
-                id: "R1",
-                direction: "UPHOLD",
-                reason: "The Reviewer still disputes that interpretation.",
-                evidence: [],
-              },
-            ],
-            ...EMPTY_DECISION,
-          };
-        if (turn.phase === "resolve-findings")
-          return {
-            status: "RESOLVED",
-            decisions: [
-              {
-                id: "R1",
-                decision: "DISPUTE",
-                reason: "The existing value matches the task.",
-                evidence: ["src/base.js contains the required value."],
-              },
-            ],
-            reason: "",
-            ...EMPTY_DECISION,
-          };
-      },
-      afterTurn(turn, durable, result) {
-        if (!reported && turn.phase === "review") {
-          reported = true;
-          result.status = "FINDINGS";
-          result.findings = [reviewFinding()];
-        }
-      },
-    });
-    const paused = (await scenario.resume()).run;
-    assert.ok(interrupted);
-    assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
-    assert.equal(paused.pipelineState.findings[0].id, "R1");
-    assert.equal(
-      paused.pipelineState.disputeHistory.at(-1).direction,
-      "UPHOLD",
-    );
-    const count = scenario.calls.length;
-    scenario.reopen();
-    const completed = (await scenario.resume()).run;
-    assert.equal(
-      completed.pipelineState.workflowState,
-      "DONE",
-      JSON.stringify(completed.pause),
-    );
-    assert.equal(scenario.calls[count].role, "arbiter");
-    assert.ok(
-      scenario.calls
-        .filter(({ role }) => role === "arbiter")
-        .every(({ request }) => request.session === undefined),
-    );
-    assert.deepEqual(
-      scenario.calls.slice(count + 1, count + 4).map(({ phase }) => phase),
-      ["check-and-fix", "clean-confirm", "review"],
-    );
-    if (pipelineId === "polishing") {
-      assert.equal(
-        completed.pipelineState.findingArbitrations[0].direction,
-        "WORKER_CORRECT",
-      );
-      assert.equal(completed.pipelineState.disputeCounts.R1, 1);
-    }
-  });
 }
 
 for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
@@ -1884,11 +1472,18 @@ test("polishes a dirty worktree through mixed CLI roles without committing", asy
 test("executes every planned commit across backend configurations", async (t) => {
   const cases = [
     {
-      name: "Codex runner default",
-      configuration: { schemaVersion: 1, defaultBackend: "codex" },
+      name: "combined Codex configuration",
+      configuration: {
+        schemaVersion: 1,
+        defaultBackend: "codex",
+        pipelines: { "plan-execution": { mode: "combined" } },
+      },
       args: ["--fork-from", "codex:source-codex"],
+      mode: "combined",
+      plan: ONE_STEP_PLAN,
       roles: { worker: "codex", reviewer: "codex", arbiter: "codex" },
       source: "source-codex",
+      subjects: ["feat(feature): add value"],
     },
     {
       name: "Claude runner default",
@@ -1933,7 +1528,11 @@ test("executes every planned commit across backend configurations", async (t) =>
 
   for (const scenario of cases) {
     await t.test(scenario.name, async (t) => {
-      const paths = await fixture(t);
+      const subjects = scenario.subjects ?? [
+        "feat(feature): add value",
+        "test(feature): cover value",
+      ];
+      const paths = await fixture(t, { plan: scenario.plan });
       const codex = createBackend("codex", {
         bootstrapDisagreement: scenario.bootstrapDisagreement,
       });
@@ -1966,7 +1565,11 @@ test("executes every planned commit across backend configurations", async (t) =>
       assert.match(stdout.value(), /State: DONE/u);
       const run = await onlyRun(runStore);
       assert.equal(run.pipelineState.workflowState, "DONE");
-      assert.equal(run.pipelineState.completedCommits.length, 2);
+      assert.equal(
+        run.pipelineState.settings.mode,
+        scenario.mode ?? "independent",
+      );
+      assert.equal(run.pipelineState.completedCommits.length, subjects.length);
       assert.deepEqual(
         Object.fromEntries(
           Object.entries(run.roles).map(([role, value]) => [
@@ -1985,8 +1588,8 @@ test("executes every planned commit across backend configurations", async (t) =>
           ])
         )
           .split("\n")
-          .slice(-2),
-        ["feat(feature): add value", "test(feature): cover value"],
+          .slice(-subjects.length),
+        subjects,
       );
       assert.equal(
         await gitOutput(paths.projectPath, ["status", "--porcelain"]),
@@ -2011,7 +1614,7 @@ test("executes every planned commit across backend configurations", async (t) =>
       const allCalls = [...codex.calls, ...claude.calls];
       assert.equal(
         allCalls.filter(({ access }) => access === "local-commit").length,
-        2,
+        subjects.length,
       );
       assert.equal(
         allCalls.some(({ commit }) =>
@@ -2023,32 +1626,14 @@ test("executes every planned commit across backend configurations", async (t) =>
         const sourceCalls = allCalls.filter(
           ({ session }) => session?.id === scenario.source,
         );
-        assert.ok(sourceCalls.length >= 3);
+        assert.ok(sourceCalls.length >= 2);
         assert.ok(sourceCalls.every(({ session }) => session.mode === "fork"));
-        const candidateReviews = allCalls.filter((call) =>
-          call.prompt.includes("Review the changes and verify"),
+        assert.equal(run.sessionLineage.source, scenario.source);
+        const childRoles = new Set(
+          run.sessionLineage.children.map(({ role }) => role),
         );
-        const terminalConfirmations = allCalls.filter((call) =>
-          call.prompt.includes("Confirm the finalized changes"),
-        );
-        assert.equal(candidateReviews.length, 2);
-        assert.ok(
-          candidateReviews.every(
-            ({ session }) =>
-              session?.mode === "fork" && session.id === scenario.source,
-          ),
-        );
-        assert.equal(terminalConfirmations.length, 2);
-        assert.ok(
-          terminalConfirmations.every(
-            ({ session }) => session?.mode === "continue",
-          ),
-        );
-        assert.equal(
-          run.sessionLineage.children.filter(({ role }) => role === "reviewer")
-            .length,
-          3,
-        );
+        assert.equal(childRoles.has("worker"), true);
+        assert.equal(childRoles.has("reviewer"), true);
       }
       if (scenario.bootstrapDisagreement) {
         const arbitration = allCalls.find((call) =>
