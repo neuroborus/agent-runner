@@ -1156,7 +1156,12 @@ export function normalizeCompatibilityResult(payload) {
   return Object.freeze({ status: payload.status });
 }
 
-export function normalizeBootstrapResultCandidate(payload, role, stepCount) {
+export function normalizeBootstrapResultCandidate(
+  payload,
+  role,
+  stepCount,
+  { trustedCommands = [] } = {},
+) {
   assertStepAssessment(payload?.stepAssessment);
   const statuses = [
     "READY",
@@ -1264,9 +1269,9 @@ export function normalizeBootstrapResultCandidate(payload, role, stepCount) {
     INVALID_OUTPUT_CODE,
     { maxItems: MAX_BOOTSTRAP_ITEMS, scoped: true, stepCount },
   );
-  if (!validCapabilityReports(payload, requiredChecks)) {
+  if (!validCapabilityReports(payload, requiredChecks, trustedCommands)) {
     throw outputError(
-      "Capability reports must be bounded and name exact inventory commands.",
+      "Capability reports must contain actual needs and match the frozen command inventory.",
       outputConstraint(
         "capabilityRequirements",
         "exact-command-capability-reports",
@@ -1300,8 +1305,13 @@ export function normalizeBootstrapResultCandidate(payload, role, stepCount) {
   });
 }
 
-export function normalizeBootstrapResult(payload, role, stepCount) {
-  const candidate = normalizeBootstrapResultCandidate(payload, role, stepCount);
+export function normalizeBootstrapResult(payload, role, stepCount, options) {
+  const candidate = normalizeBootstrapResultCandidate(
+    payload,
+    role,
+    stepCount,
+    options,
+  );
   if (candidate.diagnostics.length !== 0) {
     throw new PlanExecutionWorkflowError(
       "Required checks must be staging-independent.",
@@ -3514,7 +3524,13 @@ export function createPersistedFinalizationEvidence({
   });
 }
 
-function normalizePersistedValidation(value, name, stepCount, allowLegacy) {
+function normalizePersistedValidation(
+  value,
+  name,
+  stepCount,
+  allowLegacy,
+  trustedCommands,
+) {
   if (value === null) {
     return null;
   }
@@ -3552,7 +3568,7 @@ function normalizePersistedValidation(value, name, stepCount, allowLegacy) {
       value.capabilityRequirements === null &&
       value.environmentBlockers === null
     ) &&
-    !validCapabilityReports(value, value.requiredChecks)
+    !validCapabilityReports(value, value.requiredChecks, trustedCommands)
   )
     throw workflowError("Persisted capability reports are invalid.");
   return value;
@@ -4201,12 +4217,14 @@ export function normalizePipelineState(value) {
     "Worker validation evidence",
     planSteps?.length,
     value.validationScopeLegacy,
+    trustedValidation.commands,
   );
   const reviewerValidation = normalizePersistedValidation(
     value.reviewerValidation,
     "Reviewer validation evidence",
     planSteps?.length,
     value.validationScopeLegacy,
+    trustedValidation.commands,
   );
   const resolvedSummary = normalizedSummary(
     value.resolvedSummary,

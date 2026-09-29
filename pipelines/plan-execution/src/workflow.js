@@ -538,9 +538,13 @@ function normalizeBootstrapRoleOutputCandidate(
   role,
   phase = "bootstrap",
   stepCount,
+  trustedCommands,
 ) {
   return normalizeRoleOutput(
-    (value) => normalizeBootstrapResultCandidate(value, role, stepCount),
+    (value) =>
+      normalizeBootstrapResultCandidate(value, role, stepCount, {
+        trustedCommands,
+      }),
     output,
     bootstrapOutputContext(role, phase),
   );
@@ -562,12 +566,18 @@ function normalizeBootstrapArbitrationOutput(output, phase = "bootstrap") {
   );
 }
 
-function normalizeValidationMigrationRoleOutput(output, role, stepCount) {
+function normalizeValidationMigrationRoleOutput(
+  output,
+  role,
+  stepCount,
+  trustedCommands,
+) {
   const candidate = normalizeBootstrapRoleOutputCandidate(
     output,
     role,
     "validation-migration",
     stepCount,
+    trustedCommands,
   );
   const { result } = candidate;
   if (
@@ -3015,6 +3025,7 @@ ${evidence}`,
           output,
           role,
           parseCommitPlan(state().canonicalPlan).steps.length,
+          state().trustedValidation.commands,
         ),
     });
     if (result === null) {
@@ -3774,6 +3785,7 @@ ${evidence}`,
           role,
           "bootstrap",
           parseCommitPlan(state().canonicalPlan).steps.length,
+          state().trustedValidation.commands,
         ),
     });
     if (result === null) {

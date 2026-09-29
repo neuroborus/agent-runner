@@ -71,8 +71,11 @@ const plain = (value) =>
   !/[\p{Cc}\p{Zl}\p{Zp}]/u.test(value);
 const bounded = (value, max) => Array.isArray(value) && value.length <= max;
 
-export function validCapabilityReports(value, checks) {
+export function validCapabilityReports(value, checks, trustedCommands = []) {
   const commands = new Set(checks.map(({ command }) => command));
+  const commandIdentities = new Map(
+    trustedCommands.map(({ command, identity }) => [command, identity]),
+  );
   if (
     !bounded(value.capabilityRequirements, 256) ||
     !bounded(value.environmentBlockers, 256)
@@ -92,6 +95,8 @@ export function validCapabilityReports(value, checks) {
         (typeof report.commandIdentity === "string" &&
           /^[a-f0-9]{64}$/u.test(report.commandIdentity))
       ) ||
+      (report.commandIdentity !== null &&
+        report.commandIdentity !== commandIdentities.get(report.command)) ||
       !exact(report.capabilities, ["scratch", "cache", "artifacts"]) ||
       typeof report.capabilities.scratch !== "boolean" ||
       typeof report.capabilities.cache !== "boolean" ||
@@ -101,7 +106,11 @@ export function validCapabilityReports(value, checks) {
         (item) =>
           typeof item !== "string" || !/^[a-z][a-z0-9-]{0,63}$/u.test(item),
       ) ||
-      new Set(report.unsupported).size !== report.unsupported.length
+      new Set(report.unsupported).size !== report.unsupported.length ||
+      (!report.capabilities.scratch &&
+        !report.capabilities.cache &&
+        report.capabilities.artifacts.length === 0 &&
+        report.unsupported.length === 0)
     )
       return false;
     const urls = new Set();

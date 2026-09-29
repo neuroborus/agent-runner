@@ -405,9 +405,14 @@ function normalizeLazyOutput(normalize, output, context) {
   }
 }
 
-function normalizeBootstrapRoleOutput(output, role, phase = "bootstrap") {
+function normalizeBootstrapRoleOutput(
+  output,
+  role,
+  phase = "bootstrap",
+  trustedCommands,
+) {
   return normalizeRoleOutput(
-    (value) => normalizeBootstrapResult(value, role),
+    (value) => normalizeBootstrapResult(value, role, { trustedCommands }),
     output,
     bootstrapOutputContext(role, phase),
   );
@@ -429,11 +434,12 @@ function normalizeBootstrapArbitrationOutput(output, phase = "bootstrap") {
   );
 }
 
-function normalizeValidationMigrationRoleOutput(output, role) {
+function normalizeValidationMigrationRoleOutput(output, role, trustedCommands) {
   const result = normalizeBootstrapRoleOutput(
     output,
     role,
     "validation-migration",
+    trustedCommands,
   );
   if (!["READY", "CAPACITY_EXHAUSTED"].includes(result.status)) {
     throw invalidRoleOutput(
@@ -2329,7 +2335,11 @@ ${PRODUCT_DECISION_INSTRUCTIONS}
 
 ${evidence}`,
       normalize: (output) =>
-        normalizeValidationMigrationRoleOutput(output, role),
+        normalizeValidationMigrationRoleOutput(
+          output,
+          role,
+          state().trustedValidation.commands,
+        ),
     });
     if (result === null) {
       return false;
@@ -3591,7 +3601,13 @@ ${trustedValidationInstructions()}
 ${PRODUCT_DECISION_INSTRUCTIONS}
 
 ${evidence}`,
-      normalize: (output) => normalizeBootstrapRoleOutput(output, role),
+      normalize: (output) =>
+        normalizeBootstrapRoleOutput(
+          output,
+          role,
+          "bootstrap",
+          state().trustedValidation.commands,
+        ),
     });
     if (result === null) {
       return false;

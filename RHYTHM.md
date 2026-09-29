@@ -7,6 +7,14 @@ remain in the owning documentation.
 
 ## 2026-09-29
 
+- **Capability reports now represent actual delegated needs.** Plan execution
+  and polishing reject zero-need reports and any supplied command identity that
+  does not match the frozen trusted-command snapshot, using their existing
+  bounded read-only correction path. Correcting to an empty report array keeps
+  an ordinary check agent-runnable instead of manufacturing a `not-selected`
+  trusted requirement. Genuine blockers and additive multi-role needs remain
+  unchanged.
+
 - **Claude scaffolding belongs to the adapter, outside the validation tree.**
   Both sandbox policies project tool HOME/config separately from provider
   authentication and sessions. Read-only mount preparation prevents optional

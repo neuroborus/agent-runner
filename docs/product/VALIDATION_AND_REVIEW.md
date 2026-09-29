@@ -232,13 +232,18 @@ commit or completed handoff remains available without those capabilities.
 Plan execution and polishing also discover exact-command capability needs and environment
 blockers read-only during bootstrap or legacy validation migration. Accepted
 active-role reports are preserved together; reconciliation cannot discard a
-role's needs. Invalid reports receive bounded contract correction. Valid needs
-without trusted selection, sufficient frozen authority, runner support, or actual
-availability pause before any writable checkpoint, with no content or index
-mutation. Every writable entry and resume rechecks the saved request. A sandbox
-limitation on an exactly delegated command is satisfied only by successful runner
-inspection; another command's limitation remains a blocker. Inspection never
-executes or attests the required check, changes authority, or reloads configuration.
+role's needs. Every capability report must identify an actual scratch, cache,
+artifact, or unsupported need. A reported non-null command identity must match
+the frozen selected-command identity exactly. Zero-need reports, substituted
+identities, and other invalid reports receive bounded contract correction; a
+corrected empty report array leaves the ordinary check agent-runnable rather than
+turning it into an unselected trusted requirement. Valid needs without trusted
+selection, sufficient frozen authority, runner support, or actual availability
+pause before any writable checkpoint, with no content or index mutation. Every
+writable entry and resume rechecks the saved request. A sandbox limitation on an
+exactly delegated command is satisfied only by successful runner inspection;
+another command's limitation remains a blocker. Inspection never executes or
+attests the required check, changes authority, or reloads configuration.
 
 Before finalization, writable roles receive the exact
 selected command text from the persisted run, including on continuation,

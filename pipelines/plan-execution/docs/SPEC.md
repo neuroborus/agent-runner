@@ -428,8 +428,14 @@ with up to 16 unique lowercase capability identifiers. `environmentBlockers`
 permits 256 reports per role: `command`, `source` (`agent-sandbox` or `runner`),
 and 1–8 bounded single-line evidence strings. Every command must occur in that
 role's exact inventory; existing structured-result byte bounds also apply.
-Non-READY outcomes carry empty report arrays. Malformed fields, parameters, or
-references use the existing bounded read-only bootstrap correction path.
+Every capability report must contain at least one scratch, cache, artifact, or
+unsupported need. A non-null `commandIdentity` must exactly equal the frozen
+identity supplied for that selected command; the field may remain null.
+Non-READY outcomes carry empty report arrays. Zero-need reports, substituted
+identities, malformed fields or parameters, and invalid references use the
+existing bounded read-only bootstrap correction path. A corrected empty array
+leaves the ordinary inventory command agent-runnable and creates no delegated
+requirement for root inspection.
 
 Accepted reports are persisted before inspection. Requirements from Worker and
 Reviewer remain additive regardless of which reconciliation or arbitration

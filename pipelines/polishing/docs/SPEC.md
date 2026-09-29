@@ -90,7 +90,13 @@ null), `capabilities` with boolean `scratch`/`cache` and up to 32 exact
 `{url, sha256}` artifacts, and up to 16 unique `unsupported` identifiers.
 Each blocker names an inventory command, `source` (`agent-sandbox` or `runner`),
 and 1–8 bounded single-line evidence strings. Non-READY outcomes use empty arrays.
-Malformed reports use the existing bounded read-only bootstrap correction path.
+Every capability report must contain at least one scratch, cache, artifact, or
+unsupported need. A non-null `commandIdentity` must exactly equal the frozen
+identity supplied for that selected command; the field may remain null.
+Zero-need reports, substituted identities, and malformed reports use the
+existing bounded read-only bootstrap correction path. A corrected empty array
+leaves the ordinary inventory command agent-runnable and creates no delegated
+requirement for root inspection.
 
 Accepted reports from every active role remain additive regardless of the
 reconciled or arbitrated summary. Reports cannot grant permissions, omit another

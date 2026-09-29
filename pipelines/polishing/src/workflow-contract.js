@@ -972,7 +972,11 @@ export function normalizeClarificationResult(payload) {
   return Object.freeze({ status: payload.status, questions });
 }
 
-export function normalizeBootstrapResult(payload, role) {
+export function normalizeBootstrapResult(
+  payload,
+  role,
+  { trustedCommands = [] } = {},
+) {
   const fields = [
     "status",
     "summary",
@@ -1071,9 +1075,9 @@ export function normalizeBootstrapResult(payload, role) {
     INVALID_OUTPUT_CODE,
     { maxItems: MAX_BOOTSTRAP_ITEMS },
   );
-  if (!validCapabilityReports(payload, requiredChecks)) {
+  if (!validCapabilityReports(payload, requiredChecks, trustedCommands)) {
     throw outputError(
-      "Capability reports must be bounded and name exact inventory commands.",
+      "Capability reports must contain actual needs and match the frozen command inventory.",
       outputConstraint(
         "capabilityRequirements",
         "exact-command-capability-reports",
@@ -3132,7 +3136,7 @@ function normalizePersistedFinalization(value) {
   return value;
 }
 
-function normalizePersistedValidation(value, name) {
+function normalizePersistedValidation(value, name, trustedCommands) {
   if (value === null) {
     return null;
   }
@@ -3159,7 +3163,7 @@ function normalizePersistedValidation(value, name) {
       value.capabilityRequirements === null &&
       value.environmentBlockers === null
     ) &&
-    !validCapabilityReports(value, value.requiredChecks)
+    !validCapabilityReports(value, value.requiredChecks, trustedCommands)
   )
     throw workflowError("Persisted capability reports are invalid.");
   return value;
@@ -3632,10 +3636,12 @@ export function normalizePipelineState(value) {
   const workerValidation = normalizePersistedValidation(
     value.workerValidation,
     "Worker validation evidence",
+    trustedValidation.commands,
   );
   const reviewerValidation = normalizePersistedValidation(
     value.reviewerValidation,
     "Reviewer validation evidence",
+    trustedValidation.commands,
   );
   const resolvedSummary = normalizeOptionalSummary(
     value.resolvedSummary,

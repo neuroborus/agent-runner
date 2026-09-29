@@ -34,6 +34,12 @@ const requirement = (target = command) => ({
   capabilities: { scratch: true, cache: false, artifacts: [] },
   unsupported: [],
 });
+const emptyRequirement = (target = command) => ({
+  command: target,
+  commandIdentity: null,
+  capabilities: { scratch: false, cache: false, artifacts: [] },
+  unsupported: [],
+});
 const blocked = () => ({
   status: "BLOCKED",
   blockers: [{ command, reason: "unavailable" }],
@@ -66,9 +72,10 @@ function legacy(run) {
   return migratePolishingStateV13({ ...run, pipelineState });
 }
 
-test("polishing capability contracts reject malformed reports and preserve immutable needs", () => {
+test("polishing capability contracts reject empty needs, mismatched identities, and malformed reports", () => {
   const base = bootstrapReady("Worker");
   for (const report of [
+    emptyRequirement(),
     { ...requirement(), command: "node outside-inventory" },
     { ...requirement(), commandIdentity: "invalid" },
     {
@@ -108,6 +115,81 @@ test("polishing capability contracts reject malformed reports and preserve immut
         { ...base, capabilityRequirements: [requirement()] },
         "worker",
       ).capabilityRequirements[0].capabilities,
+    ),
+  );
+
+  const snapshot = trustedValidationSnapshot();
+  const selected = snapshot.commands[0];
+  const selectedResult = {
+    ...base,
+    requiredChecks: [
+      ...base.requiredChecks,
+      { id: "C2", command: selected.command },
+    ],
+  };
+  assert.throws(
+    () =>
+      normalizeBootstrapResult(
+        {
+          ...selectedResult,
+          capabilityRequirements: [
+            {
+              ...requirement(selected.command),
+              commandIdentity: "a".repeat(64),
+            },
+          ],
+        },
+        "worker",
+        { trustedCommands: snapshot.commands },
+      ),
+    { code: "ERR_INVALID_POLISHING_OUTPUT" },
+  );
+  assert.equal(
+    normalizeBootstrapResult(
+      {
+        ...selectedResult,
+        capabilityRequirements: [
+          {
+            ...requirement(selected.command),
+            commandIdentity: selected.identity,
+          },
+        ],
+      },
+      "worker",
+      { trustedCommands: snapshot.commands },
+    ).capabilityRequirements[0].commandIdentity,
+    selected.identity,
+  );
+});
+
+test("combined polishing corrects empty needs without delegating ordinary checks", async (t) => {
+  const inspections = [];
+  const fixture = await createFixture(t, {
+    mode: "combined",
+    worker: [
+      clarificationReady(),
+      {
+        ...bootstrapReady("Worker"),
+        capabilityRequirements: [emptyRequirement()],
+      },
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      ...finish("combined"),
+    ],
+    onRequirementInspection(input) {
+      inspections.push(structuredClone(input));
+      return ready;
+    },
+  });
+
+  const completed = await fixture.run();
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.pipelineState.bootstrapCorrections.length, 1);
+  assert.ok(inspections.length > 0);
+  assert.ok(inspections.every(({ requirements }) => requirements.length === 0));
+  assert.ok(
+    completed.pipelineState.finalizationResult.checks.every(
+      ({ executor }) => executor === "agent",
     ),
   );
 });
@@ -613,7 +695,12 @@ test("saved needs cannot expand selected frozen authority and diagnostics stay b
     worker: bootstrap("independent", {
       ...bootstrapReady("Worker"),
       requiredChecks,
-      capabilityRequirements: [requirement(target)],
+      capabilityRequirements: [
+        {
+          ...requirement(target),
+          commandIdentity: snapshot.commands[0].identity,
+        },
+      ],
     }),
     reviewer: [{ ...bootstrapReady("Reviewer"), requiredChecks }],
     onRequirementInspection: (input) => root.inspectRequirements(input),

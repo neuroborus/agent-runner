@@ -34,6 +34,12 @@ const requirement = (target = command) => ({
   capabilities: { scratch: true, cache: false, artifacts: [] },
   unsupported: [],
 });
+const emptyRequirement = (target = command) => ({
+  command: target,
+  commandIdentity: null,
+  capabilities: { scratch: false, cache: false, artifacts: [] },
+  unsupported: [],
+});
 const blocked = (target = command) => ({
   status: "BLOCKED",
   blockers: [
@@ -62,9 +68,10 @@ function legacy(run) {
   return migratePlanExecutionStateV17({ ...run, pipelineState });
 }
 
-test("capability reports reject malformed parameters and noninventory commands", () => {
+test("capability reports reject empty needs, mismatched identities, and malformed parameters", () => {
   const result = bootstrapReady("Worker");
   for (const report of [
+    emptyRequirement(),
     { ...requirement(), command: "node undeclared" },
     { ...requirement(), commandIdentity: "private value" },
     {
@@ -112,6 +119,86 @@ test("capability reports reject malformed parameters and noninventory commands",
     "worker",
   );
   assert.ok(Object.isFrozen(normalized.capabilityRequirements[0].capabilities));
+
+  const snapshot = trustedValidationSnapshot();
+  const selected = snapshot.commands[0];
+  const selectedResult = {
+    ...result,
+    requiredChecks: [
+      ...result.requiredChecks,
+      { id: "C2", command: selected.command, steps: [1] },
+    ],
+  };
+  assert.throws(
+    () =>
+      normalizeBootstrapResult(
+        {
+          ...selectedResult,
+          capabilityRequirements: [
+            {
+              ...requirement(selected.command),
+              commandIdentity: "a".repeat(64),
+            },
+          ],
+        },
+        "worker",
+        1,
+        { trustedCommands: snapshot.commands },
+      ),
+    { code: "ERR_INVALID_PLAN_EXECUTION_OUTPUT" },
+  );
+  assert.equal(
+    normalizeBootstrapResult(
+      {
+        ...selectedResult,
+        capabilityRequirements: [
+          {
+            ...requirement(selected.command),
+            commandIdentity: selected.identity,
+          },
+        ],
+      },
+      "worker",
+      1,
+      { trustedCommands: snapshot.commands },
+    ).capabilityRequirements[0].commandIdentity,
+    selected.identity,
+  );
+});
+
+test("empty capability output is corrected without delegating an ordinary check", async (t) => {
+  const inspections = [];
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    worker: [
+      clarificationReady(),
+      {
+        ...bootstrapReady("Worker"),
+        capabilityRequirements: [emptyRequirement()],
+      },
+      bootstrapReady("Worker"),
+    ],
+    workWorker: [
+      implementationCompleted(),
+      checkAndFix(),
+      finalizationPassed(),
+    ],
+    onRequirementInspection(input) {
+      inspections.push(structuredClone(input));
+      return ready;
+    },
+  });
+
+  const completed = await fixture.run();
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.pipelineState.bootstrapCorrections.length, 1);
+  assert.ok(inspections.length > 0);
+  assert.ok(inspections.every(({ requirements }) => requirements.length === 0));
+  assert.ok(
+    completed.pipelineState.finalizationResult.checks.every(
+      ({ executor }) => executor === "agent",
+    ),
+  );
 });
 
 for (const mode of ["independent", "lazy", "combined"]) {
@@ -392,10 +479,14 @@ test("reports cannot add authority to frozen selected commands", async (t) => {
   };
   const root = createTrustedValidationService();
   for (const [fields, reason] of [
-    [{ capabilityRequirements: [needs] }, "insufficient-authority"],
     [
       {
-        capabilityRequirements: [{ ...needs, commandIdentity: "a".repeat(64) }],
+        capabilityRequirements: [
+          {
+            ...needs,
+            commandIdentity: snapshot.commands[0].identity,
+          },
+        ],
       },
       "insufficient-authority",
     ],
