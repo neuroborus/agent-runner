@@ -714,6 +714,12 @@ Keep these outcomes separate:
   guide; a task or product requirement belongs in task context or tracked
   project documentation.
 
+For deliberate local issue processing, follow the
+[local issue index contract](product/OPERATOR_MODEL.md#local-issue-index) for
+`LOCAL_ARTIFACTS/agent-runner/issues/index.json`. It defines append order, safe
+paths, missing-file handling, and durable cursor advancement. Issue Markdown
+remains authoritative; the runner does not load or maintain this backlog.
+
 The canonical common guide is shipped with Agent Runner. Optional project-local
 Markdown lives at `<artifactRoot>/agent-runner/rules.md`, using the same current
 configuration resolution as a new run. The shared guidance capability returns

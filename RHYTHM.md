@@ -7,6 +7,17 @@ remain in the owning documentation.
 
 ## 2026-09-30
 
+- **The local issue index records order and a durable processing cursor.** The
+  [operator contract](docs/product/OPERATOR_MODEL.md#local-issue-index) specifies
+  the ignored `LOCAL_ARTIFACTS/agent-runner/issues/index.json` artifact while
+  keeping issue Markdown authoritative. Maintenance preserves the stored prefix
+  and appends unique discoveries in timestamp/path order. Invalid paths and
+  stored duplicates are rejected; missing pending reports block advancement,
+  while processed missing paths remain only as historical cursor anchors.
+  Successful processing precedes atomic replacement and syncing of the complete
+  index. This supports deliberate operator bookkeeping without automatic backlog
+  loading or new CLI, MCP, prompt, or public run surfaces.
+
 - **Provider inactivity consumes one durable reconstruction allowance.** New
   runs freeze and fingerprint a root/project timeout, defaulting to 30 minutes;
   legacy runs migrate without configuration reload. Both providers reset only
