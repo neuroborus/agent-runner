@@ -914,6 +914,28 @@ test("resume dispatches one validated action and preserves pause exit", async ()
   assert.equal(stderr.read(), "");
 });
 
+test("resume treats a canceled run as terminal success", async () => {
+  const stdout = createSink();
+  const stderr = createSink();
+  let request;
+
+  const exitCode = await main(["resume", "--run", RUN_ID], {
+    stdout: stdout.stream,
+    stderr: stderr.stream,
+    runner: fakeRunner({
+      async resume(input) {
+        request = input;
+        return commandResult({ state: "CANCELED" });
+      },
+    }),
+  });
+
+  assert.equal(exitCode, 0);
+  assert.deepEqual(request, { runId: RUN_ID, action: null });
+  assert.match(stdout.read(), /State: CANCELED/u);
+  assert.equal(stderr.read(), "");
+});
+
 test("CLI action-free resume preserves an explicit revision and rejects invalid revisions", async () => {
   const requests = [];
   const runner = fakeRunner({
