@@ -24,7 +24,12 @@ test("tracked example is valid and local configuration is ignored", async () => 
   assert.equal(CONFIG_FILENAME, ".agent-runner.json");
   assert.equal(CONFIG_SCHEMA_VERSION, 1);
   assert.equal(configuration.artifactRoot, "LOCAL_ARTIFACTS");
+  assert.deepEqual(configuration.clientAttribution, {
+    name: "agent_runner",
+    title: "Agent Runner",
+  });
   assert.equal(configuration.issueReporting, true);
+  assert.ok(Object.isFrozen(configuration.clientAttribution));
   assert.equal(configuration.defaultBackend, "codex");
   assert.equal(configuration.defaultProfile, "current");
   assert.equal(configuration.defaultModel, "current");
@@ -89,6 +94,10 @@ test("minimal configuration uses pipeline-owned setting defaults", () => {
   assert.equal(configuration.defaultBackend, undefined);
   assert.equal(configuration.artifactRoot, DEFAULT_ARTIFACT_ROOT);
   assert.equal(configuration.issueReporting, true);
+  assert.deepEqual(configuration.clientAttribution, {
+    name: "agent_runner",
+    title: "Agent Runner",
+  });
   assert.equal(configuration.trustedCommandTimeoutMs, 3_600_000);
   assert.deepEqual(configuration.profiles, {});
   assert.deepEqual(configuration.trustedCommands, {});
@@ -194,6 +203,11 @@ test("configuration rejects unsupported shapes and values", () => {
     ['{"schemaVersion":1,"extra":true}', /configuration\.extra/u],
     ['{"schemaVersion":1,"defaultBackend":null}', /defaultBackend/u],
     ['{"schemaVersion":1,"issueReporting":"yes"}', /issueReporting/u],
+    ['{"schemaVersion":1,"clientAttribution":null}', /clientAttribution/u],
+    [
+      '{"schemaVersion":1,"clientAttribution":{"name":"agent","title":" Runner"}}',
+      /clientAttribution/u,
+    ],
     ['{"schemaVersion":1,"defaultBackend":"other"}', /codex, claude/u],
     ['{"schemaVersion":1,"artifactRoot":"."}', /artifactRoot/u],
     ['{"schemaVersion":1,"artifactRoot":"../outside"}', /artifactRoot/u],
@@ -450,6 +464,10 @@ test("project configuration rejects untrusted and unsafe fields", () => {
   const invalidConfigurations = [
     [{ profiles: {} }, /profiles/u],
     [{ issueReporting: false }, /issueReporting/u],
+    [
+      { clientAttribution: { name: "project", title: "Project" } },
+      /clientAttribution/u,
+    ],
     [{ credentials: {} }, /credentials/u],
     [{ binary: "/usr/bin/codex" }, /binary/u],
     [{ environment: {} }, /environment/u],

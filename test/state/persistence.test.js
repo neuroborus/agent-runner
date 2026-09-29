@@ -14,6 +14,10 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  clientAttributionFingerprint,
+  DEFAULT_CLIENT_ATTRIBUTION,
+} from "../../src/agents/index.js";
+import {
   restoreOperatorPause,
   stopSettlement,
 } from "../../src/runner/stops.js";
@@ -113,6 +117,11 @@ test("resolves the external state root and creates a complete run", async (t) =>
   assert.equal(created.state.projectPath, projectPath);
   assert.equal(created.state.taskPath, taskPath);
   assert.equal(created.state.projectConfigurationProtection, null);
+  assert.deepEqual(created.state.clientAttribution, DEFAULT_CLIENT_ATTRIBUTION);
+  assert.equal(
+    created.state.clientAttributionFingerprint,
+    clientAttributionFingerprint(DEFAULT_CLIENT_ATTRIBUTION),
+  );
   assert.deepEqual(created.state.sessionLineage, {
     source: "codex:source-session",
     sourceProfile: null,
@@ -140,6 +149,54 @@ test("resolves the external state root and creates a complete run", async (t) =>
   );
   assert.match(progress, /Revision: 1/u);
   assert.match(progress, /runner\/run\/created: Run created\./u);
+});
+
+test("persists a validated immutable client-attribution snapshot", async (t) => {
+  const { projectPath, store, taskPath } = await createFixture(t);
+  const clientAttribution = {
+    name: "example/agent-runner",
+    title: "Example Agent Runner",
+  };
+  const input = {
+    ...runInput(projectPath, taskPath),
+    clientAttribution,
+    clientAttributionFingerprint:
+      clientAttributionFingerprint(clientAttribution),
+  };
+  const created = await store.createRun(input);
+  t.after(() => created.lease.release().catch(() => {}));
+  assert.deepEqual(created.state.clientAttribution, clientAttribution);
+  assert.equal(
+    created.state.clientAttributionFingerprint,
+    clientAttributionFingerprint(clientAttribution),
+  );
+  assert.notEqual(
+    created.state.clientAttributionFingerprint,
+    clientAttributionFingerprint(DEFAULT_CLIENT_ATTRIBUTION),
+  );
+  assert.ok(Object.isFrozen(created.state.clientAttribution));
+
+  await assert.rejects(
+    store.createRun({
+      ...input,
+      clientAttributionFingerprint: "a".repeat(64),
+    }),
+    { code: "ERR_INVALID_RUN_STATE" },
+  );
+  await assert.rejects(
+    store.createRun({
+      ...runInput(projectPath, taskPath),
+      clientAttribution: { name: " invalid", title: "Invalid" },
+    }),
+    { code: "ERR_INVALID_RUN_STATE" },
+  );
+  await assert.rejects(
+    store.createRun({
+      ...runInput(projectPath, taskPath),
+      clientAttribution: null,
+    }),
+    { code: "ERR_INVALID_RUN_STATE" },
+  );
 });
 
 test("pins one bounded provider policy receipt per role", async (t) => {
@@ -713,6 +770,8 @@ test("migrates a legacy run envelope as one leased journal transition", async (t
   const eventsPath = join(created.directoryPath, "events.jsonl");
   const legacyState = JSON.parse(await readFile(statePath, "utf8"));
   legacyState.schemaVersion = 1;
+  delete legacyState.clientAttribution;
+  delete legacyState.clientAttributionFingerprint;
   delete legacyState.providerPolicies;
   delete legacyState.runtimeCompatibility;
   delete legacyState.activeTurn;
@@ -731,6 +790,11 @@ test("migrates a legacy run envelope as one leased journal transition", async (t
   assert.equal(legacyRun.schemaVersion, 1);
   assert.equal(legacyRun.runtimeCompatibility, null);
   assert.equal(legacyRun.projectConfigurationProtection, null);
+  assert.deepEqual(legacyRun.clientAttribution, DEFAULT_CLIENT_ATTRIBUTION);
+  assert.equal(
+    legacyRun.clientAttributionFingerprint,
+    clientAttributionFingerprint(DEFAULT_CLIENT_ATTRIBUTION),
+  );
   assert.equal(await readFile(statePath, "utf8"), legacyStateSource);
   assert.equal(await readFile(eventsPath, "utf8"), legacyEventSource);
 
@@ -757,6 +821,7 @@ test("migrates a legacy run envelope as one leased journal transition", async (t
   assert.equal(migrated.revision, 2);
   assert.deepEqual(migrated.runtimeCompatibility, RUNTIME_COMPATIBILITY);
   assert.equal(migrated.projectConfigurationProtection, null);
+  assert.deepEqual(migrated.clientAttribution, DEFAULT_CLIENT_ATTRIBUTION);
   assert.deepEqual(await resumedStore.loadRun(created.state.runId), migrated);
   const events = (await readFile(eventsPath, "utf8"))
     .trimEnd()

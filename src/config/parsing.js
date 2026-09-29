@@ -1,7 +1,11 @@
 import { posix } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
-import { PROVIDER_REGISTRY } from "../agents/index.js";
+import {
+  DEFAULT_CLIENT_ATTRIBUTION,
+  normalizeClientAttribution,
+  PROVIDER_REGISTRY,
+} from "../agents/index.js";
 import { listPipelines } from "../pipeline-registry.js";
 import {
   DEFAULT_AVAILABILITY_POLICY,
@@ -24,6 +28,7 @@ const PROFILE_NAME_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const TOP_LEVEL_FIELDS = new Set([
   "artifactRoot",
   "availabilityRetryMaxDelayMs",
+  "clientAttribution",
   "schemaVersion",
   "defaultBackend",
   "defaultContextSize",
@@ -38,7 +43,8 @@ const TOP_LEVEL_FIELDS = new Set([
 ]);
 const PROJECT_TOP_LEVEL_FIELDS = new Set(
   [...TOP_LEVEL_FIELDS].filter(
-    (field) => !["issueReporting", "profiles"].includes(field),
+    (field) =>
+      !["clientAttribution", "issueReporting", "profiles"].includes(field),
   ),
 );
 const ROLE_FIELDS = new Set([
@@ -343,6 +349,19 @@ export function normalizeConfiguration(input, providers = PROVIDER_REGISTRY) {
       "configuration.trustedCommandTimeoutMs",
     );
   }
+  let clientAttribution;
+  try {
+    clientAttribution = normalizeClientAttribution(
+      input.clientAttribution === undefined
+        ? DEFAULT_CLIENT_ATTRIBUTION
+        : input.clientAttribution,
+    );
+  } catch (cause) {
+    throw new ConfigurationError(
+      "configuration.clientAttribution is invalid.",
+      { cause },
+    );
+  }
 
   const inputProfiles = input.profiles === undefined ? {} : input.profiles;
   assertRecord(inputProfiles, "configuration.profiles");
@@ -378,6 +397,7 @@ export function normalizeConfiguration(input, providers = PROVIDER_REGISTRY) {
       input.availabilityRetryMaxDelayMs ??
       DEFAULT_AVAILABILITY_POLICY.maxDelayMs,
     issueReporting: input.issueReporting ?? true,
+    clientAttribution,
     defaultProfile: input.defaultProfile ?? CURRENT,
     defaultModel: input.defaultModel ?? CURRENT,
     defaultContextSize: input.defaultContextSize ?? CURRENT,

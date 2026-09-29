@@ -282,6 +282,10 @@ The V1 shape is:
   "schemaVersion": 1,
   "artifactRoot": "LOCAL_ARTIFACTS",
   "issueReporting": true,
+  "clientAttribution": {
+    "name": "agent_runner",
+    "title": "Agent Runner"
+  },
   "defaultBackend": "codex",
   "defaultProfile": "current",
   "defaultModel": "current",
@@ -330,6 +334,17 @@ project configuration. The MCP process loads it once at startup; applying a
 change requires a restart. A disabled server omits the reporting tool, schema,
 and related instructions from discovery. Other runner settings are reloaded
 for each fresh report and persisted through its resolved reservation.
+
+`clientAttribution` is also runner-root-only and defaults to the generic
+`agent_runner` / `Agent Runner` identity. Configuration uses the public agent
+contract to normalize the exact `{ name, title }` object, then rejects a custom
+value when any active role's provider descriptor does not support it. There is
+no project, CLI, MCP, pipeline, prompt, or repository-content override. The
+normalized value and its SHA-256 fingerprint are immutable common run-envelope
+fields. Production adapter sets are constructed through provider descriptors
+from the resolved frozen value during creation and from the saved value on
+resume; current configuration cannot replace it. Prompts, activity, public
+status, and diagnostics omit both fields.
 
 `trustedCommandTimeoutMs` is accepted by root and safe project configuration as
 a strict integer from `1` through `2147483647` milliseconds and defaults to
@@ -976,6 +991,11 @@ their counts as configuration would weaken the persistence proof without
 creating a useful operator control.
 
 ### Durable availability episodes
+
+Common envelope version 16 adds the immutable normalized client attribution and
+its matching fingerprint. Version 1 through version 15 runs normalize only to
+the generic default; a leased runtime migration journals that value without
+loading current configuration. Legacy state cannot claim a custom identity.
 
 Common envelope version 15 adds immutable `availabilityPolicy` and nullable
 `availabilityRetry`. Runtime compatibility includes this envelope version.

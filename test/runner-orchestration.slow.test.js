@@ -37,6 +37,8 @@ async function rewriteRunAsLegacy(directoryPath) {
   const eventsPath = join(directoryPath, "events.jsonl");
   const state = JSON.parse(await readFile(statePath, "utf8"));
   state.schemaVersion = 1;
+  delete state.clientAttribution;
+  delete state.clientAttributionFingerprint;
   delete state.providerPolicies;
   delete state.runtimeCompatibility;
   delete state.activeTurn;
@@ -63,6 +65,8 @@ async function rewriteRunAsLegacy(directoryPath) {
     previousActiveTurn = activeTurn;
     event.schemaVersion = 1;
     event.state.schemaVersion = 1;
+    delete event.state.clientAttribution;
+    delete event.state.clientAttributionFingerprint;
     delete event.state.providerPolicies;
     delete event.state.runtimeCompatibility;
     delete event.state.activeTurn;
@@ -207,6 +211,10 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
   const fixture = await createFixture(t);
   const adapter = createAdapter({ questionFirst: true });
   const activities = [];
+  const clientAttribution = {
+    name: "example/agent-runner",
+    title: "Example Agent Runner",
+  };
   const firstRunner = runnerFor(
     fixture,
     { codex: adapter },
@@ -214,6 +222,7 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
       activities,
       configuration: {
         ...RUNNER_CONFIGURATION,
+        clientAttribution,
         defaultEffort: "xhigh",
         pipelines: { "plan-authoring": { preferredCommitLineLimit: 650 } },
       },
@@ -237,6 +246,8 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
   assert.equal(paused.run.pause.reason, "clarification_answers_required");
   assert.equal(paused.run.sessionLineage.source, SOURCE_SESSION);
   assert.equal(paused.run.sessionLineage.sourceProfile, null);
+  assert.deepEqual(paused.run.clientAttribution, clientAttribution);
+  assert.match(paused.run.clientAttributionFingerprint, /^[a-f0-9]{64}$/u);
   assert.deepEqual(paused.run.roles.planner, {
     backend: "codex",
     profile: "current",
@@ -267,6 +278,10 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
       activities,
       configuration: {
         schemaVersion: 1,
+        clientAttribution: {
+          name: "changed/agent-runner",
+          title: "Changed Agent Runner",
+        },
         defaultBackend: "claude",
         defaultEffort: "low",
         pipelines: { "plan-authoring": { preferredCommitLineLimit: 1200 } },
@@ -286,6 +301,11 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
   assert.equal(completed.run.pipelineState.workflowState, "DONE");
   assert.equal(await readFile(join(fixture.taskPath, "plan.md"), "utf8"), PLAN);
   assert.deepEqual(completed.run.roles, paused.run.roles);
+  assert.deepEqual(completed.run.clientAttribution, clientAttribution);
+  assert.equal(
+    completed.run.clientAttributionFingerprint,
+    paused.run.clientAttributionFingerprint,
+  );
   assert.ok(adapter.calls.every(({ effort }) => effort === "xhigh"));
   assert.ok(adapter.probes.every(({ effort }) => effort === "xhigh"));
   assert.deepEqual(completed.run.pipelineState.settings, {
@@ -315,6 +335,12 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
   assert.ok(activities.some(({ actor }) => actor === "planner"));
   assert.ok(activities.some(({ actor }) => actor === "reviewer"));
   assert.ok(activities.every(({ runId }) => runId === paused.run.runId));
+  for (const projection of [activities, adapter.calls]) {
+    const serialized = JSON.stringify(projection);
+    assert.doesNotMatch(serialized, /example\/agent-runner/u);
+    assert.doesNotMatch(serialized, /Example Agent Runner/u);
+    assert.ok(!serialized.includes(paused.run.clientAttributionFingerprint));
+  }
 });
 
 test("migrates legacy authoring line targets under the lease without configuration reload", async (t) => {
@@ -431,6 +457,10 @@ test("migrates a legacy runtime envelope under the run lease before resume", asy
   );
   assert.equal(legacyStatus.run.schemaVersion, 1);
   assert.equal(legacyStatus.run.runtimeCompatibility, null);
+  assert.deepEqual(legacyStatus.run.clientAttribution, {
+    name: "agent_runner",
+    title: "Agent Runner",
+  });
   assert.equal(legacyStatus.run.revision, 1);
 
   const completed = await runner.resume({
@@ -439,6 +469,10 @@ test("migrates a legacy runtime envelope under the run lease before resume", asy
   });
   assert.equal(completed.run.pipelineState.workflowState, "DONE");
   assert.equal(completed.run.schemaVersion, RUN_STATE_SCHEMA_VERSION);
+  assert.deepEqual(completed.run.clientAttribution, {
+    name: "agent_runner",
+    title: "Agent Runner",
+  });
   assert.equal(
     completed.run.runtimeCompatibility.runStateVersion,
     RUN_STATE_SCHEMA_VERSION,

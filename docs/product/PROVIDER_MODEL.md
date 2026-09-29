@@ -88,6 +88,15 @@ This identity tells a provider which client originated a request. It does not
 guarantee that a provider dashboard will create or rename an accounting or
 usage bucket for that identity.
 
+Runner-root configuration is its sole operator input. Resolution checks a
+custom identity against every active role descriptor before provider work,
+then freezes the normalized value and fingerprint in the common run envelope.
+Resume and reconstruction create adapters from that snapshot without reloading
+current configuration. Project configuration, CLI, MCP, pipeline settings,
+prompts, and repository content cannot override it. Legacy runs receive the
+generic default, and public projections, activity, prompts, and diagnostics do
+not expose either string.
+
 Claude owns its tool HOME/config projections, launcher, and temporary
 scaffolding outside project/task trees. Missing optional paths never authorize
 cwd-relative placeholders. Existing project restrictions remain effective;

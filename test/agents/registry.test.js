@@ -30,6 +30,7 @@ import { createRunStore } from "../../src/state/index.js";
 const SOURCE_SESSION = "11111111-1111-4111-8111-111111111111";
 
 function fakeProvider() {
+  const adapterOptions = [];
   const adapter = {
     probes: [],
     async probe(options) {
@@ -55,7 +56,10 @@ function fakeProvider() {
   const registry = createProviderRegistry([
     {
       id: "fake",
-      createAdapter: () => adapter,
+      createAdapter(options) {
+        adapterOptions.push(options);
+        return adapter;
+      },
       clientAttribution: { supportsCustom: true },
       validateExecutionOptions(value) {
         assert.deepEqual(Object.keys(value).sort(), [
@@ -92,12 +96,16 @@ function fakeProvider() {
       },
     },
   ]);
-  return { adapter, registry, validations };
+  return { adapter, adapterOptions, registry, validations };
 }
 
 function fakeConfiguration() {
   return {
     schemaVersion: 1,
+    clientAttribution: {
+      name: "example/agent-runner",
+      title: "Example Agent Runner",
+    },
     defaultBackend: "fake",
     defaultProfile: "fake-work",
     profiles: {
@@ -394,7 +402,7 @@ test("one fake descriptor drives configuration and every pipeline", () => {
   assert.ok(validations.length > 0);
 });
 
-test("runner construction, probing, and source sessions use the registry", async (t) => {
+test("runner construction, attribution, probing, and source sessions use the registry", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "agent-runner-registry-"));
   const projectPath = join(root, "project");
   const taskPath = join(root, "task");
@@ -402,7 +410,7 @@ test("runner construction, probing, and source sessions use the registry", async
   await Promise.all([mkdir(projectPath), mkdir(taskPath)]);
   t.after(() => rm(root, { recursive: true, force: true }));
 
-  const { adapter, registry } = fakeProvider();
+  const { adapter, adapterOptions, registry } = fakeProvider();
   const configuration = parseRunnerConfiguration(
     JSON.stringify(fakeConfiguration()),
     registry,
@@ -449,6 +457,14 @@ test("runner construction, probing, and source sessions use the registry", async
   }
   assert.ok(adapter.probes.length > 0);
   assert.ok(adapter.probes.every(({ profile }) => profile === "native-work"));
+  assert.deepEqual(adapterOptions, [
+    {
+      clientAttribution: {
+        name: "example/agent-runner",
+        title: "Example Agent Runner",
+      },
+    },
+  ]);
 
   const normalized = normalizeAdapterFailure(
     "fake",

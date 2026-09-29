@@ -35,6 +35,8 @@ const IMMUTABLE_STATE_FIELDS = [
   "projectPath",
   "taskPath",
   "projectConfigurationProtection",
+  "clientAttribution",
+  "clientAttributionFingerprint",
   "roles",
   "availabilityPolicy",
   "createdAt",
@@ -102,6 +104,7 @@ function normalizeEvent(value, runId, lineNumber) {
         12,
         13,
         14,
+        15,
         RUN_STATE_SCHEMA_VERSION,
       ].includes(value.schemaVersion)
     ) {

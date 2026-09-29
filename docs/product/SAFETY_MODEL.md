@@ -80,6 +80,15 @@ snapshots use the one-hour fallback, while version 3 retains its timeout without
 gaining source authority. Preparation keeps its independent
 `Math.min(timeoutMs, 10_000)` safety cap.
 
+Provider-visible client attribution comes only from runner-root configuration.
+The runner normalizes and fingerprints it before persisting both values as an
+immutable common run snapshot, validates custom support across active provider
+descriptors before work, and reconstructs adapters from that saved snapshot on
+resume. Project content and configuration, transports, pipelines, and prompts
+cannot alter it. Legacy envelopes receive only the generic default without
+configuration reload. Prompts, public projections, activity, and bounded
+diagnostics retain neither attribution string.
+
 Authoritative run state is external to both repository and task. These trees
 must be disjoint: neither the project nor task may contain or be contained by
 the state root. Atomic files,

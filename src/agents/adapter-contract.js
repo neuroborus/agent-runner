@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { dirname, isAbsolute, resolve } from "node:path";
 
 const ACCESS_ORDER = Object.freeze([
@@ -238,6 +239,11 @@ export function normalizeClientAttribution(value) {
     throw new TypeError("Client attribution is invalid.");
   }
   return Object.freeze({ name: value.name, title: value.title });
+}
+
+export function clientAttributionFingerprint(value) {
+  const attribution = normalizeClientAttribution(value);
+  return createHash("sha256").update(JSON.stringify(attribution)).digest("hex");
 }
 
 export function isDefaultClientAttribution(value) {

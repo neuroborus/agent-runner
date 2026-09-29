@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { clientAttributionFingerprint } from "../../src/agents/index.js";
 import {
   ConfigurationError,
   parseProjectConfiguration,
@@ -141,6 +142,11 @@ test("role resolution normalizes configuration objects", () => {
   assert.deepEqual(resolved, {
     artifactRoot: "LOCAL_ARTIFACTS",
     availabilityPolicy: { initialDelayMs: 5_000, maxDelayMs: 1_800_000 },
+    clientAttribution: { name: "agent_runner", title: "Agent Runner" },
+    clientAttributionFingerprint: clientAttributionFingerprint({
+      name: "agent_runner",
+      title: "Agent Runner",
+    }),
     pipelineId: "plan-authoring",
     roles: {
       planner: {
@@ -180,6 +186,49 @@ test("role resolution normalizes configuration objects", () => {
         defaultBackend: "other",
       }),
     /defaultBackend/u,
+  );
+});
+
+test("client attribution is frozen at root and admitted only for active providers", () => {
+  const custom = {
+    name: "example/agent-runner",
+    title: "Example Agent Runner",
+  };
+  const configuration = {
+    schemaVersion: 1,
+    clientAttribution: custom,
+    defaultBackend: "codex",
+    pipelines: {
+      "plan-authoring": {
+        mode: "lazy",
+        roles: { reviewer: { backend: "claude" } },
+      },
+    },
+  };
+  const lazy = resolvePipelineConfiguration("plan-authoring", configuration);
+  assert.deepEqual(lazy.clientAttribution, custom);
+  assert.equal(
+    lazy.clientAttributionFingerprint,
+    clientAttributionFingerprint(custom),
+  );
+  assert.ok(Object.isFrozen(lazy.clientAttribution));
+
+  assert.throws(
+    () =>
+      resolvePipelineConfiguration("plan-authoring", {
+        ...configuration,
+        pipelines: {
+          "plan-authoring": {
+            mode: "independent",
+            roles: { reviewer: { backend: "claude" } },
+          },
+        },
+      }),
+    (error) =>
+      error instanceof ConfigurationError &&
+      error.code === "ERR_UNSUPPORTED_CLIENT_ATTRIBUTION" &&
+      !error.message.includes(custom.name) &&
+      !error.message.includes(custom.title),
   );
 });
 

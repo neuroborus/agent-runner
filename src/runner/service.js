@@ -157,6 +157,7 @@ export function createRunner(options = {}) {
     !Array.isArray(providers.sourceSessionIds) ||
     typeof providers.get !== "function" ||
     typeof providers.createAdapters !== "function" ||
+    typeof providers.supportsClientAttribution !== "function" ||
     typeof providers.validateExecutionOptions !== "function" ||
     typeof providers.supportsSourceSessionFork !== "function" ||
     typeof providers.classifyFailure !== "function" ||
@@ -166,7 +167,7 @@ export function createRunner(options = {}) {
       code: "ERR_INVALID_RUNNER_OPTIONS",
     });
   }
-  const adapters = options.adapters ?? defaultAdapters(providers);
+  const adapters = options.adapters;
   const clarifications = options.clarifications ?? createClarificationService();
   const git = options.git ?? createGitService();
   const inspectSessionProcesses =
@@ -182,8 +183,9 @@ export function createRunner(options = {}) {
   // lease for safe reclamation after owner loss.
   const heldWorktreeLeases = new Map();
   const retainedRunLeases = new Map();
+  const defaultAdapterSets = new Map();
   if (
-    !isRecord(adapters) ||
+    (adapters !== undefined && !isRecord(adapters)) ||
     !isRecord(clarifications) ||
     !isRecord(git) ||
     typeof inspectSessionProcesses !== "function" ||
@@ -201,6 +203,32 @@ export function createRunner(options = {}) {
     throw new RunnerError("Runner services are invalid.", {
       code: "ERR_INVALID_RUNNER_OPTIONS",
     });
+  }
+
+  function validateClientAttribution(run) {
+    const unsupportedBackend = Object.values(run.roles)
+      .map(({ backend }) => backend)
+      .find(
+        (backend) =>
+          !providers.supportsClientAttribution(backend, run.clientAttribution),
+      );
+    if (unsupportedBackend !== undefined) {
+      throw new RunnerError(
+        `Client attribution is not supported by active backend: ${unsupportedBackend}.`,
+        { code: "ERR_UNSUPPORTED_CLIENT_ATTRIBUTION" },
+      );
+    }
+  }
+
+  function adaptersFor(run) {
+    validateClientAttribution(run);
+    if (adapters !== undefined) return adapters;
+    let selected = defaultAdapterSets.get(run.clientAttributionFingerprint);
+    if (selected === undefined) {
+      selected = defaultAdapters(run.clientAttribution, providers);
+      defaultAdapterSets.set(run.clientAttributionFingerprint, selected);
+    }
+    return selected;
   }
 
   async function publish(activity, run) {
@@ -589,32 +617,43 @@ export function createRunner(options = {}) {
   function selectedRoleAdapters(pipeline, run, lease) {
     const currentPolicies = { ...run.providerPolicies };
     let pendingPolicyReceipt = Promise.resolve();
-    return roleAdapters(run, pipeline, adapters, providers, (role, receipt) => {
-      const operation = pendingPolicyReceipt.then(async () => {
-        const expected = currentPolicies[role];
-        if (expected !== null) {
-          if (!isDeepStrictEqual(expected, receipt)) {
-            throw new RunnerError(`Provider policy changed for role ${role}.`, {
-              code: "ERR_PROVIDER_POLICY_CHANGED",
-            });
+    return roleAdapters(
+      run,
+      pipeline,
+      adaptersFor(run),
+      providers,
+      (role, receipt) => {
+        const operation = pendingPolicyReceipt.then(async () => {
+          const expected = currentPolicies[role];
+          if (expected !== null) {
+            if (!isDeepStrictEqual(expected, receipt)) {
+              throw new RunnerError(
+                `Provider policy changed for role ${role}.`,
+                { code: "ERR_PROVIDER_POLICY_CHANGED" },
+              );
+            }
+            return;
           }
-          return;
-        }
-        const next = await runStore.recordProviderPolicy(lease, role, receipt);
-        currentPolicies[role] = next.providerPolicies[role];
-        await publish(
-          {
-            actor: "runner",
-            phase: "runtime",
-            kind: "provider-policy-recorded",
-            message: `Recorded immutable provider policy for ${role}.`,
-          },
-          next,
-        );
-      });
-      pendingPolicyReceipt = operation.catch(() => {});
-      return operation;
-    });
+          const next = await runStore.recordProviderPolicy(
+            lease,
+            role,
+            receipt,
+          );
+          currentPolicies[role] = next.providerPolicies[role];
+          await publish(
+            {
+              actor: "runner",
+              phase: "runtime",
+              kind: "provider-policy-recorded",
+              message: `Recorded immutable provider policy for ${role}.`,
+            },
+            next,
+          );
+        });
+        pendingPolicyReceipt = operation.catch(() => {});
+        return operation;
+      },
+    );
   }
 
   async function execute(
@@ -1174,7 +1213,7 @@ export function createRunner(options = {}) {
       providerPolicies = await probeRequiredRoles(
         pipeline,
         resolved.roles,
-        adapters,
+        adaptersFor(resolved),
         normalized.sourceSession,
         providers,
       );
@@ -1196,6 +1235,8 @@ export function createRunner(options = {}) {
       projectPath,
       taskPath,
       projectConfigurationProtection: projectConfiguration?.protection ?? null,
+      clientAttribution: resolved.clientAttribution,
+      clientAttributionFingerprint: resolved.clientAttributionFingerprint,
       roles: resolved.roles,
       providerPolicies,
       availabilityPolicy: resolved.availabilityPolicy,

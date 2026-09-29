@@ -136,6 +136,17 @@ instructions from discovery. This discovery switch is restart-scoped; each
 fresh report reloads the current runner configuration. Its scope is the
 runner-local configuration.
 
+`clientAttribution` is a runner-root-only exact `{ "name", "title" }` object
+for provider-visible client identity. It defaults to
+`{ "name": "agent_runner", "title": "Agent Runner" }`. Both strings must be
+non-empty, trimmed, at most 256 characters, and free of unsafe control or
+bidirectional formatting characters. Project configuration, CLI, MCP,
+pipelines, prompts, and repository content cannot override it. Custom identity
+requires support from every active role provider; Codex supports it and Claude
+does not. New runs persist its normalized value and fingerprint, resume ignores
+later root-configuration changes, and legacy runs use the generic default.
+Public prompts, status, activity, and diagnostics do not expose it.
+
 A target repository may optionally provide an ignored, untracked
 `LOCAL_ARTIFACTS/agent-runner.json`, or a new run may select another confined
 ignored path with `--project-config`. A project file may select aliases already

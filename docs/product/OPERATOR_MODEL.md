@@ -23,6 +23,15 @@ pipeline settings, and an artifact root, but cannot add provider binaries,
 credentials, environment values, or new host authority. CLI and MCP overrides
 have the documented highest precedence.
 
+Only runner-root configuration accepts `clientAttribution`, an exact
+`{ name, title }` provider-visible identity. It defaults to
+`agent_runner` / `Agent Runner`; project configuration, CLI, MCP, pipelines,
+prompts, and repository content cannot override it. A custom value must be
+supported by every active role provider before work begins. Each new run saves
+the normalized value and fingerprint, resume never reloads it, and legacy runs
+migrate to the generic default. Public status, activity, and diagnostics do not
+expose the value.
+
 The top-level `trustedCommandTimeoutMs` sets the per-command runner-trusted
 execution deadline in milliseconds. It is a strict integer from `1` through
 `2147483647`, defaults to `3600000` (60 minutes), and may be set in either

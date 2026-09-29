@@ -470,6 +470,11 @@ test("CLI and MCP project the same persisted launch recovery", async () => {
     checkpoint: "initialize",
   });
   const fixture = projectionFixture(launchRecovery);
+  fixture.run.clientAttribution = {
+    name: "DO_NOT_PROJECT_CLIENT_NAME",
+    title: "DO_NOT_PROJECT_CLIENT_TITLE",
+  };
+  fixture.run.clientAttributionFingerprint = "f".repeat(64);
   fixture.run.availabilityRetry = {
     role: "worker",
     checkpoint: "implement:1",
@@ -515,6 +520,11 @@ test("CLI and MCP project the same persisted launch recovery", async () => {
   assert.deepEqual(status.launchRecovery, projectLaunchRecovery(fixture.run));
   assert.deepEqual(status.launchRecovery, launchRecovery);
   assert.deepEqual(status.availabilityRetry, fixture.run.availabilityRetry);
+  assert.doesNotMatch(
+    JSON.stringify({ output, status }),
+    /DO_NOT_PROJECT_CLIENT/u,
+  );
+  assert.doesNotMatch(JSON.stringify({ output, status }), /clientAttribution/u);
   assert.match(
     output,
     /Availability retry: worker implement:1; transport_unavailable; attempt 2; delay 10000ms; deadline 2026-09-29T10:00:00.000Z/u,

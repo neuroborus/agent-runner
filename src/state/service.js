@@ -5,6 +5,11 @@ import { homedir, hostname } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
+import {
+  clientAttributionFingerprint,
+  DEFAULT_CLIENT_ATTRIBUTION,
+} from "../agents/index.js";
+
 import { createActionStore } from "./actions.js";
 import {
   dispatchActivity,
@@ -66,6 +71,8 @@ const CREATE_RUN_FIELDS = new Set([
   "projectPath",
   "taskPath",
   "projectConfigurationProtection",
+  "clientAttribution",
+  "clientAttributionFingerprint",
   "roles",
   "providerPolicies",
   "availabilityPolicy",
@@ -542,6 +549,22 @@ export function createRunStore({
     try {
       lease = await runLeases.acquire(runDirectory, runId);
       const createdAt = timestamp();
+      const clientAttribution =
+        input.clientAttribution === undefined
+          ? DEFAULT_CLIENT_ATTRIBUTION
+          : input.clientAttribution;
+      let attributionFingerprint = input.clientAttributionFingerprint;
+      if (attributionFingerprint === undefined) {
+        try {
+          attributionFingerprint =
+            clientAttributionFingerprint(clientAttribution);
+        } catch (cause) {
+          throw new RunStoreError("run.clientAttribution is invalid.", {
+            cause,
+            code: "ERR_INVALID_RUN_STATE",
+          });
+        }
+      }
       const state = normalizeRunState(
         {
           schemaVersion: RUN_STATE_SCHEMA_VERSION,
@@ -556,6 +579,8 @@ export function createRunStore({
             input.projectConfigurationProtection === undefined
               ? null
               : input.projectConfigurationProtection,
+          clientAttribution,
+          clientAttributionFingerprint: attributionFingerprint,
           roles: normalizeRoles(input.roles),
           availabilityPolicy:
             input.availabilityPolicy === undefined

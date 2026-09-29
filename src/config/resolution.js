@@ -1,4 +1,7 @@
-import { PROVIDER_REGISTRY } from "../agents/index.js";
+import {
+  clientAttributionFingerprint,
+  PROVIDER_REGISTRY,
+} from "../agents/index.js";
 import { getPipeline } from "../pipeline-registry.js";
 import {
   DEFAULT_AVAILABILITY_POLICY,
@@ -289,6 +292,22 @@ export function resolvePipelineConfiguration(
     }),
   );
 
+  const unsupportedAttributionBackend = Object.values(resolvedRoles)
+    .map(({ backend }) => backend)
+    .find(
+      (backend) =>
+        !providers.supportsClientAttribution(
+          backend,
+          normalizedConfiguration.clientAttribution,
+        ),
+    );
+  if (unsupportedAttributionBackend !== undefined) {
+    throw new ConfigurationError(
+      `Client attribution is not supported by active backend: ${unsupportedAttributionBackend}.`,
+      { code: "ERR_UNSUPPORTED_CLIENT_ATTRIBUTION" },
+    );
+  }
+
   let trustedValidation;
   if (Object.hasOwn(settings, "trustedChecks")) {
     try {
@@ -318,6 +337,10 @@ export function resolvePipelineConfiguration(
         normalizedProjectConfiguration?.availabilityRetryMaxDelayMs ??
         normalizedConfiguration.availabilityRetryMaxDelayMs,
     }),
+    clientAttribution: normalizedConfiguration.clientAttribution,
+    clientAttributionFingerprint: clientAttributionFingerprint(
+      normalizedConfiguration.clientAttribution,
+    ),
     pipelineId,
     roles: Object.freeze(resolvedRoles),
     settings,

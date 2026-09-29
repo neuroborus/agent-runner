@@ -1,11 +1,16 @@
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
-import { isAdapterDiagnosticClass } from "../agents/index.js";
+import {
+  clientAttributionFingerprint,
+  DEFAULT_CLIENT_ATTRIBUTION,
+  isAdapterDiagnosticClass,
+  normalizeClientAttribution,
+} from "../agents/index.js";
 import { normalizeAvailabilityState } from "./availability.js";
 import { normalizeLaunchRecovery } from "./launch-recovery.js";
 import { validStopTiming, validStopSettlement } from "./stop-contract.js";
 
-export const RUN_STATE_SCHEMA_VERSION = 15;
+export const RUN_STATE_SCHEMA_VERSION = 16;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
   runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
@@ -19,6 +24,7 @@ export const RUNTIME_VERSION_SKEW_EXIT_CODE = 78;
 const LEGACY_RUN_STATE_SCHEMA_VERSION = 1;
 const ACTIVITY_RUN_STATE_SCHEMA_VERSION = 3;
 const PROVIDER_POLICY_SCHEMA_VERSION = 13;
+const CLIENT_ATTRIBUTION_SCHEMA_VERSION = 16;
 const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   LEGACY_RUN_STATE_SCHEMA_VERSION,
   2,
@@ -34,6 +40,7 @@ const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   12,
   13,
   14,
+  15,
   RUN_STATE_SCHEMA_VERSION,
 ]);
 
@@ -52,6 +59,8 @@ const STATE_FIELDS = new Set([
   "projectPath",
   "taskPath",
   "projectConfigurationProtection",
+  "clientAttribution",
+  "clientAttributionFingerprint",
   "roles",
   "providerPolicies",
   "availabilityPolicy",
@@ -459,6 +468,46 @@ function normalizeRuntimeCompatibility(value, schemaVersion) {
   }
 
   return { ...value };
+}
+
+function normalizeClientAttributionSnapshot(value, fingerprint, schemaVersion) {
+  if (schemaVersion < CLIENT_ATTRIBUTION_SCHEMA_VERSION) {
+    if (value !== undefined || fingerprint !== undefined) {
+      let legacyAttribution;
+      try {
+        legacyAttribution = normalizeClientAttribution(value);
+      } catch {
+        fail("Legacy run state cannot grant custom client attribution.");
+      }
+      if (
+        fingerprint !==
+          clientAttributionFingerprint(DEFAULT_CLIENT_ATTRIBUTION) ||
+        legacyAttribution.name !== DEFAULT_CLIENT_ATTRIBUTION.name ||
+        legacyAttribution.title !== DEFAULT_CLIENT_ATTRIBUTION.title
+      ) {
+        fail("Legacy run state cannot grant custom client attribution.");
+      }
+    }
+    return {
+      clientAttribution: DEFAULT_CLIENT_ATTRIBUTION,
+      clientAttributionFingerprint: clientAttributionFingerprint(
+        DEFAULT_CLIENT_ATTRIBUTION,
+      ),
+    };
+  }
+  let clientAttribution;
+  try {
+    clientAttribution = normalizeClientAttribution(value);
+  } catch {
+    fail("run.clientAttribution is invalid.");
+  }
+  if (
+    typeof fingerprint !== "string" ||
+    fingerprint !== clientAttributionFingerprint(clientAttribution)
+  ) {
+    fail("run.clientAttributionFingerprint is invalid.");
+  }
+  return { clientAttribution, clientAttributionFingerprint: fingerprint };
 }
 
 function decimalIdentity(value, path) {
@@ -1069,6 +1118,11 @@ export function normalizeRunState(value, expectedRunId) {
   const roles = normalizeRoles(value.roles, {
     allowMissingEffort: value.schemaVersion < 8,
   });
+  const clientAttribution = normalizeClientAttributionSnapshot(
+    value.clientAttribution,
+    value.clientAttributionFingerprint,
+    value.schemaVersion,
+  );
   const normalized = {
     schemaVersion: value.schemaVersion,
     revision: value.revision,
@@ -1085,6 +1139,7 @@ export function normalizeRunState(value, expectedRunId) {
       value.projectConfigurationProtection,
       value,
     ),
+    ...clientAttribution,
     roles,
     providerPolicies: normalizeProviderPolicies(
       value.providerPolicies,

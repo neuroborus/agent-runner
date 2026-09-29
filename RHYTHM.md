@@ -7,6 +7,14 @@ remain in the owning documentation.
 
 ## 2026-09-29
 
+- **Client attribution is frozen per run at the root boundary.** Only
+  runner-root configuration may select the normalized provider-visible
+  identity. Resolution admits a custom value only when every active provider
+  descriptor supports it, then persists the value and fingerprint in the
+  immutable common envelope. Resume reconstructs adapters from that snapshot;
+  legacy runs receive the generic default without configuration reload, and
+  prompts, projections, activity, and diagnostics disclose neither string.
+
 - **Provider-visible client identity has one descriptor-owned contract.** The
   public agent boundary now validates and freezes exact `{ name, title }`
   attribution with the generic Agent Runner identity as its default. Codex

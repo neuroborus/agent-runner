@@ -105,6 +105,15 @@ Repository-local artifacts must already be ignored. The runner never changes
 ignore rules automatically. Keep authoritative state in a separate tree from
 the project and task directories; neither may contain the other.
 
+Set provider-visible client identity only with top-level runner-root
+`clientAttribution: { "name": "...", "title": "..." }`. The default is
+`agent_runner` / `Agent Runner`. Project files and CLI/MCP inputs cannot set or
+override it. A custom identity requires support from every active role backend;
+Claude does not support one. Start a new run after changing the root value:
+resume and detached recovery keep the saved fingerprinted identity, while
+legacy runs use the generic default. Status, activity, prompts, and diagnostics
+do not display it.
+
 Set portable effort with `defaultEffort` or role `effort` in runner/project
 configuration, CLI `--effort` and `--<role>-effort`, or MCP `run_start.effort`
 and `roleOverrides.<role>.effort`. Values are `current`, `low`, `medium`,

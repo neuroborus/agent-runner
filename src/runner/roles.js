@@ -11,8 +11,11 @@ import {
 
 import { isRecord, RunnerError } from "./input.js";
 
-export function defaultAdapters(providers = PROVIDER_REGISTRY) {
-  return providers.createAdapters();
+export function defaultAdapters(
+  clientAttribution,
+  providers = PROVIDER_REGISTRY,
+) {
+  return providers.createAdapters(clientAttribution);
 }
 
 function resolveAdapter(adapters, pipelineId, role, backend) {

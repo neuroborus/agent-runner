@@ -76,6 +76,7 @@ export {
 export {
   ADAPTER_FAILURE_CLASS,
   AVAILABILITY_REASONS,
+  clientAttributionFingerprint,
   createCapabilityProof,
   DEFAULT_CLIENT_ATTRIBUTION,
   deriveEffectStarted,
