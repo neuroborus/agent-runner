@@ -331,6 +331,9 @@ export function resolvePipelineConfiguration(
     artifactRoot:
       normalizedProjectConfiguration?.artifactRoot ??
       normalizedConfiguration.artifactRoot,
+    providerInactivityTimeoutMs:
+      normalizedProjectConfiguration?.providerInactivityTimeoutMs ??
+      normalizedConfiguration.providerInactivityTimeoutMs,
     availabilityPolicy: normalizeAvailabilityPolicy({
       initialDelayMs: DEFAULT_AVAILABILITY_POLICY.initialDelayMs,
       maxDelayMs:

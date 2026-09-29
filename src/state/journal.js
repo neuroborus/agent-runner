@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
+import { assertInactivityContinuity } from "./inactivity.js";
 import { assertAvailabilityContinuity } from "./availability.js";
 import { publicDispatchActivity } from "./dispatch.js";
 import {
@@ -39,6 +40,8 @@ const IMMUTABLE_STATE_FIELDS = [
   "clientAttributionFingerprint",
   "roles",
   "availabilityPolicy",
+  "providerInactivityTimeoutMs",
+  "providerInactivityFingerprint",
   "createdAt",
 ];
 const VERSION_STATE_FIELDS = [
@@ -48,6 +51,7 @@ const VERSION_STATE_FIELDS = [
 ];
 const TRANSITION_STATE_FIELDS = [
   "availabilityRetry",
+  "inactivityRecovery",
   "counters",
   "hashes",
   "pause",
@@ -105,6 +109,7 @@ function normalizeEvent(value, runId, lineNumber) {
         13,
         14,
         15,
+        16,
         RUN_STATE_SCHEMA_VERSION,
       ].includes(value.schemaVersion)
     ) {
@@ -170,13 +175,13 @@ function assertEventContinuity(
       code: "ERR_INVALID_EVENT_LOG",
     });
   }
-  if (events[0].state.availabilityRetry !== null) {
-    throw new RunStoreError(
-      "Initial run cannot contain an availability episode.",
-      {
-        code: "ERR_INVALID_EVENT_LOG",
-      },
-    );
+  if (
+    events[0].state.inactivityRecovery !== null ||
+    events[0].state.availabilityRetry !== null
+  ) {
+    throw new RunStoreError("Initial run cannot contain provider recovery.", {
+      code: "ERR_INVALID_EVENT_LOG",
+    });
   }
 
   for (let index = startIndex; index < events.length; index += 1) {
@@ -184,8 +189,9 @@ function assertEventContinuity(
     const state = events[index].state;
     try {
       assertAvailabilityContinuity(previousState, state);
+      assertInactivityContinuity(previousState, state, events[index].activity);
     } catch {
-      throw new RunStoreError("Availability retry history is inconsistent.", {
+      throw new RunStoreError("Provider recovery history is inconsistent.", {
         code: "ERR_INVALID_EVENT_LOG",
       });
     }
@@ -339,6 +345,7 @@ function assertStopContinuity(events, index, migrating, resolveStopBoundary) {
   if (
     [
       "availabilityRetry",
+      "inactivityRecovery",
       "pipelineState",
       "pause",
       "activeTurn",

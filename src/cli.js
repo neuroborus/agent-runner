@@ -13,6 +13,7 @@ import { getPipeline, listPipelines } from "./pipeline-registry.js";
 import { createRunner, parseSourceSession } from "./runner/index.js";
 import {
   projectAvailabilityRetry,
+  projectInactivityRecovery,
   projectLaunchRecovery,
   projectOperatorStop,
   RUNTIME_VERSION_SKEW_EXIT_CODE,
@@ -230,6 +231,11 @@ function runSummary({ directoryPath, run }) {
       );
   }
   const launchRecovery = projectLaunchRecovery(run);
+  const inactivity = projectInactivityRecovery(run);
+  if (inactivity !== null)
+    lines.push(
+      `Provider inactivity: ${inactivity.role} ${inactivity.checkpoint}; ${inactivity.status}; attempt ${inactivity.attempt} of 2`,
+    );
   const retry = projectAvailabilityRetry(run);
   if (retry !== null) {
     lines.push(

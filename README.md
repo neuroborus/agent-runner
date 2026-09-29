@@ -351,6 +351,25 @@ projects may safely use different deadlines. Legacy snapshot versions use the
 same deterministic 60-minute fallback. Capability preparation remains capped
 at the smaller of this value and 10 seconds.
 
+`providerInactivityTimeoutMs` limits provider inactivity, with a conservative
+`1800000` (30-minute) default. Root and project configuration accept integers
+from `1` through `2147483647`; project configuration takes precedence. There is
+no CLI or MCP override. Each run freezes and fingerprints the setting; resume
+and legacy migration never reload it. Only validated semantic progress resets
+the deadline. Owned local commands suspend it until every overlapping command
+completes; keepalives, process liveness, and command output do not reset it.
+
+Expiry records bounded recovery evidence before stopping the invocation. After
+safe repository reconciliation, the same role can use its single fresh-session
+reconstruction allowance without reforking the source. Native fresh fallback
+uses that same durable allowance. A repeated expiry pauses as
+`backend_unavailable` with `ERR_PROVIDER_INACTIVE`; an offered explicit resume
+tries once without replenishing automatic recovery. Safe partial work and
+correction accounting survive. CLI and MCP expose only the role, checkpoint,
+attempt, and recovery status. Trusted commands, constrained commit execution,
+runner-owned handoff, usage limits, operator stops, and availability backoff
+retain their separate policies. See the [provider contract](docs/product/PROVIDER_MODEL.md#provider-inactivity).
+
 `availabilityRetryMaxDelayMs` sets the frozen common availability-policy ceiling
 for new runs. It accepts integers from `5000` through `2147483647` milliseconds,
 defaults to `1800000` (30 minutes), and resolves project over runner configuration.
@@ -728,7 +747,9 @@ live supervision and replacement-owner recovery. Version 14 adds the owner's
 control-group identity so an inaccessible same-user process can be excluded
 only when it is proven to belong elsewhere. Legacy states migrate with no new
 authority and remain compatibility-blocked when that evidence is needed.
-Version 15 adds frozen availability policy and nullable retry episodes, with
+Version 17 adds the frozen provider inactivity timeout, its fingerprint, and a
+nullable durable recovery allowance. Legacy runs use 30 minutes without
+configuration reload. Version 15 adds frozen availability policy and nullable retry episodes, with
 default-only legacy migration that preserves saved workflow and session evidence.
 The mode-aware pipeline versions are plan-authoring version 5, plan-execution
 version 24, and polishing version 16. Their ordered migrations resolve missing

@@ -1698,6 +1698,7 @@ export function createClaudeAdapter(options = {}) {
   async function createAuthorizedCommit(request) {
     let effectStarted = false;
     try {
+      await request.onCommitExecution?.();
       request.signal?.throwIfAborted();
       await executeClaudeLocalCommit({
         bubblewrapBinary: BUBBLEWRAP_BINARY,
@@ -1848,6 +1849,8 @@ export function createClaudeAdapter(options = {}) {
             }
           }
         }
+        if ((await request.onFreshSession?.()) === false) throw cause;
+        request.signal?.throwIfAborted();
         result = await runAttempt(request, {
           recovery: "fresh",
           session: null,
@@ -1856,6 +1859,8 @@ export function createClaudeAdapter(options = {}) {
         cause.code === "ERR_CLAUDE_CONTINUATION_SESSION_UNAVAILABLE" &&
         request.session?.mode === "continue"
       ) {
+        if ((await request.onFreshSession?.()) === false) throw cause;
+        request.signal?.throwIfAborted();
         result = await runAttempt(request, {
           recovery: "fresh",
           session: null,

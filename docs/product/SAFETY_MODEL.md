@@ -422,3 +422,22 @@ owner/device/inode proof are required before removing the recorded allocation.
 Replacement or cleanup uncertainty retains the reservation. No output or
 fingerprint is accepted until cleanup completes; recovery reconciles the exact
 checkpoint without weakening stronger containment or consumed-effect checks.
+
+## Inactivity recovery boundaries
+
+The shared provider watchdog journals a bounded expiry and configuration/content-
+bound recovery marker before termination. Safe repository reconciliation and
+verified process/resource retirement precede the one fresh reconstruction;
+restart cannot replenish that allowance, and reconstruction never repeats a
+source fork. Partial writes invalidate prior approvals and preserve charged
+correction accounting. Recovery evidence clears only with a returned response
+and matching reconciliation. Persistence failure grants no retry authority.
+
+Only validated semantic progress resets inactivity. Owned overlapping commands
+suspend it until all complete; transport traffic and process liveness do not.
+Readiness recovery requires existing pre-executor proof plus Git verification.
+The constrained commit executor, trusted commands, and runner-owned handoff
+remain outside this watchdog. Possible effects, unsafe repository controls,
+operator stops, permission/isolation failures, and usage limits keep their
+existing precedence. An MCP disconnect cannot reset a deadline or create a new
+execution owner. See the [runtime contract](../ARCHITECTURE.md#provider-inactivity-deadlines).

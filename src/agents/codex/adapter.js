@@ -1791,6 +1791,7 @@ export function createCodexAdapter(options = {}) {
   async function createAuthorizedCommit(request) {
     let effectStarted = false;
     try {
+      await request.onCommitExecution?.();
       request.signal?.throwIfAborted();
       await executeCodexLocalCommit({
         codexBinary,
@@ -2021,6 +2022,8 @@ export function createCodexAdapter(options = {}) {
         cause.availabilityReason === undefined &&
         request.session?.mode !== "fork"
       ) {
+        if ((await request.onFreshSession?.()) === false) throw cause;
+        request.signal?.throwIfAborted();
         result = await runAttempt(request, {
           fresh: true,
           recovery: "fresh",

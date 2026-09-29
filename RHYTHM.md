@@ -7,6 +7,17 @@ remain in the owning documentation.
 
 ## 2026-09-30
 
+- **Provider inactivity consumes one durable reconstruction allowance.** New
+  runs freeze and fingerprint a root/project timeout, defaulting to 30 minutes;
+  legacy runs migrate without configuration reload. Both providers reset only
+  on validated semantic progress and suspend while owned commands are active.
+  Expiry is journaled before termination. Each pipeline reconciles safe partial
+  content and corrections before reconstructing the same role without another
+  source fork. Native fresh fallback shares the allowance, and restart cannot
+  replenish it. Repeated inactivity pauses for explicit resume. Commit readiness
+  retains pre-effect proof; constrained effects and trusted commands keep their
+  own boundaries. CLI and MCP share bounded activity without native payloads.
+
 - **Provider progress is an internal validated lifecycle.** Both adapters emit
   only closed semantic/tool event kinds and an active-command count, keeping
   overlapping commands independent and native payloads private. Codex correlates

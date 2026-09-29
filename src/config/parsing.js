@@ -8,6 +8,8 @@ import {
 } from "../agents/index.js";
 import { listPipelines } from "../pipeline-registry.js";
 import {
+  DEFAULT_PROVIDER_INACTIVITY_TIMEOUT_MS,
+  normalizeProviderInactivityTimeoutMs,
   DEFAULT_AVAILABILITY_POLICY,
   MAX_AVAILABILITY_DELAY_MS,
 } from "../state/index.js";
@@ -27,6 +29,7 @@ export const CURRENT = "current";
 const PROFILE_NAME_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const TOP_LEVEL_FIELDS = new Set([
   "artifactRoot",
+  "providerInactivityTimeoutMs",
   "availabilityRetryMaxDelayMs",
   "clientAttribution",
   "schemaVersion",
@@ -296,6 +299,16 @@ function normalizePipeline(
 export function normalizeConfiguration(input, providers = PROVIDER_REGISTRY) {
   assertRecord(input, "configuration");
   rejectUnknownFields(input, TOP_LEVEL_FIELDS, "configuration");
+  if (input.providerInactivityTimeoutMs !== undefined) {
+    try {
+      normalizeProviderInactivityTimeoutMs(input.providerInactivityTimeoutMs);
+    } catch (cause) {
+      throw new ConfigurationError(
+        "providerInactivityTimeoutMs must be an integer from 1 through 2147483647.",
+        { cause },
+      );
+    }
+  }
   if (input.availabilityRetryMaxDelayMs !== undefined) {
     assertAvailabilityRetryMaxDelayMs(
       input.availabilityRetryMaxDelayMs,
@@ -393,6 +406,9 @@ export function normalizeConfiguration(input, providers = PROVIDER_REGISTRY) {
   const normalized = {
     schemaVersion: CONFIG_SCHEMA_VERSION,
     artifactRoot: input.artifactRoot ?? DEFAULT_ARTIFACT_ROOT,
+    providerInactivityTimeoutMs:
+      input.providerInactivityTimeoutMs ??
+      DEFAULT_PROVIDER_INACTIVITY_TIMEOUT_MS,
     availabilityRetryMaxDelayMs:
       input.availabilityRetryMaxDelayMs ??
       DEFAULT_AVAILABILITY_POLICY.maxDelayMs,
@@ -466,6 +482,16 @@ export function normalizeProjectConfiguration(
   const rootPath = "projectConfiguration";
   assertRecord(input, rootPath);
   rejectUnknownFields(input, PROJECT_TOP_LEVEL_FIELDS, rootPath);
+  if (input.providerInactivityTimeoutMs !== undefined) {
+    try {
+      normalizeProviderInactivityTimeoutMs(input.providerInactivityTimeoutMs);
+    } catch (cause) {
+      throw new ConfigurationError(
+        "providerInactivityTimeoutMs must be an integer from 1 through 2147483647.",
+        { cause },
+      );
+    }
+  }
   if (input.availabilityRetryMaxDelayMs !== undefined) {
     assertAvailabilityRetryMaxDelayMs(
       input.availabilityRetryMaxDelayMs,
@@ -559,6 +585,7 @@ export function normalizeProjectConfiguration(
   );
   for (const field of [
     "artifactRoot",
+    "providerInactivityTimeoutMs",
     "availabilityRetryMaxDelayMs",
     "defaultBackend",
     "defaultProfile",

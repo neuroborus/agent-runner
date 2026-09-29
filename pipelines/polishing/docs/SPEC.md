@@ -1544,3 +1544,33 @@ Do not add a workflow framework, dynamic plugins, pipeline-to-pipeline imports,
 commit-plan parsing, fuzzy finding matching, parallel reviewers, network
 transport, daemon, remote mutation, automatic commits, or open-ended dialogue
 after clarification closes.
+
+## Provider inactivity recovery
+
+The common [inactivity contract](../../../docs/ARCHITECTURE.md#provider-inactivity-deadlines)
+applies to every role turn. The frozen root/project
+`providerInactivityTimeoutMs` defaults to 1800000 milliseconds, validates the
+strict range 1–2147483647, and has no CLI/MCP override. Legacy common state
+migrates to that default without configuration reload; pipeline versions and
+saved settings are unchanged. Only validated semantic progress resets the
+watchdog; an aggregate owned-command count suspends it until all commands
+complete. Keepalives and process liveness are ignored.
+
+The runner journals an expiry and role/checkpoint/attempt/configuration/content
+marker before aborting the invocation. This pipeline reconciles its repository
+boundary before requesting a fresh reconstruction. It retains the same logical
+checkpoint and complete durable prompt, never reforks the source, and preserves
+partial-content correction accounting while invalidating stale approvals.
+Native fresh fallback and inactivity share one durably consumed allowance.
+Repeated expiry pauses as `backend_unavailable` / `ERR_PROVIDER_INACTIVE`.
+Restart preserves the allowance; an offered explicit resume attempts the same
+checkpoint once without replenishing automatic recovery. A returned provider
+response clears recovery only with matching repository reconciliation, atomically
+with any safe content/counter update and before structured-output validation.
+
+Availability backoff, authentication, usage limits, operator stops, and trusted
+command deadlines remain separate. Commit readiness may retry only with existing
+pre-executor proof and Git verification; the constrained executor and runner-owned
+handoff are excluded. Ambiguous effects retain precedence. CLI/MCP publish the
+same bounded expiry/reconstruction/recovery activity and status; a client
+disconnect changes observation only.

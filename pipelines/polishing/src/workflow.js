@@ -1167,12 +1167,12 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     }
     return (
       turn.phase === "resolve-findings" &&
-      currentRun.availabilityRetry?.checkpoint.startsWith(
-        "resolve-findings:read-only:",
-      ) !== true &&
-      (currentRun.availabilityRetry?.checkpoint.startsWith(
-        "resolve-findings:workspace-write:",
-      ) ||
+      (
+        currentRun.availabilityRetry ?? currentRun.inactivityRecovery
+      )?.checkpoint.startsWith("resolve-findings:read-only:") !== true &&
+      ((
+        currentRun.availabilityRetry ?? currentRun.inactivityRecovery
+      )?.checkpoint.startsWith("resolve-findings:workspace-write:") ||
         state().availabilityCorrectionCharged ||
         counters().fixRounds < fixBudget())
     );
@@ -1296,13 +1296,15 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
               : current.findings,
           findings:
             currentRun.availabilityRetry == null &&
+            currentRun.inactivityRecovery == null &&
             !current.availabilityCorrectionCharged
               ? []
               : current.findings,
           pendingCorrection: true,
           availabilityCorrectionCharged:
             current.availabilityCorrectionCharged ||
-            currentRun.availabilityRetry != null,
+            currentRun.availabilityRetry != null ||
+            currentRun.inactivityRecovery != null,
           reviewReconsideration: [],
           ...markPendingLazyCorrectionCharged(current),
         },
@@ -1360,7 +1362,10 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       return null;
     const turn = activeTurn(role, state().workflowState);
     const retrying = currentRun.availabilityRetry != null;
-    const recovering = interruptedTurn !== null || retrying;
+    const recovering =
+      interruptedTurn !== null ||
+      retrying ||
+      currentRun.inactivityRecovery != null;
     if (interruptedTurn !== null && !isDeepStrictEqual(interruptedTurn, turn)) {
       throw workflowError(
         "Persisted agent turn does not match polishing recovery.",
@@ -1398,6 +1403,13 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     const availabilityCheckpoint = `${turn.phase}:${access}:${checkpoint}`;
     if (retrying && runtime.availability !== undefined) {
       currentRun = await runtime.availability.before({
+        role,
+        checkpoint: availabilityCheckpoint,
+        repository: turnSnapshot,
+      });
+    }
+    if (runtime.inactivity !== undefined) {
+      currentRun = await runtime.inactivity.before({
         role,
         checkpoint: availabilityCheckpoint,
         repository: turnSnapshot,
@@ -1458,6 +1470,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     };
     let response;
     let agentError;
+    let repositoryReconciled = false;
+    let inactivityFailure = false;
     let availabilityFailure = false;
     let authenticationFailure = false;
     currentRun = await runtime.startAgentTurn(
@@ -1481,6 +1495,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       } catch (cause) {
         agentError = cause;
         if (isOwnershipFailure(cause)) throw cause;
+        inactivityFailure =
+          runtime.inactivity?.eligible(cause) === true ||
+          (await runtime.inactivity?.pending()) === true;
         availabilityFailure = runtime.availability?.eligible(cause) === true;
         authenticationFailure =
           runtime.authentication?.eligible(cause) === true;
@@ -1543,11 +1560,15 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
                   pendingCorrection: true,
                   availabilityCorrectionCharged:
                     current.availabilityCorrectionCharged ||
-                    ((availabilityFailure || authenticationFailure) &&
+                    ((availabilityFailure ||
+                      authenticationFailure ||
+                      inactivityFailure) &&
                       contentChangingLazyCheck) ||
                     (authenticationFailure && contentChangingCorrection),
                   reviewReconsideration: [],
-                  ...(availabilityFailure || authenticationFailure
+                  ...(availabilityFailure ||
+                  authenticationFailure ||
+                  inactivityFailure
                     ? {
                         workflowState: current.workflowState,
                         finalizationCorrection: current.finalizationCorrection,
@@ -1615,6 +1636,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       if ((await readCurrentInputs()) === null) {
         return null;
       }
+      repositoryReconciled = true;
       if (
         authenticationFailure &&
         agentError?.failureClass !== STRUCTURED_OUTPUT_FAILURE_CLASS
@@ -1654,7 +1676,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         currentRun.activeTurn != null &&
         !isOwnershipFailure(agentError)
       ) {
-        currentRun = await runtime.finishAgentTurn(turn);
+        currentRun = await runtime.finishAgentTurn(turn, {
+          repositoryReconciled,
+        });
         assertRun(currentRun);
       }
     }
@@ -1674,6 +1698,14 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
             ? { field: "result", constraint: "provider-structured-output" }
             : undefined,
         );
+      }
+      if (
+        runtime.inactivity?.eligible(agentError) &&
+        (await runtime.inactivity.retry({
+          repository: state().repositoryBaseline,
+        }))
+      ) {
+        return availabilityRetry;
       }
       if (runtime.availability?.eligible(agentError)) {
         currentRun = await runtime.availability.schedule({
@@ -4506,6 +4538,7 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
     let current = state();
     if (
       currentRun.availabilityRetry == null &&
+      currentRun.inactivityRecovery == null &&
       !current.availabilityCorrectionCharged &&
       current.pendingLazyCorrection === null &&
       counters().fixRounds >= fixBudget()
@@ -4521,6 +4554,7 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
     );
     if (
       currentRun.availabilityRetry == null &&
+      currentRun.inactivityRecovery == null &&
       !current.availabilityCorrectionCharged &&
       current.pendingLazyCorrection === null &&
       stableFindingIds.length > 0
@@ -4534,6 +4568,7 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
     }
     if (
       currentRun.availabilityRetry == null &&
+      currentRun.inactivityRecovery == null &&
       !current.availabilityCorrectionCharged &&
       current.pendingLazyCorrection === null &&
       current.blockedSinceStagnation >= current.settings.stagnationWindowRounds
@@ -5940,7 +5975,9 @@ ${JSON.stringify(
       }
       return arbitrateStagnation();
     }
-    const retryCheckpoint = currentRun.availabilityRetry?.checkpoint;
+    const retryCheckpoint = (
+      currentRun.availabilityRetry ?? currentRun.inactivityRecovery
+    )?.checkpoint;
     const budgetExhausted =
       retryCheckpoint?.startsWith("resolve-findings:read-only:") === true ||
       (retryCheckpoint?.startsWith("resolve-findings:workspace-write:") !==
@@ -6570,7 +6607,9 @@ ${evidence}`,
   } catch (cause) {
     if (
       authenticationPausePersistence ||
-      cause?.code === "ERR_AVAILABILITY_RECOVERY"
+      ["ERR_AVAILABILITY_RECOVERY", "ERR_INACTIVITY_RECOVERY"].includes(
+        cause?.code,
+      )
     )
       throw cause;
     if (isOwnershipFailure(cause)) {

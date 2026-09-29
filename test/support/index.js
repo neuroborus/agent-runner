@@ -18,3 +18,5 @@ export {
   runnerFor,
   strandedPreWorkOwner,
 } from "./runner.js";
+
+export { attachInactivity } from "./inactivity.js";

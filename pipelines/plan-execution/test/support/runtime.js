@@ -1472,6 +1472,7 @@ async function createFixture(
             repositoryControl,
           );
           if (request.access === "local-commit") {
+            await request.onCommitExecution?.();
             if (onCommitRun === undefined) {
               if (repository === "git") {
                 await executeFile("git", ["-C", projectPath, "add", "-A"]);

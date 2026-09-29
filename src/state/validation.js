@@ -6,11 +6,12 @@ import {
   isAdapterDiagnosticClass,
   normalizeClientAttribution,
 } from "../agents/index.js";
+import { normalizeInactivityState } from "./inactivity.js";
 import { normalizeAvailabilityState } from "./availability.js";
 import { normalizeLaunchRecovery } from "./launch-recovery.js";
 import { validStopTiming, validStopSettlement } from "./stop-contract.js";
 
-export const RUN_STATE_SCHEMA_VERSION = 16;
+export const RUN_STATE_SCHEMA_VERSION = 17;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
   runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
@@ -41,6 +42,7 @@ const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   13,
   14,
   15,
+  16,
   RUN_STATE_SCHEMA_VERSION,
 ]);
 
@@ -63,6 +65,9 @@ const STATE_FIELDS = new Set([
   "clientAttributionFingerprint",
   "roles",
   "providerPolicies",
+  "providerInactivityTimeoutMs",
+  "providerInactivityFingerprint",
+  "inactivityRecovery",
   "availabilityPolicy",
   "availabilityRetry",
   "counters",
@@ -101,6 +106,7 @@ const INPUT_QUESTION_FIELDS = new Set([
 ]);
 const INPUT_RESPONSE_FIELDS = new Set(["requestId", "transcriptHash"]);
 const TRANSITION_FIELDS = new Set([
+  "inactivityRecovery",
   "availabilityRetry",
   "counters",
   "hashes",
@@ -1165,9 +1171,13 @@ export function normalizeRunState(value, expectedRunId) {
     updatedAt,
   };
   try {
-    Object.assign(normalized, normalizeAvailabilityState({ ...value, roles }));
+    Object.assign(
+      normalized,
+      normalizeAvailabilityState({ ...value, roles }),
+      normalizeInactivityState({ ...value, roles }),
+    );
   } catch {
-    fail("Run availability policy or retry episode is invalid.");
+    fail("Run provider recovery policy or evidence is invalid.");
   }
   assertSerializedSize(normalized, "run");
   return normalized;
@@ -1179,6 +1189,15 @@ export function normalizeTransitionPatch(value) {
   rejectUnknownFields(patch, TRANSITION_FIELDS, "transition");
 
   const normalized = {};
+  if (Object.hasOwn(patch, "inactivityRecovery")) {
+    normalized.inactivityRecovery =
+      patch.inactivityRecovery === null
+        ? null
+        : cloneRecord(
+            patch.inactivityRecovery,
+            "transition.inactivityRecovery",
+          );
+  }
   if (Object.hasOwn(patch, "availabilityRetry")) {
     normalized.availabilityRetry =
       patch.availabilityRetry === null

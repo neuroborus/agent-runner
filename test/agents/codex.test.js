@@ -4576,3 +4576,78 @@ test(
     assert.equal(registrations.at(-1), null);
   },
 );
+
+test("runner can deny an already consumed fresh reconstruction allowance", async () => {
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method === "thread/resume")
+        return { error: { code: -32000, message: "missing" } };
+      return undefined;
+    },
+  });
+  let reserved = 0;
+  await assert.rejects(
+    fixture.adapter.run(
+      request({
+        session: { mode: "continue", id: "source-thread" },
+        onFreshSession: async () => {
+          reserved++;
+          return false;
+        },
+      }),
+    ),
+  );
+  assert.equal(reserved, 1);
+  assert.equal(fixture.processes.length, 1);
+});
+
+test("commit readiness awaits the runner boundary before any constrained effect", async () => {
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method === "turn/start")
+        return {
+          result: { turn: { id: "ready" } },
+          notification: completedTurn(
+            message.params.threadId,
+            "ready",
+            '{"ready":true}',
+          ),
+        };
+      return undefined;
+    },
+  });
+  const entered = Promise.withResolvers(),
+    release = Promise.withResolvers();
+  const controller = new AbortController();
+  const attempt = fixture.adapter.run(
+    request({
+      access: "local-commit",
+      authorizationId: "authorization-1",
+      commit: {
+        expectedHead: EXPECTED_HEAD,
+        message: "test(scope): verify readiness",
+      },
+      signal: controller.signal,
+      onCommitExecution: async () => {
+        entered.resolve();
+        await release.promise;
+      },
+    }),
+  );
+  await entered.promise;
+  assert.equal(
+    fixture.executeCalls.some(
+      ({ options }) => options.ownershipMode === "native-sandbox-provider",
+    ),
+    false,
+  );
+  controller.abort(new Error("expired"));
+  release.resolve();
+  await assert.rejects(attempt, (cause) => cause.effectStarted === false);
+  assert.equal(
+    fixture.executeCalls.some(
+      ({ options }) => options.ownershipMode === "native-sandbox-provider",
+    ),
+    false,
+  );
+});

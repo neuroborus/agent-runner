@@ -43,6 +43,19 @@ without shared service state. For example, `"trustedCommandTimeoutMs": 7200000`
 selects two hours. Legacy snapshot versions use the one-hour fallback, while
 capability preparation remains capped at 10 seconds.
 
+Root and project configuration accept `providerInactivityTimeoutMs`, a strict
+integer from 1 through 2147483647 milliseconds with a 30-minute default and
+project precedence. The run freezes and fingerprints it; neither resume nor
+legacy migration reloads configuration. There is no CLI or MCP override.
+An inactive provider records bounded recovery activity before termination,
+reconciles safe partial work, and may reconstruct the same role once without
+reforking a source. Native fresh fallback shares that durable allowance. A
+second expiry pauses as `backend_unavailable` / `ERR_PROVIDER_INACTIVE`.
+Follow the offered resume action for one invocation without renewed automatic
+retries. CLI and MCP show the role, checkpoint, attempt, and recovery status;
+client disconnect does not affect execution. Owned local commands suspend the
+deadline, while keepalives do not. See the [provider contract](PROVIDER_MODEL.md#provider-inactivity).
+
 Root and project configuration also accept `availabilityRetryMaxDelayMs`, a
 strict integer from `5000` through `2147483647` milliseconds with a `1800000`
 (30-minute) default. The project value wins, without CLI/MCP or role overrides.

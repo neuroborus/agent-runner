@@ -27,6 +27,7 @@ import {
 import {
   createRunStore,
   projectAvailabilityRetry,
+  projectInactivityRecovery,
   projectLaunchRecovery,
   projectOperatorStop,
   RUNTIME_VERSION_SKEW_EXIT_CODE,
@@ -361,6 +362,7 @@ function statusProjection({ directoryPath, run }, leaseOwner) {
     status: run.pipelineState.workflowState,
     launchRecovery: projectLaunchRecovery(run),
     availabilityRetry: projectAvailabilityRetry(run),
+    inactivityRecovery: projectInactivityRecovery(run),
     stop: projectOperatorStop(run),
     pendingStop:
       run.stopRequest?.reconciledRevision === null

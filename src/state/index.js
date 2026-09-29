@@ -22,3 +22,12 @@ export {
 } from "./validation.js";
 
 export { normalizeRecoveryDispatch } from "./dispatch.js";
+
+export {
+  DEFAULT_PROVIDER_INACTIVITY_TIMEOUT_MS,
+  MAX_PROVIDER_INACTIVITY_TIMEOUT_MS,
+  normalizeProviderInactivityTimeoutMs,
+  providerInactivityFingerprint,
+  inactivityActivity,
+  projectInactivityRecovery,
+} from "./inactivity.js";

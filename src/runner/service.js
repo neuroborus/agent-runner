@@ -38,6 +38,7 @@ import {
   RunnerError,
 } from "./input.js";
 import { createAuthenticationPolicy } from "./authentication.js";
+import { createInactivityCoordinator } from "./inactivity.js";
 import { createAvailabilityCoordinator } from "./availability.js";
 import { pipelineForRun } from "./migration.js";
 import { inspectTrustedRequirements } from "./trusted-requirements.js";
@@ -57,6 +58,7 @@ import {
 
 const WORKTREE_LEASE_PIPELINES = new Set(["plan-execution", "polishing"]);
 const RUNNER_OPTION_FIELDS = new Set([
+  "inactivityTimers",
   "availabilityClock",
   "availabilityWait",
   "adapters",
@@ -192,6 +194,10 @@ export function createRunner(options = {}) {
     typeof inspectSessionProcesses !== "function" ||
     typeof loadConfiguration !== "function" ||
     typeof onActivity !== "function" ||
+    (options.inactivityTimers !== undefined &&
+      (!isRecord(options.inactivityTimers) ||
+        typeof options.inactivityTimers.setTimeout !== "function" ||
+        typeof options.inactivityTimers.clearTimeout !== "function")) ||
     (options.availabilityClock !== undefined &&
       typeof options.availabilityClock !== "function") ||
     (options.availabilityWait !== undefined &&
@@ -370,11 +376,33 @@ export function createRunner(options = {}) {
             validateRun: pipeline.workflow.validateRun,
             initialRun: run,
           });
+    const inactivity =
+      monitor === undefined
+        ? undefined
+        : createInactivityCoordinator({
+            runId: run.runId,
+            lease,
+            runStore,
+            git,
+            monitor,
+            publish,
+            initialRun: run,
+            timers: options.inactivityTimers,
+          });
     async function reconcileProviderResponse(options) {
       if (providerResponseRole === null) return undefined;
-      const next = await availability.completed(providerResponseRole, options);
+      const recovered = await inactivity.completed(
+        providerResponseRole,
+        options,
+      );
+      const next = await availability.completed(
+        providerResponseRole,
+        recovered === undefined
+          ? options
+          : { expectedRevision: recovered.revision },
+      );
       providerResponseRole = null;
-      return next;
+      return next ?? recovered;
     }
     async function checkConfiguration() {
       try {
@@ -387,6 +415,7 @@ export function createRunner(options = {}) {
     return Object.freeze({
       authentication,
       availability,
+      inactivity,
       adapters:
         monitor === undefined
           ? selectedAdapters
@@ -402,7 +431,12 @@ export function createRunner(options = {}) {
                     await checkConfiguration();
                     try {
                       const response = await monitor.invoke(
-                        (value) => adapter.run(value),
+                        (value) =>
+                          inactivity.invoke(
+                            role,
+                            (attempt) => adapter.run(attempt),
+                            value,
+                          ),
                         {
                           ...request,
                           storageForbiddenPaths: storageForbiddenPaths(run),
@@ -538,8 +572,8 @@ export function createRunner(options = {}) {
           throw cause;
         }
       },
-      async finishAgentTurn(activeTurn) {
-        await reconcileProviderResponse();
+      async finishAgentTurn(activeTurn, { repositoryReconciled = true } = {}) {
+        await reconcileProviderResponse({ repositoryReconciled });
         return runStore.finishAgentTurn(lease, activeTurn);
       },
       async recordChildSession(child, { activity } = {}) {
@@ -1245,6 +1279,7 @@ export function createRunner(options = {}) {
       clientAttributionFingerprint: resolved.clientAttributionFingerprint,
       roles: resolved.roles,
       providerPolicies,
+      providerInactivityTimeoutMs: resolved.providerInactivityTimeoutMs,
       availabilityPolicy: resolved.availabilityPolicy,
       sourceSession: normalized.sourceSession?.id ?? null,
       sourceProfile: resolved.sourceProfile,

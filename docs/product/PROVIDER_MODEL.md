@@ -403,3 +403,43 @@ credentials, and process causes do not enter public activity or durable state.
 Adding another backend is a source-controlled runtime decision, not dynamic
 plugin loading, and must preserve these shared semantics without adding
 provider branches to pipeline policy.
+
+## Provider inactivity
+
+Adapters await the runner's `onFreshSession` reservation before native fresh
+fallback; a false result preserves the original failure. After validated
+local-commit readiness they await `onCommitExecution` before any constrained
+effect. These internal callbacks carry no provider payload or additional authority.
+
+All three pipelines apply the same frozen `providerInactivityTimeoutMs` policy
+to Codex and Claude turns. Its default is 30 minutes; root and project settings
+accept strict positive integers up to 2147483647 milliseconds, with project
+precedence and no transport override. Resume keeps the saved setting, and
+legacy runs receive the default without reading configuration again.
+
+Only validated semantic progress resets the deadline. Owned local commands,
+including overlapping or nested commands, suspend it until all complete.
+Heartbeat traffic, process liveness, unrelated bytes, and command output cannot
+keep a stalled provider alive. Local tool start/completion counts as progress
+without suspending the deadline.
+
+Expiry journals the role, logical checkpoint, attempt, configuration binding,
+and observed content fingerprint before terminating owned execution. The
+pipeline then reconciles read-only safety or safe partial writes and corrections.
+One fresh reconstruction is shared with existing native fresh fallback, reserved
+durably before launch, and never replenished by restart. It uses the same logical
+role and complete durable request without reforking the supplied source.
+Repeated inactivity enters resumable `backend_unavailable` with the fixed
+`ERR_PROVIDER_INACTIVE` code. An explicit offered resume makes one attempt;
+it does not grant another automatic retry. Only a returned response and matching
+repository reconciliation retire the recovery evidence. A partial correction is
+charged once across the whole recovery episode.
+
+Availability backoff, usage limits, authentication, and operator stops retain
+separate precedence and accounting. Trusted commands use their own deadlines.
+Validated commit readiness ends the watchdog before constrained execution;
+readiness recovery still requires the existing pre-effect proof and Git
+verification. Potential commit or handoff effects always follow their existing
+ambiguity/reconciliation paths. Public CLI/MCP activity remains bounded and
+contains no commands, output, native errors, or heartbeat traffic. Disconnects
+and canceled waits affect observation only.

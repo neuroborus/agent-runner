@@ -604,6 +604,19 @@ unsafe reconciliation, changed inputs, or ambiguous effects have their own
 bounded recovery rules. Do not erase locks, patch state files, reset stagnation
 history, or assume every `no_progress` pause has the same recovery path.
 
+For `backend_unavailable` with `ERR_PROVIDER_INACTIVE`, inspect the bounded
+`Provider inactivity` status line or MCP `inactivityRecovery`: role, checkpoint,
+attempt, and status. The default deadline is 30 minutes without meaningful
+provider progress; root/project `providerInactivityTimeoutMs` affects new runs
+only. Owned local commands suspend it; keepalives do not. The runner preserves
+safe partial content and correction counts, then uses at most one fresh
+reconstruction without reforking the source. If that also expires, use the
+currently offered resume action after restoring the provider. Resume allows
+one invocation without another automatic recovery allowance. Do not edit the
+marker or change a running project's configuration. Trusted-command deadlines
+and ambiguous commit/handoff outcomes have their own recovery paths. See the
+[provider inactivity contract](product/PROVIDER_MODEL.md#provider-inactivity).
+
 For a launch failure without explicit availability evidence, CLI status prints
 `Launch recovery: <checkpoint> (<failureClass>)` and MCP status returns the
 equivalent two-field `launchRecovery` object. Restore availability and use only

@@ -1501,12 +1501,12 @@ Include every listed command exactly once in requiredChecks with its actual cano
     }
     return (
       turn.phase === "resolve-findings" &&
-      currentRun.availabilityRetry?.checkpoint.startsWith(
-        "resolve-findings:read-only:",
-      ) !== true &&
-      (currentRun.availabilityRetry?.checkpoint.startsWith(
-        "resolve-findings:workspace-write:",
-      ) ||
+      (
+        currentRun.availabilityRetry ?? currentRun.inactivityRecovery
+      )?.checkpoint.startsWith("resolve-findings:read-only:") !== true &&
+      ((
+        currentRun.availabilityRetry ?? currentRun.inactivityRecovery
+      )?.checkpoint.startsWith("resolve-findings:workspace-write:") ||
         state().availabilityCorrectionCharged ||
         counters().fixRounds < fixBudget())
     );
@@ -1636,13 +1636,15 @@ Include every listed command exactly once in requiredChecks with its actual cano
               : current.findings,
           findings:
             currentRun.availabilityRetry == null &&
+            currentRun.inactivityRecovery == null &&
             !current.availabilityCorrectionCharged
               ? []
               : current.findings,
           pendingCorrection: true,
           availabilityCorrectionCharged:
             current.availabilityCorrectionCharged ||
-            currentRun.availabilityRetry != null,
+            currentRun.availabilityRetry != null ||
+            currentRun.inactivityRecovery != null,
           reviewReconsideration: [],
           ...markPendingLazyCorrectionCharged(current),
         },
@@ -1701,7 +1703,10 @@ Include every listed command exactly once in requiredChecks with its actual cano
       ? { role, phase: "plan-context" }
       : activeTurn(role, state().workflowState);
     const retrying = currentRun.availabilityRetry != null;
-    const recovering = interruptedTurn !== null || retrying;
+    const recovering =
+      interruptedTurn !== null ||
+      retrying ||
+      currentRun.inactivityRecovery != null;
     if (interruptedTurn !== null && !isDeepStrictEqual(interruptedTurn, turn)) {
       throw workflowError(
         "Persisted agent turn does not match plan-execution recovery.",
@@ -1743,11 +1748,18 @@ Include every listed command exactly once in requiredChecks with its actual cano
         repository: turnSnapshot,
       });
     }
+    if (runtime.inactivity !== undefined) {
+      currentRun = await runtime.inactivity.before({
+        role,
+        checkpoint: availabilityCheckpoint,
+        repository: turnSnapshot,
+      });
+    }
     const latestSession = [...currentRun.sessionLineage.children]
       .reverse()
       .find((child) => child.role === role);
     const selectedSession =
-      contextReview && latestSession?.contextKey === contextKey
+      contextReview && !recovering && latestSession?.contextKey === contextKey
         ? {
             session: { id: latestSession.sessionId, mode: "continue" },
             previousSession: latestSession.sessionId,
@@ -1819,6 +1831,8 @@ Include every listed command exactly once in requiredChecks with its actual cano
     };
     let response;
     let agentError;
+    let repositoryReconciled = false;
+    let inactivityFailure = false;
     let availabilityFailure = false;
     let authenticationFailure = false;
     currentRun = await runtime.startAgentTurn(
@@ -1841,6 +1855,9 @@ Include every listed command exactly once in requiredChecks with its actual cano
       } catch (cause) {
         agentError = cause;
         if (isOwnershipFailure(cause)) throw cause;
+        inactivityFailure =
+          runtime.inactivity?.eligible(cause) === true ||
+          (await runtime.inactivity?.pending()) === true;
         availabilityFailure = runtime.availability?.eligible(cause) === true;
         authenticationFailure =
           runtime.authentication?.eligible(cause) === true;
@@ -1895,11 +1912,15 @@ Include every listed command exactly once in requiredChecks with its actual cano
                   pendingCorrection: true,
                   availabilityCorrectionCharged:
                     current.availabilityCorrectionCharged ||
-                    ((availabilityFailure || authenticationFailure) &&
+                    ((availabilityFailure ||
+                      authenticationFailure ||
+                      inactivityFailure) &&
                       changedLazyCheck) ||
                     (authenticationFailure && changedCorrection),
                   reviewReconsideration: [],
-                  ...(availabilityFailure || authenticationFailure
+                  ...(availabilityFailure ||
+                  authenticationFailure ||
+                  inactivityFailure
                     ? {
                         workflowState: current.workflowState,
                         findings: current.findings,
@@ -1956,6 +1977,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
           );
         }
       }
+      repositoryReconciled = true;
       if (
         authenticationFailure &&
         agentError?.failureClass !== STRUCTURED_OUTPUT_FAILURE_CLASS
@@ -1995,7 +2017,9 @@ Include every listed command exactly once in requiredChecks with its actual cano
         currentRun.activeTurn != null &&
         !isOwnershipFailure(agentError)
       ) {
-        currentRun = await runtime.finishAgentTurn(turn);
+        currentRun = await runtime.finishAgentTurn(turn, {
+          repositoryReconciled,
+        });
         assertRun(currentRun);
       }
     }
@@ -2020,6 +2044,14 @@ Include every listed command exactly once in requiredChecks with its actual cano
               }
             : undefined,
         );
+      }
+      if (
+        runtime.inactivity?.eligible(agentError) &&
+        (await runtime.inactivity.retry({
+          repository: state().repositoryBaseline,
+        }))
+      ) {
+        return availabilityRetry;
       }
       if (runtime.availability?.eligible(agentError)) {
         currentRun = await runtime.availability.schedule({
@@ -5087,6 +5119,7 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
     let current = state();
     if (
       currentRun.availabilityRetry == null &&
+      currentRun.inactivityRecovery == null &&
       !current.availabilityCorrectionCharged &&
       current.pendingLazyCorrection === null &&
       counters().fixRounds >= fixBudget()
@@ -5102,6 +5135,7 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
     );
     if (
       currentRun.availabilityRetry == null &&
+      currentRun.inactivityRecovery == null &&
       !current.availabilityCorrectionCharged &&
       current.pendingLazyCorrection === null &&
       stableFindingIds.length > 0
@@ -5115,6 +5149,7 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
     }
     if (
       currentRun.availabilityRetry == null &&
+      currentRun.inactivityRecovery == null &&
       !current.availabilityCorrectionCharged &&
       current.pendingLazyCorrection === null &&
       current.blockedSinceStagnation >= current.settings.stagnationWindowRounds
@@ -6630,7 +6665,9 @@ ${JSON.stringify(
       }
       return arbitrateStagnation();
     }
-    const retryCheckpoint = currentRun.availabilityRetry?.checkpoint;
+    const retryCheckpoint = (
+      currentRun.availabilityRetry ?? currentRun.inactivityRecovery
+    )?.checkpoint;
     const budgetExhausted =
       retryCheckpoint?.startsWith("resolve-findings:read-only:") === true ||
       (retryCheckpoint?.startsWith("resolve-findings:workspace-write:") !==
@@ -6866,6 +6903,17 @@ ${JSON.stringify(
     )
       return false;
 
+    if (
+      pendingCommit?.status !== "consumed" &&
+      runtime.inactivity !== undefined
+    ) {
+      currentRun = await runtime.inactivity.before({
+        role: "worker",
+        checkpoint: availabilityCheckpoint,
+        repository: current.repositoryBaseline,
+      });
+    }
+
     if (pendingCommit === null) {
       if ((await readCurrentInputs()) === null) {
         return false;
@@ -7016,7 +7064,8 @@ ${JSON.stringify(
 Authorized planned commit:
 ${step.subject}`),
         ...executionPreferences,
-        ...(previousSession === undefined
+        ...(previousSession === undefined ||
+        currentRun.inactivityRecovery != null
           ? {}
           : { session: { id: previousSession, mode: "continue" } }),
       };
@@ -7078,6 +7127,21 @@ ${step.subject}`),
         cause.code === "ERR_COMMIT_NOT_CREATED" &&
         pendingCommit.preEffectRejection !== null
       ) {
+        if (
+          pendingCommit.preEffectRejection.code === "ERR_PROVIDER_INACTIVE" &&
+          currentRun.inactivityRecovery !== null &&
+          !operatorStop
+        ) {
+          // Only the adapter's validated not-started proof reaches this branch.
+          if (
+            await runtime.inactivity.retry({
+              repository: state().repositoryBaseline,
+            })
+          ) {
+            await transition({ ...state(), pendingCommit: null });
+            return true;
+          }
+        }
         if (pendingCommit.preEffectRejection.authentication !== undefined) {
           await pausePreEffectCommitRejection(pendingCommit.preEffectRejection);
           return false;
@@ -7699,7 +7763,9 @@ ${step.subject}`),
   } catch (cause) {
     if (
       authenticationPausePersistence ||
-      cause?.code === "ERR_AVAILABILITY_RECOVERY"
+      ["ERR_AVAILABILITY_RECOVERY", "ERR_INACTIVITY_RECOVERY"].includes(
+        cause?.code,
+      )
     )
       throw cause;
     if (isOwnershipFailure(cause) && state().workflowState !== "COMMIT") {

@@ -142,6 +142,7 @@ test("role resolution normalizes configuration objects", () => {
   assert.deepEqual(resolved, {
     artifactRoot: "LOCAL_ARTIFACTS",
     availabilityPolicy: { initialDelayMs: 5_000, maxDelayMs: 1_800_000 },
+    providerInactivityTimeoutMs: 1_800_000,
     clientAttribution: { name: "agent_runner", title: "Agent Runner" },
     clientAttributionFingerprint: clientAttributionFingerprint({
       name: "agent_runner",
@@ -837,5 +838,61 @@ test("role resolution rejects missing backends and invalid overrides", () => {
     (error) =>
       error instanceof ConfigurationError &&
       error.code === "ERR_UNKNOWN_PIPELINE",
+  );
+});
+
+test("provider inactivity timeout is strict, shared, and project-overridable without a role override", () => {
+  const root = parseRunnerConfiguration(
+    JSON.stringify({ schemaVersion: 1, defaultBackend: "codex" }),
+  );
+  assert.equal(root.providerInactivityTimeoutMs, 1_800_000);
+  for (const value of [1, 90_000, 2_147_483_647]) {
+    const configured = parseRunnerConfiguration(
+      JSON.stringify({
+        schemaVersion: 1,
+        defaultBackend: "codex",
+        providerInactivityTimeoutMs: value,
+      }),
+    );
+    const project = parseProjectConfiguration(
+      JSON.stringify({ schemaVersion: 1, providerInactivityTimeoutMs: value }),
+      root,
+    );
+    for (const pipeline of ["plan-execution", "plan-authoring", "polishing"]) {
+      assert.equal(
+        resolvePipelineConfiguration(pipeline, configured)
+          .providerInactivityTimeoutMs,
+        value,
+      );
+      assert.equal(
+        resolvePipelineConfiguration(pipeline, root, {}, {}, null, project)
+          .providerInactivityTimeoutMs,
+        value,
+      );
+    }
+  }
+  for (const value of [null, true, "1000", 0, -1, 1.5, 2_147_483_648]) {
+    const text = JSON.stringify({
+      schemaVersion: 1,
+      providerInactivityTimeoutMs: value,
+    });
+    assert.throws(
+      () => parseRunnerConfiguration(text),
+      /providerInactivityTimeoutMs/u,
+    );
+    assert.throws(
+      () => parseProjectConfiguration(text, root),
+      /providerInactivityTimeoutMs/u,
+    );
+  }
+  assert.throws(
+    () =>
+      resolvePipelineConfiguration(
+        "plan-execution",
+        root,
+        {},
+        { providerInactivityTimeoutMs: 1 },
+      ),
+    /not supported/u,
   );
 });

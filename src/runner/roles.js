@@ -227,6 +227,15 @@ async function runAdapter(adapter, backend, request, providers) {
       });
       throw new AgentBoundaryError({ code: stopReason?.code }, record);
     }
+    if (
+      request.signal?.aborted &&
+      ["ERR_PROVIDER_INACTIVE", "ERR_INACTIVITY_RECOVERY"].includes(
+        stopReason?.code,
+      ) &&
+      [cause, cause?.cause, cause?.cause?.cause].includes(stopReason)
+    ) {
+      throw new AgentBoundaryError({ code: stopReason.code }, failure.failure);
+    }
     throw failure;
   }
 }

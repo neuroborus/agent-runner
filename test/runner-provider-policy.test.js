@@ -534,6 +534,15 @@ test("CLI and MCP project the same persisted launch recovery", async () => {
     title: "DO_NOT_PROJECT_CLIENT_TITLE",
   };
   fixture.run.clientAttributionFingerprint = "f".repeat(64);
+  fixture.run.inactivityRecovery = {
+    role: "worker",
+    checkpoint: "implement:workspace-write:1",
+    attempt: 2,
+    status: "expired",
+    reconstructionRevision: 23,
+    configurationFingerprint: "DO_NOT_PROJECT_INACTIVITY_BINDING",
+    contentFingerprint: "DO_NOT_PROJECT_INACTIVITY_CONTENT",
+  };
   fixture.run.availabilityRetry = {
     role: "worker",
     checkpoint: "implement:1",
@@ -579,6 +588,20 @@ test("CLI and MCP project the same persisted launch recovery", async () => {
   assert.deepEqual(status.launchRecovery, projectLaunchRecovery(fixture.run));
   assert.deepEqual(status.launchRecovery, launchRecovery);
   assert.deepEqual(status.availabilityRetry, fixture.run.availabilityRetry);
+  assert.deepEqual(status.inactivityRecovery, {
+    role: "worker",
+    checkpoint: "implement:workspace-write:1",
+    attempt: 2,
+    status: "expired",
+  });
+  assert.match(
+    output,
+    /Provider inactivity: worker implement:workspace-write:1; expired; attempt 2 of 2/u,
+  );
+  assert.doesNotMatch(
+    JSON.stringify({ output, status }),
+    /DO_NOT_PROJECT_INACTIVITY/u,
+  );
   assert.doesNotMatch(
     JSON.stringify({ output, status }),
     /DO_NOT_PROJECT_CLIENT/u,

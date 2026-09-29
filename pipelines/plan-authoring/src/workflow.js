@@ -494,7 +494,10 @@ export async function runPlanAuthoring({
   ) {
     const turn = activeTurn(role, pipelineState().workflowState);
     const retrying = currentRun.availabilityRetry != null;
-    const recovering = interruptedTurn !== null || retrying;
+    const recovering =
+      interruptedTurn !== null ||
+      retrying ||
+      currentRun.inactivityRecovery != null;
     if (interruptedTurn !== null && !isDeepStrictEqual(interruptedTurn, turn)) {
       throw workflowError(
         "Persisted agent turn does not match plan-authoring recovery.",
@@ -521,6 +524,13 @@ export async function runPlanAuthoring({
     const availabilityCheckpoint = `${turn.phase}:read-only:${checkpoint}`;
     if (retrying && runtime.availability !== undefined) {
       currentRun = await runtime.availability.before({
+        role,
+        checkpoint: availabilityCheckpoint,
+        repository: snapshot,
+      });
+    }
+    if (runtime.inactivity !== undefined) {
+      currentRun = await runtime.inactivity.before({
         role,
         checkpoint: availabilityCheckpoint,
         repository: snapshot,
@@ -593,6 +603,7 @@ export async function runPlanAuthoring({
     };
     let response;
     let agentError;
+    let repositoryReconciled = false;
     currentRun = await runtime.startAgentTurn(
       turn,
       consumeSourceFork
@@ -616,6 +627,7 @@ export async function runPlanAuthoring({
       }
       await runtime.git.assertUnchanged(snapshot);
       await runtime.git.assertUnchanged(pipelineState().repositoryBaseline);
+      repositoryReconciled = true;
       if (
         runtime.authentication?.eligible(agentError) &&
         agentError?.failureClass !== STRUCTURED_OUTPUT_FAILURE_CLASS
@@ -655,7 +667,9 @@ export async function runPlanAuthoring({
         currentRun.activeTurn != null &&
         !isOwnershipFailure(agentError)
       ) {
-        currentRun = await runtime.finishAgentTurn(turn);
+        currentRun = await runtime.finishAgentTurn(turn, {
+          repositoryReconciled,
+        });
         assertRun(currentRun);
       }
     }
@@ -673,6 +687,14 @@ export async function runPlanAuthoring({
           outputContext,
           { field: "result", constraint: "provider-structured-output" },
         );
+      }
+      if (
+        runtime.inactivity?.eligible(agentError) &&
+        (await runtime.inactivity.retry({
+          repository: pipelineState().repositoryBaseline,
+        }))
+      ) {
+        return availabilityRetry;
       }
       if (runtime.availability?.eligible(agentError)) {
         currentRun = await runtime.availability.schedule({
@@ -1831,7 +1853,9 @@ ${findingPrompt(pipelineState())}`,
   } catch (cause) {
     if (
       authenticationPausePersistence ||
-      cause?.code === "ERR_AVAILABILITY_RECOVERY"
+      ["ERR_AVAILABILITY_RECOVERY", "ERR_INACTIVITY_RECOVERY"].includes(
+        cause?.code,
+      )
     )
       throw cause;
     if (isOwnershipFailure(cause)) {

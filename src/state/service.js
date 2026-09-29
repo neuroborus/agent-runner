@@ -23,6 +23,11 @@ import {
   DEFAULT_AVAILABILITY_POLICY,
 } from "./availability.js";
 import { atomicWriteFile, resolveRunArtifactPath } from "./files.js";
+import {
+  DEFAULT_PROVIDER_INACTIVITY_TIMEOUT_MS,
+  providerInactivityFingerprint,
+  inactivityActivity,
+} from "./inactivity.js";
 import { createStateJournal } from "./journal.js";
 import { createLeaseManager } from "./lease.js";
 import { createMutationBoundary } from "./mutation.js";
@@ -73,6 +78,7 @@ const CREATE_RUN_FIELDS = new Set([
   "clientAttributionFingerprint",
   "roles",
   "providerPolicies",
+  "providerInactivityTimeoutMs",
   "availabilityPolicy",
   "counters",
   "hashes",
@@ -577,6 +583,16 @@ export function createRunStore({
             input.availabilityPolicy === undefined
               ? DEFAULT_AVAILABILITY_POLICY
               : input.availabilityPolicy,
+          providerInactivityTimeoutMs:
+            input.providerInactivityTimeoutMs === undefined
+              ? DEFAULT_PROVIDER_INACTIVITY_TIMEOUT_MS
+              : input.providerInactivityTimeoutMs,
+          providerInactivityFingerprint: providerInactivityFingerprint(
+            input.providerInactivityTimeoutMs === undefined
+              ? DEFAULT_PROVIDER_INACTIVITY_TIMEOUT_MS
+              : input.providerInactivityTimeoutMs,
+          ),
+          inactivityRecovery: null,
           availabilityRetry: null,
           providerPolicies:
             input.providerPolicies === undefined
@@ -1179,16 +1195,81 @@ export function createRunStore({
     });
   }
 
-  async function completeAvailabilityTurn(
+  async function recordInactivity(lease, recovery, kind) {
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
+      const snapshot = await loadSnapshot(runDirectory, record.runId);
+      const state = snapshot.state;
+      if (recovery?.status !== "expired")
+        assertRunCanAdvance(state, resolveStopBoundary);
+      if (
+        state.schemaVersion !== RUN_STATE_SCHEMA_VERSION ||
+        (state.activeTurn?.role !== recovery?.role &&
+          recovery?.status === "expired")
+      ) {
+        throw new RunStoreError(
+          "Inactivity expiry requires a current active turn.",
+          { code: "ERR_INVALID_AGENT_TURN" },
+        );
+      }
+      // Expiry is evidence about still-owned execution, not workflow advancement.
+      // Keep every other field unchanged while journaling before termination.
+      const next = normalizeRunState(
+        {
+          ...state,
+          inactivityRecovery: {
+            ...recovery,
+            reconstructionRevision:
+              kind === "reconstructing"
+                ? state.revision + 1
+                : (state.inactivityRecovery?.reconstructionRevision ?? null),
+          },
+          revision: state.revision + 1,
+          updatedAt: timestamp(state.updatedAt),
+        },
+        record.runId,
+      );
+      await journal.appendTransition(
+        runDirectory,
+        next,
+        snapshot,
+        normalizePublicActivity(inactivityActivity(recovery, kind)),
+      );
+      return deepFreeze(next);
+    });
+  }
+
+  function completeAvailabilityTurn(lease, role, options) {
+    return completeProviderRecovery(
+      lease,
+      role,
+      "availabilityRetry",
+      availabilityActivity,
+      options,
+    );
+  }
+
+  function completeInactivityTurn(lease, role, options) {
+    return completeProviderRecovery(
+      lease,
+      role,
+      "inactivityRecovery",
+      inactivityActivity,
+      options,
+    );
+  }
+
+  async function completeProviderRecovery(
     lease,
     role,
+    field,
+    activityFor,
     { patch = {}, expectedRevision } = {},
   ) {
     const normalizedPatch = normalizeTransitionPatch(patch);
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
       const state = snapshot.state;
-      if (state.availabilityRetry === null) return deepFreeze(state);
+      if (state[field] === null) return deepFreeze(state);
       if (
         expectedRevision !== undefined &&
         state.revision !== expectedRevision
@@ -1202,12 +1283,12 @@ export function createRunStore({
       }
       if (
         state.activeTurn?.role !== role ||
-        state.availabilityRetry.role !== role ||
+        state[field].role !== role ||
         state.executionProcess !== null ||
         state.executionResource !== null
       ) {
         throw new RunStoreError(
-          "Availability completion requires a retired provider response.",
+          "Provider recovery completion requires a retired provider response.",
           {
             code: "ERR_INVALID_AGENT_TURN",
           },
@@ -1219,7 +1300,7 @@ export function createRunStore({
         {
           ...state,
           ...normalizedPatch,
-          availabilityRetry: null,
+          [field]: null,
           revision: state.revision + 1,
           updatedAt: timestamp(state.updatedAt),
         },
@@ -1230,9 +1311,7 @@ export function createRunStore({
         runDirectory,
         next,
         snapshot,
-        normalizePublicActivity(
-          availabilityActivity(state.availabilityRetry, "recovered"),
-        ),
+        normalizePublicActivity(activityFor(state[field], "recovered")),
       );
       return deepFreeze(next);
     });
@@ -1641,6 +1720,8 @@ export function createRunStore({
     recordProviderPolicy,
     scheduleAvailabilityRetry,
     completeAvailabilityTurn,
+    completeInactivityTurn,
+    recordInactivity,
     recoverRun,
     inspectRecoveryDispatch,
     recordRecoveryDispatch,

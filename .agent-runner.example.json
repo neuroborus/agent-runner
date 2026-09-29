@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "artifactRoot": "LOCAL_ARTIFACTS",
   "availabilityRetryMaxDelayMs": 1800000,
+  "providerInactivityTimeoutMs": 1800000,
   "clientAttribution": {
     "name": "agent_runner",
     "title": "Agent Runner"

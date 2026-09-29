@@ -4591,3 +4591,68 @@ test("cleanup failure does not replace an ambiguous writable outcome", async () 
   });
   assert.equal(resource, null);
 });
+
+test("runner can deny an already consumed fresh reconstruction allowance", async () => {
+  const fixture = createFixture({
+    handle({ call }) {
+      if (call.file === "claude" && call.argumentsList.includes("-p"))
+        throw processFailure(
+          undefined,
+          `No conversation found with session ID: ${SOURCE_SESSION}`,
+        );
+      return undefined;
+    },
+  });
+  let reserved = 0;
+  await assert.rejects(
+    fixture.adapter.run(
+      request({
+        session: { mode: "continue", id: SOURCE_SESSION },
+        onFreshSession: async () => {
+          reserved++;
+          return false;
+        },
+      }),
+    ),
+  );
+  assert.equal(reserved, 1);
+  assert.equal(turnCalls(fixture).length, 1);
+});
+
+test("commit readiness awaits the runner boundary before any constrained effect", async () => {
+  const fixture = createFixture();
+  const entered = Promise.withResolvers(),
+    release = Promise.withResolvers();
+  const controller = new AbortController();
+  const attempt = fixture.adapter.run(
+    request({
+      access: "local-commit",
+      authorizationId: "authorization-1",
+      commit: {
+        expectedHead: EXPECTED_HEAD,
+        message: "test(scope): verify readiness",
+      },
+      signal: controller.signal,
+      onCommitExecution: async () => {
+        entered.resolve();
+        await release.promise;
+      },
+    }),
+  );
+  await entered.promise;
+  assert.equal(
+    localCommitSandboxCalls(fixture).some(
+      ({ options }) => options.ownershipMode === "native-sandbox-provider",
+    ),
+    false,
+  );
+  controller.abort(new Error("expired"));
+  release.resolve();
+  await assert.rejects(attempt, (cause) => cause.effectStarted === false);
+  assert.equal(
+    localCommitSandboxCalls(fixture).some(
+      ({ options }) => options.ownershipMode === "native-sandbox-provider",
+    ),
+    false,
+  );
+});
