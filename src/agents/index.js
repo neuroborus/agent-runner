@@ -75,6 +75,7 @@ export {
 } from "./codex/index.js";
 export {
   ADAPTER_FAILURE_CLASS,
+  AUTHENTICATION_REQUIRED_DISPOSITION,
   AVAILABILITY_REASONS,
   clientAttributionFingerprint,
   createCapabilityProof,
@@ -82,6 +83,7 @@ export {
   deriveEffectStarted,
   deriveLaunchRecovery,
   EFFECT_EVIDENCE,
+  FAILURE_DISPOSITIONS,
   LAUNCH_CHECKPOINTS,
   LAUNCH_OUTCOMES,
   LAUNCH_RECOVERY_CHECKPOINTS,

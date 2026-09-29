@@ -2241,6 +2241,13 @@ outcome, and no started effects. A commit checkpoint additionally requires
 validated `commitExecutor: "not_started"` proof. Possible workspace changes still
 require repository reconciliation; ambiguous outcomes cannot carry this evidence.
 
+The same exact record may instead carry the finite optional
+`disposition: "authentication_required"`. The contract accepts it only for a
+terminal rejected response without started effect, process outcome, or
+availability evidence. It is not an availability reason and does not collapse
+authorization, permission, usage-limit, malformed-request, or ambiguous-effect
+failures into authentication.
+
 Provider-private availability recognition maps explicit offline, DNS, refused or
 reset connections, timeouts, overload, and model-busy errors. Both adapters map
 statuses 408, 425, 500, 502, 503, 504, and 529 to the same finite reasons. Codex
@@ -2283,6 +2290,17 @@ ID suffixes are discarded. Unknown codes, malformed JSON, duplicate fields or
 metadata, inconsistent status text, oversized evidence, transient statuses,
 and prose lookalikes remain opaque; additional details and variant payloads
 are never alternative sources for this client-envelope refinement.
+Within that parser, only status 401 with `authentication_error`, an absent or
+null parameter, and an absent, null, or `invalid_api_key` code establishes the
+shared `authentication_required` disposition. Completion evidence must agree
+with any native HTTP status. App Server request errors additionally require a
+native server-error RPC code and the standard exact `code`, `message`, and
+optional opaque `data` shape. HTTP 403, permission/authorization evidence,
+conflicting status or client codes, non-null parameters, unknown request-error
+fields, and protocol/request RPC codes remain outside the authentication path.
+The resulting fixed failure retains none of the native message, URL, request
+ID, payload, or credential material. Claude and future providers remain
+unchanged until their descriptors own an equivalent bounded classifier.
 Opaque failures retain `turn_other`; the native `serverOverloaded` variant maps
 to `turn_server_overloaded`. Both classes are recoverable after the turn-item
 audit unless a validated client envelope rejects the request. Explicit native

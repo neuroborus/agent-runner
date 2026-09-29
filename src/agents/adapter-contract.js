@@ -64,6 +64,10 @@ export const AVAILABILITY_REASONS = Object.freeze([
   "model_busy",
   "server_unavailable",
 ]);
+export const AUTHENTICATION_REQUIRED_DISPOSITION = "authentication_required";
+export const FAILURE_DISPOSITIONS = Object.freeze([
+  AUTHENTICATION_REQUIRED_DISPOSITION,
+]);
 export const PROVIDER_NEUTRAL_LAUNCH_FAILURE_CLASSES = Object.freeze([
   "launch_process_exited",
   "launch_version_unsupported",
@@ -82,6 +86,7 @@ const FAILURE_FIELDS = Object.freeze([
   "commitExecutor",
   "processOutcome",
   "availabilityReason",
+  "disposition",
 ]);
 const PROCESS_OUTCOME_FIELDS = Object.freeze(["exitCode", "signal"]);
 const CAPABILITY_FIELDS = Object.freeze([
@@ -151,6 +156,7 @@ const CHECKPOINT_SET = new Set(LAUNCH_CHECKPOINTS);
 const OUTCOME_SET = new Set(LAUNCH_OUTCOMES);
 const EFFECT_SET = new Set(EFFECT_EVIDENCE);
 const RETRY_SET = new Set(RETRY_ELIGIBILITY);
+const FAILURE_DISPOSITION_SET = new Set(FAILURE_DISPOSITIONS);
 const SHARED_FAILURE_CLASS_SET = new Set([
   ADAPTER_FAILURE_CLASS,
   ...PROVIDER_NEUTRAL_LAUNCH_FAILURE_CLASSES,
@@ -325,7 +331,14 @@ export function normalizeFailureRecord(value, failureClasses = []) {
         !["not_started", "rejected", "exited"].includes(value.outcome) ||
         value.effect === "started" ||
         (value.checkpoint === "commit" &&
-          value.commitExecutor !== "not_started")))
+          value.commitExecutor !== "not_started"))) ||
+    (Object.hasOwn(value, "disposition") &&
+      (!FAILURE_DISPOSITION_SET.has(value.disposition) ||
+        value.outcome !== "rejected" ||
+        value.effect === "started" ||
+        value.retry !== "terminal" ||
+        value.processOutcome !== undefined ||
+        Object.hasOwn(value, "availabilityReason")))
   ) {
     throw new TypeError("Adapter failure record is invalid.");
   }
@@ -337,6 +350,9 @@ export function normalizeFailureRecord(value, failureClasses = []) {
     retry: value.retry,
     ...(Object.hasOwn(value, "availabilityReason")
       ? { availabilityReason: value.availabilityReason }
+      : {}),
+    ...(Object.hasOwn(value, "disposition")
+      ? { disposition: value.disposition }
       : {}),
     ...(Object.hasOwn(value, "commitExecutor")
       ? { commitExecutor: value.commitExecutor }

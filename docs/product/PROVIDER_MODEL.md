@@ -249,7 +249,11 @@ Adapters classify native failures into one finite provider-neutral control
 surface. Each record contains exactly a failure class, checkpoint, outcome,
 effect evidence, and retry eligibility, plus optional commit-executor proof,
 finite provider-neutral `availabilityReason`, and an optional process outcome
-with only an exit code or signal.
+with only an exit code or signal. The optional finite `disposition` currently
+admits only `authentication_required`. It marks a terminal rejected response
+with no started effect and cannot coexist with availability or process-outcome
+evidence; it remains separate from authorization, permission, usage-limit,
+malformed-request, and ambiguous-effect classifications.
 `commitExecutor: "not_started"` is valid only at the `commit` checkpoint with
 `none` or `possible` effect evidence; it is invalid with `started` evidence or
 at any other checkpoint. The shared checkpoints are `probe`, `spawn`,
@@ -328,6 +332,19 @@ terminal `ERR_CODEX_TURN_FAILED` with `turn_bad_request`, a fixed message, and
 no provider retry, availability pause, or output correction. Raw error text,
 payloads, and additional details are discarded after classification. Malformed,
 oversized, ambiguous, or transient-status evidence does not become a bad request.
+
+A bounded, duplicate-free HTTP 401 envelope whose type is
+`authentication_error`, whose `param` is absent or null, and whose optional
+code is absent, null, or `invalid_api_key` adds only
+`disposition: "authentication_required"` to the fixed rejected failure. Codex
+applies the same rule to failed completion notifications and App Server request
+errors with an exact standard error shape and a server-error RPC code. A
+conflicting native HTTP status, HTTP 403, permission or authorization evidence,
+another client-error code, a non-null parameter, malformed wrapper, or
+protocol/request RPC code does not establish this disposition. Native messages,
+URLs, request identifiers, payloads, and credential material remain private and
+are discarded. Other providers do not emit the disposition without their own
+descriptor-owned bounded evidence contract.
 
 The remaining Codex `turn_other` and the explicit native `serverOverloaded`
 variant, normalized as `turn_server_overloaded`, are recoverable provider

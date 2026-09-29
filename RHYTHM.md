@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-09-29
 
+- **Authentication-required failures have one redacted disposition.** The
+  provider-neutral failure record now distinguishes a terminal authentication
+  requirement from availability, authorization, permissions, usage limits,
+  malformed requests, and ambiguous effects. Codex emits it only from a
+  bounded, structurally valid HTTP 401 authentication envelope in completion
+  or App Server request-error paths; conflicting evidence and HTTP 403 remain
+  outside the classification, and native messages, identifiers, payloads,
+  URLs, and credentials never cross the adapter boundary.
+
 - **Dead lease owners are reclaimed by identity rather than age.** Current
   same-host execution and canonical-worktree leases can be replaced immediately
   only when their boot/PID/start identity proves the exact owner dead or

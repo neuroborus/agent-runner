@@ -19,6 +19,7 @@ import {
 } from "../../src/agents/codex/index.js";
 import {
   AgentBoundaryError,
+  AUTHENTICATION_REQUIRED_DISPOSITION,
   STRUCTURED_OUTPUT_FAILURE_CLASS,
   normalizeAdapterFailure,
 } from "../../src/agents/index.js";
@@ -122,16 +123,21 @@ function failedTurn(threadId, turnId, error, items = []) {
 function httpClientErrorMessage({
   status = "400 Bad Request",
   type = "invalid_request_error",
+  param = "DO_NOT_RETAIN_SCHEMA_PATH",
   code = "invalid_json_schema",
+  message = type === "authentication_error"
+    ? "DO_NOT_RETAIN_NATIVE_MESSAGE: invalid API key."
+    : type === "permission_error"
+      ? "DO_NOT_RETAIN_NATIVE_MESSAGE: permission denied."
+      : "DO_NOT_RETAIN_NATIVE_MESSAGE: finalizationFindingIds uses unsupported uniqueItems.",
   pretty = false,
 } = {}) {
   const body = JSON.stringify(
     {
       error: {
-        message:
-          "DO_NOT_RETAIN_NATIVE_MESSAGE: finalizationFindingIds uses unsupported uniqueItems.",
+        message,
         type,
-        param: "DO_NOT_RETAIN_SCHEMA_PATH",
+        param,
         code,
       },
     },
@@ -3041,7 +3047,7 @@ test("normalizes Codex availability while preserving rejection precedence and co
       };
     },
   });
-  for (const [info, message, expected] of [
+  for (const [info, message, expected, expectedDisposition] of [
     ...[
       "network is offline",
       "EAI_AGAIN",
@@ -3132,6 +3138,27 @@ test("normalizes Codex availability while preserving rejection precedence and co
     ...["rate_limit_error", "insufficient_quota", "protocol_incompatible"].map(
       (code) => ["other", `${code}; ECONNRESET`, undefined],
     ),
+    [
+      { httpConnectionFailed: { httpStatusCode: 401 } },
+      httpClientErrorMessage({
+        status: "401 Unauthorized",
+        type: "authentication_error",
+        param: null,
+        code: "invalid_api_key",
+      }),
+      undefined,
+      AUTHENTICATION_REQUIRED_DISPOSITION,
+    ],
+    [
+      { httpConnectionFailed: { httpStatusCode: 403 } },
+      httpClientErrorMessage({
+        status: "401 Unauthorized",
+        type: "authentication_error",
+        param: null,
+        code: "invalid_api_key",
+      }),
+      undefined,
+    ],
     ["other", "refresh token expired; ECONNRESET", undefined],
     ...["not authenticated", "please log in"].map((message) => [
       "other",
@@ -3159,6 +3186,11 @@ test("normalizes Codex availability while preserving rejection precedence and co
       (error) => {
         const normalized = normalizeAdapterFailure("codex", error);
         assert.equal(normalized.failure.availabilityReason, expected, message);
+        assert.equal(
+          normalized.failure.disposition,
+          expectedDisposition,
+          message,
+        );
         assert.equal(normalized.failure.checkpoint, "commit");
         assert.equal(normalized.failure.commitExecutor, "not_started");
         assert.equal(normalized.effectStarted, false);
@@ -3205,6 +3237,114 @@ test("Codex turn-start availability preserves RPC rejection precedence", async (
   }
 });
 
+test("normalizes bounded App Server authentication request errors without retaining native evidence", async (t) => {
+  const sensitiveMarker = "DO_NOT_RETAIN_AUTHENTICATION_EVIDENCE";
+  for (const [name, rpcCode, message, expected, extraFields = {}] of [
+    [
+      "authentication required",
+      -32603,
+      `${httpClientErrorMessage({
+        status: "401 Unauthorized",
+        type: "authentication_error",
+        param: null,
+        code: "invalid_api_key",
+      })}, url: https://example.test/${sensitiveMarker}, request id: ${sensitiveMarker}`,
+      AUTHENTICATION_REQUIRED_DISPOSITION,
+    ],
+    [
+      "permission denied",
+      -32603,
+      httpClientErrorMessage({
+        status: "403 Forbidden",
+        type: "permission_error",
+        param: null,
+        code: null,
+      }),
+      undefined,
+    ],
+    [
+      "conflicting code",
+      -32603,
+      httpClientErrorMessage({
+        status: "401 Unauthorized",
+        type: "authentication_error",
+        param: null,
+        code: "model_not_found",
+      }),
+      undefined,
+    ],
+    [
+      "request protocol rejection",
+      -32602,
+      httpClientErrorMessage({
+        status: "401 Unauthorized",
+        type: "authentication_error",
+        param: null,
+        code: "invalid_api_key",
+      }),
+      undefined,
+    ],
+    [
+      "conflicting parameter",
+      -32603,
+      httpClientErrorMessage({
+        status: "401 Unauthorized",
+        type: "authentication_error",
+        param: "response_format",
+        code: "invalid_api_key",
+      }),
+      undefined,
+    ],
+    [
+      "malformed request error",
+      -32603,
+      httpClientErrorMessage({
+        status: "401 Unauthorized",
+        type: "authentication_error",
+        param: null,
+        code: "invalid_api_key",
+      }),
+      undefined,
+      { requestId: sensitiveMarker },
+    ],
+  ]) {
+    await t.test(name, async () => {
+      const fixture = createFixture({
+        handle({ message: requestMessage }) {
+          if (requestMessage.method === "turn/start") {
+            return {
+              error: {
+                code: rpcCode,
+                message,
+                data: { credential: sensitiveMarker },
+                ...extraFields,
+              },
+            };
+          }
+        },
+      });
+      await assert.rejects(fixture.adapter.run(request()), (error) => {
+        const normalized = normalizeAdapterFailure("codex", error);
+        assert.equal(normalized.failure.disposition, expected);
+        assert.equal(normalized.recoverable, false);
+        assert.equal(normalized.ambiguous, false);
+        if (expected !== undefined) {
+          assert.ok(
+            hasDiagnostic("ERR_CODEX_TURN_FAILED", "turn_unauthorized")(error),
+          );
+        }
+        assert.doesNotMatch(
+          JSON.stringify({ ...error, message: error.message }),
+          /DO_NOT_RETAIN|https:\/\//u,
+        );
+        assert.doesNotMatch(JSON.stringify(normalized), /DO_NOT_RETAIN/u);
+        return true;
+      });
+      assert.equal(fixture.processes.length, 1);
+    });
+  }
+});
+
 test("rejects structured HTTP client failures marked other without provider recovery", async (t) => {
   for (const [status, type, code] of [
     ["400 Bad Request", "invalid_request_error", "invalid_json_schema"],
@@ -3232,6 +3372,10 @@ test("rejects structured HTTP client failures marked other without provider reco
                     httpClientErrorMessage({
                       status,
                       type,
+                      param:
+                        type === "invalid_request_error"
+                          ? "DO_NOT_RETAIN_SCHEMA_PATH"
+                          : null,
                       code,
                       pretty: access === "workspace-write",
                     }) +
@@ -3266,8 +3410,14 @@ test("rejects structured HTTP client failures marked other without provider reco
             }),
           ),
           (error) => {
+            const authenticationRequired = status.startsWith("401");
             assert.ok(
-              hasDiagnostic("ERR_CODEX_TURN_FAILED", "turn_bad_request")(error),
+              hasDiagnostic(
+                "ERR_CODEX_TURN_FAILED",
+                authenticationRequired
+                  ? "turn_unauthorized"
+                  : "turn_bad_request",
+              )(error),
             );
             assert.equal(error.message, "Codex turn failed.");
             for (const failure of [
@@ -3282,6 +3432,12 @@ test("rejects structured HTTP client failures marked other without provider reco
                 access === "local-commit" ? false : undefined,
               );
               assert.equal(failure.cause, undefined);
+              assert.equal(
+                failure.failure.disposition,
+                authenticationRequired
+                  ? AUTHENTICATION_REQUIRED_DISPOSITION
+                  : undefined,
+              );
               assert.doesNotMatch(
                 JSON.stringify({ ...failure, message: failure.message }),
                 /DO_NOT_RETAIN|uniqueItems|invalid_json_schema/u,

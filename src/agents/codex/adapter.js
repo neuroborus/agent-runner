@@ -7,6 +7,7 @@ import { executeOwnedProcess, spawnOwnedProcess } from "../owned-process.js";
 import packageMetadata from "../../../package.json" with { type: "json" };
 import {
   ADAPTER_FAILURE_CLASS,
+  AUTHENTICATION_REQUIRED_DISPOSITION,
   createAdapterContract,
   DEFAULT_CLIENT_ATTRIBUTION,
   deepFreeze,
@@ -94,6 +95,8 @@ const CLIENT_ERROR_CODES = new Set([
   "unsupported_parameter",
   "unsupported_value",
 ]);
+const AUTHENTICATION_ERROR_CODES = new Set(["invalid_api_key"]);
+const REQUEST_ERROR_FIELDS = new Set(["code", "message", "data"]);
 const CODEX_DIAGNOSTIC_CLASSES = new Set([
   EFFORT_DIAGNOSTIC_CLASS,
   ...Object.values(CAPABILITY_DIAGNOSTICS),
@@ -339,6 +342,9 @@ function codexFailureRecord(cause) {
     cause.availabilityReason !== undefined
       ? { availabilityReason: cause.availabilityReason }
       : {}),
+    ...(cause instanceof CodexAdapterError && cause.disposition !== undefined
+      ? { disposition: cause.disposition }
+      : {}),
     ...(checkpoint === "commit" && cause?.effectStarted === false
       ? { commitExecutor: "not_started" }
       : {}),
@@ -372,6 +378,7 @@ export class CodexAdapterError extends Error {
       cause,
       code = "ERR_CODEX_ADAPTER",
       diagnosticClass,
+      disposition,
       effectStarted,
       failureClass,
       method,
@@ -385,6 +392,7 @@ export class CodexAdapterError extends Error {
     this.recoverable = recoverable;
     if (availabilityReason !== undefined)
       this.availabilityReason = availabilityReason;
+    if (disposition !== undefined) this.disposition = disposition;
     if (typeof effectStarted === "boolean") {
       this.effectStarted = effectStarted;
     }
@@ -868,7 +876,10 @@ async function selectThread(client, request, fresh) {
     } catch (cause) {
       if (
         cause instanceof CodexAdapterError &&
-        ["ERR_CODEX_PROTOCOL", "ERR_UNSUPPORTED_EFFORT"].includes(cause.code)
+        (["ERR_CODEX_PROTOCOL", "ERR_UNSUPPORTED_EFFORT"].includes(
+          cause.code,
+        ) ||
+          isAuthenticationRequiredError(cause))
       ) {
         throw cause;
       }
@@ -893,7 +904,8 @@ async function selectThread(client, request, fresh) {
   } catch (cause) {
     if (
       cause instanceof CodexAdapterError &&
-      ["ERR_CODEX_PROTOCOL", "ERR_UNSUPPORTED_EFFORT"].includes(cause.code)
+      (["ERR_CODEX_PROTOCOL", "ERR_UNSUPPORTED_EFFORT"].includes(cause.code) ||
+        isAuthenticationRequiredError(cause))
     ) {
       throw cause;
     }
@@ -947,6 +959,43 @@ function structuredClientError(message) {
   return { ...error, status };
 }
 
+function isAuthenticationRequired(rejection, nativeStatus) {
+  return (
+    isRecord(rejection) &&
+    rejection.status === 401 &&
+    rejection.type === "authentication_error" &&
+    rejection.param == null &&
+    (rejection.code === undefined ||
+      rejection.code === null ||
+      AUTHENTICATION_ERROR_CODES.has(rejection.code)) &&
+    (nativeStatus === undefined || nativeStatus === rejection.status)
+  );
+}
+
+function isAuthenticationRequiredError(cause) {
+  return (
+    cause instanceof CodexAdapterError &&
+    cause.disposition === AUTHENTICATION_REQUIRED_DISPOSITION
+  );
+}
+
+function authenticationRequiredError() {
+  return new CodexAdapterError("Codex turn failed.", {
+    code: "ERR_CODEX_TURN_FAILED",
+    diagnosticClass: TERMINAL_TURN_DIAGNOSTICS.unauthorized,
+    disposition: AUTHENTICATION_REQUIRED_DISPOSITION,
+  });
+}
+
+function isStructuredRequestError(error) {
+  return (
+    isRecord(error) &&
+    Object.hasOwn(error, "code") &&
+    Object.hasOwn(error, "message") &&
+    Reflect.ownKeys(error).every((field) => REQUEST_ERROR_FIELDS.has(field))
+  );
+}
+
 function rejectsEffort(message) {
   return (
     typeof message === "string" &&
@@ -989,6 +1038,13 @@ function classifyRequestError(error, method, request) {
     isEffortRejection(error.message)
   )
     return effortError();
+  if (
+    isStructuredRequestError(error) &&
+    [-32603, -32000].includes(error.code) &&
+    isAuthenticationRequired(structuredClientError(error.message))
+  ) {
+    return authenticationRequiredError();
+  }
   if (
     method === "turn/start" &&
     isRecord(error) &&
@@ -1060,6 +1116,7 @@ async function resolveCompletedTurn(client, value, threadId, turnId) {
       includeTurns: true,
     });
   } catch (cause) {
+    if (isAuthenticationRequiredError(cause)) throw cause;
     throw invalidCompletedTurn(cause);
   }
   if (
@@ -1155,6 +1212,7 @@ async function compactThread(client, threadId) {
       });
     }
   } catch (cause) {
+    if (isAuthenticationRequiredError(cause)) throw cause;
     throw new CodexAdapterError("Codex context compaction failed.", {
       cause,
       code: "ERR_CODEX_CONTEXT_RECOVERY_FAILED",
@@ -1227,19 +1285,32 @@ async function runTurn(
     const availability = codexAvailabilityEvidence(turn.error);
     const canRefine =
       diagnosticClass === TERMINAL_TURN_DIAGNOSTICS.badRequest ||
+      diagnosticClass === TERMINAL_TURN_DIAGNOSTICS.unauthorized ||
       RECOVERABLE_TURN_DIAGNOSTICS.has(diagnosticClass) ||
       Object.hasOwn(availability, "status");
     if (canRefine) {
       // Native availability cannot hide policy, protocol, or isolation violations.
       auditItems(turn.items, request);
     }
-    const rejection = canRefine && structuredClientError(turn.error?.message);
-    if ([401, 403].includes(availability.status)) {
+    const parsedRejection =
+      canRefine && structuredClientError(turn.error?.message);
+    const rejection =
+      parsedRejection &&
+      (availability.status === undefined ||
+        availability.status === parsedRejection.status)
+        ? parsedRejection
+        : false;
+    const authenticationRequired = isAuthenticationRequired(
+      rejection,
+      availability.status,
+    );
+    if (authenticationRequired || [401, 403].includes(availability.status)) {
       diagnosticClass = TERMINAL_TURN_DIAGNOSTICS.unauthorized;
     } else if (availability.status === 429) {
       diagnosticClass = TERMINAL_TURN_DIAGNOSTICS.usageLimitExceeded;
     } else if (
-      rejection ||
+      (rejection &&
+        diagnosticClass !== TERMINAL_TURN_DIAGNOSTICS.unauthorized) ||
       (availability.status >= 400 &&
         availability.status < 500 &&
         ![408, 425].includes(availability.status))
@@ -1273,6 +1344,9 @@ async function runTurn(
         RECOVERABLE_TURN_DIAGNOSTICS.has(diagnosticClass) ||
         availabilityReason !== undefined,
       availabilityReason,
+      ...(authenticationRequired
+        ? { disposition: AUTHENTICATION_REQUIRED_DISPOSITION }
+        : {}),
     });
   }
   return turn;
