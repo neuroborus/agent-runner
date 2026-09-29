@@ -2492,6 +2492,53 @@ test("resumes only action-free ownerless interrupted runs at the exact revision"
   assert.equal(launches.length, 2);
 });
 
+test("action-free resume immediately reclaims an exact dead owner", async (t) => {
+  const paths = await workspace(t, "agent-runner-mcp-dead-owner-resume-");
+  const bootId = "44444444-4444-4444-8444-444444444444";
+  const storeOptions = {
+    stateRoot: paths.stateRoot,
+    hostName: "test-host",
+    processIsAlive: (pid) => pid !== 100,
+    processIdentity: (pid) => ({ bootId, startTicks: String(pid) }),
+  };
+  const ownerStore = createRunStore({ ...storeOptions, processId: 100 });
+  await createStoredRun(ownerStore, paths);
+  const ownerLease = await ownerStore.acquireRunLease(RUN_ID);
+  const started = await ownerStore.startAgentTurn(
+    ownerLease,
+    { role: "planner", phase: "clarify" },
+    {
+      activity: {
+        actor: "planner",
+        phase: "clarify",
+        kind: "turn-started",
+        message: "planner clarify turn started.",
+      },
+    },
+  );
+
+  const recoveryStore = createRunStore({ ...storeOptions, processId: 200 });
+  let launches = 0;
+  const control = createMcpControlPlane({
+    async launchRun(id, _action, options) {
+      launches += 1;
+      await advanceMutatingStoredRun(recoveryStore, id, options.dispatch);
+    },
+    runner: storedRunner(recoveryStore, paths),
+    runStore: recoveryStore,
+  });
+  assert.deepEqual(
+    await control.runResume({
+      idempotencyKey: "dead-owner-resume",
+      runId: RUN_ID,
+      expectedRevision: started.revision,
+      action: null,
+    }),
+    { runId: RUN_ID },
+  );
+  assert.equal(launches, 1);
+});
+
 test("rejects a live pausing owner and permits an exact-key retry after release", async (t) => {
   const paths = await workspace(t, "agent-runner-mcp-resume-lease-");
   const store = createRunStore({ stateRoot: paths.stateRoot });

@@ -7,6 +7,14 @@ remain in the owning documentation.
 
 ## 2026-09-29
 
+- **Dead lease owners are reclaimed by identity rather than age.** Current
+  same-host execution and canonical-worktree leases can be replaced immediately
+  only when their boot/PID/start identity proves the exact owner dead or
+  replaced. Reclaim markers, mutation-boundary token and identity rechecks,
+  atomic replacement, and worktree ownership policy remain intact; legacy,
+  identity-free, foreign-host, live, invalid, and unverifiable records continue
+  to block competing owners.
+
 - **Client attribution is frozen per run at the root boundary.** Only
   runner-root configuration may select the normalized provider-visible
   identity. Resolution admits a custom value only when every active provider

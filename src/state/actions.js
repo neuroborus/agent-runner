@@ -229,6 +229,9 @@ export function createActionStore({
     onPublicationBoundary,
   });
   const leases = createLeaseManager({
+    // Action intents retain PID-only recovery for identity-free leases;
+    // execution and worktree ownership keep the exact-identity default.
+    allowIdentityFreeReclaim: true,
     withMutation: (_record, operation, directory) =>
       mutate(directory, operation),
     activeLeaseDescription: "MCP action lease",
@@ -239,14 +242,12 @@ export function createActionStore({
     leaseSubject: () => "MCP action",
     includeRunId: false,
     requireMatchingRunId: false,
-    currentDate: () => new Date(timestamp()),
     timestamp,
     hostName,
     processId,
     processIsAlive: checkProcess,
     processIdentity,
     onPublicationBoundary,
-    staleMs: 0,
     tokenFactory,
   });
 

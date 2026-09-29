@@ -103,8 +103,12 @@ An immediate pending request blocks ordinary state writes; deferred requests
 permit only target-step progress. Release of held execution/worktree leases
 fails closed until accounting completes. Even after owner loss, another run
 cannot reclaim that worktree until the original run records reconciliation.
-Boot and process-start identity distinguish a recorded owner from a reused PID;
-unverifiable owners remain conservative exclusion barriers. An acceptance
+Boot and process-start identity distinguish a recorded owner from a reused PID.
+A current same-host execution or worktree lease may be reclaimed without an age
+delay only when that exact identity is dead or replaced; marker publication,
+token and identity rechecks, and atomic replacement remain mandatory. Legacy,
+identity-free, foreign-host, live, invalid, and unverifiable owners remain
+conservative exclusion barriers. An acceptance
 receipt may be recovered or replayed after later transitions without executing
 work or changing a terminal outcome. The state protocol itself performs no
 process signalling or repository effect.

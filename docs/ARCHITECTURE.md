@@ -833,11 +833,11 @@ MCP status and wait also project one bounded `execution` object. Its finite
 identity. `state` remains the conservative action summary: `running` while the
 lease owner is live or unverifiable, `interrupted` when a persisted active turn
 or process record has no exclusionary owner, and `idle` otherwise. Nullable
-`role` and `phase` come only from the common run envelope. A read checks
-same-host process liveness immediately without changing the stale threshold
-used for exclusive acquisition. A timeout therefore distinguishes live lease
-ownership, unresolved lease identity, and durable process ownership without
-polling or a heartbeat.
+`role` and `phase` come only from the common run envelope. A read applies the
+same exact same-host process-identity classification used for exclusive
+acquisition without changing ownership. A timeout therefore distinguishes live
+lease ownership, unresolved lease identity, and durable process ownership
+without polling or a heartbeat.
 `pipelines_list` projects descriptor-owned setting values, defaults, and
 recommendations. Status, wait, and activity project the persisted resolved mode
 without inactive role configuration or provider-private data. `run_activity`
@@ -858,8 +858,8 @@ nonterminal checkpoint with no pause also accepts action-free continuation,
 including a crash between admission and the first provider turn. Retained
 process/resource reservations are exclusion evidence, not proof of a live
 runner: only same-host owner inspection decides whether to dispatch a replacement.
-Same-run worktree reclamation retains age, identity, mutation, and reclaim-marker
-checks, and recovery reuses an already-held worktree handle.
+Same-run worktree reclamation retains exact process identity, mutation, and
+reclaim-marker checks, and recovery reuses an already-held worktree handle.
 
 MCP action-lease contention returns `ERR_MCP_ACTION_IN_PROGRESS` immediately.
 Detached dispatch uses revision/lease notifications and the correlated child's
@@ -957,9 +957,9 @@ keeps filesystem-safe bounded keys while the owner record contains only the
 run ID, an opaque token, process ID, hostname, acquisition time, and nullable
 process identity. Version-2 lease records pin Linux boot identity and process
 start ticks when available. A live reused PID is a replaced owner, not proof
-that the recorded execution survives. Foreign-host, legacy live, and otherwise
-unverifiable owners remain conservative exclusion barriers. Legacy records are
-read without rewriting them; successful acquisition publishes the current
+that the recorded execution survives. Foreign-host, legacy, identity-free, and
+otherwise unverifiable owners remain conservative exclusion barriers. Legacy
+records are read without rewriting them; new acquisitions publish the current
 lease format. Empty key directories may remain after release. Ownership uses
 `.lease`; a pending stop also retains an interrupted `.lease-reclaiming`
 reservation until reconciliation permits its release.
@@ -975,12 +975,16 @@ interrupted publisher, it removes only the matching same-directory temporary
 link to restore the isolated final file. Bounded retries cover replacement
 publication between inspection and opening; each read still requires an
 isolated regular file, and unrecognized or persistent hard links remain unsafe.
-Exclusive contention, stale-owner recovery, and release all use
-the published record and continue to verify its opaque owner token.
+Exclusive contention, dead-owner recovery, and release all use the published
+record and continue to verify its opaque owner token. A current same-host run
+or worktree lease with a complete boot/PID/start identity is reclaimable
+immediately only when that exact owner is dead or replaced. Acquisition time is
+neither a delay nor ownership proof. Legacy, identity-free, foreign-host, live,
+invalid, and otherwise unverifiable records remain exclusion barriers.
 
 These state retry counts are fixed correctness guards rather than workflow
 budgets. Managed-state reads make at most five attempts across an atomic
-replacement; lease acquisition, including stale-marker and owner
+replacement; lease acquisition, including reclaim-marker and owner
 reconciliation, makes at most five passes. Runner release of either an
 execution or canonical-worktree lease makes at most five stop-aware attempts;
 exhaustion leaves stop reconciliation pending. Generated run IDs try at most
@@ -1209,7 +1213,7 @@ resumption once other blockers are resolved. A pending stop prevents release
 of held run/worktree ownership even after its process record has been retired.
 A dead owner's existing worktree lease remains excluded from other runs while
 the request is pending; only recovery of the same run can reclaim it.
-Reclamation, including stale-marker recovery, rechecks the stop under the
+Reclamation, including reclaim-marker recovery, rechecks the stop under the
 original run's mutation boundary before replacing ownership. A crash leaving
 only a reclaiming record retains that reservation until a replacement lease
 exists, restricted to the same run while a stop is pending; failed
@@ -2028,7 +2032,7 @@ runner retains its private run/worktree lease handles after resource cleanup
 failure; a sequential retry revalidates the run token through the state mutation
 boundary before reuse, retaining the handle if inspection itself fails.
 Concurrent resumes and other owners remain excluded, and stale revisions remain
-errors. Restart uses normal stale-owner reclamation.
+errors. Restart uses normal identity-based owner reclamation.
 `ERR_EXECUTION_RESOURCE_UNVERIFIABLE` preserves the active checkpoint for
 repository/effect reconciliation on resume. A fully cleaned pre-launch failure
 uses `ERR_AGENT_ENVIRONMENT_PREPARATION` and the existing safe provider pause,
@@ -2885,10 +2889,14 @@ execution and polishing also hold one atomic lease for the canonical Git
 worktree throughout workflow execution and runner-authorized clarification
 writes, preventing independently identified runs from mutating the same
 worktree concurrently. Status and public activity reads acquire neither lease.
-A competing owner is rejected; either lease is recoverable only after its age
-threshold of five minutes when its same-host process is demonstrably dead. Age
-alone never proves that ownership ended. Release verifies the
-opaque owner token before removing a lease. Pipeline-declared run artifacts are
+A competing owner is rejected. A current same-host lease is recoverable
+immediately only when its complete boot/PID/start identity proves the exact
+owner dead or replaced; the reclaim marker and mutation boundary recheck that
+identity and the opaque token before atomic replacement. Acquisition age does
+not delay recovery and never proves that ownership ended. Legacy,
+identity-free, foreign-host, live, invalid, and unverifiable records remain
+non-reclaimable. Release verifies the opaque owner token before removing a
+lease. Pipeline-declared run artifacts are
 atomically replaced beneath the run directory, with absolute paths, traversal,
 reserved state files, and symlink escapes rejected. Managed state and lease
 paths must be isolated regular files rather than symbolic or hard links.

@@ -445,7 +445,7 @@ normal worktree exclusion and effect reconciliation. A conflict message names
 the run recorded as lease owner; that run is distinct from the ownerless run
 whose stop is still applicable. Never manually delete, edit, or bypass lease
 files. Recover the recorded owner through supported actions, or wait for normal
-release or state-owned stale-owner reclamation.
+release or state-owned identity-based owner reclamation.
 
 ## 5. Recover a pause without taking over the work
 
@@ -519,11 +519,14 @@ plan-authoring run and require preflight to advertise read-only,
 workspace-write, and local-commit access plus a provider response before relying
 on the backend for subsequent work.
 
-A same-host execution or canonical-worktree lease is eligible for stale
-recovery after five minutes only when its recorded process is demonstrably
-dead, while short state-mutation contention returns a retryable busy result
-after roughly five seconds. These protocol and ownership limits are not
-substitutes for configurable workflow budgets or the per-command
+A current same-host execution or canonical-worktree lease is eligible for
+immediate recovery only when its recorded boot/PID/start identity proves the
+exact owner dead or replaced. Its acquisition time neither delays nor
+authorizes recovery. Legacy, identity-free, foreign-host, live, invalid, and
+otherwise unverifiable records remain blocking. Short state-mutation
+contention returns a retryable busy result after roughly five seconds. These
+protocol and ownership limits are not substitutes for configurable workflow
+budgets or the per-command
 trusted-validation timeout; repair the reported availability or ownership
 condition and use the run's offered action.
 Same-run recovery reclaims leases through this protocol, proves the persisted

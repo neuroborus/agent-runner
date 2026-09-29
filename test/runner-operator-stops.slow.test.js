@@ -334,7 +334,6 @@ test("initial execution stop recovery settles before preflight despite a distinc
       bootId: SOURCE_SESSION,
       startTicks: String(pid),
     }),
-    leaseStaleMs: 0,
   });
   const recoveredRunner = runnerFor(
     fixture,
@@ -1275,7 +1274,6 @@ test("operator stop after host loss reclaims ownership and reconciles before fur
     processId: 100,
     processIsAlive: () => true,
     processIdentity: (pid) => ({ bootId: bootA, startTicks: String(pid) }),
-    leaseStaleMs: 0,
   };
   const store = createRunStore(options);
   const lease = await store.acquireRunLease(fixture.runId);
@@ -1360,7 +1358,6 @@ test("action-free recovery retires a dead session before further provider work",
       pid === executionPid
         ? launchIdentity
         : { bootId, startTicks: String(pid) },
-    leaseStaleMs: 0,
   };
   const store = createRunStore(options);
   const lease = await store.acquireRunLease(fixture.runId);
@@ -1471,7 +1468,6 @@ test("legacy recovery evidence remains non-mutating and compatibility-blocked", 
       pid === executionPid
         ? launchIdentity
         : { bootId, startTicks: String(pid) },
-    leaseStaleMs: 0,
   };
   const store = createRunStore(options);
   const lease = await store.acquireRunLease(fixture.runId);
@@ -1545,7 +1541,6 @@ test("stop recovery preserves containment failure without reacquiring its held w
     processId: 100,
     processIsAlive: (pid) => (pid === 100 ? originalOwnerAlive : pid === 4242),
     processIdentity: (pid) => ({ bootId: bootA, startTicks: String(pid) }),
-    leaseStaleMs: 0,
   };
   const store = createRunStore(options);
   const delegate = createExecutionAdapter();
@@ -1636,7 +1631,6 @@ test("stop recovery retries settlement after process retirement was journaled", 
     processId: 100,
     processIsAlive: (pid) => pid === 100 && originalOwnerAlive,
     processIdentity: (pid) => ({ bootId: bootA, startTicks: String(pid) }),
-    leaseStaleMs: 0,
   };
   const store = createRunStore(options);
   const delegate = createExecutionAdapter();
@@ -1743,7 +1737,6 @@ test("settled stop releases its recovered worktree lease after publication failu
     processId: 100,
     processIsAlive: (pid) => pid === 100,
     processIdentity: (pid) => ({ bootId: bootA, startTicks: String(pid) }),
-    leaseStaleMs: 0,
   };
   const store = createRunStore(options);
   const delegate = createExecutionAdapter();
@@ -1827,7 +1820,6 @@ test("retired Claude execution storage is inode-verified and cleaned after owner
     processId: 100,
     processIsAlive: () => true,
     processIdentity: (pid) => ({ bootId: bootA, startTicks: String(pid) }),
-    leaseStaleMs: 0,
   };
   const store = createRunStore(options);
   const delegate = createExecutionAdapter();

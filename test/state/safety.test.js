@@ -20,6 +20,24 @@ import test from "node:test";
 
 import { createRunStore, RunStoreError } from "../../src/state/index.js";
 
+const TEST_BOOT_ID = "11111111-1111-4111-8111-111111111111";
+
+function processIdentity(pid, bootId = TEST_BOOT_ID) {
+  return { bootId, startTicks: String(pid) };
+}
+
+function leaseRecord({ acquiredAt, hostname, pid, runId, token }) {
+  return {
+    schemaVersion: 2,
+    processIdentity: processIdentity(pid),
+    runId,
+    token,
+    pid,
+    hostname,
+    acquiredAt,
+  };
+}
+
 function createPublicationBarrier() {
   let pending;
   return {
@@ -539,7 +557,7 @@ test("reads a complete worktree lease during no-replace publication", async (t) 
   await lease.release();
 });
 
-test("recovers only stale same-host worktree ownership and checks release ownership", async (t) => {
+test("recovers exact dead worktree ownership immediately and checks release ownership", async (t) => {
   const { created, projectPath, stateRoot } = await createFixture(t);
   const initialStore = createRunStore({ stateRoot });
   const initialLease = await initialStore.acquireWorktreeLease(
@@ -549,13 +567,13 @@ test("recovers only stale same-host worktree ownership and checks release owners
   await initialLease.release();
   const [worktreeKey] = await readdir(join(stateRoot, "worktrees"));
   const leasePath = join(stateRoot, "worktrees", worktreeKey, ".lease");
-  const staleLease = {
+  const staleLease = leaseRecord({
     runId: created.state.runId,
     token: "11111111-1111-4111-8111-111111111111",
     pid: 111,
     hostname: "test-host",
-    acquiredAt: "2020-01-01T00:00:00.000Z",
-  };
+    acquiredAt: "2099-01-01T00:00:00.000Z",
+  });
   await writeFile(leasePath, `${JSON.stringify(staleLease)}\n`);
 
   const recoveringRunId = "22222222-2222-4222-8222-222222222222";
@@ -565,7 +583,7 @@ test("recovers only stale same-host worktree ownership and checks release owners
     hostName: "test-host",
     processId: 222,
     processIsAlive: (pid) => pid !== 111,
-    leaseStaleMs: 0,
+    processIdentity,
   });
   const recoveredLease = await recoveringStore.acquireWorktreeLease(
     projectPath,
@@ -662,17 +680,17 @@ test("revalidates the state root before every run lookup", async (t) => {
   );
 });
 
-test("recovers only a demonstrably stale execution lease", async (t) => {
+test("recovers only a current exact dead execution lease immediately", async (t) => {
   const { created, stateRoot } = await createFixture(t);
   await created.lease.release();
   const leasePath = join(created.directoryPath, ".lease");
-  const staleLease = {
+  const staleLease = leaseRecord({
     runId: created.state.runId,
     token: "11111111-1111-4111-8111-111111111111",
     pid: 111,
     hostname: "test-host",
-    acquiredAt: "2020-01-01T00:00:00.000Z",
-  };
+    acquiredAt: "2099-01-01T00:00:00.000Z",
+  });
   await writeFile(leasePath, `${JSON.stringify(staleLease)}\n`);
 
   const recoveringStore = createRunStore({
@@ -681,7 +699,7 @@ test("recovers only a demonstrably stale execution lease", async (t) => {
     hostName: "test-host",
     processId: 222,
     processIsAlive: (pid) => pid !== 111,
-    leaseStaleMs: 0,
+    processIdentity,
   });
   const recoveredLease = await recoveringStore.acquireRunLease(
     created.state.runId,
@@ -696,7 +714,7 @@ test("recovers only a demonstrably stale execution lease", async (t) => {
     hostName: "test-host",
     processId: 222,
     processIsAlive: () => true,
-    leaseStaleMs: 0,
+    processIdentity,
   });
   await assert.rejects(
     liveOwnerStore.acquireRunLease(created.state.runId),
@@ -713,26 +731,62 @@ test("recovers only a demonstrably stale execution lease", async (t) => {
     (error) =>
       error instanceof RunStoreError && error.code === "ERR_RUN_LEASED",
   );
+
+  for (const identityFreeLease of [
+    {
+      runId: staleLease.runId,
+      token: staleLease.token,
+      pid: staleLease.pid,
+      hostname: staleLease.hostname,
+      acquiredAt: staleLease.acquiredAt,
+    },
+    { ...staleLease, processIdentity: null },
+  ]) {
+    await writeFile(leasePath, `${JSON.stringify(identityFreeLease)}\n`);
+    assert.equal(
+      (await recoveringStore.inspectRunLeaseOwner(created.state.runId)).status,
+      "unverifiable",
+    );
+    await assert.rejects(
+      recoveringStore.acquireRunLease(created.state.runId),
+      (error) =>
+        error instanceof RunStoreError && error.code === "ERR_RUN_LEASED",
+    );
+  }
+
+  await writeFile(
+    leasePath,
+    `${JSON.stringify({
+      ...staleLease,
+      processIdentity: { bootId: "invalid", startTicks: "111" },
+    })}\n`,
+  );
+  await assert.rejects(
+    recoveringStore.acquireRunLease(created.state.runId),
+    (error) =>
+      error instanceof RunStoreError && error.code === "ERR_INVALID_RUN_LEASE",
+  );
 });
 
-test("serializes stale recovery with an owned marker", async (t) => {
+test("serializes dead-owner recovery with an owned marker", async (t) => {
   const { created, stateRoot } = await createFixture(t);
   await created.lease.release();
   const leasePath = join(created.directoryPath, ".lease");
   const markerPath = join(created.directoryPath, ".lease-reclaiming");
-  const existingLease = {
+  const existingLease = leaseRecord({
     runId: created.state.runId,
     token: "11111111-1111-4111-8111-111111111111",
     pid: 111,
     hostname: "test-host",
-    acquiredAt: "2020-01-01T00:00:00.000Z",
-  };
-  const recoveryMarker = {
-    ...existingLease,
+    acquiredAt: "2099-01-01T00:00:00.000Z",
+  });
+  const recoveryMarker = leaseRecord({
+    runId: created.state.runId,
     token: "22222222-2222-4222-8222-222222222222",
     pid: 222,
+    hostname: "test-host",
     acquiredAt: "2026-08-16T00:00:00.000Z",
-  };
+  });
   await Promise.all([
     writeFile(leasePath, `${JSON.stringify(existingLease)}\n`),
     writeFile(markerPath, `${JSON.stringify(recoveryMarker)}\n`),
@@ -744,7 +798,7 @@ test("serializes stale recovery with an owned marker", async (t) => {
     hostName: "test-host",
     processId: 333,
     processIsAlive: (pid) => pid === 222,
-    leaseStaleMs: 0,
+    processIdentity,
   });
   await assert.rejects(
     store.acquireRunLease(created.state.runId),
@@ -761,18 +815,18 @@ test("serializes stale recovery with an owned marker", async (t) => {
   );
 });
 
-test("publishes reclaiming ownership before stale-lease contention", async (t) => {
+test("publishes reclaiming ownership before dead-owner contention", async (t) => {
   const { created, stateRoot } = await createFixture(t);
   await created.lease.release();
   const leasePath = join(created.directoryPath, ".lease");
   const markerPath = join(created.directoryPath, ".lease-reclaiming");
-  const staleLease = {
+  const staleLease = leaseRecord({
     runId: created.state.runId,
     token: "11111111-1111-4111-8111-111111111111",
     pid: 111,
     hostname: "test-host",
-    acquiredAt: "2020-01-01T00:00:00.000Z",
-  };
+    acquiredAt: "2099-01-01T00:00:00.000Z",
+  });
   await writeFile(leasePath, `${JSON.stringify(staleLease)}\n`);
 
   const barrier = createPublicationBarrier();
@@ -782,7 +836,7 @@ test("publishes reclaiming ownership before stale-lease contention", async (t) =
     hostName: "test-host",
     processId: 222,
     processIsAlive: (pid) => pid !== 111,
-    leaseStaleMs: 0,
+    processIdentity,
   };
   const recoveringStore = createRunStore({
     ...storeOptions,
@@ -812,6 +866,76 @@ test("publishes reclaiming ownership before stale-lease contention", async (t) =
   );
   await assert.rejects(access(markerPath), (error) => error.code === "ENOENT");
   await winner.release();
+});
+
+test("rechecks exact owner state after reclaim-marker publication", async (t) => {
+  for (const { afterPublication, beforePublication, recoverable } of [
+    {
+      beforePublication: "dead",
+      afterPublication: "replaced",
+      recoverable: true,
+    },
+    {
+      beforePublication: "replaced",
+      afterPublication: "dead",
+      recoverable: true,
+    },
+    {
+      beforePublication: "replaced",
+      afterPublication: "live",
+      recoverable: false,
+    },
+  ]) {
+    await t.test(`${beforePublication} to ${afterPublication}`, async (t) => {
+      const { created, stateRoot } = await createFixture(t);
+      await created.lease.release();
+      const leasePath = join(created.directoryPath, ".lease");
+      const markerPath = join(created.directoryPath, ".lease-reclaiming");
+      const recorded = leaseRecord({
+        runId: created.state.runId,
+        token: "11111111-1111-4111-8111-111111111111",
+        pid: 111,
+        hostname: "test-host",
+        acquiredAt: "2099-01-01T00:00:00.000Z",
+      });
+      await writeFile(leasePath, `${JSON.stringify(recorded)}\n`);
+
+      let ownerState = beforePublication;
+      const store = createRunStore({
+        stateRoot,
+        hostName: "test-host",
+        processId: 222,
+        processIsAlive(pid) {
+          return pid === 111 ? ownerState !== "dead" : true;
+        },
+        processIdentity(pid) {
+          return pid === 111 && ownerState === "replaced"
+            ? processIdentity(999)
+            : processIdentity(pid);
+        },
+        onLeasePublicationBoundary({ filePath, phase }) {
+          if (filePath === markerPath && phase === "published") {
+            ownerState = afterPublication;
+          }
+        },
+      });
+
+      if (recoverable) {
+        const lease = await store.acquireRunLease(created.state.runId);
+        assert.equal(JSON.parse(await readFile(leasePath, "utf8")).pid, 222);
+        await lease.release();
+      } else {
+        await assert.rejects(store.acquireRunLease(created.state.runId), {
+          code: "ERR_RUN_LEASED",
+        });
+        assert.deepEqual(
+          JSON.parse(await readFile(leasePath, "utf8")),
+          recorded,
+        );
+      }
+      await assert.rejects(access(markerPath), { code: "ENOENT" });
+    });
+  }
 });
 
 test("publishes complete MCP action leases under contention", async (t) => {
@@ -850,14 +974,16 @@ test("publishes complete MCP action leases under contention", async (t) => {
   await winner.release();
 });
 
-test("grants one owner during concurrent stale recovery", async (t) => {
+test("grants one owner during concurrent dead-owner recovery", async (t) => {
   const { created, stateRoot } = await createFixture(t);
   await created.lease.release();
   const staleLease = {
+    schemaVersion: 2,
+    processIdentity: processIdentity(111),
     runId: created.state.runId,
     pid: 111,
     hostname: "test-host",
-    acquiredAt: "2020-01-01T00:00:00.000Z",
+    acquiredAt: "2099-01-01T00:00:00.000Z",
   };
   await Promise.all([
     writeFile(
@@ -884,7 +1010,7 @@ test("grants one owner during concurrent stale recovery", async (t) => {
         hostName: "test-host",
         processId: 200 + index,
         processIsAlive: (pid) => pid !== 111,
-        leaseStaleMs: 0,
+        processIdentity,
       }).acquireRunLease(created.state.runId),
     ),
   );

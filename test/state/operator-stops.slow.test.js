@@ -122,7 +122,6 @@ async function fixture(
     processId: 100,
     processIsAlive: () => true,
     processIdentity: (pid) => ({ bootId: BOOT_A, startTicks: String(pid) }),
-    leaseStaleMs: 0,
     ...options,
   };
   const store = createRunStore(storeOptions);

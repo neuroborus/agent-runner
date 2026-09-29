@@ -60,8 +60,6 @@ export {
   RunStoreError,
 };
 
-const DEFAULT_LEASE_STALE_MS = 5 * 60 * 1_000;
-
 const RUNS_DIRECTORY = "runs";
 const WORKTREES_DIRECTORY = "worktrees";
 const CREATE_RUN_FIELDS = new Set([
@@ -240,7 +238,6 @@ export function createRunStore({
   processId = process.pid,
   processIsAlive = defaultProcessIsAlive,
   processIdentity = readProcessIdentity,
-  leaseStaleMs = DEFAULT_LEASE_STALE_MS,
   onLeasePublicationBoundary = async () => {},
   onTransitionBoundary = async () => {},
   resolveStopBoundary = null,
@@ -265,9 +262,7 @@ export function createRunStore({
     hostName.length > 255 ||
     /[\p{Cc}\p{Zl}\p{Zp}]/u.test(hostName) ||
     !Number.isSafeInteger(processId) ||
-    processId < 1 ||
-    !Number.isSafeInteger(leaseStaleMs) ||
-    leaseStaleMs < 0
+    processId < 1
   ) {
     throw new RunStoreError("Run-store options are invalid.", {
       code: "ERR_INVALID_RUN_STORE_OPTIONS",
@@ -337,13 +332,11 @@ export function createRunStore({
   const runLeases = createLeaseManager({
     withMutation: withRunMutation,
     beforeRelease,
-    currentDate,
     hostName,
     processId,
     processIsAlive,
     processIdentity,
     onPublicationBoundary: onLeasePublicationBoundary,
-    staleMs: leaseStaleMs,
     timestamp,
     tokenFactory: leaseTokenFactory,
   });
@@ -362,7 +355,6 @@ export function createRunStore({
     },
     activeLeaseDescription: "Worktree lease",
     conflictCode: "ERR_WORKTREE_LEASED",
-    currentDate,
     hostName,
     invalidLeaseCode: "ERR_INVALID_WORKTREE_LEASE",
     leaseDescription: "Worktree lease",
@@ -376,7 +368,6 @@ export function createRunStore({
     onPublicationBoundary: onLeasePublicationBoundary,
     reclaimingLeaseDescription: "Reclaiming worktree lease",
     requireMatchingRunId: false,
-    staleMs: leaseStaleMs,
     timestamp,
     tokenFactory: leaseTokenFactory,
   });

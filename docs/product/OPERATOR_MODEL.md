@@ -169,19 +169,21 @@ lease and settles without acquiring a canonical lease recorded for an unrelated
 run. Every checkpoint that may require repository reconciliation or effect
 verification keeps normal worktree exclusion. Status and activity reads remain
 lock-free.
-An abandoned same-host execution or canonical-worktree lease becomes eligible
-for recovery after five minutes only when the recorded process is demonstrably
-dead; age alone never proves ownership ended. Short state mutations observe
-competing claims at most 500 times with 10 milliseconds between observations
-(about five seconds plus file system work), then return a retryable busy result
-rather than risking two writers. The smaller fixed publication and collision
-retry counts are correctness mechanics, not operator-configurable workflow
-budgets.
+An abandoned current same-host execution or canonical-worktree lease becomes
+eligible for immediate recovery only when its complete boot/PID/start identity
+proves the exact owner dead or replaced. Acquisition age is neither a delay nor
+ownership proof. Legacy, identity-free, foreign-host, live, invalid, and
+otherwise unverifiable records remain exclusion barriers. Short state
+mutations observe competing claims at most 500 times with 10 milliseconds
+between observations (about five seconds plus file system work), then return a
+retryable busy result rather than risking two writers. The smaller fixed
+publication and collision retry counts are correctness mechanics, not
+operator-configurable workflow budgets.
 
 Lease ownership, same-run recovery responsibility, and a persisted execution
 process are independent facts. A current owner reuses its existing worktree
 lease while stopping; after owner loss, the replacement execution owner may
-reclaim only the stale same-run lease and must prove the recorded process and
+reclaim only the exact same-run lease and must prove the recorded process and
 all owned descendants absent before clearing the process record. Live,
 replaced, unverifiable, or descendant-bearing process evidence remains a
 blocking ownership condition. Retirement and stop settlement are separate

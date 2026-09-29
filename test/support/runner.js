@@ -503,7 +503,6 @@ export async function strandedPreWorkOwner(fixture) {
       bootId: SOURCE_SESSION,
       startTicks: String(pid),
     }),
-    leaseStaleMs: 0,
   };
   const store = createRunStore(options);
   const input = {

@@ -376,15 +376,6 @@ test("fixed operational bounds remain explicit and narrowly owned", async () => 
     );
   }
 
-  assert.match(architecture, /lease is recoverable[^.]*five minutes/u);
-  assert.match(
-    operatorModel,
-    /same-host execution or canonical-worktree lease becomes eligible[^.]*five minutes/u,
-  );
-  assert.match(
-    operatorGuide,
-    /same-host execution or canonical-worktree lease is eligible[^.]*five minutes/u,
-  );
   for (const document of [architecture, operatorModel]) {
     assert.match(document, /500/u);
     assert.match(document, /10 milliseconds/u);

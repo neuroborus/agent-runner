@@ -115,6 +115,7 @@ async function readLease(
 
 export function createLeaseManager({
   activeLeaseDescription = "Execution lease",
+  allowIdentityFreeReclaim = false,
   includeRunId = true,
   leaseFilename = LEASE_FILENAME,
   reclaimingFilename = RECLAIMING_LEASE_FILENAME,
@@ -123,7 +124,6 @@ export function createLeaseManager({
   withMutation = async (_record, operation) => operation(),
   beforeRelease = async () => {},
   conflictCode = "ERR_RUN_LEASED",
-  currentDate,
   hostName,
   invalidLeaseCode = "ERR_INVALID_RUN_LEASE",
   leaseDescription = "Run lease",
@@ -133,7 +133,6 @@ export function createLeaseManager({
   onPublicationBoundary,
   reclaimingLeaseDescription = "Reclaiming lease",
   requireMatchingRunId = true,
-  staleMs,
   timestamp,
   tokenFactory,
 }) {
@@ -159,18 +158,21 @@ export function createLeaseManager({
     );
   }
 
-  const inspectOwner = (record) =>
-    inspectProcessOwner(record, {
+  function inspectOwner(record) {
+    if (
+      !allowIdentityFreeReclaim &&
+      (record.schemaVersion !== 2 || record.processIdentity === null)
+    ) {
+      return "unverifiable";
+    }
+    return inspectProcessOwner(record, {
       hostName,
       processIsAlive,
       processIdentity,
     });
+  }
 
-  async function leaseIsStale(lease) {
-    const age = currentDate().valueOf() - Date.parse(lease.acquiredAt);
-    if (age < staleMs || lease.hostname !== hostName) {
-      return false;
-    }
+  async function leaseIsReclaimable(lease) {
     return ["dead", "replaced"].includes(await inspectOwner(lease));
   }
 
@@ -239,7 +241,10 @@ export function createLeaseManager({
     if (marker === null) {
       return null;
     }
-    if (!(await leaseIsStale(marker)) || !(await canReclaim(marker, runId))) {
+    if (
+      !(await leaseIsReclaimable(marker)) ||
+      !(await canReclaim(marker, runId))
+    ) {
       throw new RunStoreError(
         `${leaseSubject(runId, marker.runId)} lease recovery is active.`,
         { code: conflictCode },
@@ -249,7 +254,7 @@ export function createLeaseManager({
       const current = await readManagedLease(markerPath, runId);
       if (current?.token !== marker.token) return null;
       if (
-        !(await leaseIsStale(current)) ||
+        !(await leaseIsReclaimable(current)) ||
         !(await canReclaim(current, runId))
       ) {
         throw new RunStoreError(
@@ -309,7 +314,7 @@ export function createLeaseManager({
         continue;
       }
       if (
-        !(await leaseIsStale(existingLease)) ||
+        !(await leaseIsReclaimable(existingLease)) ||
         !(await canReclaim(existingLease, runId))
       ) {
         throw new RunStoreError(
@@ -333,7 +338,7 @@ export function createLeaseManager({
           const currentLease = await readManagedLease(leasePath, runId);
           if (currentLease?.token !== existingLease.token) return null;
           if (
-            !(await leaseIsStale(currentLease)) ||
+            !(await leaseIsReclaimable(currentLease)) ||
             !(await canReclaim(currentLease, runId))
           ) {
             throw new RunStoreError(
@@ -396,7 +401,7 @@ export function createLeaseManager({
         : null;
     }
     return lease !== null &&
-      (!(await leaseIsStale(lease)) || !(await canReclaim(lease, null)))
+      (!(await leaseIsReclaimable(lease)) || !(await canReclaim(lease, null)))
       ? lease.runId
       : null;
   }

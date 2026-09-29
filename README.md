@@ -801,10 +801,14 @@ separately from the ownerless pending run. Never manually delete, rewrite, or
 bypass lease records; recover the recorded owner or retry the offered action
 after normal release or state-owned reclamation.
 Recovery reuses a same-run worktree lease already held by the runner. After
-owner loss it may reclaim that lease only through stale-owner checks, then
-clears a process record only after proving the recorded process and descendants
-absent. A post-launch shared-host process is excluded only after its complete,
-stabilized lineage reaches an unchanged entry in the frozen launch baseline.
+owner loss it may immediately reclaim a current same-host execution or worktree
+lease only when the recorded boot/PID/start identity proves the exact owner dead
+or replaced; acquisition age is not a delay or proof. Legacy, identity-free,
+foreign-host, live, invalid, and unverifiable lease records remain blocking.
+The runner then clears a process record only after proving the recorded process
+and descendants absent. A post-launch shared-host process is excluded only after
+its complete, stabilized lineage reaches an unchanged entry in the frozen
+launch baseline.
 Every observed session and ownership token is checked before accepting that
 anchor. An inaccessible current environment is excluded only when its stable
 control-group identity differs from the recorded owner. Replaced or reused
