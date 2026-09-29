@@ -100,7 +100,11 @@ test("legacy recovery shares CLI and MCP actions and survives a disconnected wai
       action: null,
       idempotencyKey: "legacy-disconnect",
     });
-    await entered.promise;
+    await within(
+      entered.promise,
+      30_000,
+      "Recovery did not reach confirmation.",
+    );
     const running = await control.runStatus({ runId: fixture.runId });
     const cancellation = new AbortController();
     const wait = control.runWait(
@@ -1677,11 +1681,25 @@ function detached(runner) {
   const failures = [];
   const pending = new Set();
   return {
-    launchRun(runId, action = null) {
+    launchRun(runId, action = null, options = {}) {
       const execution = runner
-        .resume({ runId, action })
+        .resume({
+          runId,
+          action,
+          dispatch: options.dispatch,
+          expectedRuntimeCompatibility: options.expectedRuntimeCompatibility,
+          ...(options.stopCheckpointRevision == null
+            ? {}
+            : { stopCheckpointRevision: options.stopCheckpointRevision }),
+        })
+        .then(({ run }) =>
+          options.onExit?.(
+            run.pipelineState.workflowState === "WAITING_FOR_USER" ? 2 : 0,
+          ),
+        )
         .catch((error) => {
           failures.push(error);
+          options.onExit?.(1);
         })
         .finally(() => pending.delete(execution));
       pending.add(execution);

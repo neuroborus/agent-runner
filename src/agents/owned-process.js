@@ -28,6 +28,28 @@ const BUBBLEWRAP_CANDIDATES = Object.freeze([
 const DEFAULT_DESCENDANT_GRACE_MS = 1_000;
 const OWNED_PROCESS_INSPECTION_ATTEMPTS = 3;
 const MAX_PROCESS_ANCESTRY_BASELINE_ENTRIES = 4_096;
+const MAX_INSPECTION_WORK = 65_536;
+const MAX_INSPECTION_MS = 250;
+
+// Both live supervision and replacement-owner inspection use this same bound.
+// Charge reads, entries, and ancestry hops; a slow final read must also fail.
+function inspectionBudget(now, maxWork, maxElapsedMs) {
+  const started = now();
+  let spent = 0;
+  return (amount = 1) => {
+    const elapsed = now() - started;
+    spent += amount;
+    if (
+      !Number.isFinite(elapsed) ||
+      elapsed < 0 ||
+      elapsed >= maxElapsedMs ||
+      spent > maxWork
+    ) {
+      throw new Error("Ownership inspection budget exhausted.");
+    }
+  };
+}
+
 const OWNERSHIP_MODES = new Set(["ordinary", "native-sandbox-provider"]);
 // Linux reserves this procfs inode for the initial PID namespace.
 const INITIAL_PID_NAMESPACE = "pid:[4026531836]";
@@ -52,6 +74,14 @@ let launchCutoff;
 let ancestryBaseline;
 let controlGroup;
 let retentionTimer;
+const inspectionBudget = ${inspectionBudget.toString()};
+let charge;
+function readProc(path, encoding) {
+  charge();
+  try { return require("node:fs").readFileSync(path, encoding); }
+  finally { charge(0); }
+}
+
 function processStatDetails(stat) {
   const separator = stat.lastIndexOf(")");
   if (separator < 0) return null;
@@ -112,7 +142,7 @@ function isBaselineIdentity(pid, startTicks) {
   return ancestryBaseline?.get(pid) === startTicks;
 }
 function processUid(pid) {
-  const status = require("node:fs").readFileSync(
+  const status = readProc(
     "/proc/" + pid + "/status",
     "utf8",
   );
@@ -121,7 +151,7 @@ function processUid(pid) {
   return match.slice(1).map(Number);
 }
 function processControlGroup(pid) {
-  const source = require("node:fs").readFileSync(
+  const source = readProc(
     "/proc/" + pid + "/cgroup",
     "utf8",
   );
@@ -135,7 +165,7 @@ function processControlGroup(pid) {
 function verifyProcessDetails(pid, expected) {
   try {
     const current = processStatDetails(
-      require("node:fs").readFileSync("/proc/" + pid + "/stat", "utf8"),
+      readProc("/proc/" + pid + "/stat", "utf8"),
     );
     if (current === null || current.startTicks !== expected.startTicks) {
       return null;
@@ -153,13 +183,14 @@ function verifyProcessDetails(pid, expected) {
 function inspectOwnedAncestry(parentPid, session) {
   const seen = new Set();
   while (parentPid > 0 && !seen.has(parentPid)) {
+    charge();
     if (String(parentPid) === session) return "current";
     seen.add(parentPid);
     const ancestorPid = parentPid;
     let details;
     try {
       details = processStatDetails(
-        require("node:fs").readFileSync(
+        readProc(
           "/proc/" + ancestorPid + "/stat",
           "utf8",
         ),
@@ -169,8 +200,7 @@ function inspectOwnedAncestry(parentPid, session) {
         const verification = verifyProcessDetails(ancestorPid, details);
         return verification === "stable" ? "current" : verification;
       }
-      const environment = require("node:fs")
-        .readFileSync("/proc/" + ancestorPid + "/environ", "utf8")
+      const environment = readProc("/proc/" + ancestorPid + "/environ", "utf8")
         .split("\0");
       const verification = verifyProcessDetails(ancestorPid, details);
       if (verification !== "stable") return verification;
@@ -208,7 +238,7 @@ function inspectSessionProcess(pid, session) {
     let details;
     try {
       details = processStatDetails(
-        require("node:fs").readFileSync("/proc/" + pid + "/stat", "utf8"),
+        readProc("/proc/" + pid + "/stat", "utf8"),
       );
     } catch (cause) {
       if (cause?.code === "ENOENT" || cause?.code === "ESRCH") return "absent";
@@ -224,8 +254,7 @@ function inspectSessionProcess(pid, session) {
       else if (processUid(pid).some((uid) => uid !== process.getuid())) {
         ownership = "unrelated";
       } else {
-        const environment = require("node:fs")
-          .readFileSync("/proc/" + pid + "/environ", "utf8")
+        const environment = readProc("/proc/" + pid + "/environ", "utf8")
           .split("\0");
         if (environment.includes("AGENT_RUNNER_OWNED_PROCESS=" + ownerToken)) {
           ownership = "current";
@@ -267,13 +296,19 @@ function ownedMembers() {
   // The enclosing namespace may host concurrent trusted work. Limit ownership
   // to this supervisor's session and descendants carrying its launch token.
   try {
+    charge = inspectionBudget(() => performance.now(), ${MAX_INSPECTION_WORK}, ${MAX_INSPECTION_MS});
+    charge();
+    const names = readdirSync("/proc");
+    charge(names.length);
     const members = [];
-    for (const name of readdirSync("/proc")) {
+    for (const name of names) {
+      charge();
       if (!/^\d+$/.test(name) || name === String(process.pid)) continue;
       const ownership = inspectSessionProcess(Number(name), session);
       if (ownership === null) return null;
       if (ownership === "current") members.push(Number(name));
     }
+    charge(0);
     return members;
   } catch {
     return null;
@@ -719,12 +754,28 @@ function captureProcessAncestryBaseline({
   read = readFileSync,
 } = {}) {
   try {
+    const charge = inspectionBudget(
+      () => performance.now(),
+      MAX_INSPECTION_WORK,
+      MAX_INSPECTION_MS,
+    );
+    const rawRead = read;
+    read = (...args) => {
+      charge();
+      try {
+        return rawRead(...args);
+      } finally {
+        charge(0);
+      }
+    };
     const bootPath = "/proc/sys/kernel/random/boot_id";
     const bootId = read(bootPath, "utf8").trim();
     if (!validBootId(bootId)) return null;
+    const names = list("/proc");
+    charge(names.length);
     const pids = [
       ...new Set(
-        list("/proc")
+        names
           .filter((name) => /^(?:[1-9]\d*)$/u.test(name))
           .map(Number)
           .filter(Number.isSafeInteger),
@@ -946,19 +997,44 @@ export function inspectOwnedSessionProcesses(
     includeSession = true,
     list = readdirSync,
     read = readFileSync,
+    now = () => performance.now(),
+    maxWork = MAX_INSPECTION_WORK,
+    maxElapsedMs = MAX_INSPECTION_MS,
   } = {},
 ) {
-  const baseline =
-    ancestryBaseline === null
-      ? null
-      : ancestryBaselineIndex(ancestryBaseline, read);
-  if (ancestryBaseline !== null && baseline === null) return null;
-  if (controlGroup !== null && !/^[a-f0-9]{64}$/u.test(controlGroup)) {
+  if (
+    !Number.isSafeInteger(maxWork) ||
+    maxWork < 1 ||
+    maxWork > MAX_INSPECTION_WORK ||
+    !Number.isFinite(maxElapsedMs) ||
+    maxElapsedMs <= 0 ||
+    maxElapsedMs > MAX_INSPECTION_MS
+  )
     return null;
-  }
   try {
+    const charge = inspectionBudget(now, maxWork, maxElapsedMs);
+    charge(Array.isArray(ancestryBaseline) ? ancestryBaseline.length : 1);
+    const rawRead = read;
+    read = (...args) => {
+      charge();
+      try {
+        return rawRead(...args);
+      } finally {
+        charge(0);
+      }
+    };
+    const baseline =
+      ancestryBaseline === null
+        ? null
+        : ancestryBaselineIndex(ancestryBaseline, read);
+    if (ancestryBaseline !== null && baseline === null) return null;
+    if (controlGroup !== null && !/^[a-f0-9]{64}$/u.test(controlGroup))
+      return null;
+    const names = list("/proc");
+    charge(names.length);
     const members = [];
-    for (const name of list("/proc")) {
+    for (const name of names) {
+      charge();
       if (!/^\d+$/u.test(name)) continue;
       const pid = Number(name);
       const ownership = inspectSessionProcess(
@@ -974,6 +1050,7 @@ export function inspectOwnedSessionProcesses(
       if (ownership === null) return null;
       if (ownership === "current") members.push(pid);
     }
+    charge(0);
     return members;
   } catch {
     return null;

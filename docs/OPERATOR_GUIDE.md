@@ -340,13 +340,24 @@ work continues. Inspect the returned execution state to distinguish a live
 owner, an interrupted turn, and idle work. `execution.leaseOwner` reports the
 finite live/dead/replaced/unverifiable classification and
 `execution.processRecord` says whether durable process ownership remains; they
-do not expose process identity. An ownerless interrupted turn may
+do not expose process identity. An ownerless nonterminal checkpoint with no pause may
 accept action-free resume at the exact revision; it is not permission to start
 a second owner. An ownerless `applicable` stop may likewise use
 `agent-run resume --run <run-id>`, or MCP `run_resume` with `action: null`, the
 exact current revision, and a new idempotency key. MCP rejects stale revisions,
 non-null actions, live owners, and ownership races. Follow the current public
 state and actions.
+
+CLI can bind recovery with
+`agent-run resume --run <run-id> --expected-revision <revision>`. An action-free `ERR_EXECUTION_PROCESS_UNVERIFIABLE`
+keeps its saved checkpoint, including `FINALIZE`; first resolve ownership through
+supported resume, then let the runner reconcile inputs and repository controls.
+Do not interpret finished validation commands as accepted finalization evidence.
+MCP `ERR_MCP_ACTION_IN_PROGRESS` and `ERR_DETACHED_OWNERSHIP_PENDING` are bounded,
+retryable ownership outcomes. Retry the identical key and arguments; neither
+client timeout nor disconnect cancels the durable continuation or its receipt.
+Unrelated revision movement and retained lease reservations are not launch proof.
+Inspection-budget exhaustion preserves exclusion just like incomplete evidence.
 
 Shared-host recovery uses the bounded boot/PID/start ancestry baseline captured
 before supervisor launch and journaled before provider work. A post-launch

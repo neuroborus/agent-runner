@@ -179,6 +179,20 @@ function proveHistory(run, history, migrate) {
       continue;
     }
     const before = previous.pipelineState;
+    // Dispatch admission/acknowledgement advances only root journal metadata.
+    // It neither replaces nor invalidates the earlier candidate/failure proof.
+    if (
+      isActivity(event, "runner", "recovery", [
+        "dispatch-started",
+        "dispatch-ready",
+      ]) &&
+      unchangedExcept(previous, current, ["revision", "updatedAt"]) &&
+      unchangedExcept(previousRaw, event.state, ["revision", "updatedAt"])
+    ) {
+      previous = current;
+      previousRaw = event.state;
+      continue;
+    }
     const migration = !sameFields(event.state, previousRaw, [
       "schemaVersion",
       "pipelineStateVersion",

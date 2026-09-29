@@ -587,12 +587,15 @@ export async function runPlanAuthoring({
         response = await runtime.adapters[role].run(request);
       } catch (cause) {
         agentError = cause;
+        if (isOwnershipFailure(cause)) throw cause;
       }
       await runtime.git.assertUnchanged(snapshot);
       await runtime.git.assertUnchanged(pipelineState().repositoryBaseline);
     } finally {
-      currentRun = await runtime.finishAgentTurn(turn);
-      assertRun(currentRun);
+      if (!isOwnershipFailure(agentError)) {
+        currentRun = await runtime.finishAgentTurn(turn);
+        assertRun(currentRun);
+      }
     }
     if (agentError !== undefined) {
       failedSourceForkLaunchRecovery =
@@ -1757,6 +1760,7 @@ ${findingPrompt(pipelineState())}`,
     }
   } catch (cause) {
     if (cause?.code === "ERR_AVAILABILITY_RECOVERY") throw cause;
+    if (isOwnershipFailure(cause)) throw cause;
     if (cause?.code === "ERR_PROJECT_CONFIGURATION_CHANGED") {
       throw cause;
     }
@@ -1821,4 +1825,11 @@ ${findingPrompt(pipelineState())}`,
     }
     return fail(cause);
   }
+}
+
+function isOwnershipFailure(cause) {
+  return [
+    "ERR_EXECUTION_PROCESS_ACTIVE",
+    "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+  ].includes(cause?.code);
 }

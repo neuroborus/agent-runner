@@ -1774,6 +1774,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
         response = await runtime.adapters[role].run(request);
       } catch (cause) {
         agentError = cause;
+        if (isOwnershipFailure(cause)) throw cause;
         availabilityFailure = runtime.availability?.eligible(cause) === true;
       }
       let nextRepositoryBaseline = baseline;
@@ -1886,8 +1887,10 @@ Include every listed command exactly once in requiredChecks with its actual cano
         }
       }
     } finally {
-      currentRun = await runtime.finishAgentTurn(turn);
-      assertRun(currentRun);
+      if (!isOwnershipFailure(agentError)) {
+        currentRun = await runtime.finishAgentTurn(turn);
+        assertRun(currentRun);
+      }
     }
     if (agentError !== undefined) {
       failedSourceForkLaunchRecovery =
@@ -7519,6 +7522,8 @@ ${step.subject}`),
     }
   } catch (cause) {
     if (cause?.code === "ERR_AVAILABILITY_RECOVERY") throw cause;
+    if (isOwnershipFailure(cause) && state().workflowState !== "COMMIT")
+      throw cause;
     if (
       commitCheckpointSettlement ||
       commitAuthorizationPersistence ||
@@ -7616,4 +7621,11 @@ ${step.subject}`),
     }
     return fail(cause);
   }
+}
+
+function isOwnershipFailure(cause) {
+  return [
+    "ERR_EXECUTION_PROCESS_ACTIVE",
+    "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+  ].includes(cause?.code);
 }

@@ -888,3 +888,31 @@ test("replacement confirmation remains read-only and cannot commit after mutatio
     0,
   );
 });
+
+test("action-free finalization ownership uncertainty preserves its checkpoint for resume", async (t) => {
+  const failure = Object.assign(new Error("Unverifiable process retirement"), {
+    code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+  });
+  let failOnce = true;
+  const fixture = await recoveryFixture(t, {
+    initialFinalization: finalized(),
+    replacements: [],
+    rejections: [],
+    onRoleRun(_role, request) {
+      if (request.schema === FINALIZATION_SCHEMA && failOnce) {
+        failOnce = false;
+        throw failure;
+      }
+    },
+  });
+  await assert.rejects(fixture.run(), (error) => error === failure);
+  assert.equal(fixture.currentRun.pipelineState.workflowState, "FINALIZE");
+  assert.deepEqual(fixture.currentRun.activeTurn, {
+    role: "worker",
+    phase: "finalize",
+  });
+  assert.equal(fixture.currentRun.pause, null);
+  const completed = await fixture.run();
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(calls(fixture, FINALIZATION_SCHEMA).length, 2);
+});

@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import { assertAvailabilityContinuity } from "./availability.js";
+import { publicDispatchActivity } from "./dispatch.js";
 import {
   appendDurableLine,
   atomicWriteFile,
@@ -467,7 +468,9 @@ function renderProgress(state, events) {
   const activityLines = events
     .filter((event) => event.activity !== null)
     .map((event) => {
-      const { actor, kind, message, phase } = event.activity;
+      const { actor, kind, message, phase } = publicDispatchActivity(
+        event.activity,
+      );
       return `- ${event.recordedAt} — ${actor}/${phase}/${kind}: ${message}`;
     });
 

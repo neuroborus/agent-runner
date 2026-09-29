@@ -620,6 +620,21 @@ mutation pauses instead of advancing. Before creating a repository-local
 clarification transcript, require `git check-ignore` evidence that its resolved
 path is ignored and untracked.
 
+### Action-free ownership recovery
+
+A provider turn that returns `ERR_EXECUTION_PROCESS_UNVERIFIABLE` or
+`ERR_EXECUTION_PROCESS_ACTIVE` retains its active-turn marker and checkpoint.
+Do not reconcile or accept its output while process ownership is unresolved,
+or turn that action-free failure into terminal `internal_failure`. Shared runner
+resume proves process retirement under the exclusive run lease before ordinary
+interrupted-turn input and read-only Git reconciliation. The Planner or review
+turn then repeats at its saved checkpoint with fresh evidence.
+
+CLI exact-revision resume and MCP action-free resume use that same recovery path.
+MCP journals child-correlated admission and readiness, waits through bounded
+state/ownership notifications, and retains retryable intents across disconnect
+or server restart. These acknowledgements confer no workflow or content approval.
+
 ## Implementation ownership
 
 The private `src/review-policy.js` module owns pure decisions for primary

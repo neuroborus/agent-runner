@@ -20,3 +20,5 @@ export {
   RUN_STATE_SCHEMA_VERSION,
   RunStoreError,
 } from "./validation.js";
+
+export { normalizeRecoveryDispatch } from "./dispatch.js";

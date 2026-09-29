@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-09-29
 
+- **Action-free ownership uncertainty keeps its checkpoint.** Process-proof
+  failures retain the active turn, including finalization, until exclusive
+  retirement and repository reconciliation permit continuation. CLI and MCP
+  share that path; reservations are not live-owner evidence. Detached IPC
+  admission persists child identity and journals correlated progress, so exact
+  retries survive disconnects and receipt interruptions without another owner.
+  Action contention and event-driven dispatch are bounded, as are shared-host
+  scans across process churn and ancestry. Exhaustion preserves strict exclusion.
+
 - **Safe provider turns now resume through durable availability backoff.** One
   injected runner coordinator serves all pipelines, preserves reconciled partial
   work and correction accounting, and journals public schedule/start events.

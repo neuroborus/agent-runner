@@ -1803,3 +1803,83 @@ test("recovery rejects replaced and incompletely recorded owners", async () => {
     );
   }
 });
+
+test("bounds inspection work and elapsed time across baseline, ancestry, and process churn", () => {
+  const { options, ownerToken } = processRaceOptions();
+  assert.deepEqual(
+    inspectOwnedSessionProcesses(44, ownerToken, { ...options, now: () => 0 }),
+    [],
+  );
+  for (const mutation of [
+    { maxWork: 3 },
+    { list: () => Array.from({ length: 65_537 }, () => "101") },
+    {
+      now: (() => {
+        let ticks = 0;
+        return () => ticks++ * 100;
+      })(),
+    },
+    {
+      maxWork: 16,
+      read(path) {
+        if (path.endsWith("/stat")) {
+          const pid = Number(path.split("/")[2]);
+          return processStat(pid, pid + 1, 3);
+        }
+        return options.read(path);
+      },
+    },
+  ])
+    assert.equal(
+      inspectOwnedSessionProcesses(44, ownerToken, {
+        ...options,
+        now: () => 0,
+        ...mutation,
+      }),
+      null,
+    );
+
+  let bootReads = 0;
+  const baseline = Array.from({ length: 4_096 }, (_, index) => ({
+    bootId: BOOT_ID,
+    pid: index + 1,
+    startTicks: "1234",
+  }));
+  const result = inspectOwnedSessionProcesses(99_999, ownerToken, {
+    ancestryBaseline: baseline,
+    now: () => 0,
+    getuid: () => 1000,
+    list: () => baseline.map(({ pid }) => String(pid)),
+    read(path) {
+      if (path.endsWith("/boot_id")) {
+        bootReads++;
+        return BOOT_ID;
+      }
+      if (path.endsWith("/status")) return "Uid:\t1000\t1000\t1000\t1000\n";
+      if (path.endsWith("/environ")) return "";
+      return processStat(Number(path.split("/")[2]), 1, 3);
+    },
+  });
+  assert.deepEqual(result, []);
+  assert.equal(
+    bootReads,
+    1,
+    "validate and index the baseline once per inspection",
+  );
+  let elapsed = 0;
+  assert.equal(
+    inspectOwnedSessionProcesses(44, ownerToken, {
+      ...options,
+      now: () => elapsed,
+      read(path) {
+        if (path === "/proc/101/stat") {
+          elapsed = 250;
+          throw processRaceError("ENOENT");
+        }
+        return options.read(path);
+      },
+    }),
+    null,
+    "a disappearing final process cannot hide budget exhaustion",
+  );
+});

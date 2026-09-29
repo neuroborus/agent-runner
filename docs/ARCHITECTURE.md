@@ -720,8 +720,8 @@ child with no inherited standard streams. `run_respond` atomically writes the
 identified answers, records their transcript hash in run state, then launches
 the same detached continuation. `run_resume` normally accepts only an action
 applicable to the persisted pause. Two exact-revision, action-free recovery
-paths are additional: a nonterminal active turn with no live owner, and an
-ownerless applicable stop. Stop recovery persists its own idempotency intent
+paths are additional: a nonterminal checkpoint with no pause or live owner, and
+an ownerless applicable stop. Stop recovery persists its own idempotency intent
 and private stop-checkpoint revision, so it uses a new key and does not require
 the original stop key. A non-null action, stale revision, live owner, or
 duplicate ownership race is rejected without weakening ordinary pause-action
@@ -732,11 +732,11 @@ for plan execution or polishing, the canonical-worktree lease. Before ordinary
 detached dispatch, MCP rejects an already-owned worktree without completing the
 idempotency intent, leaving the reserved durable run available for an exact
 retry. After spawning an ordinary mutating continuation, MCP withholds the
-receipt until the run advances or that child owns the worktree lease. A child
-that loses a concurrent ownership race therefore leaves the intent incomplete
-and exactly retryable. The launcher reports a causally correlated child exit so
-this remains deterministic when the competing lease is released between MCP
-polls.
+receipt until journaled readiness correlates that dispatch with process retirement
+and checkpoint continuation under the required leases. A child that loses a
+concurrent ownership race leaves the intent incomplete and exactly retryable.
+Child-exit and ownership notifications wake bounded inspection; unrelated
+revision changes and transient lease ownership cannot acknowledge a launch.
 
 Detached stop reconciliation has the stronger completion condition. MCP binds
 the launched child to the exact stop checkpoint and follows it until that stop
@@ -792,10 +792,9 @@ cancels only that wait.
 
 An omitted `run_wait.timeoutMs` means 30 seconds and the public maximum is 24
 hours; either deadline ends only the client wait. Internal detached-dispatch
-and idempotency reconciliation uses a fixed 25-millisecond observation delay,
-while the operator-stop monitor waits for a revision for at most one second at
-a time. These intervals affect protocol responsiveness, do not bound or retry
-user work, and remain fixed correctness mechanics rather than configuration.
+and detached reconciliation uses bounded event-driven observation, while the
+operator-stop monitor waits for a revision for at most one second at a time.
+These are fixed correctness mechanics rather than user-work retry budgets.
 
 MCP status and wait also project one bounded `execution` object. Its finite
 `leaseOwner` is `none`, `live`, `dead`, `replaced`, or `unverifiable`, while
@@ -818,6 +817,57 @@ checkpoint, and internal ownership evidence remain private.
 
 V1 does not require the MCP Tasks extension, a network transport,
 authentication, or a daemon.
+
+### Bounded action-free continuation
+
+CLI resume accepts an optional `--expected-revision`; MCP resume always binds
+its inspected revision. Both enter the same runner resume path. Admission
+checks the revision under the execution lease before recovery. An ownerless
+nonterminal checkpoint with no pause also accepts action-free continuation,
+including a crash between admission and the first provider turn. Retained
+process/resource reservations are exclusion evidence, not proof of a live
+runner: only same-host owner inspection decides whether to dispatch a replacement.
+Same-run worktree reclamation retains age, identity, mutation, and reclaim-marker
+checks, and recovery reuses an already-held worktree handle.
+
+MCP action-lease contention returns `ERR_MCP_ACTION_IN_PROGRESS` immediately.
+Detached dispatch uses revision/lease notifications and the correlated child's
+exit, with at most 64 inspections within 30 seconds. Exhaustion returns
+`ERR_DETACHED_OWNERSHIP_PENDING`; it does not clear ownership or cancel the child.
+The client can retry the identical key. Client cancellation and disconnect affect
+only observation; reconciliation and receipt publication keep their action lease.
+
+Before IPC admission, the action intent saves a dispatch UUID, exact revision,
+and the child's hostname/boot/PID/start identity. The inert child waits up to ten
+seconds for admission and cannot execute after a pre-admission disconnect.
+Under the execution lease it journals a correlated `dispatch-started` event
+before potentially long recovery. After process/resource retirement and acquiring
+the required worktree lease, `dispatch-ready` marks checkpoint continuation;
+short input/configuration paths can acknowledge their durable return; stop
+recovery uses its existing checkpoint-bound settlement without appending another
+acknowledgement revision.
+These events do not approve content or attest workflow completion. Public activity
+and progress output omit the private correlation UUID. Legacy confirmation
+proof accepts these events only when the complete state is unchanged apart
+from revision and timestamp; it is rebuilt for the acknowledged snapshot. The detached compatibility token versions
+this admission protocol independently of the run envelope.
+
+A restarted control plane adopts only matching journal evidence, never arbitrary
+revision movement or transient lease ownership. A live or unverifiable recorded
+child prevents redispatch. A dead/replaced child without a ready event permits
+same-key recovery only at its unchanged revision or while its admission is
+followed exclusively by root reconciliation. Another admission or workflow turn
+makes that request stale. A durable ready event permits receipt repair even after
+later pauses or input changes. Stop receipts additionally require settlement of
+the specific saved stop checkpoint. A different worktree owner remains identified
+in the retryable diagnostic.
+
+Action-free provider process-proof failures leave the active turn and exact
+pipeline checkpoint durable, including a finalization failure after command
+execution. They do not become terminal `internal_failure` or accept output,
+fingerprints, or checks while ownership is uncertain. Resume retires retained
+processes first, then performs the pipeline's ordinary interrupted-turn Git/input
+reconciliation. Consumed effects retain verification-only recovery.
 
 ## External Run State
 
@@ -1254,6 +1304,20 @@ closed. Reusing the enclosing trusted namespace neither retries without
 containment nor widens its policy; its namespace init remains responsible for
 otherwise detached descendants.
 Ordinary processes never receive the initial-host session fallback.
+
+Live and recovery shared-host scans additionally share a 65,536-operation and
+250-millisecond inspection budget. Reads, snapshot entries, baseline indexing,
+and ancestry traversal consume bounded work; a final read that exceeds the time
+budget also fails closed. Each inspection builds its validated baseline index
+once. Baseline capture uses the same work/time limits and retains its 4,096-entry
+cap. These limits cannot reset per PID or during process churn, and exhaustion
+never proves process absence.
+
+Runner construction supplies the same session inspector to ordinary recovery
+and operator-stop reconciliation. Production uses the shared strict inspector;
+synthetic-process orchestration tests inject their process-table view instead of
+sampling unrelated host workers. Identity rechecks, namespace checks, and lease
+ownership remain in the real retirement path.
 
 Both shared-host scanners classify each PID under a fixed three-attempt bound.
 The first readable stat pins that entry's start tick. An `ENOENT`/`ESRCH` from a
@@ -2678,8 +2742,8 @@ reserved state files, and symlink escapes rejected. Managed state and lease
 paths must be isolated regular files rather than symbolic or hard links.
 
 At MCP startup, the root freezes one bounded detached-compatibility token
-derived canonically from the root run-envelope compatibility tuple and the
-sorted ID/state-version pairs of every loaded pipeline descriptor. Detached
+derived canonically from the detached protocol version, root run-envelope
+compatibility tuple, and the sorted ID/state-version pairs of every loaded pipeline descriptor. Detached
 launch passes that token in an internal environment field. After loading its
 own registry, the child independently recomputes and compares the token before
 acquiring a run lease, recovering state, or evaluating a migration. A mismatch

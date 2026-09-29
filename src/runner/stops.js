@@ -301,13 +301,16 @@ export async function reconcileOperatorStop({
   preEffectRejection = null,
   configurationFailure = null,
   cleanupResources = async (run) => run,
+  inspectSessionProcesses,
 }) {
   let current = await runStore.loadRun(run.runId);
   if (!stopPending(current)) return current;
   if (current.executionProcess !== null) {
     const owner = await runStore.inspectExecutionProcess(current.runId);
-    await terminateOwnedProcess(owner.pid, () =>
-      runStore.inspectExecutionProcess(current.runId),
+    await terminateOwnedProcess(
+      owner.pid,
+      () => runStore.inspectExecutionProcess(current.runId),
+      { inspectSessionProcesses },
     );
     current = await runStore.recordExecutionProcess(lease, null);
   }

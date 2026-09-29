@@ -1,6 +1,5 @@
-import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { fileURLToPath } from "node:url";
+import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 
 import { McpServer } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
@@ -32,21 +31,23 @@ import {
   projectOperatorStop,
   RUNTIME_VERSION_SKEW_EXIT_CODE,
   RunStoreError,
+  normalizeRecoveryDispatch,
 } from "../state/index.js";
 import { createUnexpectedIssueReporter } from "./reporting.js";
+import { launchDetachedRun } from "./detached.js";
+export {
+  awaitDetachedDispatch,
+  createDetachedLauncher,
+  launchDetachedRun,
+  DETACHED_RUNTIME_COMPATIBILITY_ENV,
+  DETACHED_STOP_CHECKPOINT_ENV,
+} from "./detached.js";
 
 const MAX_WAIT_MS = 24 * 60 * 60 * 1_000;
 const DEFAULT_WAIT_MS = 30_000;
-const RETRY_DELAY_MS = 25;
-const EXECUTABLE_PATH = fileURLToPath(
-  new URL("../../bin/agent-run.js", import.meta.url),
-);
-export const DETACHED_RUNTIME_COMPATIBILITY_ENV =
-  "AGENT_RUNNER_PARENT_RUNTIME_COMPATIBILITY";
-export const DETACHED_STOP_CHECKPOINT_ENV =
-  "AGENT_RUNNER_PARENT_STOP_CHECKPOINT";
-
-const RUN_INSTRUCTIONS = `Use run_start to start a durable pipeline, then use one run_wait call for the desired waiting interval. Use run_activity only for explicit or historical reads; do not poll status, activity, or wait at a fixed cadence. Stop timing defaults to immediate; use after-current-commit only for a selected plan-execution step. A blocked or interrupted step stops at its reconciled checkpoint without extra work. Use run_pause or run_cancel with the exact inspected revision and a unique idempotency key; retry the same logical request with the same values and never refresh a stale revision silently. Cancellation is terminal. For an ownerless applicable stop, use run_resume with action: null, its exact inspected revision, and a new idempotency key; the original stop key is unnecessary. Recovery follows its correlated child until durable stop settlement or child exit. independent is the default and recommended mode because it provides genuinely independent semantic review, but it uses more provider context and tokens. lazy is opt-in, reduces consumption, and does not provide independent review; never select it automatically to save tokens. combined is available for all three pipelines and adds primary convergence and clean confirmation before independent review. Leave sourceSession unset unless the user deliberately chooses to fork a compatible current native session after being offered a fresh start. Offer its known trusted profile with the fork choice; when the profile is unknown, offer only current profile inheritance and never guess an alias. In independent and combined modes the primary and review roles fork the complete source context independently; in lazy mode the primary role forks it once. Recommend a fresh start for a long, multi-topic, or uncertain source session. Keep native session IDs opaque; never inspect provider-private storage or infer or fabricate an ID. Answer pending input from explicit user context when sufficient; otherwise ask the user. Never invent a material product decision.`;
+const DISPATCH_TIMEOUT_MS = 30_000;
+const MAX_DISPATCH_INSPECTIONS = 64;
+const RUN_INSTRUCTIONS = `Use run_start to start a durable pipeline, then use one run_wait call for the desired waiting interval. Use run_activity only for explicit or historical reads; do not poll status, activity, or wait at a fixed cadence. Stop timing defaults to immediate; use after-current-commit only for a selected plan-execution step. A blocked or interrupted step stops at its reconciled checkpoint without extra work. Use run_pause or run_cancel with the exact inspected revision and a unique idempotency key; retry the same logical request with the same values and never refresh a stale revision silently. Cancellation is terminal. For an ownerless applicable stop, use run_resume with action: null, its exact inspected revision, and a new idempotency key; the original stop key is unnecessary. Recovery follows its correlated child until durable stop settlement or child exit. Action-free process-proof failures retain their checkpoint. Bounded ownership results preserve the intent: retry the identical key. Cancellation and disconnect end only the wait; reconciliation and receipt publication continue. independent is the default and recommended mode because it provides genuinely independent semantic review, but it uses more provider context and tokens. lazy is opt-in, reduces consumption, and does not provide independent review; never select it automatically to save tokens. combined is available for all three pipelines and adds primary convergence and clean confirmation before independent review. Leave sourceSession unset unless the user deliberately chooses to fork a compatible current native session after being offered a fresh start. Offer its known trusted profile with the fork choice; when the profile is unknown, offer only current profile inheritance and never guess an alias. In independent and combined modes the primary and review roles fork the complete source context independently; in lazy mode the primary role forks it once. Recommend a fresh start for a long, multi-topic, or uncertain source session. Keep native session IDs opaque; never inspect provider-private storage or infer or fabricate an ID. Answer pending input from explicit user context when sufficient; otherwise ask the user. Never invent a material product decision.`;
 const ISSUE_REPORTING_INSTRUCTIONS = `Use unexpected_issue_report only when you, as the supervising client agent, explicitly conclude that Agent Runner behaved genuinely unexpectedly or contrary to its documented contract. Expected completion, exhausted configured budgets, usage limits, expected user pauses, documented environment blockers, and invalid user or configuration input are not reportable issues. Supply concise English Markdown deliberately; the server never collects or attaches logs, transcripts, prompts, environment values, credentials, secrets, or other diagnostics automatically.`;
 const GUIDANCE_INSTRUCTIONS =
   "Call guidance_read once before first managing a run for each project and follow the combined operator guide.";
@@ -398,115 +399,17 @@ function clarificationHash(run) {
   return getPipeline(run.pipelineId).projections.clarification(run).hash;
 }
 
-function delay(milliseconds, signal) {
-  return new Promise((resolvePromise, rejectPromise) => {
-    if (signal?.aborted) {
-      rejectPromise(signal.reason ?? new DOMException("Aborted", "AbortError"));
-      return;
-    }
-    const onAbort = () => {
-      clearTimeout(timer);
-      signal.removeEventListener("abort", onAbort);
-      rejectPromise(signal.reason ?? new DOMException("Aborted", "AbortError"));
-    };
-    const timer = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolvePromise();
-    }, milliseconds);
-    signal?.addEventListener("abort", onAbort, { once: true });
-    if (signal?.aborted) {
-      onAbort();
-    }
+function waitForClient(operation, signal) {
+  if (signal === undefined) return operation;
+  return new Promise((resolve, reject) => {
+    const abort = () =>
+      reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    signal.addEventListener("abort", abort, { once: true });
+    operation
+      .then(resolve, reject)
+      .finally(() => signal.removeEventListener("abort", abort));
+    if (signal.aborted) abort();
   });
-}
-
-export function launchDetachedRun(runIdValue, action = null, options = {}) {
-  return createDetachedLauncher()(runIdValue, action, options);
-}
-
-function detachedArguments(executablePath, runIdValue, action) {
-  const args = [executablePath, "resume", "--run", runIdValue];
-  if (action?.type === "extra-fix-rounds") {
-    args.push("--extra-fix-rounds", String(action.amount));
-  } else if (action?.type === "override-finding") {
-    args.push("--override-finding", action.findingId);
-  } else if (action !== null) {
-    throw new Error("Detached resume action is invalid.");
-  }
-  return args;
-}
-
-export function createDetachedLauncher({
-  detachedCompatibilityToken = DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
-  spawnProcess = spawn,
-  executablePath = EXECUTABLE_PATH,
-  environment = process.env,
-} = {}) {
-  return (
-    runIdValue,
-    action = null,
-    {
-      expectedRuntimeCompatibility = detachedCompatibilityToken,
-      stopCheckpointRevision = null,
-      onExit,
-    } = {},
-  ) =>
-    new Promise((resolvePromise, rejectPromise) => {
-      if (expectedRuntimeCompatibility !== detachedCompatibilityToken) {
-        rejectPromise(
-          new RunStoreError(
-            "Detached continuation runtime does not match this launcher; " +
-              "restart the Agent Runner MCP server and retry.",
-            { code: "ERR_RUNTIME_VERSION_SKEW" },
-          ),
-        );
-        return;
-      }
-      if (
-        stopCheckpointRevision !== null &&
-        (!Number.isSafeInteger(stopCheckpointRevision) ||
-          stopCheckpointRevision < 1 ||
-          action !== null)
-      ) {
-        rejectPromise(
-          new RunStoreError("Detached stop checkpoint is invalid.", {
-            code: "ERR_INVALID_RUNNER_INPUT",
-          }),
-        );
-        return;
-      }
-      const {
-        [DETACHED_STOP_CHECKPOINT_ENV]: _ignoredStopCheckpoint,
-        ...childEnvironment
-      } = environment;
-      const child = spawnProcess(
-        process.execPath,
-        detachedArguments(executablePath, runIdValue, action),
-        {
-          detached: true,
-          env: {
-            ...childEnvironment,
-            [DETACHED_RUNTIME_COMPATIBILITY_ENV]: expectedRuntimeCompatibility,
-            ...(stopCheckpointRevision === null
-              ? {}
-              : {
-                  [DETACHED_STOP_CHECKPOINT_ENV]: String(
-                    stopCheckpointRevision,
-                  ),
-                }),
-          },
-          stdio: "ignore",
-        },
-      );
-      child.once("error", rejectPromise);
-      if (typeof onExit === "function") {
-        child.once("exit", onExit);
-      }
-      child.once("spawn", () => {
-        child.unref();
-        resolvePromise(child.pid);
-      });
-    });
 }
 
 export function createMcpControlPlane(options = {}) {
@@ -531,6 +434,27 @@ export function createMcpControlPlane(options = {}) {
       runStore,
     });
   const launchRun = options.launchRun ?? launchDetachedRun;
+  const dispatchClock = options.dispatchClock ?? (() => performance.now());
+  const pending = new Map();
+  function detachedAction(tool, operation, input, context) {
+    const previous = pending.get(input.idempotencyKey);
+    if (previous?.tool === tool && isDeepStrictEqual(previous.input, input))
+      return waitForClient(previous.promise, context?.signal);
+    const entry = {
+      tool,
+      input: structuredClone(input),
+      promise: operation(input),
+    };
+    pending.set(input.idempotencyKey, entry);
+    void entry.promise
+      .finally(() => {
+        if (pending.get(input.idempotencyKey) === entry)
+          pending.delete(input.idempotencyKey);
+      })
+      .catch(() => {});
+    return waitForClient(entry.promise, context?.signal);
+  }
+
   const runIdFactory = options.runIdFactory ?? randomUUID;
   const reportingGit = options.reportingOptions?.git ?? createGitService();
   const issueReporter =
@@ -550,109 +474,191 @@ export function createMcpControlPlane(options = {}) {
     return statusProjection(current, leaseOwner);
   }
 
-  async function beginAction(input, signal) {
-    while (true) {
-      try {
-        return await runStore.beginAction(input);
-      } catch (cause) {
-        if (cause?.code !== "ERR_MCP_ACTION_IN_PROGRESS") {
-          throw cause;
-        }
-        await delay(RETRY_DELAY_MS, signal);
-      }
-    }
+  async function dispatchIsReady(context, runId) {
+    const { dispatch, stopCheckpointRevision } = context;
+    if (dispatch === undefined || stopCheckpointRevision !== undefined)
+      return false;
+    const proof = await runStore.inspectRecoveryDispatch(runId, {
+      id: dispatch.id,
+      expectedRevision: dispatch.expectedRevision,
+    });
+    return proof.ready;
+  }
+
+  async function completeReadyDispatch(intent, receipt) {
+    if (!(await dispatchIsReady(intent.record.context, receipt.runId)))
+      return false;
+    // Readiness already accepted this request. Later pauses or input changes
+    // cannot turn receipt repair into another continuation or a stale request.
+    await intent.complete(receipt);
+    return true;
   }
 
   async function launchIfNeeded(
     runIdValue,
     baselineRevision,
-    { action = null, allowWaiting = false, signal, waitForLease = false } = {},
+    {
+      action = null,
+      allowWaiting = false,
+      intent,
+      stopCheckpointRevision = null,
+      rejectLiveOwner = false,
+    } = {},
   ) {
-    let dispatchedChildExitCode = null;
-    let dispatchedChildExited = false;
-    let dispatchStarted = false;
-    while (true) {
-      const run = (await runner.status(runIdValue)).run;
-      const recoverableFailure =
-        run.pipelineState.workflowState === "FAILED" &&
-        getPipeline(run.pipelineId)
-          .projections.pause(run)
-          ?.nextActions.some(
-            (next) => next.type === "resume" && next.action === null,
-          );
+    const deadline = dispatchClock() + DISPATCH_TIMEOUT_MS;
+    const exited = Promise.withResolvers();
+    let exitCode;
+    let launched = false;
+    let dispatch = intent.record.context.dispatch;
+    if (dispatch !== undefined) {
+      normalizeRecoveryDispatch({
+        id: dispatch.id,
+        expectedRevision: dispatch.expectedRevision,
+      });
       if (
-        ["DONE", "CANCELED"].includes(run.pipelineState.workflowState) ||
-        (run.pipelineState.workflowState === "FAILED" && !recoverableFailure) ||
-        (!allowWaiting &&
-          run.pipelineState.workflowState === "WAITING_FOR_USER") ||
-        run.revision > baselineRevision
-      ) {
+        Object.keys(dispatch).length !== 3 ||
+        !Object.hasOwn(dispatch, "owner")
+      )
+        throw new RunStoreError("Detached intent is invalid.", {
+          code: "ERR_INVALID_MCP_ACTION",
+        });
+    }
+    for (let inspected = 0; inspected < MAX_DISPATCH_INSPECTIONS; inspected++) {
+      const remaining = Math.ceil(deadline - dispatchClock());
+      if (!Number.isFinite(remaining) || remaining <= 0) break;
+      const exitedBeforeInspection = exitCode !== undefined;
+      const run = (await runner.status(runIdValue)).run;
+      if (
+        stopCheckpointRevision !== null &&
+        (run.stopRequest === null ||
+          run.stopRequest.reconciledRevision !== null ||
+          run.stopRequest.checkpoint.revision !== stopCheckpointRevision)
+      )
         return;
-      }
-      if (dispatchedChildExitCode === RUNTIME_VERSION_SKEW_EXIT_CODE) {
+      let proof = { started: false, ready: false };
+      if (dispatch !== undefined)
+        proof = await runStore.inspectRecoveryDispatch(runIdValue, {
+          id: dispatch.id,
+          expectedRevision: dispatch.expectedRevision,
+        });
+      if (proof.ready && stopCheckpointRevision === null) return;
+      if (exitCode !== undefined) {
+        if (!exitedBeforeInspection) continue;
+        const skew = exitCode === RUNTIME_VERSION_SKEW_EXIT_CODE;
+        const owner =
+          !skew && pipelineRequiresWorktreeLease(run.pipelineId)
+            ? await runStore.worktreeLeaseOwner(run.projectPath, runIdValue)
+            : null;
         throw new RunStoreError(
-          `Detached continuation for run ${run.runId} rejected an ` +
-            "incompatible runtime; restart the Agent Runner MCP server " +
-            "and retry this request with the same idempotency key.",
-          { code: "ERR_RUNTIME_VERSION_SKEW" },
+          `Detached ${stopCheckpointRevision === null ? "continuation" : "stop reconciliation"} for run ${runIdValue} exited before durable ${stopCheckpointRevision === null ? "acknowledgement" : "stop settlement"}; retry the same idempotency key.` +
+            (skew
+              ? " The runtime is incompatible; restart the Agent Runner MCP server."
+              : "") +
+            (owner !== null && owner !== runIdValue
+              ? ` The conflicting canonical worktree lease belongs to run ${owner}.`
+              : ""),
+          {
+            code: skew
+              ? "ERR_RUNTIME_VERSION_SKEW"
+              : "ERR_DETACHED_START_FAILED",
+          },
         );
       }
-      if (dispatchedChildExited) {
-        throw new RunStoreError(
-          `Detached continuation for run ${run.runId} exited before the ` +
-            "run advanced or acquired its execution lease; retry this MCP " +
-            "request with the same idempotency key.",
-          { code: "ERR_DETACHED_START_FAILED" },
-        );
-      }
-      const runIsLeased = await runStore.runIsLeased(runIdValue);
-      if (pipelineRequiresWorktreeLease(run.pipelineId)) {
-        const worktreeLeaseOwner = await runStore.worktreeLeaseOwner(
-          run.projectPath,
-          run.runId,
-        );
-        if (worktreeLeaseOwner !== null && worktreeLeaseOwner !== run.runId) {
+      const live = await runStore.runLeaseOwnerIsLive(runIdValue);
+      if (dispatch === undefined) {
+        if (rejectLiveOwner && live)
           throw new RunStoreError(
-            `Run ${run.runId} is durable, but its Git worktree is already ` +
-              `owned by run ${worktreeLeaseOwner}; retry this MCP request with ` +
-              "the same idempotency key after that run releases it.",
+            `Run ${runIdValue} already has a live execution owner.`,
+            { code: "ERR_RUN_LEASED" },
+          );
+        if (run.revision !== baselineRevision)
+          throw new RunStoreError("Resume request revision is stale.", {
+            code: "ERR_RUN_REVISION_CHANGED",
+          });
+        if (
+          stopCheckpointRevision === null &&
+          (["DONE", "CANCELED"].includes(run.pipelineState.workflowState) ||
+            (!allowWaiting &&
+              run.pipelineState.workflowState === "WAITING_FOR_USER"))
+        )
+          return;
+      }
+      if (
+        pipelineRequiresWorktreeLease(run.pipelineId) &&
+        stopCheckpointRevision === null
+      ) {
+        const owner = await runStore.worktreeLeaseOwner(
+          run.projectPath,
+          runIdValue,
+        );
+        if (owner !== null && owner !== runIdValue)
+          throw new RunStoreError(
+            `Run ${runIdValue} remains durable; retry the same idempotency key after worktree owner ${owner} releases ownership.`,
             { code: "ERR_WORKTREE_LEASED" },
           );
-        }
+      }
+      const ownerStatus =
+        dispatch?.owner == null
+          ? null
+          : await runStore.inspectDispatchOwner(dispatch.owner);
+      if (ownerStatus === "unverifiable") break;
+      if (!launched && !live && ownerStatus !== "live") {
+        // No started event means the child never passed exact-revision admission.
         if (
-          worktreeLeaseOwner === run.runId &&
-          (!waitForLease || dispatchStarted)
+          (proof.started && !proof.retryable) ||
+          (!proof.started &&
+            run.revision !== (dispatch?.expectedRevision ?? baselineRevision))
         ) {
-          return;
+          throw new RunStoreError(
+            "Run changed without correlated dispatch evidence.",
+            { code: "ERR_RUN_REVISION_CHANGED" },
+          );
         }
-        if (!runIsLeased && !dispatchStarted) {
-          await launchRun(runIdValue, action, {
-            expectedRuntimeCompatibility: detachedCompatibilityToken,
-            onExit(code) {
-              dispatchedChildExited = true;
-              dispatchedChildExitCode = code;
-            },
-          });
-          dispatchStarted = true;
-        }
-        await delay(RETRY_DELAY_MS, signal);
-        continue;
-      }
-      if (runIsLeased && (!waitForLease || dispatchStarted)) {
-        return;
-      }
-      if (!runIsLeased && !dispatchStarted) {
+        dispatch = {
+          id: randomUUID(),
+          expectedRevision: run.revision,
+          owner: null,
+        };
+        await intent.updateContext({ ...intent.record.context, dispatch });
         await launchRun(runIdValue, action, {
           expectedRuntimeCompatibility: detachedCompatibilityToken,
+          stopCheckpointRevision,
+          dispatch: {
+            id: dispatch.id,
+            expectedRevision: dispatch.expectedRevision,
+          },
+          async onSpawn(owner) {
+            await runStore.inspectDispatchOwner(owner);
+            dispatch = { ...dispatch, owner };
+            await intent.updateContext({ ...intent.record.context, dispatch });
+          },
           onExit(code) {
-            dispatchedChildExited = true;
-            dispatchedChildExitCode = code;
+            exitCode = code ?? 1;
+            exited.resolve();
           },
         });
-        dispatchStarted = true;
+        launched = true;
+        continue;
       }
-      await delay(RETRY_DELAY_MS, signal);
+      // Filesystem notifications and child exit are observations, never proof.
+      const wait = new AbortController();
+      const changed = runStore.waitForRunChange(runIdValue, {
+        afterRevision: run.revision,
+        timeoutMs: remaining,
+        signal: wait.signal,
+        includeOwnership: true,
+      });
+      try {
+        await Promise.race([changed, exited.promise]);
+      } finally {
+        wait.abort();
+        await changed.catch(() => {});
+      }
     }
+    throw new RunStoreError(
+      "Detached ownership recovery remains pending; retry the same idempotency key.",
+      { code: "ERR_DETACHED_OWNERSHIP_PENDING" },
+    );
   }
 
   async function pipelinesList() {
@@ -669,7 +675,7 @@ export function createMcpControlPlane(options = {}) {
     };
   }
 
-  async function runStart(input, { signal } = {}) {
+  async function runStart(input) {
     const identity = {
       key: input.idempotencyKey,
       tool: "run_start",
@@ -679,23 +685,31 @@ export function createMcpControlPlane(options = {}) {
     if (existing?.status === "completed") {
       return existing.result;
     }
-    const boundary = await runner.validateBoundary({
-      projectPath: input.projectPath,
-      taskPath: input.taskPath,
-    });
+    let boundary =
+      existing &&
+      (await dispatchIsReady(existing.context, existing.context.runId))
+        ? null
+        : await runner.validateBoundary({
+            projectPath: input.projectPath,
+            taskPath: input.taskPath,
+          });
     const context = { runId: runIdFactory() };
-    const action = await beginAction(
-      {
-        ...identity,
-        context,
-      },
-      signal,
-    );
+    const action = await runStore.beginAction({
+      ...identity,
+      context,
+    });
     try {
       if (action.record.status === "completed") {
         return action.record.result;
       }
       const reservedRunId = action.record.context.runId;
+      const completedReceipt = { runId: reservedRunId };
+      if (await completeReadyDispatch(action, completedReceipt))
+        return completedReceipt;
+      boundary ??= await runner.validateBoundary({
+        projectPath: input.projectPath,
+        taskPath: input.taskPath,
+      });
       let run;
       try {
         ({ run } = await runner.status(reservedRunId));
@@ -723,7 +737,7 @@ export function createMcpControlPlane(options = {}) {
       ) {
         throw new Error("Reserved run does not match its MCP action intent.");
       }
-      await launchIfNeeded(run.runId, run.revision, { signal });
+      await launchIfNeeded(run.runId, run.revision, { intent: action });
       const receipt = { runId: run.runId };
       await action.complete(receipt);
       return receipt;
@@ -800,7 +814,7 @@ export function createMcpControlPlane(options = {}) {
     }
   }
 
-  async function runRespond(input, { signal } = {}) {
+  async function runRespond(input) {
     const identity = {
       key: input.idempotencyKey,
       tool: "run_respond",
@@ -811,24 +825,27 @@ export function createMcpControlPlane(options = {}) {
       return existing.result;
     }
     await runner.status(input.runId);
-    const action = await beginAction(
-      {
-        ...identity,
-        context: {
-          runId: input.runId,
-          requestId: input.requestId,
-          expectedRevision: input.expectedRevision,
-          responseHash: null,
-          submittedRevision: null,
-        },
+    const action = await runStore.beginAction({
+      ...identity,
+      context: {
+        runId: input.runId,
+        requestId: input.requestId,
+        expectedRevision: input.expectedRevision,
+        responseHash: null,
+        submittedRevision: null,
       },
-      signal,
-    );
+    });
     try {
       if (action.record.status === "completed") {
         return action.record.result;
       }
       let context = action.record.context;
+      const completedReceipt = {
+        runId: input.runId,
+        requestId: input.requestId,
+      };
+      if (await completeReadyDispatch(action, completedReceipt))
+        return completedReceipt;
       if (context.responseHash === null) {
         const preview = await runner.previewInput(actionArguments(input));
         context = {
@@ -869,7 +886,7 @@ export function createMcpControlPlane(options = {}) {
       }
       await launchIfNeeded(input.runId, submittedRevision, {
         allowWaiting: true,
-        signal,
+        intent: action,
       });
       const receipt = { runId: input.runId, requestId: input.requestId };
       await action.complete(receipt);
@@ -879,7 +896,7 @@ export function createMcpControlPlane(options = {}) {
     }
   }
 
-  async function runResume(input, { signal } = {}) {
+  async function runResume(input) {
     const identity = {
       key: input.idempotencyKey,
       tool: "run_resume",
@@ -890,20 +907,20 @@ export function createMcpControlPlane(options = {}) {
       return existing.result;
     }
     await runner.status(input.runId);
-    const action = await beginAction(
-      {
-        ...identity,
-        context: {
-          runId: input.runId,
-          expectedRevision: input.expectedRevision,
-        },
+    const action = await runStore.beginAction({
+      ...identity,
+      context: {
+        runId: input.runId,
+        expectedRevision: input.expectedRevision,
       },
-      signal,
-    );
+    });
     try {
       if (action.record.status === "completed") {
         return action.record.result;
       }
+      const completedReceipt = { runId: input.runId };
+      if (await completeReadyDispatch(action, completedReceipt))
+        return completedReceipt;
       const run = (await runner.status(input.runId)).run;
       let stopCheckpointRevision = action.record.context.stopCheckpointRevision;
       if (
@@ -937,7 +954,6 @@ export function createMcpControlPlane(options = {}) {
         });
       } else if (run.revision === input.expectedRevision) {
         const interrupted =
-          run.activeTurn !== null &&
           run.pause === null &&
           !["DONE", "FAILED", "CANCELED"].includes(
             run.pipelineState.workflowState,
@@ -964,20 +980,13 @@ export function createMcpControlPlane(options = {}) {
       ) {
         throw new Error("Resume request revision is stale.");
       }
-      if (stopCheckpointRevision !== undefined) {
-        await reconcileDetachedStop(
-          { runId: input.runId, checkpointRevision: stopCheckpointRevision },
-          signal,
-          { rejectLiveOwner: action.created, waitForSettlement: true },
-        );
-      } else {
-        await launchIfNeeded(input.runId, input.expectedRevision, {
-          action: input.action,
-          allowWaiting: true,
-          signal,
-          waitForLease: true,
-        });
-      }
+      await launchIfNeeded(input.runId, input.expectedRevision, {
+        action: input.action,
+        allowWaiting: true,
+        intent: action,
+        stopCheckpointRevision: stopCheckpointRevision ?? null,
+        rejectLiveOwner: action.created,
+      });
       const receipt = { runId: input.runId };
       await action.complete(receipt);
       return receipt;
@@ -986,86 +995,48 @@ export function createMcpControlPlane(options = {}) {
     }
   }
 
-  async function reconcileDetachedStop(
-    receipt,
-    signal,
-    { rejectLiveOwner = false, waitForSettlement = false } = {},
-  ) {
-    let launched = false;
-    let childExited = false;
-    let childExitCode = null;
-    let checkpointRevision = receipt.checkpointRevision ?? null;
-    while (true) {
-      const exitedBeforeInspection = childExited;
-      const current = await runner.status(receipt.runId);
-      const stop = current.run.stopRequest;
-      if (stop === null || stop.reconciledRevision !== null) {
-        return;
-      }
-      if (checkpointRevision === null) {
-        if (stop.requestId === receipt.requestId) {
-          checkpointRevision = stop.checkpoint.revision;
-        } else if (stop.checkpoint.revision === receipt.expectedRevision) {
-          checkpointRevision = receipt.expectedRevision;
-        } else {
-          return;
-        }
-      }
-      if (stop.checkpoint.revision !== checkpointRevision) return;
-      if (childExited) {
-        if (!exitedBeforeInspection) continue;
-        const versionSkew = childExitCode === RUNTIME_VERSION_SKEW_EXIT_CODE;
-        const worktreeOwner =
-          !versionSkew && pipelineRequiresWorktreeLease(current.run.pipelineId)
-            ? await runStore.worktreeLeaseOwner(
-                current.run.projectPath,
-                receipt.runId,
-              )
-            : null;
-        throw new RunStoreError(
-          `Detached stop reconciliation for run ${receipt.runId} exited ` +
-            "before durable stop settlement; retry this request with the same " +
-            "idempotency key or recover the ownerless applicable stop with " +
-            "an action-free run_resume at its exact inspected revision." +
-            (versionSkew
-              ? " Restart the Agent Runner MCP server before retrying the incompatible runtime."
-              : "") +
-            (worktreeOwner !== null && worktreeOwner !== receipt.runId
-              ? ` The conflicting canonical worktree lease belongs to run ${worktreeOwner}.`
-              : ""),
-          {
-            code: versionSkew
-              ? "ERR_RUNTIME_VERSION_SKEW"
-              : "ERR_DETACHED_START_FAILED",
-          },
-        );
-      }
-      if (!launched) {
-        const ownerIsLive = await runStore.runLeaseOwnerIsLive(receipt.runId);
-        if (ownerIsLive && rejectLiveOwner) {
-          throw new RunStoreError(
-            `Run ${receipt.runId} already has a live execution owner.`,
-            { code: "ERR_RUN_LEASED" },
-          );
-        }
-        if (ownerIsLive && !waitForSettlement) return;
-        if (!ownerIsLive) {
-          await launchRun(receipt.runId, null, {
-            expectedRuntimeCompatibility: detachedCompatibilityToken,
-            stopCheckpointRevision: checkpointRevision,
-            onExit(code) {
-              childExited = true;
-              childExitCode = code;
-            },
-          });
-          launched = true;
-        }
-      }
-      await delay(RETRY_DELAY_MS, signal);
+  async function reconcileDetachedStop(receipt) {
+    const run = (await runner.status(receipt.runId)).run;
+    const stop = run.stopRequest;
+    if (
+      stop === null ||
+      stop.reconciledRevision !== null ||
+      stop.requestId !== receipt.requestId
+    )
+      return;
+    if (await runStore.runLeaseOwnerIsLive(receipt.runId)) return;
+    const identity = {
+      key: `stop-recovery-${createHash("sha256").update(receipt.requestId).digest("hex")}`,
+      tool: "run_resume",
+      arguments: {
+        runId: receipt.runId,
+        stopCheckpointRevision: stop.checkpoint.revision,
+      },
+      context: {
+        runId: receipt.runId,
+        expectedRevision: run.revision,
+        stopCheckpointRevision: stop.checkpoint.revision,
+      },
+    };
+    const intent = await runStore.beginAction(identity);
+    try {
+      if (intent.record.status === "completed") return;
+      await launchIfNeeded(
+        receipt.runId,
+        intent.record.context.expectedRevision,
+        {
+          allowWaiting: true,
+          intent,
+          stopCheckpointRevision: stop.checkpoint.revision,
+        },
+      );
+      await intent.complete({ runId: receipt.runId });
+    } finally {
+      await intent.release();
     }
   }
 
-  async function runStop(input, kind, signal) {
+  async function runStop(input, kind) {
     input = runStopSchema.parse(input);
     const receipt = await runner.requestOperatorStop({
       runId: input.runId,
@@ -1074,11 +1045,11 @@ export function createMcpControlPlane(options = {}) {
       idempotencyKey: input.idempotencyKey,
       ...(input.timing === undefined ? {} : { timing: input.timing }),
     });
-    await reconcileDetachedStop(receipt, signal);
+    await reconcileDetachedStop(receipt);
     return receipt;
   }
 
-  async function unexpectedIssueReport(input, { signal } = {}) {
+  async function unexpectedIssueReport(input) {
     const projectPath = await reportingGit.resolveProject(input.projectPath);
     const boundary = await runStore.validateStateBoundary({
       projectPath,
@@ -1097,19 +1068,16 @@ export function createMcpControlPlane(options = {}) {
     if (existing?.status === "completed") {
       return existing.result;
     }
-    const action = await beginAction(
-      {
-        ...identity,
-        context: {
-          issuesPath: null,
-          publicationPhase: null,
-          projectPath: null,
-          reportPath: null,
-          temporaryPath: null,
-        },
+    const action = await runStore.beginAction({
+      ...identity,
+      context: {
+        issuesPath: null,
+        publicationPhase: null,
+        projectPath: null,
+        reportPath: null,
+        temporaryPath: null,
       },
-      signal,
-    );
+    });
     try {
       if (action.record.status === "completed") {
         return action.record.result;
@@ -1152,13 +1120,26 @@ export function createMcpControlPlane(options = {}) {
     guidanceUpdate: (input) => guidanceService().update(input),
     pipelinesList,
     runActivity,
-    runRespond,
-    runResume,
+    runRespond: (input, context) =>
+      detachedAction("run_respond", runRespond, input, context),
+    runResume: (input, context) =>
+      detachedAction("run_resume", runResume, input, context),
     runPause: (input, context) =>
-      runStop(input, "pause_requested", context?.signal),
+      detachedAction(
+        "run_pause",
+        (value) => runStop(value, "pause_requested"),
+        input,
+        context,
+      ),
     runCancel: (input, context) =>
-      runStop(input, "cancel_requested", context?.signal),
-    runStart,
+      detachedAction(
+        "run_cancel",
+        (value) => runStop(value, "cancel_requested"),
+        input,
+        context,
+      ),
+    runStart: (input, context) =>
+      detachedAction("run_start", runStart, input, context),
     runStatus,
     runWait,
     unexpectedIssueReport,
@@ -1331,7 +1312,7 @@ export function createMcpServer(options = {}) {
     "run_resume",
     {
       description:
-        "Resume a persisted pause with its valid action, or recover an ownerless applicable stop or interrupted turn with action: null. Use the exact inspected revision and a unique idempotency key; stop recovery does not require the original stop key and waits for durable settlement or child exit. Reject stale revisions, non-null stop-recovery actions, and live execution owners.",
+        "Resume a persisted pause with its valid action, or recover an ownerless applicable stop or nonterminal checkpoint with action: null. Use the exact inspected revision and a unique idempotency key; stop recovery does not require the original stop key and waits for durable settlement or child exit. Action-free process-proof failures preserve the checkpoint; bounded event-driven dispatch returns retryable ownership results without clearing reservations. Disconnect cancels only observation, not reconciliation or receipt completion. Reject stale revisions, non-null stop-recovery actions, and live execution owners.",
       inputSchema: runResumeSchema,
       annotations: mutating,
     },

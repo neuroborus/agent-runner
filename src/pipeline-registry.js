@@ -42,6 +42,7 @@ export function createDetachedRuntimeCompatibilityToken({
       leftId < rightId ? -1 : leftId > rightId ? 1 : 0,
     );
   const canonicalCompatibility = JSON.stringify({
+    detachedProtocol: 1,
     runEnvelope: [
       runtimeCompatibility.runnerVersion,
       runtimeCompatibility.runStateVersion,

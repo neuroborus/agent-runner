@@ -31,6 +31,7 @@ import {
   RUN_STATE_SCHEMA_VERSION,
 } from "../../src/index.js";
 import {
+  createDetachedLauncher,
   createMcpControlPlane,
   DETACHED_RUNTIME_COMPATIBILITY_ENV,
   MCP_INSTRUCTIONS,
@@ -48,6 +49,37 @@ const SEVENTH_RUN_ID = "77777777-7777-4777-8777-777777777777";
 const RESPONSE_HASH = "a".repeat(64);
 const executeFile = promisify(execFile);
 
+test("detached IPC admission disconnects before execution and consumes its environment marker", async (t) => {
+  const paths = await workspace(t, "agent-runner-dispatch-ipc-");
+  const script = join(paths.taskPath, "child.mjs");
+  const receipt = join(paths.taskPath, "admitted.json");
+  await writeFile(
+    script,
+    `import { writeFile } from "node:fs/promises";
+import { awaitDetachedDispatch } from ${JSON.stringify(new URL("../../src/mcp/index.js", import.meta.url).href)};
+const dispatch = await awaitDetachedDispatch(process.env);
+await writeFile(${JSON.stringify(receipt)}, JSON.stringify({ dispatch, connected: process.connected, marker: Object.hasOwn(process.env, "AGENT_RUNNER_PARENT_DISPATCH") }));
+`,
+  );
+  const exited = Promise.withResolvers();
+  let owner;
+  const dispatch = { id: SECOND_RUN_ID, expectedRevision: 9 };
+  await createDetachedLauncher({ executablePath: script })(RUN_ID, null, {
+    dispatch,
+    onSpawn(value) {
+      owner = value;
+    },
+    onExit: exited.resolve,
+  });
+  assert.equal(await exited.promise, 0);
+  assert.ok(owner.processIdentity.bootId);
+  assert.deepEqual(JSON.parse(await readFile(receipt, "utf8")), {
+    dispatch,
+    connected: false,
+    marker: false,
+  });
+});
+
 test("MCP legacy recovery keeps exact revisions, idempotent receipts, and detached ownership", async (t) => {
   const fixture = await createLegacyRecoveryFixture(t, { steps: 1 });
   let launches = 0;
@@ -61,7 +93,12 @@ test("MCP legacy recovery keeps exact revisions, idempotent receipts, and detach
         options.expectedRuntimeCompatibility,
         DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
       );
-      continuation = fixture.openRunner().resume({ runId, action });
+      continuation = fixture.openRunner().resume({
+        runId,
+        action,
+        dispatch: options.dispatch,
+        expectedRuntimeCompatibility: options.expectedRuntimeCompatibility,
+      });
       continuation.then(
         () => options.onExit(0),
         () => options.onExit(1),
@@ -117,6 +154,10 @@ test("MCP legacy recovery keeps exact revisions, idempotent receipts, and detach
   assert.deepEqual(receipt, { runId: fixture.runId });
   assert.deepEqual(await control.runResume(request), receipt);
   await continuation;
+  assert.equal(
+    (await fixture.store.loadRun(fixture.runId)).pipelineState.workflowState,
+    "DONE",
+  );
   assert.deepEqual(
     await createMcpControlPlane(controlOptions).runResume(request),
     receipt,
@@ -156,9 +197,14 @@ test("MCP legacy recovery repairs an interrupted receipt without another dispatc
   const options = {
     runStore: store,
     runner: fixture.openRunner(),
-    launchRun(runId, action) {
+    launchRun(runId, action, options) {
       launches += 1;
-      continuation = fixture.openRunner().resume({ runId, action });
+      continuation = fixture.openRunner().resume({
+        runId,
+        action,
+        dispatch: options.dispatch,
+        expectedRuntimeCompatibility: options.expectedRuntimeCompatibility,
+      });
       continuation.catch(() => {});
     },
   };
@@ -234,10 +280,12 @@ function deferred() {
   return { promise, resolve: resolvePromise };
 }
 
-async function advanceMutatingStoredRun(store, runId) {
+async function advanceMutatingStoredRun(store, runId, dispatch) {
   const lease = await store.acquireRunLease(runId);
   try {
     await store.recoverRun(lease);
+    await store.recordRecoveryDispatch(lease, dispatch);
+    await store.recordRecoveryDispatch(lease, dispatch, true);
     await store.transitionRun(
       lease,
       {},
@@ -490,9 +538,9 @@ for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
       runner: storedRunner(store, paths),
       runStore: store,
       runIdFactory: () => RUN_ID,
-      async launchRun(id) {
+      async launchRun(id, _action, options) {
         launches += 1;
-        return advanceMutatingStoredRun(store, id);
+        return advanceMutatingStoredRun(store, id, options.dispatch);
       },
     });
     const input = {
@@ -951,7 +999,7 @@ test("detached stop supervision follows transient ownership until settlement or 
               : "ERR_DETACHED_START_FAILED") &&
           /before durable stop settlement/u.test(error.message) &&
           (exitCode === RUNTIME_VERSION_SKEW_EXIT_CODE
-            ? /Restart the Agent Runner MCP server/u.test(error.message)
+            ? /restart the Agent Runner MCP server/iu.test(error.message)
             : error.message.includes(`lease belongs to run ${older.runId}`)) &&
           error.message.includes(`reconciliation for run ${initial.runId}`),
       );
@@ -1595,30 +1643,28 @@ test("recovers an ownerless stop after the requesting client disconnects", async
         idempotencyKey: "disconnected-cancel",
         timing,
       };
-      await assert.rejects(
-        createMcpControlPlane({
-          runner,
-          runStore,
-          async launchRun() {
-            abort.abort();
-          },
-        }).runCancel(input, { signal: abort.signal }),
-        { name: "AbortError" },
-      );
+      const finish = deferred();
+      let launches = 0;
+      const control = createMcpControlPlane({
+        runner,
+        runStore,
+        async launchRun() {
+          launches++;
+          abort.abort();
+          await finish.promise;
+          await settleStoredStop(store, initial.runId);
+        },
+      });
+      await assert.rejects(control.runCancel(input, { signal: abort.signal }), {
+        name: "AbortError",
+      });
       assert.equal(
         (await runner.status(initial.runId)).run.stopRequest.kind,
         "cancel_requested",
       );
 
-      let launches = 0;
-      const receipt = await createMcpControlPlane({
-        runner,
-        runStore,
-        async launchRun() {
-          launches += 1;
-          await settleStoredStop(store, initial.runId);
-        },
-      }).runCancel(input);
+      finish.resolve();
+      const receipt = await control.runCancel(input);
       assert.equal(receipt.kind, "cancel_requested");
       assert.equal(receipt.revision, initial.revision + 1);
       assert.equal(launches, 1);
@@ -1661,7 +1707,7 @@ test("reconciles an incomplete start intent after run creation", async (t) => {
   const control = createMcpControlPlane({
     async launchRun(id, _action, options) {
       launches.push({ id, options });
-      await advanceMutatingStoredRun(store, id);
+      await advanceMutatingStoredRun(store, id, options.dispatch);
     },
     runIdFactory: () => SECOND_RUN_ID,
     runner,
@@ -1700,9 +1746,9 @@ test("keeps a conflicted detached start durable for idempotent retry", async (t)
   );
   const launches = [];
   const control = createMcpControlPlane({
-    async launchRun(id) {
+    async launchRun(id, _action, options) {
       launches.push(id);
-      await advanceMutatingStoredRun(store, id);
+      await advanceMutatingStoredRun(store, id, options.dispatch);
     },
     runIdFactory: () => RUN_ID,
     runner,
@@ -1730,6 +1776,288 @@ test("keeps a conflicted detached start durable for idempotent retry", async (t)
   await ownerLease.release();
   assert.deepEqual(await control.runStart(input), { runId: RUN_ID });
   assert.deepEqual(launches, [RUN_ID]);
+});
+
+test("restart recovery bounds noisy observations and preserves recorded child identity", async (t) => {
+  const paths = await workspace(t, "agent-runner-dispatch-restart-");
+  let childState = "live";
+  const identity = { bootId: RUN_ID, startTicks: "41" };
+  const store = createRunStore({
+    stateRoot: paths.stateRoot,
+    hostName: "test-host",
+    processIsAlive: (pid) => pid !== 42424 || childState !== "dead",
+    processIdentity: (pid) =>
+      pid !== 42424
+        ? identity
+        : childState === "unverifiable"
+          ? null
+          : childState === "replaced"
+            ? { ...identity, startTicks: "42" }
+            : identity,
+  });
+  await createStoredRun(store, paths);
+  const lease = await store.acquireRunLease(RUN_ID);
+  const interrupted = await store.startAgentTurn(
+    lease,
+    { role: "planner", phase: "clarify" },
+    {
+      activity: {
+        actor: "planner",
+        phase: "clarify",
+        kind: "turn-started",
+        message: "Interrupted clarification.",
+      },
+    },
+  );
+  await lease.release();
+  const input = {
+    runId: RUN_ID,
+    expectedRevision: interrupted.revision,
+    action: null,
+    idempotencyKey: "restart-dispatch",
+  };
+  let launches = 0;
+  let notifications = 0;
+  let clock = 0;
+  const options = {
+    runner: storedRunner(store, paths),
+    runStore: {
+      ...store,
+      async waitForRunChange(id) {
+        notifications++;
+        return store.loadRun(id);
+      },
+    },
+    dispatchClock: () => clock,
+    async launchRun(id, _action, options) {
+      launches++;
+      await options.onSpawn({
+        pid: 42424,
+        hostname: "test-host",
+        processIdentity: identity,
+      });
+      if (launches === 1) {
+        const lease = await store.acquireRunLease(id);
+        await store.recordRecoveryDispatch(lease, options.dispatch);
+        await lease.release();
+        throw new Error("server interrupted after admission");
+      }
+      await advanceMutatingStoredRun(store, id, options.dispatch);
+    },
+  };
+  await assert.rejects(
+    createMcpControlPlane(options).runResume(input),
+    /server interrupted/u,
+  );
+  await assert.rejects(createMcpControlPlane(options).runResume(input), {
+    code: "ERR_DETACHED_OWNERSHIP_PENDING",
+  });
+  assert.equal(notifications, 64);
+  assert.equal(launches, 1);
+  // Elapsed time is a separate bound even with no wall-clock delay.
+  options.runStore.waitForRunChange = async (id) => {
+    clock += 30_000;
+    return store.loadRun(id);
+  };
+  await assert.rejects(createMcpControlPlane(options).runResume(input), {
+    code: "ERR_DETACHED_OWNERSHIP_PENDING",
+  });
+  childState = "unverifiable";
+  await assert.rejects(createMcpControlPlane(options).runResume(input), {
+    code: "ERR_DETACHED_OWNERSHIP_PENDING",
+  });
+  assert.equal(launches, 1);
+  childState = "replaced";
+  assert.deepEqual(await createMcpControlPlane(options).runResume(input), {
+    runId: RUN_ID,
+  });
+  assert.deepEqual(await createMcpControlPlane(options).runResume(input), {
+    runId: RUN_ID,
+  });
+  assert.equal(launches, 2);
+});
+
+test("an unrelated revision cannot acknowledge or replay a detached dispatch", async (t) => {
+  const paths = await workspace(t, "agent-runner-dispatch-unrelated-");
+  const store = createRunStore({ stateRoot: paths.stateRoot });
+  let launches = 0;
+  const options = {
+    runner: storedRunner(store, paths),
+    runStore: store,
+    runIdFactory: () => RUN_ID,
+    async launchRun(id, _action, options) {
+      launches++;
+      const lease = await store.acquireRunLease(id);
+      await store.transitionRun(lease, { counters: { unrelated: 1 } });
+      await lease.release();
+      options.onExit(0);
+    },
+  };
+  const input = {
+    pipelineId: "plan-authoring",
+    projectPath: paths.projectPath,
+    taskPath: paths.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    sourceSession: null,
+    idempotencyKey: "unrelated-dispatch",
+  };
+  await assert.rejects(createMcpControlPlane(options).runStart(input), {
+    code: "ERR_DETACHED_START_FAILED",
+  });
+  await assert.rejects(createMcpControlPlane(options).runStart(input), {
+    code: "ERR_RUN_REVISION_CHANGED",
+  });
+  assert.equal(launches, 1);
+});
+
+test("an admitted dispatch cannot replay after another admission or CLI turn", async (t) => {
+  for (const replacement of ["admission", "turn"]) {
+    await t.test(replacement, async (t) => {
+      const paths = await workspace(t, "agent-runner-dispatch-superseded-");
+      const store = createRunStore({ stateRoot: paths.stateRoot });
+      let launches = 0;
+      const options = {
+        runner: storedRunner(store, paths),
+        runStore: store,
+        runIdFactory: () => RUN_ID,
+        async launchRun(id, _action, options) {
+          launches++;
+          const lease = await store.acquireRunLease(id);
+          try {
+            await store.recordRecoveryDispatch(lease, options.dispatch);
+          } finally {
+            await lease.release();
+          }
+          throw new Error("Interrupted after admission");
+        },
+      };
+      const input = {
+        pipelineId: "plan-authoring",
+        projectPath: paths.projectPath,
+        taskPath: paths.taskPath,
+        proactiveClarification: false,
+        roleOverrides: {},
+        sourceSession: null,
+        idempotencyKey: "superseded",
+      };
+      await assert.rejects(
+        createMcpControlPlane(options).runStart(input),
+        /Interrupted after admission/u,
+      );
+      const lease = await store.acquireRunLease(RUN_ID);
+      try {
+        if (replacement === "admission") {
+          await store.recordRecoveryDispatch(lease, {
+            id: SECOND_RUN_ID,
+            expectedRevision: (await store.loadRun(RUN_ID)).revision,
+          });
+        } else {
+          const turn = { role: "planner", phase: "clarify" };
+          await store.startAgentTurn(lease, turn, {
+            activity: {
+              actor: "planner",
+              phase: "clarify",
+              kind: "turn-started",
+              message: "CLI continuation started.",
+            },
+          });
+          await store.finishAgentTurn(lease, turn);
+        }
+      } finally {
+        await lease.release();
+      }
+      await assert.rejects(createMcpControlPlane(options).runStart(input), {
+        code: "ERR_RUN_REVISION_CHANGED",
+      });
+      assert.equal(launches, 1);
+    });
+  }
+});
+
+test("durable readiness repairs interrupted receipts after later input or stops", async (t) => {
+  for (const [tool, method] of [
+    ["run_start", "runStart"],
+    ["run_resume", "runResume"],
+    ["run_respond", "runRespond"],
+  ]) {
+    await t.test(tool, async (t) => {
+      const paths = await workspace(t, "agent-runner-dispatch-receipt-");
+      const store = createRunStore({ stateRoot: paths.stateRoot });
+      await createStoredRun(store, paths);
+      const args =
+        tool === "run_start"
+          ? {
+              pipelineId: "plan-authoring",
+              projectPath: paths.projectPath,
+              taskPath: paths.taskPath,
+              proactiveClarification: false,
+              roleOverrides: {},
+              sourceSession: null,
+            }
+          : {
+              runId: RUN_ID,
+              expectedRevision: 1,
+              ...(tool === "run_resume"
+                ? { action: null }
+                : {
+                    requestId: "answered",
+                    answers: [{ questionId: "q1", answer: "A" }],
+                  }),
+            };
+      const dispatch = { id: SECOND_RUN_ID, expectedRevision: 1 };
+      const intent = await store.beginAction({
+        key: "lost-receipt",
+        tool,
+        arguments: args,
+        context: {
+          runId: RUN_ID,
+          expectedRevision: 1,
+          responseHash: RESPONSE_HASH,
+          submittedRevision: 1,
+          dispatch: { ...dispatch, owner: null },
+        },
+      });
+      try {
+        await advanceMutatingStoredRun(store, RUN_ID, dispatch);
+      } finally {
+        // The child acknowledged continuation, but the parent lost its receipt.
+        await intent.release();
+      }
+      const run = await store.loadRun(RUN_ID);
+      await store.requestOperatorStop({
+        runId: RUN_ID,
+        kind: "pause_requested",
+        expectedRevision: run.revision,
+        idempotencyKey: "later-pause",
+      });
+      const before = await store.loadRun(RUN_ID);
+      const control = createMcpControlPlane({
+        runner: {
+          ...storedRunner(store, paths),
+          validateBoundary() {
+            assert.fail("Receipt repair cannot revalidate old start inputs.");
+          },
+        },
+        runStore: store,
+        launchRun() {
+          assert.fail("Receipt repair cannot execute another turn.");
+        },
+      });
+      const request = { ...args, idempotencyKey: "lost-receipt" };
+      const receipt = await control[method](request);
+      assert.deepEqual(receipt, {
+        runId: RUN_ID,
+        ...(tool === "run_respond" ? { requestId: "answered" } : {}),
+      });
+      assert.deepEqual(await store.loadRun(RUN_ID), before);
+      assert.equal(
+        (await store.readAction({ key: "lost-receipt", tool, arguments: args }))
+          .status,
+        "completed",
+      );
+    });
+  }
 });
 
 test("rejects detached pipeline skew and retries the exact start after restart", async (t) => {
@@ -1789,7 +2117,7 @@ test("rejects detached pipeline skew and retries the exact start after restart",
     staleControl.runStart(input),
     (error) =>
       error.code === "ERR_RUNTIME_VERSION_SKEW" &&
-      /restart the Agent Runner MCP server/u.test(error.message),
+      /restart the Agent Runner MCP server/iu.test(error.message),
   );
   assert.equal(launchedToken, oldParentToken);
   assert.equal(childExitCode, RUNTIME_VERSION_SKEW_EXIT_CODE);
@@ -1820,7 +2148,7 @@ test("rejects detached pipeline skew and retries the exact start after restart",
   const freshControl = createMcpControlPlane({
     async launchRun(id, _action, options) {
       launches.push({ id, token: options.expectedRuntimeCompatibility });
-      await advanceMutatingStoredRun(store, id);
+      await advanceMutatingStoredRun(store, id, options.dispatch);
     },
     runner,
     runStore: store,
@@ -1843,12 +2171,14 @@ test("keeps one detached owner after the MCP caller disconnects", async (t) => {
   const childFinished = deferred();
   let launches = 0;
   const control = createMcpControlPlane({
-    launchRun(id) {
+    launchRun(id, _action, options) {
       launches += 1;
       launchStarted.resolve();
       void (async () => {
         await acquireChild.promise;
         const childLease = await store.acquireRunLease(id);
+        await store.recordRecoveryDispatch(childLease, options.dispatch);
+        await store.recordRecoveryDispatch(childLease, options.dispatch, true);
         childOwnedRun.resolve();
         await releaseChild.promise;
         await childLease.release();
@@ -1885,7 +2215,7 @@ test("keeps one detached owner after the MCP caller disconnects", async (t) => {
   assert.deepEqual(await control.runStart(input), { runId: RUN_ID });
   assert.equal(launches, 1);
   assert.equal(await store.runIsLeased(RUN_ID), true);
-  assert.equal((await store.loadRun(RUN_ID)).revision, 1);
+  assert.equal((await store.loadRun(RUN_ID)).revision, 3);
   releaseChild.resolve();
   await childFinished.promise;
 });
@@ -1907,7 +2237,7 @@ test("retries a simultaneous detached start that loses worktree ownership", asyn
   const children = [];
   let firstStartCount = 0;
 
-  function launchRun(runId) {
+  function launchRun(runId, _action, options) {
     const attempt = (launchCounts.get(runId) ?? 0) + 1;
     launchCounts.set(runId, attempt);
     if (attempt === 1) {
@@ -1921,12 +2251,14 @@ test("retries a simultaneous detached start that loses worktree ownership", asyn
       const runLease = await store.acquireRunLease(runId);
       let worktreeLease;
       try {
+        await store.recordRecoveryDispatch(runLease, options.dispatch);
         if (runId === RUN_ID) {
           await firstChildrenStarted.promise;
           worktreeLease = await store.acquireWorktreeLease(
             paths.projectPath,
             runId,
           );
+          await store.recordRecoveryDispatch(runLease, options.dispatch, true);
           winnerOwnedWorktree.resolve();
           await releaseWinner.promise;
           return;
@@ -1950,6 +2282,7 @@ test("retries a simultaneous detached start that loses worktree ownership", asyn
           paths.projectPath,
           runId,
         );
+        await store.recordRecoveryDispatch(runLease, options.dispatch, true);
         retryOwnedWorktree.resolve();
         await releaseRetry.promise;
       } finally {
@@ -2035,10 +2368,10 @@ test("retries when a detached loser exits after transient ownership", async (t) 
   const runner = storedRunner(store, paths);
   const launches = [];
   const control = createMcpControlPlane({
-    async launchRun(runId, _action, { onExit } = {}) {
+    async launchRun(runId, _action, { onExit, dispatch } = {}) {
       launches.push(runId);
       if (launches.length > 1) {
-        await advanceMutatingStoredRun(store, runId);
+        await advanceMutatingStoredRun(store, runId, dispatch);
         return;
       }
 
@@ -2137,7 +2470,7 @@ test("MCP effort survives detached resume and stays out of public projections", 
     runner,
     runStore: store,
     runIdFactory: () => RUN_ID,
-    async launchRun(runId, action, { expectedRuntimeCompatibility }) {
+    async launchRun(runId, action, { expectedRuntimeCompatibility, dispatch }) {
       launches += 1;
       const child = createRunner({
         adapters,
@@ -2147,7 +2480,12 @@ test("MCP effort survives detached resume and stays out of public projections", 
         },
         runStore: createRunStore({ stateRoot: paths.stateRoot }),
       });
-      await child.resume({ runId, action, expectedRuntimeCompatibility });
+      await child.resume({
+        runId,
+        action,
+        expectedRuntimeCompatibility,
+        dispatch,
+      });
     },
   });
   const input = {
@@ -2202,8 +2540,8 @@ test("forwards additive run-wide, role, and source profile selections", async (t
   const baseRunner = storedRunner(store, paths);
   let createdInput;
   const control = createMcpControlPlane({
-    launchRun(id) {
-      return advanceMutatingStoredRun(store, id);
+    launchRun(id, _action, options) {
+      return advanceMutatingStoredRun(store, id, options.dispatch);
     },
     runIdFactory: () => RUN_ID,
     runner: {
@@ -2338,9 +2676,9 @@ test("records complete pending answers before detached continuation", async (t) 
   const runner = storedRunner(store, paths);
   const launches = [];
   const control = createMcpControlPlane({
-    async launchRun(id) {
+    async launchRun(id, _action, options) {
       launches.push(id);
-      await advanceMutatingStoredRun(store, id);
+      await advanceMutatingStoredRun(store, id, options.dispatch);
     },
     runner,
     runStore: store,
@@ -2377,12 +2715,12 @@ test("records complete pending answers before detached continuation", async (t) 
   assert.deepEqual(launches, [RUN_ID]);
   const status = await control.runStatus({ runId: RUN_ID });
   assert.equal(status.pendingInput, null);
-  assert.equal(status.revision, 3);
+  assert.equal(status.revision, 5);
   assert.equal(
     (
       await control.runWait({
         runId: RUN_ID,
-        cursor: 3,
+        cursor: status.revision,
         timeoutMs: 10,
         progress: false,
       })
@@ -2483,9 +2821,9 @@ test("responds to pending input projected from a compatible legacy run", async (
 
   const launches = [];
   const control = createMcpControlPlane({
-    async launchRun(id) {
+    async launchRun(id, _action, options) {
       launches.push(id);
-      await advanceMutatingStoredRun(store, id);
+      await advanceMutatingStoredRun(store, id, options.dispatch);
     },
     runner,
     runStore: store,
@@ -2515,7 +2853,7 @@ test("responds to pending input projected from a compatible legacy run", async (
   assert.deepEqual(launches, [paused.run.runId]);
   const persisted = await store.loadRun(paused.run.runId);
   assert.equal(persisted.schemaVersion, RUN_STATE_SCHEMA_VERSION);
-  assert.equal(persisted.revision, paused.run.revision + 3);
+  assert.equal(persisted.revision, paused.run.revision + 5);
   assert.equal(persisted.pause.inputResponse.requestId, pendingInput.id);
 });
 
@@ -2541,9 +2879,9 @@ test("resumes only an action valid for the persisted pause", async (t) => {
   });
   const launches = [];
   const control = createMcpControlPlane({
-    async launchRun(id, action) {
+    async launchRun(id, action, options) {
       launches.push({ action, id });
-      await advanceMutatingStoredRun(store, id);
+      await advanceMutatingStoredRun(store, id, options.dispatch);
     },
     runner: storedRunner(store, paths),
     runStore: store,
@@ -2681,7 +3019,7 @@ test("resumes only an action valid for the persisted pause", async (t) => {
     control.runResume({
       ...input,
       idempotencyKey: "invalid-resume-key",
-      expectedRevision: 2,
+      expectedRevision: (await store.loadRun(RUN_ID)).revision,
       action: { type: "extra-fix-rounds", amount: 1 },
     }),
     /not valid for this paused run/u,
@@ -2741,9 +3079,9 @@ test("resumes only action-free ownerless interrupted runs at the exact revision"
 
   const launches = [];
   const control = createMcpControlPlane({
-    async launchRun(id, action) {
+    async launchRun(id, action, options) {
       launches.push({ action, id });
-      await advanceMutatingStoredRun(store, id);
+      await advanceMutatingStoredRun(store, id, options.dispatch);
     },
     runner: storedRunner(store, paths),
     runStore: store,
@@ -2797,6 +3135,18 @@ test("resumes only action-free ownerless interrupted runs at the exact revision"
     (error) => error.code === "ERR_RUN_LEASED",
   );
   assert.equal(launches.length, 1);
+  // A crash after dispatch readiness can precede the first turn marker.
+  await createStoredRun(store, paths, { id: THIRD_RUN_ID });
+  assert.deepEqual(
+    await control.runResume({
+      ...input,
+      runId: THIRD_RUN_ID,
+      expectedRevision: 1,
+      idempotencyKey: "checkpoint-before-turn",
+    }),
+    { runId: THIRD_RUN_ID },
+  );
+  assert.equal(launches.length, 2);
 });
 
 test("does not let a paused active turn bypass resume validation", async (t) => {
@@ -2980,7 +3330,7 @@ test("projects the same bounded pause through MCP status and wait", async (t) =>
   ]);
 });
 
-test("waits for a pausing owner to release its lease before resuming", async (t) => {
+test("rejects a live pausing owner and permits an exact-key retry after release", async (t) => {
   const paths = await workspace(t, "agent-runner-mcp-resume-lease-");
   const store = createRunStore({ stateRoot: paths.stateRoot });
   await createStoredRun(store, paths, {
@@ -2998,40 +3348,26 @@ test("waits for a pausing owner to release its lease before resuming", async (t)
     await lease.release();
   });
 
-  let observeLease;
-  const leaseObserved = new Promise((resolvePromise) => {
-    observeLease = resolvePromise;
-  });
   const launches = [];
   const control = createMcpControlPlane({
-    async launchRun(id) {
+    async launchRun(id, _action, options) {
       launches.push(id);
-      await advanceMutatingStoredRun(store, id);
+      await advanceMutatingStoredRun(store, id, options.dispatch);
     },
     runner: storedRunner(store, paths),
-    runStore: {
-      ...store,
-      async runIsLeased(id) {
-        const leased = await store.runIsLeased(id);
-        if (leased) {
-          observeLease();
-        }
-        return leased;
-      },
-    },
+    runStore: store,
   });
-  const resuming = control.runResume({
+  const input = {
     idempotencyKey: "resume-after-lease",
     runId: RUN_ID,
     expectedRevision: 1,
     action: null,
-  });
-
-  await leaseObserved;
+  };
+  await assert.rejects(control.runResume(input), { code: "ERR_RUN_LEASED" });
   assert.deepEqual(launches, []);
   await worktreeLease.release();
   await lease.release();
-  assert.deepEqual(await resuming, { runId: RUN_ID });
+  assert.deepEqual(await control.runResume(input), { runId: RUN_ID });
   assert.deepEqual(launches, [RUN_ID]);
 });
 

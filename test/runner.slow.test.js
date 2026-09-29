@@ -112,20 +112,6 @@ function ready() {
   return { status: "READY", questions: [] };
 }
 
-async function frozenHostAncestryBaseline() {
-  const entries = [];
-  for (const name of (await readdir("/proc"))
-    .filter((entry) => /^(?:[1-9]\d*)$/u.test(entry))
-    .sort((left, right) => Number(left) - Number(right))) {
-    const pid = Number(name);
-    const identity = await readProcessIdentity(pid);
-    if (identity !== null) entries.push({ ...identity, pid });
-  }
-  assert.ok(entries.length > 0);
-  assert.ok(entries.length <= 4_096);
-  return entries;
-}
-
 function draft() {
   return {
     status: "DRAFT",
@@ -1972,12 +1958,12 @@ test("operator stop after host loss reclaims ownership and reconciles before fur
 
 test("action-free CLI/MCP recovery settles dead sessions", async (t) => {
   for (const transport of ["runner", "cli", "mcp"]) {
-    for (const kind of ["pause_requested", "cancel_requested"]) {
+    for (const kind of [null, "pause_requested", "cancel_requested"]) {
       await t.test(`${transport}/${kind}`, async (t) => {
         const fixture = await operatorFixture(t, "plan-execution");
         const launchIdentity = await readProcessIdentity(process.pid);
         assert.notEqual(launchIdentity, null);
-        const ancestryBaseline = await frozenHostAncestryBaseline();
+        const ancestryBaseline = [{ ...launchIdentity, pid: process.pid }];
         const namespaceId = readlinkSync("/proc/self/ns/pid");
         const executionPid = 2_000_000_001;
         let originalOwnerAlive = true;
@@ -2052,15 +2038,43 @@ test("action-free CLI/MCP recovery settles dead sessions", async (t) => {
           processId: 200,
           processIsAlive: (pid) => pid === 200,
         });
+        let resumedTurns = 0;
+        let retirementInspections = 0;
         const recoveredRunner = runnerFor(
           fixture,
           {
             codex: {
               ...delegate,
-              run: () => assert.fail("Recovery must not invoke a provider."),
+              async run() {
+                if (kind !== null)
+                  assert.fail("Stop recovery must not invoke a provider.");
+                resumedTurns++;
+                assert.equal(
+                  (await recoveredStore.loadRun(runId)).executionProcess,
+                  null,
+                );
+                throw Object.assign(new Error("Retryable proof failure"), {
+                  code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+                });
+              },
             },
           },
-          { runStore: recoveredStore },
+          {
+            runStore: recoveredStore,
+            // The owner is synthetic; unrelated host workers must not decide
+            // this orchestration fixture's process-table result. Retirement
+            // still performs its real identity and namespace checks.
+            inspectSessionProcesses(sessionId, _token, inspection) {
+              assert.equal(sessionId, executionPid);
+              assert.deepEqual(inspection, {
+                ancestryBaseline,
+                controlGroup: null,
+                includeSession: true,
+              });
+              retirementInspections++;
+              return [];
+            },
+          },
         );
         const stopRequest = {
           runId,
@@ -2069,26 +2083,54 @@ test("action-free CLI/MCP recovery settles dead sessions", async (t) => {
           idempotencyKey: `${transport}-${kind}`,
           timing: "immediate",
         };
-        const accepted = await recoveredRunner.requestOperatorStop(stopRequest);
-        assert.deepEqual(
-          await recoveredRunner.requestOperatorStop(stopRequest),
-          accepted,
-        );
+        if (kind !== null) {
+          const accepted =
+            await recoveredRunner.requestOperatorStop(stopRequest);
+          assert.deepEqual(
+            await recoveredRunner.requestOperatorStop(stopRequest),
+            accepted,
+          );
+        }
         const pending = await recoveredStore.loadRun(runId);
 
         if (transport === "runner") {
-          await recoveredRunner.resume({ runId, action: null });
+          const resumed = recoveredRunner.resume({
+            runId,
+            action: null,
+            expectedRevision: pending.revision,
+          });
+          if (kind === null)
+            await assert.rejects(resumed, {
+              code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+            });
+          else await resumed;
         } else if (transport === "cli") {
-          const exitCode = await main(["resume", "--run", runId], {
-            runner: recoveredRunner,
-            stdout: { write() {} },
-            stderr: {
-              write(message) {
-                assert.fail(message);
+          const exitCode = await main(
+            [
+              "resume",
+              "--run",
+              runId,
+              "--expected-revision",
+              String(pending.revision),
+            ],
+            {
+              runner: recoveredRunner,
+              stdout: { write() {} },
+              stderr: {
+                write(message) {
+                  if (kind !== null) assert.fail(message);
+                  else {
+                    assert.match(message, /Agent backend turn failed/u);
+                    assert.doesNotMatch(message, /Retryable proof failure/u);
+                  }
+                },
               },
             },
-          });
-          assert.equal(exitCode, kind === "pause_requested" ? 2 : 0);
+          );
+          assert.equal(
+            exitCode,
+            kind === null ? 1 : kind === "pause_requested" ? 2 : 0,
+          );
         } else {
           let launches = 0;
           let completion;
@@ -2097,15 +2139,23 @@ test("action-free CLI/MCP recovery settles dead sessions", async (t) => {
             runStore: recoveredStore,
             launchRun(id, action, launchOptions) {
               launches += 1;
-              completion = recoveredRunner.resume({ runId: id, action }).then(
-                ({ run }) =>
-                  launchOptions.onExit(
-                    run.pipelineState.workflowState === "WAITING_FOR_USER"
-                      ? 2
-                      : 0,
-                  ),
-                () => launchOptions.onExit(1),
-              );
+              completion = recoveredRunner
+                .resume({
+                  runId: id,
+                  action,
+                  dispatch: launchOptions.dispatch,
+                  expectedRuntimeCompatibility:
+                    launchOptions.expectedRuntimeCompatibility,
+                })
+                .then(
+                  ({ run }) =>
+                    launchOptions.onExit(
+                      run.pipelineState.workflowState === "WAITING_FOR_USER"
+                        ? 2
+                        : 0,
+                    ),
+                  () => launchOptions.onExit(1),
+                );
             },
           });
           const input = {
@@ -2123,14 +2173,28 @@ test("action-free CLI/MCP recovery settles dead sessions", async (t) => {
         const settled = await recoveredStore.loadRun(runId);
         assert.equal(
           settled.pipelineState.workflowState,
-          kind === "pause_requested" ? "WAITING_FOR_USER" : "CANCELED",
+          kind === null
+            ? checkpoint.pipelineState.workflowState
+            : kind === "pause_requested"
+              ? "WAITING_FOR_USER"
+              : "CANCELED",
         );
         assert.equal(settled.executionProcess, null);
-        assert.deepEqual(settled.stopRequest.settlement, {
-          kind: "quiescent",
-          commit: null,
-        });
-        assert.equal(settled.stopRequest.reconciledRevision, settled.revision);
+        assert.equal(retirementInspections, 1);
+        assert.equal(resumedTurns, kind === null ? 1 : 0);
+        if (kind === null) {
+          assert.deepEqual(settled.activeTurn, checkpoint.activeTurn);
+          assert.equal(settled.pause, null);
+        } else {
+          assert.deepEqual(settled.stopRequest.settlement, {
+            kind: "quiescent",
+            commit: null,
+          });
+          assert.equal(
+            settled.stopRequest.reconciledRevision,
+            settled.revision,
+          );
+        }
         assert.equal(await recoveredStore.runIsLeased(runId), false);
         assert.equal(
           await recoveredStore.worktreeIsLeased(fixture.projectPath, runId),
@@ -2689,6 +2753,7 @@ function runnerFor(
     activities = [],
     configuration = RUNNER_CONFIGURATION,
     git = createGitService(),
+    inspectSessionProcesses,
     runStore = createRunStore({ stateRoot: fixture.stateRoot }),
     trustedValidation,
   } = {},
@@ -2697,6 +2762,7 @@ function runnerFor(
     adapters,
     clarifications: createClarificationService({ interactive: false }),
     git,
+    inspectSessionProcesses,
     loadConfiguration: configurationLoader(configuration),
     onActivity(activity) {
       activities.push(activity);

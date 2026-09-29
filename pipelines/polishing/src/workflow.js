@@ -1446,6 +1446,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         response = await runtime.adapters[role].run(request);
       } catch (cause) {
         agentError = cause;
+        if (isOwnershipFailure(cause)) throw cause;
         availabilityFailure = runtime.availability?.eligible(cause) === true;
       }
       nextRepositoryBaseline = baseline;
@@ -1577,8 +1578,10 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         return null;
       }
     } finally {
-      currentRun = await runtime.finishAgentTurn(turn);
-      assertRun(currentRun);
+      if (!isOwnershipFailure(agentError)) {
+        currentRun = await runtime.finishAgentTurn(turn);
+        assertRun(currentRun);
+      }
     }
     if (agentError !== undefined) {
       failedSourceForkLaunchRecovery =
@@ -6471,6 +6474,7 @@ ${evidence}`,
     }
   } catch (cause) {
     if (cause?.code === "ERR_AVAILABILITY_RECOVERY") throw cause;
+    if (isOwnershipFailure(cause)) throw cause;
     if (cause?.code === "ERR_PROJECT_CONFIGURATION_CHANGED") {
       throw cause;
     }
@@ -6512,4 +6516,11 @@ ${evidence}`,
     }
     return fail(cause);
   }
+}
+
+function isOwnershipFailure(cause) {
+  return [
+    "ERR_EXECUTION_PROCESS_ACTIVE",
+    "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+  ].includes(cause?.code);
 }

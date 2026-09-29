@@ -914,6 +914,40 @@ test("resume dispatches one validated action and preserves pause exit", async ()
   assert.equal(stderr.read(), "");
 });
 
+test("CLI action-free resume preserves an explicit revision and rejects invalid revisions", async () => {
+  const requests = [];
+  const runner = fakeRunner({
+    async resume(input) {
+      requests.push(input);
+      return commandResult({ state: "WAITING_FOR_USER" });
+    },
+  });
+  const stdout = createSink();
+  const stderr = createSink();
+  assert.equal(
+    await main(["resume", "--run", RUN_ID, "--expected-revision", "17"], {
+      runner,
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    }),
+    2,
+  );
+  assert.deepEqual(requests, [
+    { runId: RUN_ID, action: null, expectedRevision: 17 },
+  ]);
+  for (const revision of ["0", "1.5", "1e2", "9007199254740992"]) {
+    assert.equal(
+      await main(["resume", "--run", RUN_ID, "--expected-revision", revision], {
+        runner,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      }),
+      1,
+    );
+  }
+  assert.equal(requests.length, 1);
+});
+
 test("status renders bounded pause details without private provider data", async () => {
   const stdout = createSink();
   const result = commandResult({ state: "WAITING_FOR_USER" });

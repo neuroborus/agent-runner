@@ -4,6 +4,7 @@ import { parseArgs } from "node:util";
 import packageMetadata from "../package.json" with { type: "json" };
 import { createGuidanceService } from "./guidance/index.js";
 import {
+  awaitDetachedDispatch,
   DETACHED_RUNTIME_COMPATIBILITY_ENV,
   DETACHED_STOP_CHECKPOINT_ENV,
   serveMcp,
@@ -31,7 +32,12 @@ const COMMAND_OPTIONS = Object.freeze({
     "idempotency-key",
     "timing",
   ]),
-  resume: Object.freeze(["run", "extra-fix-rounds", "override-finding"]),
+  resume: Object.freeze([
+    "run",
+    "extra-fix-rounds",
+    "override-finding",
+    "expected-revision",
+  ]),
   status: Object.freeze(["run"]),
   pipelines: Object.freeze([]),
   mcp: Object.freeze([]),
@@ -99,7 +105,7 @@ const USAGE = `Agent Runner
 
 Usage:
   agent-run run <pipeline> --project <repo> --task <task-dir> [--mode <independent|lazy|combined>] [--clarify] [--profile <alias>] [--fork-from <backend>:<session-id>]
-  agent-run resume --run <run-id> [--extra-fix-rounds <count> | --override-finding <finding-id>]
+  agent-run resume --run <run-id> [--expected-revision <revision>] [--extra-fix-rounds <count> | --override-finding <finding-id>]
   agent-run pause --run <run-id> [--timing immediate|after-current-commit] [--expected-revision <revision> --idempotency-key <key>]
   agent-run cancel --run <run-id> [--timing immediate|after-current-commit] [--expected-revision <revision> --idempotency-key <key>]
   agent-run status --run <run-id>
@@ -136,7 +142,7 @@ Options:
       --<role>-context-size Override a role decimal token context size
       --extra-fix-rounds   Grant a positive additional fix budget on resume
       --override-finding   Override one applicable open finding on resume
-      --expected-revision  Bind an explicit pause or cancel request revision
+      --expected-revision  Bind a resume, pause, or cancel request revision
       --idempotency-key    Bind an explicit pause or cancel retry identity
       --timing             immediate (default) or after-current-commit for pause/cancel
                            Deferred stops require a selected execution step; pauses,
@@ -305,6 +311,13 @@ function explicitStopIdentity(values) {
     );
   }
   if (revision === undefined) return null;
+  return {
+    expectedRevision: parseExpectedRevision(revision),
+    idempotencyKey: key,
+  };
+}
+
+function parseExpectedRevision(revision) {
   if (!/^[1-9][0-9]*$/u.test(revision)) {
     throw new Error("--expected-revision must be a positive integer.");
   }
@@ -312,7 +325,7 @@ function explicitStopIdentity(values) {
   if (!Number.isSafeInteger(expectedRevision)) {
     throw new Error("--expected-revision is too large.");
   }
-  return { expectedRevision, idempotencyKey: key };
+  return expectedRevision;
 }
 
 function effortSelection(value, option) {
@@ -654,9 +667,16 @@ export async function main(
       return workflowExitCode(result.run);
     }
     if (command === "resume") {
+      const dispatch = await awaitDetachedDispatch(environment);
+      const expectedRevision =
+        values["expected-revision"] === undefined
+          ? undefined
+          : parseExpectedRevision(values["expected-revision"]);
       const result = await commandRunner.resume({
         runId: values.run,
         action: resumeAction(values),
+        ...(dispatch === undefined ? {} : { dispatch }),
+        ...(expectedRevision === undefined ? {} : { expectedRevision }),
         ...(environment[DETACHED_STOP_CHECKPOINT_ENV] === undefined
           ? {}
           : {

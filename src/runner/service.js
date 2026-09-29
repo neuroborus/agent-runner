@@ -3,7 +3,11 @@ import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
-import { PROVIDER_REGISTRY, terminateOwnedProcess } from "../agents/index.js";
+import {
+  inspectOwnedSessionProcesses,
+  PROVIDER_REGISTRY,
+  terminateOwnedProcess,
+} from "../agents/index.js";
 import { createClarificationService } from "../clarifications/index.js";
 import {
   assertProjectConfigurationProtected,
@@ -57,6 +61,7 @@ const RUNNER_OPTION_FIELDS = new Set([
   "adapters",
   "clarifications",
   "git",
+  "inspectSessionProcesses",
   "loadConfiguration",
   "onActivity",
   "providers",
@@ -154,6 +159,8 @@ export function createRunner(options = {}) {
   const adapters = options.adapters ?? defaultAdapters(providers);
   const clarifications = options.clarifications ?? createClarificationService();
   const git = options.git ?? createGitService();
+  const inspectSessionProcesses =
+    options.inspectSessionProcesses ?? inspectOwnedSessionProcesses;
   const loadConfiguration =
     options.loadConfiguration ?? (() => loadRunnerConfiguration(providers));
   const onActivity = options.onActivity ?? (async () => {});
@@ -168,6 +175,7 @@ export function createRunner(options = {}) {
     !isRecord(adapters) ||
     !isRecord(clarifications) ||
     !isRecord(git) ||
+    typeof inspectSessionProcesses !== "function" ||
     typeof loadConfiguration !== "function" ||
     typeof onActivity !== "function" ||
     (options.availabilityClock !== undefined &&
@@ -544,6 +552,7 @@ export function createRunner(options = {}) {
     lease,
     action = null,
     verifyProviderPolicies = false,
+    dispatch = null,
   ) {
     if (run.pipelineState.workflowState === "CANCELED") return run;
     if (
@@ -575,7 +584,11 @@ export function createRunner(options = {}) {
     ) {
       return pauseForProjectConfiguration(run, lease);
     }
-    if (pipeline.prepareRecovery !== undefined && runStore.loadRunHistory) {
+    if (
+      stopPending(run) &&
+      pipeline.prepareRecovery !== undefined &&
+      runStore.loadRunHistory
+    ) {
       const history = await runStore.loadRunHistory(run.runId);
       if (!isDeepStrictEqual(history.run, run)) {
         throw new RunnerError("Run changed before recovery inspection.", {
@@ -594,6 +607,7 @@ export function createRunner(options = {}) {
     const baseRuntime = runtimeFor(pipeline, lease, run, selected);
     if (stopPending(run))
       return reconcileOperatorStop({
+        inspectSessionProcesses,
         cleanupResources: (current) => cleanupExecutionResource(current, lease),
         run,
         pipeline,
@@ -606,8 +620,10 @@ export function createRunner(options = {}) {
     // Recover an orphaned supervised process before examining or replaying work.
     if (run.executionProcess !== null) {
       const owner = await runStore.inspectExecutionProcess(run.runId);
-      await terminateOwnedProcess(owner.pid, () =>
-        runStore.inspectExecutionProcess(run.runId),
+      await terminateOwnedProcess(
+        owner.pid,
+        () => runStore.inspectExecutionProcess(run.runId),
+        { inspectSessionProcesses },
       );
       run = await runStore.recordExecutionProcess(lease, null);
       try {
@@ -634,17 +650,18 @@ export function createRunner(options = {}) {
       }
       if (migrationRequired) {
         run = await runStore.loadRun(run.runId);
-        if (pipeline.prepareRecovery !== undefined && runStore.loadRunHistory) {
-          const history = await runStore.loadRunHistory(run.runId);
-          if (!isDeepStrictEqual(history.run, run)) {
-            throw new RunnerError(
-              "Run changed before provider policy recovery inspection.",
-              { code: "ERR_RUN_REVISION_CHANGED" },
-            );
-          }
-          pipeline.prepareRecovery(run, history);
-        }
       }
+    }
+    if (dispatch !== null)
+      run = await runStore.recordRecoveryDispatch(lease, dispatch, true);
+    if (pipeline.prepareRecovery !== undefined && runStore.loadRunHistory) {
+      const history = await runStore.loadRunHistory(run.runId);
+      if (!isDeepStrictEqual(history.run, run)) {
+        throw new RunnerError("Run changed before checkpoint continuation.", {
+          code: "ERR_RUN_REVISION_CHANGED",
+        });
+      }
+      pipeline.prepareRecovery(run, history);
     }
     const monitor = createStopMonitor({
       runId: run.runId,
@@ -684,6 +701,7 @@ export function createRunner(options = {}) {
     const latest = await runStore.loadRun(run.runId);
     if (stopPending(latest)) {
       return reconcileOperatorStop({
+        inspectSessionProcesses,
         cleanupResources: (current) => cleanupExecutionResource(current, lease),
         run: latest,
         pipeline,
@@ -716,6 +734,7 @@ export function createRunner(options = {}) {
       configurationFailure = cause;
     }
     return reconcileOperatorStop({
+      inspectSessionProcesses,
       cleanupResources: (current) => cleanupExecutionResource(current, lease),
       run: current,
       pipeline,
@@ -830,11 +849,15 @@ export function createRunner(options = {}) {
     if (!pipelineRequiresWorktreeLease(run.pipelineId)) {
       return operation();
     }
-    const ownership = {
+    const ownership = heldWorktreeLeases.get(run.runId) ?? {
       lease: await runStore.acquireWorktreeLease(run.projectPath, run.runId),
       projectPath: run.projectPath,
       runId: run.runId,
     };
+    if (ownership.projectPath !== run.projectPath)
+      throw new RunnerError("Held worktree boundary changed.", {
+        code: "ERR_RUN_PATH_CHANGED",
+      });
     heldWorktreeLeases.set(run.runId, ownership);
     return withHeldWorktreeLease(ownership, operation, executionLease);
   }
@@ -1293,7 +1316,14 @@ export function createRunner(options = {}) {
           );
         }
         await validatePersistedBoundary(recovered);
-        return execute(pipeline, recovered, lease, normalized.action, true);
+        return execute(
+          pipeline,
+          recovered,
+          lease,
+          normalized.action,
+          true,
+          normalized.dispatch,
+        );
       },
       lease,
     );
@@ -1304,7 +1334,25 @@ export function createRunner(options = {}) {
     const lease = await runStore.acquireRunLease(normalized.runId);
     let executionFailure = null;
     try {
+      const inspected = await runStore.loadRun(normalized.runId);
+      if (
+        normalized.expectedRevision !== null &&
+        inspected.revision !== normalized.expectedRevision
+      ) {
+        throw new RunnerError("Resume request revision is stale.", {
+          code: "ERR_RUN_REVISION_CHANGED",
+        });
+      }
+      if (normalized.dispatch !== null)
+        await runStore.recordRecoveryDispatch(lease, normalized.dispatch);
       await resumeLeased(normalized, lease);
+      if (
+        normalized.dispatch !== null &&
+        normalized.stopCheckpointRevision === null &&
+        !stopPending(inspected)
+      ) {
+        await runStore.recordRecoveryDispatch(lease, normalized.dispatch, true);
+      }
     } catch (cause) {
       executionFailure = cause;
       throw cause;

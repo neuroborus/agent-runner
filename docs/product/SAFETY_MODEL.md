@@ -358,3 +358,18 @@ mutation, credentials, process escape, network access, and host Unix sockets.
 Workspace-write turns retain their existing command denials and
 autonomous-write restrictions. The access-specific effective policy is part of
 the immutable provider receipt, so resume fails closed after policy drift.
+
+Action-free process-proof failure preserves the active checkpoint instead of
+terminally discarding it. No turn output, fingerprint, or validation evidence is
+accepted before ownership is settled. Recovery reuses an owned worktree handle
+or reclaims the same run's stale reservation under the existing exclusive lease
+protocol. A retained reservation does not count as a live execution owner.
+
+Shared-host inspection bounds total work and elapsed time across baseline
+validation, every candidate, ancestry traversal, and churn. Exhaustion remains
+unverifiable; current identities and descendants still require complete proof.
+Detached admission saves child identity before releasing its IPC barrier and
+journals progress under the run lease. Matching acknowledgement evidence, not a
+lease's mere existence or unrelated state advancement, permits receipt completion.
+Public activity omits dispatch identities; persisted PIDs never grant signalling
+authority. Caller disconnect cannot release another execution's ownership.

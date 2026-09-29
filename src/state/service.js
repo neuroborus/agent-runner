@@ -7,6 +7,12 @@ import { isDeepStrictEqual } from "node:util";
 
 import { createActionStore } from "./actions.js";
 import {
+  dispatchActivity,
+  isRecoveryPreparation,
+  normalizeRecoveryDispatch,
+  publicDispatchActivity,
+} from "./dispatch.js";
+import {
   availabilityActivity,
   availabilityDelayMs,
   DEFAULT_AVAILABILITY_POLICY,
@@ -33,6 +39,7 @@ import {
   normalizeRunState,
   normalizeRoles,
   normalizeTransitionPatch,
+  validateProcessIdentity,
   RUNTIME_COMPATIBILITY,
   RUNTIME_COMPATIBILITY_TOKEN,
   RUNTIME_VERSION_SKEW_EXIT_CODE,
@@ -720,13 +727,14 @@ export function createRunStore({
 
   async function waitForRunChange(
     runId,
-    { afterRevision, timeoutMs, signal } = {},
+    { afterRevision, timeoutMs, signal, includeOwnership = false } = {},
   ) {
     if (
       !Number.isSafeInteger(afterRevision) ||
       afterRevision < 0 ||
       !Number.isSafeInteger(timeoutMs) ||
       timeoutMs < 0 ||
+      typeof includeOwnership !== "boolean" ||
       (signal !== undefined && !(signal instanceof AbortSignal))
     ) {
       throw new RunStoreError("Run wait options are invalid.", {
@@ -743,10 +751,16 @@ export function createRunStore({
     }
 
     const runDirectory = await getRunDirectory(runId);
+    const directories = includeOwnership
+      ? [runDirectory, await getWorktreeLeaseDirectory(initial.projectPath)]
+      : [runDirectory];
     return new Promise((resolvePromise, rejectPromise) => {
       let settled = false;
       let timer;
-      let watcher;
+      const watchers = [];
+      let ownershipChanged = false;
+      let loading = false;
+      let reload = false;
 
       const finish = (operation, value) => {
         if (settled) {
@@ -755,17 +769,29 @@ export function createRunStore({
         settled = true;
         clearTimeout(timer);
         signal?.removeEventListener("abort", onAbort);
-        watcher?.close();
+        for (const watcher of watchers) watcher.close();
         operation(value);
       };
       const load = async () => {
+        if (settled) return;
+        if (loading) {
+          reload = true;
+          return;
+        }
+        loading = true;
         try {
           const current = await loadRun(runId);
-          if (current.revision > afterRevision) {
+          if (current.revision > afterRevision || ownershipChanged) {
             finish(resolvePromise, current);
           }
         } catch (cause) {
           finish(rejectPromise, cause);
+        } finally {
+          loading = false;
+          if (reload && !settled) {
+            reload = false;
+            void load();
+          }
         }
       };
       const onAbort = () =>
@@ -775,19 +801,29 @@ export function createRunStore({
         );
 
       try {
-        watcher = watch(
-          runDirectory,
-          { persistent: false },
-          (_eventType, filename) => {
-            if (
-              filename === null ||
-              ["events.jsonl", "state.json"].includes(filename.toString())
-            ) {
-              void load();
-            }
-          },
-        );
-        watcher.on("error", (cause) => finish(rejectPromise, cause));
+        for (const directory of directories) {
+          const watcher = watch(
+            directory,
+            { persistent: false },
+            (_eventType, filename) => {
+              if (
+                includeOwnership &&
+                (filename === null ||
+                  [".lease", ".lease-reclaiming"].includes(filename.toString()))
+              )
+                ownershipChanged = true;
+              if (
+                ownershipChanged ||
+                filename === null ||
+                ["events.jsonl", "state.json"].includes(filename.toString())
+              ) {
+                void load();
+              }
+            },
+          );
+          watchers.push(watcher);
+          watcher.on("error", (cause) => finish(rejectPromise, cause));
+        }
       } catch (cause) {
         finish(rejectPromise, cause);
         return;
@@ -813,6 +849,105 @@ export function createRunStore({
       const snapshot = await loadSnapshot(runDirectory, record.runId);
       await journal.recover(runDirectory, snapshot);
       return deepFreeze(snapshot.state);
+    });
+  }
+
+  async function inspectRecoveryDispatch(runId, value) {
+    const dispatch = normalizeRecoveryDispatch(value);
+    const { events } = await loadRunHistory(runId);
+    const started = events.some(
+      (event) =>
+        event.revision === dispatch.expectedRevision + 1 &&
+        isDeepStrictEqual(event.activity, dispatchActivity(dispatch)),
+    );
+    const ready =
+      started &&
+      events.some(
+        (event) =>
+          event.revision > dispatch.expectedRevision &&
+          isDeepStrictEqual(event.activity, dispatchActivity(dispatch, true)),
+      );
+    const retryable =
+      started &&
+      !ready &&
+      events
+        .slice(dispatch.expectedRevision + 1)
+        .every((event) =>
+          isRecoveryPreparation(events[event.revision - 2].state, event),
+        );
+    return { started, ready, retryable };
+  }
+
+  async function recordRecoveryDispatch(lease, value, ready = false) {
+    const dispatch = normalizeRecoveryDispatch(value);
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
+      const snapshot = await loadSnapshot(runDirectory, record.runId);
+      const started = snapshot.events.some(
+        (event) =>
+          event.revision === dispatch.expectedRevision + 1 &&
+          isDeepStrictEqual(event.activity, dispatchActivity(dispatch)),
+      );
+      if (
+        typeof ready !== "boolean" ||
+        (ready
+          ? !started
+          : snapshot.state.revision !== dispatch.expectedRevision)
+      ) {
+        throw new RunStoreError("Detached recovery revision is stale.", {
+          code: "ERR_RUN_REVISION_CHANGED",
+        });
+      }
+      if (
+        ready &&
+        (snapshot.state.executionProcess !== null ||
+          snapshot.state.executionResource !== null)
+      ) {
+        throw new RunStoreError(
+          "Detached recovery retains execution resources.",
+          { code: "ERR_EXECUTION_PROCESS_ACTIVE" },
+        );
+      }
+      const activity = dispatchActivity(dispatch, ready);
+      if (
+        ready &&
+        snapshot.events.some((event) =>
+          isDeepStrictEqual(event.activity, activity),
+        )
+      )
+        return deepFreeze(snapshot.state);
+      const next = normalizeRunState(
+        {
+          ...snapshot.state,
+          revision: snapshot.state.revision + 1,
+          updatedAt: timestamp(snapshot.state.updatedAt),
+        },
+        record.runId,
+      );
+      // This records admission before potentially long process/worktree recovery.
+      await journal.appendTransition(runDirectory, next, snapshot, activity);
+      return deepFreeze(next);
+    });
+  }
+
+  async function inspectDispatchOwner(record) {
+    if (
+      !isRecord(record) ||
+      Object.keys(record).length !== 3 ||
+      !Number.isSafeInteger(record.pid) ||
+      record.pid < 1 ||
+      typeof record.hostname !== "string" ||
+      record.hostname.length < 1 ||
+      record.hostname.length > 255 ||
+      validateProcessIdentity(record.processIdentity) === null
+    ) {
+      throw new RunStoreError("Detached owner identity is invalid.", {
+        code: "ERR_INVALID_MCP_ACTION",
+      });
+    }
+    return inspectProcessOwner(record, {
+      hostName,
+      processIsAlive,
+      processIdentity,
     });
   }
 
@@ -1288,7 +1423,7 @@ export function createRunStore({
         activities.push({
           revision: event.revision,
           recordedAt: event.recordedAt,
-          ...event.activity,
+          ...publicDispatchActivity(event.activity),
           ...(event.state.stopRequest == null
             ? {}
             : { stop: projectOperatorStop(event.state) }),
@@ -1484,6 +1619,9 @@ export function createRunStore({
     scheduleAvailabilityRetry,
     completeAvailabilityTurn,
     recoverRun,
+    inspectRecoveryDispatch,
+    recordRecoveryDispatch,
+    inspectDispatchOwner,
     runIsLeased,
     runLeaseOwnerIsLive,
     startAgentTurn,

@@ -1,4 +1,5 @@
 export {
+  awaitDetachedDispatch,
   createDetachedLauncher,
   createMcpControlPlane,
   createMcpServer,

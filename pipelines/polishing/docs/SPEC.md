@@ -1331,6 +1331,22 @@ On resume, verify the canonical paths, task hashes, accepted clarification hash,
 repository baseline, `HEAD`, refs, remotes, identity, and current content.
 Unsafe or ambiguous reconciliation pauses rather than discarding user work.
 
+### Action-free ownership recovery
+
+A provider turn that returns `ERR_EXECUTION_PROCESS_UNVERIFIABLE` or
+`ERR_EXECUTION_PROCESS_ACTIVE` retains its active-turn marker and checkpoint.
+Do not reconcile or accept its output while process ownership is unresolved,
+or turn that action-free failure into terminal `internal_failure`. Shared runner
+resume proves process retirement under exclusive run/worktree ownership before
+the ordinary interrupted-turn input and Git reconciliation. Finalization then
+repeats at its saved checkpoint with fresh evidence. Begun handoff effects
+remain governed by their existing verification-only recovery rules.
+
+CLI exact-revision resume and MCP action-free resume use that same recovery path.
+MCP journals child-correlated admission and readiness, waits through bounded
+state/ownership notifications, and retains retryable intents across disconnect
+or server restart. These acknowledgements confer no workflow or content approval.
+
 ## Testing
 
 Workflow policy tests use fake adapters with injected in-memory run-state and

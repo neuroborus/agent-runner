@@ -328,3 +328,14 @@ polishing after ownership is gone and inputs are reconciled. Plan execution
 still requires a clean worktree; polishing still stages without committing.
 Contaminated or unsafe mixed content requires an uncontaminated worktree,
 not adoption by a different pipeline.
+
+Action-free continuation is shared by CLI and MCP, including a finalization turn
+whose process-retirement proof is temporarily unverifiable. The saved turn stays
+resumable while ownership remains safety-blocking; successful retirement precedes
+ordinary checkpoint reconstruction. CLI may bind `--expected-revision`; MCP
+always requires the exact revision. Action contention and bounded detached
+observation return retryable ownership results with the original intent intact.
+Identical-key retries use correlated durable dispatch evidence and cannot create
+a second live owner. Cancellation, timeout, and disconnect end only the observing
+wait, not reconciliation or receipt publication. A receipt acknowledges accepted
+continuation or the particular stop's settlement, never content approval.

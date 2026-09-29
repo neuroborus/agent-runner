@@ -29,6 +29,80 @@ function deferred() {
   return { promise, resolve };
 }
 
+test("journals dispatch admission before retained ownership reconciliation and recovers acknowledgement", async (t) => {
+  let interrupt = false;
+  const f = await fixture(t, {
+    async onTransitionBoundary(point) {
+      if (interrupt && point === "event-appended") {
+        interrupt = false;
+        throw new Error("publication interrupted");
+      }
+    },
+  });
+  const retained = await f.store.recordExecutionProcess(f.lease, 101);
+  const dispatch = { id: OTHER_RUN, expectedRevision: retained.revision };
+  interrupt = true;
+  await assert.rejects(
+    f.store.recordRecoveryDispatch(f.lease, dispatch),
+    /publication interrupted/u,
+  );
+  assert.deepEqual(
+    await f.store.inspectRecoveryDispatch(f.input.runId, dispatch),
+    { started: true, ready: false, retryable: true },
+  );
+  await f.store.recoverRun(f.lease);
+  assert.equal(
+    (await f.store.loadRun(f.input.runId)).executionProcess.pid,
+    101,
+  );
+  await assert.rejects(
+    f.store.recordRecoveryDispatch(f.lease, dispatch, true),
+    { code: "ERR_EXECUTION_PROCESS_ACTIVE" },
+  );
+  await f.store.recordExecutionProcess(f.lease, null);
+  assert.equal(
+    (await f.store.inspectRecoveryDispatch(f.input.runId, dispatch)).retryable,
+    true,
+  );
+  interrupt = true;
+  await assert.rejects(
+    f.store.recordRecoveryDispatch(f.lease, dispatch, true),
+    /publication interrupted/u,
+  );
+  const peer = createRunStore({
+    ...f.storeOptions,
+    onTransitionBoundary: async () => {},
+  });
+  assert.deepEqual(
+    await peer.inspectRecoveryDispatch(f.input.runId, dispatch),
+    { started: true, ready: true, retryable: false },
+  );
+  assert.deepEqual(
+    await peer.inspectRecoveryDispatch(f.input.runId, {
+      ...dispatch,
+      id: BOOT_B,
+    }),
+    { started: false, ready: false, retryable: false },
+  );
+  assert.doesNotMatch(
+    JSON.stringify(await peer.readPublicActivity(f.input.runId)),
+    new RegExp(OTHER_RUN, "u"),
+  );
+  await f.store.recoverRun(f.lease);
+  const revision = (await f.store.loadRun(f.input.runId)).revision;
+  assert.doesNotMatch(
+    await readFile(
+      join(await f.store.getRunDirectory(f.input.runId), "progress.md"),
+      "utf8",
+    ),
+    new RegExp(OTHER_RUN, "u"),
+  );
+  assert.equal(
+    (await f.store.recordRecoveryDispatch(f.lease, dispatch, true)).revision,
+    revision,
+  );
+});
+
 async function fixture(
   t,
   options = {},

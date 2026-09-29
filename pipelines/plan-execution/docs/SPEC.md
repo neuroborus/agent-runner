@@ -3287,6 +3287,22 @@ Native Codex/Claude resume may be used as an optimization only.
 
 ---
 
+### Action-free ownership recovery
+
+A provider turn that returns `ERR_EXECUTION_PROCESS_UNVERIFIABLE` or
+`ERR_EXECUTION_PROCESS_ACTIVE` retains its active-turn marker and checkpoint.
+Do not reconcile or accept its output while process ownership is unresolved,
+or turn that action-free failure into terminal `internal_failure`. Shared runner
+resume proves process retirement under exclusive run/worktree ownership before
+the ordinary interrupted-turn input and Git reconciliation. Finalization then
+repeats at its saved checkpoint with fresh evidence. Begun commit effects
+remain governed by their existing verification-only recovery rules.
+
+CLI exact-revision resume and MCP action-free resume use that same recovery path.
+MCP journals child-correlated admission and readiness, waits through bounded
+state/ownership notifications, and retains retryable intents across disconnect
+or server restart. These acknowledgements confer no workflow or content approval.
+
 ## 17. Terminal UX
 
 Keep normal output concise and state-oriented:

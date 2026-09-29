@@ -1010,11 +1010,23 @@ key; optional proactive clarification accepts an empty answer array. The
 controlling agent answers from explicit user context or asks the user. Answers
 are appended verbatim to the durable clarification transcript before detached
 execution continues. Editing the artifact and using `run_resume` remains
-supported;
+supported.
+
+Action-free recovery uses the same leased runner path through CLI and MCP.
+CLI `resume --run <run-id> --expected-revision <revision>` can bind an inspected
+revision explicitly. An action-free process-proof failure retains its checkpoint,
+including `FINALIZE`, until retirement and repository reconciliation succeed.
+MCP dispatch is bounded and event-driven; ownership contention or an incomplete
+acknowledgement leaves a retryable intent. Retry the same idempotency key after
+`ERR_MCP_ACTION_IN_PROGRESS` or `ERR_DETACHED_OWNERSHIP_PENDING`. Disconnecting
+cancels only the client's wait; durable reconciliation and receipt completion
+continue. Neither retained reservations nor unrelated revision changes prove
+that a detached continuation started.
+
 `run_resume` requires `expectedRevision` from the latest status or wait result,
 a unique idempotency key, and only an action valid for the persisted pause. A
-null action at the exact revision also recovers either a nonterminal persisted
-active turn or an applicable stop when no execution owner is live. Stop recovery
+null action at the exact revision also recovers a nonterminal checkpoint with
+no pause, or an applicable stop, when no execution owner is live. Stop recovery
 uses a new `run_resume` key and does not require the original pause/cancel key;
 stale revisions, non-null actions, live owners, and concurrent ownership races
 are rejected.
@@ -1043,7 +1055,8 @@ owner or start detached same-run reconciliation when ownership was lost. Runs
 continue in detached local children, so MCP disconnects and wait cancellation
 affect only the client call. Ordinary detached start or resume rejects active
 canonical-worktree ownership before launch and withholds its receipt after
-launch until the run advances or the child owns the worktree. Detached stop
+launch until journaled readiness binds that dispatch to process retirement and
+checkpoint continuation under the required leases. Detached stop
 reconciliation instead follows the exact launched child until the stop is
 durably settled or that child exits; acquiring the run lease is not completion.
 An exit before settlement leaves recovery retryable and preserves the applicable
@@ -1051,7 +1064,8 @@ stop. Losing a concurrent ownership race keeps the durable idempotency intent
 available for an exact retry, including when the competing lease is released
 before the next MCP observation because child exit is acknowledged directly.
 The MCP process freezes a detached-compatibility token over the root
-run-envelope tuple and every sorted loaded pipeline ID/state version. The child
+detached protocol version, run-envelope tuple, and every sorted loaded pipeline
+ID/state version. The child
 independently recomputes it before acquiring the run lease, recovering state,
 or migrating a run. Version skew leaves the durable run, journal, leases, and
 incomplete intent unchanged and returns an actionable restart-and-retry error.

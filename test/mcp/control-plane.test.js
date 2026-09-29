@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 
 import { DETACHED_RUNTIME_COMPATIBILITY_TOKEN } from "../../src/index.js";
@@ -11,6 +12,79 @@ import {
 } from "../../src/mcp/index.js";
 
 const RUN_ID = "11111111-1111-4111-8111-111111111111";
+
+test("action acquisition returns retryable contention without polling", async () => {
+  const failure = Object.assign(new Error("Action is owned"), {
+    code: "ERR_MCP_ACTION_IN_PROGRESS",
+  });
+  let attempts = 0;
+  const control = createMcpControlPlane({
+    runner: { async status() {} },
+    runStore: {
+      async readAction() {
+        return null;
+      },
+      async beginAction() {
+        assert.equal(++attempts, 1);
+        throw failure;
+      },
+    },
+  });
+  await assert.rejects(
+    control.runResume({
+      runId: RUN_ID,
+      expectedRevision: 1,
+      action: null,
+      idempotencyKey: "owned",
+    }),
+    (error) => error === failure,
+  );
+  assert.equal(attempts, 1);
+});
+
+test("admits a detached child only after its identity is durable", async () => {
+  const registered = Promise.withResolvers();
+  const persist = Promise.withResolvers();
+  const messages = [];
+  let killed = false;
+  const child = Object.assign(new EventEmitter(), {
+    pid: process.pid,
+    send(message, callback) {
+      messages.push(message);
+      callback();
+    },
+    unref() {},
+    kill() {
+      killed = true;
+    },
+  });
+  const launch = createDetachedLauncher({
+    spawnProcess(_command, _args, options) {
+      assert.deepEqual(options.stdio, ["ignore", "ignore", "ignore", "ipc"]);
+      queueMicrotask(() => {
+        child.emit("spawn");
+        child.emit("message", { type: "dispatch-listening" });
+      });
+      return child;
+    },
+  });
+  const dispatch = { id: RUN_ID, expectedRevision: 7 };
+  const admitted = launch(RUN_ID, null, {
+    dispatch,
+    async onSpawn(owner) {
+      assert.equal(owner.pid, child.pid);
+      assert.ok(owner.processIdentity.bootId);
+      registered.resolve();
+      await persist.promise;
+    },
+  });
+  await registered.promise;
+  assert.deepEqual(messages, []);
+  persist.resolve();
+  assert.equal(await admitted, child.pid);
+  assert.deepEqual(messages, [{ type: "dispatch", dispatch }]);
+  assert.equal(killed, false);
+});
 
 test("projects descriptor-owned pipeline mode guidance", async () => {
   assert.match(

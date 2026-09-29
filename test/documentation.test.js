@@ -400,8 +400,13 @@ test("fixed operational bounds remain explicit and narrowly owned", async () => 
   );
   assert.match(architecture, /run_wait\.timeoutMs` means 30 seconds/u);
   assert.match(architecture, /public maximum is 24\s+hours/u);
-  assert.match(architecture, /fixed 25-millisecond observation delay/u);
+  assert.match(architecture, /bounded event-driven observation/u);
+  assert.match(architecture, /at most 64 inspections within 30 seconds/u);
+  assert.match(architecture, /ERR_DETACHED_OWNERSHIP_PENDING/u);
   assert.match(architecture, /at most one second at\s+a time/u);
-  assert.match(architecture, /do not bound or retry\s+user work/u);
+  assert.match(
+    architecture,
+    /fixed correctness mechanics rather than user-work retry budgets/u,
+  );
   assert.match(operatorGuide, /run_wait\.timeoutMs` waits 30 seconds/u);
 });
