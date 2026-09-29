@@ -56,6 +56,7 @@ const HELP = [
   "--autocompact",
   "--fork-session",
   "--json-schema",
+  "--include-partial-messages",
   "--mcp-config",
   "--model",
   "--no-chrome",
@@ -68,6 +69,7 @@ const HELP = [
   "--settings",
   "--strict-mcp-config",
   "--tools",
+  "--verbose",
 ].join("\n");
 const STRICT_SCHEMA = Object.freeze({
   type: "object",
@@ -716,6 +718,349 @@ function request(overrides = {}) {
     ...overrides,
   };
 }
+
+test("streams Claude progress before completion without exposing payloads or losing command nesting", async (t) => {
+  const entered = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const events = [];
+  const fixture = createFixture({
+    async handle({ call }) {
+      if (call.file !== "claude" || !call.argumentsList.includes("-p")) return;
+      entered.resolve(call);
+      await release.promise;
+      return { stdout: "", stderr: "" };
+    },
+  });
+  await assert.rejects(
+    fixture.adapter.run(request({ onProgress: true })),
+    hasCode("ERR_INVALID_CLAUDE_OPTIONS"),
+  );
+  const running = fixture.adapter.run(
+    request({
+      schema: STRICT_SCHEMA,
+      session: { id: FRESH_SESSION, mode: "continue" },
+      onProgress: (event) => events.push(event),
+    }),
+  );
+  t.after(async () => {
+    release.resolve();
+    await running.catch(() => {});
+  });
+  const call = await entered.promise;
+  assert.equal(option(call.argumentsList, "--output-format"), "stream-json");
+  assert.ok(call.argumentsList.includes("--verbose"));
+  assert.ok(call.argumentsList.includes("--include-partial-messages"));
+  const send = (record) =>
+    call.options.onStdout(
+      Buffer.from(
+        `${JSON.stringify({ session_id: FRESH_SESSION, ...record })}\n`,
+      ),
+    );
+  send({ type: "system", subtype: "init" });
+  const partial = (event) => send({ type: "stream_event", event });
+  partial({
+    type: "message_start",
+    message: { id: "message", role: "assistant" },
+  });
+  partial({
+    type: "content_block_start",
+    index: 0,
+    content_block: { type: "text", text: "" },
+  });
+  const text = Buffer.from(
+    `${JSON.stringify({
+      type: "stream_event",
+      session_id: FRESH_SESSION,
+      event: {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "private-🙂" },
+      },
+    })}\n`,
+  );
+  const split = text.indexOf(Buffer.from("🙂")) + 1;
+  call.options.onStdout(text.subarray(0, split));
+  call.options.onStdout(text.subarray(split));
+  assert.equal(events.length, 4);
+  const beforeIgnored = events.length;
+  send({ type: "ping" });
+  send({
+    type: "tool_progress",
+    tool_use_id: "first",
+    elapsed_time_seconds: 300,
+  });
+  partial({
+    type: "content_block_delta",
+    index: 5,
+    delta: { type: "text_delta", text: "unowned" },
+  });
+  partial({
+    type: "content_block_delta",
+    index: 0,
+    delta: { type: "text_delta", text: 123 },
+  });
+  partial({
+    type: "content_block_delta",
+    index: 5,
+    delta: { type: "__proto__", undefined: "unowned" },
+  });
+  send({ type: "system", subtype: "init", session_id: SOURCE_SESSION });
+  assert.equal(events.length, beforeIgnored);
+  const assistant = {
+    type: "assistant",
+    message: {
+      id: "tools",
+      role: "assistant",
+      content: ["first", "second"].map((id) => ({
+        type: "tool_use",
+        id,
+        name: "Bash",
+        input: { command: "private-command" },
+      })),
+    },
+  };
+  send(assistant);
+  send(assistant);
+  send({
+    type: "assistant",
+    message: {
+      id: "read",
+      role: "assistant",
+      content: [
+        {
+          type: "tool_use",
+          id: "read",
+          name: "Read",
+          input: { file_path: "private-path" },
+        },
+      ],
+    },
+  });
+  send({
+    type: "user",
+    message: {
+      role: "user",
+      content: [
+        { type: "tool_result", tool_use_id: "read", content: "private-file" },
+      ],
+    },
+  });
+  send({
+    type: "system",
+    subtype: "task_started",
+    task_type: "local_bash",
+    task_id: "background",
+    tool_use_id: "first",
+  });
+  send({
+    type: "user",
+    message: {
+      role: "user",
+      content: ["second", "unknown", "first", "first"].map((tool_use_id) => ({
+        type: "tool_result",
+        tool_use_id,
+        content: "private-output",
+      })),
+    },
+  });
+  assert.equal(events.at(-1).activeCommands, 1);
+  send({
+    type: "system",
+    subtype: "task_notification",
+    task_id: "background",
+    status: "completed",
+  });
+  send(result({ structured: { ok: true }, output: "done🙂" }));
+  release.resolve();
+  const response = await running;
+  assert.equal(response.output, "done🙂");
+  assert.deepEqual(response.structured, { ok: true });
+  assert.equal(response.sessionId, FRESH_SESSION);
+  assert.deepEqual(
+    events
+      .filter(({ kind }) => kind.startsWith("local-command-"))
+      .map(({ activeCommands }) => activeCommands),
+    [1, 2, 3, 2, 1, 0],
+  );
+  assert.deepEqual(
+    events.filter(({ kind }) => kind.startsWith("local-tool-")),
+    [
+      { kind: "local-tool-started", activeCommands: 2 },
+      { kind: "local-tool-completed", activeCommands: 2 },
+    ],
+  );
+  for (const event of events) {
+    assert.ok(Object.isFrozen(event));
+    assert.deepEqual(Object.keys(event), ["kind", "activeCommands"]);
+  }
+  assert.doesNotMatch(
+    JSON.stringify(events),
+    /private-|first|second|background|session/u,
+  );
+});
+
+test("rejects malformed, duplicate, mismatched, missing, and oversized Claude stream results", async (t) => {
+  const init = JSON.stringify({
+    type: "system",
+    subtype: "init",
+    session_id: FRESH_SESSION,
+  });
+  const final = JSON.stringify(result());
+  for (const [name, stdout, failed] of [
+    ["malformed", `bad-json\n${final}\n`],
+    ["duplicate", `${final}\n${final}\n`],
+    ["trailing-init", `${final}\n${init}\n`],
+    [
+      "trailing",
+      `${final}\n${JSON.stringify({ type: "assistant", session_id: FRESH_SESSION, message: {} })}\n`,
+    ],
+    [
+      "mismatched",
+      `${init}\n${JSON.stringify(result({ sessionId: CHILD_SESSION }))}\n`,
+    ],
+    ["missing", `${init}\n`],
+    ["failed-incomplete", `${init}\n`, true],
+    ["oversized", "x".repeat(16 * 1024 * 1024 + 1)],
+    ["oversized-whitespace", `${" ".repeat(16 * 1024 * 1024 + 1)}\n`],
+    ["invalid-utf8", Buffer.from([0xff, 10])],
+    [
+      "stream-limit",
+      (write) => {
+        const line = `${JSON.stringify({ type: "ping", padding: "x".repeat(1024 * 1024) })}\n`;
+        for (let index = 0; index < 64; index += 1) write(line);
+      },
+    ],
+  ])
+    await t.test(name, async () => {
+      const fixture = createFixture({
+        handle({ call }) {
+          if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+            return;
+          if (typeof stdout === "function") stdout(call.options.onStdout);
+          else call.options.onStdout(stdout);
+          if (failed) throw processFailure();
+          return { stdout: "", stderr: "" };
+        },
+      });
+      await assert.rejects(
+        fixture.adapter.run(request()),
+        hasCode("ERR_CLAUDE_PROTOCOL"),
+      );
+      assert.equal(turnCalls(fixture).length, 1);
+    });
+});
+
+test("Claude streaming preserves permission precedence and retires unfinished command activity", async () => {
+  const events = [];
+  const fixture = createFixture({
+    handle({ call }) {
+      if (call.file !== "claude" || !call.argumentsList.includes("-p")) return;
+      for (const record of [
+        { type: "system", subtype: "init" },
+        {
+          type: "assistant",
+          message: {
+            id: "message",
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "command",
+                name: "Bash",
+                input: { command: "private-command" },
+              },
+            ],
+          },
+        },
+        result({
+          error: true,
+          api_error_status: 503,
+          permission_denials: [
+            { tool_name: "Bash", tool_input: { command: "git push" } },
+          ],
+        }),
+      ])
+        call.options.onStdout(
+          `${JSON.stringify({ session_id: FRESH_SESSION, ...record })}\n`,
+        );
+      throw Object.assign(new Error("private-process-error"), {
+        stdout: "",
+        stderr: "",
+      });
+    },
+  });
+  await assert.rejects(
+    fixture.adapter.run(request({ onProgress: (event) => events.push(event) })),
+    hasDiagnostic(
+      "ERR_CLAUDE_PERMISSION_DENIED",
+      "permission_forbidden_operation",
+    ),
+  );
+  assert.equal(turnCalls(fixture).length, 1);
+  assert.deepEqual(events.at(-1), {
+    kind: "local-command-completed",
+    activeCommands: 0,
+  });
+});
+
+test("redacts Claude retirement observer errors without replacing provider failures", async (t) => {
+  for (const failed of [false, true])
+    await t.test(
+      failed ? "provider failure" : "successful result",
+      async () => {
+        const fixture = createFixture({
+          handle({ call }) {
+            if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+              return;
+            for (const record of [
+              { type: "system", subtype: "init" },
+              {
+                type: "assistant",
+                message: {
+                  id: "message",
+                  role: "assistant",
+                  content: [
+                    {
+                      type: "tool_use",
+                      id: "command",
+                      name: "Bash",
+                      input: { command: "inspection" },
+                    },
+                  ],
+                },
+              },
+              result(failed ? { error: true, api_error_status: 429 } : {}),
+            ])
+              call.options.onStdout(
+                `${JSON.stringify({ session_id: FRESH_SESSION, ...record })}\n`,
+              );
+            return { stdout: "", stderr: "" };
+          },
+        });
+        await assert.rejects(
+          fixture.adapter.run(
+            request({
+              onProgress({ kind }) {
+                if (kind === "local-command-completed")
+                  throw new Error("private-observer-error");
+              },
+            }),
+          ),
+          (error) => {
+            assert.ok(
+              hasCode(
+                failed ? "ERR_CLAUDE_USAGE_LIMIT" : "ERR_CLAUDE_PROTOCOL",
+              )(error),
+            );
+            assert.doesNotMatch(error.message, /private-observer-error/u);
+            assert.equal(error.cause, undefined);
+            return true;
+          },
+        );
+        assert.equal(turnCalls(fixture).length, 1);
+      },
+    );
+});
 
 function turnCalls(fixture) {
   return fixture.calls.filter(

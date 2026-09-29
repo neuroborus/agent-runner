@@ -16,6 +16,7 @@ export function createCodexAppServerClient(
   AdapterError,
   signal,
   classifyRequestError,
+  progress,
 ) {
   if (
     child === null ||
@@ -68,6 +69,18 @@ export function createCodexAppServerClient(
   if (signal?.aborted) abort();
 
   function dispatchNotification(message) {
+    try {
+      progress?.notification(message);
+    } catch {
+      rejectAll(
+        new AdapterError("Codex progress notification is invalid.", {
+          code: "ERR_CODEX_PROTOCOL",
+          method: "progress",
+        }),
+      );
+      child.kill();
+      return;
+    }
     const waiterIndex = waiters.findIndex(
       (waiter) =>
         waiter.method === message.method && waiter.predicate(message.params),
@@ -136,7 +149,17 @@ export function createCodexAppServerClient(
             }),
         );
       } else if (message.result !== undefined) {
-        operation.resolve(message.result);
+        try {
+          progress?.response(operation.method, message.result);
+          operation.resolve(message.result);
+        } catch {
+          operation.reject(
+            new AdapterError("Codex progress response is invalid.", {
+              code: "ERR_CODEX_PROTOCOL",
+              method: "progress",
+            }),
+          );
+        }
       } else {
         operation.reject(
           new AdapterError("Codex response is missing its result.", {
@@ -202,6 +225,7 @@ export function createCodexAppServerClient(
   });
 
   async function request(method, params) {
+    progress?.begin(method, params);
     const id = nextId;
     nextId += 1;
     return new Promise((resolvePromise, rejectPromise) => {

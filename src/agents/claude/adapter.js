@@ -30,6 +30,7 @@ import {
 } from "./local-commit.js";
 import { probeClaudeIsolationPolicies } from "./native-sandbox.js";
 import { createClaudeSeccompFilter } from "./seccomp-filter.js";
+import { createClaudeStream } from "./stream.js";
 
 export const CLAUDE_BACKEND_ID = "claude";
 
@@ -86,6 +87,7 @@ const REQUIRED_HELP_FLAGS = Object.freeze([
   "--autocompact",
   "--fork-session",
   "--json-schema",
+  "--include-partial-messages",
   "--mcp-config",
   "--model",
   "--no-chrome",
@@ -98,6 +100,7 @@ const REQUIRED_HELP_FLAGS = Object.freeze([
   "--settings",
   "--strict-mcp-config",
   "--tools",
+  "--verbose",
 ]);
 const LOCAL_COMMIT_OUTPUT_SCHEMA = Object.freeze({
   type: "object",
@@ -109,7 +112,9 @@ const LOCAL_COMMIT_OUTPUT_SCHEMA = Object.freeze({
 });
 const BASE_OPTIONS = Object.freeze([
   "--output-format",
-  "json",
+  "stream-json",
+  "--verbose",
+  "--include-partial-messages",
   "--prompt-suggestions",
   "false",
   "--safe-mode",
@@ -290,11 +295,35 @@ export function classifyClaudeFailure(cause) {
   return failure;
 }
 
-function executeFile(file, argumentsList, { input, ...options }) {
-  const execution = executeFileAsync(file, argumentsList, options);
+async function executeFile(
+  file,
+  argumentsList,
+  { input, onStdout, ...options },
+) {
+  const execution = executeFileAsync(file, argumentsList, {
+    ...options,
+    ...(onStdout === undefined ? {} : { encoding: "buffer" }),
+  });
+  let outputError;
+  if (onStdout !== undefined)
+    execution.child.stdout.on("data", (chunk) => {
+      if (outputError !== undefined) return;
+      try {
+        onStdout(chunk);
+      } catch (cause) {
+        outputError = cause;
+        execution.child.kill();
+      }
+    });
   execution.child.stdin.once("error", () => execution.child.kill());
   execution.child.stdin.end(input);
-  return execution;
+  try {
+    const result = await execution;
+    if (outputError !== undefined) throw outputError;
+    return result;
+  } catch (cause) {
+    throw outputError ?? cause;
+  }
 }
 
 export class ClaudeAdapterError extends Error {
@@ -523,15 +552,6 @@ function processOutput(value) {
     return value.toString("utf8");
   }
   return "";
-}
-
-function parseJsonOutput(value) {
-  try {
-    const parsed = JSON.parse(value);
-    return isRecord(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
 }
 
 function outputSchemaFor(request) {
@@ -1479,6 +1499,13 @@ export function createClaudeAdapter(options = {}) {
     const isolationPolicy = isolationPolicies?.[request.access];
     const baseEnvironment = executionEnvironment(processEnvironment, request);
     const storage = await allocateClaudeStorage(request);
+    const stream = createClaudeStream(
+      request.onProgress,
+      () =>
+        new ClaudeAdapterError("Claude returned an invalid JSON stream.", {
+          code: "ERR_CLAUDE_PROTOCOL",
+        }),
+    );
     let processRetired = true;
     let primaryError;
     try {
@@ -1524,6 +1551,7 @@ export function createClaudeAdapter(options = {}) {
           encoding: "utf8",
           env: turnEnvironment,
           input: turnPrompt(request, recovery),
+          onStdout: stream.write,
           maxBuffer: MAX_PROCESS_OUTPUT_BYTES,
           ...(request.signal === undefined ? {} : { signal: request.signal }),
           ...(request.onProcess === undefined
@@ -1546,6 +1574,7 @@ export function createClaudeAdapter(options = {}) {
         )
           throw cause;
         request.signal?.throwIfAborted();
+        if (cause instanceof ClaudeAdapterError) throw cause;
         if (cause?.signal != null || cause?.killed === true) {
           // Even a parseable diagnostic cannot prove a killed process completed.
           throw processFailureError(request);
@@ -1562,8 +1591,9 @@ export function createClaudeAdapter(options = {}) {
           );
         }
         const standardOutput = processOutput(cause?.stdout);
-        const payload = parseJsonOutput(standardOutput);
+        const payload = stream.finish(standardOutput);
         if (payload === null) {
+          if (stream.hasRecords) stream.assertValid();
           const reportedError = outputError(
             { result: `${standardError}\n${standardOutput}`.trim() },
             request,
@@ -1596,6 +1626,7 @@ export function createClaudeAdapter(options = {}) {
             code: "ERR_CLAUDE_PROTOCOL",
           });
         }
+        stream.assertValid();
         throw outputError(payload, request, selectedSession);
       }
       if (
@@ -1612,7 +1643,12 @@ export function createClaudeAdapter(options = {}) {
           },
         );
       }
-      const payload = parseJsonOutput(processOutput(processResult.stdout));
+      const payload = stream.finish(processOutput(processResult.stdout));
+      if (
+        !Array.isArray(payload?.permission_denials) ||
+        payload.permission_denials.length === 0
+      )
+        stream.assertValid();
       const result = normalizeResult(payload, request, selectedSession);
       if (
         selectedSession?.mode === "fork" &&
@@ -1649,6 +1685,11 @@ export function createClaudeAdapter(options = {}) {
             throw primaryError;
           }
           throw cause;
+        }
+        try {
+          stream.retire();
+        } catch (cause) {
+          throw primaryError ?? cause;
         }
       }
     }

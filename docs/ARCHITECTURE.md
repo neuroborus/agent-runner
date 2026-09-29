@@ -1908,6 +1908,41 @@ isolation only. They do not apply a selected native profile and do not claim
 that its authentication or provider is usable; that is established by the
 first real turn under the effective profile.
 
+Turn requests accept an optional synchronous `onProgress` observer. The shared
+internal contract emits frozen `{ kind, activeCommands }` records only. Its
+closed kinds are `semantic`, `local-command-started`,
+`local-command-completed`, `local-tool-started`, and `local-tool-completed`.
+The nonnegative command count covers overlapping commands independently of
+other local tools. Provider-private identities correlate starts and completions;
+duplicate starts/completions and unmatched completions cannot change the count.
+Each attempt bounds its retained tool identities to 16,384 and retires remaining
+activity only after process retirement. Progress carries no native identifiers,
+payloads, commands, output, diagnostics, or timestamps. It is not public CLI/MCP
+activity and changes neither retry policy nor turn deadlines.
+Observer failures are redacted; retirement reporting cannot replace an already
+established provider failure.
+
+Codex derives progress from validated, matching thread/turn notifications for
+turn and item lifecycle events and nonempty text/reasoning/plan deltas. Up to
+1,024 payload-free facts can precede the `turn/start` reply; only facts matching
+the returned turn are delivered. Command-output deltas, unrelated turns,
+keepalives, and unknown traffic provide no semantic progress. Final turn-item
+auditing and failure classification remain authoritative.
+
+Claude consumes UTF-8 JSONL using `--output-format stream-json --verbose
+--include-partial-messages`. The private parser bounds each line to 16 MiB and
+the complete stdout stream to 64 MiB, validates message/block/session envelopes,
+and retains one terminal result for the existing structured-output, permission,
+failure, model, and session-lineage checks. Partial tool-input generation is
+semantic progress; a complete Bash tool-use starts command activity, and its
+matching tool-result completes it. Recognized background Bash tasks have their
+own correlated lifetimes. File tools report separate start/completion events.
+Token accounting, tool-progress heartbeats, and irrelevant records do not emit
+progress. Malformed, duplicate, or missing results cannot become success;
+permission failures and uncertain killed-process outcomes retain precedence.
+Owned process capture delivers bounded stdout chunks without bypassing durable
+registration, containment, cancellation, retirement, or storage cleanup.
+
 Every model-free subprocess used for version/help, Claude `socat` and isolation
 policy checks, the local-commit executor proof, or owned-process namespace
 proof has a 10-second deadline. Within that outer bound, a local-commit probe

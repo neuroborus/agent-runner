@@ -1704,6 +1704,7 @@ export async function executeOwnedProcess(file, argumentsList, options = {}) {
     encoding = "utf8",
     input,
     maxBuffer = 1024 * 1024,
+    onStdout,
     ...spawnOptions
   } = options;
   const child = spawnOwnedProcess(file, argumentsList, {
@@ -1712,19 +1713,36 @@ export async function executeOwnedProcess(file, argumentsList, options = {}) {
   });
   const output = { stdout: [], stderr: [] };
   let size = 0;
+  let outputError;
   for (const [name, stream] of [
     ["stdout", child.stdout],
     ["stderr", child.stderr],
   ]) {
     stream.on("data", (chunk) => {
       size += chunk.length;
+      if (size > maxBuffer) {
+        child.kill("SIGKILL");
+        return;
+      }
       output[name].push(chunk);
-      if (size > maxBuffer) child.kill("SIGKILL");
+      if (
+        name === "stdout" &&
+        onStdout !== undefined &&
+        outputError === undefined
+      ) {
+        try {
+          onStdout(chunk);
+        } catch (cause) {
+          outputError = cause;
+          child.kill();
+        }
+      }
     });
   }
   if (input !== undefined) child.stdin.end(input);
   else child.stdin.end();
   const supervision = await child.ownedCompletion;
+  if (outputError !== undefined) throw outputError;
   const stdout = Buffer.concat(output.stdout).toString(encoding);
   const stderr = Buffer.concat(output.stderr).toString(encoding);
   if (size > maxBuffer) {

@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-09-30
+
+- **Provider progress is an internal validated lifecycle.** Both adapters emit
+  only closed semantic/tool event kinds and an active-command count, keeping
+  overlapping commands independent and native payloads private. Codex correlates
+  App Server notifications; Claude consumes bounded stream JSON while retaining
+  terminal output, session, and failure contracts. Heartbeats and command output
+  are not semantic progress. This preparatory contract changes no public
+  activity, deadline, or retry policy.
+
 ## 2026-09-29
 
 - **Authentication recovery is one durable operator checkpoint.** Every

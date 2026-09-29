@@ -939,6 +939,7 @@ A request should contain only runner-level concepts such as:
   access: "read-only" | "workspace-write" | "local-commit",
   prompt,
   recoveryPrompt, // optional; defaults to prompt
+  onProgress, // optional synchronous observer of internal normalized progress
   effort: "current" | "low" | "medium" | "high" | "xhigh", // optional
   schema,
   session: { mode: "fork" | "continue", id }, // optional
@@ -948,6 +949,14 @@ A request should contain only runner-level concepts such as:
 ```
 
 Backend-specific CLI flags belong only inside the adapter.
+
+The optional internal progress observer receives frozen `{ kind,
+activeCommands }` records with the closed `semantic`, `local-command-started`,
+`local-command-completed`, `local-tool-started`, and `local-tool-completed`
+kinds. Only validated provider protocol events qualify; raw payloads,
+identifiers, commands, output, and heartbeats never cross this boundary. The
+count preserves overlapping command lifetimes, and remaining activity retires
+with its owned process. Progress does not change public activity or retry policy.
 
 Adapter effort is independent of the model identifier. Missing effort or
 `current` omits the native override. Codex uses its reasoning-effort control;
@@ -1244,7 +1253,7 @@ preserves the original bounded error code and recoverable classification.
 
 ### Claude Code
 
-Use non-interactive print mode with JSON output. Start in safe mode, expose only
+Use non-interactive print mode with bounded stream JSON output. Start in safe mode, expose only
 the built-in repository tools needed by the role, disable Chrome and prompt
 suggestions, and load an explicitly empty MCP configuration. Supply
 invocation-local settings that
@@ -1308,7 +1317,10 @@ permission mode: plan
 
 Do not enable bypass permissions in Reviewer or Arbiter sessions.
 
-Use `--output-format json` and `--json-schema` for machine-actionable output.
+Use `--output-format stream-json --verbose --include-partial-messages` and
+`--json-schema` for machine-actionable output. Validate bounded UTF-8 records,
+derive progress only from recognized correlated lifecycle events, and retain
+one terminal result for the existing output and failure checks.
 Reject permission denials from a non-interactive turn instead of treating a
 partial response as success. Pass an explicit model without a fallback chain
 and reject a full model ID when the result's model usage reports a different

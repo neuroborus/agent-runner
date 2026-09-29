@@ -22,6 +22,7 @@ const REQUEST_FIELDS = Object.freeze([
   "session",
   "signal",
   "onProcess",
+  "onProgress",
   "onResource",
   "storageForbiddenPaths",
 ]);
@@ -691,6 +692,8 @@ export function createAdapterContract({
       (value.signal !== undefined && !(value.signal instanceof AbortSignal)) ||
       (value.onProcess !== undefined &&
         typeof value.onProcess !== "function") ||
+      (value.onProgress !== undefined &&
+        typeof value.onProgress !== "function") ||
       (value.onResource !== undefined &&
         typeof value.onResource !== "function") ||
       (value.storageForbiddenPaths !== undefined &&
@@ -738,6 +741,9 @@ export function createAdapterContract({
       session: normalizeSession(value.session),
       ...(value.signal === undefined ? {} : { signal: value.signal }),
       ...(value.onProcess === undefined ? {} : { onProcess: value.onProcess }),
+      ...(value.onProgress === undefined
+        ? {}
+        : { onProgress: value.onProgress }),
       ...(value.onResource === undefined
         ? {}
         : { onResource: value.onResource }),

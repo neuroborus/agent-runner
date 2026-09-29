@@ -19,6 +19,7 @@ import {
   STRUCTURED_OUTPUT_FAILURE_CLASS,
 } from "../adapter-contract.js";
 import { createCodexAppServerClient } from "./app-server.js";
+import { createCodexProgress } from "./progress.js";
 import { codexAvailabilityEvidence } from "./availability.js";
 import { MAX_HTTP_ERROR_BYTES, parseHttpError } from "./http-error.js";
 import {
@@ -1177,6 +1178,12 @@ async function startTurn(client, request, threadId, prompt, workspaceStorage) {
         params.turn?.id === response.turn.id,
     );
   } catch (cause) {
+    if (
+      cause instanceof CodexAdapterError &&
+      cause.code === "ERR_CODEX_PROTOCOL" &&
+      cause.method === "progress"
+    )
+      throw cause;
     throw new CodexAdapterError("Codex turn outcome is ambiguous.", {
       ambiguous: true,
       cause,
@@ -1858,11 +1865,13 @@ export function createCodexAdapter(options = {}) {
               ownedCompletion.catch(reject);
             });
       ownedFailureSignal?.catch(() => {});
+      const progress = createCodexProgress(request.onProgress);
       const client = createCodexAppServerClient(
         child,
         CodexAdapterError,
         request.signal,
         (error, method) => classifyRequestError(error, method, request),
+        progress,
       );
       let result;
       let operationFailed = false;
@@ -1921,16 +1930,28 @@ export function createCodexAdapter(options = {}) {
         operationFailed = true;
         throw cause;
       } finally {
+        let retired = false;
         try {
           await client.close({
             retainProcess: child.ownedContainmentRetained === true,
           });
+          retired = child.ownedContainmentRetained !== true;
         } catch (cause) {
           if (!operationFailed) {
             throw cause;
           }
         } finally {
           await ownedCompletion;
+          if (retired) {
+            try {
+              progress.retire();
+            } catch {
+              if (!operationFailed)
+                throw new CodexAdapterError("Codex progress observer failed.", {
+                  code: "ERR_CODEX_PROTOCOL",
+                });
+            }
+          }
         }
       }
       return result;

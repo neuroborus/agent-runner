@@ -453,6 +453,7 @@ function createFixture({
       child.ownedCompletionState = completionState;
     }
     processes.push({
+      send,
       file,
       argumentsList,
       messages,
@@ -486,6 +487,235 @@ function request(overrides = {}) {
     ...overrides,
   };
 }
+
+test("reports only correlated Codex semantic and overlapping command progress", async () => {
+  const entered = Promise.withResolvers();
+  const events = [];
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method === "turn/start") {
+        entered.resolve(message);
+        return { pending: true };
+      }
+    },
+  });
+  await assert.rejects(
+    fixture.adapter.run(request({ onProgress: true })),
+    hasCode("ERR_INVALID_CODEX_OPTIONS"),
+  );
+  const running = fixture.adapter.run(
+    request({ onProgress: (event) => events.push(event) }),
+  );
+  const message = await entered.promise;
+  const { send } = fixture.processes[0];
+  const threadId = message.params.threadId;
+  const turnId = "progress-turn";
+  const command = (method, id, status) =>
+    send({
+      method,
+      params: {
+        threadId,
+        turnId,
+        item: {
+          id,
+          type: "commandExecution",
+          command: "private-command",
+          status,
+        },
+      },
+    });
+  try {
+    command("item/started", "first", "inProgress");
+    command("item/started", "second", "inProgress");
+    command("item/started", "first", "inProgress");
+    assert.deepEqual(events, []);
+    send({ id: message.id, result: { turn: { id: turnId } } });
+    assert.deepEqual(
+      events.map(({ activeCommands }) => activeCommands),
+      [1, 2],
+    );
+    for (const params of [
+      { threadId, turnId, itemId: "message", delta: 1 },
+      {
+        threadId: "unrelated",
+        turnId,
+        itemId: "message",
+        delta: "private-output",
+      },
+      {
+        threadId,
+        turnId: "old-turn",
+        itemId: "message",
+        delta: "private-output",
+      },
+    ])
+      send({ method: "item/agentMessage/delta", params });
+    send({
+      method: "item/commandExecution/outputDelta",
+      params: { threadId, turnId, itemId: "first", delta: "private-output" },
+    });
+    send({ method: "heartbeat", params: { threadId, turnId } });
+    command("item/completed", "unknown", "completed");
+    const fileItem = { id: "file", type: "fileChange", changes: [] };
+    send({
+      method: "item/completed",
+      params: {
+        threadId,
+        turnId,
+        item: { ...fileItem, id: "first", status: "completed" },
+      },
+    });
+    for (const [method, status] of [
+      ["item/started", "completed"],
+      ["item/completed", "inProgress"],
+    ])
+      send({
+        method,
+        params: { threadId, turnId, item: { ...fileItem, status } },
+      });
+    assert.equal(events.length, 2);
+    for (const [method, status] of [
+      ["item/started", "inProgress"],
+      ["item/completed", "completed"],
+    ])
+      send({
+        method,
+        params: { threadId, turnId, item: { ...fileItem, status } },
+      });
+    command("item/completed", "second", "completed");
+    command("item/started", "second", "inProgress");
+    send({
+      method: "item/agentMessage/delta",
+      params: { threadId, turnId, itemId: "message", delta: "private-output" },
+    });
+    command("item/completed", "first", "completed");
+  } finally {
+    send(completedTurn(threadId, turnId));
+  }
+  assert.equal((await running).output, "done");
+  assert.deepEqual(
+    events.map(({ kind, activeCommands }) => [kind, activeCommands]),
+    [
+      ["local-command-started", 1],
+      ["local-command-started", 2],
+      ["local-tool-started", 2],
+      ["local-tool-completed", 2],
+      ["local-command-completed", 1],
+      ["semantic", 1],
+      ["local-command-completed", 0],
+      ["semantic", 0],
+    ],
+  );
+  for (const event of events) {
+    assert.ok(Object.isFrozen(event));
+    assert.deepEqual(Object.keys(event), ["kind", "activeCommands"]);
+  }
+  assert.doesNotMatch(
+    JSON.stringify(events),
+    /private-|progress-turn|first|second/u,
+  );
+});
+
+test("retires Codex command activity before the existing fresh recovery", async () => {
+  const events = [];
+  const fixture = createFixture({
+    handle({ message, processIndex }) {
+      if (message.method !== "turn/start" || processIndex !== 0) return;
+      const threadId = message.params.threadId;
+      return {
+        result: { turn: { id: "failed" } },
+        notification: [
+          {
+            method: "item/started",
+            params: {
+              threadId,
+              turnId: "failed",
+              item: {
+                id: "command",
+                type: "commandExecution",
+                command: "inspection",
+                status: "inProgress",
+              },
+            },
+          },
+          failedTurn(threadId, "failed", { codexErrorInfo: "other" }),
+        ],
+      };
+    },
+  });
+  await fixture.adapter.run(
+    request({ onProgress: (event) => events.push(event) }),
+  );
+  assert.equal(fixture.processes.length, 2);
+  assert.deepEqual(
+    events.map(({ kind, activeCommands }) => [kind, activeCommands]),
+    [
+      ["local-command-started", 1],
+      ["semantic", 1],
+      ["local-command-completed", 0],
+      ["semantic", 0],
+    ],
+  );
+});
+
+test("redacts Codex retirement observer errors without replacing provider failures", async (t) => {
+  for (const failed of [false, true])
+    await t.test(
+      failed ? "provider failure" : "successful result",
+      async () => {
+        const fixture = createFixture({
+          handle({ message }) {
+            if (message.method !== "turn/start") return;
+            const threadId = message.params.threadId;
+            return {
+              result: { turn: { id: "turn" } },
+              notification: [
+                {
+                  method: "item/started",
+                  params: {
+                    threadId,
+                    turnId: "turn",
+                    item: {
+                      id: "command",
+                      type: "commandExecution",
+                      command: "inspection",
+                      status: "inProgress",
+                    },
+                  },
+                },
+                failed
+                  ? failedTurn(threadId, "turn", {
+                      codexErrorInfo: "usageLimitExceeded",
+                    })
+                  : completedTurn(threadId, "turn"),
+              ],
+            };
+          },
+        });
+        await assert.rejects(
+          fixture.adapter.run(
+            request({
+              onProgress({ kind }) {
+                if (kind === "local-command-completed")
+                  throw new Error("private-observer-error");
+              },
+            }),
+          ),
+          (error) => {
+            assert.ok(
+              hasCode(failed ? "ERR_CODEX_USAGE_LIMIT" : "ERR_CODEX_PROTOCOL")(
+                error,
+              ),
+            );
+            assert.doesNotMatch(error.message, /private-observer-error/u);
+            assert.equal(error.cause, undefined);
+            return true;
+          },
+        );
+        assert.equal(fixture.processes.length, 1);
+      },
+    );
+});
 
 test("maps portable Codex effort across sessions and commit readiness", async () => {
   for (const effort of ["low", "medium", "high", "xhigh"]) {

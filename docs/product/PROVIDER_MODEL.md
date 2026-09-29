@@ -206,6 +206,14 @@ budgets, so they are intentionally not configuration settings.
 
 Provider requests may carry runner-owned abort and process-registration
 callbacks. The adapter keeps these out of prompts and provider configuration.
+They may also carry an internal synchronous progress observer receiving only a
+closed event kind and active-command count. Validated protocol progress and
+correlated local-tool starts/completions are distinct from keepalives, token
+accounting, and raw command output. Overlapping commands retain independent
+lifetimes; activity is cleared only after matching completion or proven process
+retirement. Codex uses scoped App Server notifications; Claude uses bounded
+validated stream JSON and preserves its terminal structured-result and failure
+contracts. This internal signal adds no public activity, deadline, or retry.
 Owned supervisors wait for durable registration, including their bounded
 launch-time boot/PID/start ancestry baseline and control-group identity, before
 launching work. Live
