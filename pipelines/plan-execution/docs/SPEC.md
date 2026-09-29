@@ -3788,3 +3788,21 @@ Implementation priority:
 5. review/fix/dispute behavior;
 6. minimal code/dependencies;
 7. terminal UX.
+
+## Adapter environment recovery
+
+The root supplies adapter-owned resource journaling and cleanup. Unresolved
+cleanup uncertainty (`ERR_EXECUTION_RESOURCE_UNVERIFIABLE`) preserves the exact
+active checkpoint without accepting a provider result or fingerprint. The root
+retires owned processes and verifies/removes the allocation before another
+turn or trusted check. Fully cleaned pre-launch preparation failures use the
+existing safe provider pause and not-started launch proof, including source-fork
+recovery. Pipeline recovery then performs its existing repository
+and effect reconciliation. A stronger provider failure retains its class;
+retained-resource evidence prevents turn settlement over unfinished cleanup.
+Terminal provider failures remain durably failed after cleanup; only safe
+ownership uncertainty permits checkpoint continuation.
+No agent receives cleanup authority and no ignore/fingerprint exception hides
+scaffolding. Read-only mutation, containment failure, and ambiguous consumed
+effects keep their existing precedence. Only bounded environment class/stage
+and trusted command identity/outcome evidence may be retained, not diagnostics.

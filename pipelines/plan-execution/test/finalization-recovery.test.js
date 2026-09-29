@@ -889,30 +889,63 @@ test("replacement confirmation remains read-only and cannot commit after mutatio
   );
 });
 
-test("action-free finalization ownership uncertainty preserves its checkpoint for resume", async (t) => {
-  const failure = Object.assign(new Error("Unverifiable process retirement"), {
-    code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+test("terminal provider failure remains terminal after retained cleanup is recovered", async (t) => {
+  const failure = Object.assign(new Error("Ambiguous writable outcome"), {
+    code: "ERR_CLAUDE_PROCESS_INTERRUPTED",
+    executionResourceRetained: true,
+    failure: { retry: "terminal" },
   });
-  let failOnce = true;
   const fixture = await recoveryFixture(t, {
     initialFinalization: finalized(),
     replacements: [],
     rejections: [],
     onRoleRun(_role, request) {
-      if (request.schema === FINALIZATION_SCHEMA && failOnce) {
-        failOnce = false;
-        throw failure;
-      }
+      if (request.schema === FINALIZATION_SCHEMA) throw failure;
     },
   });
   await assert.rejects(fixture.run(), (error) => error === failure);
-  assert.equal(fixture.currentRun.pipelineState.workflowState, "FINALIZE");
+  assert.equal(fixture.currentRun.pipelineState.workflowState, "FAILED");
+  assert.equal(fixture.currentRun.pause.code, failure.code);
   assert.deepEqual(fixture.currentRun.activeTurn, {
     role: "worker",
     phase: "finalize",
   });
-  assert.equal(fixture.currentRun.pause, null);
-  const completed = await fixture.run();
-  assert.equal(completed.pipelineState.workflowState, "DONE");
-  assert.equal(calls(fixture, FINALIZATION_SCHEMA).length, 2);
+  assert.equal((await fixture.run()).pipelineState.workflowState, "FAILED");
+  assert.equal(calls(fixture, FINALIZATION_SCHEMA).length, 1);
 });
+
+for (const code of [
+  "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+  "ERR_EXECUTION_RESOURCE_UNVERIFIABLE",
+]) {
+  test(`action-free finalization ${code} preserves its checkpoint for resume`, async (t) => {
+    const failure = Object.assign(
+      new Error("Unverifiable process retirement"),
+      {
+        code,
+      },
+    );
+    let failOnce = true;
+    const fixture = await recoveryFixture(t, {
+      initialFinalization: finalized(),
+      replacements: [],
+      rejections: [],
+      onRoleRun(_role, request) {
+        if (request.schema === FINALIZATION_SCHEMA && failOnce) {
+          failOnce = false;
+          throw failure;
+        }
+      },
+    });
+    await assert.rejects(fixture.run(), (error) => error === failure);
+    assert.equal(fixture.currentRun.pipelineState.workflowState, "FINALIZE");
+    assert.deepEqual(fixture.currentRun.activeTurn, {
+      role: "worker",
+      phase: "finalize",
+    });
+    assert.equal(fixture.currentRun.pause, null);
+    const completed = await fixture.run();
+    assert.equal(completed.pipelineState.workflowState, "DONE");
+    assert.equal(calls(fixture, FINALIZATION_SCHEMA).length, 2);
+  });
+}

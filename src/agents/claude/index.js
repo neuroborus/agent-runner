@@ -6,3 +6,5 @@ export {
   createClaudeAdapter,
   validateClaudeExecutionOptions,
 } from "./adapter.js";
+
+export { CLAUDE_STORAGE_IDENTITY, recoverClaudeStorage } from "./storage.js";

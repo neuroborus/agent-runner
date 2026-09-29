@@ -101,6 +101,10 @@ if (!writable) {
     false,
   );
 }
+if (process.env.HOME === process.cwd()) process.exit(28);
+if (readFileSync(join(process.env.HOME, ".bashrc"), "utf8") !== "") process.exit(29);
+write(join(process.env.HOME, "home-probe"), false);
+write(join(process.env.TMPDIR, "temporary-probe"), true);
 write("workspace-probe", writable);
 write(join(gitDirectory, "git-probe"), false);
 write(join(outsideDirectory, "outside-probe"), false);
@@ -195,6 +199,10 @@ if (!writable) {
     false,
   );
 }
+if (process.env.HOME === process.cwd()) process.exit(28);
+if (readFileSync(join(process.env.HOME, ".bashrc"), "utf8") !== "") process.exit(29);
+write(join(process.env.HOME, "home-probe"), false);
+write(join(process.env.TMPDIR, "temporary-probe"), true);
 write("workspace-probe", writable);
 if (writable && !statSync(".claude").isDirectory()) process.exit(23);
 write(".claude/mask-probe", false);
@@ -278,7 +286,14 @@ function nativeArguments({
   if (access === "workspace-write") {
     argumentsList.push("--bind", workspaceDirectory, workspaceDirectory);
   }
-  argumentsList.push("--ro-bind", gitDirectory, gitDirectory);
+  argumentsList.push(
+    "--ro-bind",
+    workspaceDirectory,
+    workspaceDirectory,
+    "--ro-bind",
+    gitDirectory,
+    gitDirectory,
+  );
   argumentsList.push(
     "--chdir",
     workspaceDirectory,
@@ -322,6 +337,9 @@ function fallbackProbeArguments({
   if (access === "workspace-write") {
     argumentsList.push(
       "--bind",
+      workspaceDirectory,
+      workspaceDirectory,
+      "--ro-bind",
       workspaceDirectory,
       workspaceDirectory,
       "--ro-bind",
@@ -492,9 +510,12 @@ async function probePolicy({
     const emptyMaskDirectory = join(basePath, "claude-empty-probe");
     await mkdir(workspaceDirectory);
     await Promise.all(
-      [gitDirectory, outsideDirectory, emptyMaskDirectory].map((path) =>
-        mkdir(path, { mode: 0o700 }),
-      ),
+      [
+        gitDirectory,
+        outsideDirectory,
+        emptyMaskDirectory,
+        join(workspaceDirectory, ".claude"),
+      ].map((path) => mkdir(path, { mode: 0o700 })),
     );
     await initializeProbeRepositories({
       env,
@@ -538,6 +559,16 @@ async function probePolicy({
         workspaceDirectory,
       });
     } else {
+      commandLauncher = await createClaudeCommandLauncher({
+        access,
+        architecture,
+        bubblewrapBinary,
+        cwd: workspaceDirectory,
+        environment: env,
+        gitDirectories: [gitDirectory],
+        isolationPolicy: "native",
+        unsetEnvironmentNames: credentialEnvironmentNames,
+      });
       const inner = nativeArguments({
         access,
         basePath,
@@ -551,7 +582,7 @@ async function probePolicy({
         "--input-type=module",
         "-e",
         PROVIDER_PROBE_SCRIPT,
-        bubblewrapBinary,
+        commandLauncher.path,
         ...inner,
       ];
       file = providerCommand[0];
@@ -620,7 +651,8 @@ export async function probeClaudeIsolationPolicies(options) {
   for (const access of ACCESS_MODES) {
     const native = await probePolicy({ ...options, access, weaker: false });
     if (native.available) {
-      selected[access] = "native";
+      managedSettingsAvailable ??= await probeManagedSettings(options);
+      selected[access] = managedSettingsAvailable ? "native" : "unavailable";
       continue;
     }
     if (!native.nestedUserNamespaceDenied) {

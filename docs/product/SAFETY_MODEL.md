@@ -328,9 +328,10 @@ path used by each model-issued command. The launcher accepts only the supported
 Claude bubblewrap grammar, rejects malformed or weakened input before spawning,
 and strengthens the validated invocation into one user, PID, mount, and network
 boundary with private `/proc`, `/tmp`, and `/run`, a read-only host root,
-access-specific workspace writes, and read-only Git metadata. Its file and
-containing directory are non-writable during the turn, and it pins canonical
-host `bwrap` rather than resolving it through a workspace-writable path. The
+access-specific workspace writes, and read-only Git metadata. Its launcher file
+is non-writable and its private allocation is outside command write authority;
+it pins canonical host `bwrap` rather than resolving it through a
+workspace-writable path. The
 launcher verifies an exact owner-read-only x64 or arm64 Runner seccomp filter,
 unlinks the verified resource, passes its sealed descriptor to bubblewrap, and
 executes bubblewrap directly once with the single validated user namespace.
@@ -373,3 +374,17 @@ journals progress under the run lease. Matching acknowledgement evidence, not a
 lease's mere existence or unrelated state advancement, permits receipt completion.
 Public activity omits dispatch identities; persisted PIDs never grant signalling
 authority. Caller disconnect cannot release another execution's ownership.
+
+Claude sandbox scaffolding is adapter-owned content outside project and task
+trees, including tool HOME/config projections and provider temporary storage.
+Absent optional project masks cannot become host-visible mount-point files.
+Existing project masks and runner-owned workspace, Git, network, and process
+restrictions remain enforced. The repository view during execution is the same
+unfiltered view used by Git fingerprints and subsequent trusted validation.
+
+The adapter journals allocation ownership before launch. Neither cancellation
+nor owner loss grants deletion authority: process retirement and canonical
+owner/device/inode proof are required before removing the recorded allocation.
+Replacement or cleanup uncertainty retains the reservation. No output or
+fingerprint is accepted until cleanup completes; recovery reconciles the exact
+checkpoint without weakening stronger containment or consumed-effect checks.

@@ -131,11 +131,21 @@ export function pipelineRequiresWorktreeLease(pipelineId) {
   return WORKTREE_LEASE_PIPELINES.has(pipelineId);
 }
 
-function isProcessContainmentFailure(cause) {
-  return [
-    "ERR_EXECUTION_PROCESS_ACTIVE",
-    "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
-  ].includes(cause?.code);
+function isResourceOwnershipFailure(cause) {
+  return (
+    cause?.executionResourceRetained === true ||
+    cause?.code === "ERR_EXECUTION_RESOURCE_UNVERIFIABLE"
+  );
+}
+
+function isExecutionOwnershipFailure(cause) {
+  return (
+    isResourceOwnershipFailure(cause) ||
+    [
+      "ERR_EXECUTION_PROCESS_ACTIVE",
+      "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    ].includes(cause?.code)
+  );
 }
 
 export function createRunner(options = {}) {
@@ -171,6 +181,7 @@ export function createRunner(options = {}) {
   // reconciliation keeps its handle for same-owner retry and its durable
   // lease for safe reclamation after owner loss.
   const heldWorktreeLeases = new Map();
+  const retainedRunLeases = new Map();
   if (
     !isRecord(adapters) ||
     !isRecord(clarifications) ||
@@ -247,23 +258,60 @@ export function createRunner(options = {}) {
     );
   }
 
+  async function recordAdapterCleanupPending(run, lease) {
+    if (
+      run.executionResource === null ||
+      run.executionProcess !== null ||
+      stopPending(run)
+    )
+      return;
+    const activity = {
+      actor: "runner",
+      phase: "environment",
+      kind: "cleanup-pending",
+      message:
+        "Agent environment_cleanup remains pending before checkpoint acceptance.",
+    };
+    const next = await runStore.transitionRun(
+      lease,
+      {},
+      { activity, expectedRevision: run.revision },
+    );
+    await publish(activity, next);
+  }
+
   async function cleanupExecutionResource(run, lease) {
     if (run.executionResource == null) return run;
-    if (
-      run.executionProcess !== null ||
-      typeof trustedValidation.recoverResources !== "function"
-    ) {
+    const adapterRecovery = providers.ids
+      .map((id) => providers.get(id).resources)
+      .find(
+        (owner) => owner?.identity === run.executionResource.commandIdentity,
+      )?.recover;
+    const recover = adapterRecovery ?? trustedValidation.recoverResources;
+    if (run.executionProcess !== null || typeof recover !== "function") {
       throw new RunnerError(
         "Execution storage cleanup requires verified process retirement.",
         { code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE" },
       );
     }
-    await trustedValidation.recoverResources({
-      resource: run.executionResource,
-      projectPath: run.projectPath,
-      storageForbiddenPaths: storageForbiddenPaths(run),
-      onResource: (value) => runStore.recordExecutionResource(lease, value),
-    });
+    try {
+      await recover({
+        resource: run.executionResource,
+        projectPath: run.projectPath,
+        storageForbiddenPaths: storageForbiddenPaths(run),
+        onResource: (value) => runStore.recordExecutionResource(lease, value),
+      });
+    } catch (cause) {
+      try {
+        if (adapterRecovery !== undefined)
+          await recordAdapterCleanupPending(
+            await runStore.loadRun(run.runId),
+            lease,
+          );
+      } finally {
+        throw cause;
+      }
+    }
     return runStore.loadRun(run.runId);
   }
 
@@ -324,10 +372,28 @@ export function createRunner(options = {}) {
                     try {
                       const response = await monitor.invoke(
                         (value) => adapter.run(value),
-                        request,
+                        {
+                          ...request,
+                          storageForbiddenPaths: storageForbiddenPaths(run),
+                          onResource: (value) =>
+                            runStore.recordExecutionResource(lease, value),
+                        },
                       );
                       providerResponseRole = role;
                       return response;
+                    } catch (cause) {
+                      // Keep stronger provider failures intact while preventing
+                      // fingerprints or turn settlement over retained storage.
+                      const current = await runStore.loadRun(run.runId);
+                      if (current.executionResource !== null) {
+                        cause.executionResourceRetained = true;
+                        try {
+                          await recordAdapterCleanupPending(current, lease);
+                        } finally {
+                          throw cause;
+                        }
+                      }
+                      throw cause;
                     } finally {
                       await checkConfiguration();
                     }
@@ -873,7 +939,7 @@ export function createRunner(options = {}) {
       try {
         await releaseWorktreeLease(ownership, executionLease);
       } catch (cause) {
-        if (isProcessContainmentFailure(operationFailure)) {
+        if (isExecutionOwnershipFailure(operationFailure)) {
           throw operationFailure;
         }
         throw cause;
@@ -1197,7 +1263,9 @@ export function createRunner(options = {}) {
       try {
         await releaseRunLease(created.lease, created.state.runId);
       } catch (cause) {
-        if (isProcessContainmentFailure(executionFailure)) {
+        if (isResourceOwnershipFailure(executionFailure))
+          retainedRunLeases.set(created.state.runId, created.lease);
+        if (isExecutionOwnershipFailure(executionFailure)) {
           throw executionFailure;
         }
         throw cause;
@@ -1331,7 +1399,20 @@ export function createRunner(options = {}) {
 
   async function resume(input) {
     const normalized = normalizeResumeInput(input);
-    const lease = await runStore.acquireRunLease(normalized.runId);
+    const retained = retainedRunLeases.get(normalized.runId);
+    // Taking the private handle synchronously excludes concurrent resumes; all
+    // other callers still encounter the live durable lease and are rejected.
+    retainedRunLeases.delete(normalized.runId);
+    let lease;
+    try {
+      lease = await runStore.acquireRunLease(normalized.runId, retained);
+    } catch (cause) {
+      // Revalidation never releases a retained handle. Keep it for a later
+      // verified retry even when reading the lease or snapshot fails.
+      if (retained !== undefined)
+        retainedRunLeases.set(normalized.runId, retained);
+      throw cause;
+    }
     let executionFailure = null;
     try {
       const inspected = await runStore.loadRun(normalized.runId);
@@ -1360,7 +1441,15 @@ export function createRunner(options = {}) {
       try {
         await releaseRunLease(lease, normalized.runId);
       } catch (cause) {
-        if (isProcessContainmentFailure(executionFailure)) {
+        if (
+          retained !== undefined ||
+          isResourceOwnershipFailure(executionFailure)
+        )
+          retainedRunLeases.set(normalized.runId, lease);
+        if (
+          (retained !== undefined && executionFailure !== null) ||
+          isExecutionOwnershipFailure(executionFailure)
+        ) {
           throw executionFailure;
         }
         throw cause;

@@ -1284,6 +1284,12 @@ AGENT_RUNNER_LIVE_CODEX=1 npm test -- test/agents/codex.test.js
 AGENT_RUNNER_LIVE_CLAUDE=1 npm test -- test/agents/claude.test.js
 ```
 
+Claude keeps tool HOME/config projections and temporary sandbox scaffolding
+outside the project and task. Provider authentication and sessions remain
+separate. Adapter-owned cleanup must finish before content fingerprints or
+trusted checks are accepted; a cleanup reservation is recovered by resuming the
+same run, never by asking the agent to remove placeholders or changing ignores.
+
 Claude launcher changes follow the deterministic commit gate and post-install
 real acceptance procedure owned by [Testing](docs/TESTING.md).
 

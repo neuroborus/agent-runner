@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { readlinkSync } from "node:fs";
 import {
@@ -7,6 +8,7 @@ import {
   lstat,
   readdir,
   readFile,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -32,6 +34,7 @@ import {
   RunnerError,
 } from "../src/index.js";
 import { readProcessIdentity, spawnOwnedProcess } from "../src/agents/index.js";
+import { CLAUDE_STORAGE_IDENTITY } from "../src/agents/claude/index.js";
 import { resolveStopBoundary } from "../src/pipeline-registry.js";
 import { createLegacyRecoveryFixture } from "../pipelines/plan-execution/test/support/index.js";
 
@@ -2606,7 +2609,12 @@ test("settled stop releases its recovered worktree lease after publication failu
   );
 });
 
-for (const recovery of ["resume", "cancel", "configuration pause"]) {
+for (const recovery of [
+  "resume",
+  "cancel",
+  "configuration pause",
+  "Claude resume",
+]) {
   test(`retired execution storage is cleaned before ${recovery} after owner loss`, async (t) => {
     const fixture = await operatorFixture(t, "plan-execution");
     if (recovery === "configuration pause") {
@@ -2641,13 +2649,18 @@ for (const recovery of ["resume", "cancel", "configuration pause"]) {
       sourceSession: null,
     });
     const lease = await store.acquireRunLease(run.runId);
-    const root = join(fixture.stateRoot, "..", "execution-storage");
-    await mkdir(root, { mode: 0o700 });
+    const adapterOwned = recovery === "Claude resume";
+    const root = adapterOwned
+      ? join(tmpdir(), `agent-runner-claude-${process.getuid()}`)
+      : join(fixture.stateRoot, "..", "execution-storage");
+    await mkdir(root, { mode: 0o700 }).catch((cause) => {
+      if (cause.code !== "EEXIST") throw cause;
+    });
     const rootInfo = await lstat(root, { bigint: true });
     const intent = {
-      id: "55555555-5555-4555-8555-555555555555",
+      id: adapterOwned ? randomUUID() : "55555555-5555-4555-8555-555555555555",
       hostname: hostname(),
-      commandIdentity: "a".repeat(64),
+      commandIdentity: adapterOwned ? CLAUDE_STORAGE_IDENTITY : "a".repeat(64),
       phase: "allocating",
       root: {
         path: root,
@@ -2658,6 +2671,10 @@ for (const recovery of ["resume", "cancel", "configuration pause"]) {
     };
     await store.recordExecutionResource(lease, intent);
     const path = join(root, intent.id);
+    t.after(async () => {
+      await rm(path, { force: true, recursive: true });
+      await rm(`${path}-retained`, { force: true, recursive: true });
+    });
     await mkdir(path, { mode: 0o700 });
     const directory = await lstat(path, { bigint: true });
     await store.recordExecutionResource(lease, {
@@ -2683,27 +2700,97 @@ for (const recovery of ["resume", "cancel", "configuration pause"]) {
       processIdentity: (pid) => ({ bootId: bootB, startTicks: String(pid) }),
     });
     const interruption = new Error("Reached provider after recovery");
+    const leaseInspectionFailure = new Error(
+      "Transient lease inspection failure",
+    );
+    let failLeaseInspection = false;
     let providerCalls = 0;
     const recoveredRunner = runnerFor(
       fixture,
       {
         codex: {
           ...delegate,
-          async run() {
+          async run(request) {
             providerCalls++;
             const saved = await recoveredStore.loadRun(run.runId);
             assert.equal(saved.executionProcess, null);
             assert.equal(saved.executionResource, null);
-            assert.deepEqual(await readdir(root), []);
+            await assert.rejects(lstat(path), { code: "ENOENT" });
+            if (adapterOwned) {
+              // A terminal provider failure may also leave a cleanup record.
+              // Resume must retire it without invoking another provider turn.
+              await request.onResource(intent);
+              await mkdir(path, { mode: 0o700 });
+              const allocated = await lstat(path, { bigint: true });
+              await request.onResource({
+                ...intent,
+                phase: "allocated",
+                directory: {
+                  device: String(allocated.dev),
+                  inode: String(allocated.ino),
+                },
+              });
+            }
             throw interruption;
           },
         },
       },
       {
-        runStore: recoveredStore,
+        runStore: {
+          ...recoveredStore,
+          async acquireRunLease(...args) {
+            if (failLeaseInspection) {
+              failLeaseInspection = false;
+              throw leaseInspectionFailure;
+            }
+            return recoveredStore.acquireRunLease(...args);
+          },
+        },
         trustedValidation: createTrustedValidationService(),
       },
     );
+    if (adapterOwned) {
+      const ownedPath = `${path}-retained`;
+      await rename(path, ownedPath);
+      await mkdir(path, { mode: 0o700 });
+      await writeFile(join(path, "replacement"), "unowned");
+      const beforeCleanup = await recoveredStore.loadRun(run.runId);
+      await assert.rejects(
+        recoveredRunner.resume({ runId: run.runId, action: null }),
+        { code: "ERR_EXECUTION_RESOURCE_UNVERIFIABLE" },
+      );
+      const blocked = await recoveredStore.loadRun(run.runId);
+      assert.deepEqual(blocked.pipelineState, beforeCleanup.pipelineState);
+      assert.deepEqual(
+        blocked.executionResource,
+        beforeCleanup.executionResource,
+      );
+      assert.ok(
+        (await recoveredStore.loadRunHistory(run.runId)).events.some(
+          (event) => event.activity?.kind === "cleanup-pending",
+        ),
+      );
+      assert.equal(providerCalls, 0);
+      failLeaseInspection = true;
+      await assert.rejects(
+        recoveredRunner.resume({ runId: run.runId, action: null }),
+        (cause) => cause === leaseInspectionFailure,
+      );
+      await assert.rejects(
+        recoveredRunner.resume({
+          runId: run.runId,
+          action: null,
+          expectedRevision: blocked.revision - 1,
+        }),
+        { code: "ERR_RUN_REVISION_CHANGED" },
+      );
+      assert.equal(
+        await readFile(join(path, "replacement"), "utf8"),
+        "unowned",
+      );
+      await rm(path, { recursive: true });
+      await rename(ownedPath, path);
+    }
     if (recovery === "cancel") {
       const current = await recoveredStore.loadRun(run.runId);
       await recoveredRunner.requestOperatorStop({
@@ -2734,14 +2821,29 @@ for (const recovery of ["resume", "cancel", "configuration pause"]) {
     } else {
       await assert.rejects(
         recoveredRunner.resume({ runId: run.runId, action: null }),
-        { name: "AgentBoundaryError" },
+        (cause) => {
+          assert.equal(cause.name, "AgentBoundaryError", cause.code);
+          return true;
+        },
       );
       assert.equal(providerCalls, 1);
+      if (adapterOwned) {
+        const failed = await recoveredStore.loadRun(run.runId);
+        assert.equal(failed.pipelineState.workflowState, "FAILED");
+        assert.notEqual(failed.executionResource, null);
+        const recovered = await recoveredRunner.resume({
+          runId: run.runId,
+          action: null,
+        });
+        assert.equal(recovered.run.pipelineState.workflowState, "FAILED");
+        assert.equal(recovered.run.pause.code, failed.pause.code);
+        assert.equal(providerCalls, 1);
+      }
     }
     const saved = await recoveredStore.loadRun(run.runId);
     assert.equal(saved.executionProcess, null);
     assert.equal(saved.executionResource, null);
-    assert.deepEqual(await readdir(root), []);
+    await assert.rejects(lstat(path), { code: "ENOENT" });
     assert.equal(await recoveredStore.runIsLeased(run.runId), false);
   });
 }

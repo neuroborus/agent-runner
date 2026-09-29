@@ -465,6 +465,25 @@ reproduce the saved architecture-specific receipt. If it cannot, preserve the
 run and repair the installed Claude, bubblewrap, or host environment instead of
 editing durable state or forcing weaker settings.
 
+Claude uses adapter-owned HOME/config projections and temporary scaffolding
+outside the project and task. Provider login/profile/session access is separate.
+Missing optional dotfiles or tooling directories must not appear in project Git
+status while commands run. Do not add ignores or ask the agent to remove
+sandbox placeholders.
+
+A pre-launch `ERR_AGENT_ENVIRONMENT_PREPARATION` pauses at the safe checkpoint.
+A turn-time `ERR_EXECUTION_RESOURCE_UNVERIFIABLE` retains the checkpoint and
+storage reservation. Restore the environment and resume the same run so the
+runner can retire processes, verify storage identity, clean it, and reconcile
+repository effects before continuing. Never delete or replace its ownership
+record. The bounded failure class distinguishes environment preparation from
+cleanup; trusted command identities and exit/signal/timeout outcomes continue
+to distinguish actual check failures without retaining raw provider output.
+A stronger containment or ambiguous-effect failure is not reclassified as safe.
+Terminal provider failures remain failed after their storage is cleaned; cleanup
+recovery does not authorize another provider turn.
+After this policy update, start fresh runs: existing receipts remain immutable.
+
 Read-only and local-commit readiness turns use Claude's autonomous permission
 mode only after that access mode's sandbox has been proved. They expose only
 repository inspection tools and permit compound Git and filesystem inspection

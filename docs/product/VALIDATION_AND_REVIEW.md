@@ -284,6 +284,20 @@ An unexpected runner-owned finalization-state invariant retains the last valid
 `FINALIZE` checkpoint with a bounded explicit retry instead of turning the run
 into an opaque terminal failure.
 
+Provider environment preparation is distinct from a repository-check failure.
+Claude projections and scaffolding stay outside the validation tree while an
+agent runs and are retired before the runner accepts its fingerprints or
+executes trusted commands. Setup/cleanup uncertainty retains the precise
+checkpoint and ownership record for safe reconciliation; it does not become a
+finding asking the agent to delete protected files. Ignore rules and fingerprint
+exclusions cannot hide pollution.
+
+Preparation/cleanup failures expose a finite class and checkpoint. Trusted
+validation continues to retain the exact command identity and bounded outcome,
+including exit status, signal, and timeout, without storing raw diagnostics.
+A successful environment preparation does not attest a check, and a check's
+nonzero exit is still a finalization failure requiring correction.
+
 ## Commit and handoff gates
 
 Finalization is staging-independent. Agent turns do not stage, inspect the

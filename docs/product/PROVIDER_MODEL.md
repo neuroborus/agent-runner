@@ -53,8 +53,9 @@ records `commitExecutor: "not_started"`; the boundary derives
 Providers are registered through one frozen, source-controlled descriptor list.
 Each descriptor binds a backend ID to its adapter factory, execution-option
 validation, trusted-profile rules, source-session capability, and native
-failure hook. That hook supplies a finite class set and converts native evidence
-to the shared failure record. Configuration, runner construction and source
+failure hook, plus an optional adapter-owned resource recovery hook. The failure
+hook supplies a finite class set and converts native evidence to the shared
+failure record. Configuration, runner construction and source
 checks, failure normalization, and MCP backend discovery all consume that list.
 Adding a backend requires only a descriptor and its adapter implementation,
 rather than a plugin installation or provider branches in pipeline, runner,
@@ -63,6 +64,20 @@ CLI, or MCP policy.
 Tests may inject a complete fake descriptor to prove the seam. Production
 registration is fixed at process startup and does not load descriptors from
 configuration, target repositories, provider storage, or the network.
+
+Claude owns its tool HOME/config projections, launcher, and temporary
+scaffolding outside project/task trees. Missing optional paths never authorize
+cwd-relative placeholders. Existing project restrictions remain effective;
+provider authentication, profiles, and native sessions retain their own access.
+Both native and fallback policy receipts bind this lifecycle. A receipt from an
+older projection policy is incompatible rather than silently replaced.
+
+Allocation is journaled before a turn launches. Normal teardown and owner-loss
+recovery require verified process retirement and identity-checked deletion.
+Cleanup uncertainty retains ownership and prevents content acceptance. Safe
+preparation/cleanup failures preserve the exact suspended checkpoint; stronger
+containment or ambiguous-effect failures retain their original classification.
+Agents never perform adapter cleanup, and Codex's lifecycle is unchanged.
 
 ## Sessions and context
 

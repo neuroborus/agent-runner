@@ -6474,7 +6474,18 @@ ${evidence}`,
     }
   } catch (cause) {
     if (cause?.code === "ERR_AVAILABILITY_RECOVERY") throw cause;
-    if (isOwnershipFailure(cause)) throw cause;
+    if (isOwnershipFailure(cause)) {
+      if (
+        cause.executionResourceRetained === true &&
+        cause.failure?.retry === "terminal" &&
+        ![
+          "ERR_EXECUTION_PROCESS_ACTIVE",
+          "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+        ].includes(cause.code)
+      )
+        return fail(cause);
+      throw cause;
+    }
     if (cause?.code === "ERR_PROJECT_CONFIGURATION_CHANGED") {
       throw cause;
     }
@@ -6519,8 +6530,12 @@ ${evidence}`,
 }
 
 function isOwnershipFailure(cause) {
-  return [
-    "ERR_EXECUTION_PROCESS_ACTIVE",
-    "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
-  ].includes(cause?.code);
+  return (
+    cause?.executionResourceRetained === true ||
+    [
+      "ERR_EXECUTION_PROCESS_ACTIVE",
+      "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+      "ERR_EXECUTION_RESOURCE_UNVERIFIABLE",
+    ].includes(cause?.code)
+  );
 }

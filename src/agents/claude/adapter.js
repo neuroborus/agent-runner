@@ -1,7 +1,7 @@
 import { execFile as executeFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { realpath } from "node:fs/promises";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { mkdir, realpath } from "node:fs/promises";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { executeOwnedProcess } from "../owned-process.js";
@@ -15,6 +15,7 @@ import {
   isolateGitEnvironment,
   STRUCTURED_OUTPUT_FAILURE_CLASS,
 } from "../adapter-contract.js";
+import { allocateClaudeStorage, environmentError } from "./storage.js";
 import { claudeAvailabilityReason } from "./availability.js";
 import {
   CLAUDE_COMMAND_LAUNCHER_TOKEN,
@@ -45,6 +46,8 @@ const CLAUDE_DIAGNOSTIC_CLASSES = new Set([
   "configuration_unavailable",
   "continuation_session_unavailable",
   "context_exhausted",
+  "environment_preparation",
+  "environment_cleanup",
   "permission_capability",
   "permission_forbidden_operation",
   "permission_unclassified",
@@ -64,6 +67,8 @@ const RECOVERABLE_CLAUDE_DIAGNOSTIC_CLASSES = new Set([
   "configuration_unavailable",
   "continuation_session_unavailable",
   "context_exhausted",
+  "environment_preparation",
+  "environment_cleanup",
   "permission_capability",
   "provider_unavailable",
   "read_only_execution_failed",
@@ -615,10 +620,10 @@ function cliSettings(
   credentialEnvironmentNames,
   isolationPolicy,
 ) {
-  const deniedWritePaths =
-    request.access === "workspace-write"
-      ? gitDirectories
-      : [request.cwd, ...gitDirectories];
+  // Keep Claude's mount preparation read-only so it neither creates nor
+  // registers absent project paths for cleanup. The authenticated launcher
+  // supplies the exact runner-authorized workspace access.
+  const deniedWritePaths = [request.cwd, ...gitDirectories];
   return JSON.stringify({
     attribution: { commit: "", pr: "", sessionUrl: false },
     autoCompactEnabled: true,
@@ -650,6 +655,7 @@ function cliSettings(
       },
       filesystem: {
         disabled: false,
+        allowWrite: [],
         denyWrite: [...new Set(deniedWritePaths)],
       },
       network: {
@@ -1288,8 +1294,8 @@ export function createClaudeAdapter(options = {}) {
             contract: Object.values(isolationPolicies).includes(
               "runner-boundary",
             )
-              ? "claude-command-boundary-v7"
-              : "claude-isolation-v1",
+              ? "claude-command-boundary-v8"
+              : "claude-isolation-v2",
             policies: isolationPolicies,
             version: version.text,
           }),
@@ -1452,26 +1458,28 @@ export function createClaudeAdapter(options = {}) {
     const selectedSession = session === undefined ? request.session : session;
     const isolationPolicy = isolationPolicies?.[request.access];
     const baseEnvironment = executionEnvironment(processEnvironment, request);
-    let commandLauncher;
-    if (isolationPolicy === "runner-boundary") {
+    const storage = await allocateClaudeStorage(request);
+    let processRetired = true;
+    let primaryError;
+    try {
+      let commandLauncher;
       try {
+        await mkdir(join(storage.directory, "tmp"), { mode: 0o700 });
         commandLauncher = await createClaudeCommandLauncher({
           access: request.access,
           architecture,
           bubblewrapBinary: BUBBLEWRAP_BINARY,
           cwd: request.cwd,
+          directory: storage.directory,
           environment: baseEnvironment,
           gitDirectories,
+          isolationPolicy,
           unsetEnvironmentNames: credentialEnvironmentNames,
         });
-      } catch (cause) {
-        throw new ClaudeAdapterError(
-          "Claude command isolation is unavailable.",
-          { cause, code: "ERR_CLAUDE_ISOLATION" },
-        );
+        await storage.verify();
+      } catch {
+        throw environmentError("preparation");
       }
-    }
-    try {
       const argumentsList = commandArguments(
         request,
         gitDirectories,
@@ -1480,10 +1488,10 @@ export function createClaudeAdapter(options = {}) {
         isolationPolicy,
         commandLauncher?.path,
       );
-      const turnEnvironment =
-        commandLauncher === undefined
-          ? baseEnvironment
-          : commandLauncher.environment(baseEnvironment);
+      const turnEnvironment = commandLauncher.environment({
+        ...baseEnvironment,
+        TMPDIR: join(storage.directory, "tmp"),
+      });
       let processResult;
       try {
         request.signal?.throwIfAborted();
@@ -1501,12 +1509,15 @@ export function createClaudeAdapter(options = {}) {
           ...(request.onProcess === undefined
             ? {}
             : {
-                onProcess: request.onProcess,
+                onProcess: async (pid, proof) => {
+                  if (pid !== null) processRetired = false;
+                  await request.onProcess(pid, proof);
+                  if (pid === null) processRetired = true;
+                },
                 ownershipMode: "native-sandbox-provider",
               }),
         });
       } catch (cause) {
-        request.signal?.throwIfAborted();
         if (
           [
             "ERR_EXECUTION_PROCESS_ACTIVE",
@@ -1514,6 +1525,7 @@ export function createClaudeAdapter(options = {}) {
           ].includes(cause?.code)
         )
           throw cause;
+        request.signal?.throwIfAborted();
         if (cause?.signal != null || cause?.killed === true) {
           // Even a parseable diagnostic cannot prove a killed process completed.
           throw processFailureError(request);
@@ -1600,23 +1612,23 @@ export function createClaudeAdapter(options = {}) {
         );
       }
       return result;
+    } catch (cause) {
+      primaryError = cause;
+      throw cause;
     } finally {
-      if (commandLauncher !== undefined) {
+      // An unretired process may still use its storage. Recovery owns cleanup
+      // under the execution lease after proving that every descendant retired.
+      if (processRetired) {
         try {
-          await commandLauncher.remove();
+          await storage.remove();
         } catch (cause) {
-          throw new ClaudeAdapterError(
-            "Claude command isolation cleanup failed.",
-            {
-              ambiguous: request.access === "workspace-write",
-              cause,
-              code: "ERR_CLAUDE_ISOLATION",
-              diagnosticClass:
-                request.access === "workspace-write"
-                  ? "writable_process_ambiguous"
-                  : undefined,
-            },
-          );
+          if (
+            primaryError?.ambiguous === true ||
+            primaryError?.failure?.retry === "terminal"
+          ) {
+            throw primaryError;
+          }
+          throw cause;
         }
       }
     }
@@ -1703,6 +1715,19 @@ export function createClaudeAdapter(options = {}) {
         throw cause;
       }
       if (!(cause instanceof ClaudeAdapterError)) {
+        if (
+          request.access === "local-commit" &&
+          [
+            "ERR_AGENT_ENVIRONMENT_PREPARATION",
+            "ERR_EXECUTION_RESOURCE_UNVERIFIABLE",
+          ].includes(cause?.code)
+        ) {
+          cause.failure = {
+            ...cause.failure,
+            checkpoint: "commit",
+            commitExecutor: "not_started",
+          };
+        }
         throw cause;
       }
       if (cause.code === "ERR_CLAUDE_USAGE_LIMIT") {

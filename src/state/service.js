@@ -638,17 +638,24 @@ export function createRunStore({
     return Object.freeze({ projectPath: project, taskPath: task });
   }
 
-  async function acquireRunLease(runId) {
+  async function acquireRunLease(runId, retainedLease) {
+    if (retainedLease !== undefined && retainedLease?.runId !== runId) {
+      throw new RunStoreError(
+        "Retained execution lease belongs to another run.",
+        { code: "ERR_INVALID_RUN_LEASE" },
+      );
+    }
     const runDirectory = await getRunDirectory(runId);
     await loadSnapshot(runDirectory, runId);
-    const lease = await runLeases.acquire(runDirectory, runId);
+    const lease =
+      retainedLease ?? (await runLeases.acquire(runDirectory, runId));
     try {
       await runLeases.runExclusive(lease, () =>
         loadSnapshot(runDirectory, runId),
       );
       return lease;
     } catch (cause) {
-      await lease.release();
+      if (retainedLease === undefined) await lease.release();
       throw cause;
     }
   }

@@ -2,6 +2,8 @@ import { isAbsolute, resolve } from "node:path";
 
 import {
   CLAUDE_BACKEND_ID,
+  CLAUDE_STORAGE_IDENTITY,
+  recoverClaudeStorage,
   CLAUDE_FAILURE_CLASSES,
   classifyClaudeFailure,
   createClaudeAdapter,
@@ -115,6 +117,10 @@ const BUILTIN_PROVIDER_DESCRIPTORS = Object.freeze([
   }),
   Object.freeze({
     id: CLAUDE_BACKEND_ID,
+    resources: Object.freeze({
+      identity: CLAUDE_STORAGE_IDENTITY,
+      recover: recoverClaudeStorage,
+    }),
     createAdapter: createClaudeAdapter,
     validateExecutionOptions: validateClaudeExecutionOptions,
     trustedProfile: Object.freeze({
@@ -135,6 +141,12 @@ function normalizeDescriptor(value, index) {
   if (
     !isRecord(value) ||
     !BACKEND_ID_PATTERN.test(value.id) ||
+    (value.resources !== undefined &&
+      (!isRecord(value.resources) ||
+        Reflect.ownKeys(value.resources).length !== 2 ||
+        typeof value.resources.identity !== "string" ||
+        !/^[a-f0-9]{64}$/u.test(value.resources.identity) ||
+        typeof value.resources.recover !== "function")) ||
     typeof value.createAdapter !== "function" ||
     typeof value.validateExecutionOptions !== "function" ||
     !isRecord(value.trustedProfile) ||
@@ -167,6 +179,14 @@ function normalizeDescriptor(value, index) {
   }
   return Object.freeze({
     id: value.id,
+    ...(value.resources === undefined
+      ? {}
+      : {
+          resources: Object.freeze({
+            identity: value.resources.identity,
+            recover: value.resources.recover,
+          }),
+        }),
     createAdapter: value.createAdapter,
     validateExecutionOptions: value.validateExecutionOptions,
     trustedProfile: Object.freeze({
@@ -193,6 +213,14 @@ export function createProviderRegistry(
   const normalized = Object.freeze(descriptors.map(normalizeDescriptor));
   if (new Set(normalized.map(({ id }) => id)).size !== normalized.length) {
     throw new ProviderRegistryError("Provider backend IDs must be unique.");
+  }
+  const resourceIds = normalized.flatMap(({ resources }) =>
+    resources === undefined ? [] : [resources.identity],
+  );
+  if (new Set(resourceIds).size !== resourceIds.length) {
+    throw new ProviderRegistryError(
+      "Provider resource identities must be unique.",
+    );
   }
   const byId = new Map(
     normalized.map((descriptor) => [descriptor.id, descriptor]),

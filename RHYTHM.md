@@ -7,6 +7,17 @@ remain in the owning documentation.
 
 ## 2026-09-29
 
+- **Claude scaffolding belongs to the adapter, outside the validation tree.**
+  Both sandbox policies project tool HOME/config separately from provider
+  authentication and sessions. Read-only mount preparation prevents optional
+  project placeholders and provider cleanup bookkeeping; the launcher applies
+  the exact authorized workspace access afterward. The adapter journals its
+  allocation before launch and cleans only identity-verified storage after
+  process retirement, including owner recovery. Preparation/cleanup uncertainty
+  preserves the checkpoint; stronger safety and commit-effect checks still win.
+  Agents never clean scaffolding or hide it through ignores, and updated immutable
+  receipts require fresh policy proofs.
+
 - **Action-free ownership uncertainty keeps its checkpoint.** Process-proof
   failures retain the active turn, including finalization, until exclusive
   retirement and repository reconciliation permit continuation. CLI and MCP

@@ -1859,9 +1859,10 @@ transport retain the host environment and network path. The invocation-local
 spawning-parent policy selects the short-lived launcher only when Claude starts
 a sandboxed command without changing the provider's `PATH`. The launcher pins
 the canonical host `bwrap` executable before the turn instead of resolving it
-through a potentially workspace-writable path. The Runner keeps the launcher
-and its directory non-writable during the turn and restores directory write
-permission only for cleanup.
+through a potentially workspace-writable path. The launcher file is non-writable.
+Its owner-only allocation is outside the project, task, and state trees, and
+command namespaces cannot write the allocation. The adapter retains directory
+authority for teardown.
 The authenticated launcher accepts one closed Claude bubblewrap grammar: the
 session and parent-lifetime flags; unique environment removals or non-protected
 assignments; network unsharing; a read-only root followed by supported bind,
@@ -1940,6 +1941,65 @@ environment, and bounded time and output; they retain no host diagnostic and
 never apply a profile, authenticate, or invoke a model.
 The local-commit executor proof remains independent and `localCommit` requires
 both the local-commit turn policy and executor proof.
+Both policies now install an authenticated adapter-owned projection launcher.
+The native launcher preserves the native namespace/seccomp invocation; only the
+restricted-host launcher replaces its known weaker topology. Both preserve
+existing descendant masks. Claude prepares its filesystem arguments with an
+explicit read-only project reservation and no extra configured write paths;
+this prevents it from registering absent project targets for creation or later
+cleanup. The authenticated launcher replaces only that exact reservation with
+the runner-authorized workspace access. Writable access requires both the
+original workspace bind and the preparation reservation. All project bind,
+directory, tmpfs, device, and proc targets must resolve before bubblewrap starts.
+Missing `.bashrc`, `.gitconfig`, `.mcp.json`, editor directories, and `.claude`
+tooling paths must never be materialized inside a writable project bind. No project file is
+ignored, filtered from a fingerprint, or cleaned by an agent.
+
+Commands receive an empty, read-only HOME/config projection with private
+namespace-local temporary, cache, and runtime directories. The real provider
+HOME, authentication environment, selected config directory, and session store
+remain separate and unchanged. Provider temporary scaffolding and the fallback
+filter's temporary files belong to the same allocation. Probes exercise the
+projection launcher too; the contract revisions are `claude-isolation-v2` and
+`claude-command-boundary-v8`. Old receipts cannot authorize the new policy.
+
+Before a turn launches, the adapter journals allocation intent and then the
+private directory's device/inode identity through the optional `onResource`
+request callback. The stop monitor serializes that callback with process and
+stop-activity writes; cancellation does not cancel cleanup persistence.
+`storageForbiddenPaths` supplies the task/state exclusions in
+addition to cwd. The existing execution-resource slot holds the frozen adapter
+preparation identity in `commandIdentity`; this identity never selects or
+attests a trusted validation command. A provider descriptor may register one
+unique resource identity and recovery hook. The runner dispatches retirement
+cleanup through this hook without provider branches or changes to Codex.
+
+Cleanup verifies the host, canonical private root, owner, permissions, and child
+identity, pins the root descriptor, removes only the recorded child, syncs the
+parent, and journals removal. Missing children permit interrupted-removal
+recovery; replaced or unverifiable storage remains blocking. Cleanup occurs
+only after process and descendant retirement, before a response, fingerprint,
+trusted validation, or commit executor can be accepted. Owner-loss resume and
+operator stops use the same adapter cleanup under exclusive leases. A still-live
+runner retains its private run/worktree lease handles after resource cleanup
+failure; a sequential retry revalidates the run token through the state mutation
+boundary before reuse, retaining the handle if inspection itself fails.
+Concurrent resumes and other owners remain excluded, and stale revisions remain
+errors. Restart uses normal stale-owner reclamation.
+`ERR_EXECUTION_RESOURCE_UNVERIFIABLE` preserves the active checkpoint for
+repository/effect reconciliation on resume. A fully cleaned pre-launch failure
+uses `ERR_AGENT_ENVIRONMENT_PREPARATION` and the existing safe provider pause,
+including proven not-started source-fork recovery. Errors retain only finite
+`environment_preparation` or `environment_cleanup` class/checkpoint evidence.
+A journaled `environment/cleanup-pending` activity distinguishes unfinished
+adapter cleanup from a repository check without retaining raw diagnostics.
+A stronger provider or containment failure is preserved; the root marks retained
+resource ownership so pipelines cannot accept content or finish the turn over
+it. Terminal provider failures are persisted as failed checkpoints while their
+cleanup reservations remain owned; subsequent cleanup cannot replay the turn.
+Process-proof uncertainty stays resumable. Consumed commit effects remain
+verification-only.
+
 The provider-private policy identity binds the installed CLI version, selected
 isolation policy, complete effective permission, tool, deny, and sandbox policy,
 and, for fallback access, the direct-filter contract, architecture, and exact

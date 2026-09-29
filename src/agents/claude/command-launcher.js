@@ -4,6 +4,8 @@ import {
   access,
   chmod,
   mkdtemp,
+  mkdir,
+  lstat,
   realpath,
   rm,
   stat,
@@ -11,6 +13,13 @@ import {
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
+
+import {
+  createToolHome,
+  nativeLauncherSource,
+  projectionSource,
+  toolHomeArguments,
+} from "./projection.js";
 
 import { createClaudeSeccompFilter } from "./seccomp-filter.js";
 
@@ -111,6 +120,7 @@ function launcherSource({
   canonicalCwd,
   canonicalGitDirectories,
   canonicalTemporaryRoot,
+  privateTemporaryRoot,
   claudeWritablePaths,
   cwd,
   filter,
@@ -119,6 +129,7 @@ function launcherSource({
   gitDirectories,
   hiddenDirectory,
   token,
+  home,
   unsetEnvironmentNames,
 }) {
   return `#!${process.execPath}
@@ -171,7 +182,9 @@ const protectedEnvironmentNames = new Set(${JSON.stringify([
     CLAUDE_COMMAND_LAUNCHER_TOKEN,
     ...unsetEnvironmentNames,
   ])});
-const sourceArguments = process.argv.slice(2);
+${projectionSource({ access, cwd, home, injectHome: false })}
+let sourceArguments;
+try { sourceArguments = projectArguments(process.argv.slice(2)); } catch { process.exit(125); }
 const validatedArguments = [];
 const presentUnsetEnvironmentNames = [];
 const environmentOperations = new Set();
@@ -270,7 +283,7 @@ function createSeccompDescriptor() {
       !Number.isInteger(constants.O_NOFOLLOW)
     ) throw new Error("invalid filter");
     directory = mkdtempSync(
-      join(canonicalTemporaryRoot, "agent-runner-claude-seccomp-"),
+      join(${JSON.stringify(privateTemporaryRoot)}, "agent-runner-claude-seccomp-"),
     );
     path = join(directory, "filter.bpf");
     writeDescriptor = openSync(
@@ -546,6 +559,7 @@ try {
     [
       ...validatedArguments,
       ...${JSON.stringify(finalArguments)},
+      ...${JSON.stringify(toolHomeArguments(home))},
       "--seccomp",
       "3",
       ...missingUnsetArguments,
@@ -576,6 +590,8 @@ process.exit(result.status ?? 125);
 
 export async function createClaudeCommandLauncher({
   access,
+  directory,
+  isolationPolicy = "runner-boundary",
   architecture = process.arch,
   bubblewrapBinary,
   cwd,
@@ -584,8 +600,26 @@ export async function createClaudeCommandLauncher({
   unsetEnvironmentNames,
 }) {
   let launcherDirectory;
+  let launcherIdentity;
+  async function remove() {
+    const current = await lstat(launcherDirectory);
+    if (
+      !launcherIdentity ||
+      current.dev !== launcherIdentity.dev ||
+      current.ino !== launcherIdentity.ino ||
+      !current.isDirectory() ||
+      (await realpath(launcherDirectory)) !== launcherDirectory
+    ) {
+      throw new Error("Claude launcher identity changed.");
+    }
+    await chmod(launcherDirectory, 0o700);
+    await rm(launcherDirectory, { force: true, recursive: true });
+  }
   try {
-    const filter = createClaudeSeccompFilter(architecture);
+    const filter =
+      isolationPolicy === "runner-boundary"
+        ? createClaudeSeccompFilter(architecture)
+        : undefined;
     const temporaryRoot = await realpath(tmpdir());
     const canonicalCwd = await realpath(cwd);
     const canonicalGitDirectories = await Promise.all(
@@ -608,9 +642,14 @@ export async function createClaudeCommandLauncher({
     ) {
       throw new Error("Claude command isolation executable is unsafe.");
     }
-    launcherDirectory = await mkdtemp(
-      join(temporaryRoot, "agent-runner-claude-command-"),
-    );
+    launcherDirectory =
+      directory === undefined
+        ? await mkdtemp(join(temporaryRoot, "agent-runner-claude-command-"))
+        : join(directory, "launcher");
+    if (directory !== undefined)
+      await mkdir(launcherDirectory, { mode: 0o700 });
+    launcherIdentity = await lstat(launcherDirectory);
+    const home = await createToolHome(launcherDirectory);
     const path = join(launcherDirectory, "bwrap");
     const packagePath = join(launcherDirectory, "package.json");
     const token = randomUUID();
@@ -618,33 +657,45 @@ export async function createClaudeCommandLauncher({
       access,
       cwd,
       gitDirectories,
-      hiddenDirectory: launcherDirectory,
+      hiddenDirectory: directory ?? launcherDirectory,
     });
     await Promise.all([
       writeFile(
         path,
-        launcherSource({
-          access,
-          bubblewrapBinary: resolvedBubblewrapBinary,
-          canonicalCwd,
-          canonicalGitDirectories,
-          canonicalTemporaryRoot: temporaryRoot,
-          claudeWritablePaths,
-          cwd,
-          filter,
-          filesystemArguments,
-          finalArguments,
-          gitDirectories,
-          hiddenDirectory: launcherDirectory,
-          token,
-          unsetEnvironmentNames,
-        }),
+        isolationPolicy === "native"
+          ? nativeLauncherSource({
+              bubblewrapBinary: resolvedBubblewrapBinary,
+              cwd,
+              home,
+              tokenName: CLAUDE_COMMAND_LAUNCHER_TOKEN,
+              token,
+              unsetEnvironmentNames,
+              access,
+            })
+          : launcherSource({
+              access,
+              bubblewrapBinary: resolvedBubblewrapBinary,
+              canonicalCwd,
+              canonicalGitDirectories,
+              canonicalTemporaryRoot: temporaryRoot,
+              privateTemporaryRoot: directory ?? temporaryRoot,
+              claudeWritablePaths,
+              cwd,
+              filter,
+              filesystemArguments,
+              finalArguments,
+              gitDirectories,
+              hiddenDirectory: directory ?? launcherDirectory,
+              token,
+              home,
+              unsetEnvironmentNames,
+            }),
         { mode: 0o500 },
       ),
       writeFile(packagePath, '{"type":"commonjs"}\n', { mode: 0o400 }),
     ]);
     await Promise.all([chmod(path, 0o500), chmod(packagePath, 0o400)]);
-    await chmod(launcherDirectory, 0o500);
+    if (directory === undefined) await chmod(launcherDirectory, 0o500);
     return Object.freeze({
       environment(environment) {
         return Object.freeze({
@@ -653,16 +704,12 @@ export async function createClaudeCommandLauncher({
         });
       },
       path,
-      async remove() {
-        await chmod(launcherDirectory, 0o700);
-        await rm(launcherDirectory, { force: true, recursive: true });
-      },
+      remove,
     });
   } catch (cause) {
-    if (launcherDirectory !== undefined) {
+    if (directory === undefined && launcherDirectory !== undefined) {
       try {
-        await chmod(launcherDirectory, 0o700);
-        await rm(launcherDirectory, { force: true, recursive: true });
+        await remove();
       } catch {
         // Preserve the construction failure; preflight still fails closed.
       }

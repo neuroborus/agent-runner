@@ -21,6 +21,8 @@ const REQUEST_FIELDS = Object.freeze([
   "session",
   "signal",
   "onProcess",
+  "onResource",
+  "storageForbiddenPaths",
 ]);
 const EXECUTION_FIELDS = Object.freeze([
   "contextSize",
@@ -631,7 +633,20 @@ export function createAdapterContract({
     assertFields(value, REQUEST_FIELDS, `${backendName} request`);
     if (
       (value.signal !== undefined && !(value.signal instanceof AbortSignal)) ||
-      (value.onProcess !== undefined && typeof value.onProcess !== "function")
+      (value.onProcess !== undefined &&
+        typeof value.onProcess !== "function") ||
+      (value.onResource !== undefined &&
+        typeof value.onResource !== "function") ||
+      (value.storageForbiddenPaths !== undefined &&
+        (!Array.isArray(value.storageForbiddenPaths) ||
+          value.storageForbiddenPaths.length > 256 ||
+          value.storageForbiddenPaths.some(
+            (path) =>
+              typeof path !== "string" ||
+              !isAbsolute(path) ||
+              resolve(path) !== path ||
+              /[\0\r\n]/u.test(path),
+          )))
     ) {
       throw optionsError("Execution cancellation boundary is invalid.");
     }
@@ -667,6 +682,16 @@ export function createAdapterContract({
       session: normalizeSession(value.session),
       ...(value.signal === undefined ? {} : { signal: value.signal }),
       ...(value.onProcess === undefined ? {} : { onProcess: value.onProcess }),
+      ...(value.onResource === undefined
+        ? {}
+        : { onResource: value.onResource }),
+      ...(value.storageForbiddenPaths === undefined
+        ? {}
+        : {
+            storageForbiddenPaths: Object.freeze([
+              ...value.storageForbiddenPaths,
+            ]),
+          }),
     };
     if (value.access === "local-commit") {
       if (normalized.schema !== undefined) {

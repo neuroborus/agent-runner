@@ -319,6 +319,60 @@ test("both immediate and deferred operator stops interrupt an availability deadl
   }
 });
 
+test("operator stops serialize with adapter resource persistence and cleanup", async () => {
+  const changed = Promise.withResolvers();
+  const entered = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const aborted = Promise.withResolvers();
+  const events = [];
+  let current = { revision: 1, stopRequest: null };
+  const monitor = createStopMonitor({
+    runId: "run",
+    lease: {},
+    publish: async () => {},
+    runStore: {
+      async loadRun() {
+        return current;
+      },
+      async waitForRunChange() {
+        return changed.promise;
+      },
+      async recordStopActivity() {
+        events.push("stop");
+        return current;
+      },
+    },
+  });
+  const execution = monitor.invoke(
+    async ({ onResource, signal }) => {
+      signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+      await onResource({ phase: "allocating" });
+      // Cleanup must persist even though the stop has canceled the turn.
+      await onResource(null);
+    },
+    {
+      async onResource(value) {
+        if (value !== null) {
+          entered.resolve();
+          await release.promise;
+        }
+        events.push(value === null ? "cleaned" : "allocated");
+      },
+    },
+  );
+  await entered.promise;
+  current = {
+    revision: 2,
+    stopRequest: { effectiveTiming: "immediate", reconciledRevision: null },
+  };
+  changed.resolve(current);
+  await aborted.promise;
+  release.resolve();
+  await execution;
+  await monitor.close();
+  assert.deepEqual(events, ["allocated", "stop", "cleaned"]);
+});
+
 test("the runner records provider progress before rejecting a malformed response", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "availability-response-"));
   t.after(() => rm(root, { recursive: true, force: true }));

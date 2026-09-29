@@ -137,6 +137,12 @@ export function createStopMonitor({ runId, lease, runStore, publish }) {
         return await operation({
           ...request,
           signal,
+          ...(request.onResource === undefined
+            ? {}
+            : {
+                onResource: (resource) =>
+                  write(() => request.onResource(resource)),
+              }),
           onProcess: (pid, proof) =>
             write(() => runStore.recordExecutionProcess(lease, pid, proof)),
         });
