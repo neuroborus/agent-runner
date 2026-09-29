@@ -353,5 +353,7 @@ Provider availability waits preserve the exact validation/review checkpoint and
 pending correction diagnostics. Safe partial content is reconciled and stale
 approvals invalidated before scheduling; the same correction is not charged
 again after retry or restart. A successful provider response resets availability
-backoff before deterministic output validation, without relaxing that validation
-or its separate bounded correction budget.
+backoff before deterministic output validation. A normalized authentication-
+required response instead retires the superseded episode before its distinct
+operator pause. Neither path relaxes deterministic output validation or its
+separate bounded correction budget.

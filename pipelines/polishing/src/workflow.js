@@ -139,6 +139,7 @@ const INVALID_BOOTSTRAP_PATH_CODES = new Set([
   "ERR_UNSUPPORTED_GIT_PATH",
 ]);
 const RETRYABLE_CHECKPOINT_PAUSES = new Set([
+  "authentication_required",
   "backend_unavailable",
   "bootstrap_disagreement",
   "environment_blocked",
@@ -565,6 +566,8 @@ export async function runPolishing({
   let interruptedTurn = run.activeTurn;
   let interruptedRepositoryReconciled = false;
   let failedSourceForkLaunchRecovery = false;
+  // A published pause must survive an interrupted persistence response.
+  let authenticationPausePersistence = false;
 
   function state() {
     return normalizePipelineState(currentRun.pipelineState);
@@ -737,6 +740,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       nextHashes = currentRun.hashes,
       pause = currentRun.pause,
       publicActivity,
+      nextActiveTurn,
     } = {},
   ) {
     if (
@@ -762,6 +766,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       hashes: nextHashes,
       pause,
       pipelineState: nextPipelineState,
+      ...(nextActiveTurn === undefined ? {} : { activeTurn: nextActiveTurn }),
     };
     assertRun({
       ...currentRun,
@@ -774,6 +779,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
   }
 
   async function pause(reason, details = {}, pipelineStatePatch = {}) {
+    authenticationPausePersistence = reason === "authentication_required";
     await transition(
       {
         ...state(),
@@ -781,6 +787,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         workflowState: "WAITING_FOR_USER",
       },
       {
+        nextActiveTurn: authenticationPausePersistence ? null : undefined,
         pause: { ...details, reason },
         publicActivity: activity(
           "runner",
@@ -790,6 +797,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         ),
       },
     );
+    authenticationPausePersistence = false;
     return currentRun;
   }
 
@@ -1165,6 +1173,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       (currentRun.availabilityRetry?.checkpoint.startsWith(
         "resolve-findings:workspace-write:",
       ) ||
+        state().availabilityCorrectionCharged ||
         counters().fixRounds < fixBudget())
     );
   }
@@ -1397,7 +1406,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     const latestSession = [...currentRun.sessionLineage.children]
       .reverse()
       .find((child) => child.role === role);
-    const { session, previousSession, consumeSourceFork } = selectRoleSession({
+    const selectedSession = selectRoleSession({
       settings: state().settings,
       role,
       latestSession,
@@ -1407,6 +1416,24 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       recovering,
       freshSession,
     });
+    const sourceForkRecovery = state().authenticationSourceForkRecovery;
+    if (
+      sourceForkRecovery !== null &&
+      (sourceForkRecovery.role !== role ||
+        sourceForkRecovery.contextKey !== contextKey)
+    ) {
+      throw workflowError(
+        "Polishing authentication source-fork recovery changed checkpoint.",
+      );
+    }
+    const { session, previousSession, consumeSourceFork } =
+      sourceForkRecovery !== null && selectedSession.session?.mode === "fork"
+        ? {
+            session: undefined,
+            previousSession: undefined,
+            consumeSourceFork: false,
+          }
+        : selectedSession;
     const configuration = currentRun.roles[role];
     const recoveryPrompt = completeRolePrompt(buildPrompt(context));
     const executionPreferences = Object.fromEntries(
@@ -1432,6 +1459,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     let response;
     let agentError;
     let availabilityFailure = false;
+    let authenticationFailure = false;
     currentRun = await runtime.startAgentTurn(
       turn,
       consumeSourceFork
@@ -1454,6 +1482,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         agentError = cause;
         if (isOwnershipFailure(cause)) throw cause;
         availabilityFailure = runtime.availability?.eligible(cause) === true;
+        authenticationFailure =
+          runtime.authentication?.eligible(cause) === true;
       }
       nextRepositoryBaseline = baseline;
       if (access === "read-only") {
@@ -1513,9 +1543,11 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
                   pendingCorrection: true,
                   availabilityCorrectionCharged:
                     current.availabilityCorrectionCharged ||
-                    (availabilityFailure && contentChangingLazyCheck),
+                    ((availabilityFailure || authenticationFailure) &&
+                      contentChangingLazyCheck) ||
+                    (authenticationFailure && contentChangingCorrection),
                   reviewReconsideration: [],
-                  ...(availabilityFailure
+                  ...(availabilityFailure || authenticationFailure
                     ? {
                         workflowState: current.workflowState,
                         finalizationCorrection: current.finalizationCorrection,
@@ -1583,8 +1615,45 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       if ((await readCurrentInputs()) === null) {
         return null;
       }
+      if (
+        authenticationFailure &&
+        agentError?.failureClass !== STRUCTURED_OUTPUT_FAILURE_CLASS
+      ) {
+        // A fresh recovery failure cannot disprove an earlier unrecorded fork.
+        const hasPossibleSourceForkEffect =
+          (request.session?.mode === "fork" &&
+            runtime.authentication.hasPossibleEffect(agentError)) ||
+          (recovering &&
+            polishingPolicy(state().settings).primarySessionScope ===
+              "checkpoint" &&
+            role !== "arbiter" &&
+            currentRun.sessionLineage.source !== null &&
+            latestSession?.contextKey !== contextKey);
+        await pause(
+          "authentication_required",
+          {
+            code: "ERR_AUTHENTICATION_REQUIRED",
+            resumeState: state().workflowState,
+          },
+          hasPossibleSourceForkEffect
+            ? {
+                authenticationSourceForkRecovery: Object.freeze({
+                  role,
+                  contextKey,
+                }),
+              }
+            : consumeSourceFork
+              ? { lazySourceForkConsumed: false }
+              : {},
+        );
+        return null;
+      }
     } finally {
-      if (!isOwnershipFailure(agentError)) {
+      if (
+        !authenticationPausePersistence &&
+        currentRun.activeTurn != null &&
+        !isOwnershipFailure(agentError)
+      ) {
         currentRun = await runtime.finishAgentTurn(turn);
         assertRun(currentRun);
       }
@@ -1634,6 +1703,12 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       freshSession ? undefined : previousSession,
       contextKey,
     );
+    if (state().authenticationSourceForkRecovery !== null) {
+      await transition({
+        ...state(),
+        authenticationSourceForkRecovery: null,
+      });
+    }
     return reportWorkspaceChange
       ? Object.freeze({
           output: response.structured,
@@ -5870,6 +5945,7 @@ ${JSON.stringify(
       retryCheckpoint?.startsWith("resolve-findings:read-only:") === true ||
       (retryCheckpoint?.startsWith("resolve-findings:workspace-write:") !==
         true &&
+        !current.availabilityCorrectionCharged &&
         counters().fixRounds >= fixBudget());
     const blockers = activeBlockers();
     const blockerIds = new Set(blockers.map(({ id }) => id));
@@ -6492,7 +6568,11 @@ ${evidence}`,
       );
     }
   } catch (cause) {
-    if (cause?.code === "ERR_AVAILABILITY_RECOVERY") throw cause;
+    if (
+      authenticationPausePersistence ||
+      cause?.code === "ERR_AVAILABILITY_RECOVERY"
+    )
+      throw cause;
     if (isOwnershipFailure(cause)) {
       if (
         cause.executionResourceRetained === true &&

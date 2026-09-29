@@ -570,6 +570,10 @@ standard error, rejected values, internal diagnostics, and counters remain priva
 Unknown pause reasons fail closed to `unknown_pause` without their persisted
 text. A pipeline descriptor may derive bounded evidence from already validated
 pipeline state when the derivation exposes only finite public identifiers;
+`authentication_required` always projects the fixed
+`ERR_AUTHENTICATION_REQUIRED` code, a fixed reauthentication explanation, the
+saved logical checkpoint, and one null resume action. Provider-native
+diagnostics never participate in that projection.
 plan-execution finalization-backed `no_progress` exposes only the active
 finalization issue IDs and never their commands, problems, evidence, or paths.
 Plan execution also projects `finalization_transition_invalid` as a resumable
@@ -1046,13 +1050,15 @@ published to CLI/MCP activity with bounded role, checkpoint, normalized reason,
 attempt, delay, and deadline. Status projects the same fields in `availabilityRetry`.
 A successfully returned provider response clears the episode at repository
 reconciliation, before deterministic output validation; rejected output can
-therefore still mark provider progress. Reconciled content and correction
-accounting are persisted atomically with that reset. Check/fix mutation claims
-are compared against the successful attempt's starting fingerprint, including
-any safe content retained from earlier failed attempts.
-Availability errors, tool activity, partial output, session replacement, operator
-resume, and restart do not reset it. Persistence or wait failures retain the
-checkpoint and propagate without inventing a terminal pipeline failure.
+therefore still mark provider progress. A normalized authentication-required
+response instead retires the superseded episode before persisting its distinct
+operator pause. Reconciled content and correction accounting are persisted
+atomically with either transition. Check/fix mutation claims are compared against
+the attempt's starting fingerprint, including any safe content retained from
+earlier failed attempts. Other availability errors, tool activity, partial output,
+session replacement, operator resume, and restart do not reset it. Persistence or
+wait failures retain the checkpoint and propagate without inventing a terminal
+pipeline failure.
 
 Plan-execution state version 24 permits a bounded availability reason and
 `commitExecutor: "not_started"` in a persisted pre-effect rejection. Version 23
@@ -1064,9 +1070,11 @@ unchanged state; only then can one atomic journal transition retire it and
 schedule a fresh authorization.
 Potentially executed commit/handoff effects never enter availability replay.
 Polishing state version 16 preserves charged partial resolutions at their original
-checkpoint. Both writable pipelines persist whether the current availability
-continuation has charged a check/fix round; an earlier pending correction does
-not exempt a new round, and response reset cannot erase an unfinished charge.
+checkpoint. Both writable pipelines persist whether the current provider-recovery
+continuation has charged a check/fix round; authentication recovery also retains
+the charge for a partially completed finding-resolution round. An earlier
+pending correction does not exempt a new round, and availability reset or
+authentication pause cannot erase an unfinished charge.
 Legacy pipeline migration initializes that marker to false. Both retain unresolved blockers and historical
 negative validation evidence during recovery; no stale passing evidence or
 approval can authorize the changed content.
@@ -1076,6 +1084,59 @@ authority, workflow position, review or correction evidence, or handoff state.
 Null provisional reports retain the existing read-only discovery barrier.
 Foreground CLI owner loss requires resume; detached MCP ownership outlives a
 client timeout or disconnect.
+
+### Durable authentication-required pauses
+
+The runner injects one provider-neutral authentication policy into all three
+pipelines. It accepts only a strict normalized adapter failure carrying
+`disposition: "authentication_required"`; raw messages, diagnostic classes,
+HTTP evidence, and provider-specific codes cannot activate the policy.
+Authentication is an operator action, not availability: the runner schedules
+no retry or backoff and persists no availability episode. When it supersedes an
+active availability retry, that episode is retired before the authentication
+pause is persisted.
+
+After provider execution retires, each pipeline applies its ordinary repository
+guard. Writable execution and polishing turns reconcile safe partial content,
+invalidate stale fingerprint-bound approvals, and preserve correction charging.
+One durable transition retires the active turn, saves any source-fork recovery
+marker, and enters `WAITING_FOR_USER`; interrupted publication cannot leave a
+finished turn without its authentication checkpoint. The pause contains exactly
+`authentication_required`, `ERR_AUTHENTICATION_REQUIRED`, and the current
+logical resume state. Role configuration, source and child session lineage,
+content fingerprints, findings, and counters stay in their existing durable
+fields. After the operator reauthenticates, a null resume reconstructs that
+same checkpoint without requiring the failed native session. A partially
+completed finding-resolution turn retains its writable access even when its
+already charged round reached the fix budget; completing that round does not
+consume another round or authorize a new one.
+
+Authentication during an initial source-session fork additionally preserves a
+nullable provider-neutral recovery marker containing only the logical role and
+context key. Proof that the rejected request had no effect permits the source
+fork to be retried. Possible-effect evidence instead persists the marker and
+reconstructs the same role in a fresh session, never reforking a source whose
+native child may already exist. The marker survives repeated authentication or
+interruption and clears only after a child session is durably recorded.
+If interruption precedes pause publication, authentication during fresh
+recovery retains the earlier unrecorded fork's possible effect even when the
+new request proves no effect.
+
+Local-commit readiness remains effect-safe. The disposition qualifies only
+when the normalized record also proves `commitExecutor: "not_started"`.
+Plan execution persists that bounded proof with the consumed authorization,
+performs the existing Git verification-only path, and retires the authorization
+only after Git proves no commit. It then pauses at `COMMIT`; uncertain or
+started effects never become authentication retries. Polishing handoff remains
+runner-owned and uses its existing staged-effect verification path.
+
+Plan-authoring state version 6, plan-execution version 26, and polishing
+version 18 admit these new pause, proof, and source-fork recovery variants.
+Their immediately prior migrations initialize the nullable recovery marker to
+`null` while preserving workflow position, existing session lineage, evidence,
+and correction accounting. They do not reload configuration or infer a native
+child. The version bump makes older readers reject rather than misread the new
+durable checkpoint.
 
 ### State-owned operator stop protocol
 

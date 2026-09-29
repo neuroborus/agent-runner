@@ -50,12 +50,26 @@ Each run freezes the ceiling with a five-second initial delay. Resume preserves
 it, and legacy migration supplies the documented default with no pending retry.
 All three pipelines retry eligible explicit provider availability failures after
 repository reconciliation. Delays double to the ceiling and repeat there without
-an attempt quota. Only a successful provider response resets the episode, even
-when subsequent output validation rejects that response. CLI/MCP activity and
+an attempt quota. A successful provider response resets the episode, even when
+subsequent output validation rejects that response. A normalized authentication-
+required response instead retires the superseded episode before its distinct
+operator pause. CLI/MCP activity and
 status expose the saved role, checkpoint, normalized reason, attempt, delay, and
 deadline. Stops interrupt the wait under the same exclusive owner. Foreground
 CLI owner loss needs resume; detached MCP work survives client wait cancellation,
 timeout, and disconnect. Resuming an overdue deadline permits one attempt.
+
+The separate `authentication_required` disposition never enters that retry
+policy. After repository reconciliation, every pipeline pauses durably at its
+exact logical checkpoint with the fixed `ERR_AUTHENTICATION_REQUIRED` code.
+Any active availability episode superseded by that response is retired first.
+CLI and MCP expose one redacted explanation and one null resume action. The
+operator reauthenticates the selected provider and resumes the same run; saved
+roles, session lineage, fingerprints, findings, and correction accounting are
+preserved. A source fork is retried only with no-effect proof; possible-effect
+evidence resumes the same logical role fresh without risking a duplicate native
+child. Commit readiness still requires pre-effect proof and Git verification
+before a consumed authorization is replaced.
 
 Both configuration layers accept portable `defaultEffort` and role `effort`
 values: `current`, `low`, `medium`, `high`, and `xhigh`. Effort stays separate
@@ -265,7 +279,8 @@ Absent or inconsistent provenance grants no retry, and MCP retains its exact
 revision, durable receipt, idempotency, and detached ownership guarantees.
 
 Normal work is autonomous. The runner pauses for identified clarification or a
-material product decision, provider unavailability, an external validation
+material product decision, required provider authentication, provider
+unavailability, an external validation
 blocker, exhausted correction budgets, version skew, unsafe Git state, or an
 ambiguous effect. Each public pause exposes a finite reason, bounded evidence,
 the safe resume checkpoint when one exists, and concrete next actions. It does

@@ -842,7 +842,14 @@ test("migrates version-3 execution state with no consumed bootstrap corrections"
   assert.deepEqual(migrated.bootstrapCorrections, []);
   assert.equal(migrated.pendingBootstrapCorrection, null);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(planExecutionPipeline.stateVersion, 25);
+  assert.equal(planExecutionPipeline.stateVersion, 26);
+  const legacyAuthenticationState = { ...current };
+  delete legacyAuthenticationState.authenticationSourceForkRecovery;
+  const authenticationMigration = planExecutionPipeline.migrations[25]({
+    pipelineState: legacyAuthenticationState,
+  });
+  assert.deepEqual(authenticationMigration, current);
+  assert.ok(Object.isFrozen(authenticationMigration));
 });
 
 test("version 21 migration preserves terminal proof", async (t) => {

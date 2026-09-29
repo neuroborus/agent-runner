@@ -7,6 +7,22 @@ remain in the owning documentation.
 
 ## 2026-09-29
 
+- **Authentication recovery is one durable operator checkpoint.** Every
+  pipeline now consumes only the normalized `authentication_required`
+  disposition, reconciles read-only or safe writable state, and persists the
+  same fixed redacted pause without availability retry or backoff. When the
+  response supersedes an active availability episode, the runner retires that
+  episode before persisting the authentication pause. Active-turn retirement,
+  the pause, and source-fork recovery are one durable transition. Null resume after
+  reauthentication preserves roles, lineage, fingerprints, and correction
+  accounting, including completion of an already charged finding-resolution
+  round at the fix limit. A source-fork failure retries that fork only with
+  no-effect proof; possible-effect evidence persists the logical role/context
+  and reconstructs it fresh so an unrecorded native child is never duplicated.
+  Local-commit readiness additionally keeps its pre-effect proof and Git
+  verification-only boundary before replacing a
+  one-shot authorization; CLI and MCP expose no provider-private diagnostics.
+
 - **Authentication-required failures have one redacted disposition.** The
   provider-neutral failure record now distinguishes a terminal authentication
   requirement from availability, authorization, permissions, usage limits,

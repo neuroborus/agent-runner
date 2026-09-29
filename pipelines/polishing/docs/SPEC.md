@@ -148,6 +148,13 @@ accounting, review evidence, or handoff state. It does not infer authority from
 current configuration. Null provisional reports stay null and continue through
 the existing read-only discovery barrier.
 
+State version 18 admits the fixed `authentication_required` pause. The ordered
+version-17 migration initializes the nullable provider-neutral source-fork
+recovery marker to `null` while preserving workflow position, session lineage,
+fingerprints, correction accounting, and handoff state. It does not infer a
+native child or reload configuration, and it prevents older readers from
+accepting the expanded durable vocabulary as version 17.
+
 ## Combined Review
 
 Combined mode uses independent Worker/Reviewer bootstrap discovery and
@@ -479,17 +486,21 @@ permission, and harmless read-only execution failures are resumable. Bash
 permission recovery requires a positively recognized safe repository
 inspection; every other Bash denial fails closed. Structured API-error recovery
 requires an explicit transient HTTP status, while non-transient client statuses
-and an unqualified structured `api_error` are terminal. Authentication,
-forbidden-operation denials, isolation or protocol failures, and unclassified
-writable process outcomes remain terminal. Denied input,
+and an unqualified structured `api_error` are terminal. A normalized
+`authentication_required` disposition enters the fixed durable
+reauthentication pause; other authentication evidence, forbidden-operation
+denials, isolation or protocol failures, and unclassified writable process
+outcomes remain terminal. Denied input,
 native result text, raw standard error, and native process causes are discarded.
 Explicit native transport, overload, model-busy, and server availability use the
 injected runner coordinator after repository reconciliation. The exact role and
 logical checkpoint survive five-second exponential backoff capped by the frozen
 policy, with indefinite repeats at the ceiling. Scheduling and start are durable
-and immediately visible; overdue recovery dispatches once. Only a successful
-provider response resets the episode, before output validation. Partial output,
-partial writes, session changes, resume, and restart do not reset it. Safe partial
+and immediately visible; overdue recovery dispatches once. A successful provider
+response resets the episode before output validation. A normalized authentication-
+required response instead retires the superseded episode before its distinct
+operator pause. Partial output, partial writes, session changes, resume, and
+restart do not reset it. Safe partial
 content and pending corrections survive; stale approvals are invalidated and the
 same correction is not charged again. Check/fix mutation claims use the successful
 attempt's starting fingerprint, after retained partial content is reconciled.
@@ -503,6 +514,24 @@ fingerprint-bound results before pausing so the complete durable request can be
 reconstructed after capacity returns. Classified usage and provider failures
 from writable turns use this path only after workspace and repository-control
 reconciliation; no native session is required.
+Authentication uses that same safe reconciliation but no availability episode
+or automatic retry. Persist exactly `authentication_required`,
+`ERR_AUTHENTICATION_REQUIRED`, and the current polishing state. Null resume
+after reauthentication preserves safe partial content, role/session lineage,
+fingerprints, and correction accounting and reconstructs the same logical
+request. Provider-native diagnostics do not enter state or CLI/MCP projection;
+runner-owned handoff staging retains its existing effect-recovery path. For a
+failed source-session fork, normalized no-effect evidence permits the fork to
+be retried. Possible-effect evidence instead persists only the role and logical
+context key, resumes the same role in a fresh session without reforking, and
+clears that marker only after a child session is durably recorded.
+The pause and source-fork state are persisted atomically with active-turn
+retirement. An interrupted write preserves recovery instead of converting the
+run into a terminal failure. A partially completed finding-resolution round
+retains its charged writable continuation even at the fix limit; it neither
+consumes another round nor permits a new round beyond that limit.
+If publication was interrupted before the pause was saved, authentication
+during fresh recovery still preserves the earlier unrecorded source fork.
 An eligible normalized transient pre-effect launch failure without availability
 evidence adds only
 `launchRecovery: { failureClass, checkpoint }` to that pause. If a lazy source
@@ -1452,7 +1481,7 @@ semantics, and handoff behavior. Cover at least:
   plan-execution runs, detached MCP retry, and same-host stale recovery;
 - compatible legacy migration, incompatible reader and detached-child
   rejection, and disconnects that leave durable state unchanged;
-- every supported legacy version migrating through state version 17 to safe
+- every supported legacy version migrating through state version 18 to safe
   candidate convergence while preserving paused and terminal runs without
   replaying `HANDOFF`;
 - sandbox, IPC, loopback, process-isolation, missing-service, and permission

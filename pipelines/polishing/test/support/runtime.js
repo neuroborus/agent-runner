@@ -44,6 +44,7 @@ import {
   migratePolishingStateV13,
   migratePolishingStateV14,
   migratePolishingStateV16,
+  migratePolishingStateV17,
   runPolishing,
 } from "../../src/index.js";
 import {
@@ -103,6 +104,7 @@ function versionOneState(state) {
     "trustedValidation",
     "cleanConfirmationFingerprint",
     "lazySourceForkConsumed",
+    "authenticationSourceForkRecovery",
   ]) {
     delete legacy[field];
   }
@@ -151,6 +153,7 @@ function versionSevenState(state) {
   const {
     cleanConfirmationFingerprint: _confirmation,
     lazySourceForkConsumed: _sourceFork,
+    authenticationSourceForkRecovery: _authenticationSourceFork,
     ...legacy
   } = state;
   if (legacy.settings !== null) {
@@ -275,8 +278,12 @@ function migrateVersionOneState(state) {
   const versionFourteen = migratePolishingStateV13({
     pipelineState: versionThirteen,
   });
-  return migratePolishingStateV16({
-    pipelineState: migratePolishingStateV14({ pipelineState: versionFourteen }),
+  return migratePolishingStateV17({
+    pipelineState: migratePolishingStateV16({
+      pipelineState: migratePolishingStateV14({
+        pipelineState: versionFourteen,
+      }),
+    }),
   });
 }
 
@@ -1110,7 +1117,7 @@ async function createFixture(
     store = createRunStore({ stateRoot });
     const created = await store.createRun({
       pipelineId: "polishing",
-      pipelineStateVersion: 17,
+      pipelineStateVersion: 18,
       projectPath,
       taskPath,
       roles,
@@ -1133,7 +1140,7 @@ async function createFixture(
       revision: 1,
       runId: "run-1",
       pipelineId: "polishing",
-      pipelineStateVersion: 17,
+      pipelineStateVersion: 18,
       projectPath,
       taskPath,
       roles,

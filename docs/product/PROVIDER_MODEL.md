@@ -305,11 +305,15 @@ local-commit executor never started. Raw cause fields cannot override the
 validated record. Provider flags, transports, sandbox composition, protocol
 parsing, and native error recognition remain inside the provider directory.
 
-Authentication, unsafe permissions, forbidden collaboration, isolation
-failure, invalid contracts, and ambiguous writable outcomes fail closed.
-Allowlisted backend, capability, configuration, usage, provider, and
-source-session availability failures may enter a durable pause only after the
-runner proves the repository is safe.
+Normalized `authentication_required` failures enter the shared durable
+reauthentication pause only after the runner proves the repository is safe;
+they never enter availability backoff and retire any active episode they
+supersede. Authentication evidence without that disposition, unsafe permissions,
+forbidden collaboration, isolation failure, invalid contracts, and ambiguous
+writable outcomes fail closed. Allowlisted
+backend, capability, configuration, usage, provider, and source-session
+availability failures may enter a durable pause only after the same repository
+guard.
 
 An ordinary non-commit turn with native context exhaustion may receive at most
 one in-session compaction retry of the complete request when it has a usable
@@ -345,6 +349,20 @@ protocol/request RPC code does not establish this disposition. Native messages,
 URLs, request identifiers, payloads, and credential material remain private and
 are discarded. Other providers do not emit the disposition without their own
 descriptor-owned bounded evidence contract.
+
+The runner consumes that disposition through one shared policy. Every pipeline
+persists the same fixed redacted `authentication_required` pause at the failed
+logical checkpoint after read-only or writable reconciliation. It performs no
+automatic retry or availability delay and retires a superseded availability
+episode before pausing. The operator restores authentication and resumes with
+the null action. Public CLI/MCP state exposes no native
+message, URL, request identifier, payload, credential material, or
+provider-specific diagnostic. Source-fork requests retry the source only with
+normalized no-effect proof; possible-effect evidence persists the logical
+role/context recovery marker and reconstructs a fresh role session instead of
+risking a second native child. A local-commit request additionally requires
+`commitExecutor: "not_started"` and unchanged Git verification before its
+one-shot authorization can be retired and the `COMMIT` checkpoint resumed.
 
 The remaining Codex `turn_other` and the explicit native `serverOverloaded`
 variant, normalized as `turn_server_overloaded`, are recoverable provider

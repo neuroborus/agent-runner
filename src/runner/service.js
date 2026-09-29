@@ -37,8 +37,9 @@ import {
   rejectUnknownFields,
   RunnerError,
 } from "./input.js";
-import { pipelineForRun } from "./migration.js";
+import { createAuthenticationPolicy } from "./authentication.js";
 import { createAvailabilityCoordinator } from "./availability.js";
+import { pipelineForRun } from "./migration.js";
 import { inspectTrustedRequirements } from "./trusted-requirements.js";
 import {
   createStopMonitor,
@@ -352,6 +353,7 @@ export function createRunner(options = {}) {
     onConfigurationFailure = () => {},
   ) {
     let providerResponseRole = null;
+    const authentication = createAuthenticationPolicy({ providers });
     const availability =
       monitor === undefined
         ? undefined
@@ -383,6 +385,7 @@ export function createRunner(options = {}) {
       }
     }
     return Object.freeze({
+      authentication,
       availability,
       adapters:
         monitor === undefined
@@ -410,6 +413,9 @@ export function createRunner(options = {}) {
                       providerResponseRole = role;
                       return response;
                     } catch (cause) {
+                      if (authentication.eligible(cause)) {
+                        providerResponseRole = role;
+                      }
                       // Keep stronger provider failures intact while preventing
                       // fingerprints or turn settlement over retained storage.
                       const current = await runStore.loadRun(run.runId);

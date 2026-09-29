@@ -136,6 +136,7 @@ const TASK_INPUTS = Object.freeze({
   context: Object.freeze({ filename: "context.md", optional: true }),
 });
 const RETRYABLE_PAUSE_REASONS = new Set([
+  "authentication_required",
   "bootstrap_disagreement",
   "backend_unavailable",
   "confirmation_output_invalid",
@@ -167,6 +168,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   operator_paused:
     "The operator paused this run; resume restores its checkpoint and any existing blockers.",
   operator_canceled: "The operator canceled this run; it cannot resume.",
+  authentication_required:
+    "Provider authentication is required; reauthenticate, then resume the same checkpoint.",
   backend_unavailable: "The selected backend is temporarily unavailable.",
   bootstrap_inventory_capacity_exhausted:
     "A complete bootstrap validation inventory exceeds the supported bounded capacity.",
@@ -1094,9 +1097,16 @@ export function migratePolishingStateV16(run) {
   });
 }
 
+export function migratePolishingStateV17(run) {
+  return Object.freeze({
+    ...run.pipelineState,
+    authenticationSourceForkRecovery: null,
+  });
+}
+
 export const polishingPipeline = Object.freeze({
   id: POLISHING_PIPELINE_ID,
-  stateVersion: 17,
+  stateVersion: 18,
   migrations: Object.freeze({
     1: migratePolishingStateV1,
     2: migratePolishingStateV2,
@@ -1119,6 +1129,7 @@ export const polishingPipeline = Object.freeze({
         availabilityCorrectionCharged: false,
       }),
     16: migratePolishingStateV16,
+    17: migratePolishingStateV17,
   }),
   roles: ROLES,
   roleAccess: ROLE_ACCESS,

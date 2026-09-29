@@ -29,6 +29,11 @@ import {
   attachAvailability,
   availabilityFailure,
 } from "../../../test/support/availability.js";
+import {
+  attachAuthentication,
+  authenticationFailure,
+  interruptAuthenticationSettlement,
+} from "../../../test/support/authentication.js";
 
 const executeFile = promisify(execFile);
 const SOURCE_SESSION = "11111111-1111-4111-8111-111111111111";
@@ -447,7 +452,7 @@ async function createFixture(
   let currentRun = {
     revision: 1,
     pipelineId: "plan-authoring",
-    pipelineStateVersion: 5,
+    pipelineStateVersion: 6,
     projectPath,
     taskPath,
     roles: Object.fromEntries(
@@ -709,7 +714,15 @@ test("writes one validated plan through independent source-session forks", async
 });
 
 test("selects lazy Planner-only mode and migrates legacy runs to independent", async (t) => {
-  assert.equal(planAuthoringPipeline.stateVersion, 5);
+  assert.equal(planAuthoringPipeline.stateVersion, 6);
+  const currentState = createPlanAuthoringState();
+  const legacyAuthenticationState = { ...currentState };
+  delete legacyAuthenticationState.authenticationSourceForkRecovery;
+  const authenticationMigration = planAuthoringPipeline.migrations[5]({
+    pipelineState: legacyAuthenticationState,
+  });
+  assert.deepEqual(authenticationMigration, currentState);
+  assert.ok(Object.isFrozen(authenticationMigration));
   assert.equal(
     planAuthoringPipeline.resolveActiveRoles(),
     planAuthoringPipeline.roles,
@@ -734,6 +747,7 @@ test("selects lazy Planner-only mode and migrates legacy runs to independent", a
   const {
     cleanConfirmationFingerprint: _activeConfirmation,
     lazySourceForkConsumed: _activeSourceFork,
+    authenticationSourceForkRecovery: _activeAuthenticationSourceFork,
     ...activeState
   } = initial;
   const { mode: _activeMode, ...activeSettings } = activeState.settings;
@@ -748,6 +762,7 @@ test("selects lazy Planner-only mode and migrates legacy runs to independent", a
   const {
     cleanConfirmationFingerprint: _confirmation,
     lazySourceForkConsumed: _sourceFork,
+    authenticationSourceForkRecovery: _authenticationSourceFork,
     ...legacyState
   } = completed.pipelineState;
   const { mode: _mode, ...legacySettings } = legacyState.settings;
@@ -2284,6 +2299,148 @@ test("keeps Claude authentication terminal for a read-only turn", async (t) => {
     JSON.stringify(fixture.transitions),
     /authentication secret/u,
   );
+});
+
+test("preserves the authentication pause across read-only turn-retirement interruption", async (t) => {
+  let authenticationRequired = true;
+  const fixture = await createFixture(t, {
+    sourceSession: SOURCE_SESSION,
+    onRoleRun(role) {
+      if (role === "planner" && authenticationRequired) {
+        authenticationRequired = false;
+        throw authenticationFailure();
+      }
+    },
+  });
+  attachAuthentication(fixture);
+  interruptAuthenticationSettlement(fixture);
+
+  await assert.rejects(fixture.run(), {
+    code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+  });
+  const paused = fixture.currentRun;
+
+  assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.deepEqual(paused.pause, {
+    reason: "authentication_required",
+    code: "ERR_AUTHENTICATION_REQUIRED",
+    resumeState: "CLARIFY",
+  });
+  const invalid = structuredClone(paused);
+  invalid.pause.providerMessage = "DO_NOT_RETAIN_PROVIDER_MESSAGE";
+  assert.throws(() => planAuthoringPipeline.workflow.validateRun(invalid));
+  assert.equal(paused.availabilityRetry, undefined);
+  const recovery = paused.pipelineState.authenticationSourceForkRecovery;
+  assert.deepEqual(Object.keys(recovery).sort(), ["contextKey", "role"]);
+  assert.equal(recovery.role, "planner");
+  assert.match(recovery.contextKey, /^[a-f0-9]{64}$/u);
+  const invalidRecovery = structuredClone(paused);
+  invalidRecovery.pipelineState.authenticationSourceForkRecovery.providerData =
+    "DO_NOT_RETAIN_PROVIDER_AUTHENTICATION_EVIDENCE";
+  assert.throws(() =>
+    planAuthoringPipeline.workflow.validateRun(invalidRecovery),
+  );
+  const invalidRecoveryRole = structuredClone(paused);
+  invalidRecoveryRole.pipelineState.authenticationSourceForkRecovery.role =
+    "arbiter";
+  assert.throws(() =>
+    planAuthoringPipeline.workflow.validateRun(invalidRecoveryRole),
+  );
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(await readFile(fixture.planPath, "utf8"), PLAN);
+  assert.equal(fixture.calls.planner[0].session.mode, "fork");
+  assert.equal(fixture.calls.planner[1].session, undefined);
+  assert.equal(completed.pipelineState.authenticationSourceForkRecovery, null);
+});
+
+test("authentication preserves an unrecorded source fork after interrupted pause publication", async (t) => {
+  let failures = 2;
+  const fixture = await createFixture(t, {
+    sourceSession: SOURCE_SESSION,
+    onRoleRun(role) {
+      if (role === "planner" && failures > 0) {
+        failures -= 1;
+        throw authenticationFailure({
+          effect: failures === 1 ? "possible" : "none",
+        });
+      }
+    },
+  });
+  attachAuthentication(fixture);
+  interruptAuthenticationSettlement(fixture, { beforePublication: true });
+
+  await assert.rejects(fixture.run(), {
+    code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+  });
+  assert.equal(fixture.currentRun.activeTurn.role, "planner");
+
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "authentication_required");
+
+  const completed = await fixture.run();
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.deepEqual(
+    fixture.calls.planner.slice(0, 3).map(({ session }) => session?.mode),
+    ["fork", undefined, undefined],
+  );
+  assert.equal(completed.pipelineState.authenticationSourceForkRecovery, null);
+});
+
+test("uses authentication effect evidence for lazy source-fork recovery", async (t) => {
+  for (const effect of ["possible", "none"]) {
+    let authenticationRequired = true;
+    const fixture = await createFixture(t, {
+      mode: "lazy",
+      sourceSession: SOURCE_SESSION,
+      planner: [ready(), draft(), checkUnchanged(), clean()],
+      reviewer: [],
+      arbiter: [],
+      onRoleRun(role) {
+        if (role === "planner" && authenticationRequired) {
+          authenticationRequired = false;
+          throw authenticationFailure({ effect });
+        }
+      },
+    });
+    attachAuthentication(fixture);
+
+    const paused = await fixture.run();
+
+    assert.equal(paused.pause.reason, "authentication_required");
+    assert.equal(
+      paused.pipelineState.authenticationSourceForkRecovery?.role ?? null,
+      effect === "possible" ? "planner" : null,
+    );
+    assert.equal(
+      paused.pipelineState.lazySourceForkConsumed,
+      effect === "possible",
+    );
+    if (effect === "possible") {
+      const invalidConsumedFork = structuredClone(paused);
+      invalidConsumedFork.pipelineState.lazySourceForkConsumed = false;
+      assert.throws(
+        () => planAuthoringPipeline.workflow.validateRun(invalidConsumedFork),
+        /authentication source-fork recovery/u,
+      );
+    }
+
+    const completed = await fixture.run();
+
+    assert.equal(completed.pipelineState.workflowState, "DONE");
+    assert.equal(fixture.calls.planner[0].session.mode, "fork");
+    assert.equal(
+      fixture.calls.planner[1].session?.mode,
+      effect === "none" ? "fork" : undefined,
+    );
+    assert.equal(
+      fixture.calls.planner.filter(({ session }) => session?.mode === "fork")
+        .length,
+      effect === "none" ? 2 : 1,
+    );
+  }
 });
 
 test("persists a forbidden-delegation diagnostic without provider data", async (t) => {

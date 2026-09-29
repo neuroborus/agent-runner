@@ -215,12 +215,26 @@ Runs freeze this policy; resume never replaces it from current configuration.
 Legacy runs migrate with the default and no pending episode. Explicit transient
 availability failures retry after repository reconciliation, doubling the delay
 to the ceiling and repeating it without a quota. Follow the bounded schedule/start
-activity and `availabilityRetry` status instead of polling. Only a successful
-provider response resets the episode. Partial work, session changes, resume,
-and restart preserve it. Pause/cancel interrupts the wait, including a deferred
-stop when the current step cannot finish. Do not edit configuration or state to
-reset an episode. Resume after foreground CLI owner loss; a client timeout or
-disconnect does not stop detached MCP work.
+activity and `availabilityRetry` status instead of polling. A successful provider
+response resets the episode; a normalized authentication-required response retires
+it before entering the distinct operator pause. Partial work, session changes,
+resume, and restart preserve it. Pause/cancel interrupts the wait, including a
+deferred stop when the current step cannot finish. Do not edit configuration or
+state to reset an episode. Resume after foreground CLI owner loss; a client
+timeout or disconnect does not stop detached MCP work.
+
+`authentication_required` is not an availability episode. It carries the fixed
+`ERR_AUTHENTICATION_REQUIRED` code, no provider-native details, no retry delay,
+and one null resume action at the saved role checkpoint. It first retires any
+availability episode that the authentication response superseded.
+Reauthenticate the selected provider outside Agent Runner, then resume the same
+run. Do not edit the run, switch providers, or discard safe partial content;
+fingerprints, session lineage, and correction accounting are already retained.
+For commit readiness, the runner first verifies that the one-shot executor never
+started and that Git created no commit before offering the same recovery. If the failed
+request was a source-session fork with possible effect, resume reconstructs the
+same logical role fresh instead of reforking a source that may already have an
+unrecorded native child.
 
 Writable implementation, polishing, lazy or combined check/fix, and finding-resolution turns
 receive only the persisted exact selected command text, including after resume
@@ -561,11 +575,11 @@ discard, or commit its resumable work. Do not mutate frozen inputs or
 configuration to change what a resumed run will do; resume uses its durable
 snapshot.
 
-| Current action  | Operator procedure                                                                                                                                                                                                                                |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `respond`       | Answer the identified pending request with its exact revision and request ID through MCP, or use the runner-authorized clarification edit and CLI resume. Do not answer a consumed request again.                                                 |
-| `resume`        | Apply only the offered retry or explicit action: for example restore provider/service availability, grant the offered extra fix budget, or authorize one applicable finding override. Resume the same run; preserve prior counters and decisions. |
-| `start-new-run` | Follow the stated prerequisite: revise the plan, reconcile finalization blockers, or obtain an uncontaminated worktree. This action does not authorize retrying the stopped workflow or silently accepting its changes.                           |
+| Current action  | Operator procedure                                                                                                                                                                                                                                                                      |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `respond`       | Answer the identified pending request with its exact revision and request ID through MCP, or use the runner-authorized clarification edit and CLI resume. Do not answer a consumed request again.                                                                                       |
+| `resume`        | Apply only the offered retry or explicit action: for example reauthenticate the selected provider, restore provider/service availability, grant the offered extra fix budget, or authorize one applicable finding override. Resume the same run; preserve prior counters and decisions. |
+| `start-new-run` | Follow the stated prerequisite: revise the plan, reconcile finalization blockers, or obtain an uncontaminated worktree. This action does not authorize retrying the stopped workflow or silently accepting its changes.                                                                 |
 
 For an ordinary CLI retry, use `agent-run resume --run <run-id>` only when the
 current action permits it. MCP responses and resumes require the current

@@ -265,6 +265,13 @@ boolean `sourceProjection` need. The ordered version-24 migration sets it to
 accounting, review evidence, or prepared and consumed effects. It does not infer
 authority from current configuration. Null provisional reports stay null and
 continue through the existing read-only discovery barrier.
+State version 26 admits the fixed authentication pause and bounded commit
+pre-effect authentication proof. The ordered version-25 migration initializes
+the nullable provider-neutral source-fork recovery marker to `null` while
+preserving workflow position, session lineage, fingerprints, correction
+accounting, and prepared or consumed effects. It does not infer a native child
+or reload configuration, and it prevents older readers from accepting the
+expanded durable vocabulary as version 25.
 Discovery does not authorize leaving a safety pause. Interrupted correction
 edits are reconciled and charged before new writable work, without recounting
 them on a later resume.
@@ -991,8 +998,10 @@ allowlist. Structured permission denials, HTTP status, result subtype, and
 terminal reason take precedence over bounded message matching. Backend,
 capability, configuration, usage, provider, and expected-tool permission
 failures may be recoverable, but Bash permission recovery requires a positively
-recognized safe repository inspection. Authentication, every other Bash
-denial, and permission denials proving a forbidden operation remain terminal.
+recognized safe repository inspection. The normalized
+`authentication_required` disposition enters the fixed durable
+reauthentication pause; other authentication evidence, every other Bash denial,
+and permission denials proving a forbidden operation remain terminal.
 Provider recovery requires an explicit transient HTTP status; non-transient
 client statuses and an unqualified structured `api_error` fail closed. An
 otherwise unclassified valid result or process failure is recoverable only for
@@ -1013,6 +1022,25 @@ workspace and repository-control reconciliation. Unknown writable process
 outcomes remain terminal. Resume reconstructs the complete request from durable
 state rather than requiring the failed native session. These rules add no new
 pipeline-state field, provider branch, or migration.
+
+Every non-commit role routes that disposition only after repository-control and
+safe workspace reconciliation. The pause contains exactly
+`authentication_required`, `ERR_AUTHENTICATION_REQUIRED`, and the current
+logical state, with no retry delay. A null resume preserves roles, session
+lineage, fingerprints, findings, and correction accounting while rebuilding
+the same request from durable state. Provider-native diagnostics are neither
+persisted in the pause nor publicly projected. For a failed source-session fork,
+normalized no-effect evidence permits the fork to be retried. Possible-effect
+evidence instead persists only the role and logical context key, resumes the
+same role in a fresh session without reforking, and clears that marker only
+after a child session is durably recorded.
+The pause and source-fork state are persisted atomically with active-turn
+retirement. An interrupted write preserves recovery instead of converting the
+run into a terminal failure. A partially completed finding-resolution round
+retains its charged writable continuation even at the fix limit; it neither
+consumes another round nor permits a new round beyond that limit.
+If publication was interrupted before the pause was saved, authentication
+during fresh recovery still preserves the earlier unrecorded source fork.
 
 When a failure without availability evidence proves an eligible transient
 pre-effect launch failure, the same pause also persists only
@@ -1303,9 +1331,11 @@ Explicit native transport, overload, model-busy, and server availability use the
 injected runner coordinator after repository reconciliation. The exact role and
 logical checkpoint survive five-second exponential backoff capped by the frozen
 policy, with indefinite repeats at the ceiling. Scheduling and start are durable
-and immediately visible; overdue recovery dispatches once. Only a successful
-provider response resets the episode, before output validation. Partial output,
-partial writes, session changes, resume, and restart do not reset it. Safe partial
+and immediately visible; overdue recovery dispatches once. A successful provider
+response resets the episode before output validation. A normalized authentication-
+required response instead retires the superseded episode before its distinct
+operator pause. Partial output, partial writes, session changes, resume, and
+restart do not reset it. Safe partial
 content and pending corrections survive; stale approvals are invalidated and the
 same correction is not charged again. Check/fix mutation claims use the successful
 attempt's starting fingerprint, after retained partial content is reconciled.
@@ -2907,6 +2937,15 @@ authorization on that verification-only path. If a commit is created but
 violates the authorization contract, pause with `commit_contract_violated`.
 Never amend, reset, or otherwise rewrite the unexpected commit automatically.
 
+An authentication disposition follows the same proof boundary without using
+availability scheduling. The consumed record persists only
+`authentication: { disposition: "authentication_required", commitExecutor:
+"not_started" }` beside the fixed code. After unchanged Git verification
+proves no commit, retire the authorization and pause as
+`authentication_required` at `COMMIT`; null resume prepares a fresh one-shot
+authorization. Missing proof, uncertain effects, and created commits remain on
+their existing verification-only or contract-violation paths.
+
 Do not create separate "review fix" commits.
 
 Do not perform a second full review after commit. The exact content was already finalized and reviewed.
@@ -3573,7 +3612,7 @@ At minimum cover:
 73. lazy no-progress, stable-finding, fix, and additional-round behavior remains
     bounded without weakening exact commits, trusted checks, fingerprints, Git
     controls, product decisions, or no-coauthor/no-push rules.
-74. every supported legacy version migrates through state version 25 to
+74. every supported legacy version migrates through state version 26 to
     `independent` without reviving terminal runs or replaying completed or
     pending commit effects; unfinished work freezes guidance and repeats
     read-only validation discovery when prior evidence is provisional.

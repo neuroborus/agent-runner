@@ -5,6 +5,10 @@ import test from "node:test";
 
 import { normalizeAdapterFailure } from "../../../src/agents/index.js";
 import {
+  attachAuthentication,
+  authenticationFailure,
+} from "../../../test/support/authentication.js";
+import {
   migratePlanExecutionStateV5,
   migratePlanExecutionStateV21,
   planExecutionPipeline,
@@ -321,6 +325,60 @@ test("preserves pre-effect proof across interrupted Git verification", async (t)
   assert.equal(rejectionPaused.pause.reason, "commit_failed");
   assert.equal(rejectionPaused.pause.code, "ERR_FAKE_LOCAL_COMMIT_POLICY");
   assert.equal(rejectionPaused.pipelineState.pendingCommit, null);
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.deepEqual(
+    fixture.calls.worker
+      .filter(({ access }) => access === "local-commit")
+      .map(({ authorizationId }) => authorizationId),
+    ["commit-1", "commit-2"],
+  );
+});
+
+test("persists authentication proof before retiring a commit authorization", async (t) => {
+  let authenticationRequired = true;
+  let interruptVerification = true;
+  const fixture = await createFixture(t, {
+    onCommitVerify() {
+      if (interruptVerification) {
+        interruptVerification = false;
+        throw Object.assign(new Error("Git verification was interrupted."), {
+          code: "ERR_FAKE_COMMIT_VERIFICATION",
+        });
+      }
+    },
+    onRoleRun(_role, request) {
+      if (request.access === "local-commit" && authenticationRequired) {
+        authenticationRequired = false;
+        throw authenticationFailure({ commit: true });
+      }
+    },
+  });
+  attachAuthentication(fixture);
+
+  const verificationPaused = await fixture.run();
+
+  assert.equal(verificationPaused.pause.reason, "commit_failed");
+  assert.deepEqual(
+    verificationPaused.pipelineState.pendingCommit.preEffectRejection,
+    {
+      code: "ERR_AUTHENTICATION_REQUIRED",
+      recoverable: false,
+      authentication: {
+        disposition: "authentication_required",
+        commitExecutor: "not_started",
+      },
+    },
+  );
+
+  const authenticationPaused = await fixture.run();
+
+  assert.equal(authenticationPaused.pause.reason, "authentication_required");
+  assert.equal(authenticationPaused.pause.code, "ERR_AUTHENTICATION_REQUIRED");
+  assert.equal(authenticationPaused.pause.resumeState, "COMMIT");
+  assert.equal(authenticationPaused.pipelineState.pendingCommit, null);
 
   const completed = await fixture.run();
 

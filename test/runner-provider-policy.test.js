@@ -7,6 +7,8 @@ import test from "node:test";
 import { planExecutionPipeline } from "@agent-runner/plan-execution";
 
 import {
+  AgentBoundaryError,
+  AUTHENTICATION_REQUIRED_DISPOSITION,
   createProviderRegistry,
   deriveLaunchRecovery,
   normalizeFailureRecord,
@@ -16,6 +18,7 @@ import { main } from "../src/cli.js";
 import { parseRunnerConfiguration } from "../src/config/index.js";
 import { createMcpControlPlane } from "../src/mcp/index.js";
 import { createRunner } from "../src/runner/index.js";
+import { createAuthenticationPolicy } from "../src/runner/authentication.js";
 import { RunnerError } from "../src/runner/input.js";
 import { probeRequiredRoles, roleAdapters } from "../src/runner/roles.js";
 import { createRunStore, projectLaunchRecovery } from "../src/state/index.js";
@@ -401,6 +404,62 @@ test("launch recovery is derived only from eligible normalized failures", () => 
   }
 });
 
+test("authentication policy accepts only the normalized terminal disposition", () => {
+  const policy = createAuthenticationPolicy({ providers: PROVIDER_REGISTRY });
+  const failure = normalizeFailureRecord(
+    {
+      failureClass: "adapter_failure",
+      checkpoint: "turn",
+      outcome: "rejected",
+      effect: "possible",
+      retry: "terminal",
+      disposition: AUTHENTICATION_REQUIRED_DISPOSITION,
+    },
+    [],
+  );
+  const eligible = new AgentBoundaryError(
+    new Error("DO_NOT_RETAIN_AUTHENTICATION_EVIDENCE"),
+    failure,
+  );
+
+  assert.equal(policy.eligible(eligible), true);
+  assert.equal(policy.hasPossibleEffect(eligible), true);
+  assert.equal(policy.preEffect(eligible), null);
+  assert.equal(
+    policy.hasPossibleEffect(
+      new AgentBoundaryError(new Error("rejected before effect"), {
+        ...failure,
+        effect: "none",
+      }),
+    ),
+    false,
+  );
+  const commit = new AgentBoundaryError(new Error("commit authentication"), {
+    ...failure,
+    checkpoint: "commit",
+    effect: "none",
+    commitExecutor: "not_started",
+  });
+  assert.deepEqual(policy.preEffect(commit), {
+    disposition: "authentication_required",
+    commitExecutor: "not_started",
+  });
+  assert.equal(policy.eligible(new Error("authentication required")), false);
+  assert.equal(
+    policy.eligible(
+      new AgentBoundaryError(new Error("unavailable"), {
+        failureClass: "adapter_failure",
+        checkpoint: "turn",
+        outcome: "rejected",
+        effect: "possible",
+        retry: "transient",
+        availabilityReason: "server_unavailable",
+      }),
+    ),
+    false,
+  );
+});
+
 test("source forks retain recovery only before native forking can start", async () => {
   for (const checkpoint of ["spawn", "initialize", "session", "turn_start"]) {
     const adapter = failureAdapter(
@@ -528,6 +587,58 @@ test("CLI and MCP project the same persisted launch recovery", async () => {
   assert.match(
     output,
     /Availability retry: worker implement:1; transport_unavailable; attempt 2; delay 10000ms; deadline 2026-09-29T10:00:00.000Z/u,
+  );
+});
+
+test("CLI and MCP project one fixed authentication recovery action", async () => {
+  const fixture = projectionFixture(undefined);
+  fixture.run.pause = {
+    reason: "authentication_required",
+    code: "ERR_AUTHENTICATION_REQUIRED",
+    resumeState: "IMPLEMENT",
+  };
+  fixture.run.providerPrivateDiagnostics =
+    "DO_NOT_PROJECT_PROVIDER_AUTHENTICATION_EVIDENCE";
+  let output = "";
+  const runner = {
+    async status() {
+      return fixture;
+    },
+  };
+
+  assert.equal(
+    await main(["status", "--run", fixture.run.runId], {
+      runner,
+      stdout: {
+        write(value) {
+          output += value;
+        },
+      },
+      stderr: { write() {} },
+    }),
+    0,
+  );
+  const control = createMcpControlPlane({
+    issueReporter: {},
+    runner,
+    runStore: {
+      async inspectRunLeaseOwner() {
+        return { status: "none" };
+      },
+    },
+  });
+  const status = await control.runStatus({ runId: fixture.run.runId });
+
+  assert.equal(status.pause.reason, "authentication_required");
+  assert.equal(status.pause.code, "ERR_AUTHENTICATION_REQUIRED");
+  assert.equal(status.pause.resumeState, "IMPLEMENT");
+  assert.deepEqual(status.pause.nextActions, [
+    { type: "resume", action: null },
+  ]);
+  assert.match(output, /Provider authentication is required/u);
+  assert.doesNotMatch(
+    JSON.stringify({ output, status }),
+    /DO_NOT_PROJECT_PROVIDER_AUTHENTICATION_EVIDENCE/u,
   );
 });
 

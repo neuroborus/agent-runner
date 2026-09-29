@@ -75,6 +75,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   operator_paused:
     "The operator paused this run; resume restores its checkpoint and any existing blockers.",
   operator_canceled: "The operator canceled this run; it cannot resume.",
+  authentication_required:
+    "Provider authentication is required; reauthenticate, then resume the same checkpoint.",
   backend_unavailable: "The selected backend is temporarily unavailable.",
   clarification_answers_required:
     "Material clarification answers are required before planning can continue.",
@@ -138,7 +140,11 @@ function publicEvidence(run) {
 
 function publicResumeState(run) {
   return run.pipelineState.workflowState === "WAITING_FOR_USER" &&
-    ["backend_unavailable", "lazy_output_invalid"].includes(run.pause.reason) &&
+    [
+      "authentication_required",
+      "backend_unavailable",
+      "lazy_output_invalid",
+    ].includes(run.pause.reason) &&
     WORKFLOW_STATES.includes(run.pause.resumeState)
     ? run.pause.resumeState
     : null;
@@ -249,9 +255,11 @@ function validateResumeAction(run, action) {
     run.pipelineState.workflowState !== "WAITING_FOR_USER" ||
     action !== null ||
     (run.pipelineState.pendingEdit === null &&
-      !["backend_unavailable", "lazy_output_invalid"].includes(
-        run.pause?.reason,
-      )) ||
+      ![
+        "authentication_required",
+        "backend_unavailable",
+        "lazy_output_invalid",
+      ].includes(run.pause?.reason)) ||
     (run.pause?.reason === "lazy_output_invalid" &&
       run.pipelineState.pendingLazyCorrection === null)
   ) {
@@ -315,14 +323,22 @@ export function migratePlanAuthoringStateV4(run) {
   });
 }
 
+export function migratePlanAuthoringStateV5(run) {
+  return Object.freeze({
+    ...run.pipelineState,
+    authenticationSourceForkRecovery: null,
+  });
+}
+
 export const planAuthoringPipeline = Object.freeze({
   id: PLAN_AUTHORING_PIPELINE_ID,
-  stateVersion: 5,
+  stateVersion: 6,
   migrations: Object.freeze({
     1: migratePlanAuthoringStateV1,
     2: migratePlanAuthoringStateV2,
     3: migratePlanAuthoringStateV3,
     4: migratePlanAuthoringStateV4,
+    5: migratePlanAuthoringStateV5,
   }),
   roles: ROLES,
   roleAccess: ROLE_ACCESS,

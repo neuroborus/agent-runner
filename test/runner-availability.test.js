@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { AgentBoundaryError, PROVIDER_REGISTRY } from "../src/agents/index.js";
+import {
+  AgentBoundaryError,
+  AUTHENTICATION_REQUIRED_DISPOSITION,
+  PROVIDER_REGISTRY,
+} from "../src/agents/index.js";
 import { createRunner } from "../src/runner/index.js";
 import { parseRunnerConfiguration } from "../src/config/index.js";
 import { createAvailabilityCoordinator } from "../src/runner/availability.js";
@@ -29,6 +33,35 @@ function unavailable(backend, overrides = {}) {
       ...overrides,
     },
   );
+}
+
+function authenticationRequired() {
+  return new AgentBoundaryError(
+    { code: "ERR_CODEX_TURN_FAILED" },
+    {
+      failureClass: "turn_unauthorized",
+      checkpoint: "turn",
+      outcome: "rejected",
+      effect: "possible",
+      retry: "terminal",
+      disposition: AUTHENTICATION_REQUIRED_DISPOSITION,
+    },
+  );
+}
+
+function capabilities() {
+  return {
+    version: "fixture",
+    structuredOutput: true,
+    readOnly: true,
+    autonomousWrite: true,
+    gitMetadataWriteBlocked: true,
+    workspaceWrite: true,
+    localCommit: true,
+    remoteWriteBlocked: true,
+    nativeSessionContinuation: true,
+    nativeSessionFork: true,
+  };
 }
 
 async function fixture(t, backend = "codex") {
@@ -432,18 +465,7 @@ test("the runner records provider progress before rejecting a malformed response
     adapters: {
       codex: {
         async probe() {
-          return {
-            version: "fixture",
-            structuredOutput: true,
-            readOnly: true,
-            autonomousWrite: true,
-            gitMetadataWriteBlocked: true,
-            workspaceWrite: true,
-            localCommit: true,
-            remoteWriteBlocked: true,
-            nativeSessionContinuation: true,
-            nativeSessionFork: true,
-          };
+          return capabilities();
         },
         async run() {
           if (++calls === 1) throw unavailable("codex");
@@ -467,6 +489,79 @@ test("the runner records provider progress before rejecting a malformed response
   );
   assert.equal(reconciledAfterResponse, true);
   assert.equal((await store.loadRun(runId)).availabilityRetry, null);
+  assert.deepEqual(
+    events
+      .filter(({ phase }) => phase === "availability")
+      .map(({ kind }) => kind),
+    ["retry-scheduled", "retry-started", "recovered"],
+  );
+});
+
+test("the runner retires availability when authentication takes over", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "availability-authentication-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const projectPath = join(root, "project"),
+    taskPath = join(root, "task");
+  await Promise.all([mkdir(projectPath), mkdir(taskPath)]);
+  await writeFile(join(taskPath, "task.md"), "Plan a change.\n");
+  let now = Date.parse("2026-09-29T10:00:00.000Z");
+  const store = createRunStore({
+    stateRoot: join(root, "state"),
+    clock: () => new Date(now),
+  });
+  const events = [];
+  let calls = 0;
+  const snapshot = ({ allowedPaths }) => ({
+    schemaVersion: 1,
+    projectPath,
+    allowedPaths,
+    contentFingerprint: fingerprint,
+  });
+  const runner = createRunner({
+    runStore: store,
+    availabilityClock: () => now,
+    availabilityWait: async (ms) => {
+      now += ms;
+    },
+    loadConfiguration: async () =>
+      parseRunnerConfiguration(
+        JSON.stringify({ schemaVersion: 1, defaultBackend: "codex" }),
+      ),
+    onActivity: async (event) => events.push(event),
+    git: {
+      async assertUnchanged() {},
+      async inspectPath({ path }) {
+        return { path, exists: false };
+      },
+      async snapshot(input) {
+        return snapshot(input);
+      },
+      async preflight(input) {
+        return { snapshot: snapshot(input) };
+      },
+    },
+    adapters: {
+      codex: {
+        async probe() {
+          return capabilities();
+        },
+        async run() {
+          throw ++calls === 1 ? unavailable("codex") : authenticationRequired();
+        },
+      },
+    },
+  });
+
+  const paused = await runner.run({
+    pipelineId: "plan-authoring",
+    projectPath,
+    taskPath,
+    settingOverrides: { mode: "lazy" },
+  });
+
+  assert.equal(paused.run.pause.reason, "authentication_required");
+  assert.equal(paused.run.availabilityRetry, null);
+  assert.equal(calls, 2);
   assert.deepEqual(
     events
       .filter(({ phase }) => phase === "availability")

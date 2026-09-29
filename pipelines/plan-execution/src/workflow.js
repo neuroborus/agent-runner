@@ -157,6 +157,7 @@ const INPUT_DRIFT_ERROR_CODES = new Set([
   "EPERM",
 ]);
 const RETRYABLE_PAUSE_REASONS = new Set([
+  "authentication_required",
   "backend_unavailable",
   "bootstrap_disagreement",
   "confirmation_output_invalid",
@@ -767,6 +768,8 @@ export async function runPlanExecution({
   let interruptedTurn = run.activeTurn;
   let interruptedRepositoryReconciled = false;
   let failedSourceForkLaunchRecovery = false;
+  // A published pause must survive an interrupted persistence response.
+  let authenticationPausePersistence = false;
   let legacyRecoveryPersistence = false;
   let commitCheckpointSettlement = false;
   // Journal publication can succeed before its caller observes completion.
@@ -932,6 +935,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
   }
 
   async function pause(reason, details = {}, pipelineStatePatch = {}) {
+    authenticationPausePersistence = reason === "authentication_required";
     await transition(
       {
         ...state(),
@@ -939,6 +943,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
         workflowState: "WAITING_FOR_USER",
       },
       {
+        nextActiveTurn: authenticationPausePersistence ? null : undefined,
         pause: { ...details, reason },
         publicActivity: activity(
           "runner",
@@ -948,6 +953,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
         ),
       },
     );
+    authenticationPausePersistence = false;
     return currentRun;
   }
 
@@ -1000,9 +1006,13 @@ Include every listed command exactly once in requiredChecks with its actual cano
       );
       return currentRun;
     }
-    const reason = rejection.recoverable
-      ? "backend_unavailable"
-      : "commit_failed";
+    const authenticationRequired =
+      rejection.authentication?.disposition === "authentication_required";
+    const reason = authenticationRequired
+      ? "authentication_required"
+      : rejection.recoverable
+        ? "backend_unavailable"
+        : "commit_failed";
     await transition(
       {
         ...state(),
@@ -1012,7 +1022,9 @@ Include every listed command exactly once in requiredChecks with its actual cano
       {
         pause: {
           reason,
-          code: rejection.code,
+          code: authenticationRequired
+            ? "ERR_AUTHENTICATION_REQUIRED"
+            : rejection.code,
           resumeState: "COMMIT",
         },
         publicActivity: activity(
@@ -1495,6 +1507,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
       (currentRun.availabilityRetry?.checkpoint.startsWith(
         "resolve-findings:workspace-write:",
       ) ||
+        state().availabilityCorrectionCharged ||
         counters().fixRounds < fixBudget())
     );
   }
@@ -1733,7 +1746,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
     const latestSession = [...currentRun.sessionLineage.children]
       .reverse()
       .find((child) => child.role === role);
-    const { session, previousSession, consumeSourceFork } =
+    const selectedSession =
       contextReview && latestSession?.contextKey === contextKey
         ? {
             session: { id: latestSession.sessionId, mode: "continue" },
@@ -1750,6 +1763,24 @@ Include every listed command exactly once in requiredChecks with its actual cano
             recovering,
             freshSession,
           });
+    const sourceForkRecovery = state().authenticationSourceForkRecovery;
+    if (
+      sourceForkRecovery !== null &&
+      (sourceForkRecovery.role !== role ||
+        sourceForkRecovery.contextKey !== contextKey)
+    ) {
+      throw workflowError(
+        "Plan-execution authentication source-fork recovery changed checkpoint.",
+      );
+    }
+    const { session, previousSession, consumeSourceFork } =
+      sourceForkRecovery !== null && selectedSession.session?.mode === "fork"
+        ? {
+            session: undefined,
+            previousSession: undefined,
+            consumeSourceFork: false,
+          }
+        : selectedSession;
     const roleConfiguration = currentRun.roles[role];
     const positionPrompt = `\n\nRunner-selected plan position (only verified commits are completed):\n${JSON.stringify(selectedPlanPosition(state()))}`;
     const assessmentPrompt = [
@@ -1789,6 +1820,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
     let response;
     let agentError;
     let availabilityFailure = false;
+    let authenticationFailure = false;
     currentRun = await runtime.startAgentTurn(
       turn,
       consumeSourceFork
@@ -1810,6 +1842,8 @@ Include every listed command exactly once in requiredChecks with its actual cano
         agentError = cause;
         if (isOwnershipFailure(cause)) throw cause;
         availabilityFailure = runtime.availability?.eligible(cause) === true;
+        authenticationFailure =
+          runtime.authentication?.eligible(cause) === true;
       }
       let nextRepositoryBaseline = baseline;
       if (access === "read-only") {
@@ -1861,9 +1895,11 @@ Include every listed command exactly once in requiredChecks with its actual cano
                   pendingCorrection: true,
                   availabilityCorrectionCharged:
                     current.availabilityCorrectionCharged ||
-                    (availabilityFailure && changedLazyCheck),
+                    ((availabilityFailure || authenticationFailure) &&
+                      changedLazyCheck) ||
+                    (authenticationFailure && changedCorrection),
                   reviewReconsideration: [],
-                  ...(availabilityFailure
+                  ...(availabilityFailure || authenticationFailure
                     ? {
                         workflowState: current.workflowState,
                         findings: current.findings,
@@ -1920,8 +1956,45 @@ Include every listed command exactly once in requiredChecks with its actual cano
           );
         }
       }
+      if (
+        authenticationFailure &&
+        agentError?.failureClass !== STRUCTURED_OUTPUT_FAILURE_CLASS
+      ) {
+        // A fresh recovery failure cannot disprove an earlier unrecorded fork.
+        const hasPossibleSourceForkEffect =
+          (request.session?.mode === "fork" &&
+            runtime.authentication.hasPossibleEffect(agentError)) ||
+          (recovering &&
+            executionPolicy(state().settings).primarySessionScope ===
+              "checkpoint" &&
+            role !== "arbiter" &&
+            currentRun.sessionLineage.source !== null &&
+            latestSession?.contextKey !== contextKey);
+        await pause(
+          "authentication_required",
+          {
+            code: "ERR_AUTHENTICATION_REQUIRED",
+            resumeState: state().workflowState,
+          },
+          hasPossibleSourceForkEffect
+            ? {
+                authenticationSourceForkRecovery: Object.freeze({
+                  role,
+                  contextKey,
+                }),
+              }
+            : consumeSourceFork
+              ? { lazySourceForkConsumed: false }
+              : {},
+        );
+        return null;
+      }
     } finally {
-      if (!isOwnershipFailure(agentError)) {
+      if (
+        !authenticationPausePersistence &&
+        currentRun.activeTurn != null &&
+        !isOwnershipFailure(agentError)
+      ) {
         currentRun = await runtime.finishAgentTurn(turn);
         assertRun(currentRun);
       }
@@ -1968,6 +2041,12 @@ Include every listed command exactly once in requiredChecks with its actual cano
         : invalidRoleOutput(`${role} returned no response.`, outputContext);
     }
     await recordSession(role, response.sessionId, previousSession, contextKey);
+    if (state().authenticationSourceForkRecovery !== null) {
+      await transition({
+        ...state(),
+        authenticationSourceForkRecovery: null,
+      });
+    }
     if (!isRecord(response.structured)) {
       throw outputContext === undefined
         ? workflowError(
@@ -6556,6 +6635,7 @@ ${JSON.stringify(
       retryCheckpoint?.startsWith("resolve-findings:read-only:") === true ||
       (retryCheckpoint?.startsWith("resolve-findings:workspace-write:") !==
         true &&
+        !current.availabilityCorrectionCharged &&
         counters().fixRounds >= fixBudget());
     const blockers = activeBlockers();
     const disputableFindingIds = new Set(
@@ -6949,12 +7029,17 @@ ${step.subject}`),
         agentError = cause;
       }
       const availability = runtime.availability?.preEffect(agentError);
+      const authentication = runtime.authentication?.preEffect(agentError);
       const preEffectRejection =
         agentError?.effectStarted === false
           ? Object.freeze({
-              code: diagnosticCode(agentError, "ERR_COMMIT_ADAPTER_REJECTED"),
+              code:
+                authentication === null || authentication === undefined
+                  ? diagnosticCode(agentError, "ERR_COMMIT_ADAPTER_REJECTED")
+                  : "ERR_AUTHENTICATION_REQUIRED",
               recoverable: agentError?.recoverable === true,
               ...(availability == null ? {} : { availability }),
+              ...(authentication == null ? {} : { authentication }),
             })
           : null;
       pendingCommit = {
@@ -6993,6 +7078,10 @@ ${step.subject}`),
         cause.code === "ERR_COMMIT_NOT_CREATED" &&
         pendingCommit.preEffectRejection !== null
       ) {
+        if (pendingCommit.preEffectRejection.authentication !== undefined) {
+          await pausePreEffectCommitRejection(pendingCommit.preEffectRejection);
+          return false;
+        }
         if (
           !operatorStop &&
           pendingCommit.preEffectRejection.availability !== undefined &&
@@ -7269,6 +7358,7 @@ ${step.subject}`),
         RETRYABLE_PAUSE_REASONS.has(currentRun.pause.reason) &&
         (!state().preflightComplete ||
           ([
+            "authentication_required",
             "backend_unavailable",
             "bootstrap_disagreement",
             "confirmation_output_invalid",
@@ -7607,7 +7697,11 @@ ${step.subject}`),
       );
     }
   } catch (cause) {
-    if (cause?.code === "ERR_AVAILABILITY_RECOVERY") throw cause;
+    if (
+      authenticationPausePersistence ||
+      cause?.code === "ERR_AVAILABILITY_RECOVERY"
+    )
+      throw cause;
     if (isOwnershipFailure(cause) && state().workflowState !== "COMMIT") {
       if (
         cause.executionResourceRetained === true &&

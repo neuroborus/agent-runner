@@ -384,7 +384,10 @@ test("migrates legacy authoring line targets under the lease without configurati
         async run(request) {
           const saved = await store.loadRun(prepared.run.runId);
           assert.equal(await store.runIsLeased(prepared.run.runId), true);
-          assert.equal(saved.pipelineStateVersion, 5);
+          assert.equal(
+            saved.pipelineStateVersion,
+            prepared.run.pipelineStateVersion,
+          );
           assert.equal(
             saved.pipelineState.settings.preferredCommitLineLimit,
             900,

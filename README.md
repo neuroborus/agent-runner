@@ -357,11 +357,26 @@ defaults to `1800000` (30 minutes), and resolves project over runner configurati
 The initial delay is fixed at five seconds. Resume preserves the saved policy;
 legacy runs use the default. Explicit transient availability failures in all three
 pipelines retry automatically after Git reconciliation. Delays double from five
-seconds to the saved ceiling, then repeat there without a retry quota. Only a
-successful provider response resets the episode; restart and partial work do not.
+seconds to the saved ceiling, then repeat there without a retry quota. A successful
+provider response resets the episode; a normalized authentication-required response
+retires it before entering the separate operator pause. Restart and partial work do
+not reset it.
 CLI activity and MCP status expose the role, checkpoint, reason, attempt, delay,
 and deadline. A foreground CLI must be resumed after owner loss; detached MCP
 work continues independently of client wait cancellation or disconnect.
+
+Provider authentication is a distinct operator recovery. A normalized
+authentication failure pauses any pipeline immediately after safe repository
+reconciliation as `authentication_required`, with no availability retry or
+backoff; any superseded availability episode is retired first. CLI and MCP show
+the fixed `ERR_AUTHENTICATION_REQUIRED` code, the saved checkpoint, and one null
+resume action without native provider details.
+Reauthenticate the selected provider, then resume the same run; its roles,
+session lineage, content fingerprints, and correction accounting remain
+frozen. A failed source-session fork is retried only with no-effect proof;
+possible-effect evidence resumes the same logical role fresh without reforking
+the source. Commit readiness still verifies the existing pre-effect proof and
+Git state before replacing a one-shot authorization.
 
 An ignored project configuration may select root or project aliases through
 the same pipeline setting, replacing that pipeline's root selection. The tracked
@@ -507,6 +522,14 @@ the native failure is marked `other`. HTTP 400 `invalid_request_error` /
 `invalid_json_schema` is terminal `ERR_CODEX_TURN_FAILED` with
 `turn_bad_request`; it does not trigger provider retries, output correction,
 or `backend_unavailable`. Native error details are discarded.
+
+A structurally valid Codex HTTP 401 authentication envelope becomes the shared
+`authentication_required` disposition. HTTP 403, authorization or permission
+failures, conflicting or malformed payloads, and other providers without an
+equivalent descriptor contract remain outside it. The runner persists only the
+fixed redacted pause and resumes the same logical checkpoint after the operator
+reauthenticates; it never exposes the native message, URL, request identifier,
+payload, or credential material.
 
 Explicit Codex overload and both providers' normalized availability failures use
 the shared durable backoff without immediate adapter retries. Opaque Codex

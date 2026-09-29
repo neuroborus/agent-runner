@@ -47,6 +47,7 @@ const PIPELINE_STATE_FIELDS = new Set([
   "reviewApproved",
   "cleanConfirmationFingerprint",
   "lazySourceForkConsumed",
+  "authenticationSourceForkRecovery",
   "lazyCorrections",
   "pendingLazyCorrection",
   "lastCountedRevision",
@@ -1115,6 +1116,27 @@ export function normalizePipelineState(value) {
     throw workflowError("Plan-authoring source-fork state is not applicable.");
   }
   if (
+    value.authenticationSourceForkRecovery !== null &&
+    (!value.preflightComplete ||
+      !isRecord(value.authenticationSourceForkRecovery) ||
+      !hasExactFields(value.authenticationSourceForkRecovery, [
+        "role",
+        "contextKey",
+      ]) ||
+      value.authenticationSourceForkRecovery.role === "arbiter" ||
+      !resolveActiveRoles(value.settings).includes(
+        value.authenticationSourceForkRecovery.role,
+      ) ||
+      (authoringPolicy(value.settings).primarySessionScope === "run" &&
+        !value.lazySourceForkConsumed) ||
+      typeof value.authenticationSourceForkRecovery.contextKey !== "string" ||
+      !HASH_PATTERN.test(value.authenticationSourceForkRecovery.contextKey))
+  ) {
+    throw workflowError(
+      "Plan-authoring authentication source-fork recovery is invalid.",
+    );
+  }
+  if (
     value.arbiterDirection !== null &&
     !["WAITING_FOR_USER", "FAILED"].includes(value.workflowState)
   ) {
@@ -1156,6 +1178,7 @@ export function createPlanAuthoringState({
     reviewApproved: false,
     cleanConfirmationFingerprint: null,
     lazySourceForkConsumed: false,
+    authenticationSourceForkRecovery: null,
     lazyCorrections: Object.freeze([]),
     pendingLazyCorrection: null,
     lastCountedRevision: 0,
@@ -1235,7 +1258,7 @@ export function assertRun(run) {
   if (
     !isRecord(run) ||
     run.pipelineId !== "plan-authoring" ||
-    run.pipelineStateVersion !== 5 ||
+    run.pipelineStateVersion !== 6 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -1324,6 +1347,8 @@ export function assertRun(run) {
   }
   if (
     (pipelineState.lazySourceForkConsumed &&
+      run.sessionLineage.source === null) ||
+    (pipelineState.authenticationSourceForkRecovery !== null &&
       run.sessionLineage.source === null) ||
     (authoringPolicy(pipelineState.settings).primarySessionScope === "run" &&
       run.sessionLineage.source !== null &&
@@ -1463,9 +1488,17 @@ export function assertRun(run) {
       !hasResumeState ||
       checkpointAllowed(pipelineState.settings, run.pause.resumeState);
     const resumableRetry = [
+      "authentication_required",
       "backend_unavailable",
       "lazy_output_invalid",
     ].includes(run.pause.reason);
+    if (
+      run.pause.reason === "authentication_required" &&
+      (!hasExactFields(run.pause, ["reason", "code", "resumeState"]) ||
+        run.pause.code !== "ERR_AUTHENTICATION_REQUIRED")
+    ) {
+      throw workflowError("Plan-authoring authentication pause is invalid.");
+    }
     if (
       resumableRetry !== hasResumeState ||
       (hasResumeState &&

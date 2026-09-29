@@ -92,6 +92,7 @@ const PIPELINE_STATE_FIELDS = new Set([
   "candidateMigrationPending",
   "cleanConfirmationFingerprint",
   "lazySourceForkConsumed",
+  "authenticationSourceForkRecovery",
   "compatibilityCheckRequired",
   "currentStep",
   "reviewerStep",
@@ -348,6 +349,18 @@ const EDIT_PAUSE_REASONS = Object.freeze({
   "proactive-clarification": "proactive_clarification",
 });
 const PAUSE_RESUME_STATES = Object.freeze({
+  authentication_required: Object.freeze([
+    "CLARIFY",
+    "BOOTSTRAP",
+    "IMPLEMENT",
+    "FINALIZE",
+    "CHECK_AND_FIX",
+    "CLEAN_CONFIRM",
+    "CONFIRM",
+    "REVIEW",
+    "RESOLVE_FINDINGS",
+    "COMMIT",
+  ]),
   bootstrap_disagreement: Object.freeze([
     "BOOTSTRAP",
     "IMPLEMENT",
@@ -3935,15 +3948,24 @@ function normalizePendingCommit(value) {
     const hasAvailability =
       isRecord(value.preEffectRejection) &&
       Object.hasOwn(value.preEffectRejection, "availability");
+    const hasAuthentication =
+      isRecord(value.preEffectRejection) &&
+      Object.hasOwn(value.preEffectRejection, "authentication");
     assertExactFields(
       value.preEffectRejection,
-      ["code", "recoverable", ...(hasAvailability ? ["availability"] : [])],
+      [
+        "code",
+        "recoverable",
+        ...(hasAvailability ? ["availability"] : []),
+        ...(hasAuthentication ? ["authentication"] : []),
+      ],
       "Plan-execution pre-effect rejection",
     );
     if (
       value.status !== "consumed" ||
       !DIAGNOSTIC_CODE_PATTERN.test(value.preEffectRejection.code) ||
-      typeof value.preEffectRejection.recoverable !== "boolean"
+      typeof value.preEffectRejection.recoverable !== "boolean" ||
+      (hasAvailability && hasAuthentication)
     ) {
       throw workflowError("Plan-execution pre-effect rejection is invalid.");
     }
@@ -3965,6 +3987,22 @@ function normalizePendingCommit(value) {
         ].includes(proof.reason)
       ) {
         throw workflowError("Commit availability proof is invalid.");
+      }
+    }
+    const authentication = value.preEffectRejection.authentication;
+    if (hasAuthentication) {
+      assertExactFields(
+        authentication,
+        ["disposition", "commitExecutor"],
+        "Commit authentication proof",
+      );
+      if (
+        value.preEffectRejection.recoverable ||
+        value.preEffectRejection.code !== "ERR_AUTHENTICATION_REQUIRED" ||
+        authentication.disposition !== "authentication_required" ||
+        authentication.commitExecutor !== "not_started"
+      ) {
+        throw workflowError("Commit authentication proof is invalid.");
       }
     }
   }
@@ -4116,6 +4154,27 @@ export function normalizePipelineState(value) {
   }
   if (typeof value.lazySourceForkConsumed !== "boolean") {
     throw workflowError("Plan-execution source-fork state is invalid.");
+  }
+  if (value.authenticationSourceForkRecovery !== null) {
+    assertExactFields(
+      value.authenticationSourceForkRecovery,
+      ["role", "contextKey"],
+      "Plan-execution authentication source-fork recovery",
+    );
+    if (
+      !value.preflightComplete ||
+      value.authenticationSourceForkRecovery.role === "arbiter" ||
+      !resolveActiveRoles(value.settings).includes(
+        value.authenticationSourceForkRecovery.role,
+      ) ||
+      (policy.primarySessionScope === "run" && !value.lazySourceForkConsumed) ||
+      typeof value.authenticationSourceForkRecovery.contextKey !== "string" ||
+      !HASH_PATTERN.test(value.authenticationSourceForkRecovery.contextKey)
+    ) {
+      throw workflowError(
+        "Plan-execution authentication source-fork recovery is invalid.",
+      );
+    }
   }
   const trustedValidation = normalizeTrustedValidation(value.trustedValidation);
   if (trustedValidation !== value.trustedValidation) {
@@ -5295,6 +5354,7 @@ export function createPlanExecutionState({
       candidateMigrationPending: false,
       cleanConfirmationFingerprint: null,
       lazySourceForkConsumed: false,
+      authenticationSourceForkRecovery: null,
       compatibilityCheckRequired: false,
       currentStep: null,
       reviewerStep: null,
@@ -5415,7 +5475,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 25 ||
+    run.pipelineStateVersion !== 26 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -5504,6 +5564,8 @@ export function assertRun(run) {
   }
   if (
     (state.lazySourceForkConsumed && run.sessionLineage.source === null) ||
+    (state.authenticationSourceForkRecovery !== null &&
+      run.sessionLineage.source === null) ||
     (executionPolicy(state.settings).primarySessionScope === "run" &&
       run.sessionLineage.source !== null &&
       (run.sessionLineage.children.length > 0 ||
@@ -5658,6 +5720,7 @@ export function assertRun(run) {
       (run.pause.reason === "commit_failed" && state.pendingCommit === null) ||
       (state.preflightComplete &&
         [
+          "authentication_required",
           "backend_unavailable",
           "confirmation_output_invalid",
           "environment_blocked",
@@ -5675,6 +5738,13 @@ export function assertRun(run) {
       (requiresResumeState && !hasResumeState)
     ) {
       throw workflowError("Plan-execution pause resume state is invalid.");
+    }
+    if (
+      run.pause.reason === "authentication_required" &&
+      (!hasExactFields(run.pause, ["reason", "code", "resumeState"]) ||
+        run.pause.code !== "ERR_AUTHENTICATION_REQUIRED")
+    ) {
+      throw workflowError("Plan-execution authentication pause is invalid.");
     }
     if (
       hasLaunchRecovery &&

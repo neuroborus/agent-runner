@@ -94,6 +94,7 @@ const PIPELINE_STATE_FIELDS = new Set([
   "candidateMigrationPending",
   "cleanConfirmationFingerprint",
   "lazySourceForkConsumed",
+  "authenticationSourceForkRecovery",
   "polishSummary",
   "finalizationResult",
   "finalizedFingerprint",
@@ -287,6 +288,17 @@ const EDIT_PAUSE_REASONS = Object.freeze({
   "proactive-clarification": "proactive_clarification",
 });
 const PAUSE_RESUME_STATES = Object.freeze({
+  authentication_required: Object.freeze([
+    "CLARIFY",
+    "BOOTSTRAP",
+    "POLISH",
+    "FINALIZE",
+    "CHECK_AND_FIX",
+    "CLEAN_CONFIRM",
+    "REVIEW",
+    "CONFIRM",
+    "RESOLVE_FINDINGS",
+  ]),
   bootstrap_disagreement: Object.freeze([
     "BOOTSTRAP",
     "POLISH",
@@ -3566,6 +3578,27 @@ export function normalizePipelineState(value) {
   if (typeof value.lazySourceForkConsumed !== "boolean") {
     throw workflowError("Polishing source-fork state is invalid.");
   }
+  if (value.authenticationSourceForkRecovery !== null) {
+    assertExactFields(
+      value.authenticationSourceForkRecovery,
+      ["role", "contextKey"],
+      "Polishing authentication source-fork recovery",
+    );
+    if (
+      !value.preflightComplete ||
+      value.authenticationSourceForkRecovery.role === "arbiter" ||
+      !resolveActiveRoles(value.settings).includes(
+        value.authenticationSourceForkRecovery.role,
+      ) ||
+      (policy.primarySessionScope === "run" && !value.lazySourceForkConsumed) ||
+      typeof value.authenticationSourceForkRecovery.contextKey !== "string" ||
+      !HASH_PATTERN.test(value.authenticationSourceForkRecovery.contextKey)
+    ) {
+      throw workflowError(
+        "Polishing authentication source-fork recovery is invalid.",
+      );
+    }
+  }
   const trustedValidation = normalizeTrustedValidation(value.trustedValidation);
   if (trustedValidation !== value.trustedValidation) {
     value = { ...value, trustedValidation };
@@ -4561,6 +4594,7 @@ export function createPolishingState({
       primaryFindings: Object.freeze([]),
       cleanConfirmationFingerprint: null,
       lazySourceForkConsumed: false,
+      authenticationSourceForkRecovery: null,
       polishSummary: null,
       finalizationResult: null,
       finalizedFingerprint: null,
@@ -4689,7 +4723,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "polishing" ||
-    run.pipelineStateVersion !== 17 ||
+    run.pipelineStateVersion !== 18 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -4777,6 +4811,8 @@ export function assertRun(run) {
   }
   if (
     (state.lazySourceForkConsumed && run.sessionLineage.source === null) ||
+    (state.authenticationSourceForkRecovery !== null &&
+      run.sessionLineage.source === null) ||
     (polishingPolicy(state.settings).primarySessionScope === "run" &&
       run.sessionLineage.source !== null &&
       (run.sessionLineage.children.length > 0 ||
@@ -4941,6 +4977,7 @@ export function assertRun(run) {
       ) ||
       (state.preflightComplete &&
         [
+          "authentication_required",
           "backend_unavailable",
           "confirmation_output_invalid",
           "environment_blocked",
@@ -4956,6 +4993,13 @@ export function assertRun(run) {
       (requiresResumeState && !hasResumeState)
     ) {
       throw workflowError("Polishing pause resume state is invalid.");
+    }
+    if (
+      run.pause.reason === "authentication_required" &&
+      (!hasExactFields(run.pause, ["reason", "code", "resumeState"]) ||
+        run.pause.code !== "ERR_AUTHENTICATION_REQUIRED")
+    ) {
+      throw workflowError("Polishing authentication pause is invalid.");
     }
     if (
       hasLaunchRecovery &&

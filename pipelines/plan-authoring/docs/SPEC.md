@@ -249,6 +249,13 @@ mode defaults to independent; unsupported legacy values fail closed. No
 configuration is reloaded, role is replayed, or artifact is written. Lock-free
 projection may migrate in memory; continuation persists under the existing lease.
 
+Pipeline state version 6 admits the fixed `authentication_required` pause. The
+ordered version-5 migration initializes the nullable provider-neutral
+source-fork recovery marker to `null` while preserving saved workflow content,
+session lineage, and correction accounting. It neither reloads configuration
+nor infers a native child, and it prevents older readers from accepting the
+expanded durable vocabulary as version 5.
+
 ## Operator Pause And Cancellation
 
 The runner's durable stop protocol applies to every role, checkpoint, and mode.
@@ -493,16 +500,20 @@ safe repository inspection; all other Bash denials fail closed. Structured API-e
 recovery requires an explicit transient HTTP status, while non-transient client
 statuses and an unqualified structured `api_error` are terminal. An
 unclassified valid read-only result or process failure may use this path only
-after the repository guard proves the turn remained read-only. Authentication,
+after the repository guard proves the turn remained read-only. A normalized
+`authentication_required` disposition enters the fixed durable
+reauthentication pause after that guard; other authentication evidence,
 forbidden-operation permission denials, protocol failures, and isolation
 failures remain terminal. Denied input and native provider text are discarded.
 Explicit native transport, overload, model-busy, and server availability use the
 injected runner coordinator after repository reconciliation. The exact role and
 logical checkpoint survive five-second exponential backoff capped by the frozen
 policy, with indefinite repeats at the ceiling. Scheduling and start are durable
-and immediately visible; overdue recovery dispatches once. Only a successful
-provider response resets the episode, before output validation. Partial output,
-partial writes, session changes, resume, and restart do not reset it. Safe partial
+and immediately visible; overdue recovery dispatches once. A successful provider
+response resets the episode before output validation. A normalized authentication-
+required response instead retires the superseded episode before its distinct
+operator pause. Partial output, partial writes, session changes, resume, and
+restart do not reset it. Safe partial
 content and pending corrections survive; stale approvals are invalidated and the
 same correction is not charged again. Source forks are never replayed. An
 abortable wait retains exclusive ownership and honors immediate/deferred stops.
@@ -520,6 +531,20 @@ transient pre-effect launch recovery, also persist only its strict
 `launchRecovery: { failureClass, checkpoint }` projection. Resume, cancellation,
 and operator-pause restoration follow the common state contract. This uses the
 current pipeline state and common run envelope without an additional migration.
+The authentication pause contains only `authentication_required`,
+`ERR_AUTHENTICATION_REQUIRED`, and the current authoring state. It has no
+automatic retry or delay. Null resume after reauthentication reconstructs the
+same role request from frozen inputs and preserved session lineage; no native
+diagnostic enters state or public projection. If that failed request was the
+source-session fork, normalized no-effect evidence permits the fork to be
+retried. Possible-effect evidence instead persists only the role and logical
+context key, resumes that role in a fresh session without reforking, and clears
+the marker after the child session is durably recorded.
+The pause and source-fork state are persisted atomically with active-turn
+retirement, so interruption cannot lose the authentication checkpoint after
+clearing the turn.
+If publication was interrupted before the pause was saved, authentication
+during fresh recovery still preserves the earlier unrecorded source fork.
 The planning checkpoint is seeded from the validated inputs and its current
 draft, blockers, and bounded correction history. A product-decision edit
 invalidates it before planning resumes.

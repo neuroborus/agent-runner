@@ -142,6 +142,7 @@ const TASK_INPUTS = Object.freeze({
   context: Object.freeze({ filename: "context.md", optional: true }),
 });
 const RETRYABLE_PAUSE_REASONS = new Set([
+  "authentication_required",
   "backend_unavailable",
   "bootstrap_disagreement",
   "confirmation_output_invalid",
@@ -172,6 +173,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   operator_canceled: "The operator canceled this run; it cannot resume.",
   arbiter_cannot_resolve:
     "The Arbiter could not resolve the current blocking dispute.",
+  authentication_required:
+    "Provider authentication is required; reauthenticate, then resume the same checkpoint.",
   backend_unavailable: "The selected backend is temporarily unavailable.",
   bootstrap_disagreement:
     "Independent bootstrap summaries remain unresolved. Retry reconciliation after clarifying the repository evidence; combined mode cannot arbitrate bootstrap.",
@@ -596,6 +599,7 @@ function validateResumeAction(run, action) {
       (RETRYABLE_PAUSE_REASONS.has(run.pause?.reason) &&
         (!state.preflightComplete ||
           ([
+            "authentication_required",
             "backend_unavailable",
             "bootstrap_disagreement",
             "confirmation_output_invalid",
@@ -1330,11 +1334,18 @@ export function migratePlanExecutionStateV24(run) {
   });
 }
 
+export function migratePlanExecutionStateV25(run) {
+  return Object.freeze({
+    ...run.pipelineState,
+    authenticationSourceForkRecovery: null,
+  });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
   classifyStopCheckpoint,
   resolveStopBoundary,
-  stateVersion: 25,
+  stateVersion: 26,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1365,6 +1376,7 @@ export const planExecutionPipeline = Object.freeze({
         availabilityCorrectionCharged: false,
       }),
     24: migratePlanExecutionStateV24,
+    25: migratePlanExecutionStateV25,
   }),
   roles: ROLES,
   roleAccess: ROLE_ACCESS,

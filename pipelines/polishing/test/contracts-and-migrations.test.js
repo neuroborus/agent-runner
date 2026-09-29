@@ -15,6 +15,7 @@ import {
   migratePolishingStateV9,
   migratePolishingStateV14,
   migratePolishingStateV16,
+  migratePolishingStateV17,
   polishingPipeline,
   runPolishing,
 } from "../src/index.js";
@@ -357,7 +358,14 @@ test("migrates version-2 state with empty trust and invalidates its active gate"
   assert.deepEqual(migrated.settings.trustedChecks, []);
   assert.deepEqual(migrated.trustedValidation.commands, []);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(polishingPipeline.stateVersion, 17);
+  assert.equal(polishingPipeline.stateVersion, 18);
+  const legacyAuthenticationState = { ...completed.pipelineState };
+  delete legacyAuthenticationState.authenticationSourceForkRecovery;
+  const authenticationMigration = polishingPipeline.migrations[17]({
+    pipelineState: legacyAuthenticationState,
+  });
+  assert.deepEqual(authenticationMigration, completed.pipelineState);
+  assert.ok(Object.isFrozen(authenticationMigration));
 });
 
 test("migrates version-3 state with no consumed bootstrap corrections", () => {
@@ -456,9 +464,11 @@ test("version 14 migration makes active validation evidence provisional", async 
   };
   const migratedPaused = {
     ...legacyPaused,
-    pipelineStateVersion: 17,
-    pipelineState: migratePolishingStateV16({
-      pipelineState: migratePolishingStateV14(legacyPaused),
+    pipelineStateVersion: 18,
+    pipelineState: migratePolishingStateV17({
+      pipelineState: migratePolishingStateV16({
+        pipelineState: migratePolishingStateV14(legacyPaused),
+      }),
     }),
   };
   assert.doesNotThrow(() => assertRun(migratedPaused));
@@ -614,7 +624,11 @@ test("selects Worker-only lazy mode and migrates version 7 to independent", () =
   assert.equal(migrated.settings.mode, "independent");
   assert.equal(migrated.cleanConfirmationFingerprint, null);
   assert.equal(migrated.lazySourceForkConsumed, false);
-  assert.doesNotThrow(() => normalizePipelineState(migrated));
+  assert.doesNotThrow(() =>
+    normalizePipelineState(
+      migratePolishingStateV17({ pipelineState: migrated }),
+    ),
+  );
 });
 
 test("migrates version-9 active and terminal states through candidate convergence", async (t) => {

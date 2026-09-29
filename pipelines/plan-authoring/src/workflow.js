@@ -267,6 +267,8 @@ export async function runPlanAuthoring({
   let interruptedTurn = run.activeTurn;
   let interruptedRepositoryReconciled = false;
   let failedSourceForkLaunchRecovery = false;
+  // A published pause must survive an interrupted persistence response.
+  let authenticationPausePersistence = false;
   const clarificationPath = join(run.taskPath, "clarifications.md");
   const planPath = join(run.taskPath, "plan.md");
 
@@ -285,6 +287,7 @@ export async function runPlanAuthoring({
       nextHashes = currentRun.hashes,
       pause = currentRun.pause,
       publicActivity,
+      nextActiveTurn,
     } = {},
   ) {
     currentRun = await runtime.transition(
@@ -293,6 +296,7 @@ export async function runPlanAuthoring({
         hashes: nextHashes,
         pause,
         pipelineState: nextPipelineState,
+        ...(nextActiveTurn === undefined ? {} : { activeTurn: nextActiveTurn }),
       },
       { activity: publicActivity },
     );
@@ -301,6 +305,7 @@ export async function runPlanAuthoring({
   }
 
   async function pause(reason, details = {}, pipelineStatePatch = {}) {
+    authenticationPausePersistence = reason === "authentication_required";
     await transition(
       {
         ...pipelineState(),
@@ -308,6 +313,7 @@ export async function runPlanAuthoring({
         workflowState: "WAITING_FOR_USER",
       },
       {
+        nextActiveTurn: authenticationPausePersistence ? null : undefined,
         pause: { reason, ...details },
         publicActivity: activity(
           "runner",
@@ -317,6 +323,7 @@ export async function runPlanAuthoring({
         ),
       },
     );
+    authenticationPausePersistence = false;
     return currentRun;
   }
 
@@ -522,7 +529,7 @@ export async function runPlanAuthoring({
     const latestSession = [...currentRun.sessionLineage.children]
       .reverse()
       .find((child) => child.role === role);
-    const { session, previousSession, consumeSourceFork } = selectRoleSession({
+    const selectedSession = selectRoleSession({
       settings: pipelineState().settings,
       role,
       latestSession,
@@ -532,6 +539,24 @@ export async function runPlanAuthoring({
       recovering,
       freshSession,
     });
+    const sourceForkRecovery = pipelineState().authenticationSourceForkRecovery;
+    if (
+      sourceForkRecovery !== null &&
+      (sourceForkRecovery.role !== role ||
+        sourceForkRecovery.contextKey !== contextKey)
+    ) {
+      throw workflowError(
+        "Plan-authoring authentication source-fork recovery changed checkpoint.",
+      );
+    }
+    const { session, previousSession, consumeSourceFork } =
+      sourceForkRecovery !== null && selectedSession.session?.mode === "fork"
+        ? {
+            session: undefined,
+            previousSession: undefined,
+            consumeSourceFork: false,
+          }
+        : selectedSession;
     const roleConfiguration = currentRun.roles[role];
     const promptWithSettings = (evidence) =>
       pipelineState().workflowState === "CLARIFY"
@@ -591,8 +616,45 @@ export async function runPlanAuthoring({
       }
       await runtime.git.assertUnchanged(snapshot);
       await runtime.git.assertUnchanged(pipelineState().repositoryBaseline);
+      if (
+        runtime.authentication?.eligible(agentError) &&
+        agentError?.failureClass !== STRUCTURED_OUTPUT_FAILURE_CLASS
+      ) {
+        // A fresh recovery failure cannot disprove an earlier unrecorded fork.
+        const hasPossibleSourceForkEffect =
+          (request.session?.mode === "fork" &&
+            runtime.authentication.hasPossibleEffect(agentError)) ||
+          (recovering &&
+            authoringPolicy(pipelineState().settings).primarySessionScope ===
+              "checkpoint" &&
+            role !== "arbiter" &&
+            currentRun.sessionLineage.source !== null &&
+            latestSession?.contextKey !== contextKey);
+        await pause(
+          "authentication_required",
+          {
+            code: "ERR_AUTHENTICATION_REQUIRED",
+            resumeState: pipelineState().workflowState,
+          },
+          hasPossibleSourceForkEffect
+            ? {
+                authenticationSourceForkRecovery: Object.freeze({
+                  role,
+                  contextKey,
+                }),
+              }
+            : consumeSourceFork
+              ? { lazySourceForkConsumed: false }
+              : {},
+        );
+        return null;
+      }
     } finally {
-      if (!isOwnershipFailure(agentError)) {
+      if (
+        !authenticationPausePersistence &&
+        currentRun.activeTurn != null &&
+        !isOwnershipFailure(agentError)
+      ) {
         currentRun = await runtime.finishAgentTurn(turn);
         assertRun(currentRun);
       }
@@ -640,6 +702,12 @@ export async function runPlanAuthoring({
       freshSession ? undefined : previousSession,
       contextKey,
     );
+    if (pipelineState().authenticationSourceForkRecovery !== null) {
+      await transition({
+        ...pipelineState(),
+        authenticationSourceForkRecovery: null,
+      });
+    }
     if (!isRecord(response.structured)) {
       throw outputContext === undefined
         ? workflowError(
@@ -1154,9 +1222,11 @@ ${JSON.stringify(
           return currentRun;
         }
       } else if (
-        ["backend_unavailable", "lazy_output_invalid"].includes(
-          currentRun.pause.reason,
-        )
+        [
+          "authentication_required",
+          "backend_unavailable",
+          "lazy_output_invalid",
+        ].includes(currentRun.pause.reason)
       ) {
         await transition(
           {
@@ -1759,7 +1829,11 @@ ${findingPrompt(pipelineState())}`,
       );
     }
   } catch (cause) {
-    if (cause?.code === "ERR_AVAILABILITY_RECOVERY") throw cause;
+    if (
+      authenticationPausePersistence ||
+      cause?.code === "ERR_AVAILABILITY_RECOVERY"
+    )
+      throw cause;
     if (isOwnershipFailure(cause)) {
       if (
         cause.executionResourceRetained === true &&
