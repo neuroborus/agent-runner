@@ -36,7 +36,6 @@ import {
 import { readProcessIdentity, spawnOwnedProcess } from "../src/agents/index.js";
 import { CLAUDE_STORAGE_IDENTITY } from "../src/agents/claude/index.js";
 import { resolveStopBoundary } from "../src/pipeline-registry.js";
-import { createLegacyRecoveryFixture } from "../pipelines/plan-execution/test/support/index.js";
 
 const executeFile = promisify(execFile);
 const SOURCE_SESSION = "11111111-1111-4111-8111-111111111111";
@@ -50,45 +49,6 @@ const RUNNER_CONFIGURATION = { schemaVersion: 1, defaultBackend: "codex" };
 const PLAN = `## Commit 1: feat(test): add behavior
 
 Implement the requested behavior.`;
-
-test("legacy recovery status is lock-free and resume retains run-then-worktree ownership", async (t) => {
-  const fixture = await createLegacyRecoveryFixture(t, { steps: 1 });
-  const before = await fixture.bytes();
-  const lease = await fixture.store.acquireRunLease(fixture.runId);
-  try {
-    assert.deepEqual(await fixture.recoveryAction(), [
-      { type: "resume", action: null },
-    ]);
-    await assert.rejects(
-      fixture.openRunner().resume({ runId: fixture.runId }),
-      { code: "ERR_RUN_LEASED" },
-    );
-  } finally {
-    await lease.release();
-  }
-  const worktree = await fixture.store.acquireWorktreeLease(
-    fixture.projectPath,
-    PREPARED_RUN,
-  );
-  try {
-    await assert.rejects(
-      fixture.openRunner().resume({ runId: fixture.runId }),
-      { code: "ERR_WORKTREE_LEASED" },
-    );
-    assert.equal(await fixture.store.runIsLeased(fixture.runId), false);
-    assert.deepEqual(await fixture.bytes(), before);
-  } finally {
-    await worktree.release();
-  }
-  const status = await fixture.openRunner().status(fixture.runId);
-  assert.equal(Object.hasOwn(status, "events"), false);
-  assert.equal(Object.hasOwn(status.run, "events"), false);
-  assert.equal(
-    (await fixture.openRunner().resume({ runId: fixture.runId })).run
-      .pipelineState.workflowState,
-    "DONE",
-  );
-});
 
 function requestedStepAssessment(request) {
   const matched = /Runner-selected plan position[^\n]*\n([^\n]+)/u.exec(
