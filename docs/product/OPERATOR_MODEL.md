@@ -77,6 +77,13 @@ delegated check is resolved only when runner inspection succeeds. Required check
 remain exclusive to finalization, and consumed commit and completed handoff verification precede new
 preparation effects.
 
+Plan execution and polishing each independently require a boolean
+source-projection need in every capability report. A role may identify only the
+frozen exact command; it cannot choose a path or broaden authority. Ordered
+legacy migration defaults that need to false without adopting current
+configuration or changing saved progress, review evidence, correction
+accounting, or effect recovery.
+
 A trusted command that must write beside its inputs may declare
 `"sourceProjection": true` in its closed capabilities object. The runner then
 runs it from a private writable materialization of the accepted source rather

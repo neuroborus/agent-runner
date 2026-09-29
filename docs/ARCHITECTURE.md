@@ -1030,6 +1030,10 @@ not exempt a new round, and response reset cannot erase an unfinished charge.
 Legacy pipeline migration initializes that marker to false. Both retain unresolved blockers and historical
 negative validation evidence during recovery; no stale passing evidence or
 approval can authorize the changed content.
+Polishing state version 17 makes its independently owned source-projection need
+explicit and defaults version-16 reports to false without changing frozen
+authority, workflow position, review or correction evidence, or handoff state.
+Null provisional reports retain the existing read-only discovery barrier.
 Foreground CLI owner loss requires resume; detached MCP ownership outlives a
 client timeout or disconnect.
 
@@ -2400,6 +2404,12 @@ resolves the decision before provider work and repeats read-only validation
 migration when prior evidence cannot prove the selected skill is part of the
 established inventory. Neither pipeline imports the other's report schemas or
 workflow internals.
+
+Plan execution and polishing each require a boolean `sourceProjection` field in
+their own report schema and map only `true` into the shared capability request.
+Their ordered migrations add `false` to historical concrete reports without
+reloading configuration or changing immutable trusted snapshots, and preserve
+null provisional reports for read-only rediscovery.
 
 Inspection accepts `inventory` (up to 512 unique, trimmed, single-line exact
 command strings, each at most 4,000 characters) and `requirements` (up to 1,024

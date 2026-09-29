@@ -86,13 +86,17 @@ and `environmentBlockers` with each active role's exact inventory. The private
 `inspectRequirements` capability evaluates authority, support, and availability.
 There are at most 256 reports of each kind per role. Each need names an exact
 inventory command, an optional frozen identity (`commandIdentity`, otherwise
-null), `capabilities` with boolean `scratch`/`cache` and up to 32 exact
-`{url, sha256}` artifacts, and up to 16 unique `unsupported` identifiers.
+null), `capabilities` with boolean `scratch`/`cache`, a required boolean
+`sourceProjection` need, up to 32 exact `{url, sha256}` artifacts, and up to 16
+unique `unsupported` identifiers. `sourceProjection` may be true only when the
+frozen exact command must write beside the staging-independent source it checks;
+agents cannot name a projection path or grant broader authority.
 Each blocker names an inventory command, `source` (`agent-sandbox` or `runner`),
 and 1–8 bounded single-line evidence strings. Non-READY outcomes use empty arrays.
-Every capability report must contain at least one scratch, cache, artifact, or
-unsupported need. A non-null `commandIdentity` must exactly equal the frozen
-identity supplied for that selected command; the field may remain null.
+Every capability report must contain at least one scratch, cache,
+source-projection, artifact, or unsupported need. A non-null `commandIdentity`
+must exactly equal the frozen identity supplied for that selected command; the
+field may remain null.
 Zero-need reports, substituted identities, and malformed reports use the
 existing bounded read-only bootstrap correction path. A corrected empty array
 leaves the ordinary inventory command agent-runnable and creates no delegated
@@ -126,16 +130,23 @@ or capability preparation; untouched legacy staging returns to discovery and
 candidate convergence. Current untouched handoffs recheck availability before
 runner-owned staging. Stop reconciliation starts no new effects.
 
-State version 16 permits a charged partial resolution to retain its blockers at
-`RESOLVE_FINDINGS` during availability recovery. Obsolete failed validation remains
-negative diagnostic evidence only; stale approvals and passing evidence are
-invalidated. Version 15 migrates without changing saved checkpoints or counters.
-
 State version 15 adds the independently owned frozen finalization-guidance
 decision. Completed handoffs and terminal history remain verification-only.
 Other unfinished legacy runs resolve guidance before provider work and repeat
 the existing read-only validation migration before writable work when their
 prior evidence cannot prove the new contract.
+
+State version 16 permits a charged partial resolution to retain its blockers at
+`RESOLVE_FINDINGS` during availability recovery. Obsolete failed validation remains
+negative diagnostic evidence only; stale approvals and passing evidence are
+invalidated. Version 15 migrates without changing saved checkpoints or counters.
+
+State version 17 requires every polishing capability report to carry the
+boolean `sourceProjection` need. The ordered version-16 migration sets it to
+`false` without changing the trusted snapshot, workflow position, correction
+accounting, review evidence, or handoff state. It does not infer authority from
+current configuration. Null provisional reports stay null and continue through
+the existing read-only discovery barrier.
 
 ## Combined Review
 
@@ -1441,7 +1452,7 @@ semantics, and handoff behavior. Cover at least:
   plan-execution runs, detached MCP retry, and same-host stale recovery;
 - compatible legacy migration, incompatible reader and detached-child
   rejection, and disconnects that leave durable state unchanged;
-- every supported legacy version migrating through state version 16 to safe
+- every supported legacy version migrating through state version 17 to safe
   candidate convergence while preserving paused and terminal runs without
   replaying `HANDOFF`;
 - sandbox, IPC, loopback, process-isolation, missing-service, and permission
@@ -1454,6 +1465,9 @@ semantics, and handoff behavior. Cover at least:
   execution only during `FINALIZE`;
 - successful, blocked, failed, non-allowlisted, fingerprint-drifting, mutating,
   and resumed runner-trusted checks with the durable selected snapshot;
+- source-projection discovery, correction, migration, execution in every mode,
+  content-change invalidation, evidence recovery, and matching handoff binding
+  without duplicating root sandbox or Git-materialization proofs;
 - finite redacted Claude failure classification, durable read-only request
   reconstruction, writable usage/provider reconciliation, and terminal
   authentication, forbidden-operation, and ambiguous writable boundaries;

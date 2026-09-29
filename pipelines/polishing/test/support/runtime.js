@@ -43,6 +43,7 @@ import {
   migratePolishingStateV12,
   migratePolishingStateV13,
   migratePolishingStateV14,
+  migratePolishingStateV16,
   runPolishing,
 } from "../../src/index.js";
 import {
@@ -274,7 +275,9 @@ function migrateVersionOneState(state) {
   const versionFourteen = migratePolishingStateV13({
     pipelineState: versionThirteen,
   });
-  return migratePolishingStateV14({ pipelineState: versionFourteen });
+  return migratePolishingStateV16({
+    pipelineState: migratePolishingStateV14({ pipelineState: versionFourteen }),
+  });
 }
 
 function hash(value) {
@@ -284,24 +287,26 @@ function hash(value) {
 function trustedValidationSnapshot(
   alias = "service-check",
   command = "npm run test:service",
+  capabilities = {},
 ) {
   const vector = {
     alias,
     command,
     executable: "npm",
     arguments: ["run", "test:service"],
-    capabilities: {},
+    capabilities,
   };
   const identity = hash(JSON.stringify(vector));
   const commands = [{ ...vector, identity }];
+  const schemaVersion = capabilities.sourceProjection === true ? 4 : 3;
   return Object.freeze({
-    schemaVersion: 3,
+    schemaVersion,
     timeoutMs: 3_600_000,
     commands: Object.freeze(commands.map(Object.freeze)),
     commandFingerprint: hash(JSON.stringify([identity])),
     configurationFingerprint: hash(
       JSON.stringify({
-        schemaVersion: 3,
+        schemaVersion,
         commands: [vector],
         timeoutMs: 3_600_000,
       }),
@@ -1105,7 +1110,7 @@ async function createFixture(
     store = createRunStore({ stateRoot });
     const created = await store.createRun({
       pipelineId: "polishing",
-      pipelineStateVersion: 16,
+      pipelineStateVersion: 17,
       projectPath,
       taskPath,
       roles,
@@ -1128,7 +1133,7 @@ async function createFixture(
       revision: 1,
       runId: "run-1",
       pipelineId: "polishing",
-      pipelineStateVersion: 16,
+      pipelineStateVersion: 17,
       projectPath,
       taskPath,
       roles,

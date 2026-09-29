@@ -116,6 +116,9 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
   assert.match(BOOTSTRAP_INSTRUCTIONS, /staging-independent/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /HEAD or explicit trees/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /only to HANDOFF/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /sourceProjection: boolean/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /frozen exact command/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /Do not request projection paths/u);
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /one read-only correction/u);
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /rejected command/u);
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /staging-dependent/u);

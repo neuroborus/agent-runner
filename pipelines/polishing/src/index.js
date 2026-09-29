@@ -1067,9 +1067,36 @@ export function migratePolishingStateV14(run) {
   });
 }
 
+export function migratePolishingStateV16(run) {
+  // Historical reports cannot acquire a projection need from current
+  // configuration; frozen authority and every other checkpoint stay intact.
+  const upgradeValidation = (validation) => {
+    if (validation?.capabilityRequirements == null) return validation;
+    return Object.freeze({
+      ...validation,
+      capabilityRequirements: Object.freeze(
+        validation.capabilityRequirements.map((report) =>
+          Object.freeze({
+            ...report,
+            capabilities: Object.freeze({
+              ...report.capabilities,
+              sourceProjection: false,
+            }),
+          }),
+        ),
+      ),
+    });
+  };
+  return Object.freeze({
+    ...run.pipelineState,
+    workerValidation: upgradeValidation(run.pipelineState.workerValidation),
+    reviewerValidation: upgradeValidation(run.pipelineState.reviewerValidation),
+  });
+}
+
 export const polishingPipeline = Object.freeze({
   id: POLISHING_PIPELINE_ID,
-  stateVersion: 16,
+  stateVersion: 17,
   migrations: Object.freeze({
     1: migratePolishingStateV1,
     2: migratePolishingStateV2,
@@ -1091,6 +1118,7 @@ export const polishingPipeline = Object.freeze({
         ...run.pipelineState,
         availabilityCorrectionCharged: false,
       }),
+    16: migratePolishingStateV16,
   }),
   roles: ROLES,
   roleAccess: ROLE_ACCESS,

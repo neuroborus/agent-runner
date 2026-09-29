@@ -249,12 +249,13 @@ and validation-infrastructure binding.
 Plan execution and polishing also discover exact-command capability needs and
 environment blockers read-only during bootstrap or legacy validation migration.
 Accepted active-role reports are preserved together; reconciliation cannot
-discard a role's needs. Plan execution requires a boolean `sourceProjection`
-need in every report alongside scratch, cache, artifacts, and unsupported needs.
-It can identify only the frozen exact command: no report can choose a projection
-path or broader authority. Its ordered migration defaults historical reports to
-no projection without reloading configuration or changing workflow, evidence,
-correction, or effect state. Every capability report must identify an actual
+discard a role's needs. Plan execution and polishing independently require a
+boolean `sourceProjection` need in every report alongside scratch, cache,
+artifacts, and unsupported needs. They can identify only the frozen exact
+command: no report can choose a projection path or broader authority. Their
+ordered migrations default historical reports to no projection without
+reloading configuration or changing workflow, evidence, correction, or effect
+state. Every capability report must identify an actual
 scratch, cache, source-projection, artifact, or unsupported need. A reported
 non-null command identity must match the frozen selected-command identity
 exactly. Zero-need reports, substituted identities, and other invalid reports

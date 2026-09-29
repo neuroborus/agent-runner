@@ -105,6 +105,7 @@ async function recoveryFixture(
     rejections = [rejected()],
     work = [],
     requiredChecks = finalizationPassed().requiredChecks,
+    capabilityRequirements = [],
     onRoleRun,
     onTransition,
     ...options
@@ -144,6 +145,7 @@ async function recoveryFixture(
             ...bootstrapReady(role),
             requiredChecks,
             validationInfrastructure: ESTABLISHED,
+            capabilityRequirements,
           };
           break;
         case BOOTSTRAP_RECONCILIATION_SCHEMA:
@@ -964,9 +966,26 @@ for (const kind of ["removed", "missing", "symlink"]) {
   });
 }
 
-test("runner-trusted replacement evidence resumes an externally blocked attempt and binds every check before handoff", async (t) => {
-  const trusted = trustedValidationSnapshot();
+test("projected replacement evidence resumes an externally blocked attempt and binds every check before handoff", async (t) => {
+  const trusted = trustedValidationSnapshot(
+    "service-check",
+    "npm run test:service",
+    { sourceProjection: true },
+  );
   const command = trusted.commands[0];
+  const capabilityRequirements = [
+    {
+      command: command.command,
+      commandIdentity: command.identity,
+      capabilities: {
+        scratch: false,
+        cache: false,
+        sourceProjection: true,
+        artifacts: [],
+      },
+      unsupported: [],
+    },
+  ];
   const requiredChecks = [
     ...finalizationPassed().requiredChecks,
     { id: "C2", command: command.command },
@@ -987,6 +1006,7 @@ test("runner-trusted replacement evidence resumes an externally blocked attempt 
   const executions = [];
   const fixture = await recoveryFixture(t, {
     requiredChecks,
+    capabilityRequirements,
     modeSettings: { trustedChecks: [command.alias] },
     trustedValidation: trusted,
     initialFinalization: result,
@@ -1016,6 +1036,12 @@ test("runner-trusted replacement evidence resumes an externally blocked attempt 
   assert.equal(completed.pipelineState.finalizationRecovery.attempts, 1);
   assert.equal(fixture.handoffs.length, 1);
   assert.equal(executions.length, 3);
+  assert.ok(
+    executions.every(
+      ({ sourceHead }) =>
+        sourceHead === completed.pipelineState.repositoryBaseline.head,
+    ),
+  );
   const evidence = completed.pipelineState.finalizationResult;
   assert.equal(evidence.checks[1].executor, "runner");
   assert.equal(evidence.checks[1].commandIdentity, command.identity);

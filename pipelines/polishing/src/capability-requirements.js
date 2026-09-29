@@ -30,9 +30,10 @@ export const CAPABILITY_REQUIREMENTS = {
         properties: {
           scratch: { type: "boolean" },
           cache: { type: "boolean" },
+          sourceProjection: { type: "boolean" },
           artifacts: { type: "array", maxItems: 32, items: artifact },
         },
-        required: ["scratch", "cache", "artifacts"],
+        required: ["scratch", "cache", "sourceProjection", "artifacts"],
       },
       unsupported: {
         type: "array",
@@ -97,9 +98,15 @@ export function validCapabilityReports(value, checks, trustedCommands = []) {
       ) ||
       (report.commandIdentity !== null &&
         report.commandIdentity !== commandIdentities.get(report.command)) ||
-      !exact(report.capabilities, ["scratch", "cache", "artifacts"]) ||
+      !exact(report.capabilities, [
+        "scratch",
+        "cache",
+        "sourceProjection",
+        "artifacts",
+      ]) ||
       typeof report.capabilities.scratch !== "boolean" ||
       typeof report.capabilities.cache !== "boolean" ||
+      typeof report.capabilities.sourceProjection !== "boolean" ||
       !bounded(report.capabilities.artifacts, 32) ||
       !bounded(report.unsupported, 16) ||
       report.unsupported.some(
@@ -109,6 +116,7 @@ export function validCapabilityReports(value, checks, trustedCommands = []) {
       new Set(report.unsupported).size !== report.unsupported.length ||
       (!report.capabilities.scratch &&
         !report.capabilities.cache &&
+        !report.capabilities.sourceProjection &&
         report.capabilities.artifacts.length === 0 &&
         report.unsupported.length === 0)
     )
@@ -167,6 +175,7 @@ export function inspectionRequirements(validations) {
         capabilities: {
           ...(capabilities.scratch ? { scratch: true } : {}),
           ...(capabilities.cache ? { cache: true } : {}),
+          ...(capabilities.sourceProjection ? { sourceProjection: true } : {}),
           ...(capabilities.artifacts.length
             ? { artifacts: capabilities.artifacts }
             : {}),

@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-09-29
 
+- **Polishing owns source-projection discovery and migration independently.**
+  Its bootstrap and validation migration now require the same closed boolean
+  need without importing plan-execution internals or allowing agent-selected
+  paths. Version 17 defaults historical reports to no projection while
+  preserving frozen authority, review and correction evidence, workflow
+  position, and handoff recovery. Projected results remain fingerprint-bound,
+  invalidated by content changes, and accepted only through terminal review
+  before runner-owned staging.
+
 - **Plan execution discovers source-projection needs without choosing paths.**
   Bootstrap and validation migration now require a boolean projection need for
   every exact-command capability report. Accepted needs remain additive and

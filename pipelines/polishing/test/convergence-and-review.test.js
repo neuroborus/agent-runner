@@ -1518,11 +1518,29 @@ test("rejects non-allowlisted polishing finalization placeholders", () => {
   );
 });
 
-test("turns a runner-trusted polishing failure into a bounded issue", async (t) => {
-  const trustedValidation = trustedValidationSnapshot();
+test("replaces failed projected evidence after a content repair", async (t) => {
+  const trustedValidation = trustedValidationSnapshot(
+    "service-check",
+    "npm run test:service",
+    { sourceProjection: true },
+  );
+  const trustedCommand = trustedValidation.commands[0];
   const requiredChecks = [
     ...REQUIRED_CHECKS,
-    { id: "C2", command: trustedValidation.commands[0].command },
+    { id: "C2", command: trustedCommand.command },
+  ];
+  const capabilityRequirements = [
+    {
+      command: trustedCommand.command,
+      commandIdentity: trustedCommand.identity,
+      capabilities: {
+        scratch: false,
+        cache: false,
+        sourceProjection: true,
+        artifacts: [],
+      },
+      unsupported: [],
+    },
   ];
   const finalization = {
     ...finalizationPassed(),
@@ -1531,23 +1549,31 @@ test("turns a runner-trusted polishing failure into a bounded issue", async (t) 
       ...checkResults("PASS"),
       {
         checkId: "C2",
-        command: trustedValidation.commands[0].command,
+        command: trustedCommand.command,
         status: "NOT_RUN",
         evidence: ["Reserved for the runner-trusted executor."],
       },
     ],
   };
-  let trustedCalls = 0;
+  const executions = [];
   const fixture = await createFixture(t, {
     settings: { ...SETTINGS, trustedChecks: ["service-check"] },
     trustedValidation,
     reviewer: [
-      { ...bootstrapReady("Reviewer"), requiredChecks },
+      {
+        ...bootstrapReady("Reviewer"),
+        requiredChecks,
+        capabilityRequirements,
+      },
       reviewApproved(),
     ],
     worker: [
       clarificationReady(),
-      { ...bootstrapReady("Worker"), requiredChecks },
+      {
+        ...bootstrapReady("Worker"),
+        requiredChecks,
+        capabilityRequirements,
+      },
       reconciliationResolved(),
       polishingCompleted(),
       finalization,
@@ -1566,15 +1592,16 @@ test("turns a runner-trusted polishing failure into a bounded issue", async (t) 
       }
     },
     onTrustedValidation(options) {
-      trustedCalls += 1;
+      executions.push(options);
+      const failed = executions.length === 1;
       return {
-        status: trustedCalls === 1 ? "FAIL" : "PASS",
+        status: failed ? "FAIL" : "PASS",
         commandIdentity: options.commandIdentity,
-        exitCode: trustedCalls === 1 ? 7 : 0,
+        exitCode: failed ? 7 : 0,
         signal: null,
         timedOut: false,
         evidence: [
-          trustedCalls === 1
+          failed
             ? "Runner-trusted command service-check exited with code 7."
             : "Runner-trusted command service-check exited with code 0.",
         ],
@@ -1586,7 +1613,21 @@ test("turns a runner-trusted polishing failure into a bounded issue", async (t) 
   const result = await fixture.run();
 
   assert.equal(result.pipelineState.workflowState, "DONE");
-  assert.equal(trustedCalls, 2);
+  assert.equal(executions.length, 2);
+  assert.notEqual(
+    executions[0].bindings.contentFingerprint,
+    executions[1].bindings.contentFingerprint,
+  );
+  assert.equal(
+    executions[1].bindings.contentFingerprint,
+    result.pipelineState.finalizationResult.fingerprint,
+  );
+  assert.ok(
+    executions.every(
+      ({ sourceHead }) =>
+        sourceHead === result.pipelineState.repositoryBaseline.head,
+    ),
+  );
   assert.equal(result.counters.fixRounds, 1);
   assert.ok(
     fixture.calls.worker.some(({ prompt }) =>

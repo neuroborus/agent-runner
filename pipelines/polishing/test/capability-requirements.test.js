@@ -4,7 +4,11 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { createTrustedValidationService } from "../../../src/trusted-validation/index.js";
-import { migratePolishingStateV13 } from "../src/index.js";
+import {
+  migratePolishingStateV13,
+  migratePolishingStateV16,
+} from "../src/index.js";
+import { BOOTSTRAP_SCHEMA } from "../src/schemas.js";
 import {
   normalizeBootstrapResult,
   normalizePipelineState,
@@ -31,19 +35,38 @@ const command = bootstrapReady("Worker").requiredChecks[0].command;
 const requirement = (target = command) => ({
   command: target,
   commandIdentity: null,
-  capabilities: { scratch: true, cache: false, artifacts: [] },
+  capabilities: {
+    scratch: true,
+    cache: false,
+    sourceProjection: false,
+    artifacts: [],
+  },
   unsupported: [],
 });
 const emptyRequirement = (target = command) => ({
   command: target,
   commandIdentity: null,
-  capabilities: { scratch: false, cache: false, artifacts: [] },
+  capabilities: {
+    scratch: false,
+    cache: false,
+    sourceProjection: false,
+    artifacts: [],
+  },
   unsupported: [],
 });
-const blocked = () => ({
-  status: "BLOCKED",
-  blockers: [{ command, reason: "unavailable" }],
+const projectionRequirement = (target, commandIdentity = null) => ({
+  ...emptyRequirement(target),
+  commandIdentity,
+  capabilities: {
+    ...emptyRequirement(target).capabilities,
+    sourceProjection: true,
+  },
 });
+const blockedFor = (target) => ({
+  status: "BLOCKED",
+  blockers: [{ command: target, reason: "unavailable" }],
+});
+const blocked = () => blockedFor(command);
 const ready = { status: "READY", blockers: [] };
 const bootstrap = (mode, report = bootstrapReady("Worker")) => [
   clarificationReady(),
@@ -80,7 +103,18 @@ test("polishing capability contracts reject empty needs, mismatched identities, 
     { ...requirement(), commandIdentity: "invalid" },
     {
       ...requirement(),
-      capabilities: { scratch: "/tmp", cache: false, artifacts: [] },
+      capabilities: { ...requirement().capabilities, scratch: "/tmp" },
+    },
+    {
+      ...requirement(),
+      capabilities: { scratch: true, cache: false, artifacts: [] },
+    },
+    {
+      ...projectionRequirement(command),
+      capabilities: {
+        ...projectionRequirement(command).capabilities,
+        sourcePath: "/tmp/projected-source",
+      },
     },
     { ...requirement(), unsupported: ["network", "network"] },
   ])
@@ -117,6 +151,22 @@ test("polishing capability contracts reject empty needs, mismatched identities, 
       ).capabilityRequirements[0].capabilities,
     ),
   );
+  assert.equal(
+    normalizeBootstrapResult(
+      { ...base, capabilityRequirements: [projectionRequirement(command)] },
+      "worker",
+    ).capabilityRequirements[0].capabilities.sourceProjection,
+    true,
+  );
+  const capabilitySchema =
+    BOOTSTRAP_SCHEMA.properties.capabilityRequirements.items.properties
+      .capabilities;
+  assert.deepEqual(capabilitySchema.required, [
+    "scratch",
+    "cache",
+    "sourceProjection",
+    "artifacts",
+  ]);
 
   const snapshot = trustedValidationSnapshot();
   const selected = snapshot.commands[0];
@@ -160,6 +210,60 @@ test("polishing capability contracts reject empty needs, mismatched identities, 
     ).capabilityRequirements[0].commandIdentity,
     selected.identity,
   );
+});
+
+test("version-16 migration denies source projection without disturbing handoff proof", () => {
+  const capabilityRequirements = [
+    {
+      command,
+      commandIdentity: null,
+      capabilities: { scratch: true, cache: false, artifacts: [] },
+      unsupported: [],
+    },
+  ];
+  const validation = {
+    requiredChecks: [{ id: "C1", command }],
+    validationInfrastructure: [".agents/skills/finalization/SKILL.md"],
+    capabilityRequirements,
+    environmentBlockers: [],
+  };
+  const trustedValidation = trustedValidationSnapshot();
+  const bootstrapCorrections = [{ attempt: 1, diagnostics: [] }];
+  const reviewResult = { status: "APPROVED", fingerprint: "a".repeat(64) };
+  const repositoryBaseline = { head: "b".repeat(40) };
+  const legacy = {
+    workerValidation: validation,
+    reviewerValidation: validation,
+    trustedValidation,
+    workflowState: "HANDOFF",
+    bootstrapCorrections,
+    reviewResult,
+    repositoryBaseline,
+  };
+
+  const migrated = migratePolishingStateV16({ pipelineState: legacy });
+
+  for (const role of ["worker", "reviewer"]) {
+    assert.deepEqual(
+      migrated[`${role}Validation`].capabilityRequirements[0].capabilities,
+      {
+        scratch: true,
+        cache: false,
+        artifacts: [],
+        sourceProjection: false,
+      },
+    );
+    assert.ok(
+      Object.isFrozen(
+        migrated[`${role}Validation`].capabilityRequirements[0].capabilities,
+      ),
+    );
+  }
+  assert.equal(migrated.trustedValidation, trustedValidation);
+  assert.equal(migrated.bootstrapCorrections, bootstrapCorrections);
+  assert.equal(migrated.reviewResult, reviewResult);
+  assert.equal(migrated.repositoryBaseline, repositoryBaseline);
+  assert.equal(migrated.workflowState, "HANDOFF");
 });
 
 test("combined polishing corrects empty needs without delegating ordinary checks", async (t) => {
@@ -235,8 +339,12 @@ for (const mode of ["independent", "lazy", "combined"]) {
     assert.equal(after.indexFingerprint, before.indexFingerprint);
   });
 
-  test(`${mode} delegated sandbox limitations retry frozen requirements and execute checks only in FINALIZE`, async (t) => {
-    const snapshot = trustedValidationSnapshot();
+  test(`${mode} routes projected checks through frozen requirements only in FINALIZE`, async (t) => {
+    const snapshot = trustedValidationSnapshot(
+      "service-check",
+      "npm run test:service",
+      { sourceProjection: true },
+    );
     const target = snapshot.commands[0].command;
     const requiredChecks = [
       ...finalizationPassed().requiredChecks,
@@ -258,6 +366,9 @@ for (const mode of ["independent", "lazy", "combined"]) {
     const report = {
       ...bootstrapReady("Worker"),
       requiredChecks,
+      capabilityRequirements: [
+        projectionRequirement(target, snapshot.commands[0].identity),
+      ],
       environmentBlockers: [
         {
           command: target,
@@ -266,9 +377,9 @@ for (const mode of ["independent", "lazy", "combined"]) {
         },
       ],
     };
-    let available = false,
-      executed = 0;
+    let available = false;
     const requests = [];
+    const executions = [];
     const fixture = await createFixture(t, {
       mode,
       trustedValidation: snapshot,
@@ -277,14 +388,23 @@ for (const mode of ["independent", "lazy", "combined"]) {
       reviewer: [{ ...bootstrapReady("Reviewer"), requiredChecks }],
       onRequirementInspection(input) {
         requests.push(structuredClone(input));
-        return available ? ready : blocked();
+        return available ? ready : blockedFor(target);
       },
       onTrustedValidation(input) {
         assert.equal(
           fixture.currentRun.pipelineState.workflowState,
           "FINALIZE",
         );
-        executed++;
+        executions.push(input);
+        assert.equal(
+          input.sourceHead,
+          fixture.currentRun.pipelineState.repositoryBaseline.head,
+        );
+        assert.equal(
+          input.bindings.contentFingerprint,
+          fixture.currentRun.pipelineState.repositoryBaseline
+            .contentFingerprint,
+        );
         return {
           ...input.bindings,
           commandIdentity: input.commandIdentity,
@@ -296,18 +416,33 @@ for (const mode of ["independent", "lazy", "combined"]) {
         };
       },
     });
-    assert.equal((await fixture.run()).pause.reason, "environment_blocked");
-    assert.equal(executed, 0);
+    const paused = await fixture.run();
+    assert.equal(paused.pause.reason, "environment_blocked");
+    assert.deepEqual(paused.pause.evidence, [`${target}: unavailable`]);
+    assert.equal(executions.length, 0);
     assert.equal(writes(fixture).length, 0);
     available = true;
     const done = await fixture.run();
     assert.equal(done.pipelineState.workflowState, "DONE");
-    assert.equal(executed, 1);
+    assert.equal(executions.length, 1);
+    assert.equal(
+      executions[0].bindings.contentFingerprint,
+      done.pipelineState.finalizationResult.fingerprint,
+    );
     assert.deepEqual(done.pipelineState.trustedValidation, snapshot);
     assert.ok(requests.length >= 4);
     assert.ok(
       requests.every(
         (value) => JSON.stringify(value) === JSON.stringify(requests[0]),
+      ),
+    );
+    assert.ok(
+      requests.every(({ requirements }) =>
+        requirements.some(
+          (value) =>
+            value.command === target &&
+            value.capabilities.sourceProjection === true,
+        ),
       ),
     );
     if (mode === "lazy") assert.equal(fixture.calls.reviewer.length, 0);
