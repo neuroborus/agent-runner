@@ -19,6 +19,14 @@ import {
 
 const INITIAL_PID_NAMESPACE = "pid:[4026531836]";
 const BOOT_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+// Keep synthetic procfs identities outside Linux's PID range so they cannot
+// alias the live supervisor or its target in a small test PID namespace.
+const TOPOLOGY_PIDS = Object.freeze({
+  process: 2 ** 32,
+  parent: 2 ** 32 + 1,
+  anchor: 2 ** 32 + 2,
+  session: 2 ** 32 + 3,
+});
 const OWNED_PROCESS_MODULE = fileURLToPath(
   new URL("../../src/agents/index.js", import.meta.url),
 );
@@ -102,6 +110,7 @@ async function inspectionSequenceEnvironment(t, sequence) {
 }
 
 async function productionTopologyEnvironment(t, bootId) {
+  const { process: pid, parent, anchor, session } = TOPOLOGY_PIDS;
   const directory = await mkdtemp(join(tmpdir(), "owned-process-topology-"));
   t.after(() => rm(directory, { force: true, recursive: true }));
   const preloadPath = join(directory, "production-topology.cjs");
@@ -113,24 +122,24 @@ async function productionTopologyEnvironment(t, bootId) {
   const originalRead = fs.readFileSync;
   const originalList = fs.readdirSync;
   const values = new Map(${JSON.stringify([
-    ["/proc/101/stat", processStat(101, 202, 3)],
+    [`/proc/${pid}/stat`, processStat(pid, parent, session)],
     [
-      "/proc/101/status",
+      `/proc/${pid}/status`,
       `Uid:\t${process.getuid()}\t${process.getuid()}\t${process.getuid()}\t${process.getuid()}\n`,
     ],
-    ["/proc/101/environ", ""],
-    ["/proc/202/stat", processStat(202, 303, 3, "5678")],
-    ["/proc/303/stat", processStat(303, 1, 3, "6789")],
-    ["/proc/303/environ", ""],
+    [`/proc/${pid}/environ`, ""],
+    [`/proc/${parent}/stat`, processStat(parent, anchor, session, "5678")],
+    [`/proc/${anchor}/stat`, processStat(anchor, 1, session, "6789")],
+    [`/proc/${anchor}/environ`, ""],
     ["/proc/sys/kernel/random/boot_id", `${bootId}\n`],
   ])});
   fs.readdirSync = function readdirSync(path, ...argumentsList) {
     return path === "/proc"
-      ? ["101"]
+      ? [${JSON.stringify(String(pid))}]
       : Reflect.apply(originalList, this, [path, ...argumentsList]);
   };
   fs.readFileSync = function readFileSync(path, ...argumentsList) {
-    if (path === "/proc/202/environ") ${denied}
+    if (path === "/proc/${parent}/environ") ${denied}
     return values.has(path)
       ? values.get(path)
       : Reflect.apply(originalRead, this, [path, ...argumentsList]);
@@ -815,7 +824,11 @@ test(
     const identity = await readProcessIdentity(process.pid);
     assert.notEqual(identity, null);
     const frozenBaseline = [
-      { bootId: identity.bootId, pid: 303, startTicks: "6789" },
+      {
+        bootId: identity.bootId,
+        pid: TOPOLOGY_PIDS.anchor,
+        startTicks: "6789",
+      },
     ];
     const child = spawnOwnedProcess(process.execPath, ["-e", ""], {
       captureAncestryBaseline: () => frozenBaseline,

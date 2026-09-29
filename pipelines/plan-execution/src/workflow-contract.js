@@ -117,6 +117,7 @@ const PIPELINE_STATE_FIELDS = new Set([
   "correctionHistory",
   "sameFindingRounds",
   "pendingCorrection",
+  "availabilityCorrectionCharged",
   "blockedSinceStagnation",
   "stagnationArbitrationUsed",
   "stagnationDirection",
@@ -3903,9 +3904,12 @@ function normalizePendingCommit(value) {
     throw workflowError("Plan-execution commit authorization is invalid.");
   }
   if (value.preEffectRejection !== null) {
+    const hasAvailability =
+      isRecord(value.preEffectRejection) &&
+      Object.hasOwn(value.preEffectRejection, "availability");
     assertExactFields(
       value.preEffectRejection,
-      ["code", "recoverable"],
+      ["code", "recoverable", ...(hasAvailability ? ["availability"] : [])],
       "Plan-execution pre-effect rejection",
     );
     if (
@@ -3914,6 +3918,26 @@ function normalizePendingCommit(value) {
       typeof value.preEffectRejection.recoverable !== "boolean"
     ) {
       throw workflowError("Plan-execution pre-effect rejection is invalid.");
+    }
+    const proof = value.preEffectRejection.availability;
+    if (hasAvailability) {
+      assertExactFields(
+        proof,
+        ["reason", "commitExecutor"],
+        "Commit availability proof",
+      );
+      if (
+        !value.preEffectRejection.recoverable ||
+        proof.commitExecutor !== "not_started" ||
+        ![
+          "transport_unavailable",
+          "temporarily_overloaded",
+          "model_busy",
+          "server_unavailable",
+        ].includes(proof.reason)
+      ) {
+        throw workflowError("Commit availability proof is invalid.");
+      }
     }
   }
   return value;
@@ -3979,6 +4003,7 @@ export function normalizePipelineState(value) {
     "validationScopeLegacy",
     "candidateMigrationPending",
     "pendingCorrection",
+    "availabilityCorrectionCharged",
     "stagnationArbitrationUsed",
   ]) {
     if (typeof value[field] !== "boolean") {
@@ -4864,12 +4889,32 @@ export function normalizePipelineState(value) {
   ) {
     throw workflowError("Plan-execution review evidence is inconsistent.");
   }
+  if (value.availabilityCorrectionCharged && !value.pendingCorrection) {
+    throw workflowError(
+      "Availability correction charge has no pending correction.",
+    );
+  }
+  // A reconciled partial correction retains blockers and its one charged fix,
+  // but carries no approval for the changed content.
+  const pendingCorrectionEvidence =
+    value.pendingCorrection &&
+    (["RESOLVE_FINDINGS", "WAITING_FOR_USER", "FAILED"].includes(
+      value.workflowState,
+    ) ||
+      (policy.primaryConvergence &&
+        value.workflowState === "CHECK_AND_FIX" &&
+        value.availabilityCorrectionCharged));
   if (
     (findings.length > 0 || pendingDisputes.length > 0) &&
     value.reviewedFingerprint === null &&
     value.candidateReviewedFingerprint === null &&
     (finalizationResult?.status !== "PASS" ||
       value.finalizedFingerprint === null) &&
+    !(
+      pendingCorrectionEvidence &&
+      findings.length > 0 &&
+      pendingDisputes.length === 0
+    ) &&
     !deferredDisputes &&
     finalizationRecovery.feedback === null
   ) {
@@ -4889,6 +4934,7 @@ export function normalizePipelineState(value) {
   if (
     value.pendingCorrection &&
     ![
+      "RESOLVE_FINDINGS",
       "FINALIZE",
       "CHECK_AND_FIX",
       "CLEAN_CONFIRM",
@@ -5244,6 +5290,7 @@ export function createPlanExecutionState({
       correctionHistory: Object.freeze([]),
       sameFindingRounds: Object.freeze({}),
       pendingCorrection: false,
+      availabilityCorrectionCharged: false,
       blockedSinceStagnation: 0,
       stagnationArbitrationUsed: false,
       stagnationDirection: null,
@@ -5338,7 +5385,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 23 ||
+    run.pipelineStateVersion !== 24 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||

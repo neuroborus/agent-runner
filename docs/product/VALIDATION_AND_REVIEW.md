@@ -297,3 +297,10 @@ The content and validation fingerprints must remain unchanged from the
 accepted gate through the effect. Recovery verifies a pending or possibly
 completed effect before deciding what remains; it never reruns an ambiguous
 commit or duplicates a completed handoff.
+
+Provider availability waits preserve the exact validation/review checkpoint and
+pending correction diagnostics. Safe partial content is reconciled and stale
+approvals invalidated before scheduling; the same correction is not charged
+again after retry or restart. A successful provider response resets availability
+backoff before deterministic output validation, without relaxing that validation
+or its separate bounded correction budget.

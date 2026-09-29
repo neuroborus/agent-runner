@@ -875,6 +875,12 @@ Include every listed command exactly once in requiredChecks with its actual cano
         },
       };
     }
+    if (!nextPipelineState.pendingCorrection) {
+      nextPipelineState = {
+        ...nextPipelineState,
+        availabilityCorrectionCharged: false,
+      };
+    }
     const patch = {
       counters: nextCounters,
       hashes: nextHashes,
@@ -1448,7 +1454,14 @@ Include every listed command exactly once in requiredChecks with its actual cano
       return true;
     }
     return (
-      turn.phase === "resolve-findings" && counters().fixRounds < fixBudget()
+      turn.phase === "resolve-findings" &&
+      currentRun.availabilityRetry?.checkpoint.startsWith(
+        "resolve-findings:read-only:",
+      ) !== true &&
+      (currentRun.availabilityRetry?.checkpoint.startsWith(
+        "resolve-findings:workspace-write:",
+      ) ||
+        counters().fixRounds < fixBudget())
     );
   }
 
@@ -1574,15 +1587,24 @@ Include every listed command exactly once in requiredChecks with its actual cano
             current.findings.length === 0
               ? current.previousFindings
               : current.findings,
-          findings: [],
+          findings:
+            currentRun.availabilityRetry == null &&
+            !current.availabilityCorrectionCharged
+              ? []
+              : current.findings,
           pendingCorrection: true,
+          availabilityCorrectionCharged:
+            current.availabilityCorrectionCharged ||
+            currentRun.availabilityRetry != null,
           reviewReconsideration: [],
           ...markPendingLazyCorrectionCharged(current),
         },
         {
           nextCounters: {
             ...counters(),
-            fixRounds: counters().fixRounds + 1,
+            fixRounds:
+              counters().fixRounds +
+              (current.availabilityCorrectionCharged ? 0 : 1),
           },
         },
       );
@@ -1599,7 +1621,16 @@ Include every listed command exactly once in requiredChecks with its actual cano
     return true;
   }
 
-  async function runRole(
+  const availabilityRetry = Symbol("availability-retry");
+  async function runRole(role, schema, buildPrompt, options) {
+    for (;;) {
+      const result = await runRoleAttempt(role, schema, buildPrompt, options);
+      if (result !== availabilityRetry) return result;
+      await options?.onAvailabilityRetry?.();
+    }
+  }
+
+  async function runRoleAttempt(
     role,
     schema,
     buildPrompt,
@@ -1622,8 +1653,9 @@ Include every listed command exactly once in requiredChecks with its actual cano
     const turn = contextReview
       ? { role, phase: "plan-context" }
       : activeTurn(role, state().workflowState);
-    const recovering = interruptedTurn !== null;
-    if (recovering && !isDeepStrictEqual(interruptedTurn, turn)) {
+    const retrying = currentRun.availabilityRetry != null;
+    const recovering = interruptedTurn !== null || retrying;
+    if (interruptedTurn !== null && !isDeepStrictEqual(interruptedTurn, turn)) {
       throw workflowError(
         "Persisted agent turn does not match plan-execution recovery.",
         "ERR_INVALID_PLAN_EXECUTION_STATE",
@@ -1656,6 +1688,14 @@ Include every listed command exactly once in requiredChecks with its actual cano
     );
     const context = durableContext(evidenceContext, recoveryContext);
     const contextKey = contextKeyFor(role, checkpoint, evidenceContext);
+    const availabilityCheckpoint = `${turn.phase}:${access}:${checkpoint}`;
+    if (retrying && runtime.availability !== undefined) {
+      currentRun = await runtime.availability.before({
+        role,
+        checkpoint: availabilityCheckpoint,
+        repository: turnSnapshot,
+      });
+    }
     const latestSession = [...currentRun.sessionLineage.children]
       .reverse()
       .find((child) => child.role === role);
@@ -1714,6 +1754,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
     };
     let response;
     let agentError;
+    let availabilityFailure = false;
     currentRun = await runtime.startAgentTurn(
       turn,
       consumeSourceFork
@@ -1733,6 +1774,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
         response = await runtime.adapters[role].run(request);
       } catch (cause) {
         agentError = cause;
+        availabilityFailure = runtime.availability?.eligible(cause) === true;
       }
       let nextRepositoryBaseline = baseline;
       if (access === "read-only") {
@@ -1782,7 +1824,26 @@ Include every listed command exactly once in requiredChecks with its actual cano
                       : current.findings,
                   findings: [],
                   pendingCorrection: true,
+                  availabilityCorrectionCharged:
+                    current.availabilityCorrectionCharged ||
+                    (availabilityFailure && changedLazyCheck),
                   reviewReconsideration: [],
+                  ...(availabilityFailure
+                    ? {
+                        workflowState: current.workflowState,
+                        findings: current.findings,
+                        primaryFindings: current.primaryFindings,
+                        lazyCorrections: current.lazyCorrections,
+                        pendingLazyCorrection: current.pendingLazyCorrection,
+                        ...(current.finalizationResult?.status === "FAIL"
+                          ? {
+                              finalizationResult: current.finalizationResult,
+                              finalizedFingerprint:
+                                current.finalizedFingerprint,
+                            }
+                          : {}),
+                      }
+                    : {}),
                   ...(changedLazyCheck
                     ? markPendingLazyCorrectionCharged(current)
                     : {}),
@@ -1815,7 +1876,9 @@ Include every listed command exactly once in requiredChecks with its actual cano
                 ? {
                     nextCounters: {
                       ...counters(),
-                      fixRounds: counters().fixRounds + 1,
+                      fixRounds:
+                        counters().fixRounds +
+                        (current.availabilityCorrectionCharged ? 0 : 1),
                     },
                   }
                 : {},
@@ -1847,6 +1910,15 @@ Include every listed command exactly once in requiredChecks with its actual cano
               }
             : undefined,
         );
+      }
+      if (runtime.availability?.eligible(agentError)) {
+        currentRun = await runtime.availability.schedule({
+          cause: agentError,
+          role,
+          checkpoint: availabilityCheckpoint,
+          repository: state().repositoryBaseline,
+        });
+        return availabilityRetry;
       }
       throw agentError;
     }
@@ -4846,6 +4918,8 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
   async function runCheckAndFixTurn() {
     let current = state();
     if (
+      currentRun.availabilityRetry == null &&
+      !current.availabilityCorrectionCharged &&
       current.pendingLazyCorrection === null &&
       counters().fixRounds >= fixBudget()
     ) {
@@ -4858,7 +4932,12 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
     const stableFindingIds = exhaustedStableFindingIds(
       primaryFindings(current),
     );
-    if (current.pendingLazyCorrection === null && stableFindingIds.length > 0) {
+    if (
+      currentRun.availabilityRetry == null &&
+      !current.availabilityCorrectionCharged &&
+      current.pendingLazyCorrection === null &&
+      stableFindingIds.length > 0
+    ) {
       await pause("no_progress", {
         findingIds: stableFindingIds,
         reason: "stable_findings",
@@ -4867,6 +4946,8 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
       return false;
     }
     if (
+      currentRun.availabilityRetry == null &&
+      !current.availabilityCorrectionCharged &&
       current.pendingLazyCorrection === null &&
       current.blockedSinceStagnation >= current.settings.stagnationWindowRounds
     ) {
@@ -4884,9 +4965,11 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
       current = state();
       const correction = current.pendingLazyCorrection;
       const scope = correction ?? lazyCorrectionScope("CHECK_AND_FIX", current);
-      const alreadyCharged = correction?.fixRoundCharged === true;
+      let alreadyCharged =
+        current.availabilityCorrectionCharged ||
+        correction?.fixRoundCharged === true;
       const fixRoundsBeforeTurn = counters().fixRounds;
-      const beforeFingerprint = await contentFingerprint();
+      let beforeFingerprint = await contentFingerprint();
       try {
         const output = await runRole(
           "worker",
@@ -4906,6 +4989,10 @@ Concrete findings from the preceding clean confirmation:
 ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(correction)}`,
           {
             access: "workspace-write",
+            async onAvailabilityRetry() {
+              beforeFingerprint = await contentFingerprint();
+              alreadyCharged ||= state().availabilityCorrectionCharged;
+            },
             checkpoint:
               correction === null
                 ? `${combinedReview(current.settings) ? "primary" : "lazy-commit"}:${current.currentStep}`
@@ -4934,11 +5021,16 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
         }
         if (result.status === "BLOCKED") {
           if (correction !== null) {
-            await transition({ ...state(), pendingLazyCorrection: null });
+            await transition({
+              ...state(),
+              availabilityCorrectionCharged: false,
+              pendingLazyCorrection: null,
+            });
           }
           if (changed) {
             await transition({
               ...state(),
+              availabilityCorrectionCharged: false,
               ...clearedCandidateAndTerminalGate(),
               previousFindings:
                 current.findings.length === 0
@@ -4963,6 +5055,7 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
           await transition(
             {
               ...state(),
+              availabilityCorrectionCharged: false,
               ...clearedCandidateAndTerminalGate(),
               workflowState: "CHECK_AND_FIX",
               previousFindings:
@@ -4992,6 +5085,7 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
         await transition(
           {
             ...state(),
+            availabilityCorrectionCharged: false,
             workflowState: "CLEAN_CONFIRM",
             ...clearedCandidateAndConfirmationGate(current),
             pendingLazyCorrection: null,
@@ -5021,7 +5115,9 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
         const resolution = await handleInvalidLazyOutput(cause, context, {
           ...scope,
           fixRoundCharged:
-            scope.fixRoundCharged || counters().fixRounds > fixRoundsBeforeTurn,
+            alreadyCharged ||
+            scope.fixRoundCharged ||
+            counters().fixRounds > fixRoundsBeforeTurn,
         });
         if (resolution === "retry") {
           continue;
@@ -6366,7 +6462,12 @@ ${JSON.stringify(
       }
       return arbitrateStagnation();
     }
-    const budgetExhausted = counters().fixRounds >= fixBudget();
+    const retryCheckpoint = currentRun.availabilityRetry?.checkpoint;
+    const budgetExhausted =
+      retryCheckpoint?.startsWith("resolve-findings:read-only:") === true ||
+      (retryCheckpoint?.startsWith("resolve-findings:workspace-write:") !==
+        true &&
+        counters().fixRounds >= fixBudget());
     const blockers = activeBlockers();
     const disputableFindingIds = new Set(
       current.findings
@@ -6577,6 +6678,18 @@ ${JSON.stringify(
     const current = state();
     const step = planStep();
     let pendingCommit = current.pendingCommit;
+    const availabilityCheckpoint = `commit:${current.currentStep}`;
+    if (
+      pendingCommit?.status !== "consumed" &&
+      currentRun.availabilityRetry != null &&
+      runtime.availability !== undefined
+    ) {
+      currentRun = await runtime.availability.before({
+        role: "worker",
+        checkpoint: availabilityCheckpoint,
+        repository: current.repositoryBaseline,
+      });
+    }
     if (
       pendingCommit?.status !== "consumed" &&
       (!(await ensureCheckRequirements()) ||
@@ -6746,11 +6859,13 @@ ${step.subject}`),
       } catch (cause) {
         agentError = cause;
       }
+      const availability = runtime.availability?.preEffect(agentError);
       const preEffectRejection =
         agentError?.effectStarted === false
           ? Object.freeze({
               code: diagnosticCode(agentError, "ERR_COMMIT_ADAPTER_REJECTED"),
               recoverable: agentError?.recoverable === true,
+              ...(availability == null ? {} : { availability }),
             })
           : null;
       pendingCommit = {
@@ -6789,6 +6904,20 @@ ${step.subject}`),
         cause.code === "ERR_COMMIT_NOT_CREATED" &&
         pendingCommit.preEffectRejection !== null
       ) {
+        if (
+          !operatorStop &&
+          pendingCommit.preEffectRejection.availability !== undefined &&
+          runtime.availability !== undefined
+        ) {
+          currentRun = await runtime.availability.schedule({
+            proof: pendingCommit.preEffectRejection.availability,
+            role: "worker",
+            checkpoint: availabilityCheckpoint,
+            repository: state().repositoryBaseline,
+            pipelineState: { ...state(), pendingCommit: null },
+          });
+          return true;
+        }
         await pausePreEffectCommitRejection(pendingCommit.preEffectRejection);
         return false;
       }
@@ -7389,6 +7518,7 @@ ${step.subject}`),
       );
     }
   } catch (cause) {
+    if (cause?.code === "ERR_AVAILABILITY_RECOVERY") throw cause;
     if (
       commitCheckpointSettlement ||
       commitAuthorizationPersistence ||

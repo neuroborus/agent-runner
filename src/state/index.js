@@ -1,9 +1,11 @@
 export { createRunStore, resolveStateRoot } from "./service.js";
 export {
+  availabilityActivity,
   availabilityDelayMs,
   DEFAULT_AVAILABILITY_POLICY,
   MAX_AVAILABILITY_DELAY_MS,
   normalizeAvailabilityPolicy,
+  projectAvailabilityRetry,
 } from "./availability.js";
 export {
   normalizeLaunchRecovery,

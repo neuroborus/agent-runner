@@ -998,8 +998,8 @@ outcomes remain terminal. Resume reconstructs the complete request from durable
 state rather than requiring the failed native session. These rules add no new
 pipeline-state field, provider branch, or migration.
 
-When the normalized failure proves an eligible transient pre-effect launch
-failure, the same pause also persists only
+When a failure without availability evidence proves an eligible transient
+pre-effect launch failure, the same pause also persists only
 `launchRecovery: { failureClass, checkpoint }`. In lazy mode, a failed source
 fork at `spawn` or `initialize` with no recorded child restores
 `lazySourceForkConsumed: false` in that atomic pause transition. Resume rebuilds
@@ -1011,11 +1011,8 @@ resume that could refork the source. Operator pause, resume, and cancellation
 use the common state semantics.
 
 Codex App Server `serverOverloaded` is a distinct recoverable provider
-diagnostic. After turn-item policy, protocol, and isolation auditing, eligible
-ordinary non-commit requests outside source forks use the existing single fresh
-reconstruction. Repeated overload propagates as a bounded recoverable failure
-and pauses at the exact durable checkpoint through the same backend-neutral
-path. Source forks and local-commit turns bypass that fallback. An overload that
+diagnostic. After turn-item policy, protocol, and isolation auditing, it uses the
+shared durable availability coordinator, with no immediate adapter retry. An overload that
 rejects local-commit readiness retains `effectStarted: false`; only Git proof of
 no effect may retire and reauthorize the one-shot request.
 
@@ -1128,9 +1125,8 @@ compaction, fresh retry, `backend_unavailable`, and output-correction recovery.
 Malformed, oversized, ambiguous, and transient-status evidence remains opaque
 `turn_other`: eligible non-commit turns outside source forks reconstruct once
 from the complete durable request, then propagate the next failure unchanged.
-The explicit `turn_server_overloaded` class follows the same single-fresh-
-reconstruction eligibility and repeated-failure propagation after item
-auditing, without passing through native HTTP-message refinement.
+The explicit `turn_server_overloaded` class enters shared durable backoff after
+item auditing, without passing through native HTTP-message refinement.
 Local-commit readiness failures remain pre-effect rejections and never replay
 the executor. Recognition and redaction belong to the adapter as specified in
 [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md); no pipeline branch or
@@ -1287,9 +1283,19 @@ fail closed on non-transient client statuses and `api_error` without such a stat
 valid read-only result failures and unclassified read-only process exits are
 recoverable; the same unknown outcomes during workspace-write or one-shot
 commit work are not.
-Explicit native transport, overload, model-busy, and server evidence may carry
-the provider contract's shared availability reason without changing this
-pipeline's pause or retry policy.
+Explicit native transport, overload, model-busy, and server availability use the
+injected runner coordinator after repository reconciliation. The exact role and
+logical checkpoint survive five-second exponential backoff capped by the frozen
+policy, with indefinite repeats at the ceiling. Scheduling and start are durable
+and immediately visible; overdue recovery dispatches once. Only a successful
+provider response resets the episode, before output validation. Partial output,
+partial writes, session changes, resume, and restart do not reset it. Safe partial
+content and pending corrections survive; stale approvals are invalidated and the
+same correction is not charged again. Check/fix mutation claims use the successful
+attempt's starting fingerprint, after retained partial content is reconciled.
+Source forks are never replayed. An
+abortable wait retains exclusive ownership and honors immediate/deferred stops.
+See the common [availability contract](../../../docs/ARCHITECTURE.md#durable-availability-episodes).
 
 Map a trusted Claude alias only to its configured absolute isolated
 configuration directory through `CLAUDE_CONFIG_DIR`. Map an explicit decimal
@@ -2850,8 +2856,12 @@ If no commit is created, pause with `commit_failed`. If the adapter also proved
 verification and durably retire the consumed authorization only after that
 verification reports no commit. A non-recoverable policy rejection remains
 `commit_failed`; a recoverable provider rejection remains
-`backend_unavailable`. Either resumes at `COMMIT` by preparing a fresh
-authorization with a new ID. If verification is interrupted, retain both the
+`backend_unavailable`. Explicit availability additionally persists a bounded
+`availability: { reason, commitExecutor: "not_started" }` proof. After unchanged
+Git verification, retire that authorization and schedule backoff atomically;
+a fresh ID is issued only after the deadline. Other rejections retain their
+existing explicit resume at `COMMIT`. State version 24 accepts this proof;
+version 23 migrates unchanged and cannot invent missing evidence. If verification is interrupted, retain both the
 consumed authorization and its proof, then resume verification without invoking
 the Worker again. Without the explicit marker, retain the consumed
 authorization on that verification-only path. If a commit is created but
@@ -3425,8 +3435,8 @@ At minimum cover:
 52. Codex `usageLimitExceeded`, `serverOverloaded`, and Claude structured status
     and permission classification are finite and redacted; explicit usage
     exhaustion and allowlisted Claude read-only failures reconstruct from
-    durable state, eligible Codex overload receives only the established single
-    fresh reconstruction, classified writable usage/provider failures preserve
+    durable state, eligible Codex overload receives the shared durable availability
+    backoff without an immediate adapter retry, classified writable usage/provider failures preserve
     reconciled changes, and forbidden, authentication, ambiguous writable, and
     one-shot outcomes remain fail closed.
 53. merged root/project trusted catalogs, deduplication, conflicts, 256-definition
@@ -3508,7 +3518,7 @@ At minimum cover:
 73. lazy no-progress, stable-finding, fix, and additional-round behavior remains
     bounded without weakening exact commits, trusted checks, fingerprints, Git
     controls, product decisions, or no-coauthor/no-push rules.
-74. every supported legacy version migrates through state version 23 to
+74. every supported legacy version migrates through state version 24 to
     `independent` without reviving terminal runs or replaying completed or
     pending commit effects; unfinished work freezes guidance and repeats
     read-only validation discovery when prior evidence is provisional.

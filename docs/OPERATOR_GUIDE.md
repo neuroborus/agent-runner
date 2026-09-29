@@ -190,14 +190,20 @@ for a two-hour deadline. Legacy snapshots retain a deterministic 60-minute
 deadline, and capability preparation still uses the smaller of the resolved
 deadline and 10 seconds.
 
-`availabilityRetryMaxDelayMs` prepares the common availability retry policy for
+`availabilityRetryMaxDelayMs` sets the common availability retry policy for
 new runs. Root and ignored project configuration accept integers from `5000`
 through `2147483647` milliseconds; the project value wins. The default ceiling
 is `1800000` (30 minutes) and the starting delay is fixed at five seconds.
 Runs freeze this policy; resume never replaces it from current configuration.
-Legacy runs migrate with the default and no pending episode. Persistence support
-does not yet activate automatic retries: follow the existing offered pause and
-resume actions. Do not edit configuration or run state to reset an episode.
+Legacy runs migrate with the default and no pending episode. Explicit transient
+availability failures retry after repository reconciliation, doubling the delay
+to the ceiling and repeating it without a quota. Follow the bounded schedule/start
+activity and `availabilityRetry` status instead of polling. Only a successful
+provider response resets the episode. Partial work, session changes, resume,
+and restart preserve it. Pause/cancel interrupts the wait, including a deferred
+stop when the current step cannot finish. Do not edit configuration or state to
+reset an episode. Resume after foreground CLI owner loss; a client timeout or
+disconnect does not stop detached MCP work.
 
 Writable implementation, polishing, lazy or combined check/fix, and finding-resolution turns
 receive only the persisted exact selected command text, including after resume
@@ -520,7 +526,7 @@ confirmation. It preserves completed commits and accounting, including a
 proven non-actionable `pendingCorrection` marker. Do not clear the marker or
 edit the journal. Missing provenance or conflicting work grants no recovery
 action; a matching error name or migrated snapshot alone is insufficient.
-Repeated provider unavailability pauses at the same confirmation checkpoint.
+Explicit provider availability failures back off at the same confirmation checkpoint.
 
 Classify by current actions rather than an error-name shortcut. Provider usage
 exhaustion and environment limitations may be resumable; exhausted budgets,
@@ -528,7 +534,7 @@ unsafe reconciliation, changed inputs, or ambiguous effects have their own
 bounded recovery rules. Do not erase locks, patch state files, reset stagnation
 history, or assume every `no_progress` pause has the same recovery path.
 
-For an eligible transient pre-effect provider launch failure, CLI status prints
+For a launch failure without explicit availability evidence, CLI status prints
 `Launch recovery: <checkpoint> (<failureClass>)` and MCP status returns the
 equivalent two-field `launchRecovery` object. Restore availability and use only
 the offered resume action. An operator pause preserves this diagnosis; resuming
@@ -552,9 +558,9 @@ rejection. A recognized structured HTTP 400 schema rejection has the latter
 classification even if Codex labels it `other`. These failures do not enter
 provider-availability or output-correction recovery; follow the stopped run's
 actions and correct the request defect before starting again. A genuinely
-opaque `turn_other` or explicit `turn_server_overloaded` retains one fresh
-reconstruction for eligible ordinary non-commit turns outside source forks and
-then the existing `backend_unavailable` pause. Turn-item policy, protocol, and
+opaque `turn_other` retains one fresh reconstruction for eligible ordinary
+non-commit turns outside source forks and then the existing `backend_unavailable`
+pause. Explicit overload and transport availability use the shared durable backoff. Turn-item policy, protocol, and
 isolation violations retain precedence. Local-commit readiness bypasses this
 fallback and remains on the runner's pre-effect Git-verification path. Native
 error payloads and transcripts are not diagnostic evidence to collect or

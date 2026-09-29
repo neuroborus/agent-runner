@@ -128,3 +128,9 @@ When a decision would invalidate a validated plan or completed commit, the
 current execution run stops. The operator carries the recorded decision into a
 revised plan and a new run instead of letting the runner invent requirements or
 rewrite history.
+
+All pipelines use the same injected runner availability policy after their own
+repository reconciliation. Explicit transient failures resume the exact logical
+role and checkpoint with durable capped exponential delays; no pipeline parses
+provider-native errors. Correction budgets remain distinct from availability
+attempts, and commit/handoff effects retain their verification-only safety gates.

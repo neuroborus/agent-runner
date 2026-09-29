@@ -221,8 +221,9 @@ failures retain precedence. Unknown or contradictory diagnostics cannot establis
 availability. Its finite reason cannot accompany terminal retry eligibility,
 ambiguous outcomes, started effects, or commit work without validated
 pre-executor proof. Safe partial workspace changes still require reconciliation.
-This evidence augments existing bounded recovery and pauses without scheduling
-automatic backoff.
+After Git reconciliation this evidence activates the shared runner-owned durable
+backoff. Adapters do not add an immediate availability retry. Other context/session
+recovery retains its existing bounds.
 
 After the adapter's single applicable reconstruction is exhausted, the shared
 boundary may derive one resumable launch-recovery projection only from a
@@ -233,7 +234,8 @@ commit-executor evidence. The projection contains exactly `failureClass` and
 causes, or provider-specific fields. Deterministic launch incompatibilities,
 ambiguous effects, turn failures, and commit evidence cannot qualify.
 
-For a source-fork request, the runner retains that projection only at `spawn`
+For failures without availability evidence in a source-fork request, the runner
+retains that projection only at `spawn`
 or `initialize`. A later checkpoint could have created a native child before
 durable lineage was recorded, so retrying it could fork the source twice. In
 lazy mode an eligible early failure with no child atomically restores the
@@ -285,13 +287,15 @@ variant, normalized as `turn_server_overloaded`, are recoverable provider
 failures unless a validated client envelope rejects the request. Native
 transport/server failures with explicit availability evidence are also
 recoverable. The adapter audits reported turn items first so policy, protocol, and
-isolation violations retain precedence. An ordinary non-commit request uses the
+isolation violations retain precedence. An ordinary non-commit request without availability evidence uses the
 existing single fresh reconstruction from its complete persisted recovery
 context and the observed workspace. A second failure returns to the pipeline
 without another adapter retry and pauses as `backend_unavailable` at the safe
 checkpoint when it remains recoverable. Writable workflows first reconcile safe
 workspace changes and invalidate stale fingerprint-bound evidence. A source
-fork is never replaced by fresh context. Local-commit turns bypass this retry:
+fork is never replayed; availability recovery reconstructs the same logical role
+from durable context without another source fork. Local-commit turns bypass
+adapter retry:
 a rejected readiness turn, including overload, reports that the executor never
 started, and any uncertain commit effect remains subject to verification
 without replay. Native error details are discarded.

@@ -938,9 +938,47 @@ are calculated from the current scheduling time, so overdue recovery cannot
 produce a catch-up schedule. Unrelated transitions and restart retain the episode;
 clearing it is reserved for the successful-provider-turn coordinator path.
 
-This is persistence support only. No current pipeline schedules availability
-episodes, waits on their deadlines, or dispatches automatic retries. Existing
-bounded recovery and pause behavior remains active.
+The runner injects one availability coordinator into all three pipelines.
+Logical checkpoints bind the original access mode as well as role and phase;
+read-only dispute recovery cannot regain write access through an availability
+episode when its correction budget is exhausted.
+Each pipeline first reconciles repository controls, safe partial content, and
+turn/process retirement, then requests scheduling. Correction accounting and
+pending correction diagnostics remain bound to the same logical turn; partial
+writes invalidate dependent approvals without charging that correction twice.
+After restart the pipeline reconstructs the same role/checkpoint from durable
+state, preserving lineage without reforking the source. Deadline waits retain
+the execution/worktree leases and are abortable by immediate or deferred stops.
+An overdue deadline permits one attempt, never a catch-up burst.
+
+Scheduling and retry start are journaled before waiting or dispatch and immediately
+published to CLI/MCP activity with bounded role, checkpoint, normalized reason,
+attempt, delay, and deadline. Status projects the same fields in `availabilityRetry`.
+A successfully returned provider response clears the episode at repository
+reconciliation, before deterministic output validation; rejected output can
+therefore still mark provider progress. Reconciled content and correction
+accounting are persisted atomically with that reset. Check/fix mutation claims
+are compared against the successful attempt's starting fingerprint, including
+any safe content retained from earlier failed attempts.
+Availability errors, tool activity, partial output, session replacement, operator
+resume, and restart do not reset it. Persistence or wait failures retain the
+checkpoint and propagate without inventing a terminal pipeline failure.
+
+Plan-execution state version 24 permits a bounded availability reason and
+`commitExecutor: "not_started"` in a persisted pre-effect rejection. Version 23
+migrates without inventing that proof. Consumed authorization remains
+verification-only until Git proves no commit and unchanged state; only then can
+one atomic journal transition retire it and schedule a fresh authorization.
+Potentially executed commit/handoff effects never enter availability replay.
+Polishing state version 16 preserves charged partial resolutions at their original
+checkpoint. Both writable pipelines persist whether the current availability
+continuation has charged a check/fix round; an earlier pending correction does
+not exempt a new round, and response reset cannot erase an unfinished charge.
+Legacy pipeline migration initializes that marker to false. Both retain unresolved blockers and historical
+negative validation evidence during recovery; no stale passing evidence or
+approval can authorize the changed content.
+Foreground CLI owner loss requires resume; detached MCP ownership outlives a
+client timeout or disconnect.
 
 ### State-owned operator stop protocol
 
@@ -2047,9 +2085,9 @@ precedence over text. A Claude budget-exhaustion terminal reason precedes transi
 statuses but cannot replace a structured authentication, request, or output
 rejection. Killed processes cannot use even parseable diagnostics to hide
 uncertain effects.
-Unknown errors receive no availability reason. The common envelope can persist
-availability policy and episodes, but failure classification does not activate
-their scheduling; existing bounded recovery and pause policy remain.
+Unknown errors receive no availability reason. Explicit eligible evidence enters
+the runner's durable availability coordinator after repository reconciliation;
+other failures retain their bounded recovery, pause, or terminal outcomes.
 
 Codex App Server `usageLimitExceeded` and explicit Claude rate, quota, credit,
 or spend-limit rejections bypass context recovery and provider fallback. Their
@@ -2083,11 +2121,12 @@ Completion notifications and hydrated turns accept only `completed`, `failed`,
 and `interrupted` statuses before failure classification. For these failures,
 the existing item audit and explicit-model reroute guard still reject policy,
 protocol, and isolation violations before classification or recovery. For
-recoverable non-commit failures outside a source fork, the existing recovery
+recoverable non-commit failures without availability evidence outside a source fork, the existing recovery
 path attempts one fresh session with the complete `recoveryPrompt` and observed
 workspace. The failure itself does not request compaction, and the second
 attempt's failure propagates unchanged without another reconstruction. Source
-forks remain ineligible for fresh fallback. Local-commit readiness failures
+forks remain ineligible for adapter fallback; the runner reconstructs an eligible
+availability failure without reforking its source. Local-commit readiness failures
 record that the commit executor did not start; the boundary-derived
 `effectStarted: false` projection therefore keeps an overload rejected before
 the isolated executor as a proven pre-effect rejection.
@@ -2100,7 +2139,8 @@ post-turn repository guard prove that it could not mutate the repository.
 Unknown writable process outcomes remain terminal after reconciliation;
 classified usage and provider failures may pause only after safe workspace
 changes and control state have been reconciled. After the adapter's applicable
-retry policy is exhausted, the owning pipeline persists `backend_unavailable`,
+retry policy is exhausted for failures without availability evidence, the owning
+pipeline persists `backend_unavailable`,
 the exact resumable workflow checkpoint, reconciled one-shot authorization
 state, and any safe workspace changes before entering `WAITING_FOR_USER`. An
 eligible normalized transient launch failure also persists only
@@ -2503,7 +2543,7 @@ first eligible turn of each new primary or review checkpoint creates a direct
 child and returns its ID without resuming or mutating the source. In lazy mode,
 only the first eligible primary turn may create that child, and the durable
 one-time marker forbids later source forks even when a native session must be
-reconstructed. If an eligible `spawn` or `initialize` launch failure occurs
+reconstructed. For failures without availability evidence, if an eligible `spawn` or `initialize` launch failure occurs
 before a lazy fork can create a child, the same atomic availability-pause
 transition restores the one-time marker. Resume then makes the run's single
 fork for the same logical role. Recovery at `session` or `turn_start` is removed
@@ -2532,7 +2572,8 @@ produce a proof containing the version, required capabilities, and the existing
 
 The root boundary derives launch recovery only from that validated record and
 never from raw provider causes. The frozen projection contains exactly the
-normalized failure class and checkpoint. Fork requests retain it only at
+normalized failure class and checkpoint. Without availability evidence, fork
+requests retain it only at
 `spawn` and `initialize`; a later eligible checkpoint keeps its normalized
 failure record but cannot enter pipeline retry policy. All other requests may
 retain any eligible launch checkpoint. CLI and MCP status read the same

@@ -120,6 +120,11 @@ or capability preparation; untouched legacy staging returns to discovery and
 candidate convergence. Current untouched handoffs recheck availability before
 runner-owned staging. Stop reconciliation starts no new effects.
 
+State version 16 permits a charged partial resolution to retain its blockers at
+`RESOLVE_FINDINGS` during availability recovery. Obsolete failed validation remains
+negative diagnostic evidence only; stale approvals and passing evidence are
+invalidated. Version 15 migrates without changing saved checkpoints or counters.
+
 State version 15 adds the independently owned frozen finalization-guidance
 decision. Completed handoffs and terminal history remain verification-only.
 Other unfinished legacy runs resolve guidance before provider work and repeat
@@ -444,9 +449,9 @@ Codex locally rejects incompatible response schemas with terminal
 `ERR_INVALID_CODEX_SCHEMA`. A valid native `other` failure with bounded,
 structured non-transient HTTP client evidence becomes terminal
 `ERR_CODEX_TURN_FAILED` / `turn_bad_request`. Neither is an output-correction or
-backend-availability failure. Opaque `turn_other` and explicit
-`turn_server_overloaded` retain one fresh reconstruction outside source forks
-before the next failure propagates. Turn-item policy, protocol, and isolation
+backend-availability failure. Opaque `turn_other` retains one fresh
+reconstruction outside source forks before the next failure propagates. Explicit
+overload uses the runner's durable availability policy. Turn-item policy, protocol, and isolation
 auditing and the model-reroute guard take precedence, and native error details
 are discarded; the adapter owns recognition and recovery.
 Claude classifies structured permission denials, HTTP status, result subtype,
@@ -460,9 +465,19 @@ and an unqualified structured `api_error` are terminal. Authentication,
 forbidden-operation denials, isolation or protocol failures, and unclassified
 writable process outcomes remain terminal. Denied input,
 native result text, raw standard error, and native process causes are discarded.
-Explicit native transport, overload, model-busy, and server evidence may carry
-the provider contract's shared availability reason without changing this
-pipeline's pause or retry policy.
+Explicit native transport, overload, model-busy, and server availability use the
+injected runner coordinator after repository reconciliation. The exact role and
+logical checkpoint survive five-second exponential backoff capped by the frozen
+policy, with indefinite repeats at the ceiling. Scheduling and start are durable
+and immediately visible; overdue recovery dispatches once. Only a successful
+provider response resets the episode, before output validation. Partial output,
+partial writes, session changes, resume, and restart do not reset it. Safe partial
+content and pending corrections survive; stale approvals are invalidated and the
+same correction is not charged again. Check/fix mutation claims use the successful
+attempt's starting fingerprint, after retained partial content is reconciled.
+Source forks are never replayed. An
+abortable wait retains exclusive ownership and honors immediate/deferred stops.
+See the common [availability contract](../../../docs/ARCHITECTURE.md#durable-availability-episodes).
 An explicit rate, quota, credit, or spend-limit rejection is not retried through
 compaction, a fresh session, or provider fallback. Persist
 `backend_unavailable`, safe Worker workspace changes, and invalidation of stale
@@ -470,7 +485,8 @@ fingerprint-bound results before pausing so the complete durable request can be
 reconstructed after capacity returns. Classified usage and provider failures
 from writable turns use this path only after workspace and repository-control
 reconciliation; no native session is required.
-An eligible normalized transient pre-effect launch failure adds only
+An eligible normalized transient pre-effect launch failure without availability
+evidence adds only
 `launchRecovery: { failureClass, checkpoint }` to that pause. If a lazy source
 fork fails at `spawn` or `initialize` before a child exists, the same atomic
 transition restores `lazySourceForkConsumed: false`; later fork checkpoints are
@@ -1401,7 +1417,7 @@ semantics, and handoff behavior. Cover at least:
   plan-execution runs, detached MCP retry, and same-host stale recovery;
 - compatible legacy migration, incompatible reader and detached-child
   rejection, and disconnects that leave durable state unchanged;
-- every supported legacy version migrating through state version 15 to safe
+- every supported legacy version migrating through state version 16 to safe
   candidate convergence while preserving paused and terminal runs without
   replaying `HANDOFF`;
 - sandbox, IPC, loopback, process-isolation, missing-service, and permission

@@ -1911,6 +1911,7 @@ export function createCodexAdapter(options = {}) {
       if (
         cause instanceof CodexAdapterError &&
         cause.recoverable &&
+        cause.availabilityReason === undefined &&
         request.session?.mode !== "fork"
       ) {
         result = await runAttempt(request, {

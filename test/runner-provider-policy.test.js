@@ -470,6 +470,14 @@ test("CLI and MCP project the same persisted launch recovery", async () => {
     checkpoint: "initialize",
   });
   const fixture = projectionFixture(launchRecovery);
+  fixture.run.availabilityRetry = {
+    role: "worker",
+    checkpoint: "implement:1",
+    reason: "transport_unavailable",
+    attempt: 2,
+    delayMs: 10000,
+    nextRetryAt: "2026-09-29T10:00:00.000Z",
+  };
   let output = "";
   const runner = {
     async status() {
@@ -506,6 +514,11 @@ test("CLI and MCP project the same persisted launch recovery", async () => {
   const status = await control.runStatus({ runId: fixture.run.runId });
   assert.deepEqual(status.launchRecovery, projectLaunchRecovery(fixture.run));
   assert.deepEqual(status.launchRecovery, launchRecovery);
+  assert.deepEqual(status.availabilityRetry, fixture.run.availabilityRetry);
+  assert.match(
+    output,
+    /Availability retry: worker implement:1; transport_unavailable; attempt 2; delay 10000ms; deadline 2026-09-29T10:00:00.000Z/u,
+  );
 });
 
 test("Runner recreation retains frozen availability policy and rejects provider policy drift", async (t) => {
@@ -690,6 +703,30 @@ test("CLI and MCP preserve the same bounded capability diagnosis", async () => {
     (error) => {
       assert.equal(error.code, "ERR_UNSUPPORTED_BACKEND");
       assert.equal(error.message, standardError.trim());
+      return true;
+    },
+  );
+});
+
+test("a late failed source fork retains availability eligibility without authorizing another fork", async () => {
+  const adapter = failureAdapter(
+    () => ({
+      failureClass: "fixture_failure",
+      checkpoint: "session",
+      outcome: "exited",
+      effect: "none",
+      retry: "transient",
+      availabilityReason: "transport_unavailable",
+    }),
+    async () => {
+      throw new Error("offline");
+    },
+  );
+  await assert.rejects(
+    adapter.run({ session: { id: "source", mode: "fork" } }),
+    (error) => {
+      assert.equal(error.recoverable, true);
+      assert.equal(error.failure.availabilityReason, "transport_unavailable");
       return true;
     },
   );

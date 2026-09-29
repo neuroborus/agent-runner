@@ -3494,7 +3494,7 @@ test("reconstructs opaque turn failures once from the complete recovery prompt",
   }
 });
 
-test("reconstructs an explicit server overload once from the complete recovery prompt", async () => {
+test("leaves explicit availability retries to the durable runner coordinator", async () => {
   const fixture = createFixture({
     handle({ message, processIndex }) {
       if (message.method !== "turn/start" || processIndex !== 0) {
@@ -3511,19 +3511,24 @@ test("reconstructs an explicit server overload once from the complete recovery p
     },
   });
 
-  const result = await fixture.adapter.run(
-    request({ recoveryPrompt: "Complete durable context." }),
+  await assert.rejects(
+    fixture.adapter.run(
+      request({ recoveryPrompt: "Complete durable context." }),
+    ),
+    (error) => {
+      assert.equal(error.availabilityReason, "temporarily_overloaded");
+      assert.equal(error.recoverable, true);
+      assert.doesNotMatch(JSON.stringify(error), /DO_NOT_RETAIN/u);
+      return true;
+    },
   );
-
-  assert.equal(result.output, "done");
-  assert.equal(fixture.processes.length, 2);
-  const turns = fixture.processes.flatMap(({ messages }) =>
-    messages.filter(({ method }) => method === "turn/start"),
+  assert.equal(fixture.processes.length, 1);
+  assert.equal(
+    fixture.processes[0].messages.filter(
+      ({ method }) => method === "turn/start",
+    ).length,
+    1,
   );
-  assert.equal(turns.length, 2);
-  assert.match(turns[1].params.input[0].text, /Complete durable context\./u);
-  assert.doesNotMatch(JSON.stringify(result), /DO_NOT_RETAIN/u);
-  assert.doesNotMatch(JSON.stringify(turns[1]), /DO_NOT_RETAIN/u);
 });
 
 test("propagates a second recoverable or terminal turn failure without another retry", async (t) => {
@@ -3532,8 +3537,7 @@ test("propagates a second recoverable or terminal turn failure without another r
       for (const [firstVariant, secondVariant, secondDiagnosticClass] of [
         ["other", "other", "turn_other"],
         ["other", "unauthorized", "turn_unauthorized"],
-        ["serverOverloaded", "serverOverloaded", "turn_server_overloaded"],
-        ["serverOverloaded", "unauthorized", "turn_unauthorized"],
+        ["other", "serverOverloaded", "turn_server_overloaded"],
       ]) {
         await t.test(
           `${access}/${mode}/${firstVariant}/${secondVariant}`,

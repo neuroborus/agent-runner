@@ -25,6 +25,11 @@ import {
   runPlanAuthoring,
 } from "../src/index.js";
 
+import {
+  attachAvailability,
+  availabilityFailure,
+} from "../../../test/support/availability.js";
+
 const executeFile = promisify(execFile);
 const SOURCE_SESSION = "11111111-1111-4111-8111-111111111111";
 const ROLE_SESSIONS = Object.freeze({
@@ -605,6 +610,7 @@ async function createFixture(
 
   return {
     calls,
+    runtime,
     clarificationPath,
     get currentRun() {
       return currentRun;
@@ -2980,4 +2986,32 @@ test("version four migration preserves progress and defaults only missing mode",
       }),
     /Unsupported legacy/u,
   );
+});
+
+test("authoring resumes a failed source fork with a fresh same-role request and no extra correction", async (t) => {
+  let fail = true;
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    sourceSession: SOURCE_SESSION,
+    planner: [ready(), draft(), checkUnchanged(), clean()],
+    reviewer: [],
+    onRoleRun() {
+      if (fail) {
+        fail = false;
+        throw availabilityFailure();
+      }
+    },
+  });
+  const retry = attachAvailability(fixture);
+  const run = await fixture.run();
+  assert.equal(run.pipelineState.workflowState, "DONE");
+  assert.deepEqual(retry.delays, [5000]);
+  assert.equal(fixture.calls.planner[0].session.mode, "fork");
+  assert.equal(fixture.calls.planner[1].session, undefined);
+  assert.equal(
+    fixture.calls.planner.filter(({ session }) => session?.mode === "fork")
+      .length,
+    1,
+  );
+  assert.equal(run.counters.correctionRounds, 0);
 });

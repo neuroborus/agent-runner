@@ -7,6 +7,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import { createActionStore } from "./actions.js";
 import {
+  availabilityActivity,
   availabilityDelayMs,
   DEFAULT_AVAILABILITY_POLICY,
 } from "./availability.js";
@@ -937,7 +938,11 @@ export function createRunStore({
     });
   }
 
-  async function scheduleAvailabilityRetry(lease, input) {
+  async function scheduleAvailabilityRetry(
+    lease,
+    input,
+    { pipelineState } = {},
+  ) {
     if (!isRecord(input)) {
       throw new RunStoreError("Availability retry input is invalid.", {
         code: "ERR_INVALID_RUN_STATE",
@@ -984,6 +989,7 @@ export function createRunStore({
       const nextState = normalizeRunState(
         {
           ...state,
+          ...(pipelineState === undefined ? {} : { pipelineState }),
           revision: state.revision + 1,
           updatedAt: scheduledAt,
           availabilityRetry: {
@@ -1003,8 +1009,74 @@ export function createRunStore({
         },
         record.runId,
       );
-      await journal.appendTransition(runDirectory, nextState, snapshot, null);
+      await journal.appendTransition(
+        runDirectory,
+        nextState,
+        snapshot,
+        normalizePublicActivity(
+          availabilityActivity(nextState.availabilityRetry, "retry-scheduled"),
+        ),
+      );
       return deepFreeze(nextState);
+    });
+  }
+
+  async function completeAvailabilityTurn(
+    lease,
+    role,
+    { patch = {}, expectedRevision } = {},
+  ) {
+    const normalizedPatch = normalizeTransitionPatch(patch);
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
+      const snapshot = await loadSnapshot(runDirectory, record.runId);
+      const state = snapshot.state;
+      if (state.availabilityRetry === null) return deepFreeze(state);
+      if (
+        expectedRevision !== undefined &&
+        state.revision !== expectedRevision
+      ) {
+        throw new RunStoreError("Run changed before transition.", {
+          code: "ERR_RUN_REVISION_CHANGED",
+        });
+      }
+      if (Object.keys(normalizedPatch).length > 0) {
+        assertRunCanAdvance(state, resolveStopBoundary);
+      }
+      if (
+        state.activeTurn?.role !== role ||
+        state.availabilityRetry.role !== role ||
+        state.executionProcess !== null ||
+        state.executionResource !== null
+      ) {
+        throw new RunStoreError(
+          "Availability completion requires a retired provider response.",
+          {
+            code: "ERR_INVALID_AGENT_TURN",
+          },
+        );
+      }
+      // A response-only reset can race a stop. Reconciliation patches still
+      // obey normal advancement rules; the supervisor owns stop settlement.
+      const next = normalizeRunState(
+        {
+          ...state,
+          ...normalizedPatch,
+          availabilityRetry: null,
+          revision: state.revision + 1,
+          updatedAt: timestamp(state.updatedAt),
+        },
+        record.runId,
+      );
+      assertStopProgress(state, next, resolveStopBoundary);
+      await journal.appendTransition(
+        runDirectory,
+        next,
+        snapshot,
+        normalizePublicActivity(
+          availabilityActivity(state.availabilityRetry, "recovered"),
+        ),
+      );
+      return deepFreeze(next);
     });
   }
 
@@ -1410,6 +1482,7 @@ export function createRunStore({
     recordChildSession,
     recordProviderPolicy,
     scheduleAvailabilityRetry,
+    completeAvailabilityTurn,
     recoverRun,
     runIsLeased,
     runLeaseOwnerIsLive,

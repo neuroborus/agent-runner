@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-09-29
+
+- **Safe provider turns now resume through durable availability backoff.** One
+  injected runner coordinator serves all pipelines, preserves reconciled partial
+  work and correction accounting, and journals public schedule/start events.
+  Response resets share the content-reconciliation write so interruption cannot
+  separate progress from its charged correction.
+  Capped waits continue without a quota, reset only on provider response, and
+  remain abortable under the same lease. Source sessions are never reforked.
+  Commit-readiness rejection retains bounded pre-executor evidence across restart;
+  unchanged Git verification must precede atomic authorization retirement and
+  retry scheduling. Potentially executed effects stay verification-only.
+
 ## 2026-09-28
 
 - **Availability retry policy and episodes survive restart.** Common envelope

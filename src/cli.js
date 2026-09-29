@@ -11,6 +11,7 @@ import {
 import { getPipeline, listPipelines } from "./pipeline-registry.js";
 import { createRunner, parseSourceSession } from "./runner/index.js";
 import {
+  projectAvailabilityRetry,
   projectLaunchRecovery,
   projectOperatorStop,
   RUNTIME_VERSION_SKEW_EXIT_CODE,
@@ -223,6 +224,12 @@ function runSummary({ directoryPath, run }) {
       );
   }
   const launchRecovery = projectLaunchRecovery(run);
+  const retry = projectAvailabilityRetry(run);
+  if (retry !== null) {
+    lines.push(
+      `Availability retry: ${retry.role} ${retry.checkpoint}; ${retry.reason}; attempt ${retry.attempt}; delay ${retry.delayMs}ms; deadline ${retry.nextRetryAt}`,
+    );
+  }
   if (launchRecovery !== null) {
     lines.push(
       `Launch recovery: ${launchRecovery.checkpoint} (${launchRecovery.failureClass})`,

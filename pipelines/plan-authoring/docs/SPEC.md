@@ -429,7 +429,8 @@ source session is forked once on the first eligible Planner turn for the entire
 run. The durable one-time marker prevents reforking after interruption or
 context reconstruction; a compatible child may continue, otherwise a fresh
 native session reconstructs the same logical Planner from durable state. An
-eligible transient failure at `spawn` or `initialize` before a child exists
+eligible transient failure without availability evidence at `spawn` or
+`initialize` before a child exists
 restores that marker in the same atomic `backend_unavailable` transition; later
 fork checkpoints fail without a resumable availability pause because an
 unrecorded native child may exist. All agent turns remain repository-read-only.
@@ -478,9 +479,9 @@ Codex locally rejects incompatible response schemas with terminal
 `ERR_INVALID_CODEX_SCHEMA`. A valid native `other` failure with bounded,
 structured non-transient HTTP client evidence becomes terminal
 `ERR_CODEX_TURN_FAILED` / `turn_bad_request`. Neither is an output-correction or
-backend-availability failure. Opaque `turn_other` and explicit
-`turn_server_overloaded` retain one fresh reconstruction outside source forks
-before the next failure propagates. Turn-item policy, protocol, and isolation
+backend-availability failure. Opaque `turn_other` retains one fresh
+reconstruction outside source forks before the next failure propagates. Explicit
+overload uses the runner's durable availability policy. Turn-item policy, protocol, and isolation
 auditing and the model-reroute guard take precedence, and native error details
 are discarded; the adapter owns recognition and recovery.
 Claude classifies structured permission, HTTP status, result subtype, and
@@ -495,9 +496,17 @@ unclassified valid read-only result or process failure may use this path only
 after the repository guard proves the turn remained read-only. Authentication,
 forbidden-operation permission denials, protocol failures, and isolation
 failures remain terminal. Denied input and native provider text are discarded.
-Explicit native transport, overload, model-busy, and server evidence may carry
-the provider contract's shared availability reason without changing this
-pipeline's pause or retry policy.
+Explicit native transport, overload, model-busy, and server availability use the
+injected runner coordinator after repository reconciliation. The exact role and
+logical checkpoint survive five-second exponential backoff capped by the frozen
+policy, with indefinite repeats at the ceiling. Scheduling and start are durable
+and immediately visible; overdue recovery dispatches once. Only a successful
+provider response resets the episode, before output validation. Partial output,
+partial writes, session changes, resume, and restart do not reset it. Safe partial
+content and pending corrections survive; stale approvals are invalidated and the
+same correction is not charged again. Source forks are never replayed. An
+abortable wait retains exclusive ownership and honors immediate/deferred stops.
+See the common [availability contract](../../../docs/ARCHITECTURE.md#durable-availability-episodes).
 The root agent boundary normalizes those finite adapter-owned classes before
 workflow code sees the failure. In particular, Codex collaboration activity
 despite disabled multi-agent support remains terminal

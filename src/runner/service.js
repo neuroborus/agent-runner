@@ -34,6 +34,7 @@ import {
   RunnerError,
 } from "./input.js";
 import { pipelineForRun } from "./migration.js";
+import { createAvailabilityCoordinator } from "./availability.js";
 import { inspectTrustedRequirements } from "./trusted-requirements.js";
 import {
   createStopMonitor,
@@ -51,6 +52,8 @@ import {
 
 const WORKTREE_LEASE_PIPELINES = new Set(["plan-execution", "polishing"]);
 const RUNNER_OPTION_FIELDS = new Set([
+  "availabilityClock",
+  "availabilityWait",
   "adapters",
   "clarifications",
   "git",
@@ -167,6 +170,10 @@ export function createRunner(options = {}) {
     !isRecord(git) ||
     typeof loadConfiguration !== "function" ||
     typeof onActivity !== "function" ||
+    (options.availabilityClock !== undefined &&
+      typeof options.availabilityClock !== "function") ||
+    (options.availabilityWait !== undefined &&
+      typeof options.availabilityWait !== "function") ||
     !isRecord(runStore) ||
     !isRecord(trustedValidation) ||
     typeof trustedValidation.preflight !== "function" ||
@@ -260,6 +267,29 @@ export function createRunner(options = {}) {
     monitor,
     onConfigurationFailure = () => {},
   ) {
+    let providerResponseRole = null;
+    const availability =
+      monitor === undefined
+        ? undefined
+        : createAvailabilityCoordinator({
+            runId: run.runId,
+            lease,
+            runStore,
+            providers,
+            git,
+            publish,
+            monitor,
+            clock: options.availabilityClock,
+            wait: options.availabilityWait,
+            validateRun: pipeline.workflow.validateRun,
+            initialRun: run,
+          });
+    async function reconcileProviderResponse(options) {
+      if (providerResponseRole === null) return undefined;
+      const next = await availability.completed(providerResponseRole, options);
+      providerResponseRole = null;
+      return next;
+    }
     async function checkConfiguration() {
       try {
         await guardProjectConfiguration(run);
@@ -269,6 +299,7 @@ export function createRunner(options = {}) {
       }
     }
     return Object.freeze({
+      availability,
       adapters:
         monitor === undefined
           ? selectedAdapters
@@ -283,10 +314,12 @@ export function createRunner(options = {}) {
                   async run(request) {
                     await checkConfiguration();
                     try {
-                      return await monitor.invoke(
+                      const response = await monitor.invoke(
                         (value) => adapter.run(value),
                         request,
                       );
+                      providerResponseRole = role;
+                      return response;
                     } finally {
                       await checkConfiguration();
                     }
@@ -392,8 +425,10 @@ export function createRunner(options = {}) {
           throw cause;
         }
       },
-      finishAgentTurn: (activeTurn) =>
-        runStore.finishAgentTurn(lease, activeTurn),
+      async finishAgentTurn(activeTurn) {
+        await reconcileProviderResponse();
+        return runStore.finishAgentTurn(lease, activeTurn);
+      },
       async recordChildSession(child, { activity } = {}) {
         const next = await runStore.recordChildSession(lease, child, {
           activity,
@@ -405,6 +440,7 @@ export function createRunner(options = {}) {
         patch,
         { activity, expectedPipelineState, verifiedCommit },
       ) {
+        await reconcileProviderResponse();
         let configurationFailure = null;
         try {
           await checkConfiguration();
@@ -448,9 +484,16 @@ export function createRunner(options = {}) {
         return next;
       },
       async transition(patch, { activity, expectedRevision } = {}) {
+        // Reconcile safe content and correction accounting atomically with the
+        // response reset, so owner loss cannot turn a retry into a second fix.
+        const reconciled = await reconcileProviderResponse({
+          patch,
+          expectedRevision,
+        });
+        if (reconciled !== undefined && activity == null) return reconciled;
         const next = await runStore.transitionRun(lease, patch, {
           activity,
-          expectedRevision,
+          expectedRevision: reconciled?.revision ?? expectedRevision,
         });
         await publish(activity, next);
         return next;

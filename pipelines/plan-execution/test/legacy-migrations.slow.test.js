@@ -40,7 +40,7 @@ test("version-22 terminal history remains readable and scoped discovery precedes
   const offset = fixture.calls.length;
   const { run } = await fixture.openRunner().resume({ runId: fixture.runId });
   assert.equal(run.pipelineState.workflowState, "DONE");
-  assert.equal(run.pipelineStateVersion, 23);
+  assert.equal(run.pipelineStateVersion, 24);
   assert.equal(
     run.pipelineState.completedCommits[0],
     fixture.failed.pipelineState.completedCommits[0],

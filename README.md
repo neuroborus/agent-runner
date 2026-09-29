@@ -334,8 +334,13 @@ at the smaller of this value and 10 seconds.
 for new runs. It accepts integers from `5000` through `2147483647` milliseconds,
 defaults to `1800000` (30 minutes), and resolves project over runner configuration.
 The initial delay is fixed at five seconds. Resume preserves the saved policy;
-legacy runs use the default. Durable policy/episode storage is available, while
-automatic retry activation remains pending; existing pause/resume behavior applies.
+legacy runs use the default. Explicit transient availability failures in all three
+pipelines retry automatically after Git reconciliation. Delays double from five
+seconds to the saved ceiling, then repeat there without a retry quota. Only a
+successful provider response resets the episode; restart and partial work do not.
+CLI activity and MCP status expose the role, checkpoint, reason, attempt, delay,
+and deadline. A foreground CLI must be resumed after owner loss; detached MCP
+work continues independently of client wait cancellation or disconnect.
 
 An ignored project configuration may select root or project aliases through
 the same pipeline setting, replacing that pipeline's root selection. The tracked
@@ -472,18 +477,18 @@ the native failure is marked `other`. HTTP 400 `invalid_request_error` /
 `turn_bad_request`; it does not trigger provider retries, output correction,
 or `backend_unavailable`. Native error details are discarded.
 
-Explicit Codex `turn_server_overloaded` and opaque `turn_other` failures use at
-most one fresh reconstruction for ordinary non-commit turns, with the complete
-durable recovery request and observed workspace. Turn items are audited before
-recovery so policy, protocol, and isolation failures retain precedence. A
-repeated recoverable failure pauses as `backend_unavailable` at the safe
-checkpoint; restore provider availability and resume the same run. Native error
-details are discarded, source forks are never replaced by fresh context, and
-local-commit turns never use this retry or replay a commit effect. An overload
-that rejects commit readiness before the isolated executor starts remains a
-proven pre-effect rejection for the runner's Git verification path.
+Explicit Codex overload and both providers' normalized availability failures use
+the shared durable backoff without immediate adapter retries. Opaque Codex
+`turn_other` retains its bounded fresh reconstruction and pause path. Policy,
+protocol, isolation, usage-limit, and ambiguous-effect outcomes retain precedence.
+A failed source fork is reconstructed as the same logical role without forking
+the source again. Commit-readiness availability rejection requires persisted
+proof that the executor never started and unchanged Git verification before
+retiring the consumed authorization and scheduling a fresh one. Potentially
+executed effects remain verification-only; native error details are discarded.
 
-When bounded adapter recovery ends in an eligible transient pre-effect launch
+For failures without explicit availability evidence, when bounded adapter
+recovery ends in an eligible transient pre-effect launch
 failure, the availability pause retains only `failureClass` and the `spawn`,
 `initialize`, `session`, or `turn_start` checkpoint. CLI status renders
 `Launch recovery: <checkpoint> (<failureClass>)`; MCP status returns the same
@@ -672,7 +677,7 @@ authority and remain compatibility-blocked when that evidence is needed.
 Version 15 adds frozen availability policy and nullable retry episodes, with
 default-only legacy migration that preserves saved workflow and session evidence.
 The mode-aware pipeline versions are plan-authoring version 5, plan-execution
-version 17, and polishing version 13. Their ordered migrations resolve missing
+version 24, and polishing version 16. Their ordered migrations resolve missing
 legacy modes to `independent` and preserve explicitly saved modes without
 moving terminal workflows or replaying role turns,
 commits, or handoffs. Complete write-ahead events precede atomic state

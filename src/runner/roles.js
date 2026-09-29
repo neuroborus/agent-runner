@@ -194,6 +194,7 @@ async function runAdapter(adapter, backend, request, providers) {
     const failure = normalizeAdapterFailure(backend, cause, providers);
     if (
       request.session?.mode === "fork" &&
+      failure.failure.availabilityReason === undefined &&
       failure.launchRecovery !== undefined &&
       !["spawn", "initialize"].includes(failure.launchRecovery.checkpoint)
     ) {

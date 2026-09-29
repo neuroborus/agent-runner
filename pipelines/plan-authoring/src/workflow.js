@@ -471,15 +471,24 @@ export async function runPlanAuthoring({
     assertRun(currentRun);
   }
 
-  async function runRole(
+  const availabilityRetry = Symbol("availability-retry");
+  async function runRole(...args) {
+    for (;;) {
+      const result = await runRoleAttempt(...args);
+      if (result !== availabilityRetry) return result;
+    }
+  }
+
+  async function runRoleAttempt(
     role,
     schema,
     buildPrompt,
     { checkpoint, freshSession = false },
   ) {
     const turn = activeTurn(role, pipelineState().workflowState);
-    const recovering = interruptedTurn !== null;
-    if (recovering && !isDeepStrictEqual(interruptedTurn, turn)) {
+    const retrying = currentRun.availabilityRetry != null;
+    const recovering = interruptedTurn !== null || retrying;
+    if (interruptedTurn !== null && !isDeepStrictEqual(interruptedTurn, turn)) {
       throw workflowError(
         "Persisted agent turn does not match plan-authoring recovery.",
         "ERR_INVALID_PLAN_AUTHORING_STATE",
@@ -502,6 +511,14 @@ export async function runPlanAuthoring({
       evidence.clarification,
     );
     const contextKey = contextKeyFor(role, checkpoint, evidenceContext);
+    const availabilityCheckpoint = `${turn.phase}:read-only:${checkpoint}`;
+    if (retrying && runtime.availability !== undefined) {
+      currentRun = await runtime.availability.before({
+        role,
+        checkpoint: availabilityCheckpoint,
+        repository: snapshot,
+      });
+    }
     const latestSession = [...currentRun.sessionLineage.children]
       .reverse()
       .find((child) => child.role === role);
@@ -591,6 +608,15 @@ export async function runPlanAuthoring({
           outputContext,
           { field: "result", constraint: "provider-structured-output" },
         );
+      }
+      if (runtime.availability?.eligible(agentError)) {
+        currentRun = await runtime.availability.schedule({
+          cause: agentError,
+          role,
+          checkpoint: availabilityCheckpoint,
+          repository: pipelineState().repositoryBaseline,
+        });
+        return availabilityRetry;
       }
       throw agentError;
     }
@@ -1730,6 +1756,7 @@ ${findingPrompt(pipelineState())}`,
       );
     }
   } catch (cause) {
+    if (cause?.code === "ERR_AVAILABILITY_RECOVERY") throw cause;
     if (cause?.code === "ERR_PROJECT_CONFIGURATION_CHANGED") {
       throw cause;
     }

@@ -282,7 +282,11 @@ does not cross public CLI or MCP projections.
 Intent is durable before any commit, handoff, editor, or MCP mutation. If a
 process stops after an effect may have started, recovery inspects the observed
 state before acting. A consumed commit authorization stays on a verification-
-only path; it is never replayed. A handoff may be accepted as already complete
+only path; it is never replayed. A persisted explicit availability rejection with
+validated proof that the executor never started permits retirement only after
+Git verifies no commit and unchanged controls/content/index. Retirement and
+scheduling a fresh authorization are one durable transition. Authorization
+consumption alone never proves executor activity. A handoff may be accepted as already complete
 or retried only from its exact unchanged pre-effect state. Ambiguous partial
 effects fail closed.
 

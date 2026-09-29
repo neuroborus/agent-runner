@@ -745,6 +745,12 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         },
       };
     }
+    if (!nextPipelineState.pendingCorrection) {
+      nextPipelineState = {
+        ...nextPipelineState,
+        availabilityCorrectionCharged: false,
+      };
+    }
     const patch = {
       counters: nextCounters,
       hashes: nextHashes,
@@ -1146,7 +1152,14 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       return true;
     }
     return (
-      turn.phase === "resolve-findings" && counters().fixRounds < fixBudget()
+      turn.phase === "resolve-findings" &&
+      currentRun.availabilityRetry?.checkpoint.startsWith(
+        "resolve-findings:read-only:",
+      ) !== true &&
+      (currentRun.availabilityRetry?.checkpoint.startsWith(
+        "resolve-findings:workspace-write:",
+      ) ||
+        counters().fixRounds < fixBudget())
     );
   }
 
@@ -1266,8 +1279,15 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
             current.findings.length === 0
               ? current.previousFindings
               : current.findings,
-          findings: [],
+          findings:
+            currentRun.availabilityRetry == null &&
+            !current.availabilityCorrectionCharged
+              ? []
+              : current.findings,
           pendingCorrection: true,
+          availabilityCorrectionCharged:
+            current.availabilityCorrectionCharged ||
+            currentRun.availabilityRetry != null,
           reviewReconsideration: [],
           ...markPendingLazyCorrectionCharged(current),
         },
@@ -1276,7 +1296,10 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
             ...counters(),
             fixRounds:
               counters().fixRounds +
-              (current.pendingLazyCorrection?.fixRoundCharged ? 0 : 1),
+              (current.availabilityCorrectionCharged ||
+              current.pendingLazyCorrection?.fixRoundCharged
+                ? 0
+                : 1),
           },
         },
       );
@@ -1293,7 +1316,16 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     return true;
   }
 
-  async function runRole(
+  const availabilityRetry = Symbol("availability-retry");
+  async function runRole(role, schema, buildPrompt, options) {
+    for (;;) {
+      const result = await runRoleAttempt(role, schema, buildPrompt, options);
+      if (result !== availabilityRetry) return result;
+      await options?.onAvailabilityRetry?.();
+    }
+  }
+
+  async function runRoleAttempt(
     role,
     schema,
     buildPrompt,
@@ -1312,8 +1344,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     if (access === "workspace-write" && !(await ensureCheckRequirements()))
       return null;
     const turn = activeTurn(role, state().workflowState);
-    const recovering = interruptedTurn !== null;
-    if (recovering && !isDeepStrictEqual(interruptedTurn, turn)) {
+    const retrying = currentRun.availabilityRetry != null;
+    const recovering = interruptedTurn !== null || retrying;
+    if (interruptedTurn !== null && !isDeepStrictEqual(interruptedTurn, turn)) {
       throw workflowError(
         "Persisted agent turn does not match polishing recovery.",
         "ERR_INVALID_POLISHING_STATE",
@@ -1347,6 +1380,14 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           );
     const context = durableContext(evidenceContext, checkpointContext);
     const contextKey = contextKeyFor(role, checkpoint, evidenceContext);
+    const availabilityCheckpoint = `${turn.phase}:${access}:${checkpoint}`;
+    if (retrying && runtime.availability !== undefined) {
+      currentRun = await runtime.availability.before({
+        role,
+        checkpoint: availabilityCheckpoint,
+        repository: turnSnapshot,
+      });
+    }
     const latestSession = [...currentRun.sessionLineage.children]
       .reverse()
       .find((child) => child.role === role);
@@ -1384,6 +1425,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     };
     let response;
     let agentError;
+    let availabilityFailure = false;
     currentRun = await runtime.startAgentTurn(
       turn,
       consumeSourceFork
@@ -1404,6 +1446,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         response = await runtime.adapters[role].run(request);
       } catch (cause) {
         agentError = cause;
+        availabilityFailure = runtime.availability?.eligible(cause) === true;
       }
       nextRepositoryBaseline = baseline;
       if (access === "read-only") {
@@ -1461,7 +1504,29 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
                   finalizationCorrection: null,
                   pendingFinalizationCorrection: null,
                   pendingCorrection: true,
+                  availabilityCorrectionCharged:
+                    current.availabilityCorrectionCharged ||
+                    (availabilityFailure && contentChangingLazyCheck),
                   reviewReconsideration: [],
+                  ...(availabilityFailure
+                    ? {
+                        workflowState: current.workflowState,
+                        finalizationCorrection: current.finalizationCorrection,
+                        pendingFinalizationCorrection:
+                          current.pendingFinalizationCorrection,
+                        findings: current.findings,
+                        primaryFindings: current.primaryFindings,
+                        lazyCorrections: current.lazyCorrections,
+                        pendingLazyCorrection: current.pendingLazyCorrection,
+                        ...(current.finalizationResult?.status === "FAIL"
+                          ? {
+                              finalizationResult: current.finalizationResult,
+                              finalizedFingerprint:
+                                current.finalizedFingerprint,
+                            }
+                          : {}),
+                      }
+                    : {}),
                   ...(contentChangingLazyCheck
                     ? markPendingLazyCorrectionCharged(current)
                     : {}),
@@ -1493,7 +1558,10 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
                     ...counters(),
                     fixRounds:
                       counters().fixRounds +
-                      (contentChangingCorrection && current.pendingCorrection
+                      ((contentChangingCorrection &&
+                        current.pendingCorrection) ||
+                      (contentChangingLazyCheck &&
+                        current.availabilityCorrectionCharged)
                         ? 0
                         : contentChangingLazyCheck &&
                             current.pendingLazyCorrection?.fixRoundCharged
@@ -1528,6 +1596,15 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
             ? { field: "result", constraint: "provider-structured-output" }
             : undefined,
         );
+      }
+      if (runtime.availability?.eligible(agentError)) {
+        currentRun = await runtime.availability.schedule({
+          cause: agentError,
+          role,
+          checkpoint: availabilityCheckpoint,
+          repository: state().repositoryBaseline,
+        });
+        return availabilityRetry;
       }
       throw agentError;
     }
@@ -4331,6 +4408,8 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
   async function runCheckAndFixTurn() {
     let current = state();
     if (
+      currentRun.availabilityRetry == null &&
+      !current.availabilityCorrectionCharged &&
       current.pendingLazyCorrection === null &&
       counters().fixRounds >= fixBudget()
     ) {
@@ -4343,7 +4422,12 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
     const stableFindingIds = exhaustedStableFindingIds(
       primaryFindings(current),
     );
-    if (current.pendingLazyCorrection === null && stableFindingIds.length > 0) {
+    if (
+      currentRun.availabilityRetry == null &&
+      !current.availabilityCorrectionCharged &&
+      current.pendingLazyCorrection === null &&
+      stableFindingIds.length > 0
+    ) {
       await pause("no_progress", {
         findingIds: stableFindingIds,
         reason: "stable_findings",
@@ -4352,6 +4436,8 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
       return false;
     }
     if (
+      currentRun.availabilityRetry == null &&
+      !current.availabilityCorrectionCharged &&
       current.pendingLazyCorrection === null &&
       current.blockedSinceStagnation >= current.settings.stagnationWindowRounds
     ) {
@@ -4368,8 +4454,10 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
       current = state();
       const correction = current.pendingLazyCorrection;
       const scope = correction ?? lazyCorrectionScope("CHECK_AND_FIX", current);
-      const alreadyCharged = correction?.fixRoundCharged === true;
-      const beforeFingerprint = await contentFingerprint();
+      let alreadyCharged =
+        current.availabilityCorrectionCharged ||
+        correction?.fixRoundCharged === true;
+      let beforeFingerprint = await contentFingerprint();
       try {
         const output = await runRole(
           "worker",
@@ -4384,6 +4472,10 @@ Concrete findings from the preceding clean confirmation:
 ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(correction)}`,
           {
             access: "workspace-write",
+            async onAvailabilityRetry() {
+              beforeFingerprint = await contentFingerprint();
+              alreadyCharged ||= state().availabilityCorrectionCharged;
+            },
             checkpoint:
               correction === null
                 ? combinedReview(current.settings)
@@ -4418,7 +4510,11 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
         }
         if (result.status === "BLOCKED") {
           if (correction !== null) {
-            await transition({ ...state(), pendingLazyCorrection: null });
+            await transition({
+              ...state(),
+              availabilityCorrectionCharged: false,
+              pendingLazyCorrection: null,
+            });
           }
           await pause("environment_blocked", {
             explanation: result.reason,
@@ -4429,7 +4525,11 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
         }
         if (changed) {
           await transition(
-            { ...state(), pendingLazyCorrection: null },
+            {
+              ...state(),
+              availabilityCorrectionCharged: false,
+              pendingLazyCorrection: null,
+            },
             {
               publicActivity: activity(
                 "worker",
@@ -4448,6 +4548,7 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
         await transition(
           {
             ...state(),
+            availabilityCorrectionCharged: false,
             workflowState: "CLEAN_CONFIRM",
             ...clearedCandidateAndConfirmationGate(current),
             pendingLazyCorrection: null,
@@ -5742,7 +5843,12 @@ ${JSON.stringify(
       }
       return arbitrateStagnation();
     }
-    const budgetExhausted = counters().fixRounds >= fixBudget();
+    const retryCheckpoint = currentRun.availabilityRetry?.checkpoint;
+    const budgetExhausted =
+      retryCheckpoint?.startsWith("resolve-findings:read-only:") === true ||
+      (retryCheckpoint?.startsWith("resolve-findings:workspace-write:") !==
+        true &&
+        counters().fixRounds >= fixBudget());
     const blockers = activeBlockers();
     const blockerIds = new Set(blockers.map(({ id }) => id));
     const nonDisputableIds = new Set([
@@ -5921,7 +6027,11 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
           reviewReconsideration: [],
         },
         {
-          nextCounters: { ...counters(), fixRounds: counters().fixRounds + 1 },
+          nextCounters: {
+            ...counters(),
+            fixRounds:
+              counters().fixRounds + (state().pendingCorrection ? 0 : 1),
+          },
           publicActivity: activity(
             "worker",
             "resolution",
@@ -6360,6 +6470,7 @@ ${evidence}`,
       );
     }
   } catch (cause) {
+    if (cause?.code === "ERR_AVAILABILITY_RECOVERY") throw cause;
     if (cause?.code === "ERR_PROJECT_CONFIGURATION_CHANGED") {
       throw cause;
     }

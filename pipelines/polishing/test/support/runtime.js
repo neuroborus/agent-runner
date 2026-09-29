@@ -1105,7 +1105,7 @@ async function createFixture(
     store = createRunStore({ stateRoot });
     const created = await store.createRun({
       pipelineId: "polishing",
-      pipelineStateVersion: 15,
+      pipelineStateVersion: 16,
       projectPath,
       taskPath,
       roles,
@@ -1128,7 +1128,7 @@ async function createFixture(
       revision: 1,
       runId: "run-1",
       pipelineId: "polishing",
-      pipelineStateVersion: 15,
+      pipelineStateVersion: 16,
       projectPath,
       taskPath,
       roles,

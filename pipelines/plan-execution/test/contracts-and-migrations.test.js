@@ -842,7 +842,7 @@ test("migrates version-3 execution state with no consumed bootstrap corrections"
   assert.deepEqual(migrated.bootstrapCorrections, []);
   assert.equal(migrated.pendingBootstrapCorrection, null);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(planExecutionPipeline.stateVersion, 23);
+  assert.equal(planExecutionPipeline.stateVersion, 24);
 });
 
 test("version 21 migration preserves terminal proof", async (t) => {

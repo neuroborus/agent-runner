@@ -6,6 +6,29 @@ export const DEFAULT_AVAILABILITY_POLICY = Object.freeze({
 });
 // Node timers must not overflow into an immediate retry.
 export const MAX_AVAILABILITY_DELAY_MS = 2_147_483_647;
+
+export function projectAvailabilityRetry(run) {
+  if (run.availabilityRetry == null) return null;
+  const { role, checkpoint, reason, attempt, delayMs, nextRetryAt } =
+    run.availabilityRetry;
+  return Object.freeze({
+    role,
+    checkpoint,
+    reason,
+    attempt,
+    delayMs,
+    nextRetryAt,
+  });
+}
+
+export function availabilityActivity(episode, kind) {
+  return {
+    actor: episode.role,
+    phase: "availability",
+    kind,
+    message: `${episode.role} ${episode.checkpoint}: ${episode.reason}; attempt ${episode.attempt}, delay ${episode.delayMs}ms, deadline ${episode.nextRetryAt}.`,
+  };
+}
 const EPISODE_FIELDS = [
   "id",
   "role",

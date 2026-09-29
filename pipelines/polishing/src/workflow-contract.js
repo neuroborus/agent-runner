@@ -114,6 +114,7 @@ const PIPELINE_STATE_FIELDS = new Set([
   "correctionHistory",
   "sameFindingRounds",
   "pendingCorrection",
+  "availabilityCorrectionCharged",
   "blockedSinceStagnation",
   "stagnationArbitrationUsed",
   "stagnationDirection",
@@ -3467,6 +3468,7 @@ export function normalizePipelineState(value) {
     "validationMigrationPending",
     "candidateMigrationPending",
     "pendingCorrection",
+    "availabilityCorrectionCharged",
     "stagnationArbitrationUsed",
   ]) {
     if (typeof value[field] !== "boolean") {
@@ -4182,9 +4184,22 @@ export function normalizePipelineState(value) {
   ) {
     throw workflowError("Polishing candidate fingerprint is inconsistent.");
   }
+  if (value.availabilityCorrectionCharged && !value.pendingCorrection) {
+    throw workflowError(
+      "Availability correction charge has no pending correction.",
+    );
+  }
+  // A reconciled partial resolution retains blockers and its one charged fix,
+  // but carries no approval for the changed content.
+  const pendingResolution =
+    value.pendingCorrection &&
+    ["RESOLVE_FINDINGS", "WAITING_FOR_USER", "FAILED"].includes(
+      value.workflowState,
+    );
   if (
     value.repositoryBaseline !== null &&
     ((finalizationResult !== null &&
+      !(pendingResolution && finalizationResult.status === "FAIL") &&
       finalizationResult.fingerprint !==
         value.repositoryBaseline.contentFingerprint) ||
       (value.finalizedFingerprint !== null &&
@@ -4205,6 +4220,11 @@ export function normalizePipelineState(value) {
     value.candidateReviewedFingerprint === null &&
     (finalizationResult?.status !== "PASS" ||
       value.finalizedFingerprint === null) &&
+    !(
+      pendingResolution &&
+      findings.length > 0 &&
+      pendingDisputes.length === 0
+    ) &&
     !deferredDisputes &&
     finalizationRecovery.feedback === null &&
     !(
@@ -4221,6 +4241,7 @@ export function normalizePipelineState(value) {
     value.pendingCorrection &&
     ![
       "POLISH",
+      "RESOLVE_FINDINGS",
       "FINALIZE",
       "CHECK_AND_FIX",
       "CLEAN_CONFIRM",
@@ -4542,6 +4563,7 @@ export function createPolishingState({
       correctionHistory: [],
       sameFindingRounds: {},
       pendingCorrection: false,
+      availabilityCorrectionCharged: false,
       blockedSinceStagnation: 0,
       stagnationArbitrationUsed: false,
       stagnationDirection: null,
@@ -4649,7 +4671,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "polishing" ||
-    run.pipelineStateVersion !== 15 ||
+    run.pipelineStateVersion !== 16 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||

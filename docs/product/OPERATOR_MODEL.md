@@ -39,8 +39,14 @@ strict integer from `5000` through `2147483647` milliseconds with a `1800000`
 (30-minute) default. The project value wins, without CLI/MCP or role overrides.
 Each run freezes the ceiling with a five-second initial delay. Resume preserves
 it, and legacy migration supplies the documented default with no pending retry.
-The common envelope now supports durable episodes and capped exponential delays;
-automatic retry execution is not activated by this persistence support.
+All three pipelines retry eligible explicit provider availability failures after
+repository reconciliation. Delays double to the ceiling and repeat there without
+an attempt quota. Only a successful provider response resets the episode, even
+when subsequent output validation rejects that response. CLI/MCP activity and
+status expose the saved role, checkpoint, normalized reason, attempt, delay, and
+deadline. Stops interrupt the wait under the same exclusive owner. Foreground
+CLI owner loss needs resume; detached MCP work survives client wait cancellation,
+timeout, and disconnect. Resuming an overdue deadline permits one attempt.
 
 Both configuration layers accept portable `defaultEffort` and role `effort`
 values: `current`, `low`, `medium`, `high`, and `xhigh`. Effort stays separate

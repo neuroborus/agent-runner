@@ -1069,7 +1069,7 @@ export function migratePolishingStateV14(run) {
 
 export const polishingPipeline = Object.freeze({
   id: POLISHING_PIPELINE_ID,
-  stateVersion: 15,
+  stateVersion: 16,
   migrations: Object.freeze({
     1: migratePolishingStateV1,
     2: migratePolishingStateV2,
@@ -1085,6 +1085,12 @@ export const polishingPipeline = Object.freeze({
     12: migratePolishingStateV12,
     13: migratePolishingStateV13,
     14: migratePolishingStateV14,
+    // Pending partial resolutions retain their already charged correction.
+    15: (run) =>
+      Object.freeze({
+        ...run.pipelineState,
+        availabilityCorrectionCharged: false,
+      }),
   }),
   roles: ROLES,
   roleAccess: ROLE_ACCESS,

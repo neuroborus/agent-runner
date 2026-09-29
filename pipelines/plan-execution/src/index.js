@@ -1307,7 +1307,7 @@ export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
   classifyStopCheckpoint,
   resolveStopBoundary,
-  stateVersion: 23,
+  stateVersion: 24,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1331,6 +1331,12 @@ export const planExecutionPipeline = Object.freeze({
     20: migratePlanExecutionStateV20,
     21: migratePlanExecutionStateV21,
     22: migratePlanExecutionStateV22,
+    // Older rejections contain no availability proof. Never infer one.
+    23: (run) =>
+      Object.freeze({
+        ...run.pipelineState,
+        availabilityCorrectionCharged: false,
+      }),
   }),
   roles: ROLES,
   roleAccess: ROLE_ACCESS,

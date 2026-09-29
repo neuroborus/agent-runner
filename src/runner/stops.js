@@ -49,6 +49,7 @@ export function createStopMonitor({ runId, lease, runStore, publish }) {
   const controller = new AbortController();
   const watcher = new AbortController();
   let closed = false;
+  let waiting = false;
   let stopping = null;
   let preEffectRejection = null;
   let monitoringFailure = null;
@@ -62,7 +63,8 @@ export function createStopMonitor({ runId, lease, runStore, publish }) {
 
   async function detect(current = null) {
     current ??= await runStore.loadRun(runId);
-    if (!stopImmediately(current)) return current;
+    if (!(stopImmediately(current) || (waiting && stopPending(current))))
+      return current;
     if (stopping === null) {
       stopping = (async () => {
         const activity = {
@@ -85,7 +87,10 @@ export function createStopMonitor({ runId, lease, runStore, publish }) {
 
   const watching = (async () => {
     let current = await runStore.loadRun(runId);
-    while (!closed && !stopImmediately(current)) {
+    while (
+      !closed &&
+      !(stopImmediately(current) || (waiting && stopPending(current)))
+    ) {
       current = await runStore.waitForRunChange(runId, {
         afterRevision: current.revision,
         timeoutMs: 1_000,
@@ -104,6 +109,16 @@ export function createStopMonitor({ runId, lease, runStore, publish }) {
   });
 
   return Object.freeze({
+    async wait(operation) {
+      waiting = true;
+      try {
+        await detect();
+        controller.signal.throwIfAborted();
+        return await operation(controller.signal);
+      } finally {
+        waiting = false;
+      }
+    },
     get preEffectRejection() {
       return preEffectRejection;
     },

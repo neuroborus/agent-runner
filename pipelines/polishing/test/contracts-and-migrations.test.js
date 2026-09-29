@@ -356,7 +356,7 @@ test("migrates version-2 state with empty trust and invalidates its active gate"
   assert.deepEqual(migrated.settings.trustedChecks, []);
   assert.deepEqual(migrated.trustedValidation.commands, []);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(polishingPipeline.stateVersion, 15);
+  assert.equal(polishingPipeline.stateVersion, 16);
 });
 
 test("migrates version-3 state with no consumed bootstrap corrections", () => {
@@ -455,7 +455,7 @@ test("version 14 migration makes active validation evidence provisional", async 
   };
   const migratedPaused = {
     ...legacyPaused,
-    pipelineStateVersion: 15,
+    pipelineStateVersion: 16,
     pipelineState: migratePolishingStateV14(legacyPaused),
   };
   assert.doesNotThrow(() => assertRun(migratedPaused));
