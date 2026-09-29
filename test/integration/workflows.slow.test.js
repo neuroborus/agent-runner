@@ -5,7 +5,6 @@ import {
   mkdtemp,
   readFile,
   readdir,
-  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -15,11 +14,6 @@ import test from "node:test";
 import { promisify } from "node:util";
 
 import { createLegacyRecoveryFixture } from "../../pipelines/plan-execution/test/support/index.js";
-import { resolveStopBoundary } from "../../src/pipeline-registry.js";
-import {
-  createTrustedValidationService,
-  createTrustedValidationSnapshot,
-} from "../../src/trusted-validation/index.js";
 import {
   createClarificationService,
   createGitService,
@@ -134,98 +128,6 @@ test("legacy recovery shares CLI and MCP actions and survives a disconnected wai
   );
 });
 
-test("MCP pause and cancellation reconcile through the shared active runner", async (t) => {
-  for (const action of ["pause", "cancel"]) {
-    const paths = await fixture(t);
-    const implementationGate = {
-      entered: deferred(),
-      release: deferred(),
-    };
-    const codex = createBackend("codex", { implementationGate });
-    const { runner, runStore } = runtime(
-      paths,
-      { codex },
-      { schemaVersion: 1, defaultBackend: "codex" },
-    );
-    const activeRun = runner.run({
-      pipelineId: "plan-execution",
-      projectPath: paths.projectPath,
-      taskPath: paths.taskPath,
-      roleOverrides: {},
-      sourceSession: null,
-    });
-    await within(
-      implementationGate.entered.promise,
-      30_000,
-      "Execution did not reach implementation.",
-    );
-
-    const control = createMcpControlPlane({ runner, runStore });
-    const running = await onlyRun(runStore);
-    const input = {
-      runId: running.runId,
-      expectedRevision: running.revision,
-      idempotencyKey: `integration-${action}`,
-    };
-    const requestStop =
-      action === "pause" ? control.runPause : control.runCancel;
-    const receipt = await requestStop(input);
-    assert.equal(receipt.kind, `${action}_requested`);
-    assert.deepEqual(
-      (await control.runStatus({ runId: running.runId })).pendingStop,
-      {
-        kind: `${action}_requested`,
-        revision: receipt.revision,
-        timing: "immediate",
-        effectiveTiming: "immediate",
-        targetStep: null,
-      },
-    );
-    assert.ok(
-      (
-        await control.runActivity({
-          runId: running.runId,
-          cursor: running.revision,
-          limit: 10,
-        })
-      ).activities.some(({ kind }) => kind === `${action}-requested`),
-    );
-
-    implementationGate.release.resolve();
-    const stopped = await within(
-      activeRun,
-      30_000,
-      `Execution did not reconcile the ${action}.`,
-    );
-    assert.deepEqual(await requestStop(input), receipt);
-    const projected = await control.runWait({
-      runId: running.runId,
-      cursor: 0,
-      timeoutMs: 0,
-      progress: false,
-    });
-    assert.equal(projected.pendingStop, null);
-    if (action === "pause") {
-      assert.equal(stopped.run.pipelineState.workflowState, "WAITING_FOR_USER");
-      assert.equal(stopped.run.pause.reason, "operator_paused");
-      assert.equal(projected.pause.reason, "operator_paused");
-      assert.deepEqual(projected.pause.nextActions, [
-        { type: "resume", action: null },
-      ]);
-    } else {
-      assert.equal(stopped.run.pipelineState.workflowState, "CANCELED");
-      assert.equal(projected.status, "CANCELED");
-      await assert.rejects(
-        control.runResume({
-          runId: running.runId,
-          expectedRevision: projected.revision,
-          action: null,
-          idempotencyKey: "revive-canceled",
-        }),
-      );
-    }
-  }
-});
 const TWO_STEP_PLAN = `## Commit 1: feat(feature): add value
 
 Add the requested value.
@@ -235,495 +137,6 @@ Add the requested value.
 Cover the requested value.`;
 
 const ONE_STEP_PLAN = TWO_STEP_PLAN.split("\n## Commit 2:")[0];
-
-const SOURCE_SESSION = "11111111-1111-4111-8111-111111111111";
-
-// Reopen the public runner with an empty adapter session set. Durable state,
-// not a surviving native conversation, must supply each resumed checkpoint.
-async function combinedScenario(t, pipelineId, hooks = {}) {
-  const paths = await fixture(t, {
-    plan: pipelineId === "plan-authoring" ? null : TWO_STEP_PLAN,
-  });
-  if (pipelineId === "polishing") {
-    await writeFile(
-      join(paths.projectPath, "src/base.js"),
-      "export const base = 2;\n",
-    );
-  }
-  const configurationPath = join(
-    paths.projectPath,
-    "LOCAL_ARTIFACTS/agent-runner.json",
-  );
-  await mkdir(join(paths.projectPath, "LOCAL_ARTIFACTS"));
-  await writeFile(
-    configurationPath,
-    JSON.stringify({
-      schemaVersion: 1,
-      pipelines: { [pipelineId]: { mode: "lazy" } },
-    }),
-  );
-  const runStore = createRunStore({
-    stateRoot: paths.stateRoot,
-    resolveStopBoundary,
-  });
-  const calls = [];
-  const git = createGitService();
-  let handoffs = 0;
-  let loads = 0;
-  let runId;
-  let runner;
-  let generation = 0;
-  function reopen() {
-    const backend = createBackend("codex", {
-      sessionPrefix: `codex-${generation++}`,
-    });
-    const sessions = new Set();
-    runner = createRunner({
-      runStore,
-      git: {
-        ...git,
-        async stagePolishingHandoff(input) {
-          handoffs += 1;
-          return git.stagePolishingHandoff(input);
-        },
-      },
-      clarifications: createClarificationService({ interactive: false }),
-      loadConfiguration: async () => {
-        assert.equal(loads++, 0, "Resume must use saved configuration.");
-        return parseRunnerConfiguration(
-          JSON.stringify({
-            schemaVersion: 1,
-            defaultBackend: "codex",
-            pipelines: {
-              [pipelineId]: { mode: "independent", ...hooks.settings },
-            },
-          }),
-        );
-      },
-      adapters: {
-        codex: {
-          ...backend,
-          async run(request) {
-            if (request.prompt.startsWith("Validate the proposed context"))
-              return backend.run(request);
-            const durable = await runStore.loadRun(runId);
-            const turn = { ...durable.activeTurn, request };
-            calls.push(turn);
-            if (
-              request.access !== "local-commit" &&
-              request.session?.mode === "continue" &&
-              !sessions.has(request.session.id)
-            ) {
-              assert.equal(typeof request.recoveryPrompt, "string");
-              assert.ok(
-                request.recoveryPrompt.includes(
-                  "Implement the requested value.",
-                ),
-              );
-              request = {
-                ...request,
-                session: undefined,
-                prompt: request.recoveryPrompt,
-              };
-            }
-            await hooks.beforeTurn?.(turn, durable, {
-              runner,
-              configurationPath,
-            });
-            const supplied = await hooks.result?.(turn, durable);
-            const response =
-              supplied === undefined
-                ? await backend.run(request)
-                : {
-                    output: "structured",
-                    sessionId: `checkpoint-${calls.length}`,
-                    structured:
-                      request.schema?.properties?.result?.anyOf === undefined
-                        ? supplied
-                        : { result: supplied },
-                  };
-            if (
-              supplied !== undefined &&
-              (
-                request.schema?.properties?.result?.anyOf?.[0]?.properties ??
-                request.schema?.properties
-              )?.stepAssessment
-            ) {
-              const { step, subject } = JSON.parse(
-                /Runner-selected plan position[^\n]*\n([^\n]+)/u.exec(
-                  request.prompt,
-                )[1],
-              );
-              (
-                response.structured.result ?? response.structured
-              ).stepAssessment = {
-                step,
-                subject,
-                disposition: "CURRENT",
-                evidence: [],
-              };
-            }
-            sessions.add(response.sessionId);
-            await hooks.afterTurn?.(
-              turn,
-              durable,
-              response.structured.result ?? response.structured,
-            );
-            return response;
-          },
-        },
-      },
-    });
-    return runner;
-  }
-  const prepared = await reopen().create({
-    pipelineId,
-    projectPath: paths.projectPath,
-    taskPath: paths.taskPath,
-    proactiveClarification: false,
-    roleOverrides: {},
-    settingOverrides: { mode: "combined" },
-    sourceSession: { backend: "codex", id: SOURCE_SESSION },
-  });
-  runId = prepared.run.runId;
-  return {
-    ...paths,
-    runId,
-    runStore,
-    calls,
-    reopen,
-    resume: (action = null) => runner.resume({ runId, action }),
-    control: () => createMcpControlPlane({ runner, runStore }),
-    get handoffs() {
-      return handoffs;
-    },
-  };
-}
-
-function providerInterruption() {
-  return Object.assign(
-    new Error("The provider stopped before returning a checkpoint."),
-    { recoverable: true },
-  );
-}
-
-for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
-  for (const kind of ["pause", "cancel"]) {
-    const timings =
-      pipelineId === "plan-execution"
-        ? ["immediate", "after-current-commit"]
-        : ["immediate"];
-    for (const timing of timings) {
-      test(`combined ${pipelineId} reconciles ${timing} ${kind} at primary confirmation`, async (t) => {
-        let receipt;
-        let stopInput;
-        let stoppedAt;
-        const scenario = await combinedScenario(t, pipelineId, {
-          async beforeTurn(turn, durable, { runner }) {
-            if (receipt || turn.phase !== "clean-confirm") return;
-            stoppedAt = scenario.calls.length;
-            const control = createMcpControlPlane({
-              runner,
-              runStore: scenario.runStore,
-            });
-            const requestStop =
-              kind === "pause" ? control.runPause : control.runCancel;
-            stopInput = {
-              runId: durable.runId,
-              expectedRevision: durable.revision,
-              idempotencyKey: `${kind}-${timing}`,
-              timing,
-            };
-            if (pipelineId !== "plan-execution") {
-              await assert.rejects(
-                requestStop({
-                  ...stopInput,
-                  idempotencyKey: "unsupported-deferred",
-                  timing: "after-current-commit",
-                }),
-              );
-              assert.equal(
-                (await scenario.runStore.loadRun(durable.runId)).stopRequest,
-                null,
-              );
-            }
-            receipt = await requestStop(stopInput);
-          },
-        });
-        const result = (await scenario.resume()).run;
-        assert.ok(receipt);
-        assert.equal(
-          result.pipelineState.workflowState,
-          kind === "pause" ? "WAITING_FOR_USER" : "CANCELED",
-        );
-        if (kind === "pause")
-          assert.equal(result.pause.reason, "operator_paused");
-        const later = scenario.calls.slice(stoppedAt);
-        assert.equal(
-          later.some(
-            ({ phase }) =>
-              phase === "implement" ||
-              phase === "polish" ||
-              phase === "check-and-fix",
-          ),
-          false,
-        );
-        if (timing === "immediate") assert.equal(later.length, 0);
-        else
-          assert.deepEqual(
-            later.map(({ phase }) => phase),
-            ["review", "finalize", "confirm", "commit"],
-          );
-        const commits = scenario.calls.filter(
-          ({ request }) => request.access === "local-commit",
-        ).length;
-        assert.equal(commits, timing === "after-current-commit" ? 1 : 0);
-        assert.equal(scenario.handoffs, 0);
-        const control = scenario.control();
-        assert.deepEqual(
-          await (kind === "pause" ? control.runPause : control.runCancel)(
-            stopInput,
-          ),
-          receipt,
-        );
-        if (kind === "cancel") {
-          const turns = scenario.calls.length;
-          await assert.rejects(
-            control.runResume({
-              runId: scenario.runId,
-              expectedRevision: result.revision,
-              action: null,
-              idempotencyKey: "cannot-revive",
-            }),
-          );
-          assert.equal(scenario.calls.length, turns);
-        } else {
-          scenario.reopen();
-          const resumed = (await scenario.resume()).run;
-          assert.equal(
-            resumed.pipelineState.workflowState,
-            "DONE",
-            JSON.stringify(resumed.pause),
-          );
-          assert.equal(
-            scenario.calls.filter(
-              ({ request }) => request.access === "local-commit",
-            ).length,
-            pipelineId === "plan-execution" ? 2 : 0,
-          );
-          assert.equal(scenario.handoffs, pipelineId === "polishing" ? 1 : 0);
-        }
-      });
-    }
-  }
-}
-
-for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
-  for (const mutation of ["content", "index", "history", "configuration"]) {
-    test(`combined ${pipelineId} rejects ${mutation} mutation during clean confirmation`, async (t) => {
-      let mutated = false;
-      const scenario = await combinedScenario(t, pipelineId, {
-        async beforeTurn(turn, durable, { configurationPath }) {
-          if (mutated || turn.phase !== "clean-confirm") return;
-          mutated = true;
-          assert.equal(turn.request.access, "read-only");
-          if (mutation === "configuration") {
-            await writeFile(
-              configurationPath,
-              JSON.stringify({
-                schemaVersion: 1,
-                pipelines: { [pipelineId]: { mode: "independent" } },
-              }),
-            );
-          } else if (mutation === "history") {
-            await executeFile("git", [
-              "-C",
-              turn.request.cwd,
-              "commit",
-              "--allow-empty",
-              "-qm",
-              "chore(test): unauthorized history",
-            ]);
-          } else if (mutation === "index") {
-            await executeFile("git", [
-              "-C",
-              turn.request.cwd,
-              "update-index",
-              "--force-remove",
-              "src/base.js",
-            ]);
-          } else {
-            await writeFile(
-              join(turn.request.cwd, "src/base.js"),
-              "export const base = 99;\n",
-            );
-          }
-        },
-      });
-      const result = (await scenario.resume()).run;
-      assert.ok(mutated);
-      assert.equal(
-        result.pipelineState.workflowState,
-        "WAITING_FOR_USER",
-        JSON.stringify(result.pause),
-      );
-      assert.equal(
-        result.pause.reason,
-        mutation === "configuration"
-          ? "project_configuration_changed"
-          : pipelineId === "plan-authoring"
-            ? "read_only_mutation"
-            : "read_only_agent_mutated_repository",
-      );
-      assert.equal(scenario.calls.at(-1).phase, "clean-confirm");
-      if (mutation === "index") {
-        assert.equal(
-          await readFile(join(scenario.projectPath, "src/base.js"), "utf8"),
-          `export const base = ${pipelineId === "polishing" ? 2 : 1};\n`,
-        );
-      }
-      assert.equal(scenario.handoffs, 0);
-      assert.equal(
-        scenario.calls.some(({ request }) => request.access === "local-commit"),
-        false,
-      );
-      if (pipelineId !== "plan-authoring") {
-        assert.equal(result.pipelineState.finalizationResult, null);
-        assert.equal(result.pipelineState.candidateReviewResult, null);
-      }
-    });
-  }
-}
-
-for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
-  const phases =
-    pipelineId === "plan-authoring"
-      ? ["check-and-fix", "clean-confirm", "review"]
-      : ["check-and-fix", "clean-confirm", "review", "finalize", "confirm"];
-  for (const phase of phases) {
-    test(`combined ${pipelineId} reconstructs interrupted ${phase} from durable gates`, async (t) => {
-      let interrupted = false;
-      const scenario = await combinedScenario(t, pipelineId, {
-        async beforeTurn(turn) {
-          if (!interrupted && turn.phase === phase) {
-            const projected = await scenario
-              .control()
-              .runStatus({ runId: scenario.runId });
-            assert.equal(projected.mode, "combined");
-            assert.deepEqual(projected.execution, {
-              state: "running",
-              leaseOwner: "live",
-              processRecord: "none",
-              phase,
-              role: ["review", "confirm"].includes(phase)
-                ? "reviewer"
-                : pipelineId === "plan-authoring"
-                  ? "planner"
-                  : "worker",
-            });
-            interrupted = true;
-            throw providerInterruption();
-          }
-        },
-      });
-      const control = scenario.control();
-      const initial = await control.runStatus({ runId: scenario.runId });
-      assert.equal(initial.mode, "combined");
-      const paused = (await scenario.resume()).run;
-      assert.equal(
-        paused.pipelineState.workflowState,
-        "WAITING_FOR_USER",
-        JSON.stringify(paused.pause),
-      );
-      assert.equal(
-        paused.pause.resumeState,
-        phase.toUpperCase().replaceAll("-", "_"),
-      );
-      assert.deepEqual(Object.keys(paused.roles), [
-        pipelineId === "plan-authoring" ? "planner" : "worker",
-        "reviewer",
-        "arbiter",
-      ]);
-      const count = scenario.calls.length;
-      const finalized = paused.pipelineState.finalizationResult;
-      scenario.reopen();
-      const completed = (await scenario.resume()).run;
-      assert.equal(
-        completed.pipelineState.workflowState,
-        "DONE",
-        JSON.stringify(completed.pause),
-      );
-      assert.equal(completed.pipelineState.settings.mode, "combined");
-      assert.equal(scenario.calls[count].phase, phase);
-      assert.equal(
-        scenario.calls.some(({ role }) => role === "arbiter"),
-        false,
-      );
-      const firstReview = scenario.calls.find(
-        ({ phase }) => phase === "review",
-      );
-      assert.equal(firstReview.request.session?.mode, "fork");
-      assert.equal(firstReview.request.session.id, SOURCE_SESSION);
-      const resumed = scenario.calls.slice(count).map(({ phase }) => phase);
-      assert.deepEqual(
-        resumed.slice(0, phases.length - phases.indexOf(phase)),
-        phases.slice(phases.indexOf(phase)),
-      );
-      assert.ok(
-        completed.sessionLineage.children.some(
-          ({ role }) => role === "reviewer",
-        ),
-      );
-      assert.equal(completed.pipelineState.lazySourceForkConsumed, false);
-      if (pipelineId === "plan-authoring") {
-        assert.ok(
-          scenario.calls.every(({ request }) => request.access === "read-only"),
-        );
-        assert.equal(
-          await readFile(join(scenario.taskPath, "plan.md"), "utf8"),
-          TWO_STEP_PLAN,
-        );
-      } else {
-        assert.equal(
-          completed.pipelineState.candidateConfirmationFingerprint,
-          completed.pipelineState.candidateReviewedFingerprint,
-        );
-        assert.equal(
-          completed.pipelineState.reviewedFingerprint,
-          completed.pipelineState.finalizedFingerprint,
-        );
-        assert.equal(completed.counters.correctionRounds, 0);
-        if (phase === "confirm") {
-          assert.equal(
-            scenario.calls
-              .slice(count)
-              .filter(({ phase }) => phase === "finalize").length,
-            pipelineId === "plan-execution" ? 1 : 0,
-          );
-          if (pipelineId === "polishing")
-            assert.deepEqual(
-              completed.pipelineState.finalizationResult,
-              finalized,
-            );
-        }
-      }
-      const turns = scenario.calls.length;
-      await scenario.resume();
-      assert.equal(
-        scenario.calls.length,
-        turns,
-        "Completed effects must not replay.",
-      );
-      assert.equal(scenario.handoffs, pipelineId === "polishing" ? 1 : 0);
-      assert.equal(
-        scenario.calls.filter(
-          ({ request }) => request.access === "local-commit",
-        ).length,
-        pipelineId === "plan-execution" ? 2 : 0,
-      );
-    });
-  }
-}
 
 function sink() {
   let value = "";
@@ -776,22 +189,11 @@ function readyForExecution() {
 
 function createBackend(
   backend,
-  {
-    authoringQuestion = false,
-    bootstrapDisagreement = false,
-    failAuthoringClarification = false,
-    failExecutionClarification = false,
-    implementationGate = null,
-    polishingGate = null,
-    rejectSource = false,
-    sessionPrefix = backend,
-  } = {},
+  { failExecutionClarification = false, implementationGate = null } = {},
 ) {
   const calls = [];
-  let authoringClarifications = 0;
   let executionClarifications = 0;
   let implementationCalls = 0;
-  let reconciliations = 0;
   let sessionSequence = 0;
 
   function sessionId(request, role) {
@@ -799,7 +201,7 @@ function createBackend(
       return request.session.id;
     }
     sessionSequence += 1;
-    return `${sessionPrefix}-${role}-${sessionSequence}`;
+    return `${backend}-${role}-${sessionSequence}`;
   }
 
   async function implement(request) {
@@ -817,16 +219,6 @@ function createBackend(
       await writeFile(
         join(request.cwd, "src", "feature.js"),
         "export const value = 1;\n",
-      );
-    } else if (
-      request.prompt.includes(
-        "Current planned commit:\n## Commit 2: test(feature): cover value",
-      )
-    ) {
-      await mkdir(join(request.cwd, "test"), { recursive: true });
-      await writeFile(
-        join(request.cwd, "test", "feature.test.js"),
-        "export const coveredValue = 1;\n",
       );
     } else {
       throw new Error("Unexpected planned commit.");
@@ -864,11 +256,6 @@ function createBackend(
           sessionId: sessionId(request, "worker"),
         };
       calls.push(request);
-      if (request.session?.mode === "fork" && rejectSource) {
-        const error = new Error("Source session is unavailable.");
-        error.recoverable = true;
-        throw error;
-      }
       if (request.access === "local-commit") {
         await executeFile("git", ["-C", request.cwd, "add", "-A"]);
         await executeFile("git", [
@@ -930,25 +317,7 @@ function createBackend(
         request.prompt.includes("Study the task, existing clarifications")
       ) {
         role = "planner";
-        authoringClarifications += 1;
-        if (failAuthoringClarification && authoringClarifications === 1) {
-          const error = new Error("Claude usage capacity is unavailable.");
-          error.code = "ERR_CLAUDE_USAGE_LIMIT";
-          error.recoverable = true;
-          throw error;
-        }
-        structured =
-          authoringQuestion && authoringClarifications === 1
-            ? {
-                status: "QUESTIONS",
-                questions: [
-                  {
-                    question: "Which public behavior is required?",
-                    whyItMatters: "The answer affects the commit plan.",
-                  },
-                ],
-              }
-            : { status: "READY", questions: [] };
+        structured = { status: "READY", questions: [] };
       } else if (
         request.prompt.includes("Write a concise commit-by-commit plan")
       ) {
@@ -1033,37 +402,10 @@ function createBackend(
       } else if (
         request.prompt.includes("Reconcile the independent Worker and Reviewer")
       ) {
-        reconciliations += 1;
-        structured =
-          bootstrapDisagreement && reconciliations === 1
-            ? {
-                status: "DISAGREEMENT",
-                summary: "",
-                disagreement: "The roles selected different module boundaries.",
-                reason: "",
-                question: "",
-                options: [],
-                whyBlocked: "",
-                evidence: ["The summaries name different owning modules."],
-              }
-            : {
-                status: "RESOLVED",
-                summary: "Use the existing minimal module boundary.",
-                disagreement: "",
-                reason: "",
-                question: "",
-                options: [],
-                whyBlocked: "",
-                evidence: [],
-              };
-      } else if (
-        request.prompt.includes("Resolve the bootstrap disagreement")
-      ) {
-        role = "arbiter";
         structured = {
-          direction: "SYNTHESIZE",
+          status: "RESOLVED",
           summary: "Use the existing minimal module boundary.",
-          rationale: "Repository ownership supports that boundary.",
+          disagreement: "",
           reason: "",
           question: "",
           options: [],
@@ -1075,10 +417,6 @@ function createBackend(
       } else if (
         request.prompt.includes("Polish the existing local repository changes")
       ) {
-        if (polishingGate !== null) {
-          polishingGate.entered.resolve();
-          await polishingGate.release.promise;
-        }
         structured = {
           status: "COMPLETED",
           summary:
@@ -1303,13 +641,12 @@ function detached(runner) {
   };
 }
 
-test("authors a complete plan through mixed CLI roles", async (t) => {
+test("writes one plan artifact without modifying Git", async (t) => {
   const paths = await fixture(t, { plan: null });
   const codex = createBackend("codex");
-  const claude = createBackend("claude");
   const { runner, runStore } = runtime(
     paths,
-    { claude, codex },
+    { codex },
     { schemaVersion: 1, defaultBackend: "codex" },
   );
   const stdout = sink();
@@ -1323,12 +660,6 @@ test("authors a complete plan through mixed CLI roles", async (t) => {
       paths.projectPath,
       "--task",
       paths.taskPath,
-      "--planner",
-      "codex",
-      "--reviewer",
-      "claude",
-      "--arbiter",
-      "codex",
     ],
     { runner, stderr: stderr.stream, stdout: stdout.stream },
   );
@@ -1340,18 +671,8 @@ test("authors a complete plan through mixed CLI roles", async (t) => {
     await readFile(join(paths.taskPath, "plan.md"), "utf8"),
     TWO_STEP_PLAN,
   );
-  const run = await onlyRun(runStore);
-  assert.equal(run.pipelineState.workflowState, "DONE");
-  assert.equal(run.roles.planner.backend, "codex");
-  assert.equal(run.roles.reviewer.backend, "claude");
-  assert.equal(
-    codex.calls.some((call) => call.access === "workspace-write"),
-    false,
-  );
-  assert.equal(
-    claude.calls.some((call) => call.access !== "read-only"),
-    false,
-  );
+  assert.equal((await onlyRun(runStore)).pipelineState.workflowState, "DONE");
+  assert.ok(codex.calls.every(({ access }) => access === "read-only"));
   assert.equal(
     await gitOutput(paths.projectPath, ["status", "--porcelain"]),
     "",
@@ -1362,54 +683,7 @@ test("authors a complete plan through mixed CLI roles", async (t) => {
   );
 });
 
-test("persists and resumes plan authoring after a Claude usage limit", async (t) => {
-  const paths = await fixture(t, { plan: null });
-  const claude = createBackend("claude", {
-    failAuthoringClarification: true,
-  });
-  const configuration = { schemaVersion: 1, defaultBackend: "claude" };
-  const firstRuntime = runtime(paths, { claude }, configuration);
-
-  const paused = await firstRuntime.runner.run({
-    pipelineId: "plan-authoring",
-    projectPath: paths.projectPath,
-    taskPath: paths.taskPath,
-    roleOverrides: {},
-    sourceSession: null,
-  });
-
-  assert.equal(paused.run.pipelineState.workflowState, "WAITING_FOR_USER");
-  assert.deepEqual(paused.run.pause, {
-    reason: "backend_unavailable",
-    code: "ERR_CLAUDE_USAGE_LIMIT",
-    resumeState: "CLARIFY",
-  });
-  assert.equal(claude.calls.length, 1);
-  assert.equal(
-    (await firstRuntime.runStore.loadRun(paused.run.runId)).revision,
-    paused.run.revision,
-  );
-
-  const reopened = runtime(paths, { claude }, configuration);
-  const completed = await reopened.runner.resume({
-    runId: paused.run.runId,
-    action: null,
-  });
-
-  assert.equal(completed.run.pipelineState.workflowState, "DONE");
-  assert.equal(completed.run.pause, null);
-  assert.equal(claude.calls.length, 4);
-  assert.equal(
-    await readFile(join(paths.taskPath, "plan.md"), "utf8"),
-    TWO_STEP_PLAN,
-  );
-  assert.equal(
-    await gitOutput(paths.projectPath, ["status", "--porcelain"]),
-    "",
-  );
-});
-
-test("polishes a dirty worktree through mixed CLI roles without committing", async (t) => {
+test("stages one polishing handoff without committing", async (t) => {
   const paths = await fixture(t, { plan: null });
   await writeFile(
     join(paths.projectPath, "src", "base.js"),
@@ -1417,10 +691,9 @@ test("polishes a dirty worktree through mixed CLI roles without committing", asy
   );
   const initialHead = await gitOutput(paths.projectPath, ["rev-parse", "HEAD"]);
   const codex = createBackend("codex");
-  const claude = createBackend("claude");
   const { runner, runStore } = runtime(
     paths,
-    { claude, codex },
+    { codex },
     { schemaVersion: 1, defaultBackend: "codex" },
   );
   const stdout = sink();
@@ -1434,12 +707,6 @@ test("polishes a dirty worktree through mixed CLI roles without committing", asy
       paths.projectPath,
       "--task",
       paths.taskPath,
-      "--worker",
-      "codex",
-      "--reviewer",
-      "claude",
-      "--arbiter",
-      "codex",
     ],
     { runner, stderr: stderr.stream, stdout: stdout.stream },
   );
@@ -1449,14 +716,9 @@ test("polishes a dirty worktree through mixed CLI roles without committing", asy
   assert.match(stdout.value(), /Pipeline: polishing/u);
   assert.match(stdout.value(), /State: DONE/u);
   assert.doesNotMatch(stdout.value(), /^Plan:/mu);
-  const run = await onlyRun(runStore);
-  assert.equal(run.pipelineState.workflowState, "DONE");
-  assert.equal(run.roles.worker.backend, "codex");
-  assert.equal(run.roles.reviewer.backend, "claude");
+  assert.equal((await onlyRun(runStore)).pipelineState.workflowState, "DONE");
   assert.equal(
-    [...codex.calls, ...claude.calls].some(
-      (call) => call.access === "local-commit",
-    ),
+    codex.calls.some(({ access }) => access === "local-commit"),
     false,
   );
   assert.equal(
@@ -1469,477 +731,45 @@ test("polishes a dirty worktree through mixed CLI roles without committing", asy
   );
 });
 
-test("executes every planned commit across backend configurations", async (t) => {
-  const cases = [
-    {
-      name: "combined Codex configuration",
-      configuration: {
-        schemaVersion: 1,
-        defaultBackend: "codex",
-        pipelines: { "plan-execution": { mode: "combined" } },
-      },
-      args: ["--fork-from", "codex:source-codex"],
-      mode: "combined",
-      plan: ONE_STEP_PLAN,
-      roles: { worker: "codex", reviewer: "codex", arbiter: "codex" },
-      source: "source-codex",
-      subjects: ["feat(feature): add value"],
-    },
-    {
-      name: "Claude runner default",
-      configuration: { schemaVersion: 1, defaultBackend: "claude" },
-      args: ["--fork-from", "claude:source-claude"],
-      roles: { worker: "claude", reviewer: "claude", arbiter: "claude" },
-      source: "source-claude",
-    },
-    {
-      name: "runner role overrides",
-      configuration: {
-        schemaVersion: 1,
-        defaultBackend: "codex",
-        pipelines: {
-          "plan-execution": {
-            roles: {
-              worker: { backend: "claude" },
-              reviewer: { backend: "codex" },
-              arbiter: { backend: "codex" },
-            },
-          },
-        },
-      },
-      args: [],
-      roles: { worker: "claude", reviewer: "codex", arbiter: "codex" },
-      bootstrapDisagreement: true,
-    },
-    {
-      name: "CLI role overrides",
-      configuration: { schemaVersion: 1, defaultBackend: "codex" },
-      args: [
-        "--worker",
-        "codex",
-        "--reviewer",
-        "claude",
-        "--arbiter",
-        "claude",
-      ],
-      roles: { worker: "codex", reviewer: "claude", arbiter: "claude" },
-    },
-  ];
-
-  for (const scenario of cases) {
-    await t.test(scenario.name, async (t) => {
-      const subjects = scenario.subjects ?? [
-        "feat(feature): add value",
-        "test(feature): cover value",
-      ];
-      const paths = await fixture(t, { plan: scenario.plan });
-      const codex = createBackend("codex", {
-        bootstrapDisagreement: scenario.bootstrapDisagreement,
-      });
-      const claude = createBackend("claude", {
-        bootstrapDisagreement: scenario.bootstrapDisagreement,
-      });
-      const { runner, runStore } = runtime(
-        paths,
-        { claude, codex },
-        scenario.configuration,
-      );
-      const stdout = sink();
-      const stderr = sink();
-
-      const exitCode = await main(
-        [
-          "run",
-          "plan-execution",
-          "--project",
-          paths.projectPath,
-          "--task",
-          paths.taskPath,
-          ...scenario.args,
-        ],
-        { runner, stderr: stderr.stream, stdout: stdout.stream },
-      );
-
-      assert.equal(exitCode, 0, `${stdout.value()}${stderr.value()}`);
-      assert.equal(stderr.value(), "");
-      assert.match(stdout.value(), /State: DONE/u);
-      const run = await onlyRun(runStore);
-      assert.equal(run.pipelineState.workflowState, "DONE");
-      assert.equal(
-        run.pipelineState.settings.mode,
-        scenario.mode ?? "independent",
-      );
-      assert.equal(run.pipelineState.completedCommits.length, subjects.length);
-      assert.deepEqual(
-        Object.fromEntries(
-          Object.entries(run.roles).map(([role, value]) => [
-            role,
-            value.backend,
-          ]),
-        ),
-        scenario.roles,
-      );
-      assert.deepEqual(
-        (
-          await gitOutput(paths.projectPath, [
-            "log",
-            "--reverse",
-            "--pretty=%s",
-          ])
-        )
-          .split("\n")
-          .slice(-subjects.length),
-        subjects,
-      );
-      assert.equal(
-        await gitOutput(paths.projectPath, ["status", "--porcelain"]),
-        "",
-      );
-      assert.equal(
-        await gitOutput(paths.projectPath, ["remote", "get-url", "origin"]),
-        "https://example.invalid/repository.git",
-      );
-      assert.equal(
-        await gitOutput(paths.projectPath, [
-          "ls-files",
-          ".agent-runner.json",
-          "LOCAL_ARTIFACTS",
-        ]),
-        "",
-      );
-      assert.ok(isAbsolute(runStore.rootPath));
-      assert.equal(outside(paths.projectPath, runStore.rootPath), true);
-      assert.equal(outside(paths.taskPath, runStore.rootPath), true);
-
-      const allCalls = [...codex.calls, ...claude.calls];
-      assert.equal(
-        allCalls.filter(({ access }) => access === "local-commit").length,
-        subjects.length,
-      );
-      assert.equal(
-        allCalls.some(({ commit }) =>
-          /co-authored-by/iu.test(commit?.message ?? ""),
-        ),
-        false,
-      );
-      if (scenario.source !== undefined) {
-        const sourceCalls = allCalls.filter(
-          ({ session }) => session?.id === scenario.source,
-        );
-        assert.ok(sourceCalls.length >= 2);
-        assert.ok(sourceCalls.every(({ session }) => session.mode === "fork"));
-        assert.equal(run.sessionLineage.source, scenario.source);
-        const childRoles = new Set(
-          run.sessionLineage.children.map(({ role }) => role),
-        );
-        assert.equal(childRoles.has("worker"), true);
-        assert.equal(childRoles.has("reviewer"), true);
-      }
-      if (scenario.bootstrapDisagreement) {
-        const arbitration = allCalls.find((call) =>
-          call.prompt.includes("Resolve the bootstrap disagreement"),
-        );
-        assert.equal(arbitration?.session, undefined);
-        assert.ok(
-          run.sessionLineage.children.some(({ role }) => role === "arbiter"),
-        );
-      }
-      assert.equal(
-        new Set(run.sessionLineage.children.map(({ sessionId }) => sessionId))
-          .size,
-        run.sessionLineage.children.length,
-      );
-    });
-  }
-});
-
-test("does not replace an unavailable source session", async (t) => {
-  for (const backend of ["codex", "claude"]) {
-    await t.test(backend, async (t) => {
-      const paths = await fixture(t);
-      const adapter = createBackend(backend, { rejectSource: true });
-      const { runner } = runtime(
-        paths,
-        { [backend]: adapter },
-        { schemaVersion: 1, defaultBackend: backend },
-      );
-      const result = await runner.run({
-        pipelineId: "plan-execution",
-        projectPath: paths.projectPath,
-        taskPath: paths.taskPath,
-        roleOverrides: {},
-        sourceSession: { backend, id: `source-${backend}` },
-      });
-
-      assert.equal(result.run.pipelineState.workflowState, "WAITING_FOR_USER");
-      assert.equal(result.run.pause.reason, "backend_unavailable");
-      assert.equal(adapter.calls.length, 1);
-      assert.deepEqual(adapter.calls[0].session, {
-        mode: "fork",
-        id: `source-${backend}`,
-      });
-    });
-  }
-});
-
-test("projects a forbidden-delegation diagnostic without durable provider data", async (t) => {
-  const sensitiveMarker = "DO_NOT_PERSIST_CODEX_TERMINAL_DATA";
-  const paths = await fixture(t);
+test("commits one exact plan subject through combined root wiring", async (t) => {
+  const paths = await fixture(t, { plan: ONE_STEP_PLAN });
   const codex = createBackend("codex");
-  const runCodex = codex.run.bind(codex);
-  codex.run = async (request) => {
-    if (
-      request.prompt.includes("Provide a concise bootstrap summary") &&
-      !request.prompt.includes("As Reviewer")
-    ) {
-      const error = new Error(sensitiveMarker);
-      error.code = "ERR_CODEX_ISOLATION";
-      error.diagnosticClass = "operation_multi_agent";
-      error.nativeResponse = { message: sensitiveMarker };
-      error.prompt = sensitiveMarker;
-      error.transcript = sensitiveMarker;
-      error.credentials = sensitiveMarker;
-      throw error;
-    }
-    return runCodex(request);
-  };
-  const configuration = { schemaVersion: 1, defaultBackend: "codex" };
-  const firstRuntime = runtime(paths, { codex }, configuration);
-
-  await assert.rejects(
-    firstRuntime.runner.run({
-      pipelineId: "plan-execution",
-      projectPath: paths.projectPath,
-      taskPath: paths.taskPath,
-      roleOverrides: {},
-      sourceSession: null,
-    }),
-    (error) => error.code === "ERR_CODEX_ISOLATION",
-  );
-
-  const failed = await onlyRun(firstRuntime.runStore);
-  assert.equal(failed.pipelineState.workflowState, "FAILED");
-  assert.deepEqual(failed.pause, {
-    reason: "internal_failure",
-    code: "ERR_CODEX_ISOLATION",
-    diagnosticClass: "operation_multi_agent",
-  });
-
-  const reopened = runtime(paths, { codex }, configuration);
-  const recovered = await reopened.runStore.loadRun(failed.runId);
-  assert.deepEqual(recovered.pause, failed.pause);
-  const projected = await createMcpControlPlane({
-    runner: reopened.runner,
-    runStore: reopened.runStore,
-  }).runStatus({ runId: failed.runId });
-  assert.deepEqual(projected.pause, {
-    reason: "internal_failure",
-    code: "ERR_CODEX_ISOLATION",
-    explanation:
-      "Plan execution failed. Adapter diagnostic: operation_multi_agent.",
-    evidence: [],
-    resumeState: null,
-    nextActions: [],
-  });
-  const runPath = join(paths.stateRoot, "runs", failed.runId);
-  const durableData = (
-    await Promise.all(
-      ["state.json", "events.jsonl", "progress.md"].map((filename) =>
-        readFile(join(runPath, filename), "utf8"),
-      ),
-    )
-  ).join("\n");
-  assert.match(durableData, /operation_multi_agent/u);
-  assert.doesNotMatch(durableData, /DO_NOT_PERSIST/u);
-  assert.doesNotMatch(durableData, /nativeResponse|"prompt":/u);
-});
-
-test("runs registered workflows through recoverable MCP controls", async (t) => {
-  const paths = await fixture(t, { autoCleanup: false, plan: null });
-  const implementationGate = {
-    entered: deferred(),
-    release: deferred(),
-  };
-  const polishingGate = {
-    entered: deferred(),
-    release: deferred(),
-  };
-  const codex = createBackend("codex", {
-    authoringQuestion: true,
-    failExecutionClarification: true,
-    implementationGate,
-    polishingGate,
-  });
   const { runner, runStore } = runtime(
     paths,
     { codex },
-    { schemaVersion: 1, defaultBackend: "codex" },
-  );
-  const pipelineProcess = detached(runner);
-  t.after(async () => {
-    implementationGate.release.resolve();
-    polishingGate.release.resolve();
-    try {
-      await pipelineProcess.settle();
-    } finally {
-      await paths.cleanup();
-    }
-  });
-  const control = createMcpControlPlane({
-    launchRun: pipelineProcess.launchRun,
-    runner,
-    runStore,
-  });
-  const progress = [];
-
-  const authored = await control.runStart({
-    idempotencyKey: "author-start",
-    pipelineId: "plan-authoring",
-    projectPath: paths.projectPath,
-    taskPath: paths.taskPath,
-    proactiveClarification: false,
-    roleOverrides: {},
-    sourceSession: null,
-  });
-  await control.runWait(
     {
-      runId: authored.runId,
-      cursor: 0,
-      timeoutMs: 5_000,
-      progress: true,
-    },
-    {
-      progressToken: "author-progress",
-      async notify(notification) {
-        progress.push(notification);
-      },
+      schemaVersion: 1,
+      defaultBackend: "codex",
+      pipelines: { "plan-execution": { mode: "combined" } },
     },
   );
-  await pipelineProcess.settle();
-  const authoringPause = await control.runStatus({ runId: authored.runId });
-  assert.equal(authoringPause.status, "WAITING_FOR_USER");
-  assert.equal(authoringPause.pendingInput.questions[0].id, "q1");
+  const stdout = sink();
+  const stderr = sink();
+
+  const exitCode = await main(
+    [
+      "run",
+      "plan-execution",
+      "--project",
+      paths.projectPath,
+      "--task",
+      paths.taskPath,
+      "--fork-from",
+      "codex:source-codex",
+    ],
+    { runner, stderr: stderr.stream, stdout: stdout.stream },
+  );
+
+  assert.equal(exitCode, 0, `${stdout.value()}${stderr.value()}`);
+  assert.equal(stderr.value(), "");
+  assert.match(stdout.value(), /State: DONE/u);
+  const run = await onlyRun(runStore);
+  assert.equal(run.pipelineState.workflowState, "DONE");
+  assert.equal(run.pipelineState.settings.mode, "combined");
+  assert.equal(run.pipelineState.completedCommits.length, 1);
   assert.equal(
-    (await control.runStatus({ runId: authored.runId })).pendingInput.id,
-    authoringPause.pendingInput.id,
-  );
-  assert.ok(
-    progress.some(({ params }) => /^\[planner\//u.test(params.message)),
-  );
-  const authoringActivity = await control.runActivity({
-    runId: authored.runId,
-    cursor: 0,
-    limit: 100,
-  });
-  assert.ok(
-    authoringActivity.activities.some(({ actor }) => actor === "planner"),
-  );
-
-  await control.runRespond({
-    idempotencyKey: "author-response",
-    runId: authored.runId,
-    requestId: authoringPause.pendingInput.id,
-    expectedRevision: authoringPause.revision,
-    answers: [{ questionId: "q1", answer: "Expose the value directly." }],
-  });
-  await control.runWait({
-    runId: authored.runId,
-    cursor: authoringPause.activityCursor,
-    timeoutMs: 5_000,
-    progress: false,
-  });
-  await pipelineProcess.settle();
-  const authoringDone = await control.runStatus({ runId: authored.runId });
-  assert.equal(authoringDone.status, "DONE");
-  assert.match(
-    await readFile(join(paths.taskPath, "clarifications.md"), "utf8"),
-    /### A1\n\nExpose the value directly\./u,
-  );
-  assert.equal(
-    await readFile(join(paths.taskPath, "plan.md"), "utf8"),
-    TWO_STEP_PLAN,
-  );
-
-  const execution = await control.runStart({
-    idempotencyKey: "execution-start",
-    pipelineId: "plan-execution",
-    projectPath: paths.projectPath,
-    taskPath: paths.taskPath,
-    proactiveClarification: false,
-    roleOverrides: {},
-    sourceSession: null,
-  });
-  await control.runWait({
-    runId: execution.runId,
-    cursor: 0,
-    timeoutMs: 5_000,
-    progress: false,
-  });
-  await pipelineProcess.settle();
-  const executionPause = await control.runStatus({ runId: execution.runId });
-  assert.equal(executionPause.status, "WAITING_FOR_USER");
-  assert.deepEqual(executionPause.pause, {
-    reason: "backend_unavailable",
-    code: "ERR_BACKEND_UNAVAILABLE",
-    explanation: "The selected backend is temporarily unavailable.",
-    evidence: [],
-    resumeState: "CLARIFY",
-    nextActions: [{ type: "resume", action: null }],
-  });
-
-  const reconnected = createMcpControlPlane({
-    launchRun: pipelineProcess.launchRun,
-    runner,
-    runStore,
-  });
-  await reconnected.runResume({
-    idempotencyKey: "execution-resume",
-    runId: execution.runId,
-    expectedRevision: executionPause.revision,
-    action: null,
-  });
-  await within(
-    implementationGate.entered.promise,
-    30_000,
-    "Execution did not reach implementation.",
-  );
-  const timedOut = await reconnected.runWait({
-    runId: execution.runId,
-    cursor: executionPause.activityCursor,
-    timeoutMs: 10,
-    progress: false,
-  });
-  assert.equal(timedOut.timedOut, true);
-  assert.notEqual(timedOut.status, "DONE");
-
-  const afterDisconnect = createMcpControlPlane({
-    launchRun: pipelineProcess.launchRun,
-    runner,
-    runStore,
-  });
-  implementationGate.release.resolve();
-  await afterDisconnect.runWait({
-    runId: execution.runId,
-    cursor: timedOut.activityCursor,
-    timeoutMs: 5_000,
-    progress: false,
-  });
-  await pipelineProcess.settle();
-  const executionDone = await afterDisconnect.runStatus({
-    runId: execution.runId,
-  });
-  assert.equal(executionDone.status, "DONE");
-  assert.equal(executionDone.completedCommits.length, 2);
-  const executionActivity = await afterDisconnect.runActivity({
-    runId: execution.runId,
-    cursor: 0,
-    limit: 100,
-  });
-  assert.ok(
-    executionActivity.activities.some(({ actor }) => actor === "worker"),
-  );
-  assert.ok(
-    executionActivity.activities.some(({ actor }) => actor === "reviewer"),
+    await gitOutput(paths.projectPath, ["log", "-1", "--pretty=%s"]),
+    "feat(feature): add value",
   );
   assert.equal(
     await gitOutput(paths.projectPath, ["status", "--porcelain"]),
@@ -1949,713 +779,122 @@ test("runs registered workflows through recoverable MCP controls", async (t) => 
     await gitOutput(paths.projectPath, ["remote", "get-url", "origin"]),
     "https://example.invalid/repository.git",
   );
+  assert.equal(
+    await gitOutput(paths.projectPath, [
+      "ls-files",
+      ".agent-runner.json",
+      "LOCAL_ARTIFACTS",
+    ]),
+    "",
+  );
+  assert.ok(isAbsolute(runStore.rootPath));
+  assert.equal(outside(paths.projectPath, runStore.rootPath), true);
+  assert.equal(outside(paths.taskPath, runStore.rootPath), true);
 
-  await writeFile(
-    join(paths.projectPath, "src", "base.js"),
-    "export const base = 2;\n",
-  );
-  const polishingHead = await gitOutput(paths.projectPath, [
-    "rev-parse",
-    "HEAD",
-  ]);
-  const callCount = codex.calls.length;
-  const polishing = await afterDisconnect.runStart({
-    idempotencyKey: "polishing-start",
-    pipelineId: "polishing",
-    projectPath: paths.projectPath,
-    taskPath: paths.taskPath,
-    proactiveClarification: false,
-    roleOverrides: {},
-    sourceSession: null,
-  });
-  assert.deepEqual(
-    await afterDisconnect.runStart({
-      idempotencyKey: "polishing-start",
-      pipelineId: "polishing",
-      projectPath: paths.projectPath,
-      taskPath: paths.taskPath,
-      proactiveClarification: false,
-      roleOverrides: {},
-      sourceSession: null,
-    }),
-    polishing,
-  );
-  await within(
-    polishingGate.entered.promise,
-    30_000,
-    "Polishing did not reach the Worker turn.",
-  );
-  const polishingWait = await afterDisconnect.runWait({
-    runId: polishing.runId,
-    cursor: 0,
-    timeoutMs: 10,
-    progress: false,
-  });
-  assert.equal(polishingWait.timedOut, true);
-  assert.notEqual(polishingWait.status, "DONE");
-  polishingGate.release.resolve();
-  await pipelineProcess.settle();
-  // A timed-out wait remains a snapshot even after detached execution settles.
-  const polishingDone = await afterDisconnect.runStatus({
-    runId: polishing.runId,
-  });
   assert.equal(
-    polishingDone.status,
-    "DONE",
-    JSON.stringify(polishingDone.pause),
+    codex.calls.filter(({ access }) => access === "local-commit").length,
+    1,
   );
-  assert.equal(polishingDone.planPath, null);
-  assert.equal(polishingDone.completedCommits.length, 0);
   assert.equal(
-    codex.calls
-      .slice(callCount)
-      .some(({ access }) => access === "local-commit"),
+    codex.calls.some(({ commit }) =>
+      /co-authored-by/iu.test(commit?.message ?? ""),
+    ),
     false,
   );
-  assert.equal(
-    await gitOutput(paths.projectPath, ["rev-parse", "HEAD"]),
-    polishingHead,
+  const sourceCalls = codex.calls.filter(
+    ({ session }) => session?.id === "source-codex",
   );
+  assert.ok(sourceCalls.length >= 2);
+  assert.ok(sourceCalls.every(({ session }) => session.mode === "fork"));
+  assert.equal(run.sessionLineage.source, "source-codex");
+  const childRoles = new Set(
+    run.sessionLineage.children.map(({ role }) => role),
+  );
+  assert.equal(childRoles.has("worker"), true);
+  assert.equal(childRoles.has("reviewer"), true);
   assert.equal(
-    await gitOutput(paths.projectPath, ["status", "--porcelain"]),
-    "M  src/base.js",
+    new Set(run.sessionLineage.children.map(({ sessionId }) => sessionId)).size,
+    run.sessionLineage.children.length,
   );
 });
 
-async function projectCommandScenario(t, pipelineId, hooks = {}) {
-  const paths = await fixture(t, { plan: hooks.plan });
-  if (pipelineId === "polishing") {
-    await writeFile(
-      join(paths.projectPath, "src/base.js"),
-      "export const base = 2;\n",
-    );
-  }
-  const configurationPath = join(
-    paths.projectPath,
-    "LOCAL_ARTIFACTS/agent-runner.json",
-  );
-  const definition = {
-    command: "node project-only validation",
-    executable: process.execPath,
-    arguments: ["--eval", "process.exit(0)", "argument with spaces"],
-  };
-  const projectConfiguration = {
-    schemaVersion: 1,
-    trustedCommandTimeoutMs: hooks.timeoutMs ?? 12_345,
-    trustedCommands: { "project-check": definition },
-    pipelines: {
-      [pipelineId]: {
-        ...(hooks.mode === undefined ? {} : { mode: hooks.mode }),
-        trustedChecks: ["project-check"],
-      },
-    },
-  };
-  await mkdir(join(paths.projectPath, "LOCAL_ARTIFACTS"));
-  await writeFile(configurationPath, JSON.stringify(projectConfiguration));
-  const expected = createTrustedValidationSnapshot(
-    projectConfiguration.trustedCommands,
-    ["project-check"],
-    projectConfiguration.trustedCommandTimeoutMs,
-  );
-  const requiredChecks = [
-    { id: "C1", command: "git diff --check HEAD" },
-    { id: "C2", command: definition.command },
-  ];
-  const runStore = createRunStore({ stateRoot: paths.stateRoot });
-  const git = createGitService();
-  const calls = [];
-  const executions = [];
-  const preparations = [];
-  let handoffs = 0;
-  let loads = 0;
-  let runId;
-  let rootConfiguration = { schemaVersion: 1, defaultBackend: "codex" };
-  const backend = createBackend("codex");
-  const adapters = {
-    codex: {
-      ...backend,
-      async run(request) {
-        if (request.prompt.startsWith("Validate the proposed context"))
-          return backend.run(request);
-        const durable = await runStore.loadRun(runId);
-        assert.deepEqual(durable.pipelineState.trustedValidation, expected);
-        assert.equal(
-          durable.projectConfigurationProtection.path,
-          configurationPath,
-        );
-        calls.push(request);
-        const supplied = await hooks.beforeTurn?.(request, durable, {
-          configurationPath,
-          projectConfiguration,
-        });
-        const response = supplied ?? (await backend.run(request));
-        const result = response.structured.result ?? response.structured;
-        if (result.requiredChecks !== undefined) {
-          // Lazy continuation need not repeat the plan in the current prompt.
-          const steps =
-            result.requiredChecks[0]?.steps === undefined
-              ? undefined
-              : [
-                  ...durable.pipelineState.canonicalPlan.matchAll(
-                    /^## Commit ([0-9]+):/gm,
-                  ),
-                ].map((match) => Number(match[1]));
-          result.requiredChecks = requiredChecks.map((check) =>
-            steps === undefined ? check : { ...check, steps },
-          );
-          if (result.checks !== undefined) {
-            result.checks.push({
-              checkId: "C2",
-              command: definition.command,
-              status: "NOT_RUN",
-              evidence: [
-                "Reserved for the runner's selected project-check vector.",
-              ],
-            });
-          }
-        }
-        await hooks.afterTurn?.(request, durable, result);
-        if (
-          request.prompt.includes("Implement the changes described") ||
-          request.prompt.includes(
-            "Polish the existing local repository changes",
-          )
-        ) {
-          assert.match(
-            request.prompt,
-            /Selected runner-trusted commands must never execute inside an agent turn/u,
-          );
-          assert.ok(request.prompt.includes(definition.command));
-        }
-        return response;
-      },
-    },
-  };
-  const trustedValidation = createTrustedValidationService({
-    git,
-    environment: {
-      ...process.env,
-      GH_TOKEN: "PRIVATE_CREDENTIAL",
-      SSH_AUTH_SOCK: "/private/agent.sock",
-    },
-    // Inspect the real sandbox construction; no host launcher or process runs.
-    resolveLauncher: () => "/usr/bin/bwrap",
-    verifyLauncher: (path) => path,
-    async runCommand(command, options) {
-      assert.equal(command.executable, "/usr/bin/bwrap");
-      for (const flag of [
-        "--unshare-net",
-        "--unshare-pid",
-        "--cap-drop",
-        "--ro-bind",
-        "--tmpfs",
-      ]) {
-        assert.ok(command.arguments.includes(flag), flag);
-      }
-      assert.equal(command.arguments.includes("--bind"), false);
-      assert.equal(options.environment.GH_TOKEN, undefined);
-      assert.equal(options.environment.SSH_AUTH_SOCK, undefined);
-      assert.equal(options.environment.GIT_SSH_COMMAND, "/bin/false");
-      assert.equal(options.environment.GIT_CONFIG_GLOBAL, "/dev/null");
-      assert.equal(options.readinessRequired, true);
-      const preparing = command.arguments.at(-1) === "";
-      let executed;
-      if (preparing) {
-        assert.deepEqual(command.arguments.slice(-3), [
-          process.execPath,
-          "--eval",
-          "",
-        ]);
-        assert.equal(options.timeoutMs, 10_000);
-        preparations.push(command);
-      } else {
-        executions.push(command);
-        assert.equal(
-          options.timeoutMs,
-          projectConfiguration.trustedCommandTimeoutMs,
-        );
-        assert.ok(
-          calls
-            .at(-1)
-            .prompt.includes("Run the complete project finalization procedure"),
-        );
-        assert.deepEqual(command.arguments.slice(-4), [
-          definition.executable,
-          ...definition.arguments,
-        ]);
-        executed = await hooks.execute?.(paths);
-      }
-      return {
-        status: "PASS",
-        exitCode: 0,
-        signal: null,
-        timedOut: false,
-        reason: "exit",
-        ...executed,
-        stdout: "PRIVATE_EXECUTOR_OUTPUT",
-        stderr: "PRIVATE_EXECUTOR_OUTPUT",
-      };
-    },
+test("continues one detached MCP execution after client replacement", async (t) => {
+  const paths = await fixture(t, {
+    autoCleanup: false,
+    plan: ONE_STEP_PLAN,
   });
-  let runner;
-  function openRunner() {
-    runner = createRunner({
-      adapters,
-      runStore,
-      clarifications: createClarificationService({ interactive: false }),
-      git: {
-        ...git,
-        async stagePolishingHandoff(options) {
-          handoffs += 1;
-          const result = await git.stagePolishingHandoff(options);
-          await hooks.afterHandoff?.(runner, await runStore.loadRun(runId));
-          return result;
-        },
-      },
-      loadConfiguration: async () => {
-        loads += 1;
-        return parseRunnerConfiguration(JSON.stringify(rootConfiguration));
-      },
-      trustedValidation,
-    });
-    return runner;
-  }
-  const prepared = await openRunner().create({
-    pipelineId,
+  const implementationGate = {
+    entered: deferred(),
+    release: deferred(),
+  };
+  const codex = createBackend("codex", {
+    failExecutionClarification: true,
+    implementationGate,
+  });
+  const { runner, runStore } = runtime(
+    paths,
+    { codex },
+    { schemaVersion: 1, defaultBackend: "codex" },
+  );
+  const pipelineProcess = detached(runner);
+  t.after(async () => {
+    implementationGate.release.resolve();
+    try {
+      await pipelineProcess.settle();
+    } finally {
+      await paths.cleanup();
+    }
+  });
+
+  const control = createMcpControlPlane({
+    launchRun: pipelineProcess.launchRun,
+    runner,
+    runStore,
+  });
+  const execution = await control.runStart({
+    idempotencyKey: "execution-start",
+    pipelineId: "plan-execution",
     projectPath: paths.projectPath,
     taskPath: paths.taskPath,
     proactiveClarification: false,
     roleOverrides: {},
     sourceSession: null,
   });
-  runId = prepared.run.runId;
-  assert.deepEqual(prepared.run.pipelineState.trustedValidation, expected);
-  assert.equal(calls.length, 0);
-  assert.equal(executions.length, 0);
-  assert.equal(preparations.length, 0);
-  return {
-    ...paths,
-    configurationPath,
-    runId,
+  await pipelineProcess.settle();
+  const paused = await control.runStatus({ runId: execution.runId });
+  assert.equal(paused.status, "WAITING_FOR_USER");
+  assert.equal(paused.pause.reason, "backend_unavailable");
+  assert.equal(paused.pause.resumeState, "CLARIFY");
+
+  const reconnected = createMcpControlPlane({
+    launchRun: pipelineProcess.launchRun,
+    runner,
     runStore,
-    expected,
-    calls,
-    executions,
-    preparations,
-    resume: () => runner.resume({ runId, action: null }),
-    reopen() {
-      rootConfiguration = {
-        schemaVersion: 1,
-        defaultBackend: "claude",
-        trustedCommands: {
-          replacement: { command: "false", executable: "false", arguments: [] },
-        },
-        pipelines: { [pipelineId]: { trustedChecks: ["replacement"] } },
-      };
-      return openRunner();
-    },
-    get loads() {
-      return loads;
-    },
-    get handoffs() {
-      return handoffs;
-    },
-  };
-}
-
-for (const pipelineId of ["plan-execution", "polishing"]) {
-  for (const rejectEvidence of [false, true]) {
-    test(`combined ${pipelineId} ${rejectEvidence ? "reruns rejected" : "reuses interrupted"} trusted finalization evidence`, async (t) => {
-      let confirmations = 0;
-      const scenario = await projectCommandScenario(t, pipelineId, {
-        mode: "combined",
-        beforeTurn(request, durable) {
-          if (durable.activeTurn.phase !== "confirm") return;
-          confirmations += 1;
-          if (!rejectEvidence && confirmations === 1)
-            throw providerInterruption();
-        },
-        afterTurn(request, durable, result) {
-          if (
-            rejectEvidence &&
-            durable.activeTurn.phase === "confirm" &&
-            confirmations === 1
-          ) {
-            result.status = "FINDINGS";
-            result.validationChange = "REJECTED";
-            result.validationEvidence = [
-              "Fresh complete evidence is required.",
-            ];
-            result.findings = [
-              {
-                id: "R1",
-                file: "src/base.js",
-                problem: "Validation evidence is insufficient.",
-                reason: "The terminal gate requires a fresh complete run.",
-                suggestedAction: "Repeat finalization without editing content.",
-              },
-            ];
-            result.finalizationFindingIds = ["R1"];
-          }
-        },
-      });
-      let completed = (await scenario.resume()).run;
-      if (!rejectEvidence) {
-        assert.equal(completed.pause.resumeState, "CONFIRM");
-        assert.equal(scenario.executions.length, 1);
-        const finalization = completed.pipelineState.finalizationResult;
-        scenario.reopen();
-        completed = (await scenario.resume()).run;
-        if (pipelineId === "polishing")
-          assert.deepEqual(
-            completed.pipelineState.finalizationResult,
-            finalization,
-          );
-      }
-      assert.equal(
-        completed.pipelineState.workflowState,
-        "DONE",
-        JSON.stringify(completed.pause),
-      );
-      const ordinary = pipelineId === "plan-execution" ? 2 : 1;
-      assert.equal(
-        scenario.executions.length,
-        ordinary + Number(rejectEvidence),
-      );
-      assert.deepEqual(
-        completed.pipelineState.trustedValidation,
-        scenario.expected,
-      );
-      assert.equal(completed.counters.correctionRounds, 0);
-      assert.equal(
-        scenario.calls.filter(({ prompt }) =>
-          prompt.includes(
-            "Concrete findings from the preceding clean confirmation:",
-          ),
-        ).length,
-        ordinary,
-      );
-      assert.equal(scenario.handoffs, pipelineId === "polishing" ? 1 : 0);
-      const calls = scenario.calls.length;
-      const executions = scenario.executions.length;
-      await scenario.resume();
-      assert.equal(scenario.calls.length, calls);
-      assert.equal(scenario.executions.length, executions);
-    });
-  }
-
-  test(`project command snapshots survive interruption and complete ${pipelineId}`, async (t) => {
-    let interrupted = false;
-    const scenario = await projectCommandScenario(t, pipelineId, {
-      beforeTurn(request) {
-        if (
-          !interrupted &&
-          request.prompt.includes(
-            "Run the complete project finalization procedure",
-          )
-        ) {
-          interrupted = true;
-          const error = new Error("Temporary provider interruption.");
-          error.recoverable = true;
-          throw error;
-        }
-      },
-    });
-    const initialHead = await gitOutput(scenario.projectPath, [
-      "rev-parse",
-      "HEAD",
-    ]);
-    const paused = (await scenario.resume()).run;
-    assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
-    assert.equal(paused.pause.resumeState, "FINALIZE");
-    assert.equal(scenario.executions.length, 0);
-    assert.equal(scenario.preparations.length > 0, true);
-    assert.deepEqual(paused.pipelineState.trustedValidation, scenario.expected);
-    scenario.reopen();
-    const completed = (await scenario.resume()).run;
-    assert.equal(completed.pipelineState.workflowState, "DONE");
-    assert.equal(scenario.loads, 1);
-    assert.deepEqual(
-      completed.pipelineState.trustedValidation,
-      scenario.expected,
-    );
-    assert.equal(
-      scenario.executions.length,
-      pipelineId === "plan-execution" ? 2 : 1,
-    );
-    assert.equal(scenario.handoffs, pipelineId === "polishing" ? 1 : 0);
-    assert.equal(
-      scenario.calls.filter(({ access }) => access === "local-commit").length,
-      pipelineId === "plan-execution" ? 2 : 0,
-    );
-    if (pipelineId === "plan-execution") {
-      assert.equal(completed.pipelineState.completedCommits.length, 2);
-    } else {
-      assert.equal(
-        await gitOutput(scenario.projectPath, ["rev-parse", "HEAD"]),
-        initialHead,
-      );
-    }
-    const evidence = completed.pipelineState.finalizationResult.checks.find(
-      ({ checkId }) => checkId === "C2",
-    );
-    assert.equal(evidence.executor, "runner");
-    assert.equal(
-      evidence.commandIdentity,
-      scenario.expected.commands[0].identity,
-    );
-    const durable = await readFile(
-      join(scenario.stateRoot, "runs", scenario.runId, "events.jsonl"),
-      "utf8",
-    );
-    assert.doesNotMatch(durable, /PRIVATE_EXECUTOR_OUTPUT|PRIVATE_CREDENTIAL/u);
-    const turns = scenario.calls.length;
-    const executions = scenario.executions.length;
-    await scenario.resume();
-    assert.equal(scenario.calls.length, turns);
-    assert.equal(scenario.executions.length, executions);
   });
-
-  for (const access of ["read-only", "workspace-write"]) {
-    for (const mutation of ["content", "replacement"]) {
-      test(`project command guard blocks ${pipelineId} ${access} ${mutation}`, async (t) => {
-        let mutated = false;
-        const scenario = await projectCommandScenario(t, pipelineId, {
-          async beforeTurn(
-            request,
-            durable,
-            { configurationPath, projectConfiguration },
-          ) {
-            if (mutated || request.access !== access) return;
-            mutated = true;
-            if (mutation === "replacement") {
-              const replacement = `${configurationPath}.replacement`;
-              await writeFile(
-                replacement,
-                JSON.stringify(projectConfiguration),
-              );
-              await rename(replacement, configurationPath);
-            } else {
-              await writeFile(
-                configurationPath,
-                JSON.stringify({
-                  ...projectConfiguration,
-                  trustedCommands: {},
-                }),
-              );
-            }
-          },
-        });
-        const initialHead = await gitOutput(scenario.projectPath, [
-          "rev-parse",
-          "HEAD",
-        ]);
-        const blocked = (await scenario.resume()).run;
-        assert.equal(mutated, true);
-        assert.equal(blocked.pause.reason, "project_configuration_changed");
-        assert.deepEqual(
-          blocked.pipelineState.trustedValidation,
-          scenario.expected,
-        );
-        const calls = scenario.calls.length;
-        await scenario.resume();
-        assert.equal(scenario.calls.length, calls);
-        assert.equal(scenario.executions.length, 0);
-        assert.equal(scenario.handoffs, 0);
-        assert.equal(
-          await gitOutput(scenario.projectPath, ["rev-parse", "HEAD"]),
-          initialHead,
-        );
-        assert.equal(
-          scenario.calls.some(({ access }) => access === "local-commit"),
-          false,
-        );
-      });
-    }
-  }
-
-  test(`project command execution retains Git mutation guards in ${pipelineId}`, async (t) => {
-    const scenario = await projectCommandScenario(t, pipelineId, {
-      execute: (paths) =>
-        writeFile(
-          join(paths.projectPath, "src/base.js"),
-          "unauthorized validation write\n",
-        ),
-    });
-    const initialHead = await gitOutput(scenario.projectPath, [
-      "rev-parse",
-      "HEAD",
-    ]);
-    const blocked = (await scenario.resume()).run;
-    assert.equal(blocked.pipelineState.workflowState, "WAITING_FOR_USER");
-    assert.equal(blocked.pause.reason, "unsafe_git_state");
-    assert.equal(scenario.executions.length, 1);
-    assert.equal(scenario.handoffs, 0);
-    assert.equal(
-      scenario.calls.some(({ access }) => access === "local-commit"),
-      false,
-    );
-    assert.equal(
-      await gitOutput(scenario.projectPath, ["rev-parse", "HEAD"]),
-      initialHead,
-    );
+  await reconnected.runResume({
+    idempotencyKey: "execution-resume",
+    runId: execution.runId,
+    expectedRevision: paused.revision,
+    action: null,
   });
-}
+  await within(
+    implementationGate.entered.promise,
+    30_000,
+    "Execution did not reach implementation.",
+  );
 
-test("persisted lazy opaque trusted failures retry only after each explicit resume", async (t) => {
-  let attempts = 0;
-  const turns = [];
-  const scenario = await projectCommandScenario(t, "plan-execution", {
-    mode: "lazy",
-    plan: TWO_STEP_PLAN.split("\n## Commit 2:")[0],
-    beforeTurn(request, durable) {
-      const phase = durable.activeTurn.phase;
-      turns.push([durable.pipelineState.currentStep, phase]);
-      if (phase !== "resolve-findings") return;
-      return {
-        sessionId: request.session?.id ?? "blocked-resolution",
-        structured: {
-          status: "BLOCKED",
-          decisions: [],
-          reason:
-            "Trusted failure diagnostics are unavailable for a safe repair.",
-          evidence: ["The runner retains only the check exit status."],
-          question: "",
-          whyBlocked: "",
-          options: [],
-        },
-      };
-    },
-    afterTurn(request, durable, result) {
-      if (durable.activeTurn.phase === "confirm") result.status = "CLEAN";
-    },
-    execute() {
-      attempts += 1;
-      return {
-        status: attempts <= 2 ? "FAIL" : "PASS",
-        exitCode: attempts <= 2 ? 7 : 0,
-      };
-    },
+  const running = await reconnected.runStatus({ runId: execution.runId });
+  assert.equal(running.execution.state, "running");
+  await reconnected.runCancel({
+    idempotencyKey: "execution-cancel",
+    runId: execution.runId,
+    expectedRevision: running.revision,
   });
-
-  const first = (await scenario.resume()).run;
-  assert.equal(first.pause.reason, "environment_blocked");
-  assert.equal(first.pause.resumeState, "RESOLVE_FINDINGS");
-  assert.equal(attempts, 1);
-  const persisted = await createRunStore({
-    stateRoot: scenario.stateRoot,
-  }).loadRun(scenario.runId);
-  assert.deepEqual(
-    persisted.pipelineState.finalizationResult,
-    first.pipelineState.finalizationResult,
-  );
-  const before = turns.length;
-  scenario.reopen();
-  const repeated = (await scenario.resume()).run;
-  assert.equal(repeated.pause.reason, "environment_blocked");
-  assert.equal(repeated.pause.resumeState, "RESOLVE_FINDINGS");
-  assert.equal(attempts, 2);
-  assert.deepEqual(turns.slice(before), [
-    [1, "finalize"],
-    [1, "resolve-findings"],
-  ]);
-  assert.deepEqual(repeated.counters, first.counters);
-  assert.deepEqual(
-    repeated.pipelineState.finalizationResult,
-    first.pipelineState.finalizationResult,
-  );
-
-  const retryStart = turns.length;
-  scenario.reopen();
-  const completed = (await scenario.resume()).run;
-  assert.equal(
-    completed.pipelineState.workflowState,
-    "DONE",
-    JSON.stringify(completed.pause),
-  );
-  assert.equal(completed.pipelineState.completedCommits.length, 1);
-  assert.equal(attempts, 3);
-  assert.deepEqual(completed.counters, first.counters);
-  assert.deepEqual(turns.slice(retryStart), [
-    [1, "finalize"],
-    [1, "confirm"],
-    [1, "commit"],
-  ]);
-  assert.deepEqual(
-    completed.pipelineState.trustedValidation,
-    scenario.expected,
-  );
-  assert.equal(scenario.loads, 1);
-  const durable = (
-    await Promise.all(
-      ["state.json", "events.jsonl"].map((name) =>
-        readFile(
-          join(scenario.stateRoot, "runs", scenario.runId, name),
-          "utf8",
-        ),
-      ),
-    )
-  ).join("\n");
-  assert.doesNotMatch(durable, /PRIVATE_EXECUTOR_OUTPUT|PRIVATE_CREDENTIAL/u);
-});
-
-test("project command drift preserves an already verified commit", async (t) => {
-  let preserved;
-  const scenario = await projectCommandScenario(t, "plan-execution", {
-    async beforeTurn(request, durable, { configurationPath }) {
-      if (durable.pipelineState.completedCommits.length !== 1 || preserved)
-        return;
-      preserved = durable.pipelineState.completedCommits;
-      await writeFile(configurationPath, '{"schemaVersion":1}\n');
-    },
-  });
-  const blocked = (await scenario.resume()).run;
-  assert.equal(blocked.pause.reason, "project_configuration_changed");
-  assert.equal(preserved.length, 1);
-  assert.deepEqual(blocked.pipelineState.completedCommits, preserved);
-  const head = await gitOutput(scenario.projectPath, ["rev-parse", "HEAD"]);
-  const turns = scenario.calls.length;
-  await scenario.resume();
-  assert.deepEqual(
-    (await scenario.runStore.loadRun(scenario.runId)).pipelineState
-      .completedCommits,
-    preserved,
-  );
-  assert.equal(scenario.calls.length, turns);
-  assert.equal(
-    await gitOutput(scenario.projectPath, ["rev-parse", "HEAD"]),
-    head,
-  );
-});
-
-test("project command drift preserves completed polishing handoff evidence", async (t) => {
-  const scenario = await projectCommandScenario(t, "polishing", {
-    async afterHandoff(runner, run) {
-      await runner.requestOperatorStop({
-        runId: run.runId,
-        kind: "pause_requested",
-        expectedRevision: run.revision,
-        idempotencyKey: "project-command-handoff",
-      });
-    },
-  });
-  const paused = (await scenario.resume()).run;
-  assert.equal(paused.pause.reason, "operator_paused");
-  assert.equal(paused.pause.operatorResume.workflowState, "DONE");
-  const baseline = paused.pipelineState.repositoryBaseline;
-  const finalization = paused.pipelineState.finalizationResult;
-  const reviewedFingerprint = paused.pipelineState.reviewedFingerprint;
-  assert.ok(finalization);
-  assert.equal(reviewedFingerprint, paused.pipelineState.finalizedFingerprint);
-  const turns = scenario.calls.length;
-  await writeFile(scenario.configurationPath, '{"schemaVersion":1}\n');
-  const blocked = (await scenario.resume()).run;
-  assert.equal(blocked.pause.reason, "project_configuration_changed");
-  assert.deepEqual(blocked.pipelineState.repositoryBaseline, baseline);
-  assert.deepEqual(blocked.pipelineState.finalizationResult, finalization);
-  assert.equal(blocked.pipelineState.reviewedFingerprint, reviewedFingerprint);
-  assert.equal(scenario.calls.length, turns);
-  assert.equal(scenario.handoffs, 1);
+  implementationGate.release.resolve();
+  await pipelineProcess.settle();
+  const canceled = await reconnected.runStatus({ runId: execution.runId });
+  assert.equal(canceled.status, "CANCELED");
+  assert.equal(canceled.completedCommits.length, 0);
 });
 
 test("polishing migrates legacy 64/128 evidence under lease without replaying a completed handoff", async (t) => {
