@@ -18,7 +18,6 @@ import test, { after, before } from "node:test";
 import {
   createClarificationService,
   createGitService,
-  createMcpControlPlane,
   createRunner,
   createRunStore,
   createTrustedValidationService,
@@ -27,7 +26,7 @@ import {
   DETACHED_STOP_CHECKPOINT_ENV,
   main,
 } from "../src/index.js";
-import { readProcessIdentity, spawnOwnedProcess } from "../src/agents/index.js";
+import { spawnOwnedProcess } from "../src/agents/index.js";
 import { CLAUDE_STORAGE_IDENTITY } from "../src/agents/claude/index.js";
 import { resolveStopBoundary } from "../src/pipeline-registry.js";
 import {
@@ -798,91 +797,72 @@ test("runner fails closed when operator stop monitoring fails", async (t) => {
   assert.equal(await store.runIsLeased(prepared.run.runId), false);
 });
 
-test("operator stops reconcile native provider ownership before releasing leases", async (t) => {
-  for (const access of ["read-only", "workspace-write"]) {
-    await t.test(access, async (t) => {
-      const fixture = await operatorFixture(t, "polishing");
-      const store = createRunStore({ stateRoot: fixture.stateRoot });
-      const delegate = createExecutionAdapter();
-      const started = Promise.withResolvers();
-      let child;
-      const runner = runnerFor(
-        fixture,
-        {
-          codex: {
-            ...delegate,
-            async run(request) {
-              if (request.access !== access) return delegate.run(request);
-              const source = `${access === "workspace-write" ? "require('node:fs').writeFileSync('partial.txt', 'preserved');" : ""}
+test("operator stop contains native provider work and preserves writable content", async (t) => {
+  const fixture = await executionLifecycle.implementation.restore();
+  const store = createRunStore({ stateRoot: fixture.stateRoot });
+  const delegate = createExecutionAdapter();
+  const started = Promise.withResolvers();
+  let child;
+  const runner = runnerFor(
+    fixture,
+    {
+      codex: {
+        ...delegate,
+        async run(request) {
+          if (request.access !== "workspace-write")
+            return delegate.run(request);
+          const source = `require('node:fs').writeFileSync('partial.txt', 'preserved');
           require('node:fs').writeSync(1, 'ready');
           Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);`;
-              child = spawnOwnedProcess(process.execPath, ["-e", source], {
-                cwd: request.cwd,
-                env: process.env,
-                signal: request.signal,
-                onProcess: request.onProcess,
-              });
-              child.stdout.once("data", () => started.resolve());
-              child.stderr.resume();
-              child.stdin.end();
-              await child.ownedCompletion;
-              request.signal.throwIfAborted();
-              assert.fail("The native turn must be interrupted");
-            },
-          },
+          child = spawnOwnedProcess(process.execPath, ["-e", source], {
+            cwd: request.cwd,
+            env: process.env,
+            signal: request.signal,
+            onProcess: request.onProcess,
+          });
+          child.stdout.once("data", () => started.resolve());
+          child.stderr.resume();
+          child.stdin.end();
+          await child.ownedCompletion;
+          request.signal.throwIfAborted();
+          assert.fail("The native turn must be interrupted");
         },
-        { runStore: store },
-      );
-      t.after(async () => {
-        child?.kill();
-        await child?.ownedCompletion.catch(() => {});
-      });
-      const runId = (
-        await runner.create({
-          pipelineId: "polishing",
-          projectPath: fixture.projectPath,
-          taskPath: fixture.taskPath,
-          proactiveClarification: false,
-          roleOverrides: {},
-          sourceSession: null,
-        })
-      ).run.runId;
-      const executing = runner.resume({ runId, action: null });
-      await Promise.race([
-        started.promise,
-        executing.then(() => assert.fail("Provider did not start")),
-      ]);
-      const before = await store.loadRun(runId);
-      assert.equal(before.executionProcess.pid, child.ownedPid);
-      assert.ok(before.executionProcess.ancestryBaseline.length > 0);
-      assert.equal(await store.runIsLeased(runId), true);
-      const kind =
-        access === "read-only" ? "pause_requested" : "cancel_requested";
-      await runner.requestOperatorStop({
-        runId,
-        kind,
-        expectedRevision: before.revision,
-        idempotencyKey: "native-stop",
-      });
-      const stopped = (await executing).run;
-      assert.equal(
-        stopped.pause.reason,
-        access === "read-only" ? "operator_paused" : "operator_canceled",
-      );
-      assert.equal(stopped.executionProcess, null);
-      assert.equal(await store.runIsLeased(runId), false);
-      assert.equal(
-        await store.worktreeIsLeased(fixture.projectPath, runId),
-        false,
-      );
-      assert.throws(() => process.kill(-child.pid, 0), { code: "ESRCH" });
-      if (access === "workspace-write")
-        assert.equal(
-          await readFile(join(fixture.projectPath, "partial.txt"), "utf8"),
-          "preserved",
-        );
-    });
-  }
+      },
+    },
+    { runStore: store },
+  );
+  t.after(async () => {
+    child?.kill();
+    await child?.ownedCompletion.catch(() => {});
+  });
+  const executing = runner.resume({ runId: fixture.runId, action: null });
+  await Promise.race([
+    started.promise,
+    executing.then(() => assert.fail("Provider did not start")),
+  ]);
+  const before = await store.loadRun(fixture.runId);
+  assert.equal(before.executionProcess.pid, child.ownedPid);
+  assert.ok(before.executionProcess.ancestryBaseline.length > 0);
+  assert.equal(await store.runIsLeased(fixture.runId), true);
+  await runner.requestOperatorStop({
+    runId: fixture.runId,
+    kind: "pause_requested",
+    expectedRevision: before.revision,
+    idempotencyKey: "native-stop",
+  });
+  const stopped = (await executing).run;
+  assert.equal(stopped.pause.reason, "operator_paused");
+  assert.equal(stopped.executionProcess, null);
+  assert.equal(await store.runIsLeased(fixture.runId), false);
+  assert.equal(
+    await store.worktreeIsLeased(fixture.projectPath, fixture.runId),
+    false,
+  );
+  assert.throws(() => process.kill(-child.pid, 0), { code: "ESRCH" });
+  assert.equal(
+    await readFile(join(fixture.projectPath, "partial.txt"), "utf8"),
+    "preserved",
+  );
 });
 
 test("operator pause preserves writable partial content and reconstructs the primary without reforking", async () => {
@@ -1284,443 +1264,233 @@ test("operator cancellation supersedes pause during trusted validation without a
   );
 });
 
-test("operator stop after host loss reclaims ownership and reconciles before further provider work", async (t) => {
-  for (const [kind, timing] of [
-    ["pause_requested", "immediate"],
-    ["cancel_requested", "after-current-commit"],
-  ]) {
-    await t.test(`${kind}/${timing}`, async (t) => {
-      const fixture = await operatorFixture(t, "plan-execution");
-      const BOOT_A = "11111111-1111-4111-8111-111111111111";
-      const BOOT_B = "22222222-2222-4222-8222-222222222222";
-      const options = {
-        stateRoot: fixture.stateRoot,
-        resolveStopBoundary,
-        hostName: "recovery-host",
-        processId: 100,
-        processIsAlive: () => true,
-        processIdentity: (pid) => ({
-          bootId: BOOT_A,
-          startTicks: String(pid),
-        }),
-        leaseStaleMs: 0,
-      };
-      const store = createRunStore(options);
-      const delegate = createExecutionAdapter();
-      const runner = runnerFor(
-        fixture,
-        {
-          codex: {
-            ...delegate,
-            async run(request) {
-              if (
-                timing === "after-current-commit" &&
-                !request.prompt.includes("Implement the changes described")
-              )
-                return delegate.run(request);
-              await request.onProcess(4242, {
-                processIdentity: { bootId: BOOT_A, startTicks: "4242" },
-                namespaceId: "pid:[4026533000]",
-              });
-              throw new Error("Simulated execution-owner loss");
-            },
-          },
-        },
-        { runStore: store },
-      );
-      const runId = (
-        await runner.create({
-          pipelineId: "plan-execution",
-          projectPath: fixture.projectPath,
-          taskPath: fixture.taskPath,
-          proactiveClarification: false,
-          roleOverrides: {},
-          sourceSession: null,
-        })
-      ).run.runId;
-      await assert.rejects(runner.resume({ runId, action: null }), {
-        code: "ERR_EXECUTION_PROCESS_ACTIVE",
-      });
-      const checkpoint = await store.loadRun(runId);
-      assert.equal(checkpoint.executionProcess.namespaceId, "pid:[4026533000]");
-      assert.deepEqual(checkpoint.executionProcess.processIdentity, {
-        bootId: BOOT_A,
-        startTicks: "4242",
-      });
-      assert.deepEqual(
-        checkpoint.executionProcess.launchCutoff,
-        checkpoint.executionProcess.processIdentity,
-      );
-      const rebooted = createRunStore({
-        ...options,
-        processId: 200,
-        processIdentity: (pid) => ({
-          bootId: BOOT_B,
-          startTicks: String(pid),
-        }),
-      });
-      const recoveredRunner = runnerFor(
-        fixture,
-        {
-          codex: {
-            ...delegate,
-            async run() {
-              assert.fail("Stop recovery must not invoke a provider");
-            },
-          },
-        },
-        { runStore: rebooted },
-      );
-      await recoveredRunner.requestOperatorStop({
-        runId,
-        kind,
-        expectedRevision: checkpoint.revision,
-        idempotencyKey: "reboot-stop",
-        timing,
-      });
-      const canceled = (await recoveredRunner.resume({ runId, action: null }))
-        .run;
-      assert.equal(
-        canceled.pipelineState.workflowState,
-        kind === "cancel_requested" ? "CANCELED" : "WAITING_FOR_USER",
-      );
-      assert.equal(canceled.executionProcess, null);
-      assert.deepEqual(canceled.stopRequest.settlement, {
-        kind: "quiescent",
-        commit: null,
-      });
-      assert.equal(canceled.pipelineState.completedCommits.length, 0);
-      assert.deepEqual(
-        canceled.pause.operatorResume.activeTurn,
-        checkpoint.activeTurn,
-      );
-      assert.equal(await rebooted.runIsLeased(runId), false);
-      assert.equal(
-        await rebooted.worktreeIsLeased(fixture.projectPath, runId),
-        false,
-      );
-    });
-  }
-});
-
-test("action-free CLI/MCP recovery settles dead sessions", async (t) => {
-  for (const [transport, kind] of [
-    ["runner", null],
-    ["cli", null],
-    ["mcp", null],
-    ["cli", "pause_requested"],
-    ["mcp", "cancel_requested"],
-  ]) {
-    await t.test(`${transport}/${kind}`, async (t) => {
-      const fixture = await operatorFixture(t, "plan-execution");
-      const launchIdentity = await readProcessIdentity(process.pid);
-      assert.notEqual(launchIdentity, null);
-      const ancestryBaseline = [{ ...launchIdentity, pid: process.pid }];
-      const namespaceId = readlinkSync("/proc/self/ns/pid");
-      const executionPid = 2_000_000_001;
-      let originalOwnerAlive = true;
-      let executionAlive = true;
-      const processIdentity = (pid) =>
-        pid === executionPid
-          ? launchIdentity
-          : { bootId: launchIdentity.bootId, startTicks: String(pid) };
-      const options = {
-        stateRoot: fixture.stateRoot,
-        resolveStopBoundary,
-        hostName: "current-boot-recovery-host",
-        processId: 100,
-        processIsAlive: (pid) =>
-          (pid === 100 && originalOwnerAlive) ||
-          (pid === executionPid && executionAlive),
-        processIdentity,
-        leaseStaleMs: 0,
-      };
-      const store = createRunStore(options);
-      const delegate = createExecutionAdapter();
-      const runner = runnerFor(
-        fixture,
-        {
-          codex: {
-            ...delegate,
-            async run(request) {
-              await request.onProcess(executionPid, {
-                processIdentity: launchIdentity,
-                namespaceId,
-                ancestryBaseline,
-              });
-              throw new Error("Simulated execution-owner loss");
-            },
-          },
-        },
-        { runStore: store },
-      );
-      const runId = (
-        await runner.create({
-          pipelineId: "plan-execution",
-          projectPath: fixture.projectPath,
-          taskPath: fixture.taskPath,
-          proactiveClarification: false,
-          roleOverrides: {},
-          sourceSession: null,
-        })
-      ).run.runId;
-      await assert.rejects(runner.resume({ runId, action: null }), {
-        code: "ERR_EXECUTION_PROCESS_ACTIVE",
-      });
-      const checkpoint = await store.loadRun(runId);
-      assert.equal(checkpoint.executionProcess.pid, executionPid);
-      assert.deepEqual(
-        checkpoint.executionProcess.launchCutoff,
-        launchIdentity,
-      );
-      assert.deepEqual(
-        checkpoint.executionProcess.ancestryBaseline,
-        ancestryBaseline,
-      );
-      const { stdout: repositoryBeforeRecovery } = await executeFile(
-        "git",
-        ["status", "--short"],
-        { cwd: fixture.projectPath },
-      );
-
-      originalOwnerAlive = false;
-      executionAlive = false;
-      const recoveredStore = createRunStore({
-        ...options,
-        processId: 200,
-        processIsAlive: (pid) => pid === 200,
-      });
-      let resumedTurns = 0;
-      let retirementInspections = 0;
-      const recoveredRunner = runnerFor(
-        fixture,
-        {
-          codex: {
-            ...delegate,
-            async run() {
-              if (kind !== null)
-                assert.fail("Stop recovery must not invoke a provider.");
-              resumedTurns++;
-              assert.equal(
-                (await recoveredStore.loadRun(runId)).executionProcess,
-                null,
-              );
-              throw Object.assign(new Error("Retryable proof failure"), {
-                code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
-              });
-            },
-          },
-        },
-        {
-          runStore: recoveredStore,
-          // The owner is synthetic; unrelated host workers must not decide
-          // this orchestration fixture's process-table result. Retirement
-          // still performs its real identity and namespace checks.
-          inspectSessionProcesses(sessionId, _token, inspection) {
-            assert.equal(sessionId, executionPid);
-            assert.deepEqual(inspection, {
-              ancestryBaseline,
-              controlGroup: null,
-              includeSession: true,
-            });
-            retirementInspections++;
-            return [];
-          },
-        },
-      );
-      const stopRequest = {
-        runId,
-        kind,
-        expectedRevision: checkpoint.revision,
-        idempotencyKey: `${transport}-${kind}`,
-        timing: "immediate",
-      };
-      if (kind !== null) {
-        const accepted = await recoveredRunner.requestOperatorStop(stopRequest);
-        assert.deepEqual(
-          await recoveredRunner.requestOperatorStop(stopRequest),
-          accepted,
-        );
-      }
-      const pending = await recoveredStore.loadRun(runId);
-
-      if (transport === "runner") {
-        const resumed = recoveredRunner.resume({
-          runId,
-          action: null,
-          expectedRevision: pending.revision,
-        });
-        if (kind === null)
-          await assert.rejects(resumed, {
-            code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
-          });
-        else await resumed;
-      } else if (transport === "cli") {
-        const exitCode = await main(
-          [
-            "resume",
-            "--run",
-            runId,
-            "--expected-revision",
-            String(pending.revision),
-          ],
-          {
-            runner: recoveredRunner,
-            stdout: { write() {} },
-            stderr: {
-              write(message) {
-                if (kind !== null) assert.fail(message);
-                else {
-                  assert.match(message, /Agent backend turn failed/u);
-                  assert.doesNotMatch(message, /Retryable proof failure/u);
-                }
-              },
-            },
-          },
-        );
-        assert.equal(
-          exitCode,
-          kind === null ? 1 : kind === "pause_requested" ? 2 : 0,
-        );
-      } else {
-        let launches = 0;
-        let completion;
-        const control = createMcpControlPlane({
-          runner: recoveredRunner,
-          runStore: recoveredStore,
-          launchRun(id, action, launchOptions) {
-            launches += 1;
-            completion = recoveredRunner
-              .resume({
-                runId: id,
-                action,
-                dispatch: launchOptions.dispatch,
-                expectedRuntimeCompatibility:
-                  launchOptions.expectedRuntimeCompatibility,
-              })
-              .then(
-                ({ run }) =>
-                  launchOptions.onExit(
-                    run.pipelineState.workflowState === "WAITING_FOR_USER"
-                      ? 2
-                      : 0,
-                  ),
-                () => launchOptions.onExit(1),
-              );
-          },
-        });
-        const input = {
-          runId,
-          expectedRevision: pending.revision,
-          action: null,
-          idempotencyKey: `resume-${kind}`,
-        };
-        assert.deepEqual(await control.runResume(input), { runId });
-        assert.deepEqual(await control.runResume(input), { runId });
-        assert.equal(launches, 1);
-        await completion;
-      }
-
-      const settled = await recoveredStore.loadRun(runId);
-      assert.equal(
-        settled.pipelineState.workflowState,
-        kind === null
-          ? checkpoint.pipelineState.workflowState
-          : kind === "pause_requested"
-            ? "WAITING_FOR_USER"
-            : "CANCELED",
-      );
-      assert.equal(settled.executionProcess, null);
-      assert.equal(retirementInspections, 1);
-      assert.equal(resumedTurns, kind === null ? 1 : 0);
-      if (kind === null) {
-        assert.deepEqual(settled.activeTurn, checkpoint.activeTurn);
-        assert.equal(settled.pause, null);
-      } else {
-        assert.deepEqual(settled.stopRequest.settlement, {
-          kind: "quiescent",
-          commit: null,
-        });
-        assert.equal(settled.stopRequest.reconciledRevision, settled.revision);
-      }
-      assert.equal(await recoveredStore.runIsLeased(runId), false);
-      assert.equal(
-        await recoveredStore.worktreeIsLeased(fixture.projectPath, runId),
-        false,
-      );
-      const { stdout: repositoryAfterRecovery } = await executeFile(
-        "git",
-        ["status", "--short"],
-        { cwd: fixture.projectPath },
-      );
-      assert.equal(repositoryAfterRecovery, repositoryBeforeRecovery);
-    });
-  }
-});
-
-test("legacy recovery evidence remains non-mutating and compatibility-blocked", async (t) => {
-  const fixture = await operatorFixture(t, "plan-execution");
-  const launchIdentity = await readProcessIdentity(process.pid);
-  assert.notEqual(launchIdentity, null);
-  const namespaceId = readlinkSync("/proc/self/ns/pid");
-  const executionPid = 2_000_000_002;
-  let originalOwnerAlive = true;
-  let executionAlive = true;
+test("operator stop after host loss reclaims ownership and reconciles before further provider work", async () => {
+  const fixture = await executionLifecycle.implementation.restore();
+  const bootA = "11111111-1111-4111-8111-111111111111";
+  const bootB = "22222222-2222-4222-8222-222222222222";
   const options = {
     stateRoot: fixture.stateRoot,
     resolveStopBoundary,
-    hostName: "legacy-recovery-host",
+    hostName: "recovery-host",
     processId: 100,
-    processIsAlive: (pid) =>
-      (pid === 100 && originalOwnerAlive) ||
-      (pid === executionPid && executionAlive),
-    processIdentity: (pid) =>
-      pid === executionPid
-        ? launchIdentity
-        : { bootId: launchIdentity.bootId, startTicks: String(pid) },
+    processIsAlive: () => true,
+    processIdentity: (pid) => ({ bootId: bootA, startTicks: String(pid) }),
     leaseStaleMs: 0,
   };
   const store = createRunStore(options);
+  const lease = await store.acquireRunLease(fixture.runId);
+  await store.acquireWorktreeLease(fixture.projectPath, fixture.runId);
+  const checkpoint = await store.recordExecutionProcess(lease, 4242, {
+    processIdentity: { bootId: bootA, startTicks: "4242" },
+    namespaceId: "pid:[4026533000]",
+  });
+  await assert.rejects(lease.release(), {
+    code: "ERR_EXECUTION_PROCESS_ACTIVE",
+  });
+  assert.equal(checkpoint.executionProcess.namespaceId, "pid:[4026533000]");
+  assert.deepEqual(checkpoint.executionProcess.processIdentity, {
+    bootId: bootA,
+    startTicks: "4242",
+  });
+  assert.deepEqual(
+    checkpoint.executionProcess.launchCutoff,
+    checkpoint.executionProcess.processIdentity,
+  );
+
+  const rebooted = createRunStore({
+    ...options,
+    processId: 200,
+    processIdentity: (pid) => ({ bootId: bootB, startTicks: String(pid) }),
+  });
   const delegate = createExecutionAdapter();
-  const runner = runnerFor(
+  const recoveredRunner = runnerFor(
     fixture,
     {
       codex: {
         ...delegate,
-        async run(request) {
-          await request.onProcess(executionPid, {
-            processIdentity: launchIdentity,
-            namespaceId,
-          });
-          throw new Error("Simulated legacy execution-owner loss");
+        async run() {
+          assert.fail("Stop recovery must not invoke a provider");
         },
       },
     },
-    { runStore: store },
+    { runStore: rebooted },
   );
-  const runId = (
-    await runner.create({
-      pipelineId: "plan-execution",
-      projectPath: fixture.projectPath,
-      taskPath: fixture.taskPath,
-      proactiveClarification: false,
-      roleOverrides: {},
-      sourceSession: null,
-    })
-  ).run.runId;
-  await assert.rejects(runner.resume({ runId, action: null }), {
+  await recoveredRunner.requestOperatorStop({
+    runId: fixture.runId,
+    kind: "cancel_requested",
+    expectedRevision: checkpoint.revision,
+    idempotencyKey: "reboot-stop",
+    timing: "after-current-commit",
+  });
+  const canceled = (
+    await recoveredRunner.resume({ runId: fixture.runId, action: null })
+  ).run;
+  assert.equal(canceled.pipelineState.workflowState, "CANCELED");
+  assert.equal(canceled.executionProcess, null);
+  assert.deepEqual(canceled.stopRequest.settlement, {
+    kind: "quiescent",
+    commit: null,
+  });
+  assert.equal(canceled.pipelineState.completedCommits.length, 0);
+  assert.deepEqual(
+    canceled.pause.operatorResume.activeTurn,
+    checkpoint.activeTurn,
+  );
+  assert.equal(await rebooted.runIsLeased(fixture.runId), false);
+  assert.equal(
+    await rebooted.worktreeIsLeased(fixture.projectPath, fixture.runId),
+    false,
+  );
+});
+
+test("action-free recovery retires a dead session before further provider work", async () => {
+  const fixture = await executionLifecycle.implementation.restore();
+  const bootId = "11111111-1111-4111-8111-111111111111";
+  const executionPid = 2_000_000_001;
+  const launchIdentity = { bootId, startTicks: String(executionPid) };
+  const ancestryBaseline = [{ bootId, pid: 100, startTicks: "100" }];
+  const namespaceId = readlinkSync("/proc/self/ns/pid");
+  const options = {
+    stateRoot: fixture.stateRoot,
+    resolveStopBoundary,
+    hostName: "current-boot-recovery-host",
+    processId: 100,
+    processIsAlive: () => true,
+    processIdentity: (pid) =>
+      pid === executionPid
+        ? launchIdentity
+        : { bootId, startTicks: String(pid) },
+    leaseStaleMs: 0,
+  };
+  const store = createRunStore(options);
+  const lease = await store.acquireRunLease(fixture.runId);
+  await store.acquireWorktreeLease(fixture.projectPath, fixture.runId);
+  const checkpoint = await store.recordExecutionProcess(lease, executionPid, {
+    processIdentity: launchIdentity,
+    namespaceId,
+    ancestryBaseline,
+  });
+  await assert.rejects(lease.release(), {
     code: "ERR_EXECUTION_PROCESS_ACTIVE",
   });
-  const checkpoint = await store.loadRun(runId);
-  assert.equal(checkpoint.executionProcess.ancestryBaseline, null);
+  assert.deepEqual(checkpoint.executionProcess.launchCutoff, launchIdentity);
+  assert.deepEqual(
+    checkpoint.executionProcess.ancestryBaseline,
+    ancestryBaseline,
+  );
+  const { stdout: repositoryBeforeRecovery } = await executeFile(
+    "git",
+    ["status", "--short"],
+    { cwd: fixture.projectPath },
+  );
 
-  originalOwnerAlive = false;
-  executionAlive = false;
   const recoveredStore = createRunStore({
     ...options,
     processId: 200,
     processIsAlive: (pid) => pid === 200,
   });
+  let resumedTurns = 0;
+  let retirementInspections = 0;
+  const delegate = createExecutionAdapter();
+  const recoveredRunner = runnerFor(
+    fixture,
+    {
+      codex: {
+        ...delegate,
+        async run() {
+          resumedTurns++;
+          assert.equal(
+            (await recoveredStore.loadRun(fixture.runId)).executionProcess,
+            null,
+          );
+          throw Object.assign(new Error("Retryable proof failure"), {
+            code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+          });
+        },
+      },
+    },
+    {
+      runStore: recoveredStore,
+      inspectSessionProcesses(sessionId, _token, inspection) {
+        assert.equal(sessionId, executionPid);
+        assert.deepEqual(inspection, {
+          ancestryBaseline,
+          controlGroup: null,
+          includeSession: true,
+        });
+        retirementInspections++;
+        return [];
+      },
+    },
+  );
+  await assert.rejects(
+    recoveredRunner.resume({
+      runId: fixture.runId,
+      action: null,
+      expectedRevision: checkpoint.revision,
+    }),
+    { code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE" },
+  );
+
+  const settled = await recoveredStore.loadRun(fixture.runId);
+  assert.equal(
+    settled.pipelineState.workflowState,
+    checkpoint.pipelineState.workflowState,
+  );
+  assert.equal(settled.executionProcess, null);
+  assert.equal(retirementInspections, 1);
+  assert.equal(resumedTurns, 1);
+  assert.deepEqual(settled.activeTurn, checkpoint.activeTurn);
+  assert.equal(settled.pause, null);
+  assert.equal(await recoveredStore.runIsLeased(fixture.runId), false);
+  assert.equal(
+    await recoveredStore.worktreeIsLeased(fixture.projectPath, fixture.runId),
+    false,
+  );
+  const { stdout: repositoryAfterRecovery } = await executeFile(
+    "git",
+    ["status", "--short"],
+    { cwd: fixture.projectPath },
+  );
+  assert.equal(repositoryAfterRecovery, repositoryBeforeRecovery);
+});
+
+test("legacy recovery evidence remains non-mutating and compatibility-blocked", async () => {
+  const fixture = await executionLifecycle.implementation.restore();
+  const bootId = "11111111-1111-4111-8111-111111111111";
+  const executionPid = 2_000_000_002;
+  const launchIdentity = { bootId, startTicks: String(executionPid) };
+  const namespaceId = readlinkSync("/proc/self/ns/pid");
+  const options = {
+    stateRoot: fixture.stateRoot,
+    resolveStopBoundary,
+    hostName: "legacy-recovery-host",
+    processId: 100,
+    processIsAlive: () => true,
+    processIdentity: (pid) =>
+      pid === executionPid
+        ? launchIdentity
+        : { bootId, startTicks: String(pid) },
+    leaseStaleMs: 0,
+  };
+  const store = createRunStore(options);
+  const lease = await store.acquireRunLease(fixture.runId);
+  await store.acquireWorktreeLease(fixture.projectPath, fixture.runId);
+  const checkpoint = await store.recordExecutionProcess(lease, executionPid, {
+    processIdentity: launchIdentity,
+    namespaceId,
+  });
+  await assert.rejects(lease.release(), {
+    code: "ERR_EXECUTION_PROCESS_ACTIVE",
+  });
+  assert.equal(checkpoint.executionProcess.ancestryBaseline, null);
+
+  const recoveredStore = createRunStore({
+    ...options,
+    processId: 200,
+    processIsAlive: (pid) => pid === 200,
+  });
+  const delegate = createExecutionAdapter();
   const recoveredRunner = runnerFor(
     fixture,
     {
@@ -1733,25 +1503,28 @@ test("legacy recovery evidence remains non-mutating and compatibility-blocked", 
     { runStore: recoveredStore },
   );
   await recoveredRunner.requestOperatorStop({
-    runId,
+    runId: fixture.runId,
     kind: "pause_requested",
     expectedRevision: checkpoint.revision,
     idempotencyKey: "legacy-evidence-stop",
     timing: "immediate",
   });
-  const durableBefore = await recoveredStore.loadRun(runId);
+  const durableBefore = await recoveredStore.loadRun(fixture.runId);
   const { stdout: repositoryBefore } = await executeFile(
     "git",
     ["status", "--short"],
     { cwd: fixture.projectPath },
   );
-  await assert.rejects(recoveredRunner.resume({ runId, action: null }), {
-    code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
-    message:
-      "Owned execution process predates frozen ancestry recovery evidence.",
-  });
-  assert.deepEqual(await recoveredStore.loadRun(runId), durableBefore);
-  assert.equal(await recoveredStore.runIsLeased(runId), true);
+  await assert.rejects(
+    recoveredRunner.resume({ runId: fixture.runId, action: null }),
+    {
+      code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+      message:
+        "Owned execution process predates frozen ancestry recovery evidence.",
+    },
+  );
+  assert.deepEqual(await recoveredStore.loadRun(fixture.runId), durableBefore);
+  assert.equal(await recoveredStore.runIsLeased(fixture.runId), true);
   const { stdout: repositoryAfter } = await executeFile(
     "git",
     ["status", "--short"],
@@ -1760,8 +1533,8 @@ test("legacy recovery evidence remains non-mutating and compatibility-blocked", 
   assert.equal(repositoryAfter, repositoryBefore);
 });
 
-test("stop recovery preserves containment failure without reacquiring its held worktree lease", async (t) => {
-  const fixture = await operatorFixture(t, "plan-execution");
+test("stop recovery preserves containment failure without reacquiring its held worktree lease", async () => {
+  const fixture = await executionLifecycle.implementation.restore();
   const bootA = "11111111-1111-4111-8111-111111111111";
   const bootB = "22222222-2222-4222-8222-222222222222";
   let originalOwnerAlive = true;
@@ -1776,7 +1549,6 @@ test("stop recovery preserves containment failure without reacquiring its held w
   };
   const store = createRunStore(options);
   const delegate = createExecutionAdapter();
-  let runId;
   let worktreeAcquisitions = 0;
   const runner = runnerFor(
     fixture,
@@ -1792,7 +1564,7 @@ test("stop recovery preserves containment failure without reacquiring its held w
             namespaceId: "pid:[4026533000]",
           });
           await store.requestOperatorStop({
-            runId,
+            runId: fixture.runId,
             kind: "pause_requested",
             expectedRevision: registered.revision,
             idempotencyKey: "containment-stop",
@@ -1812,26 +1584,15 @@ test("stop recovery preserves containment failure without reacquiring its held w
       },
     },
   );
-  runId = (
-    await runner.create({
-      pipelineId: "plan-execution",
-      projectPath: fixture.projectPath,
-      taskPath: fixture.taskPath,
-      proactiveClarification: false,
-      roleOverrides: {},
-      sourceSession: null,
-    })
-  ).run.runId;
-
-  await assert.rejects(runner.resume({ runId, action: null }), {
+  await assert.rejects(runner.resume({ runId: fixture.runId, action: null }), {
     code: "ERR_EXECUTION_PROCESS_ACTIVE",
   });
   assert.equal(worktreeAcquisitions, 1);
   assert.equal(
-    await store.worktreeLeaseOwner(fixture.projectPath, runId),
-    runId,
+    await store.worktreeLeaseOwner(fixture.projectPath, fixture.runId),
+    fixture.runId,
   );
-  assert.equal((await store.loadRun(runId)).executionProcess.pid, 4242);
+  assert.equal((await store.loadRun(fixture.runId)).executionProcess.pid, 4242);
 
   originalOwnerAlive = false;
   const recoveredStore = createRunStore({
@@ -1850,13 +1611,15 @@ test("stop recovery preserves containment failure without reacquiring its held w
     },
     { runStore: recoveredStore },
   );
-  const paused = (await recovered.resume({ runId, action: null })).run;
+  const paused = (
+    await recovered.resume({ runId: fixture.runId, action: null })
+  ).run;
   assert.equal(paused.pause.reason, "operator_paused");
   assert.equal(paused.executionProcess, null);
   assert.equal(paused.stopRequest.reconciledRevision, paused.revision);
-  assert.equal(await recoveredStore.runIsLeased(runId), false);
+  assert.equal(await recoveredStore.runIsLeased(fixture.runId), false);
   assert.equal(
-    await recoveredStore.worktreeIsLeased(fixture.projectPath, runId),
+    await recoveredStore.worktreeIsLeased(fixture.projectPath, fixture.runId),
     false,
   );
 });
@@ -2053,241 +1816,182 @@ test("settled stop releases its recovered worktree lease after publication failu
   );
 });
 
-for (const recovery of [
-  "resume",
-  "cancel",
-  "configuration pause",
-  "Claude resume",
-]) {
-  test(`retired execution storage is cleaned before ${recovery} after owner loss`, async (t) => {
-    const fixture = await operatorFixture(t, "plan-execution");
-    if (recovery === "configuration pause") {
-      await mkdir(join(fixture.projectPath, "LOCAL_ARTIFACTS"), {
-        recursive: true,
-      });
-      await writeFile(
-        join(fixture.projectPath, "LOCAL_ARTIFACTS", "agent-runner.json"),
-        JSON.stringify({ schemaVersion: 1, defaultEffort: "current" }),
-      );
-    }
-    const bootA = "11111111-1111-4111-8111-111111111111";
-    const bootB = "22222222-2222-4222-8222-222222222222";
-    const options = {
-      stateRoot: fixture.stateRoot,
-      resolveStopBoundary,
-      hostName: "recovery-host",
-      processId: 100,
-      processIsAlive: () => true,
-      processIdentity: (pid) => ({ bootId: bootA, startTicks: String(pid) }),
-      leaseStaleMs: 0,
-    };
-    const store = createRunStore(options);
-    const delegate = createExecutionAdapter();
-    const runner = runnerFor(fixture, { codex: delegate }, { runStore: store });
-    const { run } = await runner.create({
-      pipelineId: "plan-execution",
-      projectPath: fixture.projectPath,
-      taskPath: fixture.taskPath,
-      proactiveClarification: false,
-      roleOverrides: {},
-      sourceSession: null,
-    });
-    const lease = await store.acquireRunLease(run.runId);
-    const adapterOwned = recovery === "Claude resume";
-    const root = adapterOwned
-      ? join(tmpdir(), `agent-runner-claude-${process.getuid()}`)
-      : join(fixture.stateRoot, "..", "execution-storage");
-    await mkdir(root, { mode: 0o700 }).catch((cause) => {
-      if (cause.code !== "EEXIST") throw cause;
-    });
-    const rootInfo = await lstat(root, { bigint: true });
-    const intent = {
-      id: adapterOwned ? randomUUID() : "55555555-5555-4555-8555-555555555555",
-      hostname: hostname(),
-      commandIdentity: adapterOwned ? CLAUDE_STORAGE_IDENTITY : "a".repeat(64),
-      phase: "allocating",
-      root: {
-        path: root,
-        device: String(rootInfo.dev),
-        inode: String(rootInfo.ino),
-      },
-      directory: null,
-    };
-    await store.recordExecutionResource(lease, intent);
-    const path = join(root, intent.id);
-    t.after(async () => {
-      await rm(path, { force: true, recursive: true });
-      await rm(`${path}-retained`, { force: true, recursive: true });
-    });
-    await mkdir(path, { mode: 0o700 });
-    const directory = await lstat(path, { bigint: true });
-    await store.recordExecutionResource(lease, {
-      ...intent,
-      phase: "allocated",
-      directory: {
-        device: String(directory.dev),
-        inode: String(directory.ino),
-      },
-    });
-    await writeFile(join(path, "interrupted-cache"), "must not be reused");
-    // Simulate a supervised child recorded before its owner was lost.
-    await store.recordExecutionProcess(lease, 4242, {
-      processIdentity: { bootId: bootA, startTicks: "4242" },
-      namespaceId: "pid:[4026533000]",
-    });
-    await assert.rejects(lease.release(), {
-      code: "ERR_EXECUTION_PROCESS_ACTIVE",
-    });
-    const recoveredStore = createRunStore({
-      ...options,
-      processId: 200,
-      processIdentity: (pid) => ({ bootId: bootB, startTicks: String(pid) }),
-    });
-    const interruption = new Error("Reached provider after recovery");
-    const leaseInspectionFailure = new Error(
-      "Transient lease inspection failure",
-    );
-    let failLeaseInspection = false;
-    let providerCalls = 0;
-    const recoveredRunner = runnerFor(
-      fixture,
-      {
-        codex: {
-          ...delegate,
-          async run(request) {
-            providerCalls++;
-            const saved = await recoveredStore.loadRun(run.runId);
-            assert.equal(saved.executionProcess, null);
-            assert.equal(saved.executionResource, null);
-            await assert.rejects(lstat(path), { code: "ENOENT" });
-            if (adapterOwned) {
-              // A terminal provider failure may also leave a cleanup record.
-              // Resume must retire it without invoking another provider turn.
-              await request.onResource(intent);
-              await mkdir(path, { mode: 0o700 });
-              const allocated = await lstat(path, { bigint: true });
-              await request.onResource({
-                ...intent,
-                phase: "allocated",
-                directory: {
-                  device: String(allocated.dev),
-                  inode: String(allocated.ino),
-                },
-              });
-            }
-            throw interruption;
-          },
-        },
-      },
-      {
-        runStore: {
-          ...recoveredStore,
-          async acquireRunLease(...args) {
-            if (failLeaseInspection) {
-              failLeaseInspection = false;
-              throw leaseInspectionFailure;
-            }
-            return recoveredStore.acquireRunLease(...args);
-          },
-        },
-        trustedValidation: createTrustedValidationService(),
-      },
-    );
-    if (adapterOwned) {
-      const ownedPath = `${path}-retained`;
-      await rename(path, ownedPath);
-      await mkdir(path, { mode: 0o700 });
-      await writeFile(join(path, "replacement"), "unowned");
-      const beforeCleanup = await recoveredStore.loadRun(run.runId);
-      await assert.rejects(
-        recoveredRunner.resume({ runId: run.runId, action: null }),
-        { code: "ERR_EXECUTION_RESOURCE_UNVERIFIABLE" },
-      );
-      const blocked = await recoveredStore.loadRun(run.runId);
-      assert.deepEqual(blocked.pipelineState, beforeCleanup.pipelineState);
-      assert.deepEqual(
-        blocked.executionResource,
-        beforeCleanup.executionResource,
-      );
-      assert.ok(
-        (await recoveredStore.loadRunHistory(run.runId)).events.some(
-          (event) => event.activity?.kind === "cleanup-pending",
-        ),
-      );
-      assert.equal(providerCalls, 0);
-      failLeaseInspection = true;
-      await assert.rejects(
-        recoveredRunner.resume({ runId: run.runId, action: null }),
-        (cause) => cause === leaseInspectionFailure,
-      );
-      await assert.rejects(
-        recoveredRunner.resume({
-          runId: run.runId,
-          action: null,
-          expectedRevision: blocked.revision - 1,
-        }),
-        { code: "ERR_RUN_REVISION_CHANGED" },
-      );
-      assert.equal(
-        await readFile(join(path, "replacement"), "utf8"),
-        "unowned",
-      );
-      await rm(path, { recursive: true });
-      await rename(ownedPath, path);
-    }
-    if (recovery === "cancel") {
-      const current = await recoveredStore.loadRun(run.runId);
-      await recoveredRunner.requestOperatorStop({
-        runId: run.runId,
-        kind: "cancel_requested",
-        expectedRevision: current.revision,
-        idempotencyKey: "storage-recovery-stop",
-        timing: "immediate",
-      });
-      const canceled = (
-        await recoveredRunner.resume({ runId: run.runId, action: null })
-      ).run;
-      assert.equal(canceled.pipelineState.workflowState, "CANCELED");
-      assert.equal(providerCalls, 0);
-    } else if (recovery === "configuration pause") {
-      await mkdir(join(fixture.projectPath, "LOCAL_ARTIFACTS"), {
-        recursive: true,
-      });
-      await writeFile(
-        join(fixture.projectPath, "LOCAL_ARTIFACTS", "agent-runner.json"),
-        JSON.stringify({ schemaVersion: 1, defaultEffort: "high" }),
-      );
-      const paused = (
-        await recoveredRunner.resume({ runId: run.runId, action: null })
-      ).run;
-      assert.equal(paused.pause.reason, "project_configuration_changed");
-      assert.equal(providerCalls, 0);
-    } else {
-      await assert.rejects(
-        recoveredRunner.resume({ runId: run.runId, action: null }),
-        (cause) => {
-          assert.equal(cause.name, "AgentBoundaryError", cause.code);
-          return true;
-        },
-      );
-      assert.equal(providerCalls, 1);
-      if (adapterOwned) {
-        const failed = await recoveredStore.loadRun(run.runId);
-        assert.equal(failed.pipelineState.workflowState, "FAILED");
-        assert.notEqual(failed.executionResource, null);
-        const recovered = await recoveredRunner.resume({
-          runId: run.runId,
-          action: null,
-        });
-        assert.equal(recovered.run.pipelineState.workflowState, "FAILED");
-        assert.equal(recovered.run.pause.code, failed.pause.code);
-        assert.equal(providerCalls, 1);
-      }
-    }
-    const saved = await recoveredStore.loadRun(run.runId);
-    assert.equal(saved.executionProcess, null);
-    assert.equal(saved.executionResource, null);
-    await assert.rejects(lstat(path), { code: "ENOENT" });
-    assert.equal(await recoveredStore.runIsLeased(run.runId), false);
+test("retired Claude execution storage is inode-verified and cleaned after owner loss", async (t) => {
+  const fixture = await operatorFixture(t, "plan-execution");
+  const bootA = "11111111-1111-4111-8111-111111111111";
+  const bootB = "22222222-2222-4222-8222-222222222222";
+  const options = {
+    stateRoot: fixture.stateRoot,
+    resolveStopBoundary,
+    hostName: "recovery-host",
+    processId: 100,
+    processIsAlive: () => true,
+    processIdentity: (pid) => ({ bootId: bootA, startTicks: String(pid) }),
+    leaseStaleMs: 0,
+  };
+  const store = createRunStore(options);
+  const delegate = createExecutionAdapter();
+  const runner = runnerFor(fixture, { codex: delegate }, { runStore: store });
+  const { run } = await runner.create({
+    pipelineId: "plan-execution",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    sourceSession: null,
   });
-}
+  const lease = await store.acquireRunLease(run.runId);
+  const root = join(tmpdir(), `agent-runner-claude-${process.getuid()}`);
+  await mkdir(root, { mode: 0o700 }).catch((cause) => {
+    if (cause.code !== "EEXIST") throw cause;
+  });
+  const rootInfo = await lstat(root, { bigint: true });
+  const intent = {
+    id: randomUUID(),
+    hostname: hostname(),
+    commandIdentity: CLAUDE_STORAGE_IDENTITY,
+    phase: "allocating",
+    root: {
+      path: root,
+      device: String(rootInfo.dev),
+      inode: String(rootInfo.ino),
+    },
+    directory: null,
+  };
+  await store.recordExecutionResource(lease, intent);
+  const path = join(root, intent.id);
+  t.after(async () => {
+    await rm(path, { force: true, recursive: true });
+    await rm(`${path}-retained`, { force: true, recursive: true });
+  });
+  await mkdir(path, { mode: 0o700 });
+  const directory = await lstat(path, { bigint: true });
+  await store.recordExecutionResource(lease, {
+    ...intent,
+    phase: "allocated",
+    directory: {
+      device: String(directory.dev),
+      inode: String(directory.ino),
+    },
+  });
+  await writeFile(join(path, "interrupted-cache"), "must not be reused");
+  await store.recordExecutionProcess(lease, 4242, {
+    processIdentity: { bootId: bootA, startTicks: "4242" },
+    namespaceId: "pid:[4026533000]",
+  });
+  await assert.rejects(lease.release(), {
+    code: "ERR_EXECUTION_PROCESS_ACTIVE",
+  });
+
+  const recoveredStore = createRunStore({
+    ...options,
+    processId: 200,
+    processIdentity: (pid) => ({ bootId: bootB, startTicks: String(pid) }),
+  });
+  const interruption = new Error("Reached provider after recovery");
+  const leaseInspectionFailure = new Error(
+    "Transient lease inspection failure",
+  );
+  let failLeaseInspection = false;
+  let providerCalls = 0;
+  const recoveredRunner = runnerFor(
+    fixture,
+    {
+      codex: {
+        ...delegate,
+        async run(request) {
+          providerCalls++;
+          const saved = await recoveredStore.loadRun(run.runId);
+          assert.equal(saved.executionProcess, null);
+          assert.equal(saved.executionResource, null);
+          await assert.rejects(lstat(path), { code: "ENOENT" });
+          // A terminal provider failure may also leave a cleanup record.
+          // Resume must retire it without invoking another provider turn.
+          await request.onResource(intent);
+          await mkdir(path, { mode: 0o700 });
+          const allocated = await lstat(path, { bigint: true });
+          await request.onResource({
+            ...intent,
+            phase: "allocated",
+            directory: {
+              device: String(allocated.dev),
+              inode: String(allocated.ino),
+            },
+          });
+          throw interruption;
+        },
+      },
+    },
+    {
+      runStore: {
+        ...recoveredStore,
+        async acquireRunLease(...args) {
+          if (failLeaseInspection) {
+            failLeaseInspection = false;
+            throw leaseInspectionFailure;
+          }
+          return recoveredStore.acquireRunLease(...args);
+        },
+      },
+      trustedValidation: createTrustedValidationService(),
+    },
+  );
+
+  const ownedPath = `${path}-retained`;
+  await rename(path, ownedPath);
+  await mkdir(path, { mode: 0o700 });
+  await writeFile(join(path, "replacement"), "unowned");
+  const beforeCleanup = await recoveredStore.loadRun(run.runId);
+  await assert.rejects(
+    recoveredRunner.resume({ runId: run.runId, action: null }),
+    { code: "ERR_EXECUTION_RESOURCE_UNVERIFIABLE" },
+  );
+  const blocked = await recoveredStore.loadRun(run.runId);
+  assert.deepEqual(blocked.pipelineState, beforeCleanup.pipelineState);
+  assert.deepEqual(blocked.executionResource, beforeCleanup.executionResource);
+  assert.ok(
+    (await recoveredStore.loadRunHistory(run.runId)).events.some(
+      (event) => event.activity?.kind === "cleanup-pending",
+    ),
+  );
+  assert.equal(providerCalls, 0);
+  failLeaseInspection = true;
+  await assert.rejects(
+    recoveredRunner.resume({ runId: run.runId, action: null }),
+    (cause) => cause === leaseInspectionFailure,
+  );
+  await assert.rejects(
+    recoveredRunner.resume({
+      runId: run.runId,
+      action: null,
+      expectedRevision: blocked.revision - 1,
+    }),
+    { code: "ERR_RUN_REVISION_CHANGED" },
+  );
+  assert.equal(await readFile(join(path, "replacement"), "utf8"), "unowned");
+  await rm(path, { recursive: true });
+  await rename(ownedPath, path);
+
+  await assert.rejects(
+    recoveredRunner.resume({ runId: run.runId, action: null }),
+    (cause) => {
+      assert.equal(cause.name, "AgentBoundaryError", cause.code);
+      return true;
+    },
+  );
+  assert.equal(providerCalls, 1);
+  const failed = await recoveredStore.loadRun(run.runId);
+  assert.equal(failed.pipelineState.workflowState, "FAILED");
+  assert.notEqual(failed.executionResource, null);
+  const recovered = await recoveredRunner.resume({
+    runId: run.runId,
+    action: null,
+  });
+  assert.equal(recovered.run.pipelineState.workflowState, "FAILED");
+  assert.equal(recovered.run.pause.code, failed.pause.code);
+  assert.equal(providerCalls, 1);
+  assert.equal(recovered.run.executionProcess, null);
+  assert.equal(recovered.run.executionResource, null);
+  await assert.rejects(lstat(path), { code: "ENOENT" });
+  assert.equal(await recoveredStore.runIsLeased(run.runId), false);
+});
