@@ -32,6 +32,12 @@ test("tracked example is valid and local configuration is ignored", async () => 
   assert.equal(configuration.defaultEffort, "current");
   assert.equal(configuration.trustedCommandTimeoutMs, 3_600_000);
   assert.deepEqual(configuration.trustedCommands, {
+    "projected-build": {
+      command: "node build.js",
+      executable: "node",
+      arguments: ["build.js"],
+      capabilities: { sourceProjection: true },
+    },
     "repository-check": {
       command: "npm run check",
       executable: "npm",

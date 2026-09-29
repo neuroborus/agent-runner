@@ -72,11 +72,12 @@ runner never restores the file or derives missing evidence for a legacy run,
 and begun irreversible effects remain verification-only.
 
 The same protected resolution freezes `trustedCommandTimeoutMs` into each new
-run's version-3 trusted-validation snapshot. It is a strict `1` through
+run's version-4 trusted-validation snapshot. It is a strict `1` through
 `2147483647` millisecond integer, defaults to `3600000`, and resolves project
 over root without a CLI or MCP bypass. Its fingerprinted value is reused on
 resume and remains per-run under concurrency; legacy version-1 and version-2
-snapshots use the one-hour fallback. Preparation keeps its independent
+snapshots use the one-hour fallback, while version 3 retains its timeout without
+gaining source authority. Preparation keeps its independent
 `Math.min(timeoutMs, 10_000)` safety cap.
 
 Authoritative run state is external to both repository and task. These trees
@@ -120,11 +121,18 @@ Trusted command capability requests are closed and fingerprinted. Scratch/cache
 declarations cannot name host paths or environment bindings. Artifact declarations
 pin canonical HTTPS URLs and SHA-256 digests; they do not authorize raw network,
 credentials, proxies, redirects, arbitrary mounts, or project-controlled trust.
+Source projection is one boolean authority, not a path: the runner reconstructs
+the accepted HEAD-plus-worktree source in its own mode-0700 allocation, omitting
+ignored untracked files and Git metadata, and mounts only that copy writable.
+The original worktree, index, control state, task/state trees, credentials, and
+undeclared host paths are not exposed to the check. Projected mutations are
+disposable and cannot become implementation or handoff content.
 Unavailable capabilities block before provider work rather than broadening an
 agent or validation sandbox. Legacy snapshots retain their original restricted
 authority and evidence bindings. Scratch/cache and dependency allocations have
-journaled intent and verified filesystem identity before downloading or launch,
-remain outside protected project and control paths, and are cleaned only after owned descendants retire. Uncertain
+journaled intent and verified filesystem identity before downloading,
+materializing, or launching, remain outside protected project and control paths,
+and are cleaned only after owned descendants retire. Uncertain
 ownership retains cleanup evidence and never authorizes deletion or cache reuse.
 Only digest-verified dependencies mount read-only at the runner-defined path.
 No partials, mutable shared downloads, automatic extraction, or host installation
@@ -140,6 +148,18 @@ Transports retire before publication or cleanup; uncertain retirement retains
 ownership. Journaled acquisition process identity also blocks cleanup after
 service reconstruction while the owner is live or unverifiable. Same-service
 transport retirement or verified owner death permits cleanup.
+Source materialization reconstructs the frozen repository HEAD plus the exact
+fingerprinted tracked and non-ignored untracked worktree changes without taking
+staged blob content from the mutable index. It matches the allocated source-
+directory identity before writing, then verifies the projected tree's paths,
+kinds, modes, sizes, and content hashes before rechecking repository and
+allocation identity for launch. Stale fingerprints, HEAD or index drift,
+projection substitution, protected control-path overlap, runtime exposure of an
+external protected path, incomplete copies, original-repository changes, and
+uncertain process or cleanup retirement reject the result. Accepted bounded
+evidence remains tied to the source content fingerprint and HEAD, exact command
+identity, frozen authority and trusted-configuration fingerprint, and the run's
+validation bindings.
 Timeout configuration changes only the execution deadline. It does not weaken
 isolation, make an incompatible sandbox usable, or cross the deliberate
 no-output-retention boundary. Trusted stdout/stderr remain discarded, so a host

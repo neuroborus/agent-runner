@@ -67,6 +67,12 @@ async function repository(t) {
   return projectPath;
 }
 
+function siblingStorage(t, projectPath, name) {
+  const storageRoot = `${projectPath}-${name}`;
+  t.after(() => rm(storageRoot, { recursive: true, force: true }));
+  return storageRoot;
+}
+
 function snapshot(alias, command, executable, argumentsList, timeoutMs) {
   return createTrustedValidationSnapshot(
     {
@@ -87,15 +93,20 @@ function legacySnapshot(schemaVersion) {
     command: "node check.js",
     executable: "node",
     arguments: ["check.js"],
-    ...(schemaVersion === 2 ? { capabilities: {} } : {}),
+    ...(schemaVersion >= 2 ? { capabilities: {} } : {}),
   };
   const identity = hash(JSON.stringify(vector));
   return {
     schemaVersion,
+    ...(schemaVersion >= 3 ? { timeoutMs: 3_600_000 } : {}),
     commands: [{ ...vector, identity }],
     commandFingerprint: hash(JSON.stringify([identity])),
     configurationFingerprint: hash(
-      JSON.stringify({ schemaVersion, commands: [vector] }),
+      JSON.stringify({
+        schemaVersion,
+        commands: [vector],
+        ...(schemaVersion >= 3 ? { timeoutMs: 3_600_000 } : {}),
+      }),
     ),
   };
 }
@@ -155,7 +166,7 @@ test("freezes bounded timeouts into configuration fingerprints without changing 
     2_147_483_647,
   );
 
-  assert.equal(first.schemaVersion, 3);
+  assert.equal(first.schemaVersion, 4);
   assert.equal(first.timeoutMs, 1);
   assert.equal(second.timeoutMs, 2_147_483_647);
   assert.equal(first.commands[0].identity, second.commands[0].identity);
@@ -249,7 +260,7 @@ test("uses each concurrent run snapshot's timeout independently", async () => {
   });
 });
 
-test("keeps the one-hour fallback for legacy snapshot versions", async () => {
+test("keeps legacy snapshot versions compatible without granting new authority", async () => {
   const projectPath = process.cwd();
   const before = { projectPath, contentFingerprint: hash("content") };
   const observed = [];
@@ -276,7 +287,7 @@ test("keeps the one-hour fallback for legacy snapshot versions", async () => {
     },
   );
 
-  for (const schemaVersion of [1, 2]) {
+  for (const schemaVersion of [1, 2, 3]) {
     const trusted = legacySnapshot(schemaVersion);
     await service.execute({
       bindings: {
@@ -291,7 +302,19 @@ test("keeps the one-hour fallback for legacy snapshot versions", async () => {
     });
   }
 
-  assert.deepEqual(observed, [3_600_000, 3_600_000]);
+  assert.deepEqual(observed, [3_600_000, 3_600_000, 3_600_000]);
+  const legacy = legacySnapshot(3);
+  assert.throws(() =>
+    validateTrustedValidationSnapshot({
+      ...legacy,
+      commands: [
+        {
+          ...legacy.commands[0],
+          capabilities: { sourceProjection: true },
+        },
+      ],
+    }),
+  );
 });
 
 test("caps preparation at ten seconds while honoring shorter snapshot timeouts", async () => {
@@ -547,6 +570,19 @@ async function bindings(git, projectPath, trusted) {
   };
 }
 
+async function projectedBindings(git, projectPath, trusted) {
+  const source = await git.snapshot({ allowedPaths: [], projectPath });
+  return {
+    bindings: {
+      contentFingerprint: source.contentFingerprint,
+      validationInfrastructureFingerprint: hash("test infrastructure"),
+      commandFingerprint: trusted.commandFingerprint,
+      configurationFingerprint: trusted.configurationFingerprint,
+    },
+    sourceHead: source.head,
+  };
+}
+
 test("executes an exact persisted vector with bounded redacted evidence", async (t) => {
   const projectPath = await repository(t);
   const git = createGitService();
@@ -573,6 +609,198 @@ test("executes an exact persisted vector with bounded redacted evidence", async 
     "Runner-trusted command service-check exited with code 0.",
   ]);
   assert.deepEqual(validateTrustedValidationSnapshot(trusted), trusted);
+});
+
+test("binds projected execution to exact source while leaving the checkout untouched", async (t) => {
+  const projectPath = await repository(t);
+  await writeFile(join(projectPath, "untracked.txt"), "workspace\n");
+  const git = createGitService();
+  const trusted = createTrustedValidationSnapshot(
+    {
+      build: {
+        command: "node build",
+        executable: process.execPath,
+        arguments: ["build.js"],
+        capabilities: { sourceProjection: true },
+      },
+    },
+    ["build"],
+  );
+  const records = [];
+  const service = trustedService(git, {
+    storageRoot: siblingStorage(t, projectPath, "projected-storage"),
+    async runCommand(command, options) {
+      assert.deepEqual(command, trusted.commands[0]);
+      assert.notEqual(options.cwd, projectPath);
+      assert.equal(
+        await readFile(join(options.cwd, "tracked.txt"), "utf8"),
+        "initial\n",
+      );
+      assert.equal(
+        await readFile(join(options.cwd, "untracked.txt"), "utf8"),
+        "workspace\n",
+      );
+      await writeFile(join(options.cwd, "tracked.txt"), "generated\n");
+      await writeFile(join(options.cwd, "build-output.txt"), "output\n");
+      return {
+        status: "PASS",
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        reason: "exit",
+      };
+    },
+  });
+
+  const result = await service.execute({
+    ...(await projectedBindings(git, projectPath, trusted)),
+    commandIdentity: trusted.commands[0].identity,
+    onProcess: async () => {},
+    onResource: async (record) => records.push(record),
+    projectPath,
+    snapshot: trusted,
+  });
+
+  assert.equal(result.status, "PASS", JSON.stringify({ result, records }));
+  assert.match(result.sourceHead, /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u);
+  assert.equal(
+    await readFile(join(projectPath, "tracked.txt"), "utf8"),
+    "initial\n",
+  );
+  await assert.rejects(readFile(join(projectPath, "build-output.txt")), {
+    code: "ENOENT",
+  });
+  assert.deepEqual(
+    records.map((record) => record?.phase ?? null),
+    ["allocating", "allocated", null],
+  );
+});
+
+test("rejects source drift after projection without launching the check", async (t) => {
+  const projectPath = await repository(t);
+  const git = createGitService();
+  const trusted = createTrustedValidationSnapshot(
+    {
+      build: {
+        command: "node build",
+        executable: process.execPath,
+        arguments: ["build.js"],
+        capabilities: { sourceProjection: true },
+      },
+    },
+    ["build"],
+  );
+  const service = trustedService(
+    {
+      ...git,
+      async materializeSource(options) {
+        const materialized = await git.materializeSource(options);
+        await writeFile(join(projectPath, "tracked.txt"), "raced\n");
+        return materialized;
+      },
+    },
+    {
+      storageRoot: siblingStorage(t, projectPath, "raced-storage"),
+      runCommand: () => assert.fail("A stale projection must not execute"),
+    },
+  );
+
+  await assert.rejects(
+    service.execute({
+      ...(await projectedBindings(git, projectPath, trusted)),
+      commandIdentity: trusted.commands[0].identity,
+      onProcess: async () => {},
+      onResource: async () => {},
+      projectPath,
+      snapshot: trusted,
+    }),
+    (error) =>
+      error.code === "ERR_TRUSTED_VALIDATION_MUTATED_REPOSITORY" &&
+      error.changes.includes("tracked-content"),
+  );
+});
+
+test("normalizes a materialization race as a stale trusted-validation binding", async (t) => {
+  const projectPath = await repository(t);
+  const git = createGitService();
+  const trusted = createTrustedValidationSnapshot(
+    {
+      build: {
+        command: "node build",
+        executable: process.execPath,
+        arguments: ["build.js"],
+        capabilities: { sourceProjection: true },
+      },
+    },
+    ["build"],
+  );
+  const service = trustedService(
+    {
+      ...git,
+      async materializeSource() {
+        throw Object.assign(new Error("Source raced"), {
+          code: "ERR_GIT_SOURCE_CHANGED",
+        });
+      },
+    },
+    {
+      storageRoot: siblingStorage(t, projectPath, "stale-storage"),
+      runCommand: () => assert.fail("A stale projection must not execute"),
+    },
+  );
+
+  await assert.rejects(
+    service.execute({
+      ...(await projectedBindings(git, projectPath, trusted)),
+      commandIdentity: trusted.commands[0].identity,
+      onProcess: async () => {},
+      onResource: async () => {},
+      projectPath,
+      snapshot: trusted,
+    }),
+    { code: "ERR_TRUSTED_VALIDATION_BINDING_CHANGED" },
+  );
+});
+
+test("rejects a changed source HEAD with the same workspace fingerprint", async (t) => {
+  const projectPath = await repository(t);
+  const git = createGitService();
+  const trusted = createTrustedValidationSnapshot(
+    {
+      build: {
+        command: "node build",
+        executable: process.execPath,
+        arguments: ["build.js"],
+        capabilities: { sourceProjection: true },
+      },
+    },
+    ["build"],
+  );
+  const accepted = await projectedBindings(git, projectPath, trusted);
+  await executeFile("git", [
+    "-C",
+    projectPath,
+    "commit",
+    "--allow-empty",
+    "-qm",
+    "test: move head",
+  ]);
+  const service = trustedService(git, {
+    storageRoot: siblingStorage(t, projectPath, "moved-head-storage"),
+    runCommand: () => assert.fail("A different source HEAD must not execute"),
+  });
+
+  await assert.rejects(
+    service.execute({
+      ...accepted,
+      commandIdentity: trusted.commands[0].identity,
+      onProcess: async () => {},
+      onResource: async () => {},
+      projectPath,
+      snapshot: trusted,
+    }),
+    { code: "ERR_TRUSTED_VALIDATION_BINDING_CHANGED" },
+  );
 });
 
 test("does not retain trusted command process output", async (t) => {

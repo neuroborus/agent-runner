@@ -658,7 +658,7 @@ function entriesMatch(left, right) {
   );
 }
 
-export async function contentChangesAtRoot(
+async function inspectContentChangesAtRoot(
   context,
   repositoryPath,
   allowedPaths,
@@ -754,7 +754,43 @@ export async function contentChangesAtRoot(
     contentFingerprint: hashEntries(combinedEntries.values()),
     trackedContentFingerprint: hashEntries(trackedEntries),
     untrackedContentFingerprint: hashEntries(untrackedEntries),
+    entries: Object.freeze([...combinedEntries.values()]),
   });
+}
+
+export async function contentChangesAtRoot(
+  context,
+  repositoryPath,
+  allowedPaths,
+  options,
+) {
+  const { entries: _entries, ...changes } = await inspectContentChangesAtRoot(
+    context,
+    repositoryPath,
+    allowedPaths,
+    options,
+  );
+  return Object.freeze(changes);
+}
+
+export async function sourceChangesAtRoot(context, repositoryPath, options) {
+  // Source projections bind immutable object IDs, not mutable replacement refs.
+  const sourceContext = {
+    currentHead: context.currentHead,
+    runGit(path, argumentsList, commandOptions) {
+      return context.runGit(
+        path,
+        ["--no-replace-objects", ...argumentsList],
+        commandOptions,
+      );
+    },
+  };
+  return inspectContentChangesAtRoot(
+    sourceContext,
+    repositoryPath,
+    [],
+    options,
+  );
 }
 
 export async function contentFingerprintsAtRoot(

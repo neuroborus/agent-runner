@@ -71,7 +71,7 @@ async function fixture(t, capabilities = { scratch: true, cache: true }) {
   let checks = 0;
   const git = {
     async snapshot() {
-      return { projectPath, contentFingerprint: hash };
+      return { projectPath, head: null, contentFingerprint: hash };
     },
     async assertUnchanged() {
       checks++;
@@ -89,6 +89,7 @@ async function fixture(t, capabilities = { scratch: true, cache: true }) {
     projectPath,
     snapshot,
     commandIdentity: snapshot.commands[0].identity,
+    sourceHead: null,
     storageForbiddenPaths: [projectPath, stateRoot, taskPath],
     onResource,
     onProcess: async () => {},
@@ -121,6 +122,7 @@ async function fixture(t, capabilities = { scratch: true, cache: true }) {
     root,
     projectPath,
     stateRoot,
+    taskPath,
     storageRoot,
     store,
     state,
@@ -205,6 +207,175 @@ for (const capabilities of [
     );
   });
 }
+
+test("projects exact source into owned writable storage without exposing the repository", async (t) => {
+  const f = await fixture(t, {
+    scratch: true,
+    sourceProjection: true,
+  });
+  await writeFile(join(f.projectPath, "source.txt"), "protected\n");
+  let projectionPath;
+  const service = f.service({
+    git: {
+      ...f.git,
+      async materializeSource(options) {
+        assert.equal(options.expectedContentFingerprint, hash);
+        assert.equal(f.records.at(-1)?.phase, "allocated");
+        const sourceIdentity = await lstat(options.destinationPath, {
+          bigint: true,
+        });
+        assert.deepEqual(options.destinationIdentity, {
+          device: String(sourceIdentity.dev),
+          inode: String(sourceIdentity.ino),
+        });
+        assert.ok(options.protectedPaths.includes(f.stateRoot));
+        assert.ok(options.protectedPaths.includes(f.taskPath));
+        assert.equal(options.protectedPaths.includes(f.projectPath), false);
+        projectionPath = options.destinationPath;
+        await writeFile(join(projectionPath, "source.txt"), "protected\n");
+      },
+    },
+    async runCommand(command, options) {
+      assert.equal(options.cwd, projectionPath);
+      const target = command.arguments.indexOf(f.projectPath);
+      assert.equal(command.arguments[target - 2], "--bind");
+      assert.equal(command.arguments[target - 1], projectionPath);
+      assert.equal(
+        command.arguments.some(
+          (value, index) =>
+            value === f.projectPath &&
+            command.arguments[index - 1] === "--ro-bind",
+        ),
+        false,
+      );
+      assert.ok(command.arguments.includes("--unshare-net"));
+      assert.equal(
+        command.arguments.includes(join(f.projectPath, ".git")),
+        false,
+      );
+      assert.equal(command.arguments.includes(f.stateRoot), false);
+      assert.equal(command.arguments.includes(f.taskPath), false);
+      assert.equal(options.environment.SECRET, undefined);
+      assert.equal(options.environment.HTTPS_PROXY, undefined);
+      await writeFile(join(options.cwd, "generated.txt"), "output\n");
+      return passed;
+    },
+  });
+
+  const result = await service.execute(f.request);
+  assert.equal(result.status, "PASS", JSON.stringify(result));
+  assert.equal(
+    await readFile(join(f.projectPath, "source.txt"), "utf8"),
+    "protected\n",
+  );
+  await assert.rejects(access(join(f.projectPath, "generated.txt")), {
+    code: "ENOENT",
+  });
+  assert.deepEqual(await readdir(f.storageRoot), []);
+  assert.deepEqual(
+    f.records.map((record) => record?.phase ?? null),
+    ["allocating", "allocated", null],
+  );
+});
+
+test("rejects source projection when a runtime mount exposes a protected path", async (t) => {
+  const f = await fixture(t, { sourceProjection: true });
+  const privateStorageRoot = join(f.root, "private");
+  const source = join(privateStorageRoot, "source");
+  await mkdir(source, { recursive: true, mode: 0o700 });
+
+  assert.throws(
+    () =>
+      sandboxTrustedCommand(f.request.snapshot.commands[0], {
+        bubblewrapPath: "/usr/bin/bwrap",
+        cwd: f.projectPath,
+        environment: {
+          HOME: f.root,
+          PATH: "/usr/bin:/bin",
+        },
+        privateStorageRoot,
+        protectedPaths: ["/usr"],
+        resources: { source },
+      }),
+    { code: "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE" },
+  );
+});
+
+test("cleans an interrupted source projection after process retirement", async (t) => {
+  const f = await fixture(t, { sourceProjection: true });
+  const controller = new AbortController();
+  const service = f.service({
+    git: {
+      ...f.git,
+      async materializeSource({ destinationPath }) {
+        await writeFile(join(destinationPath, "source.txt"), "projected\n");
+      },
+    },
+    async runCommand() {
+      controller.abort(new Error("Canceled projected fixture"));
+      throw controller.signal.reason;
+    },
+  });
+
+  await assert.rejects(
+    service.execute({ ...f.request, signal: controller.signal }),
+    /Canceled projected fixture/u,
+  );
+  assert.deepEqual(await readdir(f.storageRoot), []);
+  assert.equal((await f.store.loadRun(f.state.runId)).executionResource, null);
+  assert.deepEqual(
+    f.records.map((record) => record?.phase ?? null),
+    ["allocating", "allocated", null],
+  );
+});
+
+test("rejects a substituted source projection and retains recoverable ownership", async (t) => {
+  const f = await fixture(t, { sourceProjection: true });
+  const service = f.service({
+    git: {
+      ...f.git,
+      async materializeSource({ destinationPath }) {
+        await rename(destinationPath, `${destinationPath}-replaced`);
+        await mkdir(destinationPath, { mode: 0o700 });
+        throw Object.assign(new Error("Source projection was replaced"), {
+          code: "ERR_GIT_SOURCE_DESTINATION_CHANGED",
+        });
+      },
+    },
+    runCommand: () => assert.fail("No launch with a substituted projection"),
+  });
+  await assert.rejects(service.execute(f.request), {
+    code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE",
+  });
+  const saved = (await f.store.loadRun(f.state.runId)).executionResource;
+  assert.equal(saved.phase, "allocated");
+  await service.recoverResources({ ...f.request, resource: saved });
+  assert.deepEqual(await readdir(f.storageRoot), []);
+});
+
+test("rechecks source ownership after sandbox preparation and before launch", async (t) => {
+  const f = await fixture(t, { sourceProjection: true });
+  const service = f.service({
+    git: {
+      ...f.git,
+      async materializeSource() {},
+    },
+    async sandboxCommand(command, { environment, resources }) {
+      await rename(resources.source, `${resources.source}-replaced`);
+      await mkdir(resources.source, { mode: 0o700 });
+      return { command, environment };
+    },
+    runCommand: () => assert.fail("No launch with replaced source storage"),
+  });
+
+  await assert.rejects(service.execute(f.request), {
+    code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE",
+  });
+  const saved = (await f.store.loadRun(f.state.runId)).executionResource;
+  assert.equal(saved.phase, "allocated");
+  await service.recoverResources({ ...f.request, resource: saved });
+  assert.deepEqual(await readdir(f.storageRoot), []);
+});
 
 for (const outcome of ["failure", "timeout", "abort", "mutation"]) {
   test(`cleans owned storage and checks repository after ${outcome}`, async (t) => {

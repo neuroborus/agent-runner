@@ -66,7 +66,8 @@ export function normalizeRequirementRequest({ inventory, requirements }) {
     if (
       !record(needs) ||
       Object.keys(needs).some(
-        (key) => !["scratch", "cache", "artifacts"].includes(key),
+        (key) =>
+          !["scratch", "cache", "artifacts", "sourceProjection"].includes(key),
       )
     )
       invalid();
@@ -75,6 +76,10 @@ export function normalizeRequirementRequest({ inventory, requirements }) {
       if (!Object.hasOwn(needs, name)) continue;
       if (needs[name] !== true) invalid();
       capabilities[name] = true;
+    }
+    if (Object.hasOwn(needs, "sourceProjection")) {
+      if (needs.sourceProjection !== true) invalid();
+      capabilities.sourceProjection = true;
     }
     if (Object.hasOwn(needs, "artifacts")) {
       capabilities.artifacts = normalizeArtifacts(needs.artifacts);
@@ -129,6 +134,8 @@ export function requirementBlockers(request, snapshot) {
           ["scratch", "cache"].some(
             (key) => item.capabilities[key] && !authority[key],
           ) ||
+          (item.capabilities.sourceProjection === true &&
+            authority.sourceProjection !== true) ||
           (item.capabilities.artifacts ?? []).some(
             (artifact) =>
               !(authority.artifacts ?? []).some(

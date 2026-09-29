@@ -53,8 +53,8 @@ write-ahead journal, durable actions, execution leases, and state validation.
 The Git capability lives under `src/git/` behind its public `index.js`. The
 small index exposes only the service factory and shared safety error; its
 private service composes command execution, content and snapshot inspection,
-commit verification, and polishing handoff modules without exposing their
-implementation contracts to root consumers.
+exact source materialization, commit verification, and polishing handoff
+modules without exposing their implementation contracts to root consumers.
 
 `inspectHead` reads the current commit object ID and that immutable object's
 subject, including unborn HEAD as `{head: null, subject: null}`. Plan execution
@@ -2443,11 +2443,14 @@ of consumed-commit or completed-handoff verification; pipelines must keep that
 verification-only recovery ahead of any new preparation.
 
 Trusted declarations optionally carry `capabilities`, a closed object with
-`scratch: true`, `cache: true`, and `artifacts: [{ url, sha256 }]`. Omit a
-capability to leave it disabled. Scratch and cache request isolated per-execution
-storage with runner-defined paths and environment bindings; declarations cannot
-choose host paths, mount points, or environment names. Artifacts request pinned
-acquisition outside the check sandbox, never network permission for the command.
+`scratch: true`, `cache: true`, `sourceProjection: true`, and
+`artifacts: [{ url, sha256 }]`. Omit a capability to leave it disabled. Scratch
+and cache request isolated per-execution storage with runner-defined paths and
+environment bindings; declarations cannot choose host paths, mount points, or
+environment names. Source projection requests an isolated writable copy of the
+accepted staging-independent source rather than a host path. Artifacts request
+pinned acquisition outside the check sandbox, never network permission for the
+command.
 The artifact list contains 1–32 unique canonical HTTPS URLs and lowercase
 SHA-256 digests. URLs cannot carry credentials, fragments, nondefault ports,
 IP literals, or local/reserved hostnames. Public DNS, connection pinning,
@@ -2499,16 +2502,17 @@ HTTPS and deadline scheduling without network access.
 
 Root and safe project catalogs share strict normalization, including capability
 parameters. Capability changes participate in catalog conflict detection and
-command identities. New snapshots use schema version 3 with an explicit
+command identities. New snapshots use schema version 4 with an explicit
 `capabilities` object on every command and the resolved `timeoutMs`.
 Configuration fingerprints bind the version, complete normalized request, and
 timeout, while command identities and ordered-command fingerprints remain
 independent of the deadline. Version-1 and version-2 snapshots retain their
 original identities and fingerprints on migration/resume and deterministically
-use the 60-minute fallback, so already accepted finalization evidence remains
-bound to its original policy. Each run carries its own immutable snapshot;
-resume does not reload configuration, and concurrent projects do not share
-deadline state.
+use the 60-minute fallback. Version 3 retains its frozen timeout and closed
+pre-projection capability set. Legacy validation never grants source projection,
+so already accepted evidence remains bound to its original policy. Each run
+carries its own immutable snapshot; resume does not reload configuration, and
+concurrent projects do not share deadline state.
 
 Creation checks the frozen request before provider probes. A valid unavailable
 request creates a durable `environment_blocked` run with incomplete preflight,
@@ -2525,15 +2529,40 @@ Scratch and cache mount only at `/run/agent-runner/scratch` and
 `/run/agent-runner/cache`. They provide `AGENT_RUNNER_SCRATCH`/`TMPDIR` and
 `AGENT_RUNNER_CACHE`/`XDG_CACHE_HOME`/`npm_config_cache` respectively (npm uses
 `/run/agent-runner/cache/npm`). These bindings are runner-defined; project
-configuration chooses only the capability booleans. Build output must explicitly
-target scratch. Dependencies mount only at the read-only
+configuration chooses only the capability booleans. Without source projection,
+build output must explicitly target scratch. Dependencies mount only at the read-only
 `/run/agent-runner/dependencies`, with `AGENT_RUNNER_DEPENDENCIES` bound to that
 path. Files use their declared lowercase SHA-256 digest as their name. No partial
 file is exposed. Artifact-only requests allocate storage even without scratch or
 cache. Extraction or setup must be part of the exact declared command and target
 declared scratch; the runner does not extract archives or install host tools.
-Repository and system mounts remain read-only and networking remains private.
+Without source projection the repository mount remains read-only; system mounts
+are always read-only and networking remains private.
 These capabilities do not change the agent sandbox.
+
+`sourceProjection: true` makes the Git boundary materialize the immutable HEAD
+selected by the pre-execution repository snapshot plus the exact current
+tracked and non-ignored untracked content represented by its staging-independent
+content fingerprint. It neither materializes staged blob content from the
+mutable index nor carries ignored untracked files, and it never copies `.git`.
+The owned allocation is journaled before its destination exists, and the source
+directory must match its allocated device/inode before any source write.
+Descriptor-anchored writes and a final kind, mode, size, and content-hash
+comparison verify the complete owned tree before execution. Its root and
+source-directory identities are also verified before and after materialization.
+The executor rechecks the original repository snapshot before launch, mounts
+only that source directory writable at the canonical project path inside the
+namespace, and uses it as the command's working directory. Original worktree,
+index, Git metadata, state, task paths, credentials, and undeclared host storage
+are absent. The check may create or rewrite projected files, but those effects
+are discarded with the owned allocation after the complete process tree
+retires. A final repository guard rejects external or original-repository drift,
+and accepted evidence retains the source content, HEAD, command-identity,
+ordered-command, trusted-configuration, and validation-infrastructure bindings.
+Stale content or HEAD, substituted directory identities, incomplete
+materialization, projected entries overlapping protected control paths, runtime
+mounts that would expose an external protected path, and uncertain cleanup fail
+closed without reusable output.
 Preflight checks storage-root writability and rejects fixed mount targets that
 overlap protected paths before provider work; allocation rechecks that policy.
 Private storage also cannot overlap system, executable, or PATH exposures;
@@ -2560,16 +2589,18 @@ retain ownership and report the bounded resumable ownership blocker. Resource ow
 The trusted executor creates a runner-owned mode-0700 parent under the runner's
 temporary directory, disjoint from project, task, Git metadata, and runner state.
 A journaled allocation intent precedes exclusive per-execution directory creation;
-verified identity is journaled before downloading, exposing mounts, or launching
-a process. The execution directory owns its dependency subdirectory as well as
-scratch/cache; the acquisition phase records transport ownership separately from
-command process registration.
+verified identity is journaled before downloading, materializing source,
+exposing mounts, or launching a process. The execution directory owns its
+dependency and optional source subdirectories as well as scratch/cache; the
+acquisition phase records transport ownership separately from command process
+registration.
 Directory creation is synchronized before publishing allocation identity, and
 declared storage entries are synchronized before acquisition or launch. Cleanup
 synchronizes removal before clearing journaled ownership, including retries
 after removal.
 Descriptor-anchored directory operations and identity checks reject symlink
-substitution. Only declared scratch/cache subdirectories are mounted writable.
+substitution. Only declared scratch/cache subdirectories and the exact declared
+source projection are mounted writable.
 No mutable cache is reused across executions, including after interruption.
 
 Each runner-trusted validation command derives its deadline from the validated
@@ -2609,9 +2640,10 @@ Before agent work, the root resolves bubblewrap only from fixed
 system locations to a canonical absolute executable whose file and ancestor
 directories are not writable by the runner identity. Project-relative or
 project-writable `PATH` entries never participate, and resume and execution
-reverify the pinned path. The namespace contains minimal read-only system and
-repository mounts, private temporary storage, a hidden ambient home, private
-runtime storage, and a finite non-credential environment. Isolated loopback
+reverify the pinned path. The namespace contains minimal read-only system mounts
+and either the read-only repository view or the declared writable source
+projection, private temporary storage, a hidden ambient home, private runtime
+storage, and a finite non-credential environment. Isolated loopback
 listeners remain available inside the command namespace, but raw host Unix
 daemon and control sockets are masked.
 A Docker daemon must be rootless, and every service must be command-owned inside

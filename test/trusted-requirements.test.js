@@ -57,6 +57,9 @@ async function fixture(t, capabilities = {}) {
       async assertUnchanged() {
         calls.push("unchanged");
       },
+      async materializeSource() {
+        calls.push("materialize");
+      },
     },
     sandboxCommand(value, settings) {
       calls.push("sandbox");
@@ -114,6 +117,7 @@ test("malformed reports receive contract diagnostics before any availability eff
     { command, capabilities: null },
     { command, capabilities: { scratch: false } },
     { command, capabilities: { cache: "/tmp" } },
+    { command, capabilities: { sourceProjection: false } },
     { command, capabilities: { network: true } },
     { command, capabilities: { artifacts: [] } },
     {
@@ -161,6 +165,10 @@ test("valid unsatisfied needs are bounded blockers and never grants", async (t) 
       "insufficient-authority",
     ],
     [[{ command, capabilities: { cache: true } }], "insufficient-authority"],
+    [
+      [{ command, capabilities: { sourceProjection: true } }],
+      "insufficient-authority",
+    ],
     [[{ command, commandIdentity: "c".repeat(64) }], "insufficient-authority"],
     [
       [{ command, capabilities: { artifacts: [artifact] } }],
@@ -240,6 +248,26 @@ test("frozen declarations remain requirements without reports; preparation is no
     "probe",
     "unchanged",
   ]);
+});
+
+test("source-projection requirements match frozen authority without materializing source during inspection", async (t) => {
+  const f = await fixture(t, { sourceProjection: true });
+  const result = await f.service.inspectRequirements({
+    ...f.input,
+    requirements: [
+      {
+        command,
+        commandIdentity: f.input.snapshot.commands[0].identity,
+        capabilities: { sourceProjection: true },
+      },
+    ],
+  });
+  assert.deepEqual(result, { status: "READY", blockers: [] });
+  assert.equal(f.calls.includes("materialize"), false);
+  assert.deepEqual(
+    f.records.map((value) => value?.phase ?? null),
+    ["allocating", "allocated", null],
+  );
 });
 
 test("availability is rechecked after storage and isolation repair", async (t) => {

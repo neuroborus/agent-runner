@@ -185,6 +185,12 @@ test("configuration examples keep trusted vectors and the preferred planning tar
     arguments: ["run", "check"],
     capabilities: { scratch: true, cache: true },
   });
+  assert.deepEqual(example.trustedCommands["projected-build"], {
+    command: "node build.js",
+    executable: "node",
+    arguments: ["build.js"],
+    capabilities: { sourceProjection: true },
+  });
   const authoring = listPipelines().find(({ id }) => id === "plan-authoring");
   assert.equal(
     example.pipelines[authoring.id].preferredCommitLineLimit,

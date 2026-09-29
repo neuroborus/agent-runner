@@ -15,6 +15,12 @@
       "executable": "npm",
       "arguments": ["run", "check"],
       "capabilities": { "scratch": true, "cache": true }
+    },
+    "projected-build": {
+      "command": "node build.js",
+      "executable": "node",
+      "arguments": ["build.js"],
+      "capabilities": { "sourceProjection": true }
     }
   },
   "profiles": {

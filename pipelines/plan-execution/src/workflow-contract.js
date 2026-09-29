@@ -536,12 +536,16 @@ function capabilityError() {
   return workflowError("Trusted execution capabilities are invalid.");
 }
 
-function normalizeCapabilities(value) {
+function normalizeCapabilities(value, { sourceProjection = true } = {}) {
+  const allowed = [
+    "scratch",
+    "cache",
+    "artifacts",
+    ...(sourceProjection ? ["sourceProjection"] : []),
+  ];
   if (
     !isRecord(value) ||
-    Object.keys(value).some(
-      (key) => !["scratch", "cache", "artifacts"].includes(key),
-    )
+    Object.keys(value).some((key) => !allowed.includes(key))
   ) {
     throw capabilityError();
   }
@@ -551,6 +555,10 @@ function normalizeCapabilities(value) {
       if (value[key] !== true) throw capabilityError();
       normalized[key] = true;
     }
+  }
+  if (Object.hasOwn(value, "sourceProjection")) {
+    if (value.sourceProjection !== true) throw capabilityError();
+    normalized.sourceProjection = true;
   }
   if (Object.hasOwn(value, "artifacts")) {
     if (
@@ -646,7 +654,7 @@ function trustedValidationFingerprints(
             ...(capabilities === undefined ? {} : { capabilities }),
           }),
         ),
-        ...(schemaVersion === 3 ? { timeoutMs } : {}),
+        ...(schemaVersion >= 3 ? { timeoutMs } : {}),
       }),
     ),
   });
@@ -677,17 +685,17 @@ function normalizeTrustedValidation(value) {
   const snapshotVersion = value?.schemaVersion;
   const snapshotFields = [
     ...TRUSTED_VALIDATION_FIELDS,
-    ...(snapshotVersion === 3 ? ["timeoutMs"] : []),
+    ...(snapshotVersion >= 3 ? ["timeoutMs"] : []),
   ];
   if (
     !isRecord(value) ||
     !hasExactFields(value, snapshotFields) ||
-    ![1, 2, 3].includes(snapshotVersion) ||
+    ![1, 2, 3, 4].includes(snapshotVersion) ||
     !Array.isArray(value.commands) ||
     value.commands.length > MAX_ITEMS ||
     !HASH_PATTERN.test(value.commandFingerprint) ||
     !HASH_PATTERN.test(value.configurationFingerprint) ||
-    (snapshotVersion === 3 &&
+    (snapshotVersion >= 3 &&
       (!Number.isInteger(value.timeoutMs) ||
         value.timeoutMs < 1 ||
         value.timeoutMs > MAX_TRUSTED_COMMAND_TIMEOUT_MS))
@@ -734,7 +742,11 @@ function normalizeTrustedValidation(value) {
           ),
         ),
         ...(snapshotVersion >= 2
-          ? { capabilities: normalizeCapabilities(command.capabilities) }
+          ? {
+              capabilities: normalizeCapabilities(command.capabilities, {
+                sourceProjection: snapshotVersion >= 4,
+              }),
+            }
           : {}),
         identity: command.identity,
       });
@@ -768,7 +780,7 @@ function normalizeTrustedValidation(value) {
   }
   return Object.freeze({
     schemaVersion: snapshotVersion,
-    ...(snapshotVersion === 3 ? { timeoutMs: value.timeoutMs } : {}),
+    ...(snapshotVersion >= 3 ? { timeoutMs: value.timeoutMs } : {}),
     commands,
     ...fingerprints,
   });

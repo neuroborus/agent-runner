@@ -77,6 +77,18 @@ delegated check is resolved only when runner inspection succeeds. Required check
 remain exclusive to finalization, and consumed commit and completed handoff verification precede new
 preparation effects.
 
+A trusted command that must write beside its inputs may declare
+`"sourceProjection": true` in its closed capabilities object. The runner then
+runs it from a private writable materialization of the accepted source rather
+than the checkout. The projection contains the frozen HEAD plus tracked and
+non-ignored untracked workspace content, but no index, Git metadata, ignored
+dependency tree, project configuration, task/state artifacts, credentials, or
+other undeclared host paths. Writes are discarded after verified process
+retirement. Operators must declare scratch/cache or pinned artifacts separately
+when the build needs them; source projection does not grant raw network, host
+cache, or arbitrary mount authority. Legacy runs never gain it from current
+configuration.
+
 Execution pauses as `plan_revision_required` when runner-observed HEAD already
 contains the current planned subject or moved outside verified commit settlement.
 The operator must revise the plan and start a new run; external commits are never

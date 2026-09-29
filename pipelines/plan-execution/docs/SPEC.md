@@ -411,14 +411,15 @@ value once; resume and concurrent runs use their own unchanged snapshots. For
 example, `"trustedCommandTimeoutMs": 7200000` selects a two-hour deadline.
 
 Trusted declarations also accept the closed `capabilities` object described in
-the architecture: `scratch: true`, `cache: true`, and bounded pinned HTTPS
-`artifacts`. Root and project normalization are identical. New snapshots use
-version 3 and include normalized capabilities in identities plus `timeoutMs` in
-the trusted-configuration fingerprint; the timeout does not change command
-identities. Version-1 and version-2 snapshots retain their exact policy and
-evidence bindings and use the deterministic one-hour fallback. Migration never
-upgrades authority or reloads declarations. Capability preparation uses the
-smaller of the snapshot deadline and 10 seconds.
+the architecture: `scratch: true`, `cache: true`, `sourceProjection: true`, and
+bounded pinned HTTPS `artifacts`. Root and project normalization are identical.
+New snapshots use version 4 and include normalized capabilities in identities
+plus `timeoutMs` in the trusted-configuration fingerprint; the timeout does not
+change command identities. Version 3 retains its saved timeout without gaining
+source-projection authority. Version 1 and version 2 retain their exact policy
+and evidence bindings and use the deterministic one-hour fallback. Migration
+never upgrades authority or reloads declarations. Capability preparation uses
+the smaller of the snapshot deadline and 10 seconds.
 
 Bootstrap and validation migration report bounded exact-command needs alongside
 each active role's inventory. `capabilityRequirements` permits 256 reports per
@@ -2170,8 +2171,9 @@ fixed system locations to a canonical absolute executable whose file and
 ancestor directories are not writable by the runner identity. Project-relative
 or project-writable `PATH` entries never participate, and resume and execution
 reverify that pinned path. Its private network namespace contains minimal
-read-only system and repository mounts, private runtime and temporary storage,
-a hidden ambient home, and a finite non-credential environment.
+read-only system mounts and either the read-only repository view or the
+declared writable source projection, private runtime and temporary storage, a
+hidden ambient home, and a finite non-credential environment.
 Command-owned loopback listeners remain possible inside that namespace, but raw
 host Unix daemon and control sockets are masked. A Docker daemon must be
 rootless, and every service must run as part of the exact command inside the
@@ -2401,9 +2403,10 @@ identity and changes the runtime compatibility token. Leased migration preserves
 version-9 allocation records without new resource effects. The root retires owned processes and
 cleans recorded resources before resuming pipeline work or settling an operator
 stop. Legacy envelopes migrate to null storage ownership without allocation or
-provider activity. Only declared scratch/cache directories are writable, through
-the fixed mounts and environment bindings owned by the trusted-validation
-architecture. Required build output must stay outside the repository.
+provider activity. Only declared scratch/cache directories and a declared
+writable source projection are writable through bindings owned by the trusted-
+validation architecture. Projected build output is discarded; without that
+authority required output must stay in scratch and outside the repository.
 
 Cleanup uncertainty preserves the resource record and pauses finalization as
 `environment_blocked` at `FINALIZE`; neither the check nor subsequent work is

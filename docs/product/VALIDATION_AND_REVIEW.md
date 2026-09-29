@@ -198,14 +198,15 @@ selection to 32 aliases. Project selections may use project-only aliases.
 Vectors, identities, and fingerprints are frozen before agent work and reused
 unchanged on resume; later project configuration edits retain the protected-input
 guard. Profile implementations and sandbox policy remain runner-owned.
-Declarations may request the closed scratch/cache and pinned-HTTPS-artifact
-capability vocabulary owned by the trusted-validation architecture. Parameters
-are frozen into command identities and snapshot fingerprints. Version-3
-snapshots additionally carry the resolved per-command `timeoutMs` in the
-trusted-configuration fingerprint without changing command identities. Legacy
-version-1 and version-2 snapshots preserve their original policy and evidence
-bindings and use the deterministic 60-minute fallback; resume never grants
-newly configured capabilities or adopts a new deadline.
+Declarations may request the closed scratch/cache, writable source-projection,
+and pinned-HTTPS-artifact capability vocabulary owned by the trusted-validation
+architecture. Parameters are frozen into command identities and snapshot
+fingerprints. Version-4 snapshots carry the resolved per-command `timeoutMs` in
+the trusted-configuration fingerprint and may grant `sourceProjection: true`.
+Version 3 retains its frozen deadline but cannot acquire that new authority;
+version 1 and version 2 preserve their original policy and evidence bindings
+and use the deterministic 60-minute fallback. Resume never grants newly
+configured capabilities or adopts a new deadline.
 
 The public root/project setting is `trustedCommandTimeoutMs`, in milliseconds.
 It accepts strict integers from `1` through `2147483647`, defaults to `3600000`
@@ -228,6 +229,22 @@ change the declaration; retries acquire fresh files after cleanup. Preflight
 checks storage and isolation without downloading. Capability inspection is not
 check execution or validation evidence. Verification-only recovery of a consumed
 commit or completed handoff remains available without those capabilities.
+
+Source projection is configuration-frozen boolean authority, never an agent-
+chosen path. After journaling the private allocation, the Git boundary
+materializes the frozen HEAD plus the exact tracked and non-ignored untracked
+content represented by the accepted staging-independent fingerprint. It ignores
+staged blob content, ignored untracked files, and Git metadata. The isolated
+executor mounts only that owned copy writable at the canonical project path;
+original repository, index, state, task paths, credentials, and undeclared host
+storage stay absent.
+Projected build effects are disposable. Allocation identity and the original
+repository snapshot are rechecked before launch and after process retirement;
+stale source, substituted storage, external repository drift, or incomplete
+cleanup cannot produce accepted evidence. The bounded result remains tied to
+the source content fingerprint and accepted HEAD, exact command identity,
+resolved authority, ordered-command and trusted-configuration fingerprints,
+and validation-infrastructure binding.
 
 Plan execution and polishing also discover exact-command capability needs and environment
 blockers read-only during bootstrap or legacy validation migration. Accepted

@@ -595,6 +595,7 @@ test("resumes plan execution from its durable trusted-command snapshot", async (
         command: "npm run test:service",
         executable: "npm",
         arguments: ["run", "test:service"],
+        capabilities: { sourceProjection: true },
       },
     },
     pipelines: {
@@ -667,8 +668,11 @@ test("resumes plan execution from its durable trusted-command snapshot", async (
     { runId: PREPARED_RUN },
   );
   const durableSnapshot = prepared.run.pipelineState.trustedValidation;
-  assert.equal(durableSnapshot.schemaVersion, 3);
+  assert.equal(durableSnapshot.schemaVersion, 4);
   assert.equal(durableSnapshot.timeoutMs, 12_345);
+  assert.deepEqual(durableSnapshot.commands[0].capabilities, {
+    sourceProjection: true,
+  });
   assert.equal(configurationLoads, 1);
 
   const resumed = await createRunner({

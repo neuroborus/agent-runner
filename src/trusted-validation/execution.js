@@ -550,14 +550,19 @@ export function gitMetadataExposures(cwd) {
   return [gitDirectory, commonDirectory];
 }
 
-function dynamicExposures(command, { cwd, environment, homePath }) {
-  const exposures = [
-    { source: cwd, target: cwd },
-    ...gitMetadataExposures(cwd).map((path) => ({
-      source: path,
-      target: path,
-    })),
-  ];
+function dynamicExposures(
+  command,
+  { cwd, environment, homePath, sourceProjection = false },
+) {
+  const exposures = sourceProjection
+    ? []
+    : [
+        { source: cwd, target: cwd },
+        ...gitMetadataExposures(cwd).map((path) => ({
+          source: path,
+          target: path,
+        })),
+      ];
   for (const path of String(environment.PATH ?? "").split(delimiter)) {
     if (isAbsolute(path) && existsSync(path)) {
       exposures.push({ source: realpathSync(path), target: path });
@@ -576,8 +581,12 @@ function dynamicExposures(command, { cwd, environment, homePath }) {
     ...new Map(exposures.map((value) => [value.target, value])).values(),
   ]
     .filter(
-      ({ target }) =>
-        !systemPaths.some((systemPath) => coversPath(systemPath, target)),
+      ({ source, target }) =>
+        !systemPaths.some((systemPath) => coversPath(systemPath, target)) &&
+        (!sourceProjection ||
+          ![source, target].some(
+            (path) => coversPath(cwd, path) || coversPath(path, cwd),
+          )),
     )
     .sort(
       (left, right) =>
@@ -610,6 +619,7 @@ export function runtimeStorageExposures(command, { cwd, environment }) {
         cwd,
         environment,
         homePath: environment.HOME,
+        sourceProjection: command.capabilities?.sourceProjection === true,
       }).flatMap(({ source, target }) => [source, target]),
     ];
   } catch {
@@ -630,6 +640,7 @@ function sandboxArguments(
     homePath,
     resources,
     privateStorageRoot,
+    protectedPaths,
     preparationOnly,
   },
 ) {
@@ -655,18 +666,45 @@ function sandboxArguments(
     "--tmpfs",
     "/tmp",
   ];
-  const exposures = dynamicExposures(command, { cwd, environment, homePath });
+  const sourceProjection = command.capabilities?.sourceProjection === true;
+  const exposures = dynamicExposures(command, {
+    cwd,
+    environment,
+    homePath,
+    sourceProjection,
+  });
+  const runtimeExposures = runtimeStorageExposures(command, {
+    cwd,
+    environment,
+  });
   // Private storage must not leak through a runtime, PATH or system exposure.
   // Only the explicit per-command mounts below may expose owned subdirectories.
   if (
     privateStorageRoot !== undefined &&
-    runtimeStorageExposures(command, { cwd, environment }).some(
+    runtimeExposures.some(
       (path) =>
         coversPath(path, privateStorageRoot) ||
         coversPath(privateStorageRoot, path),
     )
   ) {
     throw new Error("Trusted storage overlaps a runtime exposure.");
+  }
+  if (
+    sourceProjection &&
+    (!Array.isArray(protectedPaths) ||
+      protectedPaths.some(
+        (path) =>
+          typeof path !== "string" ||
+          !isAbsolute(path) ||
+          resolve(path) !== path ||
+          (!coversPath(cwd, path) &&
+            runtimeExposures.some(
+              (runtimePath) =>
+                coversPath(runtimePath, path) || coversPath(path, runtimePath),
+            )),
+      ))
+  ) {
+    throw new Error("Trusted runtime exposes a protected path.");
   }
   appendSystemMounts(argumentsList);
   const createdParents = new Set();
@@ -679,7 +717,30 @@ function sandboxArguments(
     }
     argumentsList.push("--ro-bind", source, target);
   }
+  if (sourceProjection) {
+    const source = resources.source;
+    if (
+      typeof source !== "string" ||
+      !isAbsolute(source) ||
+      realpathSync(source) !== source ||
+      !lstatSync(source).isDirectory() ||
+      typeof privateStorageRoot !== "string" ||
+      !isInside(privateStorageRoot, source)
+    ) {
+      throw new Error("Trusted source projection is invalid.");
+    }
+    for (const parent of mountParents(cwd)) {
+      if (!createdParents.has(parent)) {
+        argumentsList.push("--dir", parent);
+        createdParents.add(parent);
+      }
+    }
+    argumentsList.push("--bind", source, cwd);
+  } else if (resources.source !== undefined) {
+    throw new Error("Undeclared source projection is invalid.");
+  }
   for (const [name, source] of Object.entries(resources)) {
+    if (name === "source") continue;
     const target = STORAGE_PATHS[name];
     if (
       target === undefined ||
@@ -724,6 +785,7 @@ export function sandboxTrustedCommand(
     environment,
     resources = {},
     privateStorageRoot,
+    protectedPaths = [],
     preparationOnly = false,
     platform = process.platform,
   },
@@ -753,6 +815,7 @@ export function sandboxTrustedCommand(
           homePath,
           resources,
           privateStorageRoot,
+          protectedPaths,
           preparationOnly,
         }),
       }),

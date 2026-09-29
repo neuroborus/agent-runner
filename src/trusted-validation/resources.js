@@ -14,19 +14,21 @@ export const STORAGE_PATHS = Object.freeze({
   cache: "/run/agent-runner/cache",
   dependencies: "/run/agent-runner/dependencies",
 });
+const RESOURCE_NAMES = Object.freeze([...Object.keys(STORAGE_PATHS), "source"]);
 
 export function needsStorage(capabilities = {}) {
   return (
     capabilities.scratch ||
     capabilities.cache ||
-    capabilities.artifacts !== undefined
+    capabilities.artifacts !== undefined ||
+    capabilities.sourceProjection === true
   );
 }
 
 export function requestsMount(capabilities = {}, name) {
-  return name === "dependencies"
-    ? capabilities.artifacts !== undefined
-    : capabilities[name] === true;
+  if (name === "dependencies") return capabilities.artifacts !== undefined;
+  if (name === "source") return capabilities.sourceProjection === true;
+  return capabilities[name] === true;
 }
 
 function resourceError(cause) {
@@ -196,7 +198,7 @@ export function createResourceStorage({
           throw resourceError();
         const mounts = {};
         const identities = {};
-        for (const name of Object.keys(STORAGE_PATHS)) {
+        for (const name of RESOURCE_NAMES) {
           if (!requestsMount(command.capabilities, name)) continue;
           await mkdir(join(`/proc/self/fd/${child.fd}`, name), { mode: 0o700 });
           const source = join(path, name);

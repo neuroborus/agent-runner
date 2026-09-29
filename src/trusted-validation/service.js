@@ -26,13 +26,14 @@ export { TrustedValidationError } from "./errors.js";
 
 const ALIAS_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
+const OBJECT_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 const MAX_ARGUMENTS = 64;
 const MAX_COMMAND_DEFINITIONS = 256;
 const MAX_SELECTED_COMMANDS = 32;
 const MAX_TEXT_LENGTH = 4_000;
 export const DEFAULT_TRUSTED_COMMAND_TIMEOUT_MS = 60 * 60 * 1_000;
 export const MAX_TRUSTED_COMMAND_TIMEOUT_MS = 2_147_483_647;
-const SNAPSHOT_SCHEMA_VERSION = 3;
+const SNAPSHOT_SCHEMA_VERSION = 4;
 const SNAPSHOT_FIELDS = Object.freeze([
   "schemaVersion",
   "commands",
@@ -93,12 +94,16 @@ function capabilityError() {
   );
 }
 
-function normalizeCapabilities(value) {
+function normalizeCapabilities(value, { sourceProjection = true } = {}) {
+  const allowed = [
+    "scratch",
+    "cache",
+    "artifacts",
+    ...(sourceProjection ? ["sourceProjection"] : []),
+  ];
   if (
     !isRecord(value) ||
-    Object.keys(value).some(
-      (key) => !["scratch", "cache", "artifacts"].includes(key),
-    )
+    Object.keys(value).some((key) => !allowed.includes(key))
   ) {
     throw capabilityError();
   }
@@ -108,6 +113,10 @@ function normalizeCapabilities(value) {
       if (value[key] !== true) throw capabilityError();
       normalized[key] = true;
     }
+  }
+  if (Object.hasOwn(value, "sourceProjection")) {
+    if (value.sourceProjection !== true) throw capabilityError();
+    normalized.sourceProjection = true;
   }
   if (Object.hasOwn(value, "artifacts")) {
     normalized.artifacts = normalizeArtifacts(value.artifacts);
@@ -130,7 +139,7 @@ function commandIdentity(command) {
   );
 }
 
-function normalizeCommand(alias, value) {
+function normalizeCommand(alias, value, options) {
   if (
     !ALIAS_PATTERN.test(alias) ||
     !hasExactFields(value, [
@@ -178,7 +187,7 @@ function normalizeCommand(alias, value) {
     executable,
     arguments: argumentsList,
     ...(Object.hasOwn(value, "capabilities")
-      ? { capabilities: normalizeCapabilities(value.capabilities) }
+      ? { capabilities: normalizeCapabilities(value.capabilities, options) }
       : {}),
   };
   return Object.freeze({
@@ -259,7 +268,7 @@ function snapshotFingerprints(
             ...(capabilities === undefined ? {} : { capabilities }),
           }),
         ),
-        ...(schemaVersion === 3 ? { timeoutMs } : {}),
+        ...(schemaVersion >= 3 ? { timeoutMs } : {}),
       }),
     ),
   });
@@ -325,16 +334,16 @@ export function validateTrustedValidationSnapshot(value) {
   const snapshotVersion = value?.schemaVersion;
   const snapshotFields = [
     ...SNAPSHOT_FIELDS,
-    ...(snapshotVersion === 3 ? ["timeoutMs"] : []),
+    ...(snapshotVersion >= 3 ? ["timeoutMs"] : []),
   ];
   if (
     !hasExactFields(value, snapshotFields) ||
-    ![1, 2, SNAPSHOT_SCHEMA_VERSION].includes(snapshotVersion) ||
+    ![1, 2, 3, SNAPSHOT_SCHEMA_VERSION].includes(snapshotVersion) ||
     !Array.isArray(value.commands) ||
     value.commands.length > MAX_SELECTED_COMMANDS ||
     !HASH_PATTERN.test(value.commandFingerprint) ||
     !HASH_PATTERN.test(value.configurationFingerprint) ||
-    (snapshotVersion === 3 &&
+    (snapshotVersion >= 3 &&
       (!Number.isInteger(value.timeoutMs) ||
         value.timeoutMs < 1 ||
         value.timeoutMs > MAX_TRUSTED_COMMAND_TIMEOUT_MS))
@@ -359,12 +368,18 @@ export function validateTrustedValidationSnapshot(value) {
           { code: "ERR_INVALID_TRUSTED_VALIDATION" },
         );
       }
-      const normalized = normalizeCommand(value.alias, {
-        command: value.command,
-        executable: value.executable,
-        arguments: value.arguments,
-        ...(snapshotVersion >= 2 ? { capabilities: value.capabilities } : {}),
-      });
+      const normalized = normalizeCommand(
+        value.alias,
+        {
+          command: value.command,
+          executable: value.executable,
+          arguments: value.arguments,
+          ...(snapshotVersion >= 2 ? { capabilities: value.capabilities } : {}),
+        },
+        {
+          sourceProjection: snapshotVersion >= 4,
+        },
+      );
       if (normalized.identity !== value.identity) {
         throw new TrustedValidationError(
           `Trusted validation command ${index + 1} identity is invalid.`,
@@ -400,7 +415,7 @@ export function validateTrustedValidationSnapshot(value) {
   }
   return Object.freeze({
     schemaVersion: snapshotVersion,
-    ...(snapshotVersion === 3 ? { timeoutMs: value.timeoutMs } : {}),
+    ...(snapshotVersion >= 3 ? { timeoutMs: value.timeoutMs } : {}),
     commands,
     ...fingerprints,
   });
@@ -535,6 +550,7 @@ export function createTrustedValidationService(options = {}) {
       bindings,
       commandIdentity: identity,
       projectPath,
+      sourceHead,
       snapshot,
       signal,
       onProcess,
@@ -555,7 +571,7 @@ export function createTrustedValidationService(options = {}) {
     }
     const trustedSnapshot = validateTrustedValidationSnapshot(snapshot);
     const timeoutMs =
-      trustedSnapshot.schemaVersion === 3
+      trustedSnapshot.schemaVersion >= 3
         ? trustedSnapshot.timeoutMs
         : DEFAULT_TRUSTED_COMMAND_TIMEOUT_MS;
     const normalizedBindings = preparationOnly
@@ -583,6 +599,26 @@ export function createTrustedValidationService(options = {}) {
       );
     }
     if (
+      command.capabilities?.sourceProjection === true &&
+      typeof git.materializeSource !== "function"
+    ) {
+      throw new TrustedValidationError(
+        "Trusted validation Git source projection is unavailable.",
+        { code: "ERR_INVALID_TRUSTED_VALIDATION_OPTIONS" },
+      );
+    }
+    if (
+      !preparationOnly &&
+      command.capabilities?.sourceProjection === true &&
+      sourceHead !== null &&
+      (typeof sourceHead !== "string" || !OBJECT_ID_PATTERN.test(sourceHead))
+    ) {
+      throw new TrustedValidationError(
+        "Trusted validation source binding is invalid.",
+        { code: "ERR_INVALID_TRUSTED_VALIDATION" },
+      );
+    }
+    if (
       (preparationOnly || needsStorage(command.capabilities)) &&
       (typeof onProcess !== "function" || typeof onResource !== "function")
     ) {
@@ -594,7 +630,9 @@ export function createTrustedValidationService(options = {}) {
     const before = await git.snapshot({ allowedPaths: [], projectPath });
     if (
       !preparationOnly &&
-      before.contentFingerprint !== normalizedBindings.contentFingerprint
+      (before.contentFingerprint !== normalizedBindings.contentFingerprint ||
+        (command.capabilities?.sourceProjection === true &&
+          before.head !== sourceHead))
     ) {
       throw new TrustedValidationError(
         "Trusted validation content binding changed before execution.",
@@ -605,9 +643,16 @@ export function createTrustedValidationService(options = {}) {
     let resource = null;
     let persistenceFailed = false;
     let processActive = false;
+    const gitMetadataPaths = gitMetadataExposures(before.projectPath);
+    const storageProtectedPaths = [...storageForbiddenPaths];
+    const projectPathIndex = storageProtectedPaths.indexOf(before.projectPath);
+    if (projectPathIndex !== -1) {
+      storageProtectedPaths.splice(projectPathIndex, 1);
+    }
+    const protectedPaths = [...gitMetadataPaths, ...storageProtectedPaths];
     const forbiddenPaths = [
       before.projectPath,
-      ...gitMetadataExposures(before.projectPath),
+      ...gitMetadataPaths,
       ...storageForbiddenPaths,
     ];
     const persistResource = async (value) => {
@@ -691,6 +736,51 @@ export function createTrustedValidationService(options = {}) {
         }
       }
       if (allocated !== null) await storage.verify(allocated);
+      if (!preparationOnly && command.capabilities?.sourceProjection === true) {
+        try {
+          await git.materializeSource({
+            baseHead: sourceHead,
+            destinationIdentity: allocated.identities.source,
+            destinationPath: allocated.mounts.source,
+            expectedContentFingerprint: normalizedBindings.contentFingerprint,
+            projectPath: before.projectPath,
+            protectedPaths,
+            signal,
+          });
+        } catch (cause) {
+          if (cause?.code === "ERR_GIT_SOURCE_CHANGED") {
+            throw new TrustedValidationError(
+              "Trusted validation source changed during materialization.",
+              {
+                cause,
+                code: "ERR_TRUSTED_VALIDATION_BINDING_CHANGED",
+              },
+            );
+          }
+          if (cause?.code === "ERR_GIT_SOURCE_DESTINATION_CHANGED") {
+            throw new TrustedValidationError(
+              "Trusted validation source ownership changed during materialization.",
+              {
+                cause,
+                code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE",
+              },
+            );
+          }
+          throw cause;
+        }
+        await storage.verify(allocated);
+        try {
+          await git.assertUnchanged(before);
+        } catch (cause) {
+          throw new TrustedValidationError(
+            "Trusted validation source changed before execution.",
+            {
+              cause,
+              code: "ERR_TRUSTED_VALIDATION_BINDING_CHANGED",
+            },
+          );
+        }
+      }
       signal?.throwIfAborted();
       const execution = await sandboxCommand(command, {
         bubblewrapPath,
@@ -698,10 +788,15 @@ export function createTrustedValidationService(options = {}) {
         environment,
         resources: allocated?.mounts ?? {},
         privateStorageRoot: allocated?.record.root.path,
+        protectedPaths,
         preparationOnly,
       });
+      if (allocated !== null) await storage.verify(allocated);
       result = await runCommand(execution.command, {
-        cwd: before.projectPath,
+        cwd:
+          command.capabilities?.sourceProjection === true
+            ? allocated.mounts.source
+            : before.projectPath,
         environment: execution.environment,
         ownershipMode: execution.ownershipMode,
         readinessRequired: execution.readinessRequired ?? false,
@@ -722,6 +817,7 @@ export function createTrustedValidationService(options = {}) {
           "Trusted execution process retirement is unverified.",
           { code: "ERR_EXECUTION_PROCESS_ACTIVE" },
         );
+      if (allocated !== null) await storage.verify(allocated);
     } catch (cause) {
       failure = cause;
       if (
@@ -735,6 +831,9 @@ export function createTrustedValidationService(options = {}) {
       )
         throw cause;
       if (cause?.code === "ERR_TRUSTED_VALIDATION_PROCESS_TREE_ACTIVE") {
+        throw cause;
+      }
+      if (cause?.code === "ERR_TRUSTED_VALIDATION_BINDING_CHANGED") {
         throw cause;
       }
       if (processActive) {
@@ -831,6 +930,9 @@ export function createTrustedValidationService(options = {}) {
     return Object.freeze({
       status: result.status,
       commandIdentity: command.identity,
+      ...(command.capabilities?.sourceProjection === true
+        ? { sourceHead }
+        : {}),
       exitCode: result.exitCode,
       signal: result.signal,
       timedOut: result.timedOut,

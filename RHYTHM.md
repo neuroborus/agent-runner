@@ -7,6 +7,17 @@ remain in the owning documentation.
 
 ## 2026-09-29
 
+- **Writable validation uses exact disposable source, not host authority.**
+  Trusted snapshot version 4 adds the closed `sourceProjection: true` command
+  capability. The runner journals an owned allocation, reconstructs frozen HEAD
+  plus the accepted staging-independent workspace source without the index,
+  ignored untracked files, or Git metadata, and mounts only that copy writable in the
+  network-isolated check. Original repository, state/task trees, credentials,
+  and undeclared host paths stay absent; projected output is discarded after
+  verified process retirement. Repository, allocation, source, command,
+  authority, configuration, and evidence bindings fail closed on drift or
+  incomplete recovery. Legacy snapshots retain their exact earlier authority.
+
 - **Capability reports now represent actual delegated needs.** Plan execution
   and polishing reject zero-need reports and any supplied command identity that
   does not match the frozen trusted-command snapshot, using their existing

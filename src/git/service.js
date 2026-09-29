@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isAbsolute, resolve } from "node:path";
 
 import {
   createGitCommandRunner,
@@ -7,6 +8,7 @@ import {
   GitSafetyError,
   hashBuffer,
   isEnvironment,
+  isWithin,
   resolveRepository,
 } from "./command.js";
 import { createGitCommitService } from "./commit.js";
@@ -19,6 +21,7 @@ import {
   pathsFingerprintAtRoot,
 } from "./content.js";
 import { createGitHandoffService } from "./handoff.js";
+import { createSourceMaterializer } from "./materialization.js";
 
 export { GitSafetyError };
 
@@ -56,6 +59,19 @@ function isRecord(value) {
   }
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
+}
+
+function isDirectoryIdentity(value) {
+  return (
+    isRecord(value) &&
+    Object.keys(value).length === 2 &&
+    ["device", "inode"].every(
+      (field) =>
+        Object.hasOwn(value, field) &&
+        typeof value[field] === "string" &&
+        /^\d+$/u.test(value[field]),
+    )
+  );
 }
 
 function assertOptions(value, name) {
@@ -156,6 +172,7 @@ export function createGitService(options = {}) {
   }
 
   const contentContext = Object.freeze({ currentHead, runGit });
+  const sourceMaterializer = createSourceMaterializer(contentContext);
 
   async function inspectHead(options) {
     assertOptions(options, "HEAD-inspection options");
@@ -427,6 +444,57 @@ export function createGitService(options = {}) {
     return pathsFingerprintAtRoot(contentContext, repositoryPath, paths);
   }
 
+  async function materializeSource(options) {
+    assertOptions(options, "Source-materialization options");
+    const {
+      baseHead,
+      destinationIdentity,
+      destinationPath,
+      expectedContentFingerprint,
+      projectPath,
+      protectedPaths = [],
+      signal,
+    } = options;
+    if (
+      (baseHead !== null &&
+        (typeof baseHead !== "string" || !OBJECT_ID_PATTERN.test(baseHead))) ||
+      !isDirectoryIdentity(destinationIdentity) ||
+      typeof destinationPath !== "string" ||
+      !isAbsolute(destinationPath) ||
+      resolve(destinationPath) !== destinationPath ||
+      typeof expectedContentFingerprint !== "string" ||
+      !SHA256_PATTERN.test(expectedContentFingerprint) ||
+      !isPathList(protectedPaths) ||
+      protectedPaths.some(
+        (path) => !isAbsolute(path) || resolve(path) !== path,
+      ) ||
+      (signal !== undefined && !(signal instanceof AbortSignal))
+    ) {
+      throw new GitSafetyError("Source-materialization options are invalid.", {
+        code: "ERR_INVALID_GIT_OPTIONS",
+      });
+    }
+    const repositoryPath = await resolveRepository(runGit, projectPath);
+    if (
+      isWithin(repositoryPath, destinationPath) ||
+      isWithin(destinationPath, repositoryPath)
+    ) {
+      throw new GitSafetyError(
+        "Source-materialization destination overlaps the repository.",
+        { code: "ERR_UNSAFE_REPOSITORY_PATH" },
+      );
+    }
+    return sourceMaterializer({
+      baseHead,
+      destinationIdentity,
+      destinationPath,
+      expectedContentFingerprint,
+      protectedPaths,
+      repositoryPath,
+      signal,
+    });
+  }
+
   async function preflight(options) {
     assertOptions(options, "Git-preflight options");
     const {
@@ -578,6 +646,7 @@ export function createGitService(options = {}) {
     preflight,
     reconcileInterrupted,
     inspectHead,
+    materializeSource,
     resolveProject,
     snapshot,
     validationInfrastructureFingerprint,

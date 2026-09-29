@@ -63,7 +63,7 @@ test("capability parameters are strict, immutable, and fingerprinted in both con
       overlay,
     );
     const frozen = selected.trustedValidation;
-    assert.equal(frozen.schemaVersion, 3);
+    assert.equal(frozen.schemaVersion, 4);
     assert.equal(frozen.timeoutMs, 3_600_000);
     assert.deepEqual(
       getPipeline(pipelineId).workflow.createState({
@@ -82,6 +82,7 @@ test("capability parameters are strict, immutable, and fingerprinted in both con
     {},
     { scratch: true },
     { cache: true },
+    { sourceProjection: true },
     { artifacts: [artifact] },
     { artifacts: [{ ...artifact, sha256: "b".repeat(64) }] },
     {
@@ -120,6 +121,8 @@ test("capabilities cannot grant arbitrary mounts, environment, credentials, or n
     { scratch: false },
     { scratch: "/tmp" },
     { cache: { path: "/project" } },
+    { sourceProjection: false },
+    { sourceProjection: "/project" },
     { network: true },
     { mounts: [] },
     { environment: { HOME: "/home" } },
@@ -186,6 +189,64 @@ test("legacy restricted snapshots retain exact identities and evidence bindings"
       commands: [{ ...current.commands[0], capabilities: { cache: true } }],
     }),
   );
+
+  const versionThreeVector = {
+    ...vector,
+    capabilities: { scratch: true },
+  };
+  const versionThreeIdentity = hash(versionThreeVector);
+  const versionThree = {
+    schemaVersion: 3,
+    timeoutMs: 12_345,
+    commands: [{ ...versionThreeVector, identity: versionThreeIdentity }],
+    commandFingerprint: hash([versionThreeIdentity]),
+    configurationFingerprint: hash({
+      schemaVersion: 3,
+      commands: [versionThreeVector],
+      timeoutMs: 12_345,
+    }),
+  };
+  assert.deepEqual(
+    validateTrustedValidationSnapshot(versionThree),
+    versionThree,
+  );
+  for (const pipelineId of ["plan-execution", "polishing"]) {
+    const settings = resolvePipelineConfiguration(pipelineId, {
+      schemaVersion: 1,
+      defaultBackend: "codex",
+      trustedCommands: { build: command },
+      pipelines: { [pipelineId]: { trustedChecks: ["build"] } },
+    }).settings;
+    assert.deepEqual(
+      getPipeline(pipelineId).workflow.createState({
+        settings,
+        trustedValidation: versionThree,
+      }).trustedValidation,
+      versionThree,
+    );
+    const unauthorizedVector = {
+      ...versionThreeVector,
+      capabilities: { sourceProjection: true },
+    };
+    const unauthorizedIdentity = hash(unauthorizedVector);
+    const unauthorized = {
+      ...versionThree,
+      commands: [{ ...unauthorizedVector, identity: unauthorizedIdentity }],
+      commandFingerprint: hash([unauthorizedIdentity]),
+      configurationFingerprint: hash({
+        schemaVersion: 3,
+        commands: [unauthorizedVector],
+        timeoutMs: 12_345,
+      }),
+    };
+    assert.throws(() =>
+      getPipeline(pipelineId).workflow.createState({
+        settings,
+        trustedValidation: unauthorized,
+      }),
+    );
+    assert.throws(() => validateTrustedValidationSnapshot(unauthorized));
+  }
 });
 
 test("unavailable storage fails closed before sandbox or command activity", async () => {

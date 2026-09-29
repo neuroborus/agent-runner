@@ -456,16 +456,21 @@ export function createRunner(options = {}) {
                 ),
               execute: async (request) => {
                 await checkConfiguration();
-                return monitor.invoke(
-                  (value) =>
-                    trustedValidation.execute({
-                      ...value,
-                      storageForbiddenPaths: storageForbiddenPaths(run),
-                      onResource: (resource) =>
-                        runStore.recordExecutionResource(lease, resource),
-                    }),
-                  request,
-                );
+                try {
+                  return await monitor.invoke(
+                    (value) =>
+                      trustedValidation.execute({
+                        ...value,
+                        storageForbiddenPaths: storageForbiddenPaths(run),
+                        onResource: (resource) =>
+                          runStore.recordExecutionResource(lease, resource),
+                      }),
+                    request,
+                  );
+                } finally {
+                  await checkConfiguration();
+                  await validatePersistedBoundary(run);
+                }
               },
             },
       readInputs: ({ taskPath }) => readInputs(pipeline, taskPath),

@@ -309,7 +309,8 @@ characters remain invalid. This example works in either configuration source:
     "service-tests": {
       "command": "npm run test:service",
       "executable": "npm",
-      "arguments": ["run", "test:service"]
+      "arguments": ["run", "test:service"],
+      "capabilities": { "sourceProjection": true }
     }
   },
   "pipelines": {
@@ -319,6 +320,15 @@ characters remain invalid. This example works in either configuration source:
   }
 }
 ```
+
+`sourceProjection: true` is the closed authority for checks that must write
+build output beside source inputs. The runner reconstructs the accepted
+staging-independent source in private owned storage and mounts only that copy
+writable at the canonical project path. It includes frozen HEAD content plus
+tracked and non-ignored untracked workspace changes, but not the index, `.git`,
+ignored untracked files, project configuration, task/state paths, credentials, or other
+host storage. Projected writes are discarded after verified process retirement.
+Source projection does not imply scratch, cache, artifacts, or network access.
 
 `trustedCommandTimeoutMs` is the per-command execution deadline in
 milliseconds. It is a strict integer from `1` through `2147483647` and defaults
@@ -355,7 +365,9 @@ locations to a canonical absolute executable protected by system-owned file and 
 permissions. The pinned path is reverified on resume and execution. Its network
 namespace has a minimal read-only system and repository view, private runtime
 and temporary storage, a hidden user home, and a finite non-credential
-environment. Rootless Docker and command-owned services run inside the same
+environment. With source projection, the original repository and Git metadata
+are absent and the owned copy replaces the read-only repository view. Rootless
+Docker and command-owned services run inside the same
 mount, network, and PID namespaces. The runner records its owned supervisor
 identity and retires the complete tree, including detached descendants, before
 reconciliation. Native-sandbox provider processes prefer private PID ownership
@@ -390,7 +402,11 @@ trusted declaration can request transient output and cache storage:
       "command": "node build.js --out-dir /run/agent-runner/scratch/build",
       "executable": "node",
       "arguments": ["build.js", "--out-dir", "/run/agent-runner/scratch/build"],
-      "capabilities": { "scratch": true, "cache": true }
+      "capabilities": {
+        "scratch": true,
+        "cache": true,
+        "sourceProjection": true
+      }
     }
   },
   "pipelines": { "polishing": { "trustedChecks": ["offline-build"] } }
@@ -398,12 +414,14 @@ trusted declaration can request transient output and cache storage:
 ```
 
 This fragment works in runner configuration or its safe project overlay. The
-project must already have the build tool and dependencies. Scratch provides
+build tool and dependencies must be present in accepted source or supplied as
+pinned artifacts; ignored untracked host dependency trees are not projected. Scratch provides
 `AGENT_RUNNER_SCRATCH` and `TMPDIR`; cache provides `AGENT_RUNNER_CACHE`,
 `XDG_CACHE_HOME`, and npm's cache binding. Paths are fixed by the runner; exact
 argument vectors do not expand environment variables. Both directories are
-private to one execution and removed after its process tree retires. Repository
-writes and network access remain prohibited. Interrupted cache contents are not
+private to one execution and removed after its process tree retires. Writes to
+the projected source are permitted and discarded; the original repository and
+network remain inaccessible. Interrupted cache or projection contents are not
 reused. An uncertain cleanup keeps ownership evidence for operator recovery;
 resume retries cleanup before new work.
 
@@ -445,8 +463,10 @@ availability before every writable checkpoint. Unsatisfied requirements pause as
 Changing trusted selection or declarations requires a new run. Inspection may
 prepare verified dependencies but does not execute required checks; those remain
 exclusive to finalization.
-The configuration example explicitly declares scratch and cache authority for
-`repository-check`; discovery can request only capabilities frozen at run creation.
+The configuration example keeps `repository-check` on the read-only checkout
+where its installed dependencies remain available, and uses the separate
+`projected-build` declaration to demonstrate source-projection authority.
+Execution can use only capabilities frozen at run creation.
 
 Backend sessions are disposable. When a native context is full, the adapter
 compacts it and retries once; persistent pressure moves ordinary turns to a

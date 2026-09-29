@@ -179,6 +179,14 @@ credentials, shell-string substitutes, or broader host authority.
 Trusted checks retain isolation and mutation guards; they do not grant broader
 agent permissions or accept user-attested results.
 
+For a check that must write beside its inputs, declare
+`"sourceProjection": true` in that command's capabilities. The runner creates
+an owned writable projection of frozen HEAD plus the exact tracked and non-
+ignored untracked workspace content. It does not copy the index, `.git`, ignored
+dependency trees, project configuration, task/state artifacts, credentials, or
+other host paths. Writes are disposable; the original checkout remains absent
+from the check. Declare scratch, cache, and pinned artifacts independently.
+
 Configure the per-command deadline with top-level
 `trustedCommandTimeoutMs`, expressed in milliseconds. The default is
 `3600000` (60 minutes), and accepted values are strict integers from `1`
@@ -233,7 +241,11 @@ trusted declaration can request transient output and cache storage:
       "command": "node build.js --out-dir /run/agent-runner/scratch/build",
       "executable": "node",
       "arguments": ["build.js", "--out-dir", "/run/agent-runner/scratch/build"],
-      "capabilities": { "scratch": true, "cache": true }
+      "capabilities": {
+        "scratch": true,
+        "cache": true,
+        "sourceProjection": true
+      }
     }
   },
   "pipelines": { "polishing": { "trustedChecks": ["offline-build"] } }
@@ -241,12 +253,14 @@ trusted declaration can request transient output and cache storage:
 ```
 
 This fragment works in runner configuration or its safe project overlay. The
-project must already have the build tool and dependencies. Scratch provides
+build tool and dependencies must be present in accepted source or supplied as
+pinned artifacts; ignored untracked host dependency trees are not projected. Scratch provides
 `AGENT_RUNNER_SCRATCH` and `TMPDIR`; cache provides `AGENT_RUNNER_CACHE`,
 `XDG_CACHE_HOME`, and npm's cache binding. Paths are fixed by the runner; exact
 argument vectors do not expand environment variables. Both directories are
-private to one execution and removed after its process tree retires. Repository
-writes and network access remain prohibited. Interrupted cache contents are not
+private to one execution and removed after its process tree retires. Projected
+source writes are permitted and discarded; original repository and network
+access remain prohibited. Interrupted cache or projection contents are not
 reused. An uncertain cleanup keeps ownership evidence for operator recovery;
 resume retries cleanup before new work.
 

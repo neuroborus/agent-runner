@@ -4149,6 +4149,9 @@ ${establishedValidationPrompt(state())}${
           bindings,
           commandIdentity: trusted.identity,
           projectPath: state().repositoryBaseline.projectPath,
+          ...(trusted.capabilities?.sourceProjection === true
+            ? { sourceHead: state().repositoryBaseline.head }
+            : {}),
           snapshot: state().trustedValidation,
         });
       } catch (cause) {

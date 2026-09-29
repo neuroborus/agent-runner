@@ -297,14 +297,15 @@ concurrent runs retain their own values. For example,
 `"trustedCommandTimeoutMs": 7200000` selects two hours.
 
 Trusted declarations also accept the architecture's closed `capabilities`
-object: `scratch: true`, `cache: true`, and bounded pinned HTTPS `artifacts`.
-Root and project normalization are identical. Version-3 snapshots include
-normalized capabilities in command identities and `timeoutMs` in the
-trusted-configuration fingerprint without changing command identities.
-Legacy version-1 and version-2 snapshots retain their policy, exact
-fingerprints, and evidence bindings with the deterministic one-hour fallback,
-without configuration reload or authority upgrades. Capability preparation
-uses the smaller of the snapshot deadline and 10 seconds.
+object: `scratch: true`, `cache: true`, `sourceProjection: true`, and bounded
+pinned HTTPS `artifacts`. Root and project normalization are identical.
+Version-4 snapshots include normalized capabilities in command identities and
+`timeoutMs` in the trusted-configuration fingerprint without changing command
+identities. Version 3 retains its saved timeout without gaining source-
+projection authority. Legacy version-1 and version-2 snapshots retain their
+policy, exact fingerprints, and evidence bindings with the deterministic one-
+hour fallback, without configuration reload or authority upgrades. Capability
+preparation uses the smaller of the snapshot deadline and 10 seconds.
 
 Unavailable frozen requests create a durable `environment_blocked` pause before
 provider work. Early pauses retain `preflightComplete: false`, null baseline,
@@ -759,9 +760,10 @@ identity and changes the runtime compatibility token. Leased migration preserves
 version-9 allocation records without new resource effects. The root retires owned processes and
 cleans recorded resources before resuming pipeline work or settling an operator
 stop. Legacy envelopes migrate to null storage ownership without allocation or
-provider activity. Only declared scratch/cache directories are writable, through
-the fixed mounts and environment bindings owned by the trusted-validation
-architecture. Required build output must stay outside the repository.
+provider activity. Only declared scratch/cache directories and a declared
+writable source projection are writable through bindings owned by the trusted-
+validation architecture. Projected build output is discarded; without that
+authority required output must stay in scratch and outside the repository.
 
 Cleanup uncertainty preserves the resource record and pauses finalization as
 `environment_blocked` at `FINALIZE`; neither the check nor subsequent work is
