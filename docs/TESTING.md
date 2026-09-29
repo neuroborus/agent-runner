@@ -22,38 +22,44 @@ instead of the scratch mount inside trusted validation.
 The parent must remain visible inside process namespaces; `/dev/shm` does not,
 because their private device mount hides it. Runtime tmpfs (`XDG_RUNTIME_DIR`
 or Linux `/run/user/<uid>`) avoids that conflict.
-The launcher reports storage and elapsed time and removes only its own directory.
-These tests exercise process recovery, not survival of a machine power loss.
-Fast files use bounded host-aware parallelism. The two system-wide process
-containment suites run in a separate bounded batch so their process inspection
-cannot race unrelated file workers. The durable slow tier retains its proven
-four-file concurrency bound.
+The launcher reports storage and total elapsed time and removes only its own
+directory. Fast runs use the concise dot reporter. Selected and complete slow
+runs use the concise spec reporter, which also reports the elapsed time of each
+file without enforcing a duration limit. These tests exercise process recovery,
+not survival of a machine power loss. Fast files use bounded host-aware
+parallelism. The two system-wide process containment suites run in a separate
+bounded batch so their process inspection cannot race unrelated file workers.
+The durable slow tier retains its proven four-file concurrency bound.
 
 ## Slow gate
 
 `npm run test:slow` runs every `*.slow.test.js` file. Both tiers together cover
-all test files; neither silently excludes a failed test.
+all test files; neither silently excludes a failed test. Use
+`npm run test:slow -- path/to/file.slow.test.js` to run an affected file, or
+pass multiple paths for one affected batch; selected files retain the same
+bounded runner and per-file timing output.
 
-| Suite                                                                     | Distinct guarantee                                                      | Run when changing                                                            |
-| ------------------------------------------------------------------------- | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `test/runner.slow.test.js`                                                | Real-service orchestration, process ownership, durable stops and resume | Runner orchestration, process ownership, state or stop contracts             |
-| `test/integration/workflows.slow.test.js`                                 | CLI/MCP workflow composition across real Git and durable storage        | Workflow gates, control-plane mutation, recovery or commit/handoff contracts |
-| `test/mcp/control-plane.slow.test.js`                                     | Durable MCP actions, detached ownership, and recovery races             | MCP mutation, detached execution, action recovery, or stop supervision       |
-| `test/state/operator-stops.slow.test.js`                                  | Journaled stop settlement, ownership, and concurrency recovery          | State mutation, operator-stop, ownership, or recovery contracts              |
-| `pipelines/plan-execution/test/legacy-confirmation-recovery.slow.test.js` | Persisted legacy confirmation recovery with real commits                | Legacy migration, confirmation evidence or commit recovery                   |
-| `pipelines/polishing/test/handoff-recovery.slow.test.js`                  | Real Git handoff recovery and legacy effect reconciliation              | Handoff settlement, legacy migration or completion recovery                  |
+| Suite                                                                     | Distinct observable guarantee                                                                           | Run when changing                                                                                                                       |
+| ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `test/integration/cli-workflows.slow.test.js`                             | Root CLI composition produces one plan artifact, one exact-subject commit, and one uncommitted handoff  | CLI projection or root plan-authoring, plan-execution, polishing, real-Git commit, or handoff composition                               |
+| `test/integration/mcp-workflows.slow.test.js`                             | A detached MCP workflow continues through durable runner state after the requesting client is replaced  | MCP-to-runner workflow composition, detached continuation, client replacement, or cross-capability durable state                        |
+| `test/mcp/control-plane.slow.test.js`                                     | Detached STDIO dispatch preserves protocol cleanliness and exactly owned durable intents and receipts   | MCP STDIO, detached starts or stops, action receipts, disconnects, waits, restart or version skew, or execution-owner contention        |
+| `test/runner-orchestration.slow.test.js`                                  | Root orchestration preserves configuration, sessions, migrations, trusted snapshots, and worktree order | Runner configuration or source sessions, runtime migration, trusted preflight snapshots, worktree serialization, or root service wiring |
+| `test/runner-operator-stops.slow.test.js`                                 | Runner stops settle owned processes and raced commit or handoff effects without losing writable content | Runner operator stops, process settlement or containment, commit or handoff races, execution-storage cleanup, or partial-content resume |
+| `test/runner-effects.slow.test.js`                                        | Commit effects settle exactly once across interruption, verification, and deferred checkpoints          | Runner Git/state effect dispatch, commit authorization or verification, deferred settlement, or consumed-effect recovery                |
+| `test/state/operator-stops.slow.test.js`                                  | State journals serialize stop publication, leases, ownership transfer, process identity, and races      | State actions or journals, publication boundaries, leases, process identity, worktree ownership transfer, or stop concurrency           |
+| `pipelines/plan-execution/test/legacy-confirmation-recovery.slow.test.js` | Journal-proven legacy confirmation reconciles one real commit through rejection, crash, and lease cases | Plan-execution legacy confirmation eligibility or proof, journal publication boundaries, verified commit recovery, or execution leases  |
+| `pipelines/plan-execution/test/legacy-migrations.slow.test.js`            | Authentic persisted migration history carries legacy confirmation proof into the current contract       | Persisted plan-execution migration composition involving confirmation proof, inventories, implementation evidence, or historical events |
+| `pipelines/polishing/test/handoff-recovery.slow.test.js`                  | Legacy handoff recovery distinguishes a completed real-Git effect from a partial effect                 | Polishing handoff settlement, legacy handoff migration, completed-effect reconciliation, or partial-effect failure                      |
 
-Run the affected slow coverage once before handing off a change to those
-contracts, and the complete slow tier before release. A documentation-only or
-unrelated policy edit does not require replaying all durable workflow matrices.
-Record exactly which tier/files ran; an unrun slow check is not a pass.
-Do not move a test to this tier merely because it fails or has a slow fixture:
-first remove redundant setup and use lightweight effects for policy.
-
-Legacy migration interaction coverage lives in
-`pipelines/plan-execution/test/legacy-migrations.slow.test.js`; select it when
-changing migration composition with confirmation, inventories, or implementation
-evidence. Pure migration validation remains in the fast tier.
+Run the affected slow coverage once before handing off a change to the listed
+contracts. After the ordinary `npm run check` gate, run the complete
+`npm run test:slow` tier as the release gate. A documentation-only or unrelated
+policy edit does not require replaying all durable workflow matrices. Record
+exactly which tier/files ran; an unrun slow check is not a pass. Do not move a
+test to this tier merely because it fails or has a slow fixture: first remove
+redundant setup and use lightweight effects for policy. Pure migration
+validation remains in the fast tier.
 
 ## Finalization
 
