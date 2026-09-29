@@ -1,31 +1,20 @@
-import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  readdir,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative, sep } from "node:path";
-import test from "node:test";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
 import {
   createClarificationService,
   createGitService,
-  createMcpControlPlane,
   createRunner,
   createRunStore,
-  main,
   parseRunnerConfiguration,
-} from "../../src/index.js";
+} from "../../../src/index.js";
 
 const executeFile = promisify(execFile);
 
-const TWO_STEP_PLAN = `## Commit 1: feat(feature): add value
+export const TWO_STEP_PLAN = `## Commit 1: feat(feature): add value
 
 Add the requested value.
 
@@ -33,29 +22,7 @@ Add the requested value.
 
 Cover the requested value.`;
 
-const ONE_STEP_PLAN = TWO_STEP_PLAN.split("\n## Commit 2:")[0];
-
-function sink() {
-  let value = "";
-  return {
-    stream: {
-      write(chunk) {
-        value += chunk;
-      },
-    },
-    value() {
-      return value;
-    },
-  };
-}
-
-function deferred() {
-  let resolvePromise;
-  const promise = new Promise((resolve) => {
-    resolvePromise = resolve;
-  });
-  return { promise, resolve: resolvePromise };
-}
+export const ONE_STEP_PLAN = TWO_STEP_PLAN.split("\n## Commit 2:")[0];
 
 function capabilities() {
   return {
@@ -84,7 +51,7 @@ function readyForExecution() {
   };
 }
 
-function createBackend(
+export function createBackend(
   backend,
   { failExecutionClarification = false, implementationGate = null } = {},
 ) {
@@ -403,7 +370,10 @@ function createBackend(
   };
 }
 
-async function fixture(t, { autoCleanup = true, plan = TWO_STEP_PLAN } = {}) {
+export async function fixture(
+  t,
+  { autoCleanup = true, plan = TWO_STEP_PLAN } = {},
+) {
   const workspace = await mkdtemp(join(tmpdir(), "agent-runner-workflows-"));
   const projectPath = join(workspace, "project");
   const taskPath = join(workspace, "task");
@@ -458,7 +428,7 @@ async function fixture(t, { autoCleanup = true, plan = TWO_STEP_PLAN } = {}) {
   return { cleanup, projectPath, stateRoot, taskPath };
 }
 
-function runtime(paths, adapters, configuration) {
+export function runtime(paths, adapters, configuration) {
   const runStore = createRunStore({ stateRoot: paths.stateRoot });
   const runner = createRunner({
     adapters,
@@ -471,325 +441,7 @@ function runtime(paths, adapters, configuration) {
   return { runner, runStore };
 }
 
-async function onlyRun(runStore) {
-  const [runId] = await readdir(join(runStore.rootPath, "runs"));
-  return runStore.loadRun(runId);
-}
-
-async function gitOutput(projectPath, args) {
+export async function gitOutput(projectPath, args) {
   const { stdout } = await executeFile("git", ["-C", projectPath, ...args]);
   return stdout.trim();
 }
-
-function outside(parent, child) {
-  const path = relative(parent, child);
-  return path === ".." || path.startsWith(`..${sep}`);
-}
-
-async function within(promise, milliseconds, message) {
-  let timer;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(message)), milliseconds);
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function detached(runner) {
-  const failures = [];
-  const pending = new Set();
-  return {
-    launchRun(runId, action = null, options = {}) {
-      const execution = runner
-        .resume({
-          runId,
-          action,
-          dispatch: options.dispatch,
-          expectedRuntimeCompatibility: options.expectedRuntimeCompatibility,
-          ...(options.stopCheckpointRevision == null
-            ? {}
-            : { stopCheckpointRevision: options.stopCheckpointRevision }),
-        })
-        .then(({ run }) =>
-          options.onExit?.(
-            run.pipelineState.workflowState === "WAITING_FOR_USER" ? 2 : 0,
-          ),
-        )
-        .catch((error) => {
-          failures.push(error);
-          options.onExit?.(1);
-        })
-        .finally(() => pending.delete(execution));
-      pending.add(execution);
-    },
-    async settle() {
-      while (pending.size > 0) {
-        await Promise.all([...pending]);
-      }
-      if (failures.length > 0) {
-        throw failures[0];
-      }
-    },
-  };
-}
-
-test("writes one plan artifact without modifying Git", async (t) => {
-  const paths = await fixture(t, { plan: null });
-  const codex = createBackend("codex");
-  const { runner, runStore } = runtime(
-    paths,
-    { codex },
-    { schemaVersion: 1, defaultBackend: "codex" },
-  );
-  const stdout = sink();
-  const stderr = sink();
-
-  const exitCode = await main(
-    [
-      "run",
-      "plan-authoring",
-      "--project",
-      paths.projectPath,
-      "--task",
-      paths.taskPath,
-    ],
-    { runner, stderr: stderr.stream, stdout: stdout.stream },
-  );
-
-  assert.equal(exitCode, 0);
-  assert.equal(stderr.value(), "");
-  assert.match(stdout.value(), /State: DONE/u);
-  assert.equal(
-    await readFile(join(paths.taskPath, "plan.md"), "utf8"),
-    TWO_STEP_PLAN,
-  );
-  assert.equal((await onlyRun(runStore)).pipelineState.workflowState, "DONE");
-  assert.ok(codex.calls.every(({ access }) => access === "read-only"));
-  assert.equal(
-    await gitOutput(paths.projectPath, ["status", "--porcelain"]),
-    "",
-  );
-  assert.equal(
-    await gitOutput(paths.projectPath, ["log", "-1", "--pretty=%s"]),
-    "chore(test): initialize",
-  );
-});
-
-test("stages one polishing handoff without committing", async (t) => {
-  const paths = await fixture(t, { plan: null });
-  await writeFile(
-    join(paths.projectPath, "src", "base.js"),
-    "export const base = 2;\n",
-  );
-  const initialHead = await gitOutput(paths.projectPath, ["rev-parse", "HEAD"]);
-  const codex = createBackend("codex");
-  const { runner, runStore } = runtime(
-    paths,
-    { codex },
-    { schemaVersion: 1, defaultBackend: "codex" },
-  );
-  const stdout = sink();
-  const stderr = sink();
-
-  const exitCode = await main(
-    [
-      "run",
-      "polishing",
-      "--project",
-      paths.projectPath,
-      "--task",
-      paths.taskPath,
-    ],
-    { runner, stderr: stderr.stream, stdout: stdout.stream },
-  );
-
-  assert.equal(exitCode, 0, stderr.value());
-  assert.equal(stderr.value(), "");
-  assert.match(stdout.value(), /Pipeline: polishing/u);
-  assert.match(stdout.value(), /State: DONE/u);
-  assert.doesNotMatch(stdout.value(), /^Plan:/mu);
-  assert.equal((await onlyRun(runStore)).pipelineState.workflowState, "DONE");
-  assert.equal(
-    codex.calls.some(({ access }) => access === "local-commit"),
-    false,
-  );
-  assert.equal(
-    await gitOutput(paths.projectPath, ["rev-parse", "HEAD"]),
-    initialHead,
-  );
-  assert.equal(
-    await gitOutput(paths.projectPath, ["status", "--porcelain"]),
-    "M  src/base.js",
-  );
-});
-
-test("commits one exact plan subject through combined root wiring", async (t) => {
-  const paths = await fixture(t, { plan: ONE_STEP_PLAN });
-  const codex = createBackend("codex");
-  const { runner, runStore } = runtime(
-    paths,
-    { codex },
-    {
-      schemaVersion: 1,
-      defaultBackend: "codex",
-      pipelines: { "plan-execution": { mode: "combined" } },
-    },
-  );
-  const stdout = sink();
-  const stderr = sink();
-
-  const exitCode = await main(
-    [
-      "run",
-      "plan-execution",
-      "--project",
-      paths.projectPath,
-      "--task",
-      paths.taskPath,
-      "--fork-from",
-      "codex:source-codex",
-    ],
-    { runner, stderr: stderr.stream, stdout: stdout.stream },
-  );
-
-  assert.equal(exitCode, 0, `${stdout.value()}${stderr.value()}`);
-  assert.equal(stderr.value(), "");
-  assert.match(stdout.value(), /State: DONE/u);
-  const run = await onlyRun(runStore);
-  assert.equal(run.pipelineState.workflowState, "DONE");
-  assert.equal(run.pipelineState.settings.mode, "combined");
-  assert.equal(run.pipelineState.completedCommits.length, 1);
-  assert.equal(
-    await gitOutput(paths.projectPath, ["log", "-1", "--pretty=%s"]),
-    "feat(feature): add value",
-  );
-  assert.equal(
-    await gitOutput(paths.projectPath, ["status", "--porcelain"]),
-    "",
-  );
-  assert.equal(
-    await gitOutput(paths.projectPath, ["remote", "get-url", "origin"]),
-    "https://example.invalid/repository.git",
-  );
-  assert.equal(
-    await gitOutput(paths.projectPath, [
-      "ls-files",
-      ".agent-runner.json",
-      "LOCAL_ARTIFACTS",
-    ]),
-    "",
-  );
-  assert.ok(isAbsolute(runStore.rootPath));
-  assert.equal(outside(paths.projectPath, runStore.rootPath), true);
-  assert.equal(outside(paths.taskPath, runStore.rootPath), true);
-
-  assert.equal(
-    codex.calls.filter(({ access }) => access === "local-commit").length,
-    1,
-  );
-  assert.equal(
-    codex.calls.some(({ commit }) =>
-      /co-authored-by/iu.test(commit?.message ?? ""),
-    ),
-    false,
-  );
-  const sourceCalls = codex.calls.filter(
-    ({ session }) => session?.id === "source-codex",
-  );
-  assert.ok(sourceCalls.length >= 2);
-  assert.ok(sourceCalls.every(({ session }) => session.mode === "fork"));
-  assert.equal(run.sessionLineage.source, "source-codex");
-  const childRoles = new Set(
-    run.sessionLineage.children.map(({ role }) => role),
-  );
-  assert.equal(childRoles.has("worker"), true);
-  assert.equal(childRoles.has("reviewer"), true);
-  assert.equal(
-    new Set(run.sessionLineage.children.map(({ sessionId }) => sessionId)).size,
-    run.sessionLineage.children.length,
-  );
-});
-
-test("continues one detached MCP execution after client replacement", async (t) => {
-  const paths = await fixture(t, {
-    autoCleanup: false,
-    plan: ONE_STEP_PLAN,
-  });
-  const implementationGate = {
-    entered: deferred(),
-    release: deferred(),
-  };
-  const codex = createBackend("codex", {
-    failExecutionClarification: true,
-    implementationGate,
-  });
-  const { runner, runStore } = runtime(
-    paths,
-    { codex },
-    { schemaVersion: 1, defaultBackend: "codex" },
-  );
-  const pipelineProcess = detached(runner);
-  t.after(async () => {
-    implementationGate.release.resolve();
-    try {
-      await pipelineProcess.settle();
-    } finally {
-      await paths.cleanup();
-    }
-  });
-
-  const control = createMcpControlPlane({
-    launchRun: pipelineProcess.launchRun,
-    runner,
-    runStore,
-  });
-  const execution = await control.runStart({
-    idempotencyKey: "execution-start",
-    pipelineId: "plan-execution",
-    projectPath: paths.projectPath,
-    taskPath: paths.taskPath,
-    proactiveClarification: false,
-    roleOverrides: {},
-    sourceSession: null,
-  });
-  await pipelineProcess.settle();
-  const paused = await control.runStatus({ runId: execution.runId });
-  assert.equal(paused.status, "WAITING_FOR_USER");
-  assert.equal(paused.pause.reason, "backend_unavailable");
-  assert.equal(paused.pause.resumeState, "CLARIFY");
-
-  const reconnected = createMcpControlPlane({
-    launchRun: pipelineProcess.launchRun,
-    runner,
-    runStore,
-  });
-  await reconnected.runResume({
-    idempotencyKey: "execution-resume",
-    runId: execution.runId,
-    expectedRevision: paused.revision,
-    action: null,
-  });
-  await within(
-    implementationGate.entered.promise,
-    30_000,
-    "Execution did not reach implementation.",
-  );
-
-  const running = await reconnected.runStatus({ runId: execution.runId });
-  assert.equal(running.execution.state, "running");
-  await reconnected.runCancel({
-    idempotencyKey: "execution-cancel",
-    runId: execution.runId,
-    expectedRevision: running.revision,
-  });
-  implementationGate.release.resolve();
-  await pipelineProcess.settle();
-  const canceled = await reconnected.runStatus({ runId: execution.runId });
-  assert.equal(canceled.status, "CANCELED");
-  assert.equal(canceled.completedCommits.length, 0);
-});
