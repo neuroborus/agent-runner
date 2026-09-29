@@ -7,6 +7,16 @@ remain in the owning documentation.
 
 ## 2026-09-29
 
+- **Provider-visible client identity has one descriptor-owned contract.** The
+  public agent boundary now validates and freezes exact `{ name, title }`
+  attribution with the generic Agent Runner identity as its default. Codex
+  carries either default or custom identity in App Server `clientInfo` beside
+  the package version. Claude declares custom identity unsupported and rejects
+  it before provider activity because its documented CLI has no transport for
+  that value; the generic default remains usable. Attribution is not smuggled
+  through sessions, commits, or environment variables, is redacted from
+  failures, and makes no promise about provider dashboard bucketing.
+
 - **Polishing owns source-projection discovery and migration independently.**
   Its bootstrap and validation migration now require the same closed boolean
   need without importing plan-execution internals or allowing agent-selected

@@ -10,9 +10,11 @@ import {
   AVAILABILITY_REASONS,
   createCapabilityProof,
   createProviderRegistry,
+  DEFAULT_CLIENT_ATTRIBUTION,
   deriveEffectStarted,
   LAUNCH_CHECKPOINTS,
   normalizeAdapterFailure,
+  normalizeClientAttribution,
   normalizeFailureRecord,
   PROVIDER_REGISTRY,
 } from "../../src/agents/index.js";
@@ -54,6 +56,7 @@ function fakeProvider() {
     {
       id: "fake",
       createAdapter: () => adapter,
+      clientAttribution: { supportsCustom: true },
       validateExecutionOptions(value) {
         assert.deepEqual(Object.keys(value).sort(), [
           "contextSize",
@@ -118,10 +121,21 @@ test("built-in provider registration is static and frozen", () => {
       failures.classes.has("effort_unsupported"),
     ),
   );
+  assert.deepEqual(
+    PROVIDER_REGISTRY.list().map(({ id, clientAttribution }) => [
+      id,
+      clientAttribution.supportsCustom,
+    ]),
+    [
+      ["codex", true],
+      ["claude", false],
+    ],
+  );
   for (const descriptor of PROVIDER_REGISTRY.list()) {
     assert.ok(Object.isFrozen(descriptor));
     assert.ok(Object.isFrozen(descriptor.trustedProfile));
     assert.ok(Object.isFrozen(descriptor.sourceSession));
+    assert.ok(Object.isFrozen(descriptor.clientAttribution));
     assert.ok(Object.isFrozen(descriptor.failures));
     assert.ok(Object.isFrozen(descriptor.failures.classes));
     assert.throws(() => descriptor.failures.classes.add("new_class"), {
@@ -136,6 +150,85 @@ test("built-in provider registration is static and frozen", () => {
       assert.equal(classes, descriptor.failures.classes);
     });
     assert.equal(descriptor.failures.classes.has("new_class"), false);
+  }
+});
+
+test("client attribution is strict, frozen, and descriptor-driven", () => {
+  const custom = normalizeClientAttribution({
+    name: "example/agent-runner",
+    title: "Example Agent Runner",
+  });
+  assert.deepEqual(DEFAULT_CLIENT_ATTRIBUTION, {
+    name: "agent_runner",
+    title: "Agent Runner",
+  });
+  assert.ok(Object.isFrozen(DEFAULT_CLIENT_ATTRIBUTION));
+  assert.ok(Object.isFrozen(custom));
+  assert.equal(
+    PROVIDER_REGISTRY.supportsClientAttribution("codex", custom),
+    true,
+  );
+  assert.equal(
+    PROVIDER_REGISTRY.supportsClientAttribution("claude", custom),
+    false,
+  );
+  for (const invalid of [
+    null,
+    {},
+    { name: "agent" },
+    { name: "agent", title: "Runner", extra: true },
+    { name: " agent", title: "Runner" },
+    { name: "agent", title: "Runner\tSecret" },
+    { name: "agent", title: "Runner\u202eSecret" },
+    { name: "a".repeat(257), title: "Runner" },
+  ]) {
+    assert.throws(() => normalizeClientAttribution(invalid), TypeError);
+  }
+
+  const options = [];
+  const registry = createProviderRegistry([
+    {
+      ...PROVIDER_REGISTRY.list()[0],
+      id: "injected",
+      clientAttribution: { supportsCustom: false },
+      createAdapter(value) {
+        options.push(value);
+        return {};
+      },
+    },
+  ]);
+  registry.createAdapters();
+  registry.createAdapters(custom);
+  assert.equal(
+    registry.supportsClientAttribution("injected", DEFAULT_CLIENT_ATTRIBUTION),
+    true,
+  );
+  assert.equal(registry.supportsClientAttribution("injected", custom), false);
+  assert.deepEqual(options, [
+    { clientAttribution: DEFAULT_CLIENT_ATTRIBUTION },
+    { clientAttribution: custom },
+  ]);
+  for (const option of options) {
+    assert.ok(Object.isFrozen(option));
+    assert.ok(Object.isFrozen(option.clientAttribution));
+  }
+  for (const clientAttribution of [
+    { supportsCustom: "yes" },
+    { supportsCustom: true, nativeField: true },
+    Object.assign(Object.create({ supportsCustom: true }), {
+      nativeField: true,
+    }),
+  ]) {
+    assert.throws(
+      () =>
+        createProviderRegistry([
+          {
+            ...PROVIDER_REGISTRY.list()[0],
+            clientAttribution,
+          },
+        ]),
+      { code: "ERR_INVALID_PROVIDER_REGISTRY" },
+    );
   }
 });
 

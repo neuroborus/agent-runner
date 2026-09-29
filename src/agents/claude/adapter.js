@@ -8,8 +8,10 @@ import { executeOwnedProcess } from "../owned-process.js";
 import {
   ADAPTER_FAILURE_CLASS,
   createAdapterContract,
+  DEFAULT_CLIENT_ATTRIBUTION,
   deepFreeze,
   EFFORT_DIAGNOSTIC_CLASS,
+  isDefaultClientAttribution,
   isEnvironment,
   isRecord,
   isolateGitEnvironment,
@@ -1155,6 +1157,7 @@ export function createClaudeAdapter(options = {}) {
     [
       "architecture",
       "claudeBinary",
+      "clientAttribution",
       "createSocketServer",
       "env",
       "execute",
@@ -1165,6 +1168,7 @@ export function createClaudeAdapter(options = {}) {
   const {
     architecture = process.arch,
     claudeBinary = "claude",
+    clientAttribution = DEFAULT_CLIENT_ATTRIBUTION,
     createSocketServer,
     env = process.env,
     execute = executeFile,
@@ -1185,6 +1189,14 @@ export function createClaudeAdapter(options = {}) {
     platform.length === 0 ||
     /[\0\r\n]/u.test(platform)
   ) {
+    throw new ClaudeAdapterError("Claude adapter options are invalid.", {
+      code: "ERR_INVALID_CLAUDE_OPTIONS",
+    });
+  }
+  let customClientAttribution;
+  try {
+    customClientAttribution = !isDefaultClientAttribution(clientAttribution);
+  } catch {
     throw new ClaudeAdapterError("Claude adapter options are invalid.", {
       code: "ERR_INVALID_CLAUDE_OPTIONS",
     });
@@ -1332,6 +1344,14 @@ export function createClaudeAdapter(options = {}) {
 
   function probe(value) {
     const options = normalizeExecutionOptions(value);
+    if (customClientAttribution) {
+      return Promise.reject(
+        new ClaudeAdapterError(
+          "Claude CLI does not support custom client attribution.",
+          { code: "ERR_UNSUPPORTED_CLAUDE_CLIENT_ATTRIBUTION" },
+        ),
+      );
+    }
     probePromise ??= inspectCapabilities();
     if (options.effort !== undefined) {
       return probePromise.then((capabilities) => {

@@ -106,6 +106,10 @@ const CAPABILITY_NAME_PATTERN = /^[a-z][A-Za-z0-9]{0,63}$/u;
 const SIGNAL_PATTERN = /^SIG[A-Z0-9]{1,15}$/u;
 const FINGERPRINT_PATTERN = /^[a-f0-9]{64}$/u;
 const OBJECT_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
+const CLIENT_ATTRIBUTION_FIELDS = Object.freeze(["name", "title"]);
+const MAX_CLIENT_ATTRIBUTION_LENGTH = 256;
+const UNSAFE_CLIENT_ATTRIBUTION_PATTERN =
+  /[\u0000-\u001f\u007f-\u009f\u2028-\u202e\u2066-\u2069]/u;
 const MAX_PROMPT_BYTES = 1024 * 1024;
 const MAX_SCHEMA_BYTES = 1024 * 1024;
 const MAX_SCHEMA_DEPTH = 128;
@@ -137,6 +141,10 @@ const SCHEMA_MAP_KEYWORDS = Object.freeze([
 ]);
 
 export const STRUCTURED_OUTPUT_FAILURE_CLASS = "structured-output";
+export const DEFAULT_CLIENT_ATTRIBUTION = Object.freeze({
+  name: "agent_runner",
+  title: "Agent Runner",
+});
 
 const CHECKPOINT_SET = new Set(LAUNCH_CHECKPOINTS);
 const OUTCOME_SET = new Set(LAUNCH_OUTCOMES);
@@ -211,6 +219,32 @@ function hasExactFields(value, fields, required = fields) {
   return (
     keys.every((field) => fields.includes(field)) &&
     required.every((field) => Object.hasOwn(value, field))
+  );
+}
+
+export function normalizeClientAttribution(value) {
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, CLIENT_ATTRIBUTION_FIELDS) ||
+    CLIENT_ATTRIBUTION_FIELDS.some(
+      (field) =>
+        typeof value[field] !== "string" ||
+        value[field].length === 0 ||
+        [...value[field]].length > MAX_CLIENT_ATTRIBUTION_LENGTH ||
+        value[field].trim() !== value[field] ||
+        UNSAFE_CLIENT_ATTRIBUTION_PATTERN.test(value[field]),
+    )
+  ) {
+    throw new TypeError("Client attribution is invalid.");
+  }
+  return Object.freeze({ name: value.name, title: value.title });
+}
+
+export function isDefaultClientAttribution(value) {
+  const attribution = normalizeClientAttribution(value);
+  return (
+    attribution.name === DEFAULT_CLIENT_ATTRIBUTION.name &&
+    attribution.title === DEFAULT_CLIENT_ATTRIBUTION.title
   );
 }
 

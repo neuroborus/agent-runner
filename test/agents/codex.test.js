@@ -193,6 +193,7 @@ function isolatedConfiguration(shellEnvironment = {}) {
 }
 
 function createFixture({
+  clientAttribution,
   closeError = false,
   closeOutputError = false,
   env,
@@ -459,6 +460,7 @@ function createFixture({
 
   return {
     adapter: createCodexAdapter({
+      ...(clientAttribution === undefined ? {} : { clientAttribution }),
       env,
       execute,
       spawnProcess,
@@ -1132,10 +1134,11 @@ test("runs a structured read-only turn with an explicit model", async () => {
     ({ method }) => method === "initialize",
   );
   assert.equal(initializeRequest.params.capabilities, null);
-  assert.equal(
-    initializeRequest.params.clientInfo.version,
-    packageMetadata.version,
-  );
+  assert.deepEqual(initializeRequest.params.clientInfo, {
+    name: "agent_runner",
+    title: "Agent Runner",
+    version: packageMetadata.version,
+  });
   assert.deepEqual(fixture.processes[0].argumentsList, [
     "app-server",
     "--listen",
@@ -1219,6 +1222,26 @@ test("runs a structured read-only turn with an explicit model", async () => {
   });
   assert.equal(turnRequest.params.approvalsReviewer, "user");
   assert.deepEqual(turnRequest.params.outputSchema, STRICT_SCHEMA);
+});
+
+test("sends custom client attribution through Codex initialization", async () => {
+  const fixture = createFixture({
+    clientAttribution: {
+      name: "example/agent-runner",
+      title: "Example Agent Runner",
+    },
+  });
+
+  await fixture.adapter.run(request());
+
+  const initializeRequest = fixture.processes[0].messages.find(
+    ({ method }) => method === "initialize",
+  );
+  assert.deepEqual(initializeRequest.params.clientInfo, {
+    name: "example/agent-runner",
+    title: "Example Agent Runner",
+    version: packageMetadata.version,
+  });
 });
 
 test("applies native profile and context selections to Codex", async () => {

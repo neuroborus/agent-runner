@@ -585,6 +585,7 @@ function socketServerFixture(socketServers) {
 function createFixture({
   architecture = "x64",
   claudeBinary,
+  clientAttribution,
   env,
   handle,
   help = HELP,
@@ -698,6 +699,7 @@ function createFixture({
   const adapter = createClaudeAdapter({
     architecture,
     ...(claudeBinary === undefined ? {} : { claudeBinary }),
+    ...(clientAttribution === undefined ? {} : { clientAttribution }),
     createSocketServer: () => socketServerFixture(socketServers),
     env: env ?? process.env,
     execute,
@@ -1078,6 +1080,34 @@ test("constructs and probes enforceable Claude capabilities", async () => {
     (await createFixture({ version: "2.1.233+distribution.1" }).adapter.probe())
       .version,
     "2.1.233+distribution.1",
+  );
+});
+
+test("reports custom client attribution as unsupported without provider activity", async () => {
+  const sensitiveMarker = "DO_NOT_RETAIN_CUSTOM_CLIENT_IDENTITY";
+  const fixture = createFixture({
+    clientAttribution: {
+      name: sensitiveMarker,
+      title: `${sensitiveMarker} title`,
+    },
+  });
+  let nativeFailure;
+
+  await assert.rejects(fixture.adapter.probe(), (error) => {
+    nativeFailure = error;
+    return (
+      error instanceof ClaudeAdapterError &&
+      error.code === "ERR_UNSUPPORTED_CLAUDE_CLIENT_ATTRIBUTION"
+    );
+  });
+
+  assert.equal(fixture.calls.length, 0);
+  const normalized = normalizeAdapterFailure("claude", nativeFailure);
+  assert.equal(normalized.message, "Agent backend turn failed.");
+  assert.equal(normalized.code, "ERR_UNSUPPORTED_CLAUDE_CLIENT_ATTRIBUTION");
+  assert.doesNotMatch(
+    JSON.stringify({ ...normalized, message: normalized.message }),
+    new RegExp(sensitiveMarker, "u"),
   );
 });
 

@@ -17,6 +17,9 @@ import {
   validateCodexExecutionOptions,
 } from "./codex/index.js";
 import {
+  DEFAULT_CLIENT_ATTRIBUTION,
+  isDefaultClientAttribution,
+  normalizeClientAttribution,
   normalizeFailureRecord,
   PROVIDER_NEUTRAL_LAUNCH_FAILURE_CLASSES,
 } from "./adapter-contract.js";
@@ -103,6 +106,7 @@ const BUILTIN_PROVIDER_DESCRIPTORS = Object.freeze([
   Object.freeze({
     id: CODEX_BACKEND_ID,
     createAdapter: createCodexAdapter,
+    clientAttribution: Object.freeze({ supportsCustom: true }),
     validateExecutionOptions: validateCodexExecutionOptions,
     trustedProfile: Object.freeze({
       fields: Object.freeze(["backend", "profile"]),
@@ -122,6 +126,7 @@ const BUILTIN_PROVIDER_DESCRIPTORS = Object.freeze([
       recover: recoverClaudeStorage,
     }),
     createAdapter: createClaudeAdapter,
+    clientAttribution: Object.freeze({ supportsCustom: false }),
     validateExecutionOptions: validateClaudeExecutionOptions,
     trustedProfile: Object.freeze({
       fields: Object.freeze(["backend", "configDirectory"]),
@@ -148,6 +153,10 @@ function normalizeDescriptor(value, index) {
         !/^[a-f0-9]{64}$/u.test(value.resources.identity) ||
         typeof value.resources.recover !== "function")) ||
     typeof value.createAdapter !== "function" ||
+    !isRecord(value.clientAttribution) ||
+    Reflect.ownKeys(value.clientAttribution).length !== 1 ||
+    !Object.hasOwn(value.clientAttribution, "supportsCustom") ||
+    typeof value.clientAttribution.supportsCustom !== "boolean" ||
     typeof value.validateExecutionOptions !== "function" ||
     !isRecord(value.trustedProfile) ||
     !Array.isArray(value.trustedProfile.fields) ||
@@ -188,6 +197,9 @@ function normalizeDescriptor(value, index) {
           }),
         }),
     createAdapter: value.createAdapter,
+    clientAttribution: Object.freeze({
+      supportsCustom: value.clientAttribution.supportsCustom,
+    }),
     validateExecutionOptions: value.validateExecutionOptions,
     trustedProfile: Object.freeze({
       fields: Object.freeze([...value.trustedProfile.fields]),
@@ -249,15 +261,27 @@ export function createProviderRegistry(
     sourceSessionIds,
     list: () => normalized,
     get,
-    createAdapters() {
+    createAdapters(clientAttribution = DEFAULT_CLIENT_ATTRIBUTION) {
+      const normalizedAttribution =
+        normalizeClientAttribution(clientAttribution);
       return Object.freeze(
         Object.fromEntries(
           normalized.map((descriptor) => [
             descriptor.id,
-            descriptor.createAdapter(),
+            descriptor.createAdapter(
+              Object.freeze({ clientAttribution: normalizedAttribution }),
+            ),
           ]),
         ),
       );
+    },
+    supportsClientAttribution(
+      backend,
+      clientAttribution = DEFAULT_CLIENT_ATTRIBUTION,
+    ) {
+      const isDefault = isDefaultClientAttribution(clientAttribution);
+      const descriptor = requireDescriptor(backend);
+      return isDefault || descriptor.clientAttribution.supportsCustom;
     },
     validateExecutionOptions(backend, value) {
       requireDescriptor(backend).validateExecutionOptions(value);

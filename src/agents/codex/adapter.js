@@ -8,11 +8,13 @@ import packageMetadata from "../../../package.json" with { type: "json" };
 import {
   ADAPTER_FAILURE_CLASS,
   createAdapterContract,
+  DEFAULT_CLIENT_ATTRIBUTION,
   deepFreeze,
   EFFORT_DIAGNOSTIC_CLASS,
   isEnvironment,
   isRecord,
   isolateGitEnvironment,
+  normalizeClientAttribution,
   STRUCTURED_OUTPUT_FAILURE_CLASS,
 } from "../adapter-contract.js";
 import { createCodexAppServerClient } from "./app-server.js";
@@ -1462,6 +1464,7 @@ export function createCodexAdapter(options = {}) {
     options,
     [
       "codexBinary",
+      "clientAttribution",
       "env",
       "execute",
       "spawnProcess",
@@ -1471,6 +1474,7 @@ export function createCodexAdapter(options = {}) {
   );
   const {
     codexBinary = "codex",
+    clientAttribution = DEFAULT_CLIENT_ATTRIBUTION,
     env = process.env,
     execute = executeFile,
     spawnProcess = spawn,
@@ -1485,6 +1489,14 @@ export function createCodexAdapter(options = {}) {
     typeof spawnProcess !== "function" ||
     typeof workspaceStorageFactory !== "function"
   ) {
+    throw new CodexAdapterError("Codex adapter options are invalid.", {
+      code: "ERR_INVALID_CODEX_OPTIONS",
+    });
+  }
+  let normalizedClientAttribution;
+  try {
+    normalizedClientAttribution = normalizeClientAttribution(clientAttribution);
+  } catch {
     throw new CodexAdapterError("Codex adapter options are invalid.", {
       code: "ERR_INVALID_CODEX_OPTIONS",
     });
@@ -1784,8 +1796,8 @@ export function createCodexAdapter(options = {}) {
         const protocolOperation = (async () => {
           await client.request("initialize", {
             clientInfo: {
-              name: "agent_runner",
-              title: "Agent Runner",
+              name: normalizedClientAttribution.name,
+              title: normalizedClientAttribution.title,
               version: packageMetadata.version,
             },
             capabilities: null,

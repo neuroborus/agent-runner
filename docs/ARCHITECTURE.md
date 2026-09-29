@@ -133,14 +133,30 @@ uniqueness that the portable response schemas cannot express.
 The root `src/agents/index.js` is the only agent API consumed outside the agent
 capability. Its private `registry.js` defines one frozen, source-controlled
 descriptor per provider. A descriptor binds the backend ID to its adapter
-factory, execution-option validation, trusted-profile normalization and
-resolution, source-session fork capability, and one `failures` hook containing
-a finite class set and classifier. The classifier is provider-private; the
-registry validates its provider-neutral result before the public agent boundary
-exposes it. Configuration validation, runner adapter construction and source
-checks, normalized failures, and MCP backend schemas all derive from that
-registry. Tests may inject another complete descriptor; production has no
-dynamic discovery, plugin loading, or provider-specific pipeline branches.
+factory, client-attribution support, execution-option validation,
+trusted-profile normalization and resolution, source-session fork capability,
+and one `failures` hook containing a finite class set and classifier. The
+classifier is provider-private; the registry validates its provider-neutral
+result before the public agent boundary exposes it. Configuration validation,
+runner adapter construction and source checks, normalized failures, and MCP
+backend schemas all derive from that registry. Tests may inject another complete
+descriptor; production has no dynamic discovery, plugin loading, or
+provider-specific pipeline branches.
+
+The public agent boundary owns one strict, frozen client-attribution shape with
+exactly `name` and `title`, plus the generic `agent_runner` / `Agent Runner`
+default. Both strings are non-empty, trimmed, bounded to 256 characters, and
+free of unsafe control, line-separator, and bidirectional formatting
+characters. Registry construction passes only a normalized frozen value into
+each adapter factory, while the descriptor states whether a provider can
+transport a custom value. Codex sends both strings through App Server
+`clientInfo` and keeps the package version in that same handshake. Claude's
+documented CLI has no client-identity transport: its generic default remains
+usable, while a custom value fails its capability probe before provider
+activity. Neither adapter maps client attribution into native session names,
+commit attribution, or undocumented environment variables, and bounded
+failures retain none of its values. Provider-visible origin identity does not
+promise a distinct provider dashboard category.
 
 ## Pipeline Ownership
 

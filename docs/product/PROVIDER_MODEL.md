@@ -65,6 +65,29 @@ Tests may inject a complete fake descriptor to prove the seam. Production
 registration is fixed at process startup and does not load descriptors from
 configuration, target repositories, provider storage, or the network.
 
+## Client attribution
+
+The public agent contract defines one exact frozen `{ name, title }` identity.
+`name` is the stable machine-readable origin and `title` is its human-readable
+label. Both are non-empty, trimmed, limited to 256 characters, and exclude
+unsafe control, line-separator, and bidirectional formatting characters. The
+generic default is `{ "name": "agent_runner", "title": "Agent Runner" }`.
+Provider descriptors declare whether they support a custom value, and registry
+construction supplies the same normalized immutable value to each adapter
+without provider branches in callers.
+
+Codex transmits default and custom values through the documented App Server
+`clientInfo` handshake while retaining the Agent Runner package version. The
+documented Claude CLI has no client-identity transport, so its generic default
+requires no native setting and remains available. A custom value is reported as
+unsupported before Claude provider inspection or turn activity. It is never
+repurposed as a session name, commit attribution, or undocumented environment
+variable, and normalized failures disclose none of its values.
+
+This identity tells a provider which client originated a request. It does not
+guarantee that a provider dashboard will create or rename an accounting or
+usage bucket for that identity.
+
 Claude owns its tool HOME/config projections, launcher, and temporary
 scaffolding outside project/task trees. Missing optional paths never authorize
 cwd-relative placeholders. Existing project restrictions remain effective;
